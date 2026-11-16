@@ -139,7 +139,10 @@ fn modes(folder: &Path, folders: u32, files: u32) {
 fn claude_code_and_codex_records_give_their_messages_in_order() {
     let pattern = |id: &str| {
         let manifest = registry().get(id).unwrap().manifest();
-        match manifest.block("import").and_then(|import| import.get("conversations")) {
+        match manifest
+            .block("import")
+            .and_then(|import| import.get("conversations"))
+        {
             Some(Yaml::Str(text)) => Some(text.clone()),
             _ => None,
         }
@@ -208,7 +211,10 @@ fn claude_code_and_codex_records_give_their_messages_in_order() {
     );
     assert_eq!(
         said(&from_codex),
-        [vec![(Speaker::Input, "add a test"), (Speaker::Agent, "Added.")]]
+        [vec![
+            (Speaker::Input, "add a test"),
+            (Speaker::Agent, "Added.")
+        ]]
     );
     assert!(from_codex.skipped.is_empty() && !from_codex.cut);
 }
@@ -297,7 +303,11 @@ fn bounds_on_records_bytes_and_messages_cut_the_import_and_say_so() {
     let all = within(&manifest, Bounds::DEFAULT);
     assert_eq!(
         records(&all),
-        [".standin/r/a.jsonl", ".standin/r/b.jsonl", ".standin/r/c.jsonl"]
+        [
+            ".standin/r/a.jsonl",
+            ".standin/r/b.jsonl",
+            ".standin/r/c.jsonl"
+        ]
     );
     assert!(!all.cut);
     let two = within(
@@ -595,9 +605,8 @@ fn each_refused_import_setting_names_its_setting() {
             "{reader}"
         );
     }
-    let rules = |record: &str, blocks: &str| {
-        refused(&manifest_of("jsonl-append", &valid, record, blocks))
-    };
+    let rules =
+        |record: &str, blocks: &str| refused(&manifest_of("jsonl-append", &valid, record, blocks));
     assert_eq!(
         rules("", RULES),
         Some((
@@ -644,9 +653,8 @@ fn a_relay_token_in_an_imported_message_is_redacted() {
     home.write(".standin/s/a.jsonl", &lines(&session), OLD);
 
     let imported = import(&sessions(".standin/s/*.jsonl"), &home.path()).unwrap();
-    let kept = format!(
-        "KEY={RELAY_REDACTED} and {RELAY_REDACTED}f; {short}; {upper}; crazyagent-relay-"
-    );
+    let kept =
+        format!("KEY={RELAY_REDACTED} and {RELAY_REDACTED}f; {short}; {upper}; crazyagent-relay-");
     let reply = format!("saw {RELAY_REDACTED}");
     assert_eq!(
         said(&imported),
@@ -716,7 +724,10 @@ fn a_line_cut_by_the_byte_bound_is_not_kept_so_no_relay_token_is_half_kept() {
     .unwrap();
     assert_eq!(
         said(&imported),
-        [vec![(Speaker::Input, "first"), (Speaker::Agent, "reply one")]]
+        [vec![
+            (Speaker::Input, "first"),
+            (Speaker::Agent, "reply one")
+        ]]
     );
     assert!(imported.conversations[0].clipped);
 }

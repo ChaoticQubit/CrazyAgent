@@ -183,7 +183,14 @@ fn an_unknown_schema_version_is_refused_in_plain_words() {
 
     assert_eq!(refused.0, VERSION_UNKNOWN);
     assert_eq!(viewed.0, VERSION_UNKNOWN);
-    for code in [UNSAFE, BUSY, VERSION_UNKNOWN, UNREADABLE, TOO_LARGE, OLD_LIBRARY] {
+    for code in [
+        UNSAFE,
+        BUSY,
+        VERSION_UNKNOWN,
+        UNREADABLE,
+        TOO_LARGE,
+        OLD_LIBRARY,
+    ] {
         let said = sentence(code).unwrap_or_else(|| panic!("{code} has no sentence"));
         assert!(said.ends_with('.') && !said.contains("record_"), "{said}");
     }

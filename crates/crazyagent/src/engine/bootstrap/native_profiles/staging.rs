@@ -118,6 +118,54 @@ impl Staging {
             .map_err(unsafe_custody)?;
         parent.sync_all().map_err(unsafe_custody)
     }
+
+    /// Swaps one finished file in this staging directory with the file of the same name in
+    /// another directory in a single rename, or moves it in when that name is free there,
+    /// so this staging directory then holds the file it replaced (RV-DS241-50). Inputs: the
+    /// name and the other directory. Output: whether a file was replaced; nothing after
+    /// the rename can fail here, so the caller owns every check that follows it.
+    pub(super) fn exchange(&self, name: &str, destination: &File) -> Result<bool, EngineError> {
+        self.directory.file.sync_all().map_err(unsafe_custody)?;
+        step()?;
+        match rustix::fs::renameat_with(
+            &self.directory.file,
+            name,
+            destination,
+            name,
+            RenameFlags::EXCHANGE,
+        ) {
+            Ok(()) => Ok(true),
+            Err(rustix::io::Errno::NOENT) => {
+                rustix::fs::renameat_with(
+                    &self.directory.file,
+                    name,
+                    destination,
+                    name,
+                    RenameFlags::NOREPLACE,
+                )
+                .map_err(unsafe_custody)?;
+                Ok(false)
+            }
+            Err(error) => Err(unsafe_custody(error)),
+        }
+    }
+
+    /// Checks that this staging directory is still the one named in its parent. Input: the
+    /// parent. Output: Ok, or the identity failure.
+    pub(super) fn verify_in(&self, parent: &File) -> Result<(), EngineError> {
+        self.directory.verify(parent, OsStr::new(&self.name))
+    }
+
+    /// Removes this staging directory and the regular files it holds while its lock is
+    /// still held. Input: the parent. Output: Ok once the parent no longer names it; on a
+    /// failure it stays for the next sweep.
+    pub(super) fn discard(self, parent: &File) -> Result<(), EngineError> {
+        self.verify_in(parent)?;
+        remove_tree(&self.directory.file, 0)?;
+        rustix::fs::unlinkat(parent, self.name.as_str(), AtFlags::REMOVEDIR)
+            .map_err(unsafe_custody)?;
+        parent.sync_all().map_err(unsafe_custody)
+    }
 }
 
 /// Removes every abandoned staging directory with the given prefix from a parent.

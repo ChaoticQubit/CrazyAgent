@@ -160,8 +160,9 @@ pub enum Asker {
 
 /// The engine steps that raise their own questions, stored as `engine:mapping`,
 /// `engine:research:<kind>`, `engine:landing:<change set>`, `engine:planning`,
-/// `engine:access:<request>` for an agent's access request (F08) and `engine:demo` for the
-/// question planted in the demo project (DEC-153).
+/// `engine:access:<request>` for an agent's access request (F08), `engine:demo` for the
+/// question planted in the demo project (DEC-153) and `engine:github-rule:<request>` for an
+/// agent's GitHub rule proposal (DEC-182 S7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineSource {
     Mapping,
@@ -170,6 +171,7 @@ pub enum EngineSource {
     Planning,
     Access(String),
     Demo,
+    GitHubRule(String),
 }
 
 /// Where a question stands. It waits for the owner until answered or dismissed; a box the
@@ -367,7 +369,10 @@ impl EngineSource {
             Self::Research(kind) if named(kind) => Some(format!("engine:research:{kind}")),
             Self::Landing(set) if named(set) => Some(format!("engine:landing:{set}")),
             Self::Access(request) if named(request) => Some(format!("engine:access:{request}")),
-            Self::Research(_) | Self::Landing(_) | Self::Access(_) => None,
+            Self::GitHubRule(request) if named(request) => {
+                Some(format!("engine:github-rule:{request}"))
+            }
+            Self::Research(_) | Self::Landing(_) | Self::Access(_) | Self::GitHubRule(_) => None,
         }
     }
 }
@@ -517,6 +522,7 @@ pub fn asker_label(asker: &str) -> String {
             Some(("research", kind)) => format!("research ({})", kind.replace('_', " ")),
             Some(("landing", set)) => format!("landing change set {set}"),
             Some(("access", request)) => format!("access request {request}"),
+            Some(("github-rule", request)) => format!("GitHub rule proposal {request}"),
             _ => asker.into(),
         },
         _ => asker.into(),
@@ -637,6 +643,8 @@ pub fn answer(
     if settled == Settlement::Settled {
         let allowed = crate::sandbox::grants::allows(&answer.picks);
         crate::sandbox::grants::decide(&tx, &project, &asker, allowed, now_ms())?;
+        let approved = crate::github::proposals::approves(&answer.picks);
+        crate::github::proposals::decide(&tx, &project, &asker, approved)?;
     }
     finish(db, tx, &project, settled)
 }
@@ -653,6 +661,7 @@ pub fn dismiss(db: &Connection, id: u64, version: u64) -> Result<Settlement, Eng
     let settled = settle(&tx, question, How::Dismiss, &owner(), version)?;
     if settled == Settlement::Settled {
         crate::sandbox::grants::decide(&tx, &project, &asker, false, now_ms())?;
+        crate::github::proposals::decide(&tx, &project, &asker, false)?;
     }
     finish(db, tx, &project, settled)
 }
@@ -708,11 +717,11 @@ pub fn withdraw(
 /// is taken only when the owner typed into that terminal after the question was asked, and
 /// one owner key time answers at most one question. The text is the master's report of the
 /// answer, kept as answered in the master's terminal and never shown as the owner's words.
-/// An access request's question is the owner's alone to decide, so a master never closes it
-/// (RV-DS241-13). Inputs: the engine connection, the project, the master's team agent id,
-/// the question id, the version it read, the answer and when the owner last typed into its
-/// terminal. Output: Settled, Stale, or `questions_not_found` (also for an access request's
-/// question), `questions_in_terminal`, `questions_owner_not_typed`,
+/// An access request's and a GitHub rule proposal's question is the owner's alone to
+/// decide, so a master never closes it (RV-DS241-13, DEC-182 S7). Inputs: the engine
+/// connection, the project, the master's team agent id, the question id, the version it
+/// read, the answer and when the owner last typed into its terminal. Output: Settled, Stale,
+/// or `questions_not_found` (also for those owner-only questions), `questions_in_terminal`, `questions_owner_not_typed`,
 /// `questions_owner_turn_used`, `questions_answer_invalid` or `questions_text_invalid`.
 pub fn relay(
     db: &Connection,
@@ -726,10 +735,14 @@ pub fn relay(
     let agent = AgentId::team(master).map_err(|_| failure("questions_not_found"))?;
     let tx = immediate(db)?;
     let question = found(&tx, id)?;
-    let access = question
-        .asker
-        .starts_with(crate::sandbox::grants::ASKER_PREFIX);
-    if &question.project != project || access {
+    let owners = [
+        crate::sandbox::grants::ASKER_PREFIX,
+        crate::github::proposals::ASKER_PREFIX,
+    ];
+    let owner_only = owners
+        .iter()
+        .any(|prefix| question.asker.starts_with(prefix));
+    if &question.project != project || owner_only {
         return Err(failure("questions_not_found"));
     }
     if question.status != QuestionStatus::Pending {
@@ -1601,7 +1614,8 @@ fn asker_writer(asker: &str) -> Option<Writer> {
 /// owner message to the project's master for a team master's or sub-agent's question,
 /// refused while the conversation is full since the asker waits for it, and an engine
 /// message for an engine step's, dropped while it is full since nothing waits for it. A
-/// terminal box or a conversation master's question gets none. Inputs: the transaction,
+/// terminal box's, a conversation master's or a GitHub rule proposal's question gets none,
+/// since the proposal tells its own outcome. Inputs: the transaction,
 /// the question and the answer, none when dismissed. Output: the message id, if any, or
 /// `questions_delivery_full`.
 fn deliver(
@@ -1628,6 +1642,7 @@ fn deliver(
             ),
             true,
         ),
+        ("engine", rest) if rest.starts_with("github-rule:") => return Ok(None),
         ("engine", _) => (
             MessageAuthor::Engine,
             told(

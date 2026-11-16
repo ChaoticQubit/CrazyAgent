@@ -39,8 +39,12 @@ const POLL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RecordSource {
-    CodexRollouts { sessions: PathBuf },
-    ClaudeSession { file: PathBuf },
+    CodexRollouts {
+        sessions: PathBuf,
+    },
+    ClaudeSession {
+        file: PathBuf,
+    },
     Manifest {
         harness: String,
         home: PathBuf,
@@ -325,7 +329,8 @@ enum Replayed {
     /// No turn is open there, or no fact says.
     Idle,
     /// The read was cut before the end and the rest passed over unread (see
-    /// `TranscriptReader::skip_to_end`), so whether a turn is open is unknown.
+    /// `TranscriptReader::skip_to_end`), so whether a turn is open is unknown; `adopt_as`
+    /// asks the pane's screen instead of the last fact read.
     Cut,
 }
 
@@ -440,10 +445,15 @@ impl TerminalSession {
     /// budget go on counting from its start, and the record is read only while that run time
     /// lasts, at most `REPLAY_WAIT`. A live master is not bound by the launch's run time (the
     /// runtime's Master run time bounds it, F01): its pane gets no deadline and its record is
-    /// read for `REPLAY_WAIT`. A read cut short passes over the rest of the record unread;
-    /// nothing is typed, the pane is taken over idle and the unknown turn is dropped and told
-    /// by `took_none` (RV-DS241-143). A pane whose first process is not the record's, before
-    /// or after that read, is `launch_closed` and is left as it is. A Codex pane still on its folder access screen
+    /// read for `REPLAY_WAIT`. A read cut short passes over the rest of the record unread, so
+    /// whether a turn is open there is unknown. A live master's pane is then taken over idle
+    /// with nothing typed and the unknown turn dropped and told by `took_none`, since its
+    /// caller holds engine input until the idle prompt (RV-DS241-143). Any other pane is taken
+    /// over that way only while it shows the app's input prompt (see `waits`); otherwise it is
+    /// handled as a pane whose turn is open, with Escape and the wait for the turn to settle,
+    /// so an order typed next is never queued behind a running turn (RV-DS241-190). A pane
+    /// whose first process is not the record's, before or after that read, is
+    /// `launch_closed` and is left as it is. A Codex pane still on its folder access screen
     /// is not ready: it goes on with its launch's one Enter before any prompt is typed. A
     /// failed look at the screen counts as not on it, so it cannot end the pane. The
     /// key and context files are removed when the session stops, or at once when the pane
@@ -486,7 +496,11 @@ impl TerminalSession {
             None => TranscriptReader::adopted(transcript, &record.cwd, record.since()),
         };
         let mut replayed = replay(&mut reader, until)?;
-        let open = replayed == Replayed::Open;
+        let open = match replayed {
+            Replayed::Open => true,
+            Replayed::Idle => false,
+            Replayed::Cut => !live && !super::waits(host.as_ref(), &agent, true),
+        };
         let stale = open
             && reader
                 .silent()

@@ -457,6 +457,7 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
                 ..Default::default()
@@ -563,6 +564,7 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
             }],
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
@@ -692,6 +694,7 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
         toolchains: Vec::new(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         network: crate::sandbox::policy::AgentNetwork::default(),
@@ -12194,6 +12197,7 @@ fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -14917,6 +14921,7 @@ fn agent_at_level_running(
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -15143,6 +15148,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -15203,6 +15209,7 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
             }],
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
@@ -15257,6 +15264,7 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -15408,6 +15416,7 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -24899,7 +24908,10 @@ fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
     let plan = Plan {
         native: true,
         tmux: Some(fixture.tmux.clone()),
-        pane: Some((crate::terminal::own_server(host.clone()), agent.clone())),
+        pane: Some((
+            crate::terminal::own_server(host.clone(), false),
+            agent.clone(),
+        )),
         ..hooks_plan("claude-code", false)
     };
     let home = fixture.base.join("lead-home");
@@ -26634,6 +26646,7 @@ fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
                     toolchains: Vec::new(),
                     ide_git_hooks: false,
                     tool_cache: Default::default(),
+                    home_caches: Default::default(),
                     ide_agent_files: Default::default(),
                     shared_folders: Default::default(),
                     ..Default::default()
@@ -29707,7 +29720,7 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
         ],
         transcript: Transcript::ClaudeSession { file: session },
     };
-    let placed = host.spawn_own_server(&lead, &command).unwrap();
+    let placed = host.spawn_own_server(&lead, &command, false).unwrap();
     assert!(crate::terminal::pane_id_valid(&placed.pane));
 
     let marker = work.join("reached.txt");
@@ -29853,6 +29866,75 @@ fn an_agent_refused_for_skills_left_in_its_codex_home_says_what_happened() {
          CrazyAgent could not remove them and Codex would have loaded them. \
          (launch_context_skills_kept)"
     );
+}
+
+/// SA vid 12: an agent is not started while a hold still lists commands a sandboxed run of
+/// it left that the owner has not ended, since they write where the agent does and its next
+/// run would run what they leave in its home. The refusal says what to do, with its code
+/// kept; another agent of the project starts.
+#[cfg(unix)]
+#[test]
+fn an_agent_is_not_started_while_commands_of_its_last_sandboxed_run_stay_held() {
+    let by = HoldBy {
+        project: Some("commands-left".into()),
+        who: "team agent 41".into(),
+    };
+    let other = HoldBy {
+        project: Some("commands-left".into()),
+        who: "team agent 42".into(),
+    };
+    let mut left = crate::harnesses::leftovers::tests::held_sandboxed(
+        by.clone(),
+        crate::harnesses::leftovers::LeftoverMode::Ask,
+    );
+
+    let refused = commands_left(&by).map_err(|problem| problem.0);
+    let started = commands_left(&other).map_err(|problem| problem.0);
+    let _ = left.kill();
+    let _ = left.wait();
+
+    assert_eq!(refused, Err(COMMANDS_LEFT.to_owned()));
+    assert_eq!(started, Ok(()));
+    assert_eq!(
+        start_problem(&LaunchError(COMMANDS_LEFT.into(), None)),
+        "This agent still has commands running from its last run. End them on the team \
+         page, then start it again. (team_commands_left)"
+    );
+}
+
+/// rv-code2 B2P2-1: nothing from the account, such as the credential copy, is handed to an
+/// agent's home while a hold still lists commands a sandboxed run of it left, since they
+/// read where the agent reads; another agent of the project is handed its own.
+#[cfg(unix)]
+#[test]
+fn nothing_is_handed_to_an_agent_home_while_commands_of_its_last_sandboxed_run_stay_held() {
+    let by = HoldBy {
+        project: Some("handed-left".into()),
+        who: "team agent 51".into(),
+    };
+    let other = HoldBy {
+        project: Some("handed-left".into()),
+        who: "team agent 52".into(),
+    };
+    let mut left = crate::harnesses::leftovers::tests::held_sandboxed(
+        by.clone(),
+        crate::harnesses::leftovers::LeftoverMode::Keep,
+    );
+    let handed = std::cell::Cell::new(0);
+
+    let refused = hand_after_check(&by, || handed.set(handed.get() + 1)).map_err(|e| e.0);
+    let while_refused = handed.get();
+    let given = hand_after_check(&other, || handed.set(handed.get() + 1)).map_err(|e| e.0);
+    let _ = left.kill();
+    let _ = left.wait();
+
+    assert_eq!(refused, Err(COMMANDS_LEFT.to_owned()));
+    assert_eq!(
+        while_refused, 0,
+        "the refused agent's home was handed the credential"
+    );
+    assert_eq!(given, Ok(()));
+    assert_eq!(handed.get(), 1);
 }
 
 /// A start that a projects home move holds back leaves its work waiting (HMC-N1): a
@@ -31803,11 +31885,11 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
 
 /// An agent leaves neither cargo's, git's, npm's nor yarn's own config in its home, nor a
 /// cargo subcommand, a file flag or an ACL there, for its next start (RV-DS241-137, -138,
-/// sec r1 F1, F2). In its installed profile a tools-on agent cannot write `.cargo/config`,
-/// `.cargo/config.toml`, `.npmrc`, `.yarnrc` or `.yarnrc.yml`, in any letter case, nor make
-/// `.config/git` or `.cargo/bin`, nor set a flag or an ACL on its home or on anything in it,
-/// while it still writes a `.gitconfig`, which no agent git reads, and its own caches. The
-/// next launch removes that `.gitconfig` and keeps the caches.
+/// sec r1 F1, F2, RV-DS241-186). In its installed profile a tools-on agent cannot write
+/// `.gitconfig`, `.cargo/config`, `.cargo/config.toml`, `.npmrc`, `.yarnrc` or `.yarnrc.yml`,
+/// in any letter case, nor make `.config/git` or `.cargo/bin`, nor move a `.config` it built
+/// elsewhere into place, nor set a flag or an ACL on its home or on a file the next launch
+/// keeps, while it still writes its own caches. The next launch keeps the caches.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
@@ -31847,6 +31929,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         )
         .unwrap();
     let home = agent_home(&runtime.state, id);
+    std::fs::write(home.join(".claude.json"), "{}\n").unwrap();
     let work = plan.working_dir.clone();
     let tried = work.join("tried.txt");
     let script = work.join("plant.sh");
@@ -31859,14 +31942,15 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
              try cargo_config_old sh -c \"printf '[build]\\n' > '{home}/.cargo/config'\"\n\
              try git_config sh -c \"mkdir -p '{home}/.config/git' && printf '[core]\\n' > '{home}/.config/git/config'\"\n\
              try gitconfig sh -c \"printf '[core]\\n' > '{home}/.gitconfig'\"\n\
+             try config_parent sh -c \"rm -rf '{home}/.config' 2>/dev/null; mkdir -p '{home}/built/git' && printf '[core]\\n' > '{home}/built/git/config' && mv '{home}/built' '{home}/.config'\"\n\
              try control_cache sh -c \"mkdir -p '{home}/.cache/tool' && printf ok > '{home}/.cache/tool/data'\"\n\
              try npmrc sh -c \"printf 'node-options=--require=x\\n' > '{home}/.npmrc'\"\n\
              try npmrc_case sh -c \"printf x > '{home}/.NPMRC'\"\n\
              try yarnrc sh -c \"printf x > '{home}/.yarnrc'\"\n\
              try yarnrc_yml sh -c \"printf x > '{home}/.yarnrc.yml'\"\n\
              try cargo_bin sh -c \"mkdir -p '{home}/.cargo/bin' && printf x > '{home}/.cargo/bin/cargo-x'\"\n\
-             try acl_file /bin/chmod +a 'everyone deny delete' '{home}/.cache/tool/data'\n\
-             try flag_file /usr/bin/chflags uchg '{home}/.cache/tool/data'\n\
+             try acl_file /bin/chmod +a 'everyone deny delete' '{home}/.claude.json'\n\
+             try flag_file /usr/bin/chflags uchg '{home}/.claude.json'\n\
              try flag_home /usr/bin/chflags uchg '{home}'\n",
             home = home.display(),
             tried = tried.display(),
@@ -31893,7 +31977,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         Command::new("/usr/bin/chflags")
             .arg("nouchg")
             .arg(&home)
-            .arg(home.join(".cache/tool/data"))
+            .arg(home.join(".claude.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
@@ -31901,7 +31985,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
     let acl_cleared = crate::spawn_gate::output(
         Command::new("/bin/chmod")
             .arg("-N")
-            .arg(home.join(".cache/tool/data"))
+            .arg(home.join(".claude.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
@@ -31932,6 +32016,8 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         "cargo_config_case",
         "cargo_config_old",
         "git_config",
+        "gitconfig",
+        "config_parent",
         "npmrc",
         "npmrc_case",
         "yarnrc",
@@ -31945,14 +32031,12 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
             problems.push(format!("{attempt} written: {:?}", exit(attempt)));
         }
     }
-    for attempt in ["gitconfig", "control_cache"] {
-        if exit(attempt).as_deref() != Some("0") {
-            problems.push(format!("{attempt} refused: {:?}", exit(attempt)));
-        }
+    if exit("control_cache").as_deref() != Some("0") {
+        problems.push(format!("control_cache refused: {:?}", exit("control_cache")));
     }
     for entry in [
         ".gitconfig",
-        ".config",
+        ".config/git",
         ".cargo/config",
         ".cargo/config.toml",
         ".cargo/bin",

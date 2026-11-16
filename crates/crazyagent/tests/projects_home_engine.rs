@@ -2448,6 +2448,143 @@ async fn an_engine_start_shows_a_project_move_an_engine_stop_cut_short() {
     engine.stop().await;
 }
 
+/// Marks the old folder of the project move recorded under `request` as still to clear, as
+/// the record of a move that went by copy does. Inputs: the engine database, the request and
+/// the old folder.
+fn mark_left(database: &Path, request: &str, origin: &Path) {
+    sql(
+        database,
+        &format!(
+            "INSERT OR REPLACE INTO projects_home_project_move_left VALUES (1, '{request}', 'reading', '{}');",
+            text(origin)
+        ),
+    );
+}
+
+/// B17 (-66): a resend of a project move whose old folder the clear left behind answers
+/// `move_project_old_folder_left`, as the first reply did, never a plain replay of the
+/// record; once that folder is gone the resend replays the record.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resent_project_move_whose_old_folder_was_left_answers_that_code_again() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let engine = Engine::start().await;
+    let (mut owner, reading, origin, target) = kept_outside(&engine, &place).await;
+    owner
+        .controller
+        .read(OwnerRead::ProjectsHome)
+        .await
+        .unwrap();
+    let ask = OwnerMutation::MoveProjectHome {
+        project_id: reading.clone(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+    };
+    let pending = owner
+        .controller
+        .begin_mutation(ask, owner.generation + 1)
+        .unwrap();
+    let sent = pending.request().clone();
+    let answered = owner.controller.send_pending().await.unwrap();
+    assert!(
+        matches!(&answered, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied && !operation.historical_replay),
+        "{answered:?}"
+    );
+    assert!(!origin.exists());
+    assert!(target.is_dir());
+    let database = engine.root.path().join("engine.db");
+    fs::create_dir(&origin).unwrap();
+    fs::write(origin.join("notes.txt"), b"newer than the copy\n").unwrap();
+    mark_left(&database, sent.request_id.as_str(), &origin);
+    let client = owner.controller.owner_client().unwrap();
+    let resent = client.request(sent.clone()).await.unwrap().response;
+    assert_eq!(
+        resent,
+        OwnerResponse::Rejected {
+            code: "move_project_old_folder_left".into()
+        }
+    );
+    assert_eq!(
+        fs::read(origin.join("notes.txt")).unwrap(),
+        b"newer than the copy\n",
+        "a resend deletes nothing"
+    );
+    fs::remove_dir_all(&origin).unwrap();
+    let replayed = client.request(sent).await.unwrap().response;
+    assert!(
+        matches!(&replayed, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied && operation.historical_replay),
+        "{replayed:?}"
+    );
+    engine.stop().await;
+}
+
+/// B17 (-66): an engine start shows a project move whose old folder the clear left behind,
+/// as its record marked it, as the ended move with the old-folder code, also when the stop
+/// came during the clear and no reply reached the owner, until the owner dismisses it; a mark
+/// whose old folder is gone shows nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_start_shows_a_project_move_whose_old_folder_was_left() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let mut engine = Engine::start().await;
+    let (mut owner, reading, origin, target) = kept_outside(&engine, &place).await;
+    let ask = OwnerMutation::MoveProjectHome {
+        project_id: reading.clone(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+    };
+    assert_eq!(owner.apply(ask).await, OwnerResult::Applied);
+    assert!(target.is_dir());
+    let database = engine.root.path().join("engine.db");
+    fs::create_dir(&origin).unwrap();
+    fs::write(origin.join("notes.txt"), b"left\n").unwrap();
+    mark_left(&database, "move-left", &origin);
+    owner.controller.detach();
+    engine.restart().await;
+    let mut after = engine.owner().await;
+    let client = after.owner_client().unwrap();
+    let restored = client
+        .job_status()
+        .await
+        .unwrap()
+        .map(|job| (job.id, job.kind, job.project_id, job.source, job.state));
+    assert_eq!(
+        restored,
+        Some((
+            id("move-left"),
+            JobKind::MoveProject,
+            Some(reading.clone()),
+            text(&origin),
+            JobState::Failed {
+                code: "move_project_old_folder_left".into(),
+                phase: Phase::Clearing,
+            }
+        ))
+    );
+    assert_eq!(fs::read(origin.join("notes.txt")).unwrap(), b"left\n");
+    assert!(client.job_dismiss(id("move-left")).await.unwrap());
+    after.detach();
+    engine.restart().await;
+    let mut again = engine.owner().await;
+    let client = again.owner_client().unwrap();
+    assert_eq!(
+        client.job_status().await.unwrap(),
+        None,
+        "a dismissed warning stays gone"
+    );
+
+    mark_left(&database, "move-gone", &origin);
+    fs::remove_dir_all(&origin).unwrap();
+    again.detach();
+    engine.restart().await;
+    let last = engine.owner().await;
+    let client = last.owner_client().unwrap();
+    assert_eq!(client.job_status().await.unwrap(), None);
+    engine.stop().await;
+}
+
 /// DEC-177 step 1b (leader 13:26): one folder change at a time for every client. While a
 /// project move job waits for its agents, a direct add and a direct move of that project
 /// from an owner client are refused `job_busy` before any plan, and an add job too; once the

@@ -14,6 +14,7 @@ import { poolReadiness } from "../settings/pools";
 import { useLoad } from "../../state";
 import { homePath } from "../settings/harnesses";
 import { accessSummary } from "./access";
+import { GitHubPublishCard } from "./github-publish";
 import { MarkdownView } from "./markdown";
 import { ProjectOverviewTabs } from "./overview-tabs";
 import { Badge, NotReady, valueOf } from "./shared";
@@ -403,6 +404,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {suggested > 0 && <div className="pj-need"><span>{suggestedLine(suggested)}</span>
           <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=%40memory`)}>Review</button></div>}
       </section>}
+      <GitHubPublishCard projectId={data.id} name={data.name} about={setup?.about ?? ""} />
       <ProjectOverviewTabs data={data} activity={<ActivityPanel data={data} />}
         quickInfo={(text) => <OverviewFacts about={setup?.about ?? ""} overview={text ?? (onboarding.kind === "ok" ? onboarding.value.overview : null)} />} />
     </div>

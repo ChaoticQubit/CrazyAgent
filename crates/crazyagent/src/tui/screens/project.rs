@@ -661,6 +661,7 @@ pub(in crate::tui) enum ProjectReply {
     RefreshOverview,
     MoveHome(crate::projects_home::AddMode),
     DeleteEverything(String),
+    GitHubRules,
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -728,6 +729,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub questions: ProjectQuestions,
     pub recovery: ProjectRecovery,
     pub roadmap: StatusLine,
+    pub github_notice: bool,
     pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
@@ -760,6 +762,7 @@ impl ProjectScreen {
             questions: ProjectQuestions::new(project.clone()),
             recovery: ProjectRecovery::new(project.clone()),
             roadmap: StatusLine::new(project.clone()),
+            github_notice: false,
             sessions: Sessions::default(),
             project,
             name,
@@ -2661,6 +2664,7 @@ impl ProjectScreen {
                 ProjectReply::Handled
             }
             KeyCode::Char('i') => ProjectReply::Process,
+            KeyCode::Char('G') => ProjectReply::GitHubRules,
             KeyCode::Char('u') => match &self.schedule {
                 Some(schedule) => ProjectReply::AccountOrder(
                     crate::tui::screens::settings::account_choice::cycle(

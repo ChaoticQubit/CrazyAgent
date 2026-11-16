@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { getSandboxSettings, saveSandboxSettings, type LinuxSockets, type SandboxSettings } from "../../api";
+import { getSandboxSettings, saveSandboxSettings, type LinuxSockets, type LinuxSupervisor, type SandboxSettings } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, NotReady, Notice, RadioCard, SettingLine, SettingSection, Skeleton } from "../../ui";
 import "../project/projects.css";
@@ -27,43 +27,80 @@ export const LINUX_SOCKETS: { value: LinuxSockets; title: string; detail: string
 /** The option an owner has until they pick another: the engine's `LinuxSockets` default. */
 export const LINUX_SOCKETS_DEFAULT: LinuxSockets = "tcp_only";
 
+/** The Linux call supervisor options in the order Settings lists them, each with its title and
+ * the plain sentence naming what it keeps and what it leaves open, as the TUI says them. */
+export const LINUX_SUPERVISOR: { value: LinuxSupervisor; title: string; detail: string }[] = [
+  {
+    value: "on",
+    title: "On (recommended)",
+    detail: "CrazyAgent checks some calls agents make and makes them for them, so ports on this computer, git repositories and signals stay within what you allow. Run as root, it starts none.",
+  },
+  {
+    value: "off",
+    title: "Off",
+    detail: "Agents start as before: a port they may reach on this computer is open to them on every host, and they can make a git repository or, on older Linux, signal your programs.",
+  },
+];
+
+/** The supervisor option an owner has until they pick another: the engine's `LinuxSupervisor` default. */
+export const LINUX_SUPERVISOR_DEFAULT: LinuxSupervisor = "on";
+
+/** The settings Save sends: each Linux choice as picked, else as stored. Inputs: the stored
+ * settings, the picked sockets option and the picked supervisor option, each null until picked.
+ * Output: the whole settings. */
+export function sandboxDraft(stored: SandboxSettings, sockets: LinuxSockets | null, calls: LinuxSupervisor | null): SandboxSettings {
+  return { ...stored, linux_sockets: sockets ?? stored.linux_sockets, linux_supervisor: calls ?? stored.linux_supervisor };
+}
+
 const SANDBOX_TOP = <div className="settings-top"><div>
   <h2>Sandbox</h2>
   <p>What agents can reach while they work.</p>
 </div></div>;
 
 /** Settings, Sandbox as a view of its state: the title in every state, then the Linux
- * limited-network sockets choice, marked when it is away from the default, with Save changes,
- * enabled only after a change. Inputs: the settings read, the picked option, a saving flag, the
- * last problem and the handlers. Output: the tab. */
-export function SandboxSettingsView({ settings, picked, saving, problem, onPick, onSave, onRetry }: {
+ * limited-network sockets and call supervisor choices, each marked when it is away from the
+ * default, with Save changes, enabled only after a change. Inputs: the settings read, the picked
+ * options, a saving flag, the last problem and the handlers. Output: the tab. */
+export function SandboxSettingsView({ settings, picked, pickedSupervisor, saving, problem, onPick, onPickSupervisor, onSave, onRetry }: {
   settings: Loaded<SandboxSettings>;
   picked: LinuxSockets | null;
+  pickedSupervisor: LinuxSupervisor | null;
   saving: boolean;
   problem: string;
   onPick: (value: LinuxSockets) => void;
+  onPickSupervisor: (value: LinuxSupervisor) => void;
   onSave: () => void;
   onRetry: () => void;
 }) {
   if (settings.kind === "loading") return <>{SANDBOX_TOP}<Skeleton shape="line" count={4} /></>;
   if (settings.kind === "not_ready") return <>{SANDBOX_TOP}<NotReady what="The sandbox settings" /></>;
   if (settings.kind === "error") return <>{SANDBOX_TOP}<LoadError message={`Couldn't load the sandbox settings. ${settings.message}`} onRetry={onRetry} /></>;
-  const chosen = picked ?? settings.value.linux_sockets;
-  const changed = chosen !== settings.value.linux_sockets;
+  const draft = sandboxDraft(settings.value, picked, pickedSupervisor);
+  const chosen = draft.linux_sockets;
+  const calls = draft.linux_supervisor;
+  const changed = chosen !== settings.value.linux_sockets || calls !== settings.value.linux_supervisor;
   function submit(event: FormEvent) {
     event.preventDefault();
     if (changed && !saving) onSave();
   }
   return <>
     {SANDBOX_TOP}
-    <form className="pj set-groups" aria-label="Linux limited-network sockets" noValidate onSubmit={submit}>
-      <SettingSection title="Network">
+    <form className="pj set-groups" aria-label="Linux sandbox settings" noValidate onSubmit={submit}>
+      <SettingSection title="Linux">
         <SettingLine wide label="Linux limited-network sockets" changed={chosen !== LINUX_SOCKETS_DEFAULT}
           help="How an agent limited to its model reaches the network when CrazyAgent runs on Linux. Landlock limits TCP by port only.">
           <fieldset className="field" disabled={saving}>
             <legend className="visually-hidden">Linux limited-network sockets</legend>
             {LINUX_SOCKETS.map((option) => <RadioCard key={option.value} name="linux-sockets" value={option.value} checked={chosen === option.value}
               onChecked={(value) => onPick(value as LinuxSockets)} title={option.title} details={[option.detail]} />)}
+          </fieldset>
+        </SettingLine>
+        <SettingLine wide label="Linux call supervisor" changed={calls !== LINUX_SUPERVISOR_DEFAULT}
+          help="Whether CrazyAgent checks the calls Landlock can't limit by itself when agents make them, when CrazyAgent runs on Linux.">
+          <fieldset className="field" disabled={saving}>
+            <legend className="visually-hidden">Linux call supervisor</legend>
+            {LINUX_SUPERVISOR.map((option) => <RadioCard key={option.value} name="linux-supervisor" value={option.value} checked={calls === option.value}
+              onChecked={(value) => onPickSupervisor(value as LinuxSupervisor)} title={option.title} details={[option.detail]} />)}
           </fieldset>
         </SettingLine>
         <div className="set-body">
@@ -76,19 +113,20 @@ export function SandboxSettingsView({ settings, picked, saving, problem, onPick,
 }
 
 /** Settings, Sandbox: reads the owner's sandbox settings and saves the picked Linux
- * limited-network sockets option in the engine. */
+ * limited-network sockets and call supervisor options in the engine, both in one save. */
 export function SandboxSettingsTab() {
   const session = useAppSession();
   const [settings, reload] = useLoad(getSandboxSettings);
   const [picked, setPicked] = useState<LinuxSockets | null>(null);
+  const [pickedSupervisor, setPickedSupervisor] = useState<LinuxSupervisor | null>(null);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState("");
-  useEffect(() => { setPicked(null); }, [settings]);
+  useEffect(() => { setPicked(null); setPickedSupervisor(null); }, [settings]);
   async function save() {
-    if (settings.kind !== "ok" || picked === null) return;
+    if (settings.kind !== "ok" || (picked === null && pickedSupervisor === null)) return;
     setSaving(true);
     setProblem("");
-    const result = await saveSandboxSettings({ ...settings.value, linux_sockets: picked });
+    const result = await saveSandboxSettings(sandboxDraft(settings.value, picked, pickedSupervisor));
     setSaving(false);
     if (result.kind === "error") { setProblem(result.message); return; }
     if (result.kind === "not_ready") { setProblem("The engine is not ready yet. Try again."); return; }
@@ -96,7 +134,8 @@ export function SandboxSettingsTab() {
     reload();
   }
   return <div className="stack">
-    <SandboxSettingsView settings={settings} picked={picked} saving={saving} problem={problem}
-      onPick={(value) => { setPicked(value); setProblem(""); }} onSave={() => void save()} onRetry={reload} />
+    <SandboxSettingsView settings={settings} picked={picked} pickedSupervisor={pickedSupervisor} saving={saving} problem={problem}
+      onPick={(value) => { setPicked(value); setProblem(""); }} onPickSupervisor={(value) => { setPickedSupervisor(value); setProblem(""); }}
+      onSave={() => void save()} onRetry={reload} />
   </div>;
 }

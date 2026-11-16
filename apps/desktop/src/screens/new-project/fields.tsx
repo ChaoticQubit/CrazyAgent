@@ -1,8 +1,14 @@
 import type { Result } from "../../api";
 import { useState } from "react";
+import { loadGitHubOwners, loadGitHubStatus } from "../../api-intake";
 import type { Platform, ProjectCatalog, ResearchKind } from "../../api-projects";
-import { Checkbox, Icon, Switch } from "../../ui";
+import type { GitHubOwners } from "../../engine-client";
+import { useLoad } from "../../state";
+import { Checkbox, Icon, Segmented, Switch } from "../../ui";
 import { displayText } from "../conversation";
+import { GitHubSignIn } from "../intake/clone";
+import { OVERVIEW_SIGNED_OUT, PUBLISH_DOCS, PUBLISH_LINE, PUBLISH_TOGGLE, SIGN_IN_CHECKING, SIGN_IN_UNREAD, SIGN_IN_WAIT, emptyPublish, publishErrors, publishShown } from "./publish";
+import type { PublishDraft } from "./publish";
 import { RESEARCH_ICONS, RESEARCH_LABELS } from "./team-editor";
 import { ABOUT_CHARS_MAX, RESEARCH_COPY, addStack, chars, removeStack } from "./wizard";
 import type { ProjectDraft, basicsErrors } from "./wizard";
@@ -131,4 +137,88 @@ export function ResearchSwitches({ prefix, catalog, value, onChange, found = {},
         disabledReason={linked ? "CrazyAgent reads the linked files instead." : undefined} />
     </div>;
   })}</div>;
+}
+
+const NO_OWNERS: Result<GitHubOwners> = { kind: "ok", value: { owners: [], problem: null } };
+
+/** Reads the GitHub sign-in and, once signed in, the accounts a new repository can go under,
+ * for the publish block and the Create project wait. Input: none. Output: the sign-in read
+ * with its reload, the accounts read, whether CrazyAgent is signed in, the accounts offered
+ * and whether those reads are still going. */
+export function useGitHubPublish() {
+  const [status, reloadStatus] = useLoad(loadGitHubStatus, [], "github-status");
+  const signedIn = status.kind === "ok" && status.value.signed_in;
+  const [owners] = useLoad(() => signedIn ? loadGitHubOwners() : Promise.resolve(NO_OWNERS), [signedIn]);
+  const offered = owners.kind === "ok" ? owners.value.owners : [];
+  const checking = status.kind === "loading" || (signedIn && owners.kind === "loading");
+  return { status, reloadStatus, owners, signedIn, offered, checking };
+}
+
+/** The GitHub reads one New Project page shares between its publish block and Create. */
+export type GitHubPublishReads = ReturnType<typeof useGitHubPublish>;
+
+/** The New Project publish block: the GitHub toggle with its one line, then, while it is on,
+ * the sign-in when CrazyAgent has none, or the visibility, account, repository name,
+ * description and docs switch, each name and description following Basics until edited.
+ * On a made project's Overview it says the Overview's sign-in words, with Try again after a
+ * failed sign-in read. Inputs: an id prefix, the draft, its change handler, the page's
+ * GitHub reads and where the block sits. Output: the block. */
+export function PublishFields({ prefix, draft, onChange, github, place = "new-project" }: { prefix: string; draft: ProjectDraft; onChange: (draft: ProjectDraft) => void; github: GitHubPublishReads; place?: "new-project" | "overview" }) {
+  const publish = draft.publish ?? emptyPublish();
+  const { status, reloadStatus, owners, signedIn, offered } = github;
+  const shown = publishShown(publish, draft.name, draft.about, offered);
+  const errors = publishErrors(publish, draft.name, draft.about, offered, signedIn);
+  const set = (changes: Partial<PublishDraft>) => onChange({ ...draft, publish: { ...publish, ...changes } });
+  const error = (field: keyof typeof errors) => errors[field] && <p className="pj-error" id={`${prefix}-publish-${field}-error`} role="alert">{errors[field]}</p>;
+
+  return <fieldset className="pj-field">
+    <legend className="pj-sr">GitHub</legend>
+    <div className="pj-switch-list"><div className="pj-switch-item">
+      <Icon name="git-branch" size={18} />
+      <span><strong>{PUBLISH_TOGGLE}</strong><span className="pj-secondary">{PUBLISH_LINE}</span></span>
+      <Switch id={`${prefix}-publish`} label={PUBLISH_TOGGLE} hideLabel checked={publish.on} onChecked={(on) => set({ on })} />
+    </div></div>
+    {publish.on && (status.kind === "loading" ? <p className="pj-help" role="status">{SIGN_IN_CHECKING}</p>
+      : status.kind === "error" && place === "overview" ? <div className="pj-stack">
+        <p className="pj-error" role="alert">{SIGN_IN_UNREAD}</p>
+        <p className="pj-help">{displayText(status.message)}</p>
+        <div className="pj-need"><button type="button" className="btn" id={`${prefix}-sign-in-reread`} onClick={() => reloadStatus()}>Try again</button></div>
+      </div>
+      : status.kind !== "ok" ? <p className="pj-error" role="alert">{status.kind === "error" ? status.message : "Publishing on GitHub isn't in this build."}</p>
+      : !status.value.signed_in ? <div className="pj-stack">
+        <p className="pj-help">{place === "overview" ? OVERVIEW_SIGNED_OUT : SIGN_IN_WAIT}</p>
+        <GitHubSignIn status={status.value} reloadStatus={reloadStatus} />
+      </div>
+      : <div className="pj-stack">
+        <div className="pj-field">
+          <span className="pj-label">Visibility</span>
+          <Segmented label="Visibility" value={publish.private ? "private" : "public"} onValue={(value) => set({ private: value === "private" })}
+            options={[{ value: "private", label: "Private", icon: "lock" }, { value: "public", label: "Public", icon: "globe" }]} />
+        </div>
+        <div className="pj-field">
+          <label htmlFor={`${prefix}-publish-owner`}>Account</label>
+          {owners.kind === "loading" ? <p className="pj-help" role="status">Loading your GitHub accounts...</p>
+            : owners.kind !== "ok" ? <p className="pj-error" role="alert">{owners.kind === "error" ? owners.message : "Listing GitHub accounts isn't in this build."}</p>
+            : <select className="pj-input" id={`${prefix}-publish-owner`} value={shown.owner} aria-invalid={Boolean(errors.owner) || undefined}
+              aria-describedby={errors.owner ? `${prefix}-publish-owner-error` : undefined} onChange={(event) => set({ owner: event.target.value })}>
+              {offered.map((owner) => <option key={owner.login} value={owner.login}>{owner.personal ? `${owner.login} (you)` : owner.login}</option>)}
+            </select>}
+          {owners.kind === "ok" && owners.value.problem && <p className="pj-help">{displayText(owners.value.problem)}</p>}
+          {error("owner")}
+        </div>
+        <div className="pj-field">
+          <label htmlFor={`${prefix}-publish-name`}>Repository name</label>
+          <input className="pj-input" id={`${prefix}-publish-name`} value={shown.name} aria-invalid={Boolean(errors.name) || undefined}
+            aria-describedby={errors.name ? `${prefix}-publish-name-error` : undefined} onChange={(event) => set({ name: event.target.value })} />
+          {error("name")}
+        </div>
+        <div className="pj-field">
+          <label htmlFor={`${prefix}-publish-description`}>Repository description</label>
+          <input className="pj-input" id={`${prefix}-publish-description`} value={shown.description} aria-invalid={Boolean(errors.description) || undefined}
+            aria-describedby={errors.description ? `${prefix}-publish-description-error` : undefined} onChange={(event) => set({ description: event.target.value })} />
+          {error("description")}
+        </div>
+        <Checkbox label={PUBLISH_DOCS} checked={publish.docs} onChecked={(docs) => set({ docs })} />
+      </div>)}
+  </fieldset>;
 }

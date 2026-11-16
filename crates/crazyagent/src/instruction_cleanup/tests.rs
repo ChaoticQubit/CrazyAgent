@@ -282,6 +282,7 @@ fn a_run_checks_the_pool_rule_and_its_one_slot_before_it_touches_the_disk() {
         project,
         pool,
         prompt: "prompt",
+        agent: "instructions-cleanup",
     };
     assert_eq!(run(&request(None, None)).unwrap_err(), POOL_NEEDED);
     assert_eq!(
@@ -331,6 +332,7 @@ fn a_run_refuses_a_linked_or_filled_work_folder() {
         project: None,
         pool: Some(&picked),
         prompt: "prompt",
+        agent: "instructions-cleanup",
     };
     let elsewhere = root.join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();

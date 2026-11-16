@@ -463,6 +463,57 @@ fn find(
     })
 }
 
+/// Takes a project Delete everything removed out of every pool in the saved settings, as
+/// choosing no pool for it does, so no pool lists it or counts it toward its project cap
+/// (rv-sec2 bgjobs-3b F2). A delete that kept the project's records keeps its pool too.
+/// Inputs: the database, the config, the settings sources, the owner's admission and the
+/// project. Output: Ok once no pool lists a removed project, else the error.
+pub(super) fn forget_pool_project(
+    db: &mut Connection,
+    config: &mut EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    admission: &Admission,
+    project: &ProjectId,
+) -> Result<(), EngineError> {
+    let kept: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if kept {
+        return Ok(());
+    }
+    let reference = CredentialRef::new(project.as_str()).map_err(error)?;
+    let pooled = |config: &EffectiveConfig| {
+        config.settings.model_access.as_ref().is_some_and(|access| {
+            access
+                .pools
+                .iter()
+                .any(|pool| pool.projects.contains(&reference))
+        })
+    };
+    if !pooled(&*config) {
+        return Ok(());
+    }
+    publish(
+        db,
+        config,
+        sources,
+        admission,
+        ModelAccessEdit::AssignProjectPool {
+            project: reference.clone(),
+            pool: None,
+        },
+    )?;
+    assert!(
+        !pooled(&*config),
+        "a published no-pool edit leaves no pool listing the project"
+    );
+    Ok(())
+}
+
 fn publish(
     db: &mut Connection,
     config: &mut EffectiveConfig,

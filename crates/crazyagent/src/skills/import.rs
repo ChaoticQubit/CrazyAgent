@@ -348,12 +348,20 @@ fn planned_digest(planned: &[PlannedFile]) -> Option<[u8; 32]> {
     Some(hash.finalize().into())
 }
 
+/// Reads one folder under a skills folder as an import candidate: none when it holds no
+/// SKILL.md, checked before any other rule so a folder that is not a skill is never listed
+/// as one that cannot be imported (RV-DS241-92), else its state under the import rules.
+/// Inputs: where it was found, the folder, its name and the app's skills. Output: the
+/// candidate, none, or `skill_import_home_unknown` for a folder path that is not UTF-8.
 fn candidate(
     from: ImportFrom,
     folder: &Path,
     name: &str,
     added: &[SkillInfo],
 ) -> Result<Option<ImportCandidate>, EngineError> {
+    if std::fs::symlink_metadata(folder.join("SKILL.md")).is_err() {
+        return Ok(None);
+    }
     let shown = folder
         .to_str()
         .ok_or_else(|| error("skill_import_home_unknown"))?
@@ -596,6 +604,48 @@ mod tests {
                 .any(|found| found.folder.ends_with("tagged\u{e0041}")),
             "the folder stays exact so an import names the same folder"
         );
+    }
+
+    /// RV-DS241-92: a folder with no SKILL.md is not a skill, so it is never listed, even
+    /// one that fails an earlier check first, such as a bundle of nested skills holding more
+    /// files than one skill may; a folder whose SKILL.md is there and that fails that check
+    /// is still listed as Can't import, so the list counts skills only.
+    #[test]
+    fn a_folder_without_skill_md_is_never_listed_whatever_check_it_fails_first() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let claude = home.join(".claude/skills");
+        skill(&claude.join("fmt"), "fmt", "Formats changed files.");
+        let crowded = claude.join("crowded");
+        skill(&crowded, "crowded", "Holds too many files.");
+        for index in 0..skill_folder::FILES_MAX + 50 {
+            let part = claude
+                .join("bundle")
+                .join(format!("part-{:02}", index % 10));
+            fs::create_dir_all(&part).unwrap();
+            fs::write(part.join(format!("note-{index:03}.md")), "Note.\n").unwrap();
+            fs::write(crowded.join(format!("note-{index:03}.md")), "Note.\n").unwrap();
+        }
+
+        let list = scan(&home, &[]).unwrap();
+        let listed: Vec<(&str, &ImportState)> = list
+            .found
+            .iter()
+            .map(|found| (found.name.as_str(), &found.state))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (
+                    "crowded",
+                    &ImportState::Unusable {
+                        code: "skill_too_many_files".into()
+                    }
+                ),
+                ("fmt", &ImportState::New),
+            ]
+        );
+        assert_eq!(list.more, 0);
     }
 
     #[test]

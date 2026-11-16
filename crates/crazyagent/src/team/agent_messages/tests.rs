@@ -935,3 +935,31 @@ fn an_old_kept_messages_table_is_rebuilt_on_open_with_every_row_and_a_notice_rec
         .unwrap();
     assert_eq!((author.as_str(), kind.as_str()), ("engine", "message"));
 }
+
+#[test]
+fn an_engine_notice_still_kept_for_an_agent_is_not_written_again() {
+    let connection = database();
+    let (ada, bob) = (agent(&connection, PROJECT), agent(&connection, PROJECT));
+    let line = "On this Linux, port 80 is below 1024.";
+    let note = |agent: i64, text: &str, at: i64| {
+        let tx = Transaction::new_unchecked(&connection, TransactionBehavior::Immediate).unwrap();
+        let written = note_once(&tx, &project(PROJECT), agent, text, at).unwrap();
+        tx.commit().unwrap();
+        written
+    };
+    assert!(note(ada, line, 10));
+    assert!(!note(ada, line, 20), "the same launch again");
+    assert!(note(bob, line, 30), "another agent");
+    let other = "On this Linux, port 443 is below 1024.";
+    said(&connection, PROJECT, ada, Said::Message, other, 40);
+    assert!(note(ada, other, 50), "the master's words are not the engine's notice");
+    assert_eq!(kept(&connection, PROJECT), 4);
+    let (ms, count): (i64, i64) = connection
+        .query_row(
+            "SELECT MIN(created_ms),COUNT(*) FROM team_agent_messages WHERE agent=?1 AND text=?2 AND author='engine'",
+            params![ada, line],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((ms, count), (10, 1));
+}

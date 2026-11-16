@@ -1,5 +1,5 @@
 use super::*;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::Command;
 
 /// A scratch HOME with no tools in it, its real path, so found files compare equal.
@@ -486,6 +486,196 @@ fn a_shim_named_by_path_is_resolved_through_to_the_real_install() {
     assert!(!resolved.grants().contains(&shim));
     assert_eq!(resolved.interpreter().unwrap().program, real);
     assert_eq!(resolved.program, script);
+}
+
+/// rv-sec2 F1 (B11): the system starts the path a first line names as written, so a
+/// version-manager shim named by path is judged at that path before the install behind it
+/// is looked up: a `node` link in a project that leads to the owner's volta shim is refused,
+/// although the shim and its install would pass, while the shim named in its own folder still
+/// resolves through (the row above).
+#[test]
+fn a_shim_named_by_path_through_a_link_agents_can_move_is_refused() {
+    let (_folder, home) = scratch();
+    let shim = program(&home.join(".volta/bin/node"), NODE);
+    program(&home.join(".volta/tools/image/node/22.11.0/bin/node"), NODE);
+    std::fs::create_dir_all(home.join("project/.crazyagent")).unwrap();
+    let planted = home.join("project/tools/node");
+    std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&shim, &planted).unwrap();
+    let script = program(
+        &home.join(".local/bin/through"),
+        &format!("#!{}\n", planted.display()),
+    );
+    let missing = resolve_entry(&script, &home_only(&home)).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(
+        missing.refused.map(|refused| (refused.file, refused.why)),
+        Some((planted, Refusal::AgentsCanWrite))
+    );
+}
+
+/// Writes a script with the given bytes and mode into the scratch HOME's `scripts` folder.
+/// Inputs: HOME, the script's name, its bytes and its mode. Output: the script.
+fn script(home: &Path, name: &str, bytes: &[u8], mode: u32) -> PathBuf {
+    let script = home.join("scripts").join(name);
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, bytes).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode)).unwrap();
+    script
+}
+
+/// The file the resolver refused for an entry and why, none when it resolved or failed for
+/// another reason. Inputs: the entry and the places. Output: the refusal.
+fn refusal_of(entry: &Path, places: &Places) -> Option<(PathBuf, Refusal)> {
+    resolve_entry(entry, places)
+        .err()
+        .filter(|missing| missing.reason == Reason::Refused)
+        .and_then(|missing| missing.refused)
+        .map(|refused| (refused.file, refused.why))
+}
+
+/// rv-sec2 F2 (B11): a script whose first line the resolver cannot read the way the system and
+/// `env` run it is refused, never taken for a program with no interpreter: `env` with a
+/// setting or a flag other than -S, an `env` other than /usr/bin/env, a relative interpreter,
+/// one with a `..` part, a line that is not UTF-8, a line longer than the part read, and
+/// `/usr/bin/env` reached as the program `env` runs or through a link of another name, plus
+/// a CRLF line end, more words than the reader keeps and an `-S` program holding `$`
+/// (B11 r2 N1), each as [`Refusal::FirstLine`].
+/// `env -S` still resolves (`shebang_flags_and_absolute_interpreters_are_kept`).
+#[test]
+fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
+    let (_folder, home) = scratch();
+    program(&home.join(".local/bin/node"), NODE);
+    std::os::unix::fs::symlink("/usr/bin/env", home.join(".local/bin/e")).unwrap();
+    let places = home_only(&home);
+    let lines: Vec<(&str, Vec<u8>)> = vec![
+        ("crlf", b"#!/bin/sh\r\n".to_vec()),
+        ("wordy", b"#!/bin/sh a b c d e f g h\n".to_vec()),
+        ("dollar", b"#!/usr/bin/env -S no$de\n".to_vec()),
+        ("assigned", b"#!/usr/bin/env PATH=/tmp/x node\n".to_vec()),
+        ("flagged", b"#!/usr/bin/env -i node\n".to_vec()),
+        (
+            "other-env",
+            format!("#!{}/env node\n", home.join(".local/bin").display()).into_bytes(),
+        ),
+        ("relative", b"#!node\n".to_vec()),
+        ("env-twice", b"#!/usr/bin/env /usr/bin/env node\n".to_vec()),
+        (
+            "env-link",
+            format!("#!{}/e node\n", home.join(".local/bin").display()).into_bytes(),
+        ),
+        ("dotted", b"#!/usr/bin/../bin/sh\n".to_vec()),
+        ("not-utf8", b"#!/bin/\xffsh\n".to_vec()),
+        (
+            "long",
+            format!(
+                "#!/usr/bin/env -S{}node\n",
+                " ".repeat(SCRIPT_HEAD_BYTES_MAX)
+            )
+            .into_bytes(),
+        ),
+    ];
+    for (name, line) in lines {
+        let script = script(&home, name, &line, 0o755);
+        assert_eq!(
+            refusal_of(&script, &places),
+            Some((script, Refusal::FirstLine)),
+            "{name}"
+        );
+    }
+}
+
+/// rv-sec2 B11 r2 F2: a first line whose interpreter is a system launcher that looks the
+/// program it is given up by name in the child's PATH, such as nice, arch or nohup, starts a
+/// copy the resolver never judged, so it is refused as [`Refusal::FirstLine`]: the launcher
+/// named by path, through a link of another name, or asked of `env` by name. A multi-call
+/// binary picks its tool by the name the line runs it as (rv-code4 B18 F1), so a `nice` link
+/// to a single-binary coreutils, as nix lays it out, is refused by that name, and a link of
+/// another name to it by the real file's.
+#[test]
+fn a_first_line_whose_interpreter_looks_its_program_up_by_name_is_refused() {
+    let (_folder, home) = scratch();
+    program(&home.join(".local/bin/node"), NODE);
+    std::os::unix::fs::symlink("/usr/bin/nice", home.join(".local/bin/nice")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/nohup", home.join(".local/bin/n")).unwrap();
+    let multi = home.join("nix/bin");
+    std::fs::create_dir_all(&multi).unwrap();
+    std::fs::copy("/bin/echo", multi.join("coreutils")).unwrap();
+    std::fs::set_permissions(
+        multi.join("coreutils"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("coreutils", multi.join("nice")).unwrap();
+    std::os::unix::fs::symlink("coreutils", multi.join("stamp")).unwrap();
+    let places = home_only(&home);
+    let lines: Vec<(&str, String)> = vec![
+        ("nice", "#!/usr/bin/nice node\n".to_owned()),
+        ("arch", "#!/usr/bin/arch -arm64 node\n".to_owned()),
+        ("nohup", "#!/usr/bin/nohup node\n".to_owned()),
+        (
+            "linked",
+            format!("#!{}/n node\n", home.join(".local/bin").display()),
+        ),
+        ("env-nice", "#!/usr/bin/env nice node\n".to_owned()),
+        (
+            "multi-call-nice",
+            format!("#!{}/nice node\n", multi.display()),
+        ),
+        (
+            "multi-call-other",
+            format!("#!{}/stamp node\n", multi.display()),
+        ),
+    ];
+    for (name, line) in lines {
+        let script = script(&home, name, line.as_bytes(), 0o755);
+        assert_eq!(
+            refusal_of(&script, &places),
+            Some((script, Refusal::FirstLine)),
+            "{name}"
+        );
+    }
+}
+
+/// rv-sec2 B11 r2 F3: the system ends a first line at its first `#`, so the words the reader
+/// would keep past it are not the ones that run: a line holding `#` anywhere after `#!` is
+/// refused as [`Refusal::FirstLine`], an `env` program named `node#x` with an owner file of
+/// that name in the places included.
+#[test]
+fn a_first_line_holding_a_hash_is_refused() {
+    let (_folder, home) = scratch();
+    program(&home.join(".local/bin/node"), NODE);
+    program(&home.join(".local/bin/node#x"), NODE);
+    let places = home_only(&home);
+    let lines: Vec<(&str, &[u8])> = vec![
+        ("word", &b"#!/bin/sh a#b c\n"[..]),
+        ("named", &b"#!/usr/bin/env node#x\n"[..]),
+        ("spaced", &b"#!/bin/sh # c\n"[..]),
+    ];
+    for (name, line) in lines {
+        let script = script(&home, name, line, 0o755);
+        assert_eq!(
+            refusal_of(&script, &places),
+            Some((script, Refusal::FirstLine)),
+            "{name}"
+        );
+    }
+}
+
+/// rv-sec2 B11 r2 F4: the system reads a script's first line whatever its read bit says, so an
+/// executable file the engine cannot read is refused as [`Refusal::FirstLine`], never taken
+/// for a program with no interpreter; the same file readable resolves.
+#[test]
+fn an_executable_file_the_engine_cannot_read_is_refused() {
+    let (_folder, home) = scratch();
+    let places = home_only(&home);
+    let locked = script(&home, "locked", b"#!/bin/echo ran\n", 0o311);
+    assert_eq!(
+        refusal_of(&locked, &places),
+        Some((locked.clone(), Refusal::FirstLine))
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(resolve_entry(&locked, &places).is_ok());
 }
 
 /// F1: an npm script's `node` comes from its own npm prefix first, the `node` beside

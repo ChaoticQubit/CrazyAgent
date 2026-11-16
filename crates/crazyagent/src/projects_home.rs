@@ -7,16 +7,19 @@ mod move_project;
 #[cfg(all(test, unix))]
 mod move_tests;
 mod platform;
+pub(crate) mod setup_mark;
 mod watch;
 
 pub use intake::{
     AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, OldSource, Placed,
     Tally, add_left, copy_tree, folder_size, move_by_copy, sweep_staging, verify_tree,
 };
+pub(crate) use layout::append_lines;
 pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
 };
 pub(crate) use move_project::holds as project_move_holds;
+pub(crate) use move_project::lands as project_move_lands;
 pub(crate) use move_project::{
     Asked, Finished, Pending, check as project_move_check, finish, forget, pending, plan,
 };
@@ -62,6 +65,12 @@ CREATE TABLE IF NOT EXISTS projects_home_project_move_ended (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
     mode TEXT NOT NULL CHECK(mode IN ('move', 'copy')),
     ended TEXT NOT NULL CHECK(length(ended) BETWEEN 1 AND 64)
+);
+CREATE TABLE IF NOT EXISTS projects_home_project_move_left (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024)
 );
 CREATE TABLE IF NOT EXISTS projects_home_add (
     request TEXT PRIMARY KEY CHECK(length(request) BETWEEN 1 AND 128),
@@ -1351,6 +1360,12 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "This engine cannot delete projects. Remove it from the dashboard instead."
         }
         "home_new_project_failed" => "The project folder could not be created. Nothing was kept.",
+        "home_new_project_interrupted" => {
+            "Setting up the project stopped part way. Nothing was kept; set it up again from New Project."
+        }
+        "setup_cannot_stop" => {
+            "The project is being saved, so it cannot stop now. Wait for it to finish on Home."
+        }
         "home_source_missing" => "That folder is no longer there.",
         "home_source_not_folder" => "Pick a folder, not a file or a link.",
         "home_source_in_home" => "That folder is already in your projects folder.",

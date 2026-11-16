@@ -3161,6 +3161,77 @@ fn reading_job(source: &str, state: JobState) -> JobView {
     }
 }
 
+/// DEC-177 step 3b: a New Project job keeps no answers (add.2 Q3 A), so Enter on one that
+/// failed opens New project, where its draft waits, and starts nothing.
+#[test]
+fn home_opens_new_project_for_a_failed_new_project_job_and_starts_nothing() {
+    let mut ctx = ctx(120, 30);
+    ctx.store.projects = Load::Ready(Vec::new());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let failed = JobView {
+        id: RequestId::new("setup-1").unwrap(),
+        kind: JobKind::Setup,
+        project_id: Some(ProjectId::new("project-tidepool").unwrap()),
+        source: "Tidepool".to_owned(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+        stopping: false,
+        state: JobState::Failed {
+            code: "home_new_project_failed".into(),
+            phase: Phase::Building,
+        },
+    };
+    job_read(&mut shell, Some(failed));
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        shows(&rows, "Tidepool: The project folder could not be created."),
+        "{rows:#?}"
+    );
+    shell.key(Key::Enter);
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    assert_eq!(
+        job_asks(&mut shell),
+        [IntakeQuery::GitHubStatus],
+        "New project reads only its GitHub sign-in"
+    );
+    assert!(
+        shell
+            .ctx
+            .message()
+            .is_none_or(|said| said.tone != Tone::Error)
+    );
+}
+
+/// rv-code bgjobs-3b F5: a New Project copying its documents reads on Home in the desktop's
+/// words, one document said in the singular; one with no documents counted reads as setting
+/// up.
+#[test]
+fn a_new_project_copying_its_documents_reads_in_the_desktops_words() {
+    let building = |done, total| JobView {
+        id: RequestId::new("setup-1").unwrap(),
+        kind: JobKind::Setup,
+        project_id: Some(ProjectId::new("project-tidepool").unwrap()),
+        source: "Tidepool".to_owned(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+        stopping: false,
+        state: JobState::Building { done, total },
+    };
+    assert_eq!(
+        super::intake_job::line(&building(1, 3)),
+        "Setting up Tidepool: 1 of 3 documents copied"
+    );
+    assert_eq!(
+        super::intake_job::line(&building(0, 1)),
+        "Setting up Tidepool: 0 of 1 document copied"
+    );
+    assert_eq!(
+        super::intake_job::line(&building(0, 0)),
+        "Setting up Tidepool..."
+    );
+}
+
 /// DEC-177: Enter on a project move that failed starts it again as a move of that project,
 /// never as an add of its folder, and a refused start is said in the move's words.
 #[test]

@@ -1042,6 +1042,78 @@ fn a_frozen_native_lead_the_next_engine_refuses_ends_without_running_again() {
     lead.end(&frozen);
 }
 
+/// v242 mates(): a native lead an earlier engine left running, whose teammates' server
+/// ended while no engine ran, is still ended by the next engine, which holds no keeper for
+/// that server and has no record of the lead: its kill finds no teammates' server rather
+/// than failing on the ended one, so the next engine starts instead of failing.
+#[test]
+fn an_unrecorded_native_lead_whose_teammates_server_ended_is_ended_by_a_next_engine() {
+    let lead = NativeLead::start_with(BEATING_CLAUDE);
+    let deadline = Instant::now() + WAIT;
+    while lead.beats() == 0 {
+        assert!(Instant::now() < deadline, "the lead's process never beat");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let agent = AgentId::team(lead.id).unwrap();
+    let mates = crate::terminal::teammates_socket(&lead.fixture.base, &agent).unwrap();
+    assert!(
+        crate::spawn_gate::connect_unix_std(&mates).is_ok(),
+        "the lead's teammates' server listens"
+    );
+    let ended = crate::spawn_gate::status(
+        Command::new(&lead.fixture.tmux)
+            .arg("-S")
+            .arg(&mates)
+            .arg("kill-server")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(ended.success(), "the teammates' server was not ended");
+    let deadline = Instant::now() + WAIT;
+    while crate::spawn_gate::connect_unix_std(&mates).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "the ended teammates' server still listens"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        std::fs::symlink_metadata(&mates)
+            .is_ok_and(|found| std::os::unix::fs::FileTypeExt::is_socket(&found.file_type())),
+        "the ended teammates' server's socket file stays"
+    );
+    lead.fixture
+        .connection
+        .execute("DELETE FROM team_panes WHERE agent=?1", [lead.id])
+        .unwrap();
+
+    let fresh = crate::terminal::tmux_host(&lead.fixture.base, Some(lead.fixture.tmux.clone()));
+    let mut next = match standin_claude_runtime(&lead.fixture, BEATING_CLAUDE).with_terminal(fresh)
+    {
+        Ok(next) => next,
+        Err(problem) => panic!(
+            "the next engine failed on the lead's ended teammates' server: {}",
+            problem.0
+        ),
+    };
+    assert!(lead.fixture.note(&format!(
+        "The terminal of team agent {} was closed: the engine has no record of it.",
+        lead.id
+    )));
+    let deadline = Instant::now() + WAIT;
+    while state_of(lead.left).is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "the unrecorded lead's process still runs"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(next.shutdown().unwrap().is_empty());
+}
+
 /// DEC-158: when the quitting engine cannot store one frozen pane's record, that pane is
 /// ended rather than left frozen with nothing to thaw it by, every later proxied pane is
 /// still frozen, and the failure is still reported.

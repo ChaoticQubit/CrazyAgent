@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, render } from "./bridge-routes.mjs";
-import { INTERNALS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { INTERNALS, closedPort, owner, required, serveApp, setUpProject, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const NAME = "E2E Owner";
@@ -140,13 +140,10 @@ test("a deep link from a project section opens its dialog and puts that exact ad
   const folder = join(run.root, "projects");
   mkdirSync(folder, { mode: 0o700 });
   assert.equal((await value(run.bridge, "desktop_set_projects_home", { path: folder, generation: 2 })).outcome, "applied");
-  const receipt = await value(run.bridge, "desktop_setup_project", {
-    spec: { name: "Menu Page", repositories: [] },
-    setup: { about: "A page under the user menu", tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [] },
-    generation: 3,
+  const project = await setUpProject(run.bridge, { name: "Menu Page", repositories: [] }, {
+    about: "A page under the user menu", tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [],
   });
-  assert.equal(receipt.outcome, "applied", `the project is made: ${JSON.stringify(receipt)}`);
-  const section = `#/projects/${encodeURIComponent(receipt.project_id)}/settings?section=remove`;
+  const section = `#/projects/${encodeURIComponent(project)}/settings?section=remove`;
   await withPage(async ({ evaluate, send }) => {
     const me = owner({ evaluate, send }, run.evidence);
     try {

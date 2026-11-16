@@ -112,6 +112,10 @@ fn brctl_runs_by_absolute_path_with_each_placeholder_as_its_own_argument() {
     assert_eq!(args[1], batch[0].as_os_str());
     assert_eq!(args[2], batch[1].as_os_str());
     assert_eq!(command.get_envs().count(), 0);
+    assert!(
+        format!("{command:?}").starts_with("env -i "),
+        "brctl starts with an empty environment: {command:?}"
+    );
 }
 
 /// Stands in for iCloud: `count` placeholders under /icloud, each landing the moment its ask

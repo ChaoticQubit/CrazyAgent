@@ -1,12 +1,11 @@
 use super::new_project_view::{Look, Row, wrap_words};
 use super::project_team::window;
 use crate::sandbox::policy::{
-    AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ToolchainChoice,
+    AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ToolchainChoice,
 };
 use crate::sandbox::shared_folders::{
     CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
 };
-use crate::sandbox::{LINUX_NESTED_GIT_LINE, LINUX_PORTS_ANY_HOST_LINE};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.
@@ -59,16 +58,20 @@ pub(in crate::tui) const SHARED_FOLDERS_NEXT_START: &str =
 /// Why the shared folders choice has no effect under Full access, the same in the desktop app.
 pub(in crate::tui) const SHARED_FOLDERS_IGNORED_UNDER_FULL: &str = "Full access runs agents without a sandbox, so they see the whole project folder, secret files included.";
 
+/// The heading over the agent home caches choice (DEC-173 add.1), the same in the desktop app.
+pub(in crate::tui) const HOME_CACHES: &str = "Tool caches in agent homes";
+
 const TEXT_WIDTH: usize = 56;
 const SECRETS_SHOWN_BYTES_MAX: usize = 256;
 
 /// The Agent access box over the Settings tab (DEC-101, DEC-102, DEC-147.9): the access level,
 /// one switch per toolchain family, the network, the IDE hooks switch, the IDE agent folders
-/// choice and the shared project folders. Row 0 is the level, each next row one toolchain,
-/// then the network, hooks, agent folders and shared folders rows, one row per top-level
-/// folder while Chosen folders is picked, and last the Read-only or Read-write row. Busy
-/// while the engine saves; a refusal keeps the choices with the reason. `linux` is whether
-/// the box shows what the Linux sandbox cannot hold.
+/// choice, the shared project folders and the tool caches in agent homes (DEC-173 add.1). Row
+/// 0 is the level, each next row one toolchain, then the network, hooks, agent folders and
+/// shared folders rows, one row per top-level folder while Chosen folders is picked, the
+/// Read-only or Read-write row, and last the caches row. Busy while the engine saves; a
+/// refusal keeps the choices with the reason. What this Linux cannot hold, for the level and
+/// the network, comes with the engine's view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct AccessEdit {
     pub view: PolicyView,
@@ -77,13 +80,13 @@ pub(in crate::tui) struct AccessEdit {
     pub allowed: Vec<bool>,
     pub ide_git_hooks: bool,
     pub ide_agent_files: IdeAgentFiles,
+    pub home_caches: HomeCaches,
     pub shared: SharedFolders,
     pub folders: Vec<String>,
     pub cursor: usize,
     pub confirm_full: bool,
     pub busy: bool,
     pub error: Option<String>,
-    pub linux: bool,
 }
 
 /// What one key in the Agent access box asks the screen to do.
@@ -104,6 +107,7 @@ impl AccessEdit {
             allowed: view.toolchains.iter().map(|row| row.allowed).collect(),
             ide_git_hooks: view.ide_git_hooks,
             ide_agent_files: view.ide_agent_files,
+            home_caches: view.home_caches,
             shared: view.shared_folders.clone(),
             folders: pickable_folders(&view.local_folders, &view.shared_folders.chosen),
             view: view.clone(),
@@ -111,8 +115,18 @@ impl AccessEdit {
             confirm_full: false,
             busy: false,
             error: None,
-            linux: cfg!(target_os = "linux"),
         }
+    }
+
+    /// Gives the line the engine sends for the chosen network: what that choice cannot
+    /// hold on this Linux. Input: the box. Output: the line, or none when the engine sent
+    /// none for it.
+    fn network_gap(&self) -> Option<&str> {
+        self.view
+            .networks
+            .iter()
+            .find(|choice| choice.network == self.network)
+            .and_then(|choice| choice.gap.as_deref())
     }
 
     /// Handles one key: Up and Down move, Left, Right and Space change the row, Enter
@@ -157,8 +171,9 @@ impl AccessEdit {
 
     /// The policy the box would save: the chosen level, a choice for each toolchain whose
     /// switch differs from the project's own use, so the others keep following the project,
-    /// the IDE hooks switch, the agent folders choice, the tool cache choice, the Apply access
-    /// changes choice and the grants as the project saved them (T8, F08), and the shared folders
+    /// the IDE hooks switch, the agent folders choice, the agent home caches choice, the tool
+    /// cache choice, the Apply access changes choice and the grants as the project saved them
+    /// (T8, F08), and the shared folders
     /// choice with its shared-back secrets kept.
     pub fn policy(&self) -> AgentPolicy {
         let toolchains: Vec<ToolchainChoice> = self
@@ -178,6 +193,7 @@ impl AccessEdit {
             toolchains,
             ide_git_hooks: self.ide_git_hooks,
             tool_cache: self.view.tool_cache,
+            home_caches: self.home_caches,
             ide_agent_files: self.ide_agent_files,
             apply_changes: self.view.apply_changes,
             grants: self
@@ -195,7 +211,8 @@ impl AccessEdit {
     /// The box's lines fitted to the rows the window leaves it: what the setting does, the
     /// level row, what lowering the level does to running agents, the toolchain rows, the
     /// network row with its help, the IDE hooks row with its line, the agent folders row with
-    /// its help, the warning or the refusal,
+    /// its help, the shared folders rows, the caches row with its help, the warning or
+    /// the refusal,
     /// and the save line, all of them when they fit. Else the warning or refusal and the save
     /// line stay whole at the bottom, and the settings above them show a window that keeps the
     /// cursor's row and as many of its help lines as fit, with how many lines sit above and
@@ -235,8 +252,8 @@ impl AccessEdit {
         rows
     }
 
-    /// The box's settings lines, through the blank line after the shared folders lines, and the
-    /// line the cursor's row is on. Input: the look. Output: the rows, that line and the last
+    /// The box's settings lines, through the blank line after the caches row and its help, and
+    /// the line the cursor's row is on. Input: the look. Output: the rows, that line and the last
     /// line of the help under it.
     fn form(&self, look: &Look) -> (Vec<Row>, usize, usize) {
         let mut body: Vec<Row> = wrap_words(
@@ -278,9 +295,9 @@ impl AccessEdit {
                     .map(|line| Row::of(line, look.warning)),
             );
         }
-        if self.linux && self.access != AgentAccess::Full {
+        for gap in level.map(|level| level.gaps.as_slice()).unwrap_or_default() {
             body.extend(
-                wrap_words(LINUX_NESTED_GIT_LINE, TEXT_WIDTH)
+                wrap_words(gap, TEXT_WIDTH)
                     .into_iter()
                     .map(|line| Row::of(line, look.warning)),
             );
@@ -363,9 +380,9 @@ impl AccessEdit {
                     .into_iter()
                     .map(|line| Row::of(line, look.warning)),
             );
-        } else if self.linux {
+        } else if let Some(gap) = self.network_gap() {
             body.extend(
-                wrap_words(LINUX_PORTS_ANY_HOST_LINE, TEXT_WIDTH)
+                wrap_words(gap, TEXT_WIDTH)
                     .into_iter()
                     .map(|line| Row::of(line, look.warning)),
             );
@@ -430,6 +447,32 @@ impl AccessEdit {
             end = body.len() - 1;
         }
         self.shared_form(look, &mut body, &mut at, &mut end);
+        body.push(Row::default());
+        body.push(Row::of(HOME_CACHES, look.accent));
+        let caches = self.caches_row();
+        if self.cursor == caches {
+            at = body.len();
+        }
+        body.push(
+            Row::of(mark(caches), look.accent)
+                .push("Caches      ", look.muted)
+                .push(
+                    format!("< {} >", self.home_caches.label()),
+                    if self.cursor == caches {
+                        look.selection
+                    } else {
+                        look.fg
+                    },
+                ),
+        );
+        body.extend(
+            wrap_words(home_caches_help(self.home_caches), TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(format!("              {line}"), look.muted)),
+        );
+        if self.cursor == caches {
+            end = body.len() - 1;
+        }
         body.push(Row::default());
         assert!(at < body.len(), "the cursor's row is a settings line");
         assert!(
@@ -609,8 +652,12 @@ impl AccessEdit {
         self.scope_row() + self.shown_folders() + 1
     }
 
+    fn caches_row(&self) -> usize {
+        self.shared_access_row() + 1
+    }
+
     fn last_row(&self) -> usize {
-        self.shared_access_row()
+        self.caches_row()
     }
 
     fn change(&mut self, forward: bool) {
@@ -637,6 +684,10 @@ impl AccessEdit {
         }
         if self.cursor == self.shared_access_row() {
             self.shared.access = next_shared_access(self.shared.access);
+            return;
+        }
+        if self.cursor == self.caches_row() {
+            self.home_caches = next_home_caches(self.home_caches, forward);
             return;
         }
         if self.cursor > self.scope_row() {
@@ -740,6 +791,35 @@ pub(in crate::tui) fn next_agent_files(current: IdeAgentFiles, forward: bool) ->
     let count = IdeAgentFiles::ALL.len();
     let step = if forward { 1 } else { count - 1 };
     IdeAgentFiles::ALL[(at + step) % count]
+}
+
+/// The next agent home caches choice, cycling in either direction (DEC-173 add.1). Input: the
+/// current choice and the direction. Output: the next choice.
+pub(in crate::tui) fn next_home_caches(current: HomeCaches, forward: bool) -> HomeCaches {
+    let at = HomeCaches::ALL
+        .iter()
+        .position(|choice| *choice == current)
+        .unwrap_or(0);
+    let count = HomeCaches::ALL.len();
+    let step = if forward { 1 } else { count - 1 };
+    HomeCaches::ALL[(at + step) % count]
+}
+
+/// What an agent home caches choice does to the `.cache` and npm cache in each agent's home
+/// at its start (DEC-173 add.1), the same in the desktop app. Input: the choice. Output: the
+/// line.
+pub(in crate::tui) fn home_caches_help(choice: HomeCaches) -> &'static str {
+    match choice {
+        HomeCaches::Keep => {
+            "An agent home keeps its .cache and npm cache from start to start, whatever level wrote them, so tools download less."
+        }
+        HomeCaches::ClearWhenRaised => {
+            "An agent home loses its .cache and npm cache when its agent starts at a wider access level than its last start, so nothing a narrower run left there reaches a wider one."
+        }
+        HomeCaches::ClearEveryLaunch => {
+            "An agent home loses its .cache and npm cache at every start; tools download what they need again."
+        }
+    }
 }
 
 /// What an agent folders choice lets the IDE, its terminals and its tasks do in agent
