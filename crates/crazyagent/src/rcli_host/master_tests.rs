@@ -47,6 +47,7 @@ impl Case {
             instructions: None,
             model: None,
             model_provider: None,
+            gateway: None,
         };
         let mut case = Self {
             _root: root,
@@ -526,6 +527,152 @@ fn an_instructions_file_adds_one_flag_and_only_a_private_single_link_file_outsid
     rejection(case.launch.command(), "rcli_master_file_rejected");
     case.launch.instructions = Some(file);
     assert_eq!(case.launch.command().unwrap().get_args().count(), 10);
+}
+
+/// Makes the entry the engine builds for a granted RCLI master turn (Connectors Task 14):
+/// an engine executable and the turn's own launch folder directly in the engine root's
+/// launches folder, both outside the project and the profile home. Input: the case.
+/// Output: the entry `connectors::launch::entry` made.
+fn gateway_entry(case: &Case) -> crate::plugins::LaunchServer {
+    let root = case.launch.cwd.parent().unwrap();
+    let engine = root.join("crazyagent-engine");
+    fs::write(&engine, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o700)).unwrap();
+    let launches = root
+        .join("engine-root")
+        .join(crate::connectors::gateway::LAUNCHES_FOLDER);
+    let folder = launches.join("launch-a");
+    fs::create_dir_all(&folder).unwrap();
+    for path in [&launches, &folder] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let launch = crate::connectors::gateway::GatewayLaunch {
+        folder,
+        snapshot: crate::connectors::gateway::GrantSnapshot {
+            project: "project-a".into(),
+            role: crate::connectors::grants::Role::Master,
+            agent: "Master".into(),
+            connectors: vec!["linear".into()],
+        },
+    };
+    crate::connectors::launch::entry(&engine, &launch).unwrap()
+}
+
+/// Connectors Task 14, both legs: a granted turn's launch names only the gateway, as
+/// `--gateway-engine <engine> --gateway-folder <folder>` right after `--cwd` and before
+/// every other flag, with no environment; the same launch without a grant keeps today's
+/// argv byte for byte. An entry that is not exactly the one `ca-connectors` stdio server
+/// with no secret is never read as a gateway.
+#[test]
+fn an_rcli_master_launch_names_only_the_gateway_server() {
+    let mut case = Case::new();
+    let argv = |case: &Case| -> Vec<std::ffi::OsString> {
+        let command = case.launch.command().unwrap();
+        command.get_args().map(|arg| arg.to_owned()).collect()
+    };
+    let without = argv(&case);
+    assert_eq!(without.len(), 8, "no grant keeps today's argv");
+    let entry = gateway_entry(&case);
+    let gateway = super::RcliGateway::from_entry(&entry).unwrap();
+    case.launch.gateway = Some(gateway.clone());
+    let args = argv(&case);
+    assert_eq!(args.len(), 12);
+    assert_eq!(args[..8], without[..]);
+    assert_eq!(args[8], "--gateway-engine");
+    assert_eq!(args[9], gateway.engine.as_os_str());
+    assert_eq!(args[10], "--gateway-folder");
+    assert_eq!(args[11], gateway.folder.as_os_str());
+    assert_eq!(
+        case.launch.command().unwrap().get_envs().count(),
+        1,
+        "the gateway adds no environment"
+    );
+    case.launch.gateway = None;
+    assert_eq!(argv(&case), without);
+    let refused = |server: &crate::plugins::LaunchServer| {
+        assert_eq!(
+            super::RcliGateway::from_entry(server).unwrap_err().0,
+            "rcli_master_gateway_rejected"
+        );
+    };
+    let crate::plugins::ServerSpec::Stdio {
+        command: engine,
+        args: entry_args,
+    } = &entry.spec
+    else {
+        panic!("the gateway entry is a stdio server");
+    };
+    let shaped = |name: &str, spec: crate::plugins::ServerSpec| crate::plugins::LaunchServer {
+        name: name.into(),
+        spec,
+        secrets: Vec::new(),
+    };
+    let stdio = |command: &str, args: &[&str]| crate::plugins::ServerSpec::Stdio {
+        command: command.into(),
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+    };
+    let (engine, folder) = (engine.as_str(), entry_args[1].as_str());
+    refused(&shaped("other", stdio(engine, &["connector-mcp", folder])));
+    refused(&shaped("ca-connectors", stdio(engine, &["connector-mcp"])));
+    refused(&shaped("ca-connectors", stdio(engine, &["connector-mcp", folder, "x"])));
+    refused(&shaped("ca-connectors", stdio(engine, &["other-mcp", folder])));
+    refused(&shaped("ca-connectors", stdio("engine", &["connector-mcp", folder])));
+    refused(&shaped("ca-connectors", stdio(engine, &["connector-mcp", "launch-a"])));
+    refused(&shaped(
+        "ca-connectors",
+        crate::plugins::ServerSpec::Http {
+            url: "https://example.com/mcp".into(),
+        },
+    ));
+}
+
+/// Connectors Task 14: the launch refuses a gateway it cannot hand the host whole: a
+/// folder or engine inside the project or the profile home, a folder not directly in a
+/// launches folder, a folder open to others or reached through a link, or an engine that
+/// is missing. Each refusal names `rcli_master_gateway_rejected` and starts nothing.
+#[test]
+fn an_rcli_master_gateway_inside_either_folder_or_outside_the_launches_folder_is_refused() {
+    let mut case = Case::new();
+    let gateway = super::RcliGateway::from_entry(&gateway_entry(&case)).unwrap();
+    let with = |case: &mut Case, engine: &Path, folder: &Path| {
+        case.launch.gateway = Some(super::RcliGateway {
+            engine: engine.to_owned(),
+            folder: folder.to_owned(),
+        });
+        rejection(case.launch.command(), "rcli_master_gateway_rejected");
+    };
+    let private_folder = |path: &Path| {
+        fs::create_dir_all(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    let (cwd, home) = (case.launch.cwd.clone(), case.launch.home_dir.clone());
+    for inside in [&cwd, &home] {
+        let folder = inside
+            .join(crate::connectors::gateway::LAUNCHES_FOLDER)
+            .join("launch-b");
+        private_folder(&folder);
+        with(&mut case, &gateway.engine, &folder);
+        let engine = inside.join("crazyagent-engine");
+        fs::copy(&gateway.engine, &engine).unwrap();
+        with(&mut case, &engine, &gateway.folder);
+    }
+    let root = case.launch.cwd.parent().unwrap().to_owned();
+    let stray = root.join("elsewhere").join("launch-c");
+    private_folder(&stray);
+    with(&mut case, &gateway.engine, &stray);
+    let launches = gateway.folder.parent().unwrap().to_owned();
+    with(&mut case, &gateway.engine, &launches);
+    let open = launches.join("launch-d");
+    private_folder(&open);
+    fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+    with(&mut case, &gateway.engine, &open);
+    let linked = launches.join("launch-e");
+    symlink(&gateway.folder, &linked).unwrap();
+    with(&mut case, &gateway.engine, &linked);
+    with(&mut case, &root.join("missing-engine"), &gateway.folder);
+    with(&mut case, Path::new("crazyagent-engine"), &gateway.folder);
+    case.launch.gateway = Some(gateway);
+    assert_eq!(case.launch.command().unwrap().get_args().count(), 12);
 }
 
 /// DEC-150 M-5: a chosen RCLI master model adds one `--model <profile provider>/<id>` flag
