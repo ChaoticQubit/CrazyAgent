@@ -281,7 +281,17 @@ pub fn prepare_if_served(
     role: Role,
     agent: &str,
 ) -> Result<Option<GatewayLaunch>, EngineError> {
-    prepare(db, root, project, role, agent)
+    if serving(root) {
+        return prepare(db, root, project, role, agent);
+    }
+    if !grants::for_launch(db, root, project, role)?.is_empty() {
+        let whom = match role {
+            Role::Master => "this master turn",
+            Role::Agent { .. } => "this agent run",
+        };
+        eprintln!("connectors are not available to {whom}: this engine runs no connector gateway");
+    }
+    Ok(None)
 }
 
 /// Ends a launch: its record goes, so no call of it is answered again, then its folder.

@@ -7,9 +7,10 @@ use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
 use std::os::unix::fs::PermissionsExt;
 
 /// Opens the fixture's team runtime with a Codex stand-in that is never run and an engine
-/// file as its delegate tool, so a tools-on launch can carry the connector entry. Input:
-/// the fixture. Output: the runtime.
-fn connector_runtime(fixture: &Fixture) -> TeamRuntime {
+/// file as its delegate tool, and starts the gateway on its engine root, as an engine with a
+/// team does, so a tools-on launch can carry the connector entry. Input: the fixture.
+/// Output: the runtime and its gateway, which the row stops.
+fn connector_runtime(fixture: &Fixture) -> (TeamRuntime, crate::connectors::gateway::Running) {
     std::fs::set_permissions(
         fixture.base.join("engine.db"),
         std::fs::Permissions::from_mode(0o600),
@@ -25,7 +26,7 @@ fn connector_runtime(fixture: &Fixture) -> TeamRuntime {
     let engine = folder.join("crazyagent");
     engine_file(&engine);
     let access = fixture.access.clone();
-    TeamRuntime::open(
+    let runtime = TeamRuntime::open(
         &fixture.base.join("engine.db"),
         &fixture.base.join("team"),
         BTreeMap::from([("codex", codex)]),
@@ -34,7 +35,9 @@ fn connector_runtime(fixture: &Fixture) -> TeamRuntime {
     )
     .unwrap()
     .with_delegation_tool(&engine)
-    .unwrap()
+    .unwrap();
+    let gateway = crate::connectors::gateway::start(&runtime.root).unwrap();
+    (runtime, gateway)
 }
 
 /// A managed account whose profile home holds a placeholder sign-in, as a team agent on a
@@ -140,7 +143,7 @@ fn an_only_network_project_gets_connectors_and_its_remotes_are_unchanged() {
             },
         )
         .unwrap();
-        let runtime = connector_runtime(&fixture);
+        let (runtime, gateway) = connector_runtime(&fixture);
         for id in [1, 2] {
             assert_eq!(
                 fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
@@ -212,6 +215,7 @@ fn an_only_network_project_gets_connectors_and_its_remotes_are_unchanged() {
             !has_entry(2),
             "{network:?}: an ended run's turn has no entry"
         );
+        gateway.stop();
     }
 }
 
@@ -221,7 +225,7 @@ fn an_only_network_project_gets_connectors_and_its_remotes_are_unchanged() {
 #[test]
 fn an_engine_shutdown_ends_the_launch_of_every_run_it_stops() {
     let fixture = Fixture::new(1);
-    let mut runtime = connector_runtime(&fixture);
+    let (mut runtime, gateway) = connector_runtime(&fixture);
     grant_board(&fixture);
     let project = ProjectId::new(PROJECT).unwrap();
     runtime
@@ -234,4 +238,5 @@ fn an_engine_shutdown_ends_the_launch_of_every_run_it_stops() {
     assert_eq!(runtime.shutdown().unwrap(), Vec::<AgentId>::new());
     assert!(runtime.connector_launches.lock().unwrap().is_empty());
     assert!(!folder.exists(), "the stopped run's launch folder is gone");
+    gateway.stop();
 }
