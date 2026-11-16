@@ -1290,6 +1290,11 @@ impl ResearchRunner {
                 launch.args(installed.arguments());
                 agent.join("output.md")
             }
+            ResearchHarness::Listed(_) => {
+                return Err(RunError::Invalid(
+                    "account does not fit this harness".into(),
+                ));
+            }
         };
         launch.current_dir(&worktree);
         if let Some(port) = installed.model_proxy() {
