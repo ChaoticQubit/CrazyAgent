@@ -151,7 +151,7 @@ pub enum PluginStatus {
 }
 
 /// One plugin as the App plugins page lists it. A refused file has its file name as name
-/// and title and no `runs`.
+/// and title, no `runs`, and the kind its text declares, embedding when that can't be read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginView {

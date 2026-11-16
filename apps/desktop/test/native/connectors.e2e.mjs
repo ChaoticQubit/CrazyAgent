@@ -92,7 +92,7 @@ async function scheme(page, wanted) {
 /** What the engine and the bridge wrote to their logs so far. Input: the evidence folder.
  * Output: the text of every log there is. */
 function logs(evidence) {
-  return ["engine.out", "engine.err", "bridge.out", "bridge.err", "calls.json"].map((name) => join(evidence, name))
+  return ["engine.out", "engine.err", "bridge.out", "bridge.err"].map((name) => join(evidence, name))
     .filter((path) => existsSync(path)).map((path) => readFileSync(path, "utf8")).join("\n");
 }
 

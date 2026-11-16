@@ -1,5 +1,6 @@
 import { call, knownError, namedFailure, type Result } from "./api";
 import { problemText, type Origin, type PluginStatus, type Preview, type Problem, type SecretView } from "./api-app-plugins";
+import { displayText } from "./screens/conversation";
 import type { Tone } from "./ui";
 
 export type WritePolicy = "ask_every_time" | "ask_once_per_project" | "read_only";
@@ -46,7 +47,7 @@ export interface ConnectorView {
   origin: Origin;
   status: PluginStatus;
   sign_in: SignIn;
-  runs: ConnectorRuns;
+  runs: ConnectorRuns | null;
   secrets: SecretView[];
   sha256: string;
 }
@@ -122,12 +123,17 @@ export type ProjectRow = { name: string; title: string; ready: boolean; word: st
 
 /** What a project's Connectors section shows: every Ready connector and every one with an
  * enabled grant, in the page's order then the grants whose connector is gone, and the titles
- * of the rest (DEC-168 addendum 20). Input: the page. Output: the rows and the others. */
+ * of the rest (DEC-168 addendum 20). One row per name: the first listed wins, so a built-in
+ * connector hides the owner's refused file it shadows. Input: the page. Output: the rows and
+ * the others. */
 export function projectRows(view: ConnectorsView): { rows: ProjectRow[]; others: string[] } {
   const grantOf = new Map(view.grants.map((grant) => [grant.connector, grant]));
   const rows: ProjectRow[] = [];
   const others: string[] = [];
+  const seen = new Set<string>();
   for (const connector of view.connectors) {
+    if (seen.has(connector.name)) continue;
+    seen.add(connector.name);
     const grant = grantOf.get(connector.name) ?? null;
     const ready = connector.status.kind === "ready";
     if (ready || grant?.enabled) rows.push({ name: connector.name, title: connector.title, ready, word: connectorWord(connector), grant });
@@ -149,6 +155,7 @@ export const CONNECTORS_PAGE = {
   add: "Add connector",
   back: "All connectors",
   oauthNotYet: "Signs in with OAuth, which this build does not have.",
+  refusedFile: "Fix its file, or remove it on the App plugins page.",
   settings: "Connector settings",
   native: "Harness-native connectors",
   nativeHelp: "Connectors from the harness's own account (claude.ai connectors in Claude Code, ChatGPT apps in Codex). The engine neither filters nor logs them.",
@@ -203,9 +210,11 @@ export function connectorState(connector: ConnectorView): { word: string; tone: 
   return { word, tone: "ok", detail: null };
 }
 
-/** Where a connector comes from and its version, one line. Input: the connector. Output: the line. */
+/** Where a connector comes from and its version, one line; a refused file has no version
+ * to name. Input: the connector. Output: the line. */
 export function originLine(connector: { name: string; version: string; origin: Origin }): string {
-  return `${connector.name}, version ${connector.version}. ${connector.origin === "bundled" ? "Built in" : "Added by you"}.`;
+  const version = connector.version === "" ? "" : `, version ${connector.version}`;
+  return `${connector.name}${version}. ${connector.origin === "bundled" ? "Built in" : "Added by you"}.`;
 }
 
 /** Every host a connector reaches, one line. Input: the hosts. Output: the line. */
@@ -295,9 +304,21 @@ export function connectorProblem(refusal: { code: string; cause?: string; messag
   return refusal.message ?? namedFailure(knownError(refusal.code), refusal.code, refusal.cause);
 }
 
+/** An engine answer as the Connectors pages may show it: every string in it, at any depth,
+ * goes through `displayText`, so a manifest's or vendor's hidden characters show as
+ * escapes. Names, ids and hashes are plain ASCII and come back as sent. Input: the answer.
+ * Output: the same shape. */
+function shown<T>(value: T): T {
+  if (typeof value === "string") return displayText(value) as T;
+  if (Array.isArray(value)) return value.map(shown) as T;
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, shown(item)])) as T;
+}
+
 async function connectorCall<T>(command: string, args: Record<string, unknown>): Promise<Result<T>> {
   const result = await call<T>(command, args);
-  return result.kind === "error" ? { ...result, message: connectorProblem(result) } : result;
+  if (result.kind === "error") return { ...result, message: connectorProblem(result) };
+  return result.kind === "ok" ? { kind: "ok", value: shown(result.value) } : result;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
