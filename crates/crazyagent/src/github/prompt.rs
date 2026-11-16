@@ -138,6 +138,22 @@ pub(crate) fn forget_prompt(db: &Connection, project: &ProjectId) -> Result<(), 
     Ok(())
 }
 
+/// Forgets the publish job kept under a deleted project's folder, as a Delete everything
+/// forgets the project's records once every folder reached the Trash, so a New project that
+/// later lands in the same folder finds no old publish to show or go on with; Remove from
+/// dashboard keeps it (DEC-178 add.1). The engine root is the folder of the database the
+/// delete writes. A job that cannot be removed is logged and the delete still records.
+/// Inputs: that database and the project folder. Output: none.
+pub(crate) fn forget_job(db: &Connection, folder: &Path) {
+    let Some(root) = db.path().map(Path::new).and_then(Path::parent) else {
+        eprintln!("github_publish_forget_failed code=engine_root_missing");
+        return;
+    };
+    if let Err(error) = state::remove_job(root, folder) {
+        eprintln!("github_publish_forget_failed code={}", error.0);
+    }
+}
+
 /// Carries a moved project's publish job, if any, from its old folder to its new one, as
 /// both moves rewrite the project's folder, so the moved project keeps its publish and a
 /// recorded publish is still never asked. The engine root is the folder of the database
