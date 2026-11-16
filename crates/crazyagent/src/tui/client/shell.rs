@@ -413,7 +413,7 @@ pools = [
         service: EngineService,
         native: NativeOwner,
         _stop: tokio::sync::watch::Sender<bool>,
-        _refusing: tokio::net::TcpSocket,
+        _refusing: [std::net::TcpStream; 2],
     }
 
     impl Live {
