@@ -26,7 +26,8 @@ const APPS_BYTES_MAX: usize = 32 * 1024;
 const RUNNING_MAX: usize = 512;
 #[cfg(unix)]
 const SCAN_MAX: usize = 1 << 20;
-/// The most agent roots one freeze accepts.
+/// The most tmux sockets one freeze asks for their listener, dead ones too, and so the
+/// most agent roots; past it the freeze is refused (rv-secreview T17b r2 F1).
 #[cfg(unix)]
 pub const ROOTS_MAX: usize = 1024;
 /// The code of a freeze refused because the agents could not be told apart (rv-code
@@ -1049,31 +1050,35 @@ mod unix {
     /// raw connection, never by a program name or a command line (rv-code T17 r2 F1), and
     /// reached through the short address a long path needs (rv-sec3 T17 r2 F2). The
     /// engine's server holds its kept panes, and each lead's own and teammates' servers
-    /// hold that lead's agents, after an engine restart too. Input: the engine root.
-    /// Output: their pids, or `keep_awake_freeze_agents_unknown` when one cannot be read,
-    /// which refuses every freeze and tells the owner (QUESTION-03:02 A).
+    /// hold that lead's agents, after an engine restart too. At most `ROOTS_MAX` sockets
+    /// are asked in all (rv-secreview T17b r2 F1). Input: the engine root. Output: their
+    /// pids, or `keep_awake_freeze_agents_unknown` when one cannot be read or there are
+    /// more, which refuses every freeze and tells the owner (QUESTION-03:02 A).
     pub fn servers(root: &Path) -> Result<BTreeSet<u32>, EngineError> {
         let mut known = BTreeSet::new();
+        let mut asked = 0_usize;
         for folder in super::socket_folders(root)? {
             for socket in sockets(&folder)? {
+                asked += 1;
+                if asked > ROOTS_MAX {
+                    return Err(error(AGENTS_UNKNOWN, "too many tmux sockets"));
+                }
                 let listener = crate::terminal::tmux::listener(&socket)
                     .map_err(|problem| error(AGENTS_UNKNOWN, problem))?;
                 known.extend(listener);
-                if known.len() > ROOTS_MAX {
-                    return Err(error(AGENTS_UNKNOWN, "too many tmux servers"));
-                }
             }
         }
-        assert!(known.len() <= ROOTS_MAX);
+        assert!(known.len() <= asked && asked <= ROOTS_MAX);
         Ok(known)
     }
 
     /// The owner's tmux sockets in one folder, by the names the engine gives them (its
     /// own, a lead's own, a lead's teammates'), each read without following a link. Every
     /// other entry, such as an agent's own temp files, is passed over, up to `SCAN_MAX`
-    /// entries in all (rv-code T17b r1 F1). Input: the folder. Output: their paths, none
-    /// for a folder that does not exist, or `keep_awake_freeze_agents_unknown` when it
-    /// cannot be read or holds more.
+    /// entries in all (rv-code T17b r1 F1), and at most `ROOTS_MAX` sockets are kept
+    /// (rv-secreview T17b r2 F1). Input: the folder. Output: their paths, none for a
+    /// folder that does not exist, or `keep_awake_freeze_agents_unknown` when it cannot be
+    /// read or holds more.
     fn sockets(folder: &Path) -> Result<Vec<PathBuf>, EngineError> {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
         let unread = |problem: std::io::Error| error(AGENTS_UNKNOWN, problem);
@@ -1103,9 +1108,12 @@ mod unix {
                 });
             if socket {
                 found.push(path);
+                if found.len() > ROOTS_MAX {
+                    return Err(error(AGENTS_UNKNOWN, "too many tmux sockets"));
+                }
             }
         }
-        assert!(found.len() <= SCAN_MAX);
+        assert!(found.len() <= ROOTS_MAX);
         Ok(found)
     }
 
