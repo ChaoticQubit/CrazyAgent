@@ -3,7 +3,7 @@ use crate::app_plugins::store;
 use crate::connectors::gateway;
 use crate::connectors::grants::{self, Role, Who};
 use crate::connectors::mcp_client::tests::{BOARD, KEY};
-use crate::connectors::settings;
+use crate::connectors::settings::{self, Wait};
 use crate::connectors::tests::{Case, add, case};
 use crate::launch_context::{AgentContext, Installed};
 use crate::plugins::LaunchPlugins;
@@ -129,9 +129,16 @@ fn a_granted_project_launch_has_the_one_gateway_entry_and_an_ungranted_one_has_n
     let mcp = claude_mcp(&installed);
     let servers = mcp["mcpServers"].as_object().unwrap();
     assert_eq!(servers.keys().collect::<Vec<_>>(), [SERVER_NAME]);
+    let timeout = u64::try_from(HARNESS_WAIT.as_millis()).unwrap();
     assert_eq!(
         servers[SERVER_NAME],
-        json!({"type": "stdio", "command": ENGINE, "args": ["connector-mcp", folder], "env": {}})
+        json!({
+            "type": "stdio",
+            "command": ENGINE,
+            "args": ["connector-mcp", folder],
+            "env": {},
+            "timeout": timeout,
+        })
     );
     drop(installed);
 
@@ -148,6 +155,44 @@ fn a_granted_project_launch_has_the_one_gateway_entry_and_an_ungranted_one_has_n
         "launch_context_connectors_taken",
         "a second entry under the same name is refused"
     );
+}
+
+/// DEC-168 addendum 14 Q2: the connector entry tells each harness to wait past the longest
+/// approval, Codex by `tool_timeout_sec` and `startup_timeout_sec` and Claude Code by its
+/// per-server `timeout` in milliseconds, so a held write is answered before either gives up.
+#[test]
+fn the_connector_entry_waits_past_the_longest_approval_in_both_harnesses() {
+    let case = granted();
+    let launch = gateway::prepare(&case.db, &case.root, PROJECT, AGENT_ROLE, AGENT)
+        .unwrap()
+        .unwrap();
+    let context = AgentContext::for_tests(LaunchPlugins::default())
+        .with_connectors(entry(Path::new(ENGINE), &launch).unwrap())
+        .unwrap();
+    let (_kept, base) = homes();
+    let longest = Wait::ALL.iter().map(|wait| wait.minutes()).max().unwrap();
+    assert!(HARNESS_WAIT.as_secs() > u64::from(longest) * 60);
+
+    let codex = home(&base, "codex");
+    let installed = context.install("codex", &codex, true).unwrap();
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let server = config["mcp_servers"][SERVER_NAME].as_table().unwrap();
+    let seconds = |key: &str| server.get(key).and_then(toml::Value::as_integer);
+    let tool = i64::try_from(HARNESS_WAIT.as_secs()).unwrap();
+    assert_eq!(seconds("tool_timeout_sec"), Some(tool));
+    let startup = i64::try_from(STARTUP_WAIT.as_secs()).unwrap();
+    assert_eq!(seconds("startup_timeout_sec"), Some(startup));
+    drop(installed);
+
+    let claude = home(&base, "claude");
+    let installed = context.install("claude-code", &claude, true).unwrap();
+    let mcp = claude_mcp(&installed);
+    let timeout = u64::try_from(HARNESS_WAIT.as_millis()).unwrap();
+    assert_eq!(mcp["mcpServers"][SERVER_NAME]["timeout"], json!(timeout));
+    drop(installed);
 }
 
 #[test]

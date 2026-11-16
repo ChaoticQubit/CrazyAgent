@@ -10,6 +10,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub mod approvals;
 pub mod audit;
 pub mod gateway;
 pub mod grants;

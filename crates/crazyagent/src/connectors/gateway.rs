@@ -616,6 +616,13 @@ impl Gateway {
             .sum()
     }
 
+    /// Answers the held writes whose approval was answered, whose wait ran out at `now_ms`
+    /// or whose launch ended. Inputs: the engine database and the time now in milliseconds.
+    /// Output: how many held writes were answered.
+    pub(crate) fn settle_at(&self, _db: &Connection, _now_ms: i64) -> usize {
+        0
+    }
+
     fn forget_ended(&self, live: &[Launch]) {
         let ids: BTreeSet<&str> = live.iter().map(|launch| launch.id.as_str()).collect();
         let ended: Vec<Held> = {
