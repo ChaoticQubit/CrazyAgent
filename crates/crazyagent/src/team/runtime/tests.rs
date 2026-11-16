@@ -34374,16 +34374,32 @@ fn a_native_leads_teammates_home_is_reset_at_each_launch() {
 #[test]
 fn a_codex_agent_with_no_readable_hook_key_list_is_never_taken_as_trusted_and_is_told_why() {
     use crate::coord::settings::{
-        CODEX_HOOKS_UNCHECKED, CODEX_HOOKS_UNLISTED, CODEX_HOOKS_UNTRUSTED,
+        CODEX_HOOKS_LIST_UNREADABLE, CODEX_HOOKS_UNCHECKED, CODEX_HOOKS_UNLISTED,
+        CODEX_HOOKS_UNTRUSTED,
     };
+    use crate::launch_context::HookKeysUnread::{Absent, Unreadable};
     let unasked = |_: &[String]| -> Result<bool, &'static str> {
         panic!("Codex was asked about hook keys the engine could not read")
     };
-    assert_eq!(hook_trust(None, unasked, false), HookTrust::Later);
+    for unread in [Absent, Unreadable] {
+        assert_eq!(hook_trust(Err(unread), unasked, false), HookTrust::Later);
+    }
     assert_eq!(
-        hook_trust(None, unasked, true),
+        hook_trust(Err(Absent), unasked, true),
         HookTrust::Notice(CODEX_HOOKS_UNLISTED),
-        "an unreadable key list says why once the wait is over"
+        "a missing key list says why once the wait is over"
+    );
+    assert_eq!(
+        hook_trust(Err(Unreadable), unasked, true),
+        HookTrust::Notice(CODEX_HOOKS_LIST_UNREADABLE),
+        "a key list that is there but unreadable is not blamed on an earlier CrazyAgent (#166 N0)"
+    );
+    assert!(
+        !CODEX_HOOKS_LIST_UNREADABLE.contains("before this update")
+            && CODEX_HOOKS_LIST_UNREADABLE.contains("replaced or damaged")
+            && CODEX_HOOKS_LIST_UNREADABLE.contains("until the agent restarts")
+            && !CODEX_HOOKS_LIST_UNREADABLE.contains('_'),
+        "{CODEX_HOOKS_LIST_UNREADABLE}"
     );
     assert!(
         CODEX_HOOKS_UNLISTED.contains("started before this update")
@@ -34392,7 +34408,7 @@ fn a_codex_agent_with_no_readable_hook_key_list_is_never_taken_as_trusted_and_is
         "the notice names the cause and the way out in plain words: {CODEX_HOOKS_UNLISTED}"
     );
     assert_eq!(
-        hook_trust(Some(Vec::new()), unasked, true),
+        hook_trust(Ok(Vec::new()), unasked, true),
         HookTrust::Settled
     );
     let keys = vec!["/h/config.toml:pre_tool_use:0:0".to_owned()];
@@ -34405,23 +34421,23 @@ fn a_codex_agent_with_no_readable_hook_key_list_is_never_taken_as_trusted_and_is
         }
     };
     assert_eq!(
-        hook_trust(Some(keys.clone()), asked(Ok(true)), false),
+        hook_trust(Ok(keys.clone()), asked(Ok(true)), false),
         HookTrust::Settled
     );
     assert_eq!(
-        hook_trust(Some(keys.clone()), asked(Ok(false)), false),
+        hook_trust(Ok(keys.clone()), asked(Ok(false)), false),
         HookTrust::Notice(CODEX_HOOKS_UNTRUSTED)
     );
     assert_eq!(
         hook_trust(
-            Some(keys.clone()),
+            Ok(keys.clone()),
             asked(Err("codex_bridge_peer_unknown")),
             false
         ),
         HookTrust::Later
     );
     assert_eq!(
-        hook_trust(Some(keys), asked(Err("codex_bridge_peer_unknown")), true),
+        hook_trust(Ok(keys), asked(Err("codex_bridge_peer_unknown")), true),
         HookTrust::Notice(CODEX_HOOKS_UNCHECKED)
     );
 }

@@ -2210,23 +2210,31 @@ const CODEX_HOOK_KEYS: &str = "codex-hook-keys.json";
 /// The most bytes of a Codex launch's hook key list `codex_pinned_keys` reads.
 const CODEX_HOOK_KEYS_BYTES_MAX: u64 = 256 * 1024;
 
+/// Why a Codex home gave no hook keys: its launch left no key list, as for an agent an
+/// earlier CrazyAgent started, or the list there cannot be read (#166 N0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookKeysUnread {
+    Absent,
+    Unreadable,
+}
+
 /// The hook trust keys a Codex launch pinned in its home's `config.toml`, read from the
 /// launch's own key list ([`CODEX_HOOK_KEYS`]) and never from the config, so the engine can
 /// ask Codex whether it trusts each one (PA1213R2-F2). Takes the agent's `CODEX_HOME`.
-/// Returns the keys, empty when the launch pinned none, or None for a home with no key list
-/// or one that cannot be read whole within `CODEX_HOOK_KEYS_BYTES_MAX` or parsed.
-pub fn codex_pinned_keys(home: &Path) -> Option<Vec<String>> {
-    let file = File::open(home.join(STATE).join(CODEX_HOOK_KEYS)).ok()?;
+/// Returns the keys, empty when the launch pinned none, or why there are none.
+pub fn codex_pinned_keys(home: &Path) -> Result<Vec<String>, HookKeysUnread> {
+    let file =
+        File::open(home.join(STATE).join(CODEX_HOOK_KEYS)).map_err(|_| HookKeysUnread::Absent)?;
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(
         &mut std::io::Read::take(file, CODEX_HOOK_KEYS_BYTES_MAX + 1),
         &mut bytes,
     )
-    .ok()?;
+    .map_err(|_| HookKeysUnread::Absent)?;
     if bytes.len() as u64 > CODEX_HOOK_KEYS_BYTES_MAX {
-        return None;
+        return Err(HookKeysUnread::Absent);
     }
-    serde_json::from_slice(&bytes).ok()
+    serde_json::from_slice(&bytes).map_err(|_| HookKeysUnread::Absent)
 }
 
 /// The owner's hooks a Codex launch runs (PA-12): those on an event Codex has, each copied

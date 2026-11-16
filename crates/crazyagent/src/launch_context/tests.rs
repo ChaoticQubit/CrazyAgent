@@ -3020,10 +3020,13 @@ fn a_codex_launch_pins_only_its_own_hooks_and_never_bypasses_hook_trust() {
     );
     assert_eq!(
         codex_pinned_keys(&codex),
-        Some(vec![key]),
+        Ok(vec![key]),
         "the engine reads back the keys it asks Codex about (PA1213R2-F2)"
     );
-    assert_eq!(codex_pinned_keys(&root.join("no-home")), None);
+    assert_eq!(
+        codex_pinned_keys(&root.join("no-home")),
+        Err(HookKeysUnread::Absent)
+    );
     drop(installed);
 }
 
@@ -3046,7 +3049,7 @@ fn a_codex_launch_s_pinned_keys_come_from_its_own_key_list_never_from_its_config
         "{}:pre_tool_use:0:0",
         codex.canonicalize().unwrap().join("config.toml").display()
     );
-    assert_eq!(codex_pinned_keys(&codex), Some(vec![key.clone()]));
+    assert_eq!(codex_pinned_keys(&codex), Ok(vec![key.clone()]));
     let planted = r#"[hooks.state."planted:pre_tool_use:0:0"]
 trusted_hash = "sha256:00"
 
@@ -3057,23 +3060,65 @@ TOKEN = "secret-value"
     fs::write(&config, planted).unwrap();
     assert_eq!(
         codex_pinned_keys(&codex),
-        Some(vec![key.clone()]),
+        Ok(vec![key.clone()]),
         "an edited config.toml is never parsed for the keys"
     );
     fs::remove_file(&config).unwrap();
     assert_eq!(
         codex_pinned_keys(&codex),
-        Some(vec![key]),
+        Ok(vec![key]),
         "the keys need no config.toml at all"
     );
     let bare = private_home(&root, "bare");
     fs::write(bare.join("config.toml"), planted).unwrap();
     assert_eq!(
         codex_pinned_keys(&bare),
-        None,
-        "a home with no key list is unreadable, never read from its config.toml"
+        Err(HookKeysUnread::Absent),
+        "a home with no key list has none, never read from its config.toml"
     );
     drop(installed);
+}
+
+/// #166 N0 and N1: a Codex home tells a missing hook key list, as an agent an earlier
+/// CrazyAgent started has, apart from one it cannot read. A link in the list's place is not
+/// followed, and a list past `CODEX_HOOK_KEYS_BYTES_MAX` or not a list of strings is
+/// unreadable, never a guess at keys.
+#[test]
+fn a_missing_codex_hook_key_list_is_told_apart_from_a_linked_oversized_or_malformed_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = private_home(&root, "codex");
+    assert_eq!(codex_pinned_keys(&home), Err(HookKeysUnread::Absent));
+    fs::create_dir(home.join(STATE)).unwrap();
+    assert_eq!(codex_pinned_keys(&home), Err(HookKeysUnread::Absent));
+    let list = home.join(STATE).join(CODEX_HOOK_KEYS);
+    let planted = root.join("planted.json");
+    fs::write(&planted, r#"["planted:pre_tool_use:0:0"]"#).unwrap();
+    std::os::unix::fs::symlink(&planted, &list).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&home),
+        Err(HookKeysUnread::Unreadable),
+        "a link in the list's place is never followed"
+    );
+    fs::remove_file(&list).unwrap();
+    fs::write(&list, r#"{"keys": ["k:pre_tool_use:0:0"]}"#).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&home),
+        Err(HookKeysUnread::Unreadable),
+        "a list that is not a list of strings"
+    );
+    let bound = usize::try_from(CODEX_HOOK_KEYS_BYTES_MAX).unwrap();
+    fs::write(&list, format!("[\"{}\"]", "k".repeat(bound))).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&home),
+        Err(HookKeysUnread::Unreadable),
+        "a well-formed list past the bound"
+    );
+    fs::write(&list, r#"["k:pre_tool_use:0:0"]"#).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&home),
+        Ok(vec!["k:pre_tool_use:0:0".to_owned()])
+    );
 }
 
 #[test]

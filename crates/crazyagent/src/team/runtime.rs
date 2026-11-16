@@ -14745,15 +14745,15 @@ enum HookTrust {
 /// never asked about nor taken as trusted. Inputs: the keys, the question to the app-server
 /// and whether `HOOK_TRUST_WAIT` has passed since the agent started. Output: the [`HookTrust`].
 fn hook_trust(
-    keys: Option<Vec<String>>,
+    keys: Result<Vec<String>, crate::launch_context::HookKeysUnread>,
     ask: impl FnOnce(&[String]) -> Result<bool, &'static str>,
     waited: bool,
 ) -> HookTrust {
     let answer = match keys {
-        Some(keys) if keys.is_empty() => return HookTrust::Settled,
-        Some(keys) => ask(&keys),
-        None if waited => return HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_UNLISTED),
-        None => return HookTrust::Later,
+        Ok(keys) if keys.is_empty() => return HookTrust::Settled,
+        Ok(keys) => ask(&keys),
+        Err(_) if waited => return HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_UNLISTED),
+        Err(_) => return HookTrust::Later,
     };
     match answer {
         Ok(true) => HookTrust::Settled,
