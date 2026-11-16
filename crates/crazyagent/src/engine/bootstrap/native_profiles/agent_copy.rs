@@ -5,7 +5,7 @@ use base64::Engine;
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -688,25 +688,7 @@ impl Serialize for ClaimsOnly<'_> {
 /// for an API-key sign-in without ChatGPT tokens, `native_profile_codex_token_unreadable`
 /// for a malformed record or token, or the unavailable refusal.
 fn codex_copy(record: &[u8]) -> Result<Record, EngineError> {
-    if !object(record) {
-        return Err(codex_unreadable());
-    }
-    let record: CodexRecord<'_> = serde_json::from_slice(record).map_err(|_| codex_unreadable())?;
-    let Some(tokens) = record
-        .tokens
-        .filter(|tokens| object(tokens.get().as_bytes()))
-    else {
-        let keyed = record
-            .api_key
-            .is_some_and(|key| key.get().starts_with('"') && key.get() != "\"\"");
-        return Err(if keyed {
-            codex_api_key()
-        } else {
-            codex_unreadable()
-        });
-    };
-    let tokens: CodexTokens<'_> =
-        serde_json::from_str(tokens.get()).map_err(|_| codex_unreadable())?;
+    let (record, tokens) = codex_record(record)?;
     let access = filled(tokens.access_token.as_ref()).ok_or_else(codex_unreadable)?;
     let identity = claims_only(filled(tokens.id_token.as_ref()).ok_or_else(codex_unreadable)?)?;
     let expires = Duration::from_secs(token_expiry(access)?);
@@ -824,20 +806,47 @@ fn polled(
     })
 }
 
+/// Reads a Codex `auth.json` record and its tokens table, the one read the agent copy and
+/// the ChatGPT sign-in share. Input: the record. Output: both, borrowed from it;
+/// `native_profile_codex_api_key` for an API-key sign-in without ChatGPT tokens, or
+/// `native_profile_codex_token_unreadable` for a malformed record or one naming a key twice.
+fn codex_record(record: &[u8]) -> Result<(CodexRecord<'_>, CodexTokens<'_>), EngineError> {
+    if !object(record) {
+        return Err(codex_unreadable());
+    }
+    let record: CodexRecord<'_> = serde_json::from_slice(record).map_err(|_| codex_unreadable())?;
+    let Some(tokens) = record
+        .tokens
+        .filter(|tokens| object(tokens.get().as_bytes()))
+    else {
+        let keyed = record
+            .api_key
+            .is_some_and(|key| key.get().starts_with('"') && key.get() != "\"\"");
+        return Err(if keyed {
+            codex_api_key()
+        } else {
+            codex_unreadable()
+        });
+    };
+    let tokens = serde_json::from_str(tokens.get()).map_err(|_| codex_unreadable())?;
+    Ok((record, tokens))
+}
+
 /// Reads a ChatGPT sign-in from a Codex `auth.json` record or an agent's copy of one: the
 /// access token, the account id when the record has one, and the access token's expiry.
-/// The refresh and id tokens are never read. Input: the record. Output: the sign-in;
-/// `native_profile_codex_api_key` for an API-key sign-in without ChatGPT tokens, or
-/// `native_profile_codex_token_unreadable` for a malformed record or token.
+/// The refresh token is never decoded and the id token is not used. Input: the record.
+/// Output: the sign-in, or the refusals of [`codex_record`] and an unreadable access token.
 pub(crate) fn chatgpt_tokens(
     record: &[u8],
 ) -> Result<crate::model_gateway::relay::chatgpt::ChatGptTokens, EngineError> {
-    let record: Value = serde_json::from_slice(record).map_err(|_| codex_unreadable())?;
-    let (tokens, access, expires) = chatgpt_fields(&record)?;
+    let (_, tokens) = codex_record(record)?;
+    let access = filled(tokens.access_token.as_ref()).ok_or_else(codex_unreadable)?;
+    let expires = Duration::from_secs(token_expiry(access)?);
     let access = crate::credentials::SecretString::bearer(access.as_bytes().to_vec())
         .map_err(|_| codex_unreadable())?;
     let account_id = tokens
-        .get("account_id")
+        .account_id
+        .as_ref()
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
         .map(str::to_owned);
@@ -846,40 +855,6 @@ pub(crate) fn chatgpt_tokens(
         account_id,
         expires,
     })
-}
-
-/// The one read of a Codex record's ChatGPT tokens that the agent copy and the ChatGPT
-/// sign-in share: the `tokens` object, its access token and that token's expiry.
-/// Input: the parsed record. Output: the three; `native_profile_codex_api_key` for an
-/// API-key sign-in without ChatGPT tokens, or `native_profile_codex_token_unreadable`.
-fn chatgpt_fields(record: &Value) -> Result<(&Map<String, Value>, &str, Duration), EngineError> {
-    let tokens = record
-        .get("tokens")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            let keyed = record
-                .get("OPENAI_API_KEY")
-                .and_then(Value::as_str)
-                .is_some_and(|key| !key.is_empty());
-            if keyed {
-                codex_api_key()
-            } else {
-                codex_unreadable()
-            }
-        })?;
-    let access = token_text(tokens, "access_token")?;
-    let expires = Duration::from_secs(token_expiry(access)?);
-    Ok((tokens, access, expires))
-}
-
-/// One non-empty text field of a Codex record's `tokens` object. Inputs: the object and
-/// the field name. Output: the text, or `native_profile_codex_token_unreadable`.
-fn token_text<'a>(tokens: &'a Map<String, Value>, key: &str) -> Result<&'a str, EngineError> {
-    tokens
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(codex_unreadable)
 }
 
 /// Reads the `exp` claim of a ChatGPT access token without checking its signature, which
