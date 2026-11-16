@@ -1,7 +1,8 @@
 #![cfg(target_os = "linux")]
 use crazyagent::sandbox::linux::{
     BWRAP_PATHS, HelperRequest, LOADER_REFUSED, LinuxBackend, LinuxSandbox, NEST_ARGS,
-    NETWORK_SHARED, SLIRP_PATHS, loader_variable,
+    NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS,
+    loader_variable,
 };
 
 use crazyagent::sandbox::{
@@ -2820,13 +2821,53 @@ fn the_routed_network_ends_with_the_agent() {
     assert_eq!(route_processes(route), none, "the network ends with the agent");
 }
 
-/// The setup child never lets an agent start on a network it did not build: handed a
-/// stand-in for bubblewrap's child that shares this test's network namespace, it refuses,
-/// writes no block byte and kills the stand-in. It needs no slirp4netns, so it holds on
-/// every machine.
+/// Stage 1 as a shell stands in for it: it starts the setup child on two named pipes, then
+/// becomes bubblewrap with its info and block descriptors on them, but leaves the network
+/// shared. The setup child refuses, writes no block byte and kills bubblewrap's child, so
+/// the command bubblewrap was to start never runs. Positional arguments: the folder, the
+/// helper and bubblewrap.
+const STAGED: &str = "cd \"$1\" && mkfifo info block || exit 9
+\"$2\" --egress $$ 18444 <info >block 2>said &
+exec \"$3\" --unshare-user --die-with-parent --dev-bind / / --info-fd 3 --block-fd 4 -- /bin/touch \"$1/started\" 3>info 4<block";
+
 #[test]
 fn a_failed_setup_never_starts_the_agent() {
-    use std::os::unix::process::ExitStatusExt;
+    let Some(bwrap) = nesting_bwrap() else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let folder = temp.path().canonicalize().unwrap();
+    let mut staged = crazyagent::spawn_gate::spawn(
+        Command::new("/bin/sh")
+            .args(["-c", STAGED, "sh"])
+            .arg(&folder)
+            .arg(HELPER)
+            .arg(&bwrap)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let status = exit_within(&mut staged, Duration::from_secs(10));
+    if status.is_none() {
+        staged.kill().unwrap();
+        staged.wait().unwrap();
+    }
+    let said = fs::read_to_string(folder.join("said")).unwrap_or_default();
+    assert!(status.is_some_and(|status| !status.success()), "{status:?}: {said}");
+    assert!(said.contains(NETWORK_SHARED), "{said}");
+    assert!(!folder.join("started").exists(), "the command ran: {said}");
+}
+
+/// The setup child runs only as its nest's child, so a caller of the helper never reaches
+/// the agent's namespaces through it (leader 23:16): without the two pipes stage 1 hands it,
+/// for a process that is not its parent's child, or under a parent that is not one of the
+/// fixed bubblewraps, it refuses with its reason, writes nothing and kills nothing. These
+/// need no bubblewrap, so they hold on every machine.
+#[test]
+fn the_setup_child_runs_only_on_its_nests_pipes_for_its_nests_child() {
     let mut stand_in = crazyagent::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .arg("60")
@@ -2835,38 +2876,39 @@ fn a_failed_setup_never_starts_the_agent() {
             .stderr(Stdio::null()),
     )
     .unwrap();
-    let mut setup = crazyagent::spawn_gate::spawn(
-        helper_command()
+    let ask = |named: u32, piped: bool| -> String {
+        let mut setup = helper_command();
+        setup
             .arg("--egress")
             .arg(std::process::id().to_string())
-            .arg("18444")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    )
-    .unwrap();
-    let info = format!("{{\n    \"child-pid\": {}\n}}\n", stand_in.id());
-    setup
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(info.as_bytes())
-        .unwrap();
-    let output = setup.wait_with_output().unwrap();
-    let said = String::from_utf8_lossy(&output.stderr);
-    let ended = exit_within(&mut stand_in, Duration::from_secs(5));
-    if ended.is_none() {
-        stand_in.kill().unwrap();
-        stand_in.wait().unwrap();
-    }
-    assert!(!output.status.success(), "{said}");
-    assert!(output.stdout.is_empty(), "a block byte: {:?}", output.stdout);
-    assert!(said.contains(NETWORK_SHARED), "{said}");
-    assert_eq!(
-        ended.and_then(|status| status.signal()),
-        Some(9),
-        "the setup child kills the agent it never let start"
-    );
+            .arg("18445")
+            .stderr(Stdio::piped());
+        if piped {
+            setup.stdin(Stdio::piped()).stdout(Stdio::piped());
+        } else {
+            setup.stdin(Stdio::null()).stdout(Stdio::null());
+        }
+        let mut child = crazyagent::spawn_gate::spawn(&mut setup).unwrap();
+        if let Some(mut input) = child.stdin.take() {
+            let info = format!("{{\n    \"child-pid\": {named}\n}}\n");
+            let _ = input.write_all(info.as_bytes());
+        }
+        let output = child.wait_with_output().unwrap();
+        let said = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(!output.status.success(), "{said}");
+        assert!(output.stdout.is_empty(), "a block byte: {said}");
+        said
+    };
+    let unpiped = ask(stand_in.id(), false);
+    let unrelated = ask(std::process::id(), true);
+    let unnested = ask(stand_in.id(), true);
+    let alive = stand_in.try_wait().unwrap().is_none();
+    stand_in.kill().unwrap();
+    stand_in.wait().unwrap();
+    assert!(unpiped.contains(SETUP_UNPIPED), "{unpiped}");
+    assert!(unrelated.contains(SETUP_NOT_CHILD), "{unrelated}");
+    assert!(unnested.contains(SETUP_NOT_NEST), "{unnested}");
+    assert!(alive, "a refused setup child kills nothing");
 }
 
 #[test]

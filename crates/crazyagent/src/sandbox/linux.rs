@@ -34,7 +34,9 @@ mod bridge;
 mod egress;
 
 pub use bridge::Bridge;
-pub use egress::{NETWORK_SHARED, SLIRP_PATHS};
+pub use egress::{
+    NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS,
+};
 
 /// The Landlock helper's file name. It ships next to the engine's own executable.
 pub const HELPER_NAME: &str = "crazyagent-landlock";

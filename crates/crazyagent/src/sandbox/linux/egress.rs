@@ -21,6 +21,14 @@ pub const SLIRP_PATHS: &[&str] = &["/usr/bin/slirp4netns"];
 /// What the setup child says when the network namespace it was handed is the one it runs
 /// in, so the agent would share this computer's network.
 pub const NETWORK_SHARED: &str = "the agent's network is not one of its own";
+/// What the setup child says when its input and output are not the two pipes stage 1
+/// hands it, as when a caller other than stage 1 starts it (leader 23:16).
+pub const SETUP_UNPIPED: &str = "the setup child runs only on the pipes its nest hands it";
+/// What the setup child says when bubblewrap's info names a process its parent did not
+/// start.
+pub const SETUP_NOT_CHILD: &str = "the setup child builds a network only for its nest's child";
+/// What the setup child says when its parent is not one of the fixed bubblewraps.
+pub const SETUP_NOT_NEST: &str = "the setup child runs only under a fixed bubblewrap";
 
 /// Splits the route flags that lead the helper's arguments from the rest: `--route` with a
 /// port the agent may reach on any host, one to [`REMOTES_MAX`] times, each once. Input:
@@ -368,6 +376,9 @@ mod tests {
             &[EGRESS, "1", "443"],
             &[EGRESS, "pid", "443"],
             &[EGRESS, "1234", "0"],
+            &[EGRESS, "1234", "65536"],
+            &[EGRESS, "1234", "443x"],
+            &[EGRESS, "+1234", "443"],
             &[EGRESS, "1234", "443", "443"],
             &[EGRESS, "1234", "--route", "443"],
             too_many.as_slice(),
