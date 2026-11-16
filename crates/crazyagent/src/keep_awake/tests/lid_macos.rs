@@ -1,16 +1,16 @@
 use super::sensing::{step_until, steps};
 use super::{IDLE, IDLE_AND_LID, NOW_MS, SECOND_MS, agent, engine};
-use crate::keep_awake::{Heat, Keeper, LidSupport, LowPowerSupport, PowerSource};
 use crate::keep_awake::hold_macos::{
     ENDED_TO_PROTECT, HELPER_UNANSWERED, HelperLine, LEASE_S, LID_UNREAD, LID_WITHHELD_MACOS,
-    LOW_POWER_NEEDS_HELPER, LOW_POWER_NOT_ON_THIS_MAC, LOW_POWER_NOT_TAKEN, lines_around,
-    LidLine, LidPlatform, PIN_FILE_KEPT, PIN_NONE, PIN_OTHER, READ_EVERY_MS, REMOVE_NOT_PUT_BACK,
-    REMOVE_NOT_YOURS, REMOVE_REFUSED, REMOVE_UNANSWERED, REMOVE_UNFINISHED, STATUS_UNREAD,
-    TURN_ON_FAILED, UNINSTALL_SLEEP_KEPT, VERSION_UNREAD, gate, macos_major,
+    LOW_POWER_NEEDS_HELPER, LOW_POWER_NOT_ON_THIS_MAC, LOW_POWER_NOT_TAKEN, LidLine, LidPlatform,
+    PIN_FILE_KEPT, PIN_NONE, PIN_OTHER, READ_EVERY_MS, REMOVE_NOT_PUT_BACK, REMOVE_NOT_YOURS,
+    REMOVE_REFUSED, REMOVE_UNANSWERED, REMOVE_UNFINISHED, STATUS_UNREAD, TURN_ON_FAILED,
+    UNINSTALL_SLEEP_KEPT, VERSION_UNREAD, gate, lines_around, macos_major,
 };
 use crate::keep_awake::power::{
     LID_REFUSED, LidAsk, LidCommand, LidReader, PowerReading, READ_MS, Reader,
 };
+use crate::keep_awake::{Heat, Keeper, LidSupport, LowPowerSupport, PowerSource};
 use crazyagent_mac_power::client::CallError;
 use crazyagent_mac_power::protocol::{
     FloorView, LidDisplay, PinView, Refusal, Reply, Request, View,
@@ -246,7 +246,10 @@ const HOLD: Request = Request::Hold {
 fn below_macos_13_the_lid_support_says_needs_macos_13() {
     let mut twelve = Rig::new(mac(12), Some(Status::Enabled));
     assert_eq!(twelve.line.step(WANTED, NOW_MS), LidSupport::NeedsMacos13);
-    assert!(twelve.calls().is_empty(), "below macOS 13 the helper is never called");
+    assert!(
+        twelve.calls().is_empty(),
+        "below macOS 13 the helper is never called"
+    );
     assert_eq!(*twelve.status_reads.lock().unwrap(), 0);
 
     let mut thirteen = Rig::new(mac(13), Some(Status::Enabled));
@@ -261,13 +264,22 @@ fn no_helper_in_the_bundle_says_helper_missing() {
         ..mac(15)
     };
     let mut unbundled = Rig::new(bare, Some(Status::Enabled));
-    assert_eq!(unbundled.line.step(WANTED, NOW_MS), LidSupport::HelperMissing);
+    assert_eq!(
+        unbundled.line.step(WANTED, NOW_MS),
+        LidSupport::HelperMissing
+    );
     assert!(unbundled.calls().is_empty());
     assert_eq!(*unbundled.status_reads.lock().unwrap(), 0);
 
     let mut not_found = Rig::new(mac(15), Some(Status::NotFound));
-    assert_eq!(not_found.line.step(WANTED, NOW_MS), LidSupport::HelperMissing);
-    assert!(not_found.calls().is_empty(), "a daemon macOS cannot find is not called");
+    assert_eq!(
+        not_found.line.step(WANTED, NOW_MS),
+        LidSupport::HelperMissing
+    );
+    assert!(
+        not_found.calls().is_empty(),
+        "a daemon macOS cannot find is not called"
+    );
 }
 
 #[test]
@@ -310,7 +322,10 @@ fn a_withheld_or_unreadable_macos_version_turns_the_lid_hold_off() {
         remove_helper(words),
         "a helper registered before the withhold is offered for removal (rv-sec2 22:38 F1)"
     );
-    assert!(fifteen.calls().is_empty(), "no hold and no read where the lid is withheld");
+    assert!(
+        fifteen.calls().is_empty(),
+        "no hold and no read where the lid is withheld"
+    );
     let mut never = Rig::new(withheld, Some(Status::NotRegistered));
     assert_eq!(never.line.step(WANTED, NOW_MS), not_available(words));
 
@@ -336,7 +351,10 @@ fn a_withheld_or_unreadable_macos_version_turns_the_lid_hold_off() {
 
 #[test]
 fn the_lease_is_renewed_every_30_seconds_while_the_lid_is_wanted() {
-    assert_eq!(READ_MS, READING_MS, "the sensor thread steps the lid line each reading");
+    assert_eq!(
+        READ_MS, READING_MS,
+        "the sensor thread steps the lid line each reading"
+    );
     assert_eq!(LEASE_S, 120);
     assert_eq!(
         i64::from(LEASE_S) * 1000,
@@ -374,7 +392,10 @@ fn no_helper_connection_while_the_lid_rule_is_off_or_the_daemon_is_not_enabled()
         let support = off.line.step(OFF, NOW_MS + reading * READING_MS);
         assert_eq!(support, not_available(LID_UNREAD));
     }
-    assert!(off.calls().is_empty(), "the rule Off never reaches the helper");
+    assert!(
+        off.calls().is_empty(),
+        "the rule Off never reaches the helper"
+    );
 
     let mut waiting = Rig::new(mac(15), Some(Status::RequiresApproval));
     for reading in 0..20 {
@@ -387,14 +408,21 @@ fn no_helper_connection_while_the_lid_rule_is_off_or_the_daemon_is_not_enabled()
     assert_eq!(holding.line.step(WANTED, NOW_MS), LidSupport::Held);
     holding.set_status(Some(Status::RequiresApproval));
     let later_ms = NOW_MS + READING_MS;
-    assert_eq!(holding.line.step(RESTING, later_ms), LidSupport::NeedsApproval);
+    assert_eq!(
+        holding.line.step(RESTING, later_ms),
+        LidSupport::NeedsApproval
+    );
     assert_eq!(
         holding.calls(),
         [HOLD],
         "a daemon turned off in Login Items is not called, launchd stopped it"
     );
     drop(holding.line);
-    assert_eq!(holding.calls.lock().unwrap().len(), 1, "nothing is held to release");
+    assert_eq!(
+        holding.calls.lock().unwrap().len(),
+        1,
+        "nothing is held to release"
+    );
 }
 
 #[test]
@@ -409,7 +437,10 @@ fn with_no_hold_the_helper_is_read_at_most_every_five_minutes() {
 
     rig.set_status(Some(Status::RequiresApproval));
     let waiting_ms = NOW_MS + 20 * READING_MS;
-    assert_eq!(rig.line.step(RESTING, waiting_ms), LidSupport::NeedsApproval);
+    assert_eq!(
+        rig.line.step(RESTING, waiting_ms),
+        LidSupport::NeedsApproval
+    );
     rig.set_status(Some(Status::Enabled));
     assert_eq!(
         rig.line.step(RESTING, waiting_ms + READING_MS),
@@ -513,7 +544,11 @@ fn a_failed_renewal_keeps_the_lid_held_until_the_lease_runs_out() {
     );
     for reading in 1..4 {
         let support = renewal.line.step(WANTED, NOW_MS + reading * READING_MS);
-        assert_eq!(support, LidSupport::Held, "a lease that still runs holds the lid");
+        assert_eq!(
+            support,
+            LidSupport::Held,
+            "a lease that still runs holds the lid"
+        );
     }
     assert_eq!(renewal.calls(), [HOLD; 4], "no read while the lease runs");
     let out_ms = NOW_MS + i64::from(LEASE_S) * 1000;
@@ -522,9 +557,16 @@ fn a_failed_renewal_keeps_the_lid_held_until_the_lease_runs_out() {
         not_available(LID_REFUSED),
         "four failed renewals end the hold within the lease (threat model section 9)"
     );
-    assert_eq!(renewal.calls(), [HOLD, HOLD, HOLD, HOLD, HOLD, Request::Read]);
+    assert_eq!(
+        renewal.calls(),
+        [HOLD, HOLD, HOLD, HOLD, HOLD, Request::Read]
+    );
     renewal.line.step(RESTING, out_ms + READING_MS);
-    assert_eq!(renewal.calls().len(), 6, "a lease that ran out is not released");
+    assert_eq!(
+        renewal.calls().len(),
+        6,
+        "a lease that ran out is not released"
+    );
 
     let mut floor = Rig::enabled();
     assert_eq!(floor.line.step(WANTED, NOW_MS), LidSupport::Held);
@@ -545,7 +587,10 @@ fn a_failed_renewal_keeps_the_lid_held_until_the_lease_runs_out() {
 fn a_renewal_the_helper_did_not_answer_holds_and_is_released_later() {
     let mut rig = Rig::enabled();
     assert_eq!(rig.line.step(WANTED, NOW_MS), LidSupport::Held);
-    rig.answer(Err(CallError::Connect(io::ErrorKind::NotFound)), Ok(ready()));
+    rig.answer(
+        Err(CallError::Connect(io::ErrorKind::NotFound)),
+        Ok(ready()),
+    );
     assert_eq!(
         rig.line.step(WANTED, NOW_MS + READING_MS),
         LidSupport::Held,
@@ -611,7 +656,10 @@ fn the_keeper_keeps_the_lid_through_failed_renewals_while_the_lease_runs() {
     });
     assert_eq!(ended.lid_support, not_available(LID_REFUSED));
     assert!(called(Request::Read));
-    assert!(!called(Request::Release), "a lease that ran out is not released");
+    assert!(
+        !called(Request::Release),
+        "a lease that ran out is not released"
+    );
 }
 
 #[test]
@@ -657,7 +705,15 @@ fn the_macos_version_is_the_first_number_of_sw_vers() {
     assert_eq!(macos_major("13\n"), Some(13));
     assert_eq!(macos_major("12.7.6"), Some(12));
     let long = format!("{}\n", "1".repeat(40));
-    let wrongs = ["", "\n", "abc\n", "+15.1\n", " 15.1\n", "15.4\n16.0\n", "0.1\n"];
+    let wrongs = [
+        "",
+        "\n",
+        "abc\n",
+        "+15.1\n",
+        " 15.1\n",
+        "15.4\n16.0\n",
+        "0.1\n",
+    ];
     for wrong in wrongs.into_iter().chain([long.as_str()]) {
         assert_eq!(macos_major(wrong), None, "{wrong:?}");
     }
@@ -712,7 +768,10 @@ fn a_failed_unregister_keeps_offering_remove_lid_helper() {
     let failed = remove_helper(&format!("{REMOVE_UNFINISHED}Operation not permitted"));
     for reading in 1..4 {
         let support = rig.line.step(RESTING, NOW_MS + reading * READING_MS);
-        assert_eq!(support, failed, "the failure stands while the daemon stays registered");
+        assert_eq!(
+            support, failed,
+            "the failure stands while the daemon stays registered"
+        );
     }
     rig.set_status(Some(Status::NotRegistered));
     let later_ms = NOW_MS + 5 * READING_MS;
@@ -764,7 +823,11 @@ fn a_refused_forget_keeps_the_daemon_registered_and_says_why() {
             !rig.seen().contains(&Seen::Unregister),
             "a refused Forget never unregisters: {forget:?}"
         );
-        assert_eq!(rig.line.step(RESTING, NOW_MS + SECOND_MS), words, "{forget:?}");
+        assert_eq!(
+            rig.line.step(RESTING, NOW_MS + SECOND_MS),
+            words,
+            "{forget:?}"
+        );
     }
 }
 
@@ -772,7 +835,11 @@ fn a_refused_forget_keeps_the_daemon_registered_and_says_why() {
 fn remove_while_the_daemon_is_not_enabled_goes_straight_to_unregister() {
     let mut waiting = Rig::new(mac(15), Some(Status::RequiresApproval));
     waiting.line.run(LidCommand::Remove, NOW_MS);
-    assert_eq!(waiting.seen(), [Seen::Unregister], "no helper runs to forget");
+    assert_eq!(
+        waiting.seen(),
+        [Seen::Unregister],
+        "no helper runs to forget"
+    );
     assert_eq!(
         waiting.line.step(RESTING, NOW_MS + SECOND_MS),
         LidSupport::NotTurnedOn
@@ -790,7 +857,10 @@ fn turn_on_registers_then_opens_login_items_and_again_while_approval_waits() {
     rig.line.run(LidCommand::TurnOn, NOW_MS + SECOND_MS);
     assert_eq!(rig.seen(), [Seen::Register, Seen::LoginItems]);
     let pending_ms = NOW_MS + 2 * SECOND_MS;
-    assert_eq!(rig.line.step(RESTING, pending_ms), LidSupport::NeedsApproval);
+    assert_eq!(
+        rig.line.step(RESTING, pending_ms),
+        LidSupport::NeedsApproval
+    );
 
     rig.line.run(LidCommand::TurnOn, pending_ms + SECOND_MS);
     assert_eq!(
@@ -801,7 +871,10 @@ fn turn_on_registers_then_opens_login_items_and_again_while_approval_waits() {
 
     let mut enabled = Rig::enabled();
     enabled.line.run(LidCommand::TurnOn, NOW_MS);
-    assert!(enabled.seen().is_empty(), "an enabled daemon is not registered again");
+    assert!(
+        enabled.seen().is_empty(),
+        "an enabled daemon is not registered again"
+    );
 }
 
 #[test]
@@ -809,7 +882,11 @@ fn a_failed_turn_on_says_why_until_the_status_changes() {
     let mut rig = Rig::new(mac(15), Some(Status::NotRegistered));
     rig.refuse("Invalid argument");
     rig.line.run(LidCommand::TurnOn, NOW_MS);
-    assert_eq!(rig.seen(), [Seen::Register], "Login Items opens only after a register");
+    assert_eq!(
+        rig.seen(),
+        [Seen::Register],
+        "Login Items opens only after a register"
+    );
     let failed = not_available(&format!("{TURN_ON_FAILED}Invalid argument"));
     assert_eq!(rig.line.step(RESTING, NOW_MS + SECOND_MS), failed);
     assert_eq!(rig.line.step(RESTING, NOW_MS + READING_MS), failed);
@@ -850,7 +927,10 @@ fn turn_on_runs_only_behind_the_platform_gate_and_remove_needs_only_the_bundle()
     }
     let mut rig = Rig::new(unbundled, Some(Status::Enabled));
     rig.line.run(LidCommand::Remove, NOW_MS);
-    assert!(rig.seen().is_empty(), "no helper in the bundle, nothing to remove");
+    assert!(
+        rig.seen().is_empty(),
+        "no helper in the bundle, nothing to remove"
+    );
     assert_eq!(*rig.status_reads.lock().unwrap(), 0);
 }
 
@@ -858,7 +938,11 @@ fn turn_on_runs_only_behind_the_platform_gate_and_remove_needs_only_the_bundle()
 fn remove_lid_helper_on_a_withheld_or_unread_version_sends_forget_then_unregister() {
     for (platform, words) in held_back() {
         let mut rig = Rig::new(platform, Some(Status::Enabled));
-        assert_eq!(rig.line.step(RESTING, NOW_MS), remove_helper(words), "{platform:?}");
+        assert_eq!(
+            rig.line.step(RESTING, NOW_MS),
+            remove_helper(words),
+            "{platform:?}"
+        );
         rig.line.run(LidCommand::Remove, NOW_MS + SECOND_MS);
         assert_eq!(
             rig.seen(),
@@ -921,7 +1005,11 @@ fn uninstall_on_a_withheld_or_unread_version_still_removes_the_helper() {
         let mut unfinished = Rig::new(platform, Some(Status::Enabled));
         unfinished.refuse("Operation not permitted");
         let words = format!("{REMOVE_UNFINISHED}Operation not permitted");
-        assert_eq!(unfinished.line.uninstall(NOW_MS), Some(words), "{platform:?}");
+        assert_eq!(
+            unfinished.line.uninstall(NOW_MS),
+            Some(words),
+            "{platform:?}"
+        );
     }
 }
 
@@ -950,7 +1038,10 @@ fn uninstall_says_what_it_could_not_remove() {
     pmset.forget_answer(Ok(Reply::Refused {
         reason: Refusal::Pmset,
     }));
-    assert_eq!(pmset.line.uninstall(NOW_MS), Some(REMOVE_NOT_PUT_BACK.into()));
+    assert_eq!(
+        pmset.line.uninstall(NOW_MS),
+        Some(REMOVE_NOT_PUT_BACK.into())
+    );
 
     let mut sleep = Rig::enabled();
     sleep.forget_answer(Ok(Reply::Refused {
@@ -958,8 +1049,14 @@ fn uninstall_says_what_it_could_not_remove() {
     }));
     let unreadable = Reply::State(view(PinView::You, FloorView::None, false));
     sleep.answer(Ok(held()), Ok(unreadable));
-    assert_eq!(sleep.line.uninstall(NOW_MS), Some(UNINSTALL_SLEEP_KEPT.into()));
-    assert!(!sleep.seen().contains(&Seen::Unregister), "the helper stays to put sleep back");
+    assert_eq!(
+        sleep.line.uninstall(NOW_MS),
+        Some(UNINSTALL_SLEEP_KEPT.into())
+    );
+    assert!(
+        !sleep.seen().contains(&Seen::Unregister),
+        "the helper stays to put sleep back"
+    );
 }
 
 #[test]
@@ -970,13 +1067,20 @@ fn every_hold_names_the_display_the_owner_picked() {
         sleep_display: false,
         ..WANTED
     };
-    assert_eq!(rig.line.step(left_on, NOW_MS + READING_MS), LidSupport::Held);
+    assert_eq!(
+        rig.line.step(left_on, NOW_MS + READING_MS),
+        LidSupport::Held
+    );
     let leave_on = Request::Hold {
         lease_s: LEASE_S,
         lid_display: LidDisplay::LeaveOn,
         low_power: false,
     };
-    assert_eq!(rig.calls(), [HOLD, leave_on], "the owner's pick rides on each Hold (Task 12)");
+    assert_eq!(
+        rig.calls(),
+        [HOLD, leave_on],
+        "the owner's pick rides on each Hold (Task 12)"
+    );
 }
 
 const LOW_POWER_ONLY: LidAsk = LidAsk {
@@ -1035,7 +1139,11 @@ fn low_power_alone_keeps_a_power_only_lease_even_with_the_lid_rule_off() {
         let mut rig = Rig::enabled();
         rig.answer(Ok(held()), power_view(Some(true), true));
         rig.line.step(ask, NOW_MS);
-        assert_eq!(rig.calls().first(), Some(&POWER_ONLY), "{ask:?} (QUESTION 40c)");
+        assert_eq!(
+            rig.calls().first(),
+            Some(&POWER_ONLY),
+            "{ask:?} (QUESTION 40c)"
+        );
         assert!(rig.calls().contains(&Request::Read), "{ask:?}");
         assert_eq!(rig.line.low_power(), LowPowerSupport::Held, "{ask:?}");
         let rest = LidAsk {
@@ -1043,7 +1151,10 @@ fn low_power_alone_keeps_a_power_only_lease_even_with_the_lid_rule_off() {
             ..ask
         };
         rig.line.step(rest, NOW_MS + READING_MS);
-        assert!(rig.calls().contains(&Request::Release), "{ask:?}: neither asked lets go");
+        assert!(
+            rig.calls().contains(&Request::Release),
+            "{ask:?}: neither asked lets go"
+        );
         assert_eq!(rig.line.low_power(), LowPowerSupport::Ready, "{ask:?}");
     }
 }
@@ -1052,10 +1163,22 @@ fn low_power_alone_keeps_a_power_only_lease_even_with_the_lid_rule_off() {
 fn the_low_power_status_follows_the_helpers_view() {
     let mut rig = Rig::enabled();
     let steps = [
-        (Some(false), LowPowerSupport::Ready, "not set yet is never the owner's"),
+        (
+            Some(false),
+            LowPowerSupport::Ready,
+            "not set yet is never the owner's",
+        ),
         (Some(true), LowPowerSupport::Held, "on for this hold"),
-        (Some(false), LowPowerSupport::OwnerChanged, "the owner turned it off"),
-        (Some(false), LowPowerSupport::OwnerChanged, "and it stays the owner's"),
+        (
+            Some(false),
+            LowPowerSupport::OwnerChanged,
+            "the owner turned it off",
+        ),
+        (
+            Some(false),
+            LowPowerSupport::OwnerChanged,
+            "and it stays the owner's",
+        ),
     ];
     for (step, (low_power, support, why)) in (0_i64..).zip(steps) {
         rig.answer(Ok(held()), power_view(low_power, true));
@@ -1064,10 +1187,18 @@ fn the_low_power_status_follows_the_helpers_view() {
     }
     rig.answer(Ok(held()), power_view(Some(false), false));
     rig.line.step(RESTING, NOW_MS + 4 * READING_MS);
-    assert_eq!(rig.line.low_power(), LowPowerSupport::Ready, "an ask that ended");
+    assert_eq!(
+        rig.line.low_power(),
+        LowPowerSupport::Ready,
+        "an ask that ended"
+    );
     rig.answer(Ok(held()), power_view(Some(false), true));
     rig.line.step(LOW_POWER_ONLY, NOW_MS + 5 * READING_MS);
-    assert_eq!(rig.line.low_power(), LowPowerSupport::Ready, "a new ask starts unseen");
+    assert_eq!(
+        rig.line.low_power(),
+        LowPowerSupport::Ready,
+        "a new ask starts unseen"
+    );
 }
 
 #[test]
@@ -1088,7 +1219,11 @@ fn a_mac_without_the_key_says_so_and_one_failed_read_keeps_the_status() {
     let unanswered = Err(CallError::Exchange(io::ErrorKind::TimedOut));
     rig.answer(Ok(held()), unanswered);
     rig.line.step(LOW_POWER_ONLY, NOW_MS + 2 * READING_MS);
-    assert_eq!(rig.line.low_power(), LowPowerSupport::Held, "an unanswered read");
+    assert_eq!(
+        rig.line.low_power(),
+        LowPowerSupport::Held,
+        "an unanswered read"
+    );
 }
 
 #[test]
@@ -1108,14 +1243,22 @@ fn low_power_needs_the_lid_helper_until_it_runs() {
     }
     let mut twelve = Rig::new(mac(12), Some(Status::Enabled));
     twelve.line.step(LOW_POWER_ONLY, NOW_MS);
-    assert_eq!(twelve.line.low_power(), needs, "the gate's early return too");
+    assert_eq!(
+        twelve.line.low_power(),
+        needs,
+        "the gate's early return too"
+    );
 
     let mut rig = Rig::new(mac(15), Some(Status::NotRegistered));
     rig.line.step(LOW_POWER_ONLY, NOW_MS);
     rig.set_status(Some(Status::Enabled));
     rig.answer(Ok(held()), power_view(Some(true), true));
     rig.line.step(LOW_POWER_ONLY, NOW_MS + READING_MS);
-    assert_eq!(rig.line.low_power(), LowPowerSupport::Held, "a helper turned on");
+    assert_eq!(
+        rig.line.low_power(),
+        LowPowerSupport::Held,
+        "a helper turned on"
+    );
 }
 
 #[test]
@@ -1137,12 +1280,23 @@ fn the_lid_and_power_lines_share_one_status_and_the_power_line_never_calls() {
     let calls = rig.calls.clone();
     let Rig { line, .. } = rig;
     let (mut lid, mut power) = lines_around(move || line);
-    assert_eq!(power(true, NOW_MS), LowPowerSupport::Unread, "nothing stepped yet");
-    assert!(calls.lock().unwrap().is_empty(), "the line is made at the first lid step");
+    assert_eq!(
+        power(true, NOW_MS),
+        LowPowerSupport::Unread,
+        "nothing stepped yet"
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "the line is made at the first lid step"
+    );
     assert_eq!(lid(WANTED_LOW_POWER, None, NOW_MS), LidSupport::Held);
     let made = calls.lock().unwrap().len();
     assert_eq!(power(true, NOW_MS), LowPowerSupport::Held, "QUESTION 40b");
-    assert_eq!(calls.lock().unwrap().len(), made, "the power line never calls the helper");
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        made,
+        "the power line never calls the helper"
+    );
 }
 
 #[test]
@@ -1150,7 +1304,11 @@ fn a_step_that_asks_no_low_power_adds_no_read() {
     let mut rig = Rig::enabled();
     rig.line.step(WANTED, NOW_MS);
     rig.line.step(WANTED, NOW_MS + READING_MS);
-    assert_eq!(rig.calls(), [HOLD, HOLD], "no status read without a low power ask");
+    assert_eq!(
+        rig.calls(),
+        [HOLD, HOLD],
+        "no status read without a low power ask"
+    );
     assert_eq!(rig.line.low_power(), LowPowerSupport::Unread);
 }
 
@@ -1164,7 +1322,11 @@ fn a_status_an_ended_ask_or_an_off_helper_left_clears_on_a_step_that_asks_nothin
         rig.set_status(Some(Status::Enabled));
         rig.line.step(ask, NOW_MS + READING_MS);
         let why = "a helper turned on with nothing read yet (advisor 01:52, 39d A)";
-        assert_eq!(rig.line.low_power(), LowPowerSupport::Unread, "{ask:?}: {why}");
+        assert_eq!(
+            rig.line.low_power(),
+            LowPowerSupport::Unread,
+            "{ask:?}: {why}"
+        );
     }
 
     let mut rig = Rig::enabled();
@@ -1177,15 +1339,27 @@ fn a_status_an_ended_ask_or_an_off_helper_left_clears_on_a_step_that_asks_nothin
     assert_eq!(rig.line.low_power(), not_taken);
     let made = rig.calls().len();
     rig.line.step(OFF, NOW_MS + READING_MS);
-    assert_eq!(rig.line.low_power(), LowPowerSupport::Ready, "the ask it was about ended");
-    assert_eq!(rig.calls().len(), made, "and the rule Off step called nothing");
+    assert_eq!(
+        rig.line.low_power(),
+        LowPowerSupport::Ready,
+        "the ask it was about ended"
+    );
+    assert_eq!(
+        rig.calls().len(),
+        made,
+        "and the rule Off step called nothing"
+    );
 
     let mut bare = Rig::enabled();
     bare.answer(Ok(held()), power_view(None, true));
     bare.line.step(LOW_POWER_RULE_OFF, NOW_MS);
     bare.line.step(OFF, NOW_MS + READING_MS);
     let not_here = low_power_not_available(LOW_POWER_NOT_ON_THIS_MAC);
-    assert_eq!(bare.line.low_power(), not_here, "a fact of this Mac outlives the ask");
+    assert_eq!(
+        bare.line.low_power(),
+        not_here,
+        "a fact of this Mac outlives the ask"
+    );
 }
 
 #[test]
@@ -1220,6 +1394,9 @@ fn a_power_only_lease_refused_after_a_lid_hold_lets_the_lid_go() {
         let at = calls.iter().position(|call| *call == POWER_ONLY);
         let why = "the lid is no longer wanted and nothing replaced its lease";
         assert!(at.is_some(), "{answer:?}");
-        assert!(calls[at.unwrap()..].contains(&Request::Release), "{answer:?}: {why}");
+        assert!(
+            calls[at.unwrap()..].contains(&Request::Release),
+            "{answer:?}: {why}"
+        );
     }
 }

@@ -76,7 +76,8 @@ impl Pmset {
     /// Output: the value, none when the battery section has no `lowpowermode` line, or why
     /// the run did not succeed.
     pub fn battery_low_power(&self) -> Result<Option<bool>, PmsetError> {
-        self.run(&["-g", "custom"]).map(|text| parse_custom_low_power(&text))
+        self.run(&["-g", "custom"])
+            .map(|text| parse_custom_low_power(&text))
     }
 
     /// Reads the battery: `pmset -g batt`.

@@ -105,7 +105,6 @@ pub struct LidOrder {
 /// stands in for the reader's.
 pub type LidReader = Box<dyn FnMut(LidAsk, Option<LidCommand>, i64) -> LidSupport + Send>;
 
-
 /// The power line on the sensor thread (Task 16, QUESTION 39g): handed whether the running
 /// hold asks for low power mode and the engine time with each reading, it holds or lets go
 /// of the platform's power saver and returns the low power support, which stands in for
@@ -316,7 +315,10 @@ impl Sensing {
             return;
         }
         self.waiting = false;
-        if !self.asked_with.is_some_and(|asked| asked.wanted || asked.low_power) {
+        if !self
+            .asked_with
+            .is_some_and(|asked| asked.wanted || asked.low_power)
+        {
             return;
         }
         if self.ask.try_send((last, None, asked_ms)).is_err() {

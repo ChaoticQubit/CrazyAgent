@@ -348,7 +348,10 @@ fn a_caller_that_trickles_its_request_is_cut_off_two_seconds_after_accept() {
         reason: Refusal::Malformed,
     };
     assert_eq!(served, Ok(expected));
-    assert!(took < CUT_OFF_MAX, "one deadline from accept, not one per read: {took:?}");
+    assert!(
+        took < CUT_OFF_MAX,
+        "one deadline from accept, not one per read: {took:?}"
+    );
     drop(trickle.join().unwrap());
 }
 
@@ -384,7 +387,10 @@ fn a_policy_that_requires_the_hardened_runtime_refuses_a_caller_without_it() {
         .unwrap();
     let (stream, _) = listener.accept().unwrap();
     let accepted = Accepted::take(stream, &ANY_VALID_RUNTIME);
-    assert!(accepted.is_ok(), "a runtime-signed copy carries 0x10000: {accepted:?}");
+    assert!(
+        accepted.is_ok(),
+        "a runtime-signed copy carries 0x10000: {accepted:?}"
+    );
     drop(accepted);
     wait_exit(&mut second);
 }

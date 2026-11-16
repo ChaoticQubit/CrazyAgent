@@ -29,7 +29,11 @@ fn lined(text: &[u8]) -> Vec<u8> {
 #[test]
 fn a_hold_names_its_lid_display_and_no_other_call_does() {
     let unnamed = br#"{"version":1,"call":"hold","lease_s":120}"#;
-    assert_eq!(read(&lined(unnamed)), Err(Refusal::Malformed), "Hold names it (Task 12)");
+    assert_eq!(
+        read(&lined(unnamed)),
+        Err(Refusal::Malformed),
+        "Hold names it (Task 12)"
+    );
     let null = br#"{"version":1,"call":"hold","lease_s":120,"lid_display":null}"#;
     assert_eq!(read(&lined(null)), Err(Refusal::Malformed));
     let unknown = br#"{"version":1,"call":"hold","lease_s":120,"lid_display":"dim"}"#;
@@ -51,7 +55,11 @@ fn a_hold_names_its_lid_display_and_no_other_call_does() {
     }
     for call in ["release", "read", "forget"] {
         let text = format!(r#"{{"version":1,"call":"{call}","lid_display":"sleep"}}"#);
-        assert_eq!(read(&lined(text.as_bytes())), Err(Refusal::Malformed), "{call}");
+        assert_eq!(
+            read(&lined(text.as_bytes())),
+            Err(Refusal::Malformed),
+            "{call}"
+        );
     }
 }
 
@@ -110,14 +118,8 @@ fn a_hold_lease_outside_thirty_to_three_hundred_seconds_is_refused() {
     let on_release = b"{\"version\":1,\"call\":\"release\",\"lease_s\":30}\n";
     assert_eq!(read(on_release), Err(Refusal::Malformed));
     let edges = [
-        (
-            30,
-            lined(&hold_text(30, "sleep")),
-        ),
-        (
-            300,
-            lined(&hold_text(300, "sleep")),
-        ),
+        (30, lined(&hold_text(30, "sleep"))),
+        (300, lined(&hold_text(300, "sleep"))),
     ];
     for (lease_s, bytes) in edges {
         let held = Request::Hold {

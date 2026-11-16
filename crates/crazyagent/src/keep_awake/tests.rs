@@ -468,7 +468,10 @@ fn the_lid_helper_commands_are_owner_changes_with_plain_names() {
     ];
     for (action, name) in names {
         assert_eq!(serde_json::to_string(&action).unwrap(), name);
-        assert_eq!(serde_json::from_str::<KeepAwakeAction>(name).unwrap(), action);
+        assert_eq!(
+            serde_json::from_str::<KeepAwakeAction>(name).unwrap(),
+            action
+        );
         assert!(action.validate().is_ok());
     }
     let (_folder, connection) = engine();
@@ -752,7 +755,11 @@ fn a_settings_row_saved_before_low_power_loads_with_its_default() {
 #[test]
 fn low_power_is_asked_only_while_a_hold_runs_on_battery_as_the_setting_says() {
     let below = KeepAwakeSettings::DEFAULT;
-    assert_eq!(below.low_power, LowPower::BatteryBelow40, "owner question 4 A");
+    assert_eq!(
+        below.low_power,
+        LowPower::BatteryBelow40,
+        "owner question 4 A"
+    );
     let on_battery = KeepAwakeSettings {
         low_power: LowPower::OnBattery,
         ..below
@@ -765,14 +772,31 @@ fn low_power_is_asked_only_while_a_hold_runs_on_battery_as_the_setting_says() {
     let ac = sensors(PowerSource::Ac, Some(30));
     let unknown = sensors(PowerSource::Unknown, Some(30));
 
-    assert!(low_power_wanted(&on_battery, &battery(Some(90)), true, None));
-    assert!(!low_power_wanted(&on_battery, &battery(Some(90)), false, None), "no hold");
-    assert!(!low_power_wanted(&on_battery, &ac, true, None), "on AC power");
-    assert!(!low_power_wanted(&on_battery, &unknown, true, None), "a source not read");
+    assert!(low_power_wanted(
+        &on_battery,
+        &battery(Some(90)),
+        true,
+        None
+    ));
+    assert!(
+        !low_power_wanted(&on_battery, &battery(Some(90)), false, None),
+        "no hold"
+    );
+    assert!(
+        !low_power_wanted(&on_battery, &ac, true, None),
+        "on AC power"
+    );
+    assert!(
+        !low_power_wanted(&on_battery, &unknown, true, None),
+        "a source not read"
+    );
     assert!(!low_power_wanted(&off, &battery(Some(5)), true, None));
     assert!(low_power_wanted(&below, &battery(Some(39)), true, None));
     assert!(!low_power_wanted(&below, &battery(Some(40)), true, None));
-    assert!(!low_power_wanted(&below, &battery(None), true, None), "a charge not read");
+    assert!(
+        !low_power_wanted(&below, &battery(None), true, None),
+        "a charge not read"
+    );
 
     let asked = Some(LowPower::BatteryBelow40);
     assert!(
@@ -780,8 +804,14 @@ fn low_power_is_asked_only_while_a_hold_runs_on_battery_as_the_setting_says() {
         "once asked in a hold it stays asked on battery (QUESTION 39e)"
     );
     assert!(low_power_wanted(&below, &battery(None), true, asked));
-    assert!(!low_power_wanted(&below, &ac, true, asked), "AC power ends it");
-    assert!(!low_power_wanted(&below, &battery(Some(41)), false, asked), "so does the end");
+    assert!(
+        !low_power_wanted(&below, &ac, true, asked),
+        "AC power ends it"
+    );
+    assert!(
+        !low_power_wanted(&below, &battery(Some(41)), false, asked),
+        "so does the end"
+    );
     assert!(
         !low_power_wanted(&below, &battery(Some(80)), true, Some(LowPower::OnBattery)),
         "an ask made under another option does not keep it"

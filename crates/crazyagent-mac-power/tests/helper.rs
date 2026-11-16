@@ -622,7 +622,10 @@ fn forget_after_a_failed_put_back_is_refused_and_keeps_the_pin_and_the_entry() {
     let state = view(&mut helper, me);
     assert_eq!(state.pin, PinView::You, "the pin stays in memory too");
     assert!(!state.held, "the leases still end");
-    assert!(!helper.idle(), "the value still to put back keeps the helper up");
+    assert!(
+        !helper.idle(),
+        "the value still to put back keeps the helper up"
+    );
     fs::remove_file(stand_in.path("refuse-put-back")).unwrap();
     assert_eq!(
         helper.handle(me, Request::Forget, NOW_MS + 2_000, OPEN),
@@ -679,8 +682,15 @@ fn forget_that_cannot_remove_the_pin_file_is_refused_and_keeps_the_pin_in_memory
         }
     );
     let state = view(&mut helper, me);
-    assert_eq!(state.pin, PinView::You, "a pin file not removed keeps the pin");
-    assert!(state.journal_ok, "the journal itself is fine, so the engine tells them apart");
+    assert_eq!(
+        state.pin,
+        PinView::You,
+        "a pin file not removed keeps the pin"
+    );
+    assert!(
+        state.journal_ok,
+        "the journal itself is fine, so the engine tells them apart"
+    );
     fs::set_permissions(stand_in.folder(), fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(stand_in.pin_text().as_deref(), Some(mine.as_str()));
     assert_eq!(
@@ -704,7 +714,10 @@ fn a_renewal_that_cannot_read_pmset_keeps_its_lease_until_it_runs_out_and_then_s
             reason: Refusal::Pmset
         }
     );
-    assert!(first.sleep_writes().is_empty(), "a first hold that fails changes nothing");
+    assert!(
+        first.sleep_writes().is_empty(),
+        "a first hold that fails changes nothing"
+    );
     assert!(!first.calls().contains(&"sleepnow".to_string()));
     assert!(helper.idle());
 
@@ -758,7 +771,11 @@ fn a_put_back_tried_again_after_a_hold_ended_sleeps_the_mac_when_the_lid_is_clos
         let slept = stand_in.calls().last().map(String::as_str) == Some("sleepnow");
         assert_eq!(slept, sleeps, "{lid:?}");
         helper.sense(NOW_MS + 180_000, Readings { lid, ..COOL });
-        let sleepnows = stand_in.calls().iter().filter(|call| *call == "sleepnow").count();
+        let sleepnows = stand_in
+            .calls()
+            .iter()
+            .filter(|call| *call == "sleepnow")
+            .count();
         assert_eq!(sleepnows, usize::from(sleeps), "sleep is owed once");
     }
 }
@@ -798,12 +815,26 @@ fn the_display_sleeps_once_per_close_while_a_lease_asks_for_it() {
     assert_eq!(ask(&mut helper, me, LidDisplay::Sleep, NOW_MS, OPEN), HELD);
     assert_eq!(ran(&stand_in, "displaysleepnow"), 0, "the lid is open");
     helper.sense(NOW_MS + 30_000, CLOSED);
-    assert_eq!(ran(&stand_in, "displaysleepnow"), 1, "the first reading after the close");
+    assert_eq!(
+        ran(&stand_in, "displaysleepnow"),
+        1,
+        "the first reading after the close"
+    );
     helper.sense(NOW_MS + 60_000, CLOSED);
     let _ = helper.handle(me, Request::Read, NOW_MS + 61_000, CLOSED_ALONE);
-    let renewed = ask(&mut helper, me, LidDisplay::Sleep, NOW_MS + 62_000, CLOSED_ALONE);
+    let renewed = ask(
+        &mut helper,
+        me,
+        LidDisplay::Sleep,
+        NOW_MS + 62_000,
+        CLOSED_ALONE,
+    );
     assert_eq!(renewed, HELD);
-    assert_eq!(ran(&stand_in, "displaysleepnow"), 1, "once per close (QUESTION 38d)");
+    assert_eq!(
+        ran(&stand_in, "displaysleepnow"),
+        1,
+        "once per close (QUESTION 38d)"
+    );
     helper.sense(NOW_MS + 90_000, COOL);
     helper.sense(NOW_MS + 120_000, CLOSED);
     assert_eq!(ran(&stand_in, "displaysleepnow"), 2, "a new close");
@@ -813,16 +844,33 @@ fn the_display_sleeps_once_per_close_while_a_lease_asks_for_it() {
     let closed = StandIn::new(0);
     let mut helper = Helper::start(closed.config());
     let me = holder(&closed, 10);
-    assert_eq!(ask(&mut helper, me, LidDisplay::Sleep, NOW_MS, CLOSED_ALONE), HELD);
+    assert_eq!(
+        ask(&mut helper, me, LidDisplay::Sleep, NOW_MS, CLOSED_ALONE),
+        HELD
+    );
     assert_eq!(ran(&closed, "displaysleepnow"), 0, "never before the reply");
     helper.sense(NOW_MS, CLOSED);
-    assert_eq!(ran(&closed, "displaysleepnow"), 1, "starts closed: the next reading");
+    assert_eq!(
+        ran(&closed, "displaysleepnow"),
+        1,
+        "starts closed: the next reading"
+    );
     let released = helper.handle(me, Request::Release, NOW_MS + 1_000, CLOSED_ALONE);
     assert_eq!(released, Reply::Released);
-    let again = ask(&mut helper, me, LidDisplay::Sleep, NOW_MS + 2_000, CLOSED_ALONE);
+    let again = ask(
+        &mut helper,
+        me,
+        LidDisplay::Sleep,
+        NOW_MS + 2_000,
+        CLOSED_ALONE,
+    );
     assert_eq!(again, HELD);
     helper.sense(NOW_MS + 2_000, CLOSED);
-    assert_eq!(ran(&closed, "displaysleepnow"), 2, "a new hold counts its own close");
+    assert_eq!(
+        ran(&closed, "displaysleepnow"),
+        2,
+        "a new hold counts its own close"
+    );
 }
 
 #[test]
@@ -831,20 +879,43 @@ fn the_display_is_left_on_at_a_desk_or_while_no_lease_asks_for_it() {
     let mut helper = Helper::start(stand_in.config());
     let first = holder(&stand_in, 10);
     let second = holder(&stand_in, 11);
-    let leave_on = ask(&mut helper, first, LidDisplay::LeaveOn, NOW_MS, CLOSED_ALONE);
+    let leave_on = ask(
+        &mut helper,
+        first,
+        LidDisplay::LeaveOn,
+        NOW_MS,
+        CLOSED_ALONE,
+    );
     assert_eq!(leave_on, HELD);
     helper.sense(NOW_MS + 30_000, CLOSED);
     assert_eq!(ran(&stand_in, "displaysleepnow"), 0, "no lease asks for it");
-    let sleep = ask(&mut helper, second, LidDisplay::Sleep, NOW_MS + 31_000, CLOSED_ALONE);
+    let sleep = ask(
+        &mut helper,
+        second,
+        LidDisplay::Sleep,
+        NOW_MS + 31_000,
+        CLOSED_ALONE,
+    );
     assert_eq!(sleep, HELD);
-    assert_eq!(ran(&stand_in, "displaysleepnow"), 0, "never before the reply");
+    assert_eq!(
+        ran(&stand_in, "displaysleepnow"),
+        0,
+        "never before the reply"
+    );
     helper.sense(NOW_MS + 31_000, CLOSED);
-    assert_eq!(ran(&stand_in, "displaysleepnow"), 1, "any live lease that asks is enough");
+    assert_eq!(
+        ran(&stand_in, "displaysleepnow"),
+        1,
+        "any live lease that asks is enough"
+    );
 
     let desk = StandIn::new(0);
     let mut helper = Helper::start(desk.config());
     let me = holder(&desk, 10);
-    assert_eq!(ask(&mut helper, me, LidDisplay::Sleep, NOW_MS, CLOSED_AT_DESK), HELD);
+    assert_eq!(
+        ask(&mut helper, me, LidDisplay::Sleep, NOW_MS, CLOSED_AT_DESK),
+        HELD
+    );
     let at_desk = Readings {
         lid: CLOSED_AT_DESK,
         ..COOL
@@ -866,8 +937,15 @@ fn a_start_that_put_back_our_entry_sleeps_a_closed_mac_at_its_first_reading_with
     drop(first);
     let mut second = Helper::start(stand_in.config());
     assert_eq!(stand_in.sleep_disabled(), 0);
-    assert_eq!(ran(&stand_in, "sleepnow"), 0, "the start sleeps nothing before it serves");
-    assert!(second.wants_readings(), "the owed sleep keeps a reading due (QUESTION 38e)");
+    assert_eq!(
+        ran(&stand_in, "sleepnow"),
+        0,
+        "the start sleeps nothing before it serves"
+    );
+    assert!(
+        second.wants_readings(),
+        "the owed sleep keeps a reading due (QUESTION 38e)"
+    );
     assert!(!second.idle(), "and keeps the helper from idling out");
     second.sense(NOW_MS, CLOSED);
     assert_eq!(ran(&stand_in, "sleepnow"), 1);
@@ -886,7 +964,10 @@ fn a_start_that_put_back_our_entry_sleeps_a_closed_mac_at_its_first_reading_with
 
     let clean = StandIn::new(0);
     let helper = Helper::start(clean.config());
-    assert!(helper.idle(), "a start with nothing to put back owes nothing");
+    assert!(
+        helper.idle(),
+        "a start with nothing to put back owes nothing"
+    );
 }
 
 #[test]
@@ -899,7 +980,11 @@ fn a_hold_accepted_after_the_start_owes_no_sleep() {
     let mut second = Helper::start(stand_in.config());
     assert_eq!(hold(&mut second, me, NOW_MS + 1_000), HELD);
     second.sense(NOW_MS + 30_000, CLOSED);
-    assert_eq!(ran(&stand_in, "sleepnow"), 0, "the engine still wants the lid");
+    assert_eq!(
+        ran(&stand_in, "sleepnow"),
+        0,
+        "the engine still wants the lid"
+    );
     assert_eq!(stand_in.sleep_disabled(), 1);
     assert!(view(&mut second, me).held);
 }
@@ -909,18 +994,35 @@ fn a_first_hold_with_the_lid_closed_answers_before_the_display_sleeps() {
     let stand_in = StandIn::new(0);
     let mut helper = Helper::start(stand_in.config());
     let me = holder(&stand_in, 10);
-    assert_eq!(ask(&mut helper, me, LidDisplay::Sleep, NOW_MS, CLOSED_ALONE), HELD);
+    assert_eq!(
+        ask(&mut helper, me, LidDisplay::Sleep, NOW_MS, CLOSED_ALONE),
+        HELD
+    );
     let held = stand_in.calls();
-    assert!(held.len() <= REPLY_PMSET_RUNS_MAX, "the Hold reply waited on {held:?}");
+    assert!(
+        held.len() <= REPLY_PMSET_RUNS_MAX,
+        "the Hold reply waited on {held:?}"
+    );
     assert_eq!(ran(&stand_in, "displaysleepnow"), 0, "the reply goes first");
     helper.sense(NOW_MS, CLOSED);
-    assert_eq!(ran(&stand_in, "displaysleepnow"), 1, "the reading right after the reply");
+    assert_eq!(
+        ran(&stand_in, "displaysleepnow"),
+        1,
+        "the reading right after the reply"
+    );
     let before = stand_in.calls().len();
     let released = helper.handle(me, Request::Release, NOW_MS + 1_000, CLOSED_ALONE);
     assert_eq!(released, Reply::Released);
     let release_runs = stand_in.calls().len() - before;
-    assert!(release_runs <= REPLY_PMSET_RUNS_MAX, "the Release reply waited on {release_runs}");
-    assert_eq!(ran(&stand_in, "sleepnow"), 1, "the hold ended with the lid closed alone");
+    assert!(
+        release_runs <= REPLY_PMSET_RUNS_MAX,
+        "the Release reply waited on {release_runs}"
+    );
+    assert_eq!(
+        ran(&stand_in, "sleepnow"),
+        1,
+        "the hold ended with the lid closed alone"
+    );
 }
 
 #[test]
@@ -932,7 +1034,11 @@ fn a_sigterm_before_the_first_reading_sleeps_what_the_start_owes() {
     let mut second = Helper::start(stand_in.config());
     assert_eq!(ran(&stand_in, "sleepnow"), 0);
     second.terminate(CLOSED_ALONE);
-    assert_eq!(ran(&stand_in, "sleepnow"), 1, "served on the way out (rv-secreview ka12 N2)");
+    assert_eq!(
+        ran(&stand_in, "sleepnow"),
+        1,
+        "served on the way out (rv-secreview ka12 N2)"
+    );
     assert!(second.idle());
 
     let open = StandIn::new(0);
@@ -1003,14 +1109,21 @@ fn low_power_is_put_back_only_if_still_the_helpers_value() {
     let mut helper = Helper::start(stand_in.config());
     let me = holder(&stand_in, 10);
     assert_eq!(helper.handle(me, LOW_POWER, NOW_MS, OPEN), HELD);
-    assert_eq!(stand_in.low_power(), (0, 0), "set at a reading, never in the reply");
+    assert_eq!(
+        stand_in.low_power(),
+        (0, 0),
+        "set at a reading, never in the reply"
+    );
     helper.sense(NOW_MS, ON_BATTERY);
     assert_eq!(stand_in.low_power(), (1, 0));
     assert!(stand_in.journal_text().unwrap().contains("low_power"));
     let released = helper.handle(me, Request::Release, NOW_MS + 1_000, OPEN);
     assert_eq!(released, Reply::Released);
     assert_eq!(stand_in.low_power(), (1, 0), "put back at the next reading");
-    assert!(helper.wants_readings(), "a value to put back keeps readings due");
+    assert!(
+        helper.wants_readings(),
+        "a value to put back keeps readings due"
+    );
     helper.sense(NOW_MS + 30_000, ON_BATTERY);
     assert_eq!(stand_in.low_power(), (0, 0));
     assert_eq!(stand_in.journal_text().as_deref(), Some("[]"));
@@ -1026,7 +1139,11 @@ fn low_power_is_put_back_only_if_still_the_helpers_value() {
     let released = helper.handle(me, Request::Release, NOW_MS + 1_000, OPEN);
     assert_eq!(released, Reply::Released);
     helper.sense(NOW_MS + 30_000, ON_BATTERY);
-    assert_eq!(owners.low_power(), (1, 0), "a value already on is the owner's (C14)");
+    assert_eq!(
+        owners.low_power(),
+        (1, 0),
+        "a value already on is the owner's (C14)"
+    );
     assert!(owners.low_power_writes().is_empty());
 }
 
@@ -1040,10 +1157,17 @@ fn a_power_only_lease_never_sets_sleep_disabled() {
     helper.sense(NOW_MS + 30_000, ON_BATTERY);
     assert!(stand_in.sleep_writes().is_empty(), "{:?}", stand_in.calls());
     assert_eq!(stand_in.sleep_disabled(), 0);
-    assert_eq!(ran(&stand_in, "displaysleepnow"), 0, "a power-only lease asks no display");
+    assert_eq!(
+        ran(&stand_in, "displaysleepnow"),
+        0,
+        "a power-only lease asks no display"
+    );
     let state = view(&mut helper, me);
     assert!(!state.held, "no lease keeps sleep off");
-    assert_eq!(state.holders, 1, "and Read still answers under a power-only lease");
+    assert_eq!(
+        state.holders, 1,
+        "and Read still answers under a power-only lease"
+    );
     assert!(state.lease_left_s > 0);
     assert!(state.low_power_held);
     assert_eq!(state.low_power, Some(true));
@@ -1077,7 +1201,11 @@ fn a_hold_turned_power_only_puts_sleep_back_and_sleeps_a_closed_mac() {
     assert_eq!(hold(&mut helper, second, NOW_MS), HELD);
     let turned = helper.handle(first, LOW_POWER, NOW_MS + 1_000, CLOSED_ALONE);
     assert_eq!(turned, HELD);
-    assert_eq!(shared.sleep_disabled(), 1, "another sleep-off lease still lives");
+    assert_eq!(
+        shared.sleep_disabled(),
+        1,
+        "another sleep-off lease still lives"
+    );
     assert_eq!(ran(&shared, "sleepnow"), 0);
 }
 
@@ -1111,14 +1239,25 @@ fn the_battery_floor_keeps_a_power_only_lease() {
         ..COOL
     };
     helper.sense(NOW_MS + 30_000, three);
-    assert_eq!(stand_in.sleep_disabled(), 0, "the floor ends the sleep-off lease");
-    assert_eq!(stand_in.low_power().0, 1, "Low Power Mode is wanted exactly then");
+    assert_eq!(
+        stand_in.sleep_disabled(),
+        0,
+        "the floor ends the sleep-off lease"
+    );
+    assert_eq!(
+        stand_in.low_power().0,
+        1,
+        "Low Power Mode is wanted exactly then"
+    );
     let state = view(&mut helper, saver);
     assert_eq!(state.floor, FloorView::Battery);
     assert_eq!(state.holders, 1);
     assert!(state.low_power_held);
     let renewed = helper.handle(saver, LOW_POWER, NOW_MS + 31_000, OPEN);
-    assert_eq!(renewed, HELD, "r9.1 F3: LowPower is accepted under the floor");
+    assert_eq!(
+        renewed, HELD,
+        "r9.1 F3: LowPower is accepted under the floor"
+    );
     assert_eq!(
         hold(&mut helper, sleeper, NOW_MS + 31_000),
         Reply::Refused {
@@ -1141,7 +1280,11 @@ fn a_power_only_lease_renewed_under_the_heat_floor_keeps_low_power_on() {
         ..ON_BATTERY
     };
     helper.sense(NOW_MS + 30_000, hot);
-    assert_eq!(stand_in.low_power().0, 1, "end_for_floor keeps a power-only lease");
+    assert_eq!(
+        stand_in.low_power().0,
+        1,
+        "end_for_floor keeps a power-only lease"
+    );
     let renewed = helper.handle(me, LOW_POWER, NOW_MS + 100_000, OPEN);
     assert_eq!(renewed, HELD, "r9.1 F3: renewed under the heat floor");
     helper.sense(NOW_MS + 150_000, hot);
@@ -1161,11 +1304,23 @@ fn an_owner_who_turns_low_power_off_mid_hold_keeps_it_off() {
     stand_in.set_low_power_by_owner(0, 0);
     helper.sense(NOW_MS + 30_000, ON_BATTERY);
     helper.sense(NOW_MS + 60_000, ON_BATTERY);
-    assert_eq!(stand_in.low_power().0, 0, "the owner's turn-off is kept (N1)");
-    assert_eq!(stand_in.journal_text().as_deref(), Some("[]"), "the entry is dropped");
+    assert_eq!(
+        stand_in.low_power().0,
+        0,
+        "the owner's turn-off is kept (N1)"
+    );
+    assert_eq!(
+        stand_in.journal_text().as_deref(),
+        Some("[]"),
+        "the entry is dropped"
+    );
     assert_eq!(helper.handle(me, LOW_POWER, NOW_MS + 61_000, OPEN), HELD);
     helper.sense(NOW_MS + 90_000, ON_BATTERY);
-    assert_eq!(stand_in.low_power().0, 0, "a renewal of the same ask sets nothing");
+    assert_eq!(
+        stand_in.low_power().0,
+        0,
+        "a renewal of the same ask sets nothing"
+    );
     let released = helper.handle(me, Request::Release, NOW_MS + 91_000, OPEN);
     assert_eq!(released, Reply::Released);
     helper.sense(NOW_MS + 120_000, ON_BATTERY);
@@ -1176,7 +1331,11 @@ fn an_owner_who_turns_low_power_off_mid_hold_keeps_it_off() {
     );
     assert_eq!(helper.handle(me, LOW_POWER, NOW_MS + 121_000, OPEN), HELD);
     helper.sense(NOW_MS + 150_000, ON_BATTERY);
-    assert_eq!(stand_in.low_power().0, 1, "a new ask after none asked sets it again");
+    assert_eq!(
+        stand_in.low_power().0,
+        1,
+        "a new ask after none asked sets it again"
+    );
 }
 
 #[test]
@@ -1193,7 +1352,11 @@ fn a_mac_without_the_lowpowermode_key_is_never_written() {
     assert_eq!(state.low_power, None, "Read says the key is missing");
     assert!(state.low_power_held);
     helper.terminate(OPEN);
-    assert!(stand_in.low_power_writes().is_empty(), "{:?}", stand_in.calls());
+    assert!(
+        stand_in.low_power_writes().is_empty(),
+        "{:?}",
+        stand_in.calls()
+    );
     let journal = stand_in.journal_text().unwrap_or_default();
     assert!(!journal.contains("low_power"), "{journal}");
 }
@@ -1213,13 +1376,29 @@ fn low_power_changes_run_after_the_reply() {
     for (step, (request, lid)) in (0_u64..).zip(steps) {
         let now_ms = NOW_MS + step * 1_000;
         let (reply, runs) = runs_of(&stand_in, || helper.handle(me, request, now_ms, lid));
-        assert!(!matches!(reply, Reply::Refused { .. }), "{request:?}: {reply:?}");
-        assert!(runs.len() <= REPLY_PMSET_RUNS_MAX, "{request:?} waited on {runs:?}");
-        let writes = runs.iter().filter(|run| run.contains(" lowpowermode ")).count();
-        assert_eq!(writes, 0, "{request:?} changed Low Power Mode in its reply: {runs:?}");
+        assert!(
+            !matches!(reply, Reply::Refused { .. }),
+            "{request:?}: {reply:?}"
+        );
+        assert!(
+            runs.len() <= REPLY_PMSET_RUNS_MAX,
+            "{request:?} waited on {runs:?}"
+        );
+        let writes = runs
+            .iter()
+            .filter(|run| run.contains(" lowpowermode "))
+            .count();
+        assert_eq!(
+            writes, 0,
+            "{request:?} changed Low Power Mode in its reply: {runs:?}"
+        );
         helper.sense(now_ms, Readings { lid, ..ON_BATTERY });
     }
-    assert_eq!(stand_in.low_power().0, 0, "the reading after Release put it back");
+    assert_eq!(
+        stand_in.low_power().0,
+        0,
+        "the reading after Release put it back"
+    );
     battery_source_only(&stand_in);
 }
 
@@ -1233,9 +1412,17 @@ fn a_power_only_request_does_not_clear_the_sleep_a_start_owes() {
     let mut second = Helper::start(stand_in.config());
     let asked = second.handle(me, LOW_POWER, NOW_MS + 1_000, CLOSED_ALONE);
     assert_eq!(asked, HELD);
-    assert_eq!(ran(&stand_in, "sleepnow"), 0, "nothing sleeps inside the reply");
+    assert_eq!(
+        ran(&stand_in, "sleepnow"),
+        0,
+        "nothing sleeps inside the reply"
+    );
     second.sense(NOW_MS + 1_000, CLOSED_ON_BATTERY);
-    assert_eq!(ran(&stand_in, "sleepnow"), 1, "the reading serves what the start owes");
+    assert_eq!(
+        ran(&stand_in, "sleepnow"),
+        1,
+        "the reading serves what the start owes"
+    );
     assert_eq!(stand_in.sleep_disabled(), 0);
 }
 
@@ -1251,8 +1438,16 @@ fn a_sigterm_puts_low_power_back_before_the_owed_sleep() {
     drop(first);
     fs::write(stand_in.path("refuse-low-power-back"), "").unwrap();
     let mut second = Helper::start(config);
-    assert_eq!(stand_in.sleep_disabled(), 0, "the start put sleep back and owes the sleep");
-    assert_eq!(stand_in.low_power().0, 1, "its Low Power put-back was refused");
+    assert_eq!(
+        stand_in.sleep_disabled(),
+        0,
+        "the start put sleep back and owes the sleep"
+    );
+    assert_eq!(
+        stand_in.low_power().0,
+        1,
+        "its Low Power put-back was refused"
+    );
     fs::remove_file(stand_in.path("refuse-low-power-back")).unwrap();
     second.terminate(CLOSED_ALONE);
     let calls = stand_in.calls();
@@ -1260,7 +1455,10 @@ fn a_sigterm_puts_low_power_back_before_the_owed_sleep() {
     let slept = calls.iter().rposition(|call| call == "sleepnow");
     assert!(back.is_some(), "{calls:?}");
     assert!(slept.is_some(), "{calls:?}");
-    assert!(back < slept, "39i: Low Power goes back before the owed sleep: {calls:?}");
+    assert!(
+        back < slept,
+        "39i: Low Power goes back before the owed sleep: {calls:?}"
+    );
     assert_eq!(stand_in.low_power().0, 0);
     assert!(second.idle());
     battery_source_only(&stand_in);
@@ -1278,7 +1476,11 @@ fn an_owner_ac_low_power_value_is_kept() {
     let released = helper.handle(me, Request::Release, NOW_MS + 1_000, OPEN);
     assert_eq!(released, Reply::Released);
     helper.sense(NOW_MS + 30_000, ON_BATTERY);
-    assert_eq!(stand_in.low_power(), (0, 1), "r9.1 F2: the owner's AC value is kept");
+    assert_eq!(
+        stand_in.low_power(),
+        (0, 1),
+        "r9.1 F2: the owner's AC value is kept"
+    );
     assert_eq!(
         stand_in.low_power_writes(),
         ["-b lowpowermode 1", "-b lowpowermode 0"]
@@ -1300,7 +1502,11 @@ fn forget_with_low_power_set_finishes() {
     assert!(runs.len() <= REPLY_PMSET_RUNS_MAX, "{runs:?}");
     assert_eq!(stand_in.low_power().0, 0);
     assert_eq!(stand_in.sleep_disabled(), 0);
-    assert_eq!(ran(&stand_in, "sleepnow"), 0, "skipped when a Low Power entry was ours");
+    assert_eq!(
+        ran(&stand_in, "sleepnow"),
+        0,
+        "skipped when a Low Power entry was ours"
+    );
     assert_eq!(stand_in.journal_text().as_deref(), Some("[]"));
     assert_eq!(stand_in.pin_text(), None);
     battery_source_only(&stand_in);
@@ -1340,13 +1546,21 @@ fn an_owners_own_low_power_turned_off_mid_hold_stays_off() {
     stand_in.set_low_power_by_owner(0, 0);
     helper.sense(NOW_MS + 30_000, ON_BATTERY);
     helper.sense(NOW_MS + 60_000, ON_BATTERY);
-    assert_eq!(stand_in.low_power().0, 0, "QUESTION 41a: the owner's own value too");
+    assert_eq!(
+        stand_in.low_power().0,
+        0,
+        "QUESTION 41a: the owner's own value too"
+    );
     assert!(stand_in.low_power_writes().is_empty());
     let released = helper.handle(me, Request::Release, NOW_MS + 61_000, OPEN);
     assert_eq!(released, Reply::Released);
     assert_eq!(helper.handle(me, LOW_POWER, NOW_MS + 62_000, OPEN), HELD);
     helper.sense(NOW_MS + 90_000, ON_BATTERY);
-    assert_eq!(stand_in.low_power().0, 1, "a new ask after none asked sets it");
+    assert_eq!(
+        stand_in.low_power().0,
+        1,
+        "a new ask after none asked sets it"
+    );
     assert_eq!(stand_in.low_power_writes(), ["-b lowpowermode 1"]);
 }
 
@@ -1359,10 +1573,16 @@ fn a_low_power_set_that_failed_never_leaves_it_on() {
         assert_eq!(helper.handle(me, LOW_POWER, NOW_MS, OPEN), HELD);
         helper.sense(NOW_MS, ON_BATTERY);
         assert_eq!(stand_in.low_power().0, u8::from(wrote), "wrote {wrote}");
-        assert!(stand_in.journal_text().unwrap().contains("low_power"), "journaled first");
+        assert!(
+            stand_in.journal_text().unwrap().contains("low_power"),
+            "journaled first"
+        );
         helper.sense(NOW_MS + 30_000, ON_BATTERY);
         let journaled = stand_in.journal_text().unwrap().contains("low_power");
-        assert_eq!(journaled, wrote, "QUESTION 41b: a 0 after a failed set is the owner's");
+        assert_eq!(
+            journaled, wrote,
+            "QUESTION 41b: a 0 after a failed set is the owner's"
+        );
         let released = helper.handle(me, Request::Release, NOW_MS + 31_000, OPEN);
         assert_eq!(released, Reply::Released);
         helper.sense(NOW_MS + 60_000, ON_BATTERY);
@@ -1395,7 +1615,11 @@ fn a_battery_section_that_loses_the_key_drops_our_entry_unwritten() {
         );
         assert_eq!(stand_in.low_power_writes(), ["-b lowpowermode 1"]);
         let forgotten = helper.handle(me, Request::Forget, NOW_MS + 31_000, OPEN);
-        assert_eq!(forgotten, Reply::Forgotten, "a vanished key never blocks Forget");
+        assert_eq!(
+            forgotten,
+            Reply::Forgotten,
+            "a vanished key never blocks Forget"
+        );
         assert!(helper.idle());
     }
 }

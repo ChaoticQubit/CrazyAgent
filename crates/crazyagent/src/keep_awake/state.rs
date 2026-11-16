@@ -62,7 +62,9 @@ pub enum LowPowerSupport {
     Ready,
     Held,
     OwnerChanged,
-    NotAvailable { reason: String },
+    NotAvailable {
+        reason: String,
+    },
 }
 
 impl LowPowerSupport {
@@ -338,7 +340,9 @@ pub fn low_power_wanted(
         LowPower::Off => false,
         LowPower::OnBattery => true,
         LowPower::BatteryBelow40 => {
-            kept || sensors.battery_pct.is_some_and(|pct| pct < LowPower::BELOW_PCT)
+            kept || sensors
+                .battery_pct
+                .is_some_and(|pct| pct < LowPower::BELOW_PCT)
         }
     };
     assert!(settings.low_power != LowPower::Off || !wanted);

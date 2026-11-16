@@ -190,7 +190,10 @@ impl Helper {
     /// reading.
     fn apply(&mut self, readings: Readings) {
         let owed = self.owed_at_start;
-        assert!(!owed || !self.leases.sleep_off(), "an accepted hold clears the owed sleep");
+        assert!(
+            !owed || !self.leases.sleep_off(),
+            "an accepted hold clears the owed sleep"
+        );
         let ended = match floor::judge(readings.battery, readings.pressure) {
             Some(floor) => self.end_for_floor(floor),
             None => {
@@ -328,7 +331,10 @@ impl Helper {
             return Reply::Refused { reason };
         }
         let held = self.leases.hold(holder, now_ms, lease_s, ask);
-        assert!(held.is_ok(), "room for a new holder was checked before pmset ran");
+        assert!(
+            held.is_ok(),
+            "room for a new holder was checked before pmset ran"
+        );
         self.sleep_owed = false;
         self.owed_at_start = false;
         Reply::Held {
@@ -420,7 +426,11 @@ impl Helper {
         let was_sleep_off = self.leases.sleep_off();
         self.leases.clear();
         self.end_left_alone();
-        let lid = if self.has_entry(Key::LowPower) { None } else { lid };
+        let lid = if self.has_entry(Key::LowPower) {
+            None
+        } else {
+            lid
+        };
         self.put_back_sleep(lid, was_sleep_off);
         self.put_back_low_power(false);
         if self.pending() {
@@ -578,7 +588,9 @@ impl Helper {
                 }
             };
         if still_ours && let Err(error) = self.pmset.set(entry.key, entry.before == 1) {
-            ffi::log(&format!("Low Power Mode put back failed, entry kept: {error:?}"));
+            ffi::log(&format!(
+                "Low Power Mode put back failed, entry kept: {error:?}"
+            ));
             return false;
         }
         if let Err(error) = journal.remove(entry.key) {
@@ -616,7 +628,10 @@ impl Helper {
                 return;
             }
         };
-        let journal = self.journal.as_mut().expect("no lease starts without a journal");
+        let journal = self
+            .journal
+            .as_mut()
+            .expect("no lease starts without a journal");
         let ours = journal.entry(Key::LowPower).is_some();
         match (value, ours) {
             (Some(true), true) => {}
@@ -627,7 +642,9 @@ impl Helper {
                     at_ms: wall_ms(),
                 };
                 if let Err(error) = journal.record(entry) {
-                    ffi::log(&format!("journal not written, Low Power Mode not set: {error:?}"));
+                    ffi::log(&format!(
+                        "journal not written, Low Power Mode not set: {error:?}"
+                    ));
                     return;
                 }
                 if let Err(error) = self.pmset.set(Key::LowPower, true) {

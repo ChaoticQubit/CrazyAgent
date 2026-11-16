@@ -131,7 +131,11 @@ mod live {
             ..PowerReading::unknown()
         };
         assert_eq!(reading.lid_closed, lid_closed);
-        assert!(reading.battery_pct.is_none_or(|percent| percent <= PERCENT_MAX));
+        assert!(
+            reading
+                .battery_pct
+                .is_none_or(|percent| percent <= PERCENT_MAX)
+        );
         reading
     }
 }

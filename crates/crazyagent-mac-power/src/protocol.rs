@@ -214,7 +214,12 @@ pub fn encode_request(request: &Request) -> Vec<u8> {
             lease_s,
             lid_display,
             low_power,
-        } => (Call::Hold, Some(lease_s), Some(lid_display), Some(low_power)),
+        } => (
+            Call::Hold,
+            Some(lease_s),
+            Some(lid_display),
+            Some(low_power),
+        ),
         Request::LowPower { lease_s } => (Call::LowPower, Some(lease_s), None, None),
         Request::Release => (Call::Release, None, None, None),
         Request::Read => (Call::Read, None, None, None),

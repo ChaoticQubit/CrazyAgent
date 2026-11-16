@@ -1,6 +1,6 @@
 use super::hold::{Held, Hold, HoldError, wanted};
-use super::power::{LID_REFUSED, LidAsk, LidCommand, LidReader, PowerLine};
 pub(super) use super::power::TURN_ON_FAILED;
+use super::power::{LID_REFUSED, LidAsk, LidCommand, LidReader, PowerLine};
 use super::state::{LidSupport, LowPowerSupport, Want};
 use crazyagent_mac_power::client::{self, CallError};
 use crazyagent_mac_power::protocol::{
@@ -151,7 +151,10 @@ pub(super) fn macos_major(text: &str) -> Option<u32> {
     if line.is_empty() || line.len() > VERSION_BYTES_MAX {
         return None;
     }
-    if !line.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.') {
+    if !line
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
         return None;
     }
     let digits = line.split('.').next()?;
@@ -204,7 +207,12 @@ impl LidLine {
         platform: LidPlatform,
     ) -> Self {
         assert!(platform.macos.is_none_or(|major| major <= MACOS_MAJOR_MAX));
-        assert!(platform.withheld.iter().all(|major| *major >= MACOS_LID_MIN));
+        assert!(
+            platform
+                .withheld
+                .iter()
+                .all(|major| *major >= MACOS_LID_MIN)
+        );
         Self {
             service,
             helper,
@@ -271,7 +279,10 @@ impl LidLine {
             Some(Status::Enabled | Status::NotFound) => return None,
         }
         if let Err(problem) = self.service.open_login_items() {
-            eprintln!("keep awake: Login Items did not open: {}", bounded(&problem));
+            eprintln!(
+                "keep awake: Login Items did not open: {}",
+                bounded(&problem)
+            );
         }
         None
     }
@@ -379,14 +390,24 @@ impl LidLine {
         } else {
             self.needs_helper();
         }
-        if self.trouble.as_ref().is_some_and(|(after, _)| *after != status) {
+        if self
+            .trouble
+            .as_ref()
+            .is_some_and(|(after, _)| *after != status)
+        {
             self.trouble = None;
         }
-        let support = self.trouble.as_ref().map_or(support, |(_, trouble)| trouble.clone());
+        let support = self
+            .trouble
+            .as_ref()
+            .map_or(support, |(_, trouble)| trouble.clone());
         self.lease_sleep_off &= self.lease_until_ms.is_some();
         assert!(enabled || self.lease_until_ms.is_none());
         assert!(self.lease_until_ms.is_some() || !self.lease_sleep_off);
-        assert!(!matches!(support, LidSupport::Off | LidSupport::IdleOnlyOnBattery));
+        assert!(!matches!(
+            support,
+            LidSupport::Off | LidSupport::IdleOnlyOnBattery
+        ));
         support
     }
 
@@ -422,7 +443,10 @@ impl LidLine {
     /// support.
     fn resting(&mut self, rule_on: bool, now_ms: i64) -> LidSupport {
         if !rule_on {
-            return self.last.clone().unwrap_or_else(|| not_available(LID_UNREAD));
+            return self
+                .last
+                .clone()
+                .unwrap_or_else(|| not_available(LID_UNREAD));
         }
         let due = self
             .read_ms
@@ -484,7 +508,10 @@ impl LidLine {
             None => unasked(&self.low_power),
         };
         self.low_power_on_seen |= asked && self.low_power == LowPowerSupport::Held;
-        let ours = matches!(self.low_power, LowPowerSupport::Held | LowPowerSupport::OwnerChanged);
+        let ours = matches!(
+            self.low_power,
+            LowPowerSupport::Held | LowPowerSupport::OwnerChanged
+        );
         assert!(asked || !ours);
         assert!(asked || !self.low_power_on_seen);
     }
@@ -661,7 +688,10 @@ fn unasked(before: &LowPowerSupport) -> LowPowerSupport {
         | LowPowerSupport::OwnerChanged
         | LowPowerSupport::NotAvailable { .. } => LowPowerSupport::Ready,
     };
-    assert!(!matches!(after, LowPowerSupport::Held | LowPowerSupport::OwnerChanged));
+    assert!(!matches!(
+        after,
+        LowPowerSupport::Held | LowPowerSupport::OwnerChanged
+    ));
     assert!(*before != LowPowerSupport::Unread || after == LowPowerSupport::Unread);
     after
 }
@@ -724,7 +754,11 @@ impl LidLine {
 /// removed, in words, or none.
 pub(super) fn remove_lid_helper(now_ms: i64) -> Option<String> {
     assert!(now_ms > 0);
-    let mut line = LidLine::new(Box::new(Daemon), Box::new(Installed), LidPlatform::this_mac());
+    let mut line = LidLine::new(
+        Box::new(Daemon),
+        Box::new(Installed),
+        LidPlatform::this_mac(),
+    );
     line.uninstall(now_ms)
 }
 
@@ -732,7 +766,13 @@ pub(super) fn remove_lid_helper(now_ms: i64) -> Option<String> {
 /// installed helper and this Mac, read on the sensor thread at the first reading so the
 /// engine start runs no system tool for it. Output: both lines.
 pub(super) fn lines() -> (LidReader, PowerLine) {
-    lines_around(|| LidLine::new(Box::new(Daemon), Box::new(Installed), LidPlatform::this_mac()))
+    lines_around(|| {
+        LidLine::new(
+            Box::new(Daemon),
+            Box::new(Installed),
+            LidPlatform::this_mac(),
+        )
+    })
 }
 
 /// Builds the lid line and the power line over one lid line (QUESTION 40b). The lid closure

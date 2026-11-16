@@ -1,7 +1,6 @@
 use super::*;
 use crate::keep_awake::power::{
-    LID_REFUSED, LidAsk, LidCommand, LidReader, PowerLine, PowerReading, READ_MS, Reader,
-    Sensing,
+    LID_REFUSED, LidAsk, LidCommand, LidReader, PowerLine, PowerReading, READ_MS, Reader, Sensing,
 };
 use crate::notifications::keep_awake::LID_SUBJECT;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -482,8 +481,15 @@ fn the_keeper_hands_the_lid_line_what_the_lid_wants_and_leaves_the_lid_to_it() {
     };
 
     keeper.tick(&connection, now_ms).unwrap();
-    assert!(until(|| last().is_some()), "the first reading reaches the lid line");
-    assert_eq!(last(), Some(off), "nothing is asked of the helper before an evaluation");
+    assert!(
+        until(|| last().is_some()),
+        "the first reading reaches the lid line"
+    );
+    assert_eq!(
+        last(),
+        Some(off),
+        "nothing is asked of the helper before an evaluation"
+    );
 
     let wanted = LidAsk {
         rule_on: true,
@@ -509,7 +515,9 @@ fn the_keeper_hands_the_lid_line_what_the_lid_wants_and_leaves_the_lid_to_it() {
     };
     let outcome = act(&connection, KeepAwakeAction::Set { settings }, now_ms);
     assert_eq!(outcome, Outcome::Applied);
-    let ruled_off = step_until(&mut keeper, &connection, &mut now_ms, |_| last() == Some(off));
+    let ruled_off = step_until(&mut keeper, &connection, &mut now_ms, |_| {
+        last() == Some(off)
+    });
     assert_eq!(ruled_off.lid_support, LidSupport::Off);
     assert_eq!(ruled_off.state.want, IDLE);
 }
@@ -533,7 +541,9 @@ fn the_keeper_asks_the_lid_line_to_sleep_the_display_only_as_the_setting_says() 
         sleep_display: true,
         low_power: false,
     };
-    step_until(&mut keeper, &connection, &mut now_ms, |_| last() == Some(sleeping));
+    step_until(&mut keeper, &connection, &mut now_ms, |_| {
+        last() == Some(sleeping)
+    });
 
     let settings = KeepAwakeSettings {
         lid_display: LidDisplay::LeaveOn,
@@ -545,10 +555,14 @@ fn the_keeper_asks_the_lid_line_to_sleep_the_display_only_as_the_setting_says() 
         sleep_display: false,
         ..sleeping
     };
-    step_until(&mut keeper, &connection, &mut now_ms, |_| last() == Some(left_on));
+    step_until(&mut keeper, &connection, &mut now_ms, |_| {
+        last() == Some(left_on)
+    });
     let heard = asks.lock().unwrap().clone();
     assert!(
-        heard.iter().all(|(ask, _, _)| ask.wanted || !ask.sleep_display),
+        heard
+            .iter()
+            .all(|(ask, _, _)| ask.wanted || !ask.sleep_display),
         "only a wanted ask carries the display ask (QUESTION 38)"
     );
 }
@@ -586,7 +600,10 @@ fn until_stepped(
 /// The commands a recording lid line heard, in order.
 fn commands(asks: &Asks) -> Vec<LidCommand> {
     let heard = asks.lock().unwrap();
-    heard.iter().filter_map(|(_, command, _)| *command).collect()
+    heard
+        .iter()
+        .filter_map(|(_, command, _)| *command)
+        .collect()
 }
 
 #[test]
@@ -640,7 +657,11 @@ fn an_owner_lid_command_reaches_the_lid_line_once() {
         !commands(&asks).is_empty()
     });
     steps(&mut keeper, &connection, &mut now_ms, 65);
-    assert_eq!(commands(&asks), [LidCommand::TurnOn], "each command goes once");
+    assert_eq!(
+        commands(&asks),
+        [LidCommand::TurnOn],
+        "each command goes once"
+    );
 
     let remove = act(&connection, KeepAwakeAction::RemoveLidHelper, now_ms);
     assert_eq!(remove, Outcome::Applied);
@@ -668,9 +689,12 @@ fn the_keeper_notes_a_lid_helper_journal_it_cannot_read_and_clears_it() {
     };
 
     until_stepped(&mut keeper, &connection, &mut now_ms, || rows() == 1);
-    crate::notifications::keep_awake::left_over(&connection, &Leftover::Kinds(Vec::new()))
-        .unwrap();
-    assert_eq!(rows(), 1, "the engine start's undo leaves the lid helper row");
+    crate::notifications::keep_awake::left_over(&connection, &Leftover::Kinds(Vec::new())).unwrap();
+    assert_eq!(
+        rows(),
+        1,
+        "the engine start's undo leaves the lid helper row"
+    );
     *support.lock().unwrap() = LidSupport::Held;
     until_stepped(&mut keeper, &connection, &mut now_ms, || rows() == 0);
 }
@@ -692,7 +716,11 @@ fn the_view_shows_the_platform_lid_support_whatever_the_lid_rule() {
     let view = step_until(&mut keeper, &connection, &mut now_ms, |view| {
         view.lid_platform == LidSupport::NeedsApproval
     });
-    assert_eq!(view.lid_support, LidSupport::Off, "the rule Off still decides the lid");
+    assert_eq!(
+        view.lid_support,
+        LidSupport::Off,
+        "the rule Off still decides the lid"
+    );
     let read = crate::keep_awake::view(&connection).unwrap();
     assert_eq!(read.lid_platform, LidSupport::NeedsApproval);
 }
@@ -713,7 +741,9 @@ fn stop_hands_the_lid_line_a_last_not_wanted_ask_before_it_returns() {
         sleep_display: true,
         low_power: false,
     };
-    until_stepped(&mut keeper, &connection, &mut now_ms, || last() == Some(wanted));
+    until_stepped(&mut keeper, &connection, &mut now_ms, || {
+        last() == Some(wanted)
+    });
 
     keeper.stop();
     let let_go = LidAsk {
@@ -722,7 +752,11 @@ fn stop_hands_the_lid_line_a_last_not_wanted_ask_before_it_returns() {
         sleep_display: false,
         low_power: false,
     };
-    assert_eq!(last(), Some(let_go), "the lid line heard the last ask before stop returned");
+    assert_eq!(
+        last(),
+        Some(let_go),
+        "the lid line heard the last ask before stop returned"
+    );
 }
 
 #[test]
@@ -747,7 +781,11 @@ fn the_keeper_asks_for_low_power_while_a_hold_runs_on_battery_below_forty() {
 
     fake.set(on_battery(Some(45)));
     steps(&mut keeper, &connection, &mut now_ms, 65);
-    assert_eq!(last(), Some(power_only), "asked once, it stays asked on battery");
+    assert_eq!(
+        last(),
+        Some(power_only),
+        "asked once, it stays asked on battery"
+    );
 
     fake.set(on_ac());
     let lid_only = LidAsk {
@@ -756,9 +794,14 @@ fn the_keeper_asks_for_low_power_while_a_hold_runs_on_battery_below_forty() {
         sleep_display: true,
         low_power: false,
     };
-    step_until(&mut keeper, &connection, &mut now_ms, |_| last() == Some(lid_only));
+    step_until(&mut keeper, &connection, &mut now_ms, |_| {
+        last() == Some(lid_only)
+    });
     let heard = asks.lock().unwrap().clone();
-    assert!(heard.iter().any(|(ask, _, _)| ask.low_power), "the battery hold asked it");
+    assert!(
+        heard.iter().any(|(ask, _, _)| ask.low_power),
+        "the battery hold asked it"
+    );
 }
 
 #[test]
@@ -777,7 +820,9 @@ fn stop_lets_go_of_a_low_power_ask_that_holds_no_lid() {
         sleep_display: false,
         low_power: true,
     };
-    until_stepped(&mut keeper, &connection, &mut now_ms, || last() == Some(power_only));
+    until_stepped(&mut keeper, &connection, &mut now_ms, || {
+        last() == Some(power_only)
+    });
 
     keeper.stop();
     let let_go = LidAsk {
@@ -830,11 +875,18 @@ fn a_changed_low_power_ask_reaches_the_power_line_at_once_and_its_support_stands
 
     let changed_ms = NOW_MS + 2 * SECOND_MS;
     assert_eq!(sensing.step(changed_ms, asked), None);
-    assert!(until(|| count() == 2), "a changed ask goes out at once with no lid line");
+    assert!(
+        until(|| count() == 2),
+        "a changed ask goes out at once with no lid line"
+    );
     assert_eq!(asks.lock().unwrap()[1], (true, changed_ms));
     let held = answered(&mut sensing, changed_ms + SECOND_MS, asked);
     assert_eq!(held.low_power, LowPowerSupport::Held);
-    assert_eq!(held.lid_support, LidSupport::Held, "the reader's lid support stays");
+    assert_eq!(
+        held.lid_support,
+        LidSupport::Held,
+        "the reader's lid support stays"
+    );
 }
 
 #[test]
@@ -847,7 +899,9 @@ fn stop_lets_the_power_line_go_with_no_lid_line() {
     let mut now_ms = NOW_MS;
     agent(&connection, "working");
     let last = || asks.lock().unwrap().last().map(|(asked, _)| *asked);
-    until_stepped(&mut keeper, &connection, &mut now_ms, || last() == Some(true));
+    until_stepped(&mut keeper, &connection, &mut now_ms, || {
+        last() == Some(true)
+    });
 
     keeper.stop();
     assert_eq!(

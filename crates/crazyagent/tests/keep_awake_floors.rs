@@ -350,7 +350,11 @@ fn the_lid_state_files_say_open_closed_or_nothing() {
 fn linux_drm_connectors_say_whether_an_external_display_is_in_use() {
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
-    assert_eq!(power_linux::external_display(root), None, "no connector says nothing");
+    assert_eq!(
+        power_linux::external_display(root),
+        None,
+        "no connector says nothing"
+    );
     put(&root.join("card0"), "dev", "226:0");
     put(&root.join("renderD128"), "dev", "226:128");
     put(&root.join("card0-eDP-1"), "status", "connected");
@@ -414,7 +418,11 @@ fn the_linux_reader_reads_one_root_folder_and_no_bus() {
         "state",
         "state:      closed",
     );
-    put(&root.join("sys/class/drm/card0-HDMI-A-1"), "status", "connected");
+    put(
+        &root.join("sys/class/drm/card0-HDMI-A-1"),
+        "status",
+        "connected",
+    );
     assert_eq!(
         power_linux::read_under(root),
         PowerReading {

@@ -91,7 +91,10 @@ fn a_helper_socket_not_owned_by_root_is_refused() {
     );
     assert_eq!(PRODUCTION.peer_uid, 0);
     assert_eq!(reply, Err(CallError::PeerUid(place.my_uid)));
-    assert!(served.join().unwrap().is_empty(), "nothing is written to a peer that is not root");
+    assert!(
+        served.join().unwrap().is_empty(),
+        "nothing is written to a peer that is not root"
+    );
 }
 
 #[test]
@@ -102,10 +105,21 @@ fn the_helper_socket_is_made_only_inside_the_gate() {
     let shut = |_: &mut dyn FnMut() -> io::Result<UnixStream>| -> io::Result<UnixStream> {
         Err(io::Error::from(io::ErrorKind::PermissionDenied))
     };
-    let reply = call(&endpoint(&place.socket, place.my_uid), &Request::Read, &shut);
-    assert_eq!(reply, Err(CallError::Connect(io::ErrorKind::PermissionDenied)));
+    let reply = call(
+        &endpoint(&place.socket, place.my_uid),
+        &Request::Read,
+        &shut,
+    );
+    assert_eq!(
+        reply,
+        Err(CallError::Connect(io::ErrorKind::PermissionDenied))
+    );
     let accepted = listener.accept().map(|_| ()).map_err(|error| error.kind());
-    assert_eq!(accepted, Err(io::ErrorKind::WouldBlock), "no connection outside the gate");
+    assert_eq!(
+        accepted,
+        Err(io::ErrorKind::WouldBlock),
+        "no connection outside the gate"
+    );
     drop(listener);
     std::fs::remove_file(&place.socket).unwrap();
     let calls = Cell::new(0_u32);
@@ -114,7 +128,11 @@ fn the_helper_socket_is_made_only_inside_the_gate() {
         connect()
     };
     let served = stand_in(&place.socket, reply_line(&Reply::Released), Duration::ZERO);
-    let reply = call(&endpoint(&place.socket, place.my_uid), &Request::Release, &counted);
+    let reply = call(
+        &endpoint(&place.socket, place.my_uid),
+        &Request::Release,
+        &counted,
+    );
     assert_eq!(reply, Ok(Reply::Released));
     assert_eq!(calls.get(), 1, "one connect, through the gate");
     served.join().unwrap();
@@ -125,15 +143,27 @@ fn a_reply_over_the_bound_or_without_its_newline_is_refused() {
     let place = place();
     let long = vec![b'a'; REPLY_BYTES_MAX + 1];
     let served = stand_in(&place.socket, long, Duration::ZERO);
-    let reply = call(&endpoint(&place.socket, place.my_uid), &Request::Read, &open_gate);
+    let reply = call(
+        &endpoint(&place.socket, place.my_uid),
+        &Request::Read,
+        &open_gate,
+    );
     assert_eq!(reply, Err(CallError::Reply));
     served.join().unwrap();
     std::fs::remove_file(&place.socket).unwrap();
     let mut cut = reply_line(&Reply::Released);
     assert_eq!(cut.pop(), Some(b'\n'));
     let served = stand_in(&place.socket, cut, Duration::ZERO);
-    let reply = call(&endpoint(&place.socket, place.my_uid), &Request::Read, &open_gate);
-    assert_eq!(reply, Err(CallError::Reply), "a reply closed before its newline");
+    let reply = call(
+        &endpoint(&place.socket, place.my_uid),
+        &Request::Read,
+        &open_gate,
+    );
+    assert_eq!(
+        reply,
+        Err(CallError::Reply),
+        "a reply closed before its newline"
+    );
     served.join().unwrap();
 }
 
@@ -142,11 +172,18 @@ fn a_helper_that_never_answers_is_cut_off_at_the_endpoint_wait() {
     let place = place();
     let served = stand_in(&place.socket, reply_line(&Reply::Released), WAIT * 3);
     let started = Instant::now();
-    let reply = call(&endpoint(&place.socket, place.my_uid), &Request::Read, &open_gate);
+    let reply = call(
+        &endpoint(&place.socket, place.my_uid),
+        &Request::Read,
+        &open_gate,
+    );
     let took = started.elapsed();
     assert!(matches!(reply, Err(CallError::Exchange(_))), "{reply:?}");
     assert!(took >= WAIT, "{took:?}");
-    assert!(took < LATE_MAX, "one deadline over the whole call: {took:?}");
+    assert!(
+        took < LATE_MAX,
+        "one deadline over the whole call: {took:?}"
+    );
     served.join().unwrap();
 }
 
