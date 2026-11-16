@@ -222,7 +222,18 @@ pub struct Installed {
     freeze_record: Option<PathBuf>,
     terminal_display: TerminalDisplay,
     environment: Vec<(OsString, OsString)>,
+    engine_servers: Vec<EngineServer>,
     _lock: File,
+}
+
+/// The engine's own MCP server as an ACP launch hands it to its agent in `session/new`:
+/// its name, absolute command and arguments. It has no secret field, so no account key,
+/// connector key or owner secret can ride along.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineServer {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
 }
 
 /// What a native-team lead's launch gives its teammates (DEC-104 K5a): the tmux program
@@ -968,6 +979,7 @@ impl AgentContext {
         }
         self.plugins.servers.push(LaunchServer {
             name: name.into(),
+            engine: true,
             spec: ServerSpec::Stdio {
                 command,
                 args: std::iter::once(subcommand.to_owned())
@@ -1102,6 +1114,7 @@ impl AgentContext {
             freeze_record: self.freeze_record.clone(),
             terminal_display: self.terminal_display,
             environment: Vec::new(),
+            engine_servers: Vec::new(),
             _lock: lock,
         };
         remove(&state);
@@ -1329,8 +1342,9 @@ impl AgentContext {
     /// manifest asks: the MCP servers and the instruction text into the files its `mcp` and
     /// `instructions` blocks name, and the environment its `home` block sets, on the guard.
     /// Inputs: the manifest, the private home ([`crate::harnesses::home::prepare`]) and the
-    /// tools switch; with tools off the MCP file holds no server, and a server with any tool
-    /// the owner switched off is left out whole, as the file cannot switch off one tool.
+    /// tools switch; with tools off the MCP file holds no server, a server with any tool the
+    /// owner switched off is left out whole, as the file cannot switch off one tool, and an
+    /// ACP harness's file leaves out the engine's own servers, which its session opens with.
     /// Output: the guard that deletes those files, `launch_manifest_invalid` for blocks that
     /// do not read, `launch_harness_unsupported` for a team agent's project files, or
     /// `launch_home_busy`.
@@ -1373,10 +1387,18 @@ impl AgentContext {
             freeze_record: self.freeze_record.clone(),
             terminal_display: self.terminal_display,
             environment: asked.environment(home),
+            engine_servers: self
+                .plugins
+                .servers
+                .iter()
+                .filter_map(engine_server)
+                .collect(),
             _lock: lock,
         };
+        let acp = manifest.piped == Some(crate::harnesses::manifest::DriverKind::Acp);
         let servers = self.plugins.servers.iter().filter(|server| {
             tools
+                && !(acp && server.engine)
                 && !self
                     .off_tools
                     .iter()
@@ -1385,6 +1407,22 @@ impl AgentContext {
         let written = crate::harnesses::render::write(&renders, home, servers, &self.instructions)?;
         assert_eq!(written.len(), count);
         Ok(installed)
+    }
+}
+
+/// The engine's own server as an ACP session takes it: one `AgentContext` marked as its
+/// own, run as a command and holding no secret. Input: one launch server. Output: its name,
+/// command and arguments, or none for any other server, whatever its name.
+fn engine_server(server: &LaunchServer) -> Option<EngineServer> {
+    match &server.spec {
+        ServerSpec::Stdio { command, args } if server.engine && server.secrets.is_empty() => {
+            Some(EngineServer {
+                name: server.name.clone(),
+                command: command.clone(),
+                args: args.clone(),
+            })
+        }
+        ServerSpec::Stdio { .. } | ServerSpec::Http { .. } => None,
     }
 }
 
@@ -1400,6 +1438,12 @@ impl Installed {
     /// private home filled in; empty for Codex and Claude Code. Output: the names and values.
     pub fn environment(&self) -> &[(OsString, OsString)] {
         &self.environment
+    }
+
+    /// The engine's own MCP servers a listed launch carries for an ACP session to open with;
+    /// none for Codex and Claude Code, whose files name them. Output: the servers.
+    pub fn engine_servers(&self) -> &[EngineServer] {
+        &self.engine_servers
     }
 
     /// Tells whether a headless Claude run of this launch keeps its transcript, as the
@@ -1485,6 +1529,7 @@ impl Installed {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             environment: Vec::new(),
+            engine_servers: Vec::new(),
             _lock: lock,
         })
     }
@@ -2464,6 +2509,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         environment: Vec::new(),
+        engine_servers: Vec::new(),
         _lock: lock,
     })
 }

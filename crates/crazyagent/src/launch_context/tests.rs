@@ -2094,6 +2094,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
             skills: Vec::new(),
             servers: vec![LaunchServer {
                 name: "tools".into(),
+                engine: false,
                 spec: ServerSpec::Stdio {
                     command: "/usr/bin/true".into(),
                     args: Vec::new(),
@@ -2223,6 +2224,7 @@ impl LeftPane {
                 skills: Vec::new(),
                 servers: vec![LaunchServer {
                     name: "tools".into(),
+                    engine: false,
                     spec: ServerSpec::Stdio {
                         command: "/usr/bin/true".into(),
                         args: Vec::new(),
@@ -2600,6 +2602,7 @@ fn private_home(root: &Path, name: &str) -> PathBuf {
 fn command_server(name: &str) -> LaunchServer {
     LaunchServer {
         name: name.into(),
+        engine: false,
         spec: ServerSpec::Stdio {
             command: "/usr/bin/true".into(),
             args: Vec::new(),

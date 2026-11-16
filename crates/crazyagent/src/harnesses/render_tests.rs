@@ -28,6 +28,7 @@ fn private_home() -> (tempfile::TempDir, PathBuf) {
 fn files_server() -> LaunchServer {
     LaunchServer {
         name: "files".into(),
+        engine: false,
         spec: ServerSpec::Stdio {
             command: "/usr/bin/files".into(),
             args: vec!["--stdio".into()],

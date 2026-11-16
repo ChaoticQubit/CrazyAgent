@@ -8,7 +8,7 @@ use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexS
 use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::credentials::SecretString;
-use crate::launch_context::{AgentContext, Installed};
+use crate::launch_context::{AgentContext, EngineServer, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -766,19 +766,42 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     let (arguments, environment) = match drivers::piped(&request.harness)? {
         Piped::Codex => codex_invocation(request, installed, key_file.as_deref())?,
         Piped::Claude => claude_invocation(request, installed, key_file.as_deref()),
-        Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
+        Piped::Acp => acp_invocation(request)?,
+        Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
             return Err(failure("launch_harness_unsupported"));
         }
     };
     sandboxed(request, installed, &arguments, &environment)
 }
 
+/// The command line of an ACP agent: its manifest's arguments filled for this launch, and no
+/// variable of its own, since the installed context gives its home block's variables.
+/// Input: the request. Output: the arguments and variables, or the refusal
+/// [`drivers::acp::arguments`] gives.
+fn acp_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> {
+    let listed = super::registry::registry()
+        .get(&request.harness)
+        .ok_or_else(|| failure("launch_harness_unsupported"))?;
+    let arguments = drivers::acp::arguments(
+        listed.manifest(),
+        request.account.home(),
+        &request.working_dir,
+        request.model.as_deref(),
+        request.tools,
+    )?;
+    Ok((
+        arguments.into_iter().map(OsString::from).collect(),
+        Vec::new(),
+    ))
+}
+
 /// Wraps a harness command line in the launch's sandbox, with the agent's own environment:
 /// its home, temporary folder, tool path, plain locale, the model proxy and git identity of
-/// an installed context, and the harness's own variables. Inputs: the checked request, the
-/// installed context, if any, the harness arguments and variables. Output: the command with
-/// piped standard streams in the working folder, or `launch_sandbox_unavailable` off macOS
-/// and `launch_environment_refused` when the environment cannot be built.
+/// an installed context, the harness's own variables and those a listed harness's home block
+/// sets. Inputs: the checked request, the installed context, if any, the harness arguments
+/// and variables. Output: the command with piped standard streams in the working folder, or
+/// `launch_sandbox_unavailable` off macOS and `launch_environment_refused` when the
+/// environment cannot be built.
 fn sandboxed(
     request: &LaunchRequest,
     installed: Option<&Installed>,
@@ -828,9 +851,15 @@ fn sandboxed(
                 .map(|(name, value)| (name, OsStr::new(value))),
         );
     }
+    let listed = installed.map(Installed::environment).unwrap_or_default();
     let harness_env = environment
         .iter()
-        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())));
+        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())))
+        .chain(
+            listed
+                .iter()
+                .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str()))),
+        );
     let words = super::interactive::launch_words(&request.executable)?;
     let (program, script) = words
         .split_first()
@@ -1259,12 +1288,14 @@ enum Driver {
 
 impl Driver {
     /// Starts the protocol driver of one headless launch: a Codex native lead (PA-7) keeps
-    /// the sub-agent threads its Codex starts, any other Codex launch interrupts each one.
-    /// Inputs: the request and whether it is a Codex native lead. Output: the driver and its
-    /// first frames, or a plain refusal code.
+    /// the sub-agent threads its Codex starts, any other Codex launch interrupts each one,
+    /// and an ACP launch opens its session with the engine's own MCP servers.
+    /// Inputs: the request, whether it is a Codex native lead and the engine's servers.
+    /// Output: the driver and its first frames, or a plain refusal code.
     fn new(
         request: &LaunchRequest,
         native_threads: bool,
+        servers: &[EngineServer],
     ) -> Result<(Self, Vec<Vec<u8>>), LaunchError> {
         let piped = drivers::piped(&request.harness);
         assert!(!native_threads || (matches!(piped, Ok(Piped::Codex)) && request.tools));
@@ -1313,7 +1344,7 @@ impl Driver {
             Piped::Acp => {
                 let (protocol, start) = Acp::new(&request.working_dir, request.tools, None)?;
                 let driver = Self::Acp {
-                    protocol: Box::new(protocol),
+                    protocol: Box::new(protocol.with_servers(servers)),
                 };
                 Ok((driver, vec![start]))
             }
@@ -1677,7 +1708,11 @@ impl Session {
         (relay, key): (Option<Relay>, Option<KeyFile>),
     ) -> Result<Self, LaunchError> {
         let native_threads = context.as_ref().is_some_and(Installed::native_threads);
-        let (driver, startup) = Driver::new(&request, native_threads)?;
+        let servers = context
+            .as_ref()
+            .map(Installed::engine_servers)
+            .unwrap_or_default();
+        let (driver, startup) = Driver::new(&request, native_threads, servers)?;
         let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
         command.env(LINEAGE_VARIABLE, token.as_str());
         let (sender, lines) = sync_channel(LINES_AHEAD_MAX);

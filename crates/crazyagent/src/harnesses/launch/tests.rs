@@ -19,7 +19,7 @@ fn claude_driver() -> Driver {
         git_identity: None,
         limits: LaunchLimits::default(),
     };
-    let (mut driver, startup) = Driver::new(&request, false).unwrap();
+    let (mut driver, startup) = Driver::new(&request, false, &[]).unwrap();
     assert!(startup.is_empty());
     driver
         .send("Reply with one short greeting.")
@@ -536,7 +536,7 @@ fn codex_driver_in_a_turn_keeping(native_threads: bool) -> Driver {
             json!({"type":"readOnly","networkAccess":false}),
         )
     };
-    let (mut driver, startup) = Driver::new(&request, native_threads).unwrap();
+    let (mut driver, startup) = Driver::new(&request, native_threads, &[]).unwrap();
     assert_eq!(startup.len(), 1);
     assert!(driver.send("Reply with OK.").unwrap().is_none());
     let (_, writes) = driver
@@ -1740,5 +1740,107 @@ fn a_chatgpt_relay_is_refused_for_own_adapters_other_formats_and_keyed_launches(
         )
         .as_deref(),
         Some("launch_chatgpt_unsupported")
+    );
+}
+
+/// T19b 19b-1: an ACP launch's driver opens the agent's session with the engine's own MCP
+/// servers its installed context carries.
+#[test]
+fn an_acp_driver_opens_its_session_with_the_engine_servers_it_is_given() {
+    let request = LaunchRequest {
+        harness: "standin-acp".into(),
+        executable: PathBuf::from("/usr/bin/true"),
+        working_dir: PathBuf::from("/work"),
+        account: AccountBinding::Url {
+            home: std::env::temp_dir().join("launch-test-home"),
+            base_url: "http://127.0.0.1:11434".into(),
+            key: None,
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: None,
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let team = crate::launch_context::EngineServer {
+        name: "crazyagent-team".into(),
+        command: "/opt/crazyagent/crazyagent".into(),
+        args: vec!["team-mcp-agent".into(), "/agent/tmp/mailbox".into()],
+    };
+    let (mut driver, startup) = Driver::new(&request, false, std::slice::from_ref(&team)).unwrap();
+    assert_eq!(startup.len(), 1);
+    let (_, writes) = driver
+        .receive(&line(json!({
+            "jsonrpc": "2.0", "id": 0,
+            "result": {"protocolVersion": 1, "agentCapabilities": {}}
+        })))
+        .unwrap();
+    assert_eq!(writes.len(), 1);
+    let opened: Value = serde_json::from_slice(&writes[0]).unwrap();
+    assert_eq!(opened["method"], "session/new");
+    assert_eq!(
+        opened["params"]["mcpServers"],
+        json!([{
+            "name": "crazyagent-team",
+            "command": "/opt/crazyagent/crazyagent",
+            "args": ["team-mcp-agent", "/agent/tmp/mailbox"],
+            "env": []
+        }])
+    );
+}
+
+/// T19b 19b-1: an ACP harness starts headless with its manifest's arguments, the private
+/// home filled in, and with its own tools-off switch added only while tools are off.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_acp_harness_starts_headless_with_its_manifest_arguments_and_its_tools_off_switch() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::Builder::new()
+        .prefix("ca-acp-launch-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let [home, work] = ["home", "work"].map(|name| base.join(name));
+    for folder in [&home, &work] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let profile = base.join("project.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let launched = |tools: bool, count: usize| {
+        let request = LaunchRequest {
+            harness: "standin-acp".into(),
+            executable: PathBuf::from("/usr/bin/true"),
+            working_dir: work.clone(),
+            account: AccountBinding::Url {
+                home: home.clone(),
+                base_url: "http://127.0.0.1:11434".into(),
+                key: None,
+            },
+            model: None,
+            tools,
+            sandbox_profile: Some(profile.clone()),
+            unconfined: false,
+            git_identity: None,
+            limits: LaunchLimits::default(),
+        };
+        super::command(&request).ok().map(|command| {
+            let args: Vec<std::ffi::OsString> =
+                command.get_args().map(std::ffi::OsStr::to_owned).collect();
+            args[args.len().saturating_sub(count)..].to_vec()
+        })
+    };
+    assert_eq!(
+        launched(true, 2),
+        Some(vec!["--home".into(), home.clone().into_os_string()])
+    );
+    assert_eq!(
+        launched(false, 3),
+        Some(vec![
+            "--home".into(),
+            home.clone().into_os_string(),
+            "--no-tools".into()
+        ])
     );
 }
