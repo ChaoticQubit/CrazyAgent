@@ -1201,3 +1201,31 @@ fn a_listed_launch_s_key_file_sits_in_its_private_home_and_holds_its_key() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), placeholder);
     drop(written);
 }
+
+/// rv-sa241 key-file addendum N2: a keyed listed launch's key guard removes its key file
+/// through the no-follow walk from the agent home, so a link planted at the harness folder
+/// before the guard ends leads the removal nowhere, even to a file holding the same key.
+#[cfg(unix)]
+#[test]
+fn a_listed_launch_s_key_guard_never_removes_through_a_link_at_its_harness_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let (agents, victim) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let base = agents.path().canonicalize().unwrap();
+    let target = victim.path().canonicalize().unwrap();
+    let kept = target.join("account-1");
+    std::fs::create_dir(&kept).unwrap();
+    for folder in [&base, &target, &kept] {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let placeholder = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    std::fs::write(kept.join(interactive::KEY_FILE), placeholder).unwrap();
+    let (_home, request) = keyed_listed(&base);
+    let guard = write_key_file(&request).unwrap();
+    std::fs::rename(base.join("standin-acp"), base.join("moved")).unwrap();
+    std::os::unix::fs::symlink(&target, base.join("standin-acp")).unwrap();
+
+    drop(guard);
+
+    let left = std::fs::read_to_string(kept.join(interactive::KEY_FILE)).ok();
+    assert_eq!(left.as_deref(), Some(placeholder));
+}
