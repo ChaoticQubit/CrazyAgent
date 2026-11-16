@@ -103,8 +103,7 @@ fn unproven_keepers(kept: &Mutex<BTreeMap<AgentId, Child>>) -> Option<BTreeSet<A
     Some(
         keepers
             .iter_mut()
-            .filter(|(_, keeper)| !ended_cleanly(keeper))
-            .map(|(lead, _)| lead.clone())
+            .filter_map(|(lead, keeper)| (!ended_cleanly(keeper)).then(|| lead.clone()))
             .collect(),
     )
 }
