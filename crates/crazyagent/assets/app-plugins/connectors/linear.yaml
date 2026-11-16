@@ -8,6 +8,11 @@ mcp:
   url: https://mcp.linear.app/mcp
   read_only_url: https://mcp.linear.app/mcp/readonly
   hosts: [mcp.linear.app]
+oauth:
+  hosts: [mcp.linear.app]
+  registration: [own, cimd, dcr]
+  scopes_read: [read]
+  scopes_write: [write]
 key:
   secret: api_key
   header: Authorization

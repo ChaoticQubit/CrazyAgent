@@ -105,7 +105,8 @@ fn bundled_plugins_list_first_with_only_the_local_one_on() {
             "ollama",
             "linear",
             "github",
-            "atlassian"
+            "atlassian",
+            "notion"
         ]
     );
     assert!(!listing.more);

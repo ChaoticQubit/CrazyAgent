@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS app_plugin_secrets (
     PRIMARY KEY (plugin, secret)
 );";
 
-const BUNDLED: [(&str, &str); 7] = [
+const BUNDLED: [(&str, &str); 8] = [
     ("local", include_str!("../../assets/app-plugins/local.yaml")),
     (
         "openai",
@@ -53,6 +53,10 @@ const BUNDLED: [(&str, &str); 7] = [
     (
         "atlassian",
         include_str!("../../assets/app-plugins/connectors/atlassian.yaml"),
+    ),
+    (
+        "notion",
+        include_str!("../../assets/app-plugins/connectors/notion.yaml"),
     ),
 ];
 
