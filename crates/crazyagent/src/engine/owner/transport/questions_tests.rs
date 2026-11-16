@@ -380,19 +380,19 @@ fn an_approved_github_rule_proposal_is_applied_after_the_answer_and_told() {
     let question = questions::raise(&db, &project, &source, &asked("Approve it?")).unwrap();
     let body = json!({"questions": {"kind": "answer", "id": question, "version": 0, "picks": [0]}});
     assert_eq!(settled(send(&root, body)), Settlement::Settled);
-    let status = || -> String {
+    let ended = || -> (String, i64) {
         db.query_row(
-            "SELECT status FROM github_rule_requests WHERE id=?1",
+            "SELECT status, told FROM github_rule_requests WHERE id=?1",
             [id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap()
     };
     let started = std::time::Instant::now();
-    while status() != "refused" && started.elapsed() < Duration::from_secs(10) {
+    while ended().1 == 0 && started.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(status(), "refused");
+    assert_eq!(ended(), ("refused".to_owned(), 1), "the tell committed");
     let told: Vec<String> = db
         .prepare("SELECT text FROM team_messages WHERE project=?1 AND author='engine'")
         .unwrap()
