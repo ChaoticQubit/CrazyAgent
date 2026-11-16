@@ -29,35 +29,35 @@ async function run(steps, delayMs, settle) {
   });
 }
 
-test("clicking three agents in the graph leaves one terminal panel, for the last one, and one attached terminal client", async () => {
+test("clicking three agents in the graph leaves one terminal panel, for the last one, and only the last two terminals attached (DEC-187)", async () => {
   const seen = await run([["card", "Ada"], ["card", "Brook"], ["card", "Cove"]], 0, true);
   assert.deepEqual(seen.panels, ["Cove terminal"], JSON.stringify(seen));
-  assert.equal(seen.xterms, 1, JSON.stringify(seen));
-  assert.deepEqual(seen.clients, ["team-3"], JSON.stringify(seen));
-  assert.deepEqual(seen.detaches, ["team-1", "team-2"], JSON.stringify(seen));
+  assert.equal(seen.xterms, 2, JSON.stringify(seen));
+  assert.deepEqual([...seen.clients].sort(), ["team-2", "team-3"], JSON.stringify(seen));
+  assert.deepEqual(seen.detaches, ["team-1"], JSON.stringify(seen));
 });
 
-test("clicking three agents faster than the engine attaches still leaves one panel and one attached client", async () => {
+test("clicking three agents faster than the engine attaches still leaves one panel and only the last two terminals attached (DEC-187)", async () => {
   const seen = await run([["card", "Ada"], ["card", "Brook"], ["card", "Cove"]], 400, false);
   assert.deepEqual(seen.panels, ["Cove terminal"], JSON.stringify(seen));
-  assert.equal(seen.xterms, 1, JSON.stringify(seen));
-  assert.deepEqual(seen.clients, ["team-3"], JSON.stringify(seen));
+  assert.equal(seen.xterms, 2, JSON.stringify(seen));
+  assert.deepEqual([...seen.clients].sort(), ["team-2", "team-3"], JSON.stringify(seen));
 });
 
-test("a terminal opened from Waiting on you is the same one panel the graph swaps, so clicking two agents after it leaves one", async () => {
+test("a terminal opened from Waiting on you is the same one panel the graph swaps, so clicking two agents after it leaves one panel and the last two attached (DEC-187)", async () => {
   const seen = await run([["waiting", "Ada"], ["card", "Brook"], ["card", "Cove"]], 0, true);
   assert.deepEqual(seen.panels, ["Cove terminal"], JSON.stringify(seen));
-  assert.equal(seen.xterms, 1, JSON.stringify(seen));
-  assert.deepEqual(seen.clients, ["team-3"], JSON.stringify(seen));
-  assert.deepEqual(seen.detaches, ["team-1", "team-2"], JSON.stringify(seen));
+  assert.equal(seen.xterms, 2, JSON.stringify(seen));
+  assert.deepEqual([...seen.clients].sort(), ["team-2", "team-3"], JSON.stringify(seen));
+  assert.deepEqual(seen.detaches, ["team-1"], JSON.stringify(seen));
 });
 
 test("an agent waiting on you that the graph does not draw opens in the same one panel, and a graph click replaces it", async () => {
   const seen = await run([["waiting", "Dune"], ["card", "Ada"]], 0, true);
   assert.deepEqual(seen.panels, ["Ada terminal"], JSON.stringify(seen));
-  assert.equal(seen.xterms, 1, JSON.stringify(seen));
-  assert.deepEqual(seen.clients, ["team-1"], JSON.stringify(seen));
-  assert.deepEqual(seen.detaches, ["team-5"], JSON.stringify(seen));
+  assert.equal(seen.xterms, 2, JSON.stringify(seen));
+  assert.deepEqual([...seen.clients].sort(), ["team-1", "team-5"], JSON.stringify(seen));
+  assert.deepEqual(seen.detaches, [], "the two most recent stay attached (DEC-187)");
 });
 
 test("Open terminal in Waiting on you opens the one panel while the team graph is loading, failed, not in the build or empty", async () => {

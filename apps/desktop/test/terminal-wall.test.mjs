@@ -201,7 +201,8 @@ test("a wall tile attaches naming its own project, so the bridge can refuse a te
   assert.match(source("screens/terminals/index.tsx"), /<TerminalPanel node=\{node\} projectId=\{projectId\} tile harness=/u);
   const panel = source("screens/team/terminal-panel.tsx");
   assert.match(panel, /projectId\?: string;/u);
-  assert.match(panel, /attachTerminal\(name, channel, pane, projectId \?\? null\)/u);
+  assert.match(panel, /const key: KeptKey \| null = name \? \{ project: projectId \?\? null, terminal: name, pane \} : null;/u);
+  assert.match(panel, /attachTerminal\(name, channel, pane, project\)/u);
   assert.match(source("api.ts"), /call<number>\("desktop_terminal_attach", \{ agent, pane, output, id: project \}\)/u);
 });
 

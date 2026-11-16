@@ -21,6 +21,7 @@ import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
 import { UserDialogLayer, closeUserDialog, openUserDialog, useUserDialog } from "./screens/user-menu";
 import { alertRoute, freshAlerts, unseenByProject, workingByProject } from "./screens/team/wake";
+import { useKeptTerminalProjects } from "./screens/team/terminal-panel";
 import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type EngineRestart } from "./screens/settings/updates";
 import { blocking, updateStore } from "./screens/settings/updates-state";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, formatRoute, isUserMenuTab, navigate, parseRoute, shortcutKey, useRoute, type Route, type SidebarProject } from "./ui";
@@ -374,5 +375,6 @@ export function App() {
   useResetNotice(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
   useLearningVisits(route, session.engine === "running");
+  useKeptTerminalProjects(session.projects, session.projectsMore);
   return <AppView session={session} route={route} alerts={alerts} working={working} under={under.current.route} back={under.current.hash} />;
 }

@@ -3,7 +3,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { failureCopy, loadAgentPolicy, loadContext, loadPools, loadResearch, loadSetup, revealProjectFolder } from "../../api-projects";
 import { loadUncommittedImport } from "../../api-process";
 import { loadQuestionCounts, pendingByProject } from "../../api-questions";
-import { SessionContext, readQuestionsShown, useLoad, type Loaded } from "../../state";
+import { SessionContext, readQuestionsShown, saveLastProject, useLoad, type Loaded } from "../../state";
 import { Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { HEARTBEAT_MS, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
@@ -202,6 +202,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   navigate?: (path: string) => void;
 }) {
   const { data, toast, session } = useProject(projectId, navigate, name);
+  useEffect(() => saveLastProject(projectId), [projectId]);
   const [ide, setIde] = useState<Result<IdeView>>();
   const [busy, setBusy] = useState(false);
   const [ideHideProblem, setIdeHideProblem] = useState<string | null>(null);

@@ -123,7 +123,7 @@ export function TeamActivity({ data, children }: { data: ProjectData; children: 
     <div className="ta-main">{children}</div>
     <aside className="ta-side" aria-label="Team activity">
       <div className="ta-scroll">
-        {target ? <TerminalPanel key={target.id} node={target} harness={harness} onClose={() => setOpen(null)} /> : <>
+        {target ? <TerminalPanel key={target.id} node={target} harness={harness} projectId={data.id} onClose={() => setOpen(null)} /> : <>
           <div className="ta-head">
             <h3>Team</h3>
             {graph?.kind === "ok" && <span className="ta-summary" role="status">{graphSummary(graph.value)}</span>}
