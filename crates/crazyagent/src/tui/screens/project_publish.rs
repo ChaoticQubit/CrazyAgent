@@ -56,11 +56,12 @@ pub(in crate::tui) struct AskText {
 
 /// The Overview's question for a project with no GitHub publish (DEC-182 S5b): the question
 /// with Publish, Not now and Don't ask again, then the New project publish panel that
-/// Publish opens, with the GitHub read it waits on.
+/// Publish opens, with the GitHub read it waits on and why the engine refused its last Start.
 #[derive(Debug, Clone, Default)]
 pub(in crate::tui) struct AskPane {
     form: Option<Publish>,
     reading: Option<IntakeQuery>,
+    refusal: Option<String>,
 }
 
 impl AskPane {
@@ -68,6 +69,18 @@ impl AskPane {
     /// Returns the answer.
     pub fn takes(&self, query: &IntakeQuery) -> bool {
         self.reading.as_ref() == Some(query)
+    }
+
+    /// Says whether the pane shows the question, before Publish opened the form. Takes
+    /// nothing. Returns the answer.
+    pub fn asking(&self) -> bool {
+        self.form.is_none()
+    }
+
+    /// Keeps the form with what the owner chose and shows why the engine refused its Start,
+    /// until the next Start. Takes the sentence. Returns nothing.
+    pub fn refused(&mut self, why: String) {
+        self.refusal = Some(why);
     }
 
     /// Handles a key: on the question Enter opens the form and reads the GitHub sign-in,
@@ -97,6 +110,7 @@ impl AskPane {
         match (publish.github.clone(), publish.panel, key) {
             (GitHub::SignedIn, Some(PanelRow::Done), Key::Enter) => {
                 if let Some(plan) = publish.plan(name, about) {
+                    self.refusal = None;
                     return AskKey::Start(plan);
                 }
                 let stop = publish.problem(name, about).map(|(row, _)| row);
@@ -139,11 +153,11 @@ impl AskPane {
     }
 
     /// The pane's words: the question, the sign-in being read, signed out, a read that
-    /// failed, or the publish panel with Publish as its last row. Takes the project's name,
-    /// its about text and the look. Returns the words.
+    /// failed, or the publish panel with Publish as its last row, then why the last Start
+    /// was refused. Takes the project's name, its about text and the look. Returns the words.
     pub fn text(&self, name: &str, about: &str, look: &Look) -> AskText {
         let cancel = ("Esc", "Cancel");
-        let (body, hints) = match self.form.as_ref() {
+        let (mut body, hints) = match self.form.as_ref() {
             None => (
                 vec![
                     Row::of(PROMPT_LINE, look.fg),
@@ -183,6 +197,14 @@ impl AskPane {
                 ),
             },
         };
+        if let Some(why) = self.refusal.as_ref().filter(|_| self.form.is_some()) {
+            body.push(Row::default());
+            body.extend(
+                wrap_words(why, 64)
+                    .into_iter()
+                    .map(|line| Row::of(line, look.error)),
+            );
+        }
         AskText {
             title: PUBLISH_TITLE,
             body,

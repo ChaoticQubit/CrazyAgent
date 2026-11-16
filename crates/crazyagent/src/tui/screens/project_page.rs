@@ -60,6 +60,9 @@ const CHANGED_MISSING: &str =
 const CHANGED_NOTE: &str =
     "That was your copy in the project folder. The agent's version lands there when you accept.";
 const ANSWER_NOT_TAKEN: &str = "The publish answer wasn't taken.";
+const ASK_STARTING: &str = "Starting the publish...";
+const ASK_SENDING: &str = "Sending your answer...";
+const ASK_READING: &str = "Checking...";
 const IMPORT_MODAL_WIDTH: u16 = 72;
 const IMPORT_ROWS_MAX: usize = 12;
 pub(in crate::tui) const BANNER_ROWS_MAX: usize = 3;
@@ -480,7 +483,7 @@ impl ProjectPage {
             }
             Ok(IntakeView::Prompt(ask)) => {
                 self.screen.github_notice = *ask;
-                if !ask {
+                if !ask && self.ask_pane.as_ref().is_some_and(AskPane::asking) {
                     self.ask_pane = None;
                 }
             }
@@ -545,16 +548,17 @@ impl ProjectPage {
         Flow::Handled
     }
 
-    /// Handles a key while the Overview's publish question or its form is open: one answer
-    /// goes to the engine at a time, Esc closes the pane meanwhile, Publish starts the
-    /// publish with the form's plan, and the sign-in closes the pane, so G reads the sign-in
-    /// again after it. Takes the key and the context. Returns the GitHub sign-in to open, or
-    /// handled, so no key reaches the page meanwhile.
+    /// Handles a key while the Overview's publish question or its form is open: one answer,
+    /// read or Start goes to the engine at a time, Esc closes the pane meanwhile, Publish
+    /// starts the publish with the form's plan and keeps the form until the engine answers,
+    /// and the sign-in closes the pane, so G reads the sign-in again after it. Takes the key
+    /// and the context. Returns the GitHub sign-in to open, or handled, so no key reaches
+    /// the page meanwhile.
     fn ask_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let Some(pane) = self.ask_pane.as_mut() else {
             return Flow::Handled;
         };
-        if self.publish_asked.is_some() {
+        if self.publish_asked.is_some() || self.publish_sent.is_some() {
             if *key == Key::Esc {
                 self.ask_pane = None;
             }
@@ -583,7 +587,6 @@ impl ProjectPage {
                 return Flow::Open(Place::CloneRepo);
             }
             AskKey::Start(plan) => {
-                self.ask_pane = None;
                 self.screen.github_notice = false;
                 self.publish_offered = true;
                 self.start_publish(plan, ctx);
@@ -597,9 +600,9 @@ impl ProjectPage {
         self.publish_pane.is_some() && !self.publish_later
     }
 
-    /// The Overview's publish question or its form as a modal, with the keys hidden while an
-    /// answer is on its way. Takes the context. Returns the modal and its keys, or none while
-    /// the pane is closed.
+    /// The Overview's publish question or its form as a modal, with the keys hidden and what
+    /// the page waits on said while an answer, a read or the Start is on its way. Takes the
+    /// context. Returns the modal and its keys, or none while the pane is closed.
     fn ask_modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
         let pane = self.ask_pane.as_ref()?;
         let about = self
@@ -609,12 +612,14 @@ impl ProjectPage {
             .map_or("", |setup| setup.about.as_str());
         let text = pane.text(&self.screen.name, about, &look(ctx));
         let mut body: Vec<Line<'static>> = text.body.into_iter().map(Row::line).collect();
-        let hints = if self.publish_asked.is_some() {
-            body.push(styled(
-                "Sending your answer...".into(),
-                Role::Muted,
-                &ctx.theme,
-            ));
+        let waiting = match (&self.publish_sent, &self.publish_asked) {
+            (Some(_), _) => Some(ASK_STARTING),
+            (None, Some(IntakeQuery::GitHubPublishPromptSet { .. })) => Some(ASK_SENDING),
+            (None, Some(_)) => Some(ASK_READING),
+            (None, None) => None,
+        };
+        let hints = if let Some(words) = waiting {
+            body.push(styled(words.into(), Role::Muted, &ctx.theme));
             Vec::new()
         } else {
             text.hints
@@ -1393,16 +1398,21 @@ impl ProjectPage {
         if self.publish_sent.as_ref() == Some(&event.query) {
             self.publish_sent = None;
             let offered = std::mem::take(&mut self.publish_offered);
+            let started = matches!(event.result, Ok(IntakeView::Publish(_)));
             if let Ok(IntakeView::Publish(job)) = &event.result {
                 self.publish_pane = Some(PublishPane::new((**job).clone()));
                 self.publish_read_ms = Some(now_ms());
+                self.ask_pane = None;
             }
             let said = match &event.result {
                 Ok(IntakeView::Publish(_)) if offered => Message::success(PUBLISH_STARTED, ""),
                 result => Self::publish_start_said(&self.screen.name, result),
             };
-            ctx.say(said);
-            if !matches!(event.result, Ok(IntakeView::Publish(_))) {
+            match self.ask_pane.as_mut().filter(|pane| !pane.asking()) {
+                Some(form) => form.refused(format!("{} {}", said.lead, said.rest)),
+                None => ctx.say(said),
+            }
+            if !started {
                 self.ask_publish(ctx);
             }
             return true;

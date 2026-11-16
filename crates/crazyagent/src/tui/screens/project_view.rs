@@ -1233,18 +1233,17 @@ fn overview(
                 ));
             }
         }
-        let notice = github_notice(screen, look);
-        let tabs_room = room.saturating_sub(lines.len() + notice.len());
+        lines.extend(github_notice(screen, look));
+        let tabs_room = room.saturating_sub(lines.len());
         lines.extend(overview_tab_rows(screen, content, tabs_room, look));
-        lines.extend(notice);
         help.push(key);
-        if asks_github(screen) {
-            help.push(PROMPT_KEY);
-        }
         if screen.overview_tabs.is_some() {
             help.extend(OVERVIEW_TAB_KEYS);
         }
         help.extend([TABS, ("Esc", "Home")]);
+        if asks_github(screen) {
+            help.push(PROMPT_KEY);
+        }
         return (lines, None, help);
     }
     if !screen.suggested().is_empty() {
@@ -1254,14 +1253,14 @@ fn overview(
             ("e", "Edit first"),
         ]);
     }
-    if asks_github(screen) {
-        help.push(PROMPT_KEY);
-    }
     help.extend([("Enter", "Open"), ("o", "Open folder")]);
     if screen.overview_tabs.is_some() {
         help.extend(OVERVIEW_TAB_KEYS);
     }
     help.extend([TABS, ("Esc", "Home")]);
+    if asks_github(screen) {
+        help.push(PROMPT_KEY);
+    }
     if width >= 100 {
         let left_width = 77;
         let right_width = content.saturating_sub(80);
@@ -1278,10 +1277,9 @@ fn overview(
         left.extend(work_rows(screen, look, true, left_width));
         left.extend(roadmap_row(screen, look));
         left.extend(roadmap_status_row(screen, look));
-        let notice = github_notice(screen, look);
-        let left_room = room.saturating_sub(left.len() + notice.len());
+        left.extend(github_notice(screen, look));
+        let left_room = room.saturating_sub(left.len());
         left.extend(overview_tab_rows(screen, left_width, left_room, look));
-        left.extend(notice);
         let mut right = vec![Row::of("Team", look.heading)];
         if let Some(setup) = &screen.setup {
             let team = &setup.team;
@@ -1368,10 +1366,9 @@ fn overview(
             .pad(6)
             .cat(pool_line(screen, look)),
     );
-    let notice = github_notice(screen, look);
-    let tabs_room = room.saturating_sub(lines.len() + notice.len());
+    lines.extend(github_notice(screen, look));
+    let tabs_room = room.saturating_sub(lines.len());
     lines.extend(overview_tab_rows(screen, content, tabs_room, look));
-    lines.extend(notice);
     (lines, None, help)
 }
 
