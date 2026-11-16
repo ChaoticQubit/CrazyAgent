@@ -126,8 +126,13 @@ test("default names take the lowest free number; form checks match the engine's 
 
 test("a server on another machine takes no port a cloud metadata service answers on, as the engine refuses it", () => {
   const refused =
-    "Use the server's https port, such as 443. Ports 80 and 32526 on another machine are refused, since cloud metadata services answer there.";
-  for (const bad of ["https://models.example.test:80/v1", "https://models.example.test:32526/v1", "https://10.0.0.5:80/v1"]) {
+    "Use the server's https port, such as 443. Ports 80, 988 and 32526 on another machine are refused, since cloud metadata services answer there.";
+  for (const bad of [
+    "https://models.example.test:80/v1",
+    "https://models.example.test:988/v1",
+    "https://models.example.test:32526/v1",
+    "https://10.0.0.5:80/v1",
+  ]) {
     assert.equal(urlError(bad), refused, bad);
   }
   for (const kept of [

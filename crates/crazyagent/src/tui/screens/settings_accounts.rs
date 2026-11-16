@@ -699,7 +699,7 @@ pub fn plain(code: &str) -> &'static str {
             "Use an https address. Plain http works only on this Mac."
         }
         "account_url_port_refused" => {
-            "Use the server's https port, such as 443. Ports 80 and 32526 on another machine are refused, since cloud metadata services answer there."
+            "Use the server's https port, such as 443. Ports 80, 988 and 32526 on another machine are refused, since cloud metadata services answer there."
         }
         "account_unreachable" | "account_url_unreachable" => {
             "Could not reach this address. Is the server running?"

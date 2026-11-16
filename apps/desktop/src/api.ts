@@ -84,7 +84,7 @@ const COPY: Record<string, string> = {
   account_url_required: "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.",
   account_url_invalid: "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.",
   account_url_port_refused:
-    "Use the server's https port, such as 443. Ports 80 and 32526 on another machine are refused, since cloud metadata services answer there.",
+    "Use the server's https port, such as 443. Ports 80, 988 and 32526 on another machine are refused, since cloud metadata services answer there.",
   account_local_url_required: "Enter a URL on this Mac, such as http://127.0.0.1:11434.",
   account_url_not_allowed: "This sign-in method doesn't use a URL.",
   account_url_unreachable: "Can't reach this URL. Check the address and that the server is running.",

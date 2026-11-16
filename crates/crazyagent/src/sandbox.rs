@@ -821,9 +821,9 @@ pub enum SandboxNetwork {
 }
 
 /// One outbound TCP destination a tools-off agent may still reach. Seatbelt
-/// filters by port only, either on loopback or on any host, so no saved endpoint on another
-/// machine takes a port a cloud metadata service answers on (`accounts::account_url`,
-/// MACOS-ANYHOST-METADATA).
+/// filters by port only, either on loopback or on any host, so `accounts::account_url`
+/// refuses an endpoint on another machine on a port a cloud metadata service answers on
+/// when it is saved (MACOS-ANYHOST-METADATA).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxRemote {
     Loopback(u16),

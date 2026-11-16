@@ -278,6 +278,7 @@ fn a_server_on_another_machine_takes_no_port_a_cloud_metadata_service_answers_on
     any.model = Some("m".into());
     for remote in [
         "https://models.example.test:80/v1",
+        "https://models.example.test:988/v1",
         "https://models.example.test:32526/v1",
         "https://10.0.0.5:80/v1",
         "https://[fd00:ec2::254]:80/",

@@ -294,11 +294,14 @@ fn plain_url(raw: &str) -> Result<url::Url, EngineError> {
     Ok(url)
 }
 
-/// The ports cloud metadata services answer on: 80 for every one of them and 32526 for
-/// Azure's WireServer. A saved endpoint on another machine grants every agent with the
-/// HTTPS network its port on any host, and Seatbelt cannot name an address, so no such
-/// endpoint takes one (MACOS-ANYHOST-METADATA).
-const METADATA_PORTS: [u16; 2] = [80, 32526];
+/// The ports besides 443 that cloud metadata services answer on: 80 (AWS IMDS and EKS Pod
+/// Identity, Azure IMDS and WireServer, Google, Alibaba, Oracle, Akamai), 32526 (Azure's
+/// WireServer) and 988 (GKE's metadata server at 169.254.169.252). A saved endpoint on
+/// another machine grants every agent with the HTTPS network its port on any host, and
+/// Seatbelt cannot name an address, so an endpoint is refused one when it is saved. 443
+/// stays, since every such agent needs it, though Google's Shielded VMs also serve
+/// metadata there (MACOS-ANYHOST-METADATA).
+const METADATA_PORTS: [u16; 3] = [80, 32526, 988];
 
 /// Parses an owner-entered endpoint as an HTTPS address, or plain HTTP only on this
 /// machine, without credentials, query or fragment, so a saved key never crosses a
