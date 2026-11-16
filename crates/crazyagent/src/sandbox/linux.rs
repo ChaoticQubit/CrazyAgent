@@ -1638,8 +1638,7 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
 /// none where the file cannot be read (no AppArmor, or an older one). Output: true when it
 /// restricts them.
 fn restricts(setting: Option<&str>) -> bool {
-    let _ = setting;
-    false
+    setting.is_some_and(|text| text.strip_suffix('\n').unwrap_or(text) == "1")
 }
 
 /// Reads what this machine holds for an agent beyond its Landlock rules: whether the

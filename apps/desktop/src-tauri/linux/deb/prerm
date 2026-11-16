@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+dst=/etc/apparmor.d/crazyagent-landlock
+if [ "$1" = remove ] && [ -f "$dst" ]; then
+  if [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -R "$dst" || true
+  fi
+  rm -f "$dst"
+fi

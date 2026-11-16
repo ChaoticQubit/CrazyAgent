@@ -919,9 +919,10 @@ impl LevelView {
 
 /// What a Linux cannot hold for agents at one access level, as plain lines both clients
 /// show under it: why root runs no supervisor; nested git, or under the supervisor its
-/// narrower line where another repository may be and what it changes; then the process
-/// list, or signals too, where agents share the process namespace. Inputs: the level, the
-/// host under the setting and whether the project may hold another repository.
+/// narrower line where another repository may be and what it changes; then, where agents
+/// share the process namespace, why AppArmor keeps it shared when it does, and the process
+/// list, or signals too. Inputs: the level, the host under the setting and whether the
+/// project may hold another repository.
 pub fn linux_gaps(
     access: AgentAccess,
     host: Option<crate::sandbox::LinuxHost>,
@@ -931,10 +932,11 @@ pub fn linux_gaps(
         return Vec::new();
     };
     assert!(!(host.root && host.supervised));
+    assert!(!(host.nested && host.armored));
     if access == AgentAccess::Full {
         return Vec::new();
     }
-    let mut lines = Vec::with_capacity(3);
+    let mut lines = Vec::with_capacity(4);
     if host.root {
         lines.push(crate::sandbox::LINUX_ROOT_LINE);
     }
@@ -946,12 +948,15 @@ pub fn linux_gaps(
     } else {
         lines.push(crate::sandbox::LINUX_NESTED_GIT_LINE);
     }
+    if host.armored {
+        lines.push(crate::sandbox::LINUX_APPARMOR_LINE);
+    }
     if !host.nested && (host.scoped || host.supervised) {
         lines.push(crate::sandbox::LINUX_PROCESS_LIST_LINE);
     } else if !host.nested {
         lines.push(crate::sandbox::LINUX_SIGNALS_LINE);
     }
-    assert!((1..=3).contains(&lines.len()));
+    assert!((1..=4).contains(&lines.len()));
     lines
 }
 
