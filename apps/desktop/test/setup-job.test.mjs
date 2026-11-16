@@ -87,6 +87,7 @@ const SETUP_WORDS = {
   document_not_a_regular_file: "Can't add a folder or a shortcut. Choose the original file.",
   document_unreadable: "One of the documents can't be read. Check its permissions.",
   document_changed_while_copying: "A document changed while it was being copied. Try again.",
+  project_id_removed: "A project you removed used this name, so it can't be used again. Choose another project name.",
 };
 
 test("every code a New Project job is refused or ends with has New Project's own sentence and reaches the window by name", () => {
