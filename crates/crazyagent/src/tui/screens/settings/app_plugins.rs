@@ -1101,10 +1101,13 @@ impl Screen for AppPluginsPage {
 }
 
 /// A fresh Add form: a multi-line paste box one character past the engine's bound, so an
-/// over-long paste stays whole and is refused, and a path field.
+/// over-long paste stays whole and is refused, that draws hidden characters as escapes, and
+/// a path field.
 fn add_form() -> AddForm {
     AddForm {
-        yaml: TextField::new("Plugin manifest (YAML)", MANIFEST_BYTES_MAX + 1).multiline(),
+        yaml: TextField::new("Plugin manifest (YAML)", MANIFEST_BYTES_MAX + 1)
+            .multiline()
+            .escaped(),
         path: TextField::new("Or the path of a .yaml file", PATH_CHARS_MAX),
         on_path: false,
     }

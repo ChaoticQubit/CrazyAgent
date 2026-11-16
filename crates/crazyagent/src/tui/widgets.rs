@@ -254,7 +254,7 @@ impl TextField {
             let dots = self.len().min(inner.saturating_sub(1));
             return (vec![glyphs.dot.repeat(dots)], 0, dots);
         }
-        let (before, after) = if self.multiline {
+        let (before, after) = if self.escaped {
             crate::memory::visible_split(&self.value, self.cursor)
         } else {
             let at = self.byte_at(self.cursor);
