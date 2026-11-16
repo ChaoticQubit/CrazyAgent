@@ -2269,6 +2269,7 @@ mod tests {
             "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
         );
         let mut expected_claude = BTreeMap::from([
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
             ("CLAUDE_CONFIG_DIR", home.to_str().unwrap()),
             ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.to_str().unwrap()),
             ("HOME", home.to_str().unwrap()),

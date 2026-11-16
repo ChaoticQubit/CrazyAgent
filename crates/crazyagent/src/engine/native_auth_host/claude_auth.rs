@@ -67,6 +67,12 @@ fn auth_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    if action == ClaudeAuthCommand::Renew {
+        command.env(
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.0,
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.1,
+        );
+    }
     assert_eq!(command.get_current_dir(), Some(home));
     assert!(Path::new(command.get_program()).is_absolute());
     Ok(command)
