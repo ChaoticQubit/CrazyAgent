@@ -1,6 +1,6 @@
 use super::pins::{self, Endpoint, Pin};
 use super::*;
-use crate::app_plugins::connector::ReadOnly;
+use crate::app_plugins::connector::{ConnectorSpec, OAuthSpec, ReadOnly, Registration};
 use crate::app_plugins::store;
 use crate::connectors::audit::{self, CallKind, CallRow};
 use crate::connectors::grants::{self, Who};
@@ -16,8 +16,8 @@ use base64::Engine;
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const PROJECT: &str = "alpha";
@@ -1977,4 +1977,196 @@ fn a_call_the_client_refuses_before_sending_is_logged_as_never_reaching_the_vend
             "{code}"
         );
     }
+}
+
+const SHELF: &str = "schema: 1
+kind: connector
+name: shelf
+title: Shelf
+version: 1
+mcp:
+  url: https://mcp.shelf.example/mcp
+  hosts: [mcp.shelf.example]
+oauth:
+  hosts: [auth.shelf.example]
+  registration: [own]
+  scopes_read: [read]
+  scopes_write: [write]
+";
+
+/// A stand-in that is an MCP server and its own authorization server: it takes only the
+/// access token `taken` holds, answers any other with a 401 naming its resource metadata,
+/// and hands out `at-shelf-<n>` as its n-th token.
+fn shelf_vendor(taken: Arc<Mutex<String>>) -> Vendor {
+    let given = Arc::new(AtomicUsize::new(0));
+    Vendor::start(move |seen, _, stream| {
+        let base = format!("http://{}", seen.header("host").unwrap_or_default());
+        let wanted = format!("Bearer {}", taken.lock().unwrap());
+        let reply = match (seen.verb.as_str(), seen.path.as_str()) {
+            ("GET", "/.well-known/oauth-protected-resource/mcp") => json_reply(
+                "200 OK",
+                &[],
+                &json!({"resource": format!("{base}/mcp"), "authorization_servers": [base]}),
+            ),
+            ("GET", "/.well-known/oauth-authorization-server") => json_reply(
+                "200 OK",
+                &[],
+                &json!({
+                    "issuer": base,
+                    "authorization_endpoint": format!("{base}/authorize"),
+                    "token_endpoint": format!("{base}/token"),
+                    "response_types_supported": ["code"],
+                    "code_challenge_methods_supported": ["S256"],
+                }),
+            ),
+            ("POST", "/token") => {
+                let at = given.fetch_add(1, Ordering::SeqCst) + 1;
+                json_reply(
+                    "200 OK",
+                    &[("Cache-Control", "no-store")],
+                    &json!({
+                        "access_token": format!("at-shelf-{at}"),
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "refresh_token": format!("rt-shelf-{at}"),
+                    }),
+                )
+            }
+            ("POST", "/mcp") if seen.header("authorization") == Some(wanted.as_str()) => {
+                legacy(seen, None, "2025-06-18").unwrap_or_else(|| match seen.rpc() {
+                    "tools/list" => result(seen, json!({"tools": [read_tool("list_items")]})),
+                    "tools/call" => result(seen, text_result("ran")),
+                    other => panic!("{other}"),
+                })
+            }
+            ("POST", "/mcp") => {
+                let challenge = format!(
+                    "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\""
+                );
+                empty(
+                    "401 Unauthorized",
+                    &[("WWW-Authenticate", challenge.as_str())],
+                )
+            }
+            _ => empty("404 Not Found", &[]),
+        };
+        send(stream, &reply);
+    })
+}
+
+/// The refresh requests the stand-in's token endpoint was sent.
+fn renewals(vendor: &Vendor) -> usize {
+    vendor
+        .seen()
+        .iter()
+        .filter(|seen| seen.path == "/token" && seen.raw.contains("grant_type=refresh_token"))
+        .count()
+}
+
+/// The Authorization values the stand-in's MCP address was sent, each run of the same
+/// value once.
+fn bearers(vendor: &Vendor) -> Vec<String> {
+    let mut sent: Vec<String> = vendor
+        .seen()
+        .iter()
+        .filter(|seen| seen.path == "/mcp")
+        .filter_map(|seen| seen.header("authorization").map(str::to_owned))
+        .collect();
+    sent.dedup();
+    sent
+}
+
+/// An OAuth connector is called with the access token of its sign-in. A server that
+/// refuses that token when a session opens gets one renewal and one new session with the
+/// same access; a held session needs none; a token still refused after the renewal ends
+/// the call without a second renewal.
+#[test]
+fn an_oauth_connector_is_called_with_its_token_and_renews_once_when_refused() {
+    let taken = Arc::new(Mutex::new("at-shelf-2".to_owned()));
+    let vendor = shelf_vendor(taken.clone());
+    let bench = bench();
+    add(&bench.case, SHELF, false);
+    assert_eq!(
+        crate::connectors::oauth::set_own_client(
+            &bench.case.db,
+            &bench.case.root,
+            "shelf",
+            "shelf-client",
+            None
+        ),
+        Ok(())
+    );
+    let spec = ConnectorSpec {
+        mcp: vendor.endpoint(),
+        key: None,
+        oauth: Some(OAuthSpec {
+            hosts: vec!["127.0.0.1".to_owned()],
+            registration: vec![Registration::Own],
+            scopes_read: vec!["read".to_owned()],
+            scopes_write: vec!["write".to_owned()],
+        }),
+        read_tools: Vec::new(),
+    };
+    let redirect = url::Url::parse("http://127.0.0.1:53682/callback").unwrap();
+    let pending = crate::connectors::oauth::begin_with(
+        &bench.case.root,
+        "shelf",
+        "sha256-of-shelf",
+        &spec,
+        &redirect,
+        false,
+        None,
+        &no_lookup(),
+    );
+    assert!(pending.is_ok(), "{pending:?}");
+    let state = pending.unwrap().state;
+    assert_eq!(
+        crate::connectors::oauth::finish_with(
+            &bench.case.root,
+            &state,
+            "code-1",
+            None,
+            &no_lookup()
+        ),
+        Ok(())
+    );
+    bench.gateway.stand_in("shelf", vendor.endpoint());
+    grant(&bench, "shelf", true);
+    let launch = launch(&bench);
+
+    assert_eq!(listed(&bench, &launch), ["shelf__list_items"]);
+    assert_eq!(
+        renewals(&vendor),
+        1,
+        "the refused first token is renewed once"
+    );
+    assert_eq!(bearers(&vendor), ["Bearer at-shelf-1", "Bearer at-shelf-2"]);
+    let (text, error) = called(&bench, &launch, "shelf__list_items", json!({}));
+    assert!(!error, "{text}");
+    assert_eq!(renewals(&vendor), 1, "a held session needs no renewal");
+
+    *taken.lock().unwrap() = "at-shelf-never".to_owned();
+    let (text, error) = called(&bench, &launch, "shelf__list_items", json!({}));
+    assert!(
+        error && text.starts_with("connector_sign_in_needed"),
+        "{text}"
+    );
+    let (text, error) = called(&bench, &launch, "shelf__list_items", json!({}));
+    assert!(
+        error && text.starts_with("connector_sign_in_needed"),
+        "{text}"
+    );
+    assert_eq!(
+        renewals(&vendor),
+        2,
+        "a new session renews once, never twice in a row"
+    );
+    assert_eq!(
+        bearers(&vendor),
+        [
+            "Bearer at-shelf-1",
+            "Bearer at-shelf-2",
+            "Bearer at-shelf-3"
+        ]
+    );
 }
