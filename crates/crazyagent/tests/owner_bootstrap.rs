@@ -134,7 +134,10 @@ impl Process {
 /// that then panicked would fail Drop's join and abort the binary. Inputs: the capture and
 /// the bytes.
 fn appended(captured: &Mutex<Vec<u8>>, bytes: &[u8]) {
-    captured.lock().unwrap().extend_from_slice(bytes);
+    captured
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .extend_from_slice(bytes);
 }
 
 impl Drop for Process {
