@@ -383,6 +383,7 @@ impl NewProjectPage {
             Reply::Leave => Flow::Back,
             Reply::Background => Flow::Open(Place::Home),
             Reply::CreatePool => Flow::Open(Place::NewPool),
+            Reply::SignInGitHub => Flow::Handled,
             Reply::CheckHarnesses => {
                 self.ask_harnesses(true, ctx);
                 Flow::Handled

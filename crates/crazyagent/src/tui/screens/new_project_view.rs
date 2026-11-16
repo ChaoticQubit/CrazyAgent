@@ -1598,6 +1598,13 @@ pub(in crate::tui) fn help_keys(wizard: &Wizard) -> Vec<(&'static str, &'static 
             STEPS,
             LEAVE,
         ],
+        Control::Publish => vec![
+            ("Space", "On or off"),
+            ("Enter", "GitHub details"),
+            ("Tab", "Next"),
+            STEPS,
+            LEAVE,
+        ],
         Control::Back => vec![("Enter", "Back"), ("Tab", "Next"), STEPS, LEAVE],
     }
 }

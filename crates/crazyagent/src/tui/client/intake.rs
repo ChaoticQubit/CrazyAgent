@@ -1,7 +1,7 @@
 use super::settings::connection_lost;
 use super::*;
 use crate::engine::owner::{AccountSecret, OwnerResult};
-use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
+use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::job::{JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
@@ -39,6 +39,7 @@ pub(in crate::tui) enum IntakeQuery {
     GitHubRepos {
         page: u32,
     },
+    GitHubOwners,
     CloneRepo {
         full_name: String,
     },
@@ -87,6 +88,7 @@ pub(in crate::tui) enum IntakeView {
     GitHub(GitHubStatus),
     DeviceCode(GitHubDeviceCode),
     Repos(GitHubRepoPage),
+    Owners(GitHubOwners),
     Cloned(CloneReceipt),
     Changed(OwnerResult),
     Job(Option<JobView>),
@@ -228,6 +230,9 @@ impl NativeOwner {
             }
             IntakeQuery::GitHubRepos { page } => {
                 IntakeView::Repos(controller.github_repos(page).await.map_err(problem)?)
+            }
+            IntakeQuery::GitHubOwners => {
+                IntakeView::Owners(controller.github_owners().await.map_err(problem)?)
             }
             IntakeQuery::CloneRepo { full_name } => {
                 IntakeView::Cloned(controller.clone_repo(full_name).await.map_err(problem)?)

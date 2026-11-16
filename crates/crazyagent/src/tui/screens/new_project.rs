@@ -1,4 +1,5 @@
 use super::new_project_input::TextInput;
+use super::new_project_publish::{Publish, PublishReply};
 use super::project_access::next_level;
 #[cfg(all(test, unix))]
 use crate::config::EffectiveConfig;
@@ -102,6 +103,7 @@ pub(in crate::tui) enum Control {
     Min,
     Max,
     Access,
+    Publish,
     Back,
     Continue,
 }
@@ -286,6 +288,7 @@ pub(in crate::tui) enum Reply {
     Background,
     CreatePool,
     CheckHarnesses,
+    SignInGitHub,
     Create(Box<(ProjectSpec, ProjectSetup)>),
 }
 
@@ -353,6 +356,7 @@ pub(in crate::tui) struct Wizard {
     pub note: Option<Note>,
     pub phase: Phase,
     pub access: AgentAccess,
+    pub publish: Publish,
 }
 
 impl Wizard {
@@ -401,6 +405,7 @@ impl Wizard {
             access: Some(AgentAccess::NEW_PROJECT)
                 .filter(|level| level.unavailable().is_none())
                 .unwrap_or_default(),
+            publish: Publish::default(),
         };
         wizard.assert_consistent();
         wizard
@@ -1157,6 +1162,10 @@ impl Wizard {
             Control::Pools => self.pool_key(key),
             Control::Team => self.team_key(key),
             Control::Access => self.access_key(key),
+            Control::Publish => {
+                let reply = self.publish.row_key(key);
+                self.publish_reply(reply)
+            }
             Control::Back if key.code == KeyCode::Enter => self.back(),
             Control::Continue if key.code == KeyCode::Enter => self.advance(),
             Control::Back | Control::Continue => Reply::Ignored,
@@ -1473,6 +1482,15 @@ impl Wizard {
             _ => return Reply::Ignored,
         }
         Reply::Handled
+    }
+
+    fn publish_reply(&mut self, reply: PublishReply) -> Reply {
+        self.typing = self.publish.typing();
+        match reply {
+            PublishReply::Ignored => Reply::Ignored,
+            PublishReply::Handled => Reply::Handled,
+            PublishReply::SignIn => Reply::SignInGitHub,
+        }
     }
 
     fn access_key(&mut self, key: KeyEvent) -> Reply {
