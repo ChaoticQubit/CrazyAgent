@@ -143,7 +143,7 @@ pub const INTAKE_CODES: [&str; 114] = [
     "document_changed_while_copying",
 ];
 
-const GITHUB_CODES: [&str; 61] = [
+const GITHUB_CODES: [&str; 65] = [
     "github_not_signed_in",
     "github_token_invalid",
     "github_token_refused",
@@ -205,6 +205,10 @@ const GITHUB_CODES: [&str; 61] = [
     "github_token_frame_invalid",
     "github_token_frame_mismatch",
     "not_connected",
+    "github_publish_project_unknown",
+    "github_publish_unavailable",
+    "github_store_unavailable",
+    "project_folder_missing",
 ];
 
 const SETUP_CODES: [&str; 48] = [
