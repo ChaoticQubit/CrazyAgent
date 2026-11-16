@@ -749,14 +749,20 @@ mod tests {
     #[test]
     fn a_held_guard_traps_every_call_that_sets_a_files_times() {
         let times = [Call::Utime, Call::Utimes, Call::Futimesat, Call::Utimensat];
+        let empty_path = [0, 0, 0, 0x1000, 0, 0];
         for calls in [Calls::X86_64, Calls::AARCH64] {
+            let mut trapped = 0;
             for call in times {
                 if let Some(nr) = calls.number(call) {
-                    assert_eq!(told(&calls, HELD, nr, [0; 6]), NOTIFY, "{call:?}");
-                    assert_eq!(told(&calls, ALL, nr, [0; 6]), ALLOW, "{call:?}");
+                    for args in [[0; 6], empty_path] {
+                        assert_eq!(told(&calls, HELD, nr, args), NOTIFY, "{call:?}");
+                        assert_eq!(told(&calls, ALL, nr, args), ALLOW, "{call:?}");
+                    }
+                    trapped += 1;
                 }
             }
-            assert!(calls.number(Call::Utimensat).is_some());
+            let named = if calls.arch == ARCH_X86_64 { 4 } else { 1 };
+            assert_eq!(trapped, named, "{:x}", calls.arch);
         }
     }
 

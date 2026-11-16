@@ -3367,6 +3367,100 @@ fn a_supervised_agent_makes_no_git_entry_but_inside_its_own_git_folder() {
     );
 }
 
+const TIMES: &str = "import ctypes, os, platform, sys
+libc = ctypes.CDLL(None, use_errno=True)
+held, own = sys.argv[1], sys.argv[2]
+x86 = platform.machine() == 'x86_64'
+utimensat = 280 if x86 else 88
+pair = ctypes.c_int64 * 4
+omit = (1 << 30) - 2
+def said(name, work):
+    try:
+        work()
+        print(name + '=0')
+    except OSError as error:
+        print(name + '=' + str(error.errno))
+def raw(nr, *args):
+    if libc.syscall(nr, *args) < 0:
+        number = ctypes.get_errno()
+        raise OSError(number, os.strerror(number))
+reading = os.open(held, os.O_RDONLY)
+said('held-path', lambda: os.utime(held, (1, 2)))
+said('held-now', lambda: os.utime(held))
+said('held-no-follow', lambda: os.utime(held, (1, 2), follow_symlinks=False))
+said('held-fd', lambda: os.utime(reading, (1, 2)))
+said('held-empty-path', lambda: raw(utimensat, reading, b'', pair(1, 0, 2, 0), 0x1000))
+said('held-omit', lambda: raw(utimensat, -100, held.encode(), pair(0, omit, 0, omit), 0))
+if x86:
+    said('held-utimes', lambda: raw(235, held.encode(), pair(1, 0, 2, 0)))
+    said('held-utime', lambda: raw(132, held.encode(), (ctypes.c_int64 * 2)(1, 2)))
+    said('held-futimesat', lambda: raw(261, reading, None, pair(1, 0, 2, 0)))
+    said('own-micros', lambda: raw(235, own.encode(), pair(1, 1000000, 2, 0)))
+said('own-path', lambda: os.utime(own, (1000, 2000)))
+said('own-nanos', lambda: raw(utimensat, -100, own.encode(), pair(1, 2000000000, 2, 0), 0))
+said('own-null-path', lambda: raw(utimensat, -100, None, None, 0))
+said('own-path-only', lambda: os.utime(os.open(own, os.O_PATH), (5, 6)))
+said('own-fd', lambda: os.utime(os.open(own, os.O_RDONLY), (3000, 4000)))
+";
+
+/// Under the held guard no call sets a held entry's times (LINUX-TEAM-TIME-CALLS): by path,
+/// unfollowed, by descriptor, by `AT_EMPTY_PATH` and on x86_64 by the older three, each
+/// refused with 13 and the time kept; leaving both times as they are does nothing. The
+/// agent's own file takes its times with the kernel's own errors (22, 14, 9), and with no
+/// guard the held entry takes a time.
+#[test]
+fn a_supervised_agent_sets_no_time_on_a_held_entry_and_sets_its_own() {
+    use std::os::unix::fs::MetadataExt;
+    let case = case();
+    let admin = case.project.join(".git").join("worktrees").join("one");
+    fs::create_dir_all(&admin).unwrap();
+    let held = admin.join("gitdir");
+    fs::write(&held, "/elsewhere/one/.git\n").unwrap();
+    let own = case.project.join("own.txt");
+    fs::write(&own, "own\n").unwrap();
+    let modified = |path: &Path| {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.mtime(), metadata.mtime_nsec())
+    };
+    let before = modified(&held);
+    let (held_text, own_text) = (held.to_str().unwrap(), own.to_str().unwrap());
+    let guard = ["--guard-held", held_text];
+    let script = ["-I", "-c", TIMES, held_text, own_text];
+    let output = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    let legacy = if cfg!(target_arch = "x86_64") {
+        "held-utimes=13\nheld-utime=13\nheld-futimesat=13\nown-micros=22\n"
+    } else {
+        ""
+    };
+    assert_eq!(
+        told(&output),
+        format!(
+            "held-path=13\nheld-now=13\nheld-no-follow=13\nheld-fd=13\nheld-empty-path=13\n\
+             held-omit=0\n{legacy}own-path=0\nown-nanos=22\nown-null-path=14\n\
+             own-path-only=9\nown-fd=0\n"
+        )
+    );
+    assert_eq!(modified(&held), before, "the held entry's time stays");
+    assert_eq!(
+        modified(&own),
+        (4000, 0),
+        "the agent's own file took its times"
+    );
+    let set = "import os, sys; os.utime(sys.argv[1], (5, 6))";
+    let control = finished(supervised(
+        &case,
+        &[],
+        "/usr/bin/python3",
+        &["-I", "-c", set, held_text],
+    ));
+    assert!(control.status.success(), "{control:?}");
+    assert_eq!(
+        modified(&held),
+        (6, 0),
+        "the control sets the time with no guard"
+    );
+}
+
 const OPENS: &str = "import ctypes, os
 libc = ctypes.CDLL(None, use_errno=True)
 refused = libc.syscall(437, -100, b'never', ctypes.create_string_buffer(24), 24)
