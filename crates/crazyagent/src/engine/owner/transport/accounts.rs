@@ -389,7 +389,8 @@ async fn handle(
             }
         }
         Action::Remove { id } => {
-            let ResultValue::Removed = actor(engine, admission, Command::Remove(id)).await? else {
+            let ResultValue::Removed(_) = actor(engine, admission, Command::Remove(id)).await?
+            else {
                 return Err(unknown());
             };
             Reply::Removed

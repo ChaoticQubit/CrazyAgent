@@ -38,7 +38,7 @@ pub(crate) struct Listed {
 
 pub(crate) enum ResultValue {
     Account(Box<Listed>),
-    Removed,
+    Removed(Box<ModelConnection>),
     Page(Vec<Listed>, Option<CredentialRef>),
     Held(Vec<CredentialRef>),
 }
@@ -402,7 +402,7 @@ pub(super) fn execute(
             for (kind, name) in &left {
                 settle_removed(db, config.settings.model_access.as_ref(), kind, name);
             }
-            Ok(ResultValue::Removed)
+            Ok(ResultValue::Removed(Box::new(connection)))
         }
     }
 }
