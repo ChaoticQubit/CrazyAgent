@@ -8,6 +8,7 @@ use super::launch::{
 };
 use super::records::{self, Reader};
 use crate::coord::settings::{HarnessKind, TerminalDisplay};
+use crate::harnesses::accounts::Handover;
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
 use std::ffi::{OsStr, OsString};
@@ -332,11 +333,10 @@ pub fn command(
 }
 
 /// Builds what the terminal host runs for one interactive agent as [`command`] does, from
-/// given terminal settings instead of the catalog's, such as a stand-in's. A harness run
-/// from settings gets their arguments and follows their record; an account with a key,
-/// tools off and Full access are refused until their tasks land, and a project context
-/// unless [`takes_context`] holds. Inputs: as for `command`, and the settings. Output: the
-/// command, or a refusal code.
+/// given terminal settings instead of the catalog's, such as a stand-in's, which give its
+/// arguments and record. A key, tools off, Full access, a project context unless
+/// [`takes_context`] holds and an account hand-over for another binding are refused.
+/// Inputs: as for `command`, and the settings. Output: the command, or a refusal code.
 pub fn command_with(
     request: &LaunchRequest,
     installed: Option<&Installed>,
@@ -519,8 +519,12 @@ pub fn command_with(
                 .map(|(name, value)| (name.to_owned(), value)),
         );
     }
+    let handover = installed.and_then(Installed::handover);
+    if let Some(handover) = handover {
+        super::launch::handover_fits(request, handover)?;
+    }
     let listed = installed.map(Installed::environment).unwrap_or_default();
-    let env = agent_env(&env, listed)?;
+    let env = agent_env(&env, listed, handover)?;
     let built = InteractiveCommand {
         argv,
         cwd,
@@ -557,24 +561,45 @@ pub(crate) fn catalog_settings(harness: &str) -> Result<TerminalSettings, Launch
     })
 }
 
-/// Passes a pane's variables through the one agent environment builder, so a pane gets
-/// the same refusals and git settings as every other agent process, with a listed
-/// harness's home block variables as the harness's own, as its piped launch has them.
-/// Inputs: the variables in order and the home block's. Output: them with
+/// Passes a pane's variables through the one agent environment builder, as every agent
+/// process's, with a listed harness's home block variables and account hand-over after them
+/// as its piped launch has them, the hand-over's placeholder the one exception to the guard.
+/// Inputs: the variables, the home block's and the hand-over. Output: the variables with
 /// [`crate::sandbox::AGENT_GIT_ENV`] appended, or `launch_environment_refused`.
 fn agent_env(
     env: &[(String, String)],
     listed: &[(OsString, OsString)],
+    handover: Option<&Handover>,
 ) -> Result<Vec<(String, String)>, LaunchError> {
     let base: Vec<(&str, &OsStr)> = env
         .iter()
         .map(|(name, value)| (name.as_str(), OsStr::new(value)))
         .collect();
+    let handed_env = handover.map(Handover::env).unwrap_or_default();
     let harness = listed
         .iter()
-        .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str())));
-    crate::sandbox::agent_env(&base, harness)
-        .map_err(|_| failure("launch_environment_refused"))?
+        .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str())))
+        .chain(
+            handed_env
+                .iter()
+                .map(|(name, value)| (OsStr::new(name), Some(OsStr::new(value)))),
+        );
+    let names: Vec<&str> = handed_env
+        .iter()
+        .filter(|(_, value)| handover.is_some_and(|handover| value == handover.token()))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let refused = |_: crate::sandbox::SandboxError| failure("launch_environment_refused");
+    let built = match handover {
+        Some(handover) => {
+            let handed = crate::sandbox::Handed::new(&names, handover.token())
+                .map_err(refused)?;
+            crate::sandbox::agent_env_handing(&base, harness, handed)
+        }
+        None => crate::sandbox::agent_env(&base, harness),
+    };
+    built
+        .map_err(refused)?
         .into_iter()
         .map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .collect::<Option<Vec<_>>>()
