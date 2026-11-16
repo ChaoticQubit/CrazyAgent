@@ -1,8 +1,10 @@
+use super::app_plugins::read_manifest;
 use super::settings::problem;
 use super::*;
 use crate::app_plugins::Preview;
 use crate::connectors::audit::ActivityView;
 use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
+use crate::engine::EngineError;
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
 use std::path::PathBuf;
 
@@ -128,17 +130,42 @@ pub(in crate::tui) fn job_name(job: &ConnectorsJob) -> &'static str {
 }
 
 impl NativeOwner {
-    /// Runs one Connectors request through the trusted owner controller. Inputs: the job
-    /// and the lost-connection flag. Output: the event; a transport failure sets the flag
-    /// so the shell reconnects.
+    /// Runs one Connectors request through the trusted owner controller; a typed path is
+    /// read here first, off the async threads, and sent as its text. Inputs: the job and the
+    /// lost-connection flag. Output: the event; a transport failure sets the flag so the
+    /// shell reconnects.
     pub(super) async fn connectors(
         &mut self,
         job: ConnectorsJob,
         lost: &mut bool,
     ) -> ConnectorsEvent {
+        let (job, read) = match job {
+            ConnectorsJob::ReadFile { path } => {
+                let text = tokio::task::spawn_blocking(move || read_manifest(&path))
+                    .await
+                    .unwrap_or_else(|_| Err("app_plugin_file_unreadable".into()));
+                match text {
+                    Ok(yaml) => (ConnectorsJob::Preview { yaml: yaml.clone() }, Some(yaml)),
+                    Err(code) => {
+                        return ConnectorsEvent::Preview {
+                            read: None,
+                            result: Err(code),
+                        };
+                    }
+                }
+            }
+            other => (other, None),
+        };
+        assert!(!matches!(job, ConnectorsJob::ReadFile { .. }), "a typed path is read above");
         let controller = match self.settings_controller() {
             Ok(controller) => controller,
             Err(code) => return failed(&job, code),
+        };
+        let trust = |result: Result<Preview, EngineError>, read, lost: &mut bool| {
+            ConnectorsEvent::Preview {
+                read,
+                result: result.map_err(|error| problem(&error, lost)),
+            }
         };
         match job {
             ConnectorsJob::Activity { connector, project } => ConnectorsEvent::Activity(
@@ -153,8 +180,58 @@ impl NativeOwner {
                     .await
                     .map_err(|error| problem(&error, lost)),
             ),
-            other => ConnectorsEvent::unavailable(&other),
+            ConnectorsJob::Preview { yaml } => {
+                trust(controller.connector_preview(yaml).await, read, lost)
+            }
+            ConnectorsJob::Review { name } => {
+                trust(controller.connector_review(name).await, None, lost)
+            }
+            ConnectorsJob::ReadFile { .. } => unreachable!("a typed path is read above"),
+            other => ConnectorsEvent::Page(
+                page(controller, other)
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
         }
+    }
+}
+
+/// Runs one request the engine answers with the whole Connectors page. Inputs: the
+/// controller and the job. Output: the page or the engine's error.
+async fn page(
+    controller: &mut OwnerController,
+    job: ConnectorsJob,
+) -> Result<ConnectorsView, EngineError> {
+    match job {
+        ConnectorsJob::View { project } => controller.connectors(project).await,
+        ConnectorsJob::Add {
+            yaml,
+            sha256,
+            replace,
+        } => controller.connector_add(yaml, sha256, replace).await,
+        ConnectorsJob::Trust { name, sha256 } => controller.connector_trust(name, sha256).await,
+        ConnectorsJob::Remove { name } => controller.connector_remove(name).await,
+        ConnectorsJob::SetKey { name, secret, key } => {
+            controller.connector_set_key(name, secret, key).await
+        }
+        ConnectorsJob::ClearKey { name, secret } => {
+            controller.connector_clear_key(name, secret).await
+        }
+        ConnectorsJob::Grant {
+            project,
+            connector,
+            enabled,
+            who,
+        } => {
+            controller
+                .connector_grant(project, connector, enabled, who)
+                .await
+        }
+        ConnectorsJob::Activity { .. }
+        | ConnectorsJob::SaveSettings { .. }
+        | ConnectorsJob::Preview { .. }
+        | ConnectorsJob::ReadFile { .. }
+        | ConnectorsJob::Review { .. } => unreachable!("{} has its own answer", job_name(&job)),
     }
 }
 

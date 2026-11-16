@@ -423,7 +423,7 @@ fn place_of(target: &NoticeTarget, ctx: &Ctx) -> Result<(Place, Option<Spot>), &
         }
         NoticeTarget::Usage => Ok(Place::Usage),
         NoticeTarget::Harnesses => Ok(Place::Settings(SettingsSection::Harnesses)),
-        NoticeTarget::Connectors => Ok(Place::Settings(SettingsSection::Plugins)),
+        NoticeTarget::Connectors => Ok(Place::Connectors),
         NoticeTarget::Home => Ok(Place::Home),
         NoticeTarget::Updates => Err(UPDATES),
     }?;
