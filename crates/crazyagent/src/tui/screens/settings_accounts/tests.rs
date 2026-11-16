@@ -841,7 +841,44 @@ fn without_a_separate_api_provider_a_company_keeps_its_own_key_choice() {
             (Provider::Claude, SignInMethod::ApiKey)
         ]
     );
-    assert_eq!(tiles.len(), 5);
+    assert_eq!(tiles.len(), 6);
+}
+
+/// Task 21 (DEC-180 addendum 2, answer 3): Add account offers the Gemini API as its own
+/// entry right after Anthropic, with one way in, an API key with its model, in its own
+/// words, and a short key is named as a Gemini key.
+#[test]
+fn add_account_offers_the_gemini_api_key_right_after_anthropic_in_its_own_words() {
+    let tiles = provider_tiles(&catalog());
+    let names: Vec<&str> = tiles.iter().map(|tile| tile.name).collect();
+    assert_eq!(
+        names,
+        [
+            "OpenAI",
+            "Anthropic",
+            "Gemini API",
+            "OpenRouter",
+            "OpenAI-compatible URL",
+            "Local model",
+        ]
+    );
+    let gemini = &tiles[2];
+    assert_eq!(gemini.mark, Provider::Gemini);
+    assert_eq!(gemini.line, "Pay-as-you-go Google Gemini API key");
+    let [key] = gemini.choices.as_slice() else {
+        panic!("one way to add a Gemini API account");
+    };
+    assert_eq!(
+        (key.provider, key.method),
+        (Provider::Gemini, SignInMethod::ApiKey)
+    );
+    assert_eq!(key.native, None);
+    assert_eq!(key.description, "Pay per use with a Gemini key.");
+    assert_eq!(
+        key_problem(Provider::Gemini, 9, true).as_deref(),
+        Some("This is too short for a Gemini key. Paste the whole key.")
+    );
+    assert_eq!(key_problem(Provider::Gemini, 51, true), None);
 }
 
 #[test]

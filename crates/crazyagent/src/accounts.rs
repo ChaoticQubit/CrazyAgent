@@ -119,9 +119,10 @@ const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 const OLLAMA_URL: &str = "http://127.0.0.1:11434/v1";
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com";
 
-const PROVIDERS: [Provider; 7] = [
+const PROVIDERS: [Provider; 8] = [
     Provider::Chatgpt,
     Provider::Claude,
+    Provider::Gemini,
     Provider::Openrouter,
     Provider::OpenaiApi,
     Provider::AnthropicApi,

@@ -4524,6 +4524,30 @@ fn a_master_stopped_for_another_reason_says_why_and_s_tries_again() {
     assert_eq!(starts_asked(&mut shell), 0, "one start for one stop");
 }
 
+/// Task 21: a live master the engine stopped because no account in the pool fits its harness
+/// shows the engine's line naming the accounts that fit, word for word as the desktop shows
+/// it, across as many rows of the Master box as it needs; the TUI builds no line of its own.
+#[test]
+fn a_master_stopped_for_no_fitting_account_shows_the_engines_accounts_that_fit_line() {
+    let line = "The live master was turned off: it could not start: No account in this \
+                project's pool can run Row Harness. Accounts that fit it: Gemini API";
+    let mut shell = open_running_master();
+    shell.arrive(stopped_master_graph());
+    requests(&mut shell);
+    shell.arrive(switch(Some(false), Some(line)));
+    requests(&mut shell);
+    let boxed: Vec<String> = render(&mut shell)
+        .iter()
+        .filter_map(|row| {
+            let (start, end) = (row.find('\u{2502}')?, row.rfind('\u{2502}')?);
+            (end > start).then(|| row[start + '\u{2502}'.len_utf8()..end].trim().to_owned())
+        })
+        .filter(|text| !text.is_empty())
+        .collect();
+    let seen = boxed.join(" ");
+    assert!(seen.contains(line), "{seen}");
+}
+
 /// A master terminal the view attached that sends no first frame within a minute is overdue
 /// too: the view says so instead of the terminal box and drops every key but s, Esc and
 /// Ctrl-], so nothing typed reaches the silent terminal or the view; s tries again (owner 11-12).

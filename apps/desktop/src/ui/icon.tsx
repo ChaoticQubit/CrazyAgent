@@ -193,6 +193,7 @@ const SVG_ATTRIBUTES = new Set(["xmlns", "width", "height", "viewBox", "fill", "
 const LOGO_FOR: Record<string, string> = {
   claude: "claude",
   anthropic_api: "anthropic",
+  gemini: "googlegemini",
   openrouter: "openrouter",
   "claude-code": "claude",
   opencode: "opencode",

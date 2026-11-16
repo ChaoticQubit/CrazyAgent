@@ -19,6 +19,8 @@ test("a waiting task shows why it waits, the pool line, or the queue line before
   const { tasks } = research.teamPanel(status, [], label, "all", 0);
   assert.deepEqual(tasks.map((row) => row.summary), [capped, "Waits for an account pool for this project", "Waits for its turn in the queue", ""]);
   assert.equal(research.waitLine({ status: "queued", wait: null }), "Waits for its turn in the queue");
+  const gemini = "Waits: No account in this project's pool can run Row Harness. Accounts that fit it: Gemini API";
+  assert.equal(research.waitLine({ status: "queued", wait: gemini }), gemini, "Task 21: the accounts that fit read word for word");
 });
 
 test("the Team view names every agent limit, read only, with No limit for an unset cap (F11)", () => {
