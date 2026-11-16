@@ -2016,6 +2016,36 @@ fn a_shim_harness_starts_its_real_install_or_else_itself_unless_agents_can_write
     assert!(launch_tool(&inside, &places).is_err());
 }
 
+/// rv-sa241 B1 L1: a shim that finds no real install starts as given only when the resolver
+/// would run its file, every link on its way included. A shim that links through a link in a
+/// project, which agents can move, while both its ends sit in owner folders, is refused.
+#[test]
+fn a_shim_reached_through_a_link_agents_can_move_never_starts_as_given() {
+    let scratch = tempfile::tempdir().unwrap();
+    let base = scratch.path().canonicalize().unwrap();
+    let name = "crazyagent-shim-hop-row";
+    let home = base.join("home");
+    let real = base.join("owner").join(name);
+    stand_in(&real);
+    let project = base.join("project");
+    std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+    let hop = project.join("tools").join(name);
+    std::fs::create_dir_all(hop.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &hop).unwrap();
+    let shim = home.join(".volta/bin").join(name);
+    std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&hop, &shim).unwrap();
+    let places = crate::tools::Places::new(Vec::new(), Some(home));
+    assert!(crate::harnesses::is_shim(places.home(), &shim));
+    assert!(
+        !places.agent_writable(&shim),
+        "both ends sit in owner folders"
+    );
+    assert!(places.agent_writable(&hop));
+    assert!(launch_tool(&shim, &places).is_err());
+    assert_eq!(launch_tool(&real, &places).unwrap().entry, real);
+}
+
 /// F2 (r2): a pinned harness file inside a project is refused with a line that names the
 /// file and says agents can change it there, never that the harness is missing with how to
 /// install it: the file is right there.
