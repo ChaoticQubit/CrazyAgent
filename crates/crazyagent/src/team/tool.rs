@@ -896,7 +896,7 @@ pub fn propose_rule_tool() -> Value {
     assert!(!rules.is_empty() && rules.len() < crate::github::GitHubRule::ALL.len());
     json!({
         "name": PROPOSE_RULE_TOOL,
-        "description": "Propose that the owner turn one GitHub rule on or off for the repository this project was published to, such as requiring resolved review threads before a merge. The engine raises a question the owner answers in the Questions view; if approved, the engine changes that one rule with the owner's GitHub sign-in. You never get the sign-in, and you get one message saying only whether it was approved and applied, refused or declined. A project that has not been published to GitHub cannot take a proposal.",
+        "description": "Propose that the owner turn one GitHub rule on or off for the repository this project was published to, such as requiring resolved review threads before a merge. The engine raises a question the owner answers in the Questions view; if approved, the engine changes that one rule with the owner's GitHub sign-in. You never get the sign-in, and one message says only whether it was approved and applied, refused or declined; your master gets it when you are a sub-agent. A project that has not been published to GitHub cannot take a proposal.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1354,9 +1354,7 @@ fn propose_call(arguments: Option<&Value>) -> Option<Call> {
         serde_json::from_value(arguments.get("rule")?.clone()).ok()?;
     let on = arguments.get("on")?.as_bool()?;
     let why = arguments.get("why")?.as_str()?.trim();
-    let plain = !why.is_empty()
-        && why.len() <= crate::github::proposals::WHY_BYTES_MAX
-        && !why.chars().any(char::is_control);
+    let plain = crate::github::proposals::plain_why(why).is_some_and(|plain| plain == why);
     if !plain || !crate::github::proposals::proposable(rule) {
         return None;
     }

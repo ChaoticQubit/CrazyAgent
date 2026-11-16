@@ -457,11 +457,14 @@ fn folder(db: &Connection, project: &ProjectId) -> Result<PathBuf, EngineError> 
     Ok(folder)
 }
 
-/// The agent's reason as plain words: trimmed, with no hidden characters, cut to
-/// `WHY_BYTES_MAX` bytes at a character boundary, or none when nothing plain is left.
-fn plain_why(why: &str) -> Option<String> {
+/// The agent's reason as plain words: trimmed, cut to `WHY_BYTES_MAX` bytes at a character
+/// boundary, or none when it is empty or holds a control or hidden character, such as a
+/// direction override or a zero-width space, so the owner reads only what shows. Input:
+/// the reason. Output: the plain reason, if any.
+pub fn plain_why(why: &str) -> Option<String> {
     let trimmed = why.trim();
-    if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+    let hidden = |c: char| c.is_control() || crate::memory::hidden_char(c);
+    if trimmed.is_empty() || trimmed.chars().any(hidden) {
         return None;
     }
     let mut end = trimmed.len().min(WHY_BYTES_MAX);

@@ -275,26 +275,26 @@ async fn handle(
         }
     }
     let root = super::changes::engine_root(authority)?;
-    let answered = matches!(action, Action::Answer { .. });
-    let running = root.clone();
-    let reply = tokio::task::spawn_blocking(move || run(&running, action))
+    tokio::task::spawn_blocking(move || run(&root, action))
         .await
-        .map_err(|_| failure("questions_unavailable"))??;
-    let settled = matches!(
-        reply,
-        Reply::Settled {
-            settlement: Settlement::Settled
-        }
-    );
-    if answered && settled {
-        drop(tokio::task::spawn_blocking(move || apply_proposals(&root)));
-    }
-    Ok(reply)
+        .map_err(|_| failure("questions_unavailable"))?
 }
 
-/// Applies the GitHub rule proposals the owner approved (DEC-182 S7) after the answer's
-/// reply is sent, with the owner's sign-in, so the owner never waits on GitHub. A failure
-/// is logged by its code alone. Input: the engine root.
+/// Starts applying the GitHub rule proposals the owner approved (DEC-182 S7) on a thread
+/// of its own once an answer is recorded, so the reply never waits on GitHub and an engine
+/// stop never waits on it either. Input: the engine root.
+fn apply_later(root: &Path) {
+    let root = root.to_path_buf();
+    let started = std::thread::Builder::new()
+        .name("crazyagent-github-rules".into())
+        .spawn(move || apply_proposals(&root));
+    if started.is_err() {
+        eprintln!("github_rule_proposals_not_started");
+    }
+}
+
+/// Applies the GitHub rule proposals the owner approved with the owner's sign-in and tells
+/// each agent how it ended. A failure is logged by its code alone. Input: the engine root.
 fn apply_proposals(root: &Path) {
     let applied = questions::open(root).and_then(|db| {
         crate::github::proposals::apply_approved(&db, &mut |folder, rule, on| {
@@ -320,7 +320,8 @@ fn parse(bytes: &[u8]) -> Result<Action, EngineError> {
 
 /// Runs one authenticated Questions action against the engine database in the engine root.
 /// An answer names option positions, a comment or both, never neither; the log checks them
-/// against the question. Inputs: the engine root and the action. Output: the reply, or the
+/// against the question, and a settled answer starts applying any approved GitHub rule
+/// proposal off the reply. Inputs: the engine root and the action. Output: the reply, or the
 /// log's refusal.
 fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
     let db = questions::open(root)?;
@@ -339,7 +340,11 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
                 return Err(failure("questions_answer_invalid"));
             }
             let answer = Answer { picks, comment };
-            settlement(questions::answer(&db, id, version, &answer)?)
+            let settled = questions::answer(&db, id, version, &answer)?;
+            if settled == Settlement::Settled {
+                apply_later(root);
+            }
+            settlement(settled)
         }
         Action::Dismiss { id, version } => settlement(questions::dismiss(&db, id, version)?),
         Action::DismissMany { items } => Ok(Reply::Dismissed {

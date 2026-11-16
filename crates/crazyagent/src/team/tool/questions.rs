@@ -418,7 +418,8 @@ pub(in crate::team) fn request_reply(
 }
 
 /// Raises one GitHub rule proposal (DEC-182 S7) for the owner and says how it went, in
-/// words that never name the repository or anything from the owner's sign-in. Inputs: the
+/// words that never name the repository or anything from the owner's sign-in; a sub-agent
+/// hears that its master gets the outcome, since it is told in the team conversation. Inputs: the
 /// engine connection, the project, who asked, the rule, whether it is to be on and the
 /// reason. Output: the sentence the caller reads and whether it is an error.
 pub(crate) fn propose_reply(
@@ -431,10 +432,14 @@ pub(crate) fn propose_reply(
 ) -> (String, bool) {
     let name = crate::github::proposals::rule_name(rule);
     let switch = if on { "on" } else { "off" };
+    let hears = match asker {
+        Asker::Agent(_) => "Your master gets",
+        _ => "You get",
+    };
     match crate::github::proposals::request(db, project, asker, rule, on, why) {
         Ok(question) => (
             format!(
-                "Proposal raised as question {question} in the owner's Questions view. You get one message saying only whether turning {name} {switch} was approved and applied, refused or declined, so do not propose it again meanwhile."
+                "Proposal raised as question {question} in the owner's Questions view. {hears} one message saying only whether turning {name} {switch} was approved and applied, refused or declined, so do not propose it again meanwhile."
             ),
             false,
         ),
