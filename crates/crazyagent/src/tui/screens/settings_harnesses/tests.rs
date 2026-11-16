@@ -423,6 +423,27 @@ fn a_harness_that_signs_in_says_which_version_sign_in_needs() {
     assert!(!frame(&mut quiet).contains("Sign-in needs"));
 }
 
+/// Task 21 (DEC-166): a harness older than the oldest version CrazyAgent drives says it needs
+/// that version or newer first on its Updates line, beside the update state, in the desktop's
+/// words; one at or past the floor says nothing of it.
+#[test]
+fn a_harness_below_the_floor_it_runs_at_says_it_needs_x_or_newer_beside_update() {
+    let found = found();
+    let floor = |installed: &str| HarnessVersions {
+        installed: Some(installed.into()),
+        run_min: Some("2.1.250".into()),
+        ..newer()
+    };
+    let line = "Claude Code 2.1.200 is too old for CrazyAgent; it needs 2.1.250 or newer.";
+    let mut shell = on_claude(&found);
+    press(&mut shell, 'c', floor("2.1.200"));
+    let shown = frame(&mut shell);
+    assert!(shown.contains(line), "{shown}");
+    let mut current = on_claude(&found);
+    press(&mut current, 'c', floor("2.1.309"));
+    assert!(!frame(&mut current).contains("is too old for CrazyAgent"));
+}
+
 #[test]
 fn u_shows_the_exact_command_and_updates_only_after_y() {
     let found = found();

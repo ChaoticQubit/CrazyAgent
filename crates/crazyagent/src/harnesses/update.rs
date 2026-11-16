@@ -783,6 +783,15 @@ pub fn below(installed: &str, minimum: &str) -> bool {
     plain_version(installed) && higher(minimum, installed)
 }
 
+/// The line both clients show beside Update for a harness older than the oldest version
+/// CrazyAgent drives (DEC-166, Task 21). Inputs: the harness name and its versions row.
+/// Output: the line, or None without a plain floor, without an installed version, or for an
+/// installed version not known to be below the floor.
+pub fn needs_newer_line(harness: &str, versions: &HarnessVersions) -> Option<String> {
+    let _ = (harness, versions);
+    None
+}
+
 fn unreadable() -> Latest {
     Latest::Failed {
         code: CHECK_UNREADABLE.to_owned(),
