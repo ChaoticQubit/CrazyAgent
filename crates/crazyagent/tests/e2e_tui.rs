@@ -658,6 +658,10 @@ fn settled(turn: &MasterTurnView) -> bool {
     )
 }
 
+/// Drives the owner from Home through adding a folder, its setup, its team tree, one master
+/// turn in the Conversation tab's console and removal, on the real engine. The project's
+/// Live terminal is Off before the project page opens: with it On, the first team read after
+/// the tab is entered opens the master's live terminal (DEC-117 Q4) and races the row's Enter.
 #[test]
 fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui() {
     let mut engine = Engine::new("ca-e2e-flow-");
@@ -814,6 +818,24 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
         !ready.contains("Needs a pool"),
         "the chosen pool went to the project:\n{ready}"
     );
+    let terminal_off = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let generation = owner.next();
+        let reply = owner
+            .controller
+            .team_action(
+                crazyagent::team::TeamAction::MasterLiveTerminal {
+                    project_id: project.clone(),
+                    on: false,
+                },
+                generation,
+            )
+            .await
+            .unwrap();
+        owner.controller.detach();
+        e2e_support::result(reply)
+    });
+    assert_eq!(terminal_off, OwnerResult::Applied);
 
     tab_until_enter(&pty, "Open");
     pty.keys(&["Enter"]);
