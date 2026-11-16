@@ -276,6 +276,7 @@ fn versions_of(installed: &str, latest: Latest) -> HarnessVersions {
         last: None,
         needs: None,
         sign_in_min: None,
+        run_min: None,
     }
 }
 
@@ -981,6 +982,7 @@ fn missing(id: &str, install: Option<&str>, guide: &str) -> HarnessVersions {
         last: None,
         needs: None,
         sign_in_min: None,
+        run_min: None,
     }
 }
 

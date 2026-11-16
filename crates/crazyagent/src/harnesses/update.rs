@@ -111,7 +111,9 @@ pub struct LastUpdate {
 /// line of an installed harness, `install` the exact install line of a missing one, `refusal`
 /// the code for why a button is not offered, `guide` the vendor's page for that case,
 /// `needs` what an installed harness lacks before it can run, as the tool resolver reads it,
-/// and `sign_in_min` the oldest version CrazyAgent signs in with, for a harness that signs in.
+/// `sign_in_min` the oldest version CrazyAgent signs in with, for a harness that signs in,
+/// and `run_min` the oldest version CrazyAgent drives at all, from the manifest's
+/// `version.minimum`, shown as "needs X or newer" beside the Update line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessVersions {
@@ -129,6 +131,8 @@ pub struct HarnessVersions {
     pub needs: Option<HarnessNeeds>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_in_min: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_min: Option<String>,
 }
 
 /// What an installed harness lacks before it can run, from the tool resolver

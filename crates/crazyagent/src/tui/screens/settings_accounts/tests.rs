@@ -1545,6 +1545,7 @@ fn too_old_versions(installed: Option<&str>) -> crate::harnesses::update::Harnes
         last: None,
         needs: None,
         sign_in_min: Some("2.1.268".into()),
+        run_min: None,
     }
 }
 
