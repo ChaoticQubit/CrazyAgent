@@ -505,7 +505,7 @@ function SandboxSection({ data }: { data: ProjectData }) {
 /** What the hidden folders section says its list of agents that can still open a hidden
  * folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A r1): team
  * agents, taken-over ones included, and the engine runs that started before (SA-VID14-R2-N2). */
-export const HIDDEN_SEERS_COVER = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named here with Restart them. Research jobs and overview, roadmap, onboarding, code graph and lockfile rebuild runs that started before are named here too, and keep their access until they end.";
+export const HIDDEN_SEERS_COVER = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named here with Restart them. Master turns, research jobs and overview, roadmap, onboarding, code graph and lockfile rebuild runs that started before are named here too, and keep their access until they end.";
 
 /** The running agents a team status lists as able to open a folder hidden after they
  * started (SA-VID14-A). Input: the team status, or null before it is read. Output: those
@@ -519,7 +519,7 @@ export function hiddenSeers(status: TeamStatus | null): TeamAgent[] {
 export const HIDDEN_RUNS_POLL_MS = 3000;
 
 const RUN_WORDS: Record<HiddenRunKind, string> = {
-  master: "",
+  master: "master turn",
   research: "research job",
   overview: "overview run",
   roadmap: "roadmap run",
