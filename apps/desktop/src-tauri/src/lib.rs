@@ -4,6 +4,8 @@ pub mod theme;
 mod updates;
 
 #[cfg(feature = "native-webdriver")]
+mod e2e_window;
+#[cfg(feature = "native-webdriver")]
 mod ide_probe;
 #[cfg(feature = "native-webdriver")]
 mod native_refresh_observation;
@@ -5602,6 +5604,7 @@ pub fn run() {
                 }
             })
             .plugin(tauri_plugin_wdio_webdriver::init())
+            .plugin(e2e_window::plugin())
     };
     builder
         .run(tauri::generate_context!())

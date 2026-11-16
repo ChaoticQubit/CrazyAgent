@@ -180,6 +180,12 @@ test("a paste that never leaves the input area fails after the last Enter instea
   assert.equal(terminal.seen.reads, 2 + reply.ENTER_PRESSES_MAX * reply.ENTER_READS_MAX);
 });
 
+test("a turn the caller's read never sees start fails as a turn that never started, not as a paste left in the input area", async () => {
+  const terminal = fakeTerminal((seen) => (seen.pasted ? SENT : IDLE));
+  await assert.rejects(reply.pasteAndSend(terminal, MESSAGE, async () => false), /the turn never started after 4 Enter presses: it was not sent/);
+  assert.equal(terminal.seen.presses, reply.ENTER_PRESSES_MAX);
+});
+
 test("a paste that never draws fails with no Enter pressed", async () => {
   const terminal = fakeTerminal(() => IDLE);
   await assert.rejects(reply.pasteAndSend(terminal, MESSAGE), /the paste never drew/);
