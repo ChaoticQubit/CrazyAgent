@@ -21,7 +21,7 @@ use std::os::unix::net::UnixStream;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 pub const WORKERS: usize = 8;
 pub const STOPPED_EXIT: i32 = 125;
@@ -102,6 +102,7 @@ pub fn run(config: Supervised, command: &mut Command) -> io::Result<i32> {
         own,
         leads: place_of(own).is_some_and(|stat| stat.group == own),
         listener,
+        names: RwLock::new(()),
     });
     for _ in 0..WORKERS {
         let server = Arc::clone(&server);
@@ -193,12 +194,18 @@ fn chain_of(folder: BorrowedFd<'_>) -> Result<Vec<Node>, Errno> {
     Err(Errno::LOOP)
 }
 
-/// The chain [`HeldNodes::holds`] needs for a folder: the whole walk when a held tree sits
-/// on the folder's device, else the folder alone, since an agent under Landlock mounts
-/// nothing into a tree. Inputs: the nodes and the folder. Output: the chain.
+/// The chain [`HeldNodes::holds`] and [`HeldNodes::stored`] need for a folder: the whole
+/// walk when a held tree or store sits on the folder's device, else the folder alone, since
+/// an agent under Landlock mounts nothing into either. Inputs: the nodes and the folder.
+/// Output: the chain.
 fn chain_for(nodes: &HeldNodes, folder: BorrowedFd<'_>) -> Result<Vec<Node>, Errno> {
     let own = node_of(&rustix::fs::fstat(folder)?);
-    if nodes.trees.iter().any(|tree| tree.0 == own.0) {
+    if nodes
+        .trees
+        .iter()
+        .chain(&nodes.stores)
+        .any(|held| held.0 == own.0)
+    {
         return chain_of(folder);
     }
     Ok(vec![own])
@@ -212,6 +219,20 @@ fn writes(asked: OFlags) -> bool {
 /// Tells whether a name is there, a link itself and not what it points at.
 fn exists(place: &Place) -> bool {
     rustix::fs::statat(&place.folder, place.name(), AtFlags::SYMLINK_NOFOLLOW).is_ok()
+}
+
+/// Tells whether an entry is a symlink or a folder, the two kinds no held store takes
+/// (DEC-185 S2b). Input: the entry's place. Output: true for either kind, false for any
+/// other kind or no entry, or the error of the read.
+fn link_or_folder(place: &Place) -> Result<bool, Errno> {
+    match rustix::fs::statat(&place.folder, place.name(), AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => {
+            let kind = FileType::from_raw_mode(stat.st_mode);
+            Ok(matches!(kind, FileType::Symlink | FileType::Directory))
+        }
+        Err(Errno::NOENT) => Ok(false),
+        Err(errno) => Err(errno),
+    }
 }
 
 /// The kind of entry `mknod` makes for a mode: a regular file when the mode names none.
@@ -369,7 +390,9 @@ impl Caller {
 
 /// One agent's supervisor: what it holds, the nodes of its held entries, the
 /// architecture's call numbers, its own process id, whether it leads its process group,
-/// and the listener its workers share.
+/// the listener its workers share, and the names lock, which a move into a held store
+/// takes alone and every other symlink, folder, node or link it makes shares; an open
+/// makes only a plain file, which a store takes, so it never waits on it (DEC-185 S2b).
 struct Server {
     config: Supervised,
     nodes: Option<HeldNodes>,
@@ -377,6 +400,7 @@ struct Server {
     own: i32,
     leads: bool,
     listener: OwnedFd,
+    names: RwLock<()>,
 }
 
 impl Server {
@@ -694,6 +718,23 @@ impl Job<'_> {
         let git = self.server.config.git.as_ref();
         let allowed = place.proc || git.is_none_or(|git| git.moves(&place.entry()));
         allowed.then_some(()).ok_or(Errno::ACCESS)
+    }
+
+    /// Tells whether an entry lands in a held store (DEC-185 S2b): by its name, then by the
+    /// nodes of its folder and of each folder above it. Input: the place. Output: true in a
+    /// store, false with no held guard, or the error of the walk.
+    fn stored(&self, place: &Place) -> Result<bool, Errno> {
+        let (Some(held), Some(nodes)) = (&self.server.config.held, &self.server.nodes) else {
+            return Ok(false);
+        };
+        if held.stored(&place.entry()) {
+            return Ok(true);
+        }
+        if nodes.stores.is_empty() {
+            return Ok(false);
+        }
+        let chain = chain_for(nodes, place.folder.as_fd())?;
+        Ok(nodes.stored(&chain))
     }
 
     /// Refuses a target the held guard keeps (DEC-185 S2a): by its name first, then by
@@ -1077,11 +1118,20 @@ impl Job<'_> {
     }
 
     /// Makes a folder, a node or a link for the caller in the resolved folder, with the
-    /// caller's file mode mask. Inputs: the folder register, the path and what to make.
+    /// caller's file mode mask, sharing the names lock; a symlink in a held store is
+    /// refused (DEC-185 S2b). Inputs: the folder register, the path and what to make.
     fn make(&self, base: u64, path: Vec<u8>, make: Make) -> Result<Answer, Errno> {
         let place = self.place(&Base::of(base), &path)?;
         self.judged(&place)?;
         self.kept(&place, false)?;
+        let _names = self
+            .server
+            .names
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        if matches!(make, Make::Link(_)) && self.stored(&place)? {
+            return Err(Errno::ACCESS);
+        }
         let umask = self.caller.umask;
         let mode = |raw: u64| Mode::from_bits_truncate(rules::mode_under(raw as u32, umask));
         let (folder, name) = (&place.folder, place.name());
@@ -1105,15 +1155,33 @@ impl Job<'_> {
     }
 
     /// Links or renames for the caller between two resolved folders. The new name is
-    /// judged as a new entry, and a rename also by what it moves away. Under the held
-    /// guard a link's source is judged as kept, after the kernel's link is followed when
-    /// asked, and the link is made from that pinned file; both sides of a rename are
-    /// judged as moved. Inputs: each path with its folder register, and which call with
-    /// its flags.
+    /// judged as a new entry; under the held guard both sides of a rename as moved, a
+    /// link's source as kept, through a pin when the kernel's link is followed, and no
+    /// symlink or folder goes into a held store, its kind read under the names lock alone.
+    /// Inputs: each path with its folder register, and which call with its flags.
     fn pair(&self, old: (u64, Vec<u8>), new: (u64, Vec<u8>), pair: Pair) -> Result<Answer, Errno> {
         let from = self.place(&Base::of(old.0), &old.1)?;
         let to = self.place(&Base::of(new.0), &new.1)?;
         self.judged(&to)?;
+        let (follows, exchange) = match &pair {
+            Pair::Link(flags) => {
+                let flags = AtFlags::from_bits_retain(*flags as u32);
+                (flags.contains(AtFlags::SYMLINK_FOLLOW), false)
+            }
+            Pair::Rename(flags) => {
+                let flags = RenameFlags::from_bits_retain(*flags as u32);
+                (false, flags.contains(RenameFlags::EXCHANGE))
+            }
+        };
+        let (into, back) = (self.stored(&to)?, exchange && self.stored(&from)?);
+        let names = &self.server.names;
+        let alone = (into || back).then(|| names.write().unwrap_or_else(PoisonError::into_inner));
+        let _shared = alone
+            .is_none()
+            .then(|| names.read().unwrap_or_else(PoisonError::into_inner));
+        if (into && !follows && link_or_folder(&from)?) || (back && link_or_folder(&to)?) {
+            return Err(Errno::ACCESS);
+        }
         let fresh = !exists(&to);
         let (a, b) = ((&from.folder, from.name()), (&to.folder, to.name()));
         match pair {

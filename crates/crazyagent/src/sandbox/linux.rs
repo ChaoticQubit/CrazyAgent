@@ -1,10 +1,10 @@
 use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS};
 use super::{
-    ADMIN_LINKS, ADMIN_WRITES, BRIDGE_PORT_MIN, GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX,
-    LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
-    LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, LinuxSupervisor, OWNER_PORTS, ProjectSandbox,
-    REMOTES_MAX, Routed, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
-    clean_absolute, invalid,
+    ADMIN_LINKS, ADMIN_WRITES, BRIDGE_PORT_MIN, GIT_FALLBACK, GIT_STATE_FILES, GIT_STATE_TREES,
+    KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF,
+    LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, LinuxSupervisor,
+    MULTI_PACK_INDEX, OWNER_PORTS, ProjectSandbox, REMOTES_MAX, Routed, STORE_ALTERNATES, Sandbox,
+    SandboxError, SandboxNetwork, SandboxRemote, agent_env, clean_absolute, invalid,
 };
 use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
@@ -618,6 +618,7 @@ fn guard_flag(
         }
         Some(GUARD_HELD) => Some(&mut guard.held.get_or_insert_with(Held::default).entries),
         Some(GUARD_HELD_TREE) => Some(&mut guard.held.get_or_insert_with(Held::default).trees),
+        Some(GUARD_HELD_STORE) => Some(&mut guard.held.get_or_insert_with(Held::default).stores),
         Some(OWN_TREE) => guard.git.as_mut().map(|git| &mut git.trees),
         Some(OWN_KIDS) => guard.git.as_mut().map(|git| &mut git.kids),
         Some(OWN_GIT) => guard.git.as_mut().map(|git| &mut git.exact),
@@ -657,7 +658,7 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     if guard.git.as_ref().map_or(0, own) > GRANTS_MAX {
         return Err("too many own git places".into());
     }
-    let held = |held: &Held| held.entries.len() + held.trees.len();
+    let held = |held: &Held| held.entries.len() + held.trees.len() + held.stores.len();
     if guard.held.as_ref().map_or(0, held) > GRANTS_MAX {
         return Err("too many held places".into());
     }
@@ -2183,7 +2184,7 @@ impl Sandbox for LinuxSandbox {
             return Err(SandboxError::Unavailable(CONFINED_NEEDS_LANDLOCK.into()));
         }
         let unheld = !grants.guarded.is_empty() && self.supervision.is_none();
-        if self.sandbox.clone.is_some() || unheld {
+        if unheld {
             return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
         }
         let mut command = match &self.backend {
@@ -2242,8 +2243,8 @@ impl Sandbox for LinuxSandbox {
 /// written with [`git_folder_rights`], and `guarded`, what Landlock cannot keep read-only
 /// under those grants, as the call supervisor holds it (protected paths in a git grant,
 /// [`ADMIN_WRITES`] and [`ADMIN_LINKS`] in the admin folder, the worktree's `.git` link and
-/// a clone's whole git folder), which that supervisor must hold before a confined launch
-/// starts, the nested binds a second layer (DEC-185 S1, S2).
+/// a clone's store names, [`clone_store`]), which that supervisor must hold before a
+/// confined launch starts, the nested binds a second layer (DEC-185 S1, S2).
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
@@ -2341,7 +2342,10 @@ impl Grants {
             }
         }
         if let Some(clone) = sandbox.clone.as_ref() {
-            guarded.trees.push(clone.join(".git"));
+            let store = clone_store(clone);
+            guarded.entries.extend(store.entries);
+            guarded.trees.extend(store.trees);
+            guarded.stores.extend(store.stores);
         }
         let secrets = sandbox.secret_paths();
         let carved = sandbox.carved_home.as_ref();
@@ -2422,6 +2426,38 @@ fn holds_all(policy: &LandlockPolicy, guarded: &Held) -> bool {
     guarded.is_empty() || policy.guard.held.as_ref() == Some(guarded)
 }
 
+/// What the call supervisor holds in a clone, the names macOS keeps by `clone_store_denies`
+/// (DEC-185 S2b): as entries the git folder, its `commondir`, the store with its `info` and
+/// `pack` folders, the alternates, the 256 loose-object folders and the multi-pack-index;
+/// whole the fallback repository and the index's chain folder; the store as a store.
+/// Input: the clone's real root. Output: the held places.
+fn clone_store(clone: &Path) -> Held {
+    let git = clone.join(".git");
+    let objects = git.join("objects");
+    let (info, pack) = (objects.join("info"), objects.join("pack"));
+    let [commondir, _] = ADMIN_LINKS;
+    let mut entries = vec![
+        git.clone(),
+        git.join(commondir),
+        objects.clone(),
+        info.clone(),
+        pack.clone(),
+        pack.join(MULTI_PACK_INDEX),
+    ];
+    entries.extend(STORE_ALTERNATES.map(|name| info.join(name)));
+    entries.extend((0..=u8::MAX).map(|byte| objects.join(format!("{byte:02x}"))));
+    let held = Held {
+        entries,
+        trees: vec![
+            clone.join(GIT_FALLBACK),
+            pack.join(format!("{MULTI_PACK_INDEX}.d")),
+        ],
+        stores: vec![objects],
+    };
+    assert_eq!(held.entries.len(), 264);
+    held
+}
+
 /// The folders an agent may make a `.git` entry in, as the macOS boundary's nested git
 /// rule allows them: the top of each working tree it works in, each folder directly inside
 /// the engine's worktree folders (when it adds worktrees) or inside a setup folder, and for
@@ -2429,7 +2465,6 @@ fn holds_all(policy: &LandlockPolicy, guarded: &Held) -> bool {
 /// write the admin folder alone (DEC-185 S2). Input: the policy. Output: the agent's own
 /// git folders.
 fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
-    assert!(sandbox.clone.is_none());
     let (working, _) = sandbox.git_deny_roots();
     let mut kids = Vec::new();
     if sandbox.adds_worktrees {
@@ -2454,6 +2489,12 @@ fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
         exact: common.into_iter().collect(),
     };
     assert!(!own.trees.is_empty());
+    assert!(
+        sandbox
+            .clone
+            .as_ref()
+            .is_none_or(|clone| own.trees.contains(clone))
+    );
     own
 }
 

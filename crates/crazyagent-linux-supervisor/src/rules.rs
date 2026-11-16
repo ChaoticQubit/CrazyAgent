@@ -284,8 +284,14 @@ impl Held {
     /// an entry. Output: true for a path in a store, and with any store held, for a path
     /// not in that form and for every path while a store is itself not in that form.
     pub fn stored(&self, real: &Path) -> bool {
-        let _ = real;
-        false
+        if self.stores.is_empty() {
+            return false;
+        }
+        let Some(path) = folded_parts(real) else {
+            return true;
+        };
+        let store = |held: &PathBuf| folded_parts(held).is_none_or(|held| path.starts_with(&held));
+        self.stores.iter().any(store)
     }
 }
 
@@ -309,7 +315,8 @@ pub struct HeldNodes {
 impl HeldNodes {
     /// Takes the nodes of the held paths. Inputs: the held paths and a stat that does not
     /// follow a link, giving none for a path that does not exist. Output: the nodes, or an
-    /// error when a stat fails otherwise or the folder of a held path does not exist.
+    /// error when a path is not absolute, a stat fails otherwise or the folder of a held
+    /// entry or tree does not exist; a store that does not exist has no node.
     pub fn taken(
         held: &Held,
         stat: impl Fn(&Path) -> io::Result<Option<Node>>,
@@ -336,9 +343,16 @@ impl HeldNodes {
                 nodes.above.push(there(above)?);
             }
         }
+        for store in &held.stores {
+            if !store.is_absolute() || store.file_name().is_none() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            nodes.stores.extend(stat(store)?);
+        }
         nodes.above.sort_unstable();
         nodes.above.dedup();
         assert_eq!(nodes.names.len(), held.entries.len() + held.trees.len());
+        assert!(nodes.stores.len() <= held.stores.len());
         assert!(nodes.trees.iter().all(|tree| nodes.nodes.contains(tree)));
         Ok(nodes)
     }
@@ -367,8 +381,7 @@ impl HeldNodes {
     /// Tells whether a folder lies in a held store. Input: the nodes of the folder and of
     /// each folder above it, nearest first. Output: true when one of them is a store.
     pub fn stored(&self, chain: &[Node]) -> bool {
-        let _ = chain;
-        false
+        chain.iter().any(|folder| self.stores.contains(folder))
     }
 }
 
