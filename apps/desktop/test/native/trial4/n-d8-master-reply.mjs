@@ -190,7 +190,9 @@ async function steadyPaste(terminal, start) {
  * paste; a dialog drawn in the box's place is no input area and gets no further Enter, which
  * would accept its choice. Inputs:
  * the terminal, { rows, paste, enter, pause }, the message and the read for a terminal that draws
- * no echo. Output: how many times Enter was pressed; throws when the paste stayed unsent. */
+ * no echo. Output: how many times Enter was pressed; throws when the turn never started, saying
+ * whether the caller's read never saw it, the paste stayed in the input area or no input area
+ * showed. */
 export async function pasteAndSend(terminal, text, started) {
   const start = messageStart(text);
   await terminal.paste();
@@ -212,6 +214,7 @@ export async function pasteAndSend(terminal, text, started) {
       if (await begun()) return presses;
     }
   }
+  if (started) throw new Error(`the turn never started after ${presses} Enter presses: it was not sent`);
   throw new Error(area
     ? `the paste stayed in the master's input area after ${presses} Enter presses: it was not sent`
     : `no input area showed after ${presses} Enter presses: it was not sent`);
