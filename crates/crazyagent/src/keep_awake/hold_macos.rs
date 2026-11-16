@@ -175,7 +175,8 @@ pub(super) fn gate(connect: &mut dyn FnMut() -> io::Result<UnixStream>) -> io::R
 /// the helper at most every `READ_EVERY_MS`, and at once after an approval or a command.
 /// It never connects while the lid rule is Off or the daemon is not enabled.
 /// `lease_until_ms` is when the last lease the helper granted runs out at the latest, none
-/// with no lease. `trouble` is what the last owner command could not do, with the daemon
+/// with no lease, and `lease_sleep_off` says that lease is a lid hold, not power only.
+/// `trouble` is what the last owner command could not do, with the daemon
 /// status after it, and stands as the lid support until that status changes. `low_power`
 /// is the low power support the last step left (QUESTION 40a), `low_power_on_seen` says the
 /// running low power ask read it on, and `viewed` is the helper's last view with its time.
@@ -185,6 +186,7 @@ pub(super) struct LidLine {
     helper: Box<dyn HelperLine>,
     platform: LidPlatform,
     lease_until_ms: Option<i64>,
+    lease_sleep_off: bool,
     read_ms: Option<i64>,
     last: Option<LidSupport>,
     trouble: Option<(Option<Status>, LidSupport)>,
@@ -208,6 +210,7 @@ impl LidLine {
             helper,
             platform,
             lease_until_ms: None,
+            lease_sleep_off: false,
             read_ms: None,
             last: None,
             trouble: None,
@@ -380,7 +383,9 @@ impl LidLine {
             self.trouble = None;
         }
         let support = self.trouble.as_ref().map_or(support, |(_, trouble)| trouble.clone());
+        self.lease_sleep_off &= self.lease_until_ms.is_some();
         assert!(enabled || self.lease_until_ms.is_none());
+        assert!(self.lease_until_ms.is_some() || !self.lease_sleep_off);
         assert!(!matches!(support, LidSupport::Off | LidSupport::IdleOnlyOnBattery));
         support
     }
@@ -431,17 +436,25 @@ impl LidLine {
     /// Asks the helper for this engine's power-only lease of `LEASE_S` (QUESTION 40c): sent
     /// while low power is asked and the lid is not wanted, with the lid rule on or Off. A
     /// lease it gave keeps `lease_until_ms`, so a step that asks neither releases it. A
-    /// refusal or no answer is logged; the view this step reads says whether a lease asks.
-    /// Input: the time.
+    /// refusal or no answer is logged; a lid hold's lease it did not replace is released,
+    /// since the lid is no longer wanted (advisor 02:04). The view this step reads says
+    /// whether a lease asks. Input: the time.
     fn power_only(&mut self, now_ms: i64) {
         let request = Request::LowPower { lease_s: LEASE_S };
         match self.helper.call(&request) {
             Ok(Reply::Held { lease_left_s }) if lease_left_s > 0 => {
                 let left_ms = i64::from(lease_left_s.min(LEASE_S)) * 1000;
                 self.lease_until_ms = Some(now_ms + left_ms);
+                self.lease_sleep_off = false;
             }
-            other => eprintln!("keep awake: the lid helper's low power answer: {other:?}"),
+            other => {
+                eprintln!("keep awake: the lid helper's low power answer: {other:?}");
+                if self.lease_until_ms.is_some() && self.lease_sleep_off {
+                    self.release();
+                }
+            }
         }
+        assert!(self.lease_until_ms.is_none() || !self.lease_sleep_off);
         let longest_ms = now_ms + i64::from(LEASE_S) * 1000;
         assert!(self.lease_until_ms.is_none_or(|until| until <= longest_ms));
     }
@@ -486,7 +499,8 @@ impl LidLine {
     /// Output: the lid support.
     fn hold(&mut self, ask: LidAsk, now_ms: i64) -> LidSupport {
         assert!(ask.wanted);
-        let running = self.lease_until_ms.is_some_and(|until| now_ms < until);
+        let lease_live = self.lease_until_ms.is_some_and(|until| now_ms < until);
+        let running = lease_live && self.lease_sleep_off;
         let lid_display = if ask.sleep_display {
             LidDisplay::Sleep
         } else {
@@ -501,6 +515,7 @@ impl LidLine {
             Ok(Reply::Held { lease_left_s }) if lease_left_s > 0 => {
                 let left_ms = i64::from(lease_left_s.min(LEASE_S)) * 1000;
                 self.lease_until_ms = Some(now_ms + left_ms);
+                self.lease_sleep_off = true;
                 self.read_ms = Some(now_ms);
                 LidSupport::Held
             }
@@ -524,6 +539,7 @@ impl LidLine {
         self.last = Some(support.clone());
         let live = self.lease_until_ms.is_some_and(|until| now_ms < until);
         assert!(support != LidSupport::Held || live);
+        assert!(support != LidSupport::Held || self.lease_sleep_off);
         support
     }
 
@@ -560,6 +576,7 @@ impl LidLine {
     fn release(&mut self) {
         assert!(self.lease_until_ms.is_some());
         self.lease_until_ms = None;
+        self.lease_sleep_off = false;
         match self.helper.call(&Request::Release) {
             Ok(Reply::Released) => {}
             other => eprintln!("keep awake: the lid helper's release answer: {other:?}"),
