@@ -2458,6 +2458,49 @@ fn the_interpreter_walk_follows_the_copy_env_takes_and_judges_its_own_interprete
     assert!(checked(fixed(), &roots.places).is_ok());
 }
 
+/// rv-sec2 B11 r2 F1: `env` passes over a copy the owner cannot execute and runs the one
+/// behind it, so the walk does too. A first `node` of mode 611, which the resolver counts as
+/// executable, ahead of a `node` link into a project, is refused; with an owner `node` behind
+/// it instead, the command passes. A first copy the owner cannot execute that leads into a
+/// project is taken as it stands and refused, since an agent could make it executable
+/// before the run.
+#[test]
+fn an_interpreter_copy_the_owner_cannot_execute_is_passed_over_as_env_does() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    let at = machine.root.path();
+    std::fs::create_dir_all(at.join("proj/.crazyagent")).unwrap();
+    machine.program("brew/bin/node", 0o755);
+    let entry = at.join("home/tool/codex");
+    executable(&entry, "#!/usr/bin/env node\n");
+    let first = at.join("home/first");
+    let second = at.join("home/second");
+    machine.program("home/first/node", 0o611);
+    std::fs::create_dir_all(&second).unwrap();
+    let planted = machine.program("proj/tools/node", 0o755);
+    std::os::unix::fs::symlink(&planted, second.join("node")).unwrap();
+    let fixed = || Fixed {
+        program: entry.clone(),
+        args: vec!["--version"],
+        search: vec![first.clone(), second.clone()],
+        prefix: None,
+    };
+    assert_eq!(
+        checked(fixed(), &roots.places).map(|_| ()),
+        Err(TOOL_UNSAFE)
+    );
+    std::fs::remove_file(second.join("node")).unwrap();
+    machine.program("home/second/node", 0o755);
+    assert!(checked(fixed(), &roots.places).is_ok());
+    let locked = machine.program("proj/tools/locked", 0o611);
+    std::fs::remove_file(first.join("node")).unwrap();
+    std::os::unix::fs::symlink(&locked, first.join("node")).unwrap();
+    assert_eq!(
+        checked(fixed(), &roots.places).map(|_| ()),
+        Err(TOOL_UNSAFE)
+    );
+}
+
 /// rv-sec2 F3 (RV-DS241-203's own chain): an `env` copy in the search folder whose middle
 /// link sits in a project is refused although its end is the owner's node, and so is a first
 /// line that names that copy by path; the same chain through an owner folder passes.
