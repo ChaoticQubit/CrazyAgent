@@ -120,9 +120,9 @@ export function terminalSize(cols: number, rows: number): { cols: number; rows: 
 
 type Job = () => Promise<boolean>;
 
-/** The last send each queue took, read through its queue function, so a lane's waiting batch
- * can tell whether anything was queued after it. */
-const lastQueued = new WeakMap<(job: Job) => boolean, () => Job | null>();
+/** How many sends every `jobQueue` of this page took, so a lane's waiting batch can tell
+ * whether anything was queued after it, through whatever wrapper hands sends to the queue. */
+let queuedSends = 0;
 
 /** Runs a terminal's sends one at a time in the order queued, so a long paste never overtakes
  * later keys or a prompt. Input: a callback for the stop. Output: a function that queues one
@@ -133,20 +133,19 @@ export function jobQueue(stopped: () => void): (job: Job) => boolean {
   let tail: Promise<void> = Promise.resolve();
   let waiting = 0;
   let stop = false;
-  let last: Job | null = null;
   const halt = () => {
     if (stop) return;
     stop = true;
     stopped();
   };
-  const queue = (job: Job): boolean => {
+  return (job) => {
     if (stop) return false;
     if (waiting >= QUEUED_CHUNKS_MAX) {
       halt();
       return false;
     }
     waiting += 1;
-    last = job;
+    queuedSends += 1;
     tail = tail
       .then(async () => { if (!stop && !await job()) halt(); })
       .catch(halt)
@@ -154,8 +153,6 @@ export function jobQueue(stopped: () => void): (job: Job) => boolean {
     assert(waiting <= QUEUED_CHUNKS_MAX, "the send queue stays bounded");
     return true;
   };
-  lastQueued.set(queue, () => last);
-  return queue;
 }
 
 /** Queues typed bytes on a terminal's send queue as chunks the bridge accepts. Inputs: the
@@ -169,32 +166,34 @@ export function keyQueue(run: (job: () => Promise<boolean>) => boolean, send: (c
 }
 
 /** One lane's waiting batch on a shared send queue. Bytes that arrive while earlier input is
- * still being sent join the one batch that waits, up to `INPUT_BYTES_MAX`, but only while that
- * batch is still the last send queued, so nothing queued after it, a prompt or the other
- * lane's input, is ever overtaken; it goes out as one send when the queue reaches it, and
- * nothing waits on a timer. Bytes over the limit go out in chunks. A queue that is not a
- * `jobQueue` never merges. Inputs: the queue and the send call for one chunk. Output: a
- * function that queues bytes and, when told, closes the batch after them. */
+ * still being sent join the one batch that waits, up to `INPUT_BYTES_MAX`, but only while no
+ * `jobQueue` of the page took a send after that batch, so nothing queued after it, a prompt or
+ * the other lane's input, is ever overtaken; it goes out as one send when the queue reaches it,
+ * and nothing waits on a timer. Bytes over the limit go out in chunks; empty input sends
+ * nothing. Inputs: the queue, a `jobQueue` or a wrapper that hands it the sends, and the send
+ * call for one chunk. Output: a function that queues bytes and, when told, closes the batch
+ * after them. */
 function batchLane(run: (job: Job) => boolean, send: (chunk: number[]) => Promise<boolean>): (bytes: Uint8Array, last: boolean) => void {
   const chunks = keyQueue(run, send);
-  let waiting: { bytes: number[]; job: Job } | null = null;
+  let waiting: { bytes: number[]; after: number } | null = null;
   return (bytes, last) => {
+    if (bytes.length === 0) return;
     if (bytes.length > INPUT_BYTES_MAX) {
       waiting = null;
       return chunks(bytes);
     }
     const joins = waiting !== null
-      && lastQueued.get(run)?.() === waiting.job
+      && waiting.after === queuedSends
       && waiting.bytes.length + bytes.length <= INPUT_BYTES_MAX;
     if (joins && waiting) {
       waiting.bytes.push(...bytes);
     } else {
       const batch = Array.from(bytes);
-      const job = () => {
+      const queued = run(() => {
         if (waiting?.bytes === batch) waiting = null;
         return send(batch);
-      };
-      waiting = run(job) ? { bytes: batch, job } : null;
+      });
+      waiting = queued ? { bytes: batch, after: queuedSends } : null;
     }
     if (last) waiting = null;
     assert(waiting === null || waiting.bytes.length <= INPUT_BYTES_MAX, "a waiting batch fits one send");
@@ -204,8 +203,8 @@ function batchLane(run: (job: Job) => boolean, send: (chunk: number[]) => Promis
 /** Splits a terminal's input into a typed lane and a wheel lane on one send queue. Keys typed
  * or wheel reports that arrive while earlier input is still being sent wait as one batch per
  * lane, so fast typing or a fast scroll costs one send per round trip rather than one per key
- * or wheel event, and never fills the queue. A batch takes more input only while it is the last
- * send queued, so keys, scrolling and prompts keep their order. A lone Esc closes its batch
+ * or wheel event, and never fills the queue. A batch takes more input only while no send was
+ * queued after it, so keys, scrolling and prompts keep their order. A lone Esc closes its batch
  * after it, so Esc and a quick key after it never reach the app as one Alt key. Inputs: the
  * queue and the send call for one chunk, told whether the wheel made it. Output: the two
  * lanes. */
