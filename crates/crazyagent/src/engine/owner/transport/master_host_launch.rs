@@ -547,6 +547,7 @@ pub(super) fn claude_master_turn(
                     mailbox: &mailbox,
                     off: tools_off,
                     connector,
+                    native_on: false,
                 },
                 settings,
             )?;
@@ -656,6 +657,7 @@ pub(super) fn codex_master_turn(
             mailbox: &mailbox,
             off: tools_off,
             connector,
+            native_on: false,
         }),
         retry,
     )?;
@@ -982,6 +984,7 @@ fn require_master_delegate(
             mailbox: &mailbox,
             off: tools_off,
             connector,
+            native_on: false,
         }),
         (None, None) => None,
         (None, Some(_)) => return Err(failure("master_delegate_unverified")),
@@ -1922,6 +1925,7 @@ mod tests {
             mailbox: Path::new("/turn/tmp/mailbox"),
             off: &off,
             connector: None,
+            native_on: false,
         };
         for retry in ProviderRetry::ALL {
             for tools in [None, Some(tools)] {
@@ -1958,6 +1962,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Native connectors (DEC-168 addendum 16 decision 4): a tools-on Codex master turn that
+    /// read the owner's setting as On leaves out the fixed `features.apps=false`, so Codex's
+    /// apps stay on; every other turn keeps it, and the master policy refuses a command whose
+    /// apps switch differs from the setting the turn read.
+    #[test]
+    fn a_tools_on_codex_master_follows_the_native_setting_and_a_mismatch_is_refused() {
+        let scratch = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+        let worktree = scratch.path().canonicalize().unwrap().join("repo");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let off: Vec<String> = Vec::new();
+        let read_off = crate::engine::claude_host::MasterTools {
+            engine: Path::new("/registered/crazyagent"),
+            drop: Path::new("/turn/tmp/drop"),
+            mailbox: Path::new("/turn/tmp/mailbox"),
+            off: &off,
+            connector: None,
+            native_on: false,
+        };
+        let read_on = crate::engine::claude_host::MasterTools {
+            native_on: true,
+            ..read_off
+        };
+        let build = |tools| {
+            master_command(
+                Path::new("/registered/codex"),
+                Path::new("/private/profile"),
+                &worktree,
+                "admitted-model",
+                tools,
+                ProviderRetry::RetryBriefly,
+            )
+            .unwrap()
+        };
+        let apps_off = |command: &Command| {
+            command
+                .get_args()
+                .any(|arg| arg == crate::harnesses::launch::CODEX_APPS_OFF)
+        };
+        for (tools, kept) in [(None, true), (Some(read_off), true), (Some(read_on), false)] {
+            let command = build(tools);
+            assert_eq!(
+                apps_off(&command),
+                kept,
+                "{:?}",
+                tools.map(|tools| tools.native_on)
+            );
+            assert_eq!(require_master_tool_policy(&command, tools), Ok(()));
+        }
+        assert!(require_master_tool_policy(&build(Some(read_on)), Some(read_off)).is_err());
+        assert!(require_master_tool_policy(&build(Some(read_off)), Some(read_on)).is_err());
     }
 
     #[test]
@@ -3757,6 +3813,7 @@ mod tests {
             mailbox: &mailbox,
             off: &[],
             connector: None,
+            native_on: false,
         };
         for (name, tools) in [("off", None), ("on", Some(tools))] {
             let home = temporary.path().join(name);

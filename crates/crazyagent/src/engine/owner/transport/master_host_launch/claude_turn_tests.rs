@@ -403,6 +403,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         mailbox: &mailbox,
         off: &off,
         connector: None,
+        native_on: false,
     };
     let delegate = |command: &Command, tools| {
         crate::engine::claude_host::require_delegate(command, tools).map_err(|error| error.0)

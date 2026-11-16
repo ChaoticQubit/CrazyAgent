@@ -1244,6 +1244,7 @@ impl ResearchRunner {
                     &output,
                     &home,
                     job.tools,
+                    false,
                     trust,
                     account,
                     retry,
@@ -1252,7 +1253,16 @@ impl ResearchRunner {
             }
             ResearchHarness::ClaudeCode => {
                 let retry = crate::provider_retry::for_launch_at(&self.database);
-                claude_arguments(&mut launch, &home, &tmp, job.tools, None, account, retry)?;
+                claude_arguments(
+                    &mut launch,
+                    &home,
+                    &tmp,
+                    job.tools,
+                    false,
+                    None,
+                    account,
+                    retry,
+                )?;
                 launch.args(installed.arguments());
                 agent.join("output.md")
             }
@@ -1886,6 +1896,7 @@ impl ResearchRunner {
                     &output,
                     &home,
                     false,
+                    false,
                     trust,
                     account,
                     retry,
@@ -1898,6 +1909,7 @@ impl ResearchRunner {
                     &mut command,
                     &home,
                     &tmp,
+                    false,
                     false,
                     run.output_tokens,
                     account,
@@ -2444,10 +2456,15 @@ fn codex_arguments(
     output: &Path,
     home: &Path,
     tools: bool,
+    native_on: bool,
     trust: crate::trust::Trust,
     account: &ResearchAccount,
     retry: crate::provider_retry::ProviderRetry,
 ) -> Result<(), RunError> {
+    assert!(
+        !native_on || tools,
+        "the Native setting reaches only a run with tools on"
+    );
     command
         .arg("exec")
         .args(["--skip-git-repo-check", "--color", "never", "--json"])
@@ -2555,10 +2572,15 @@ fn claude_arguments(
     home: &Path,
     tmp: &Path,
     tools: bool,
+    native_on: bool,
     output_tokens: Option<u32>,
     account: &ResearchAccount,
     retry: crate::provider_retry::ProviderRetry,
 ) -> Result<(), RunError> {
+    assert!(
+        !native_on || tools,
+        "the Native setting reaches only a run with tools on"
+    );
     if let Some((name, value)) = retry.claude_env() {
         command.env(name, value);
     }
@@ -5870,15 +5892,16 @@ mod tests {
         }
     }
 
-    /// A research agent on a managed ChatGPT account gets neither the account's ChatGPT
-    /// apps nor its remote plugins, with tools on or off, as team agents and the master.
+    /// A research agent on a managed ChatGPT account never gets the account's remote plugins,
+    /// and gets its ChatGPT apps only with tools on when the run read the owner's Native
+    /// setting as On (DEC-168 addendum 12 decision 4), as team agents and the master.
     #[test]
-    fn a_managed_codex_research_agent_gets_no_chatgpt_apps_or_plugins() {
+    fn a_managed_codex_research_agent_gets_chatgpt_apps_only_for_native_on_with_tools_on() {
         let account = ResearchAccount::ManagedCodex {
             connection: codex_connection(),
             model: None,
         };
-        for tools in [false, true] {
+        for (tools, native_on) in [(false, false), (true, false), (true, true)] {
             let mut command = Command::new("/usr/bin/true");
             codex_arguments(
                 &mut command,
@@ -5886,6 +5909,7 @@ mod tests {
                 Path::new("/work/report.md"),
                 Path::new("/home"),
                 tools,
+                native_on,
                 crate::trust::Trust::Reviewed,
                 &account,
                 crate::provider_retry::ProviderRetry::HarnessDefault,
@@ -5895,10 +5919,14 @@ mod tests {
                 .get_args()
                 .map(|argument| argument.to_str().unwrap())
                 .collect();
-            for setting in ["features.apps=false", "features.plugins=false"] {
-                assert!(
+            for (setting, present) in [
+                ("features.apps=false", !native_on),
+                ("features.plugins=false", true),
+            ] {
+                assert_eq!(
                     args.windows(2).any(|pair| pair == ["-c", setting]),
-                    "{tools} {setting}: {args:?}"
+                    present,
+                    "tools {tools} native {native_on} {setting}: {args:?}"
                 );
             }
         }
@@ -5927,6 +5955,7 @@ mod tests {
                 &worktree.join("report.md"),
                 Path::new("/home"),
                 true,
+                false,
                 trust,
                 &account,
                 crate::provider_retry::ProviderRetry::HarnessDefault,
@@ -6009,6 +6038,7 @@ mod tests {
                     Path::new("/work/report.md"),
                     Path::new("/home"),
                     false,
+                    false,
                     crate::trust::Trust::Reviewed,
                     account,
                     retry,
@@ -6030,6 +6060,7 @@ mod tests {
                 &mut command,
                 Path::new("/agent/home"),
                 Path::new("/agent/tmp"),
+                false,
                 false,
                 None,
                 &anthropic,
@@ -6065,6 +6096,7 @@ mod tests {
                 &worktree.join("report.md"),
                 Path::new("/home"),
                 tools,
+                false,
                 crate::trust::Trust::Reviewed,
                 &account,
                 crate::provider_retry::ProviderRetry::HarnessDefault,
@@ -7606,6 +7638,7 @@ mod tests {
                 Path::new("/agent/home"),
                 Path::new("/agent/tmp"),
                 tools,
+                false,
                 output_tokens,
                 &account,
                 crate::provider_retry::ProviderRetry::HarnessDefault,
@@ -7667,6 +7700,7 @@ mod tests {
                 Path::new("/agent/home"),
                 Path::new("/agent/tmp"),
                 false,
+                false,
                 None,
                 &account,
                 crate::provider_retry::ProviderRetry::HarnessDefault,
@@ -7697,10 +7731,10 @@ mod tests {
     }
 
     /// Every Claude Code research run, on a signed-in account, a local endpoint or a keyed
-    /// relay, with tools off or on, starts with its account's claude.ai connectors off and
-    /// hooks off, as no Native switch reaches a research run.
+    /// relay, starts with hooks off and with its account's claude.ai connectors off, unless
+    /// its tools are on and it read the owner's Native setting as On (DEC-168 addendum 12).
     #[test]
-    fn every_claude_research_run_starts_with_the_accounts_claude_ai_connectors_off() {
+    fn a_claude_research_run_keeps_claude_ai_connectors_off_unless_native_on_with_tools_on() {
         let accounts = [
             ResearchAccount::ManagedClaude {
                 connection: codex_connection(),
@@ -7718,13 +7752,14 @@ mod tests {
             },
         ];
         for account in &accounts {
-            for tools in [false, true] {
+            for (tools, native_on) in [(false, false), (true, false), (true, true)] {
                 let mut command = Command::new("/usr/bin/true");
                 claude_arguments(
                     &mut command,
                     Path::new("/agent/home"),
                     Path::new("/agent/tmp"),
                     tools,
+                    native_on,
                     None,
                     account,
                     crate::provider_retry::ProviderRetry::HarnessDefault,
@@ -7741,8 +7776,9 @@ mod tests {
                     .collect();
                 assert_eq!(settings.len(), 1, "{arguments:?}");
                 assert_eq!(
-                    settings[0]["disableClaudeAiConnectors"], true,
-                    "{account:?} tools {tools}: {}",
+                    settings[0].get("disableClaudeAiConnectors"),
+                    (!native_on).then_some(&serde_json::Value::Bool(true)),
+                    "{account:?} tools {tools} native {native_on}: {}",
                     settings[0]
                 );
                 assert_eq!(settings[0]["disableAllHooks"], true, "{}", settings[0]);

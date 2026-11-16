@@ -213,6 +213,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         mailbox: &engine,
         off: &[],
         connector: None,
+        native_on: false,
     };
     assert!(require_master_tool_policy(&command, Some(unused)).is_err());
     let caches = default_master_tool_caches(root.engine_root().unwrap(), &repository);
@@ -274,6 +275,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         mailbox: &turn.join("tmp").join(crate::team::tool::MAILBOX_FOLDER),
         off: &off,
         connector: None,
+        native_on: false,
     };
     let envs: Vec<(String, String)> = command
         .get_envs()
@@ -649,6 +651,7 @@ fn the_installed_codex_reads_a_tools_on_master_with_its_own_sub_agents_off() {
         mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
         off: &[],
         connector: None,
+        native_on: false,
     };
     let command = master_command(
         &codex,

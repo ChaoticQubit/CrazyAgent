@@ -77,7 +77,8 @@ const DENY_FLAG_SPELLINGS: [&str; 2] = [CLAUDE_DENY_FLAG, "--disallowed-tools"];
 /// turn's private temporary folder where its `delegate` tool records each proposed task, the
 /// mailbox beside it where its `remember` and `recall` calls wait for the engine, the team
 /// tools the owner switched off, which the server leaves out, and the turn's connector launch
-/// folder, whose ca-connectors server the same engine executable runs.
+/// folder, whose ca-connectors server the same engine executable runs; `native_on` when the
+/// turn read the owner's Native connectors setting as On (DEC-168 addendum 16).
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct MasterTools<'a> {
     pub(in crate::engine) engine: &'a Path,
@@ -85,6 +86,7 @@ pub(in crate::engine) struct MasterTools<'a> {
     pub(in crate::engine) mailbox: &'a Path,
     pub(in crate::engine) off: &'a [String],
     pub(in crate::engine) connector: Option<&'a Path>,
+    pub(in crate::engine) native_on: bool,
 }
 
 impl MasterTools<'_> {
@@ -1065,6 +1067,7 @@ fn validate_command(
                 mailbox,
                 off,
                 connector: connector.as_deref(),
+                native_on: false,
             }),
         &settings,
     )

@@ -2916,6 +2916,7 @@ async fn console_claude_master(
             mailbox: &mailbox,
             off: &[],
             connector: None,
+            native_on: false,
         },
         &crate::harness_settings::apply::Applied::default(),
     )

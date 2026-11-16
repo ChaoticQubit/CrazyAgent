@@ -239,6 +239,7 @@ fn a_codex_master_with_a_connector_names_exactly_that_second_server() {
         mailbox: &mailbox,
         off: &[],
         connector: None,
+        native_on: false,
     };
     let with = MasterTools {
         connector: Some(&folder),
