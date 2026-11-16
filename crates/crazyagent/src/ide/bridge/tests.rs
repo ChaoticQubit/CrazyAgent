@@ -2030,3 +2030,21 @@ fn revoking_every_capability_keeps_going_past_a_replaced_file() {
     );
     assert!(grants.revoke_all().is_ok(), "nothing is left to revoke");
 }
+
+/// RESET-WALK-CODE code r1 F1: an IDE terminal whose cargo home could not be made because
+/// removing a cargo name ran past its walk budget stops with `cleanup_walk_too_long`, which
+/// the terminal shows, and any other sandbox failure keeps its own code.
+#[test]
+fn an_ide_terminal_whose_cargo_name_walk_ran_past_its_budget_stops_with_the_walk_code() {
+    use crate::sandbox::SandboxError;
+    let refused = |error| terminal::shell_refusal(error).0;
+    let walked = std::io::Error::other(crate::team::cleanup::WALK_TOO_LONG);
+    let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+    assert_eq!(refused(SandboxError::Io(walked)), "cleanup_walk_too_long");
+    assert_eq!(refused(SandboxError::Io(missing)), "ide_terminal_refused");
+    assert_eq!(
+        refused(SandboxError::Unavailable("no sandbox".into())),
+        "ide_terminal_unavailable"
+    );
+}

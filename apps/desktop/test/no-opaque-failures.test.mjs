@@ -301,3 +301,12 @@ test("an agent start refused for skills left in its Codex home says what happene
   assert.ok(worded, "the team start line words the refusal");
   assert.equal(sentence, `${worded[1].replace(/\\\n\s*/g, "")}.`, "the desktop and the team panels give the same sentence");
 });
+
+test("an agent start refused for a home reset past its walk budget says what happened", () => {
+  const sentence = client.errorMessage({ code: "cleanup_walk_too_long" });
+  assert.equal(sentence, "The agent could not start: its home folder held too many files to reset at once, or something kept adding files to it. Try again.");
+  const runtime = production(join(ENGINE, "team/runtime.rs"));
+  const worded = runtime.match(/const WALK_TOO_LONG_PROBLEM: &str = "((?:[^"\\]|\\\n)*)";/);
+  assert.ok(worded, "the team start line words the refusal");
+  assert.equal(sentence, `${worded[1].replace(/\\\n\s*/g, "")}.`, "the desktop and the team panels give the same sentence");
+});
