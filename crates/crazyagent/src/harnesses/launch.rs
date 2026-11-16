@@ -606,11 +606,17 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
 /// Routes a launch of a listed harness on a ChatGPT sign-in through a ChatGPT relay on
 /// 127.0.0.1: the relay holds the sign-in's access token in engine memory and forwards
 /// only Responses requests to the ChatGPT backend, and the returned request names the
-/// relay's base URL and a random placeholder instead. Codex and Claude Code keep their own
-/// sign-in paths. Inputs: the request bound to the sign-in's home, the harness and the
-/// sign-in source. Output: the request to launch and the relay, which must live as long as
-/// the agent; `launch_chatgpt_unsupported` for an own adapter, a harness that does not list
-/// `openai-responses` or a request not bound to a sign-in.
+/// relay's base URL and a random placeholder instead. The launch runs in the harness's own
+/// private home made in the agent's home, never in the sign-in's managed home, where the
+/// engine hands Codex the sign-in's own copy, and its sandbox is made after routing, for
+/// that home. Codex and Claude Code keep their own sign-in paths. Inputs: the request bound
+/// to the sign-in, with no sandbox profile yet, the harness, the stored sign-in, the
+/// agent's own 0700 home and the sign-in source. Output: the request to launch and the
+/// relay, which must live as long as the agent; `launch_chatgpt_unsupported` for an own
+/// adapter, a harness that does not list `openai-responses`, another account or a request
+/// not bound to a sign-in, `launch_chatgpt_sandbox_premade` for a request that already
+/// carries a sandbox profile, `launch_account_home_holds_sign_in` where a sign-in's record
+/// lies, or the private home's refusal.
 pub fn route_chatgpt(
     mut request: LaunchRequest,
     harness: &super::registry::Harness,
@@ -618,15 +624,17 @@ pub fn route_chatgpt(
     base: &Path,
     source: std::sync::Arc<crate::model_gateway::relay::chatgpt::ChatGptSource>,
 ) -> Result<(LaunchRequest, Relay), LaunchError> {
-    let _ = (connection, base);
-    let home = match &request.account {
-        AccountBinding::Subscription { home }
-            if harness.takes_chatgpt_sign_in() && harness.named(&request.harness) =>
-        {
-            home.clone()
-        }
-        _ => return Err(failure("launch_chatgpt_unsupported")),
-    };
+    let routed = matches!(request.account, AccountBinding::Subscription { .. })
+        && harness.takes_chatgpt_sign_in()
+        && harness.named(&request.harness)
+        && super::registry::is_chatgpt_sign_in(connection);
+    if !routed {
+        return Err(failure("launch_chatgpt_unsupported"));
+    }
+    if request.sandbox_profile.is_some() {
+        return Err(failure("launch_chatgpt_sandbox_premade"));
+    }
+    let home = chatgpt_home(base, harness, &connection.id)?;
     let relay = Relay::start_chatgpt(source).map_err(|error| LaunchError(error.0, None))?;
     request.account = AccountBinding::Url {
         home,
@@ -634,6 +642,7 @@ pub fn route_chatgpt(
         key: Some(Secret::new(relay.token().to_owned())?),
     };
     assert!(relay.is_chatgpt());
+    assert!(request.account.home().starts_with(base));
     assert!(
         request
             .account
@@ -641,6 +650,50 @@ pub fn route_chatgpt(
             .is_some_and(|key| is_placeholder(key.reveal()))
     );
     Ok((request, relay))
+}
+
+/// Makes the private home a ChatGPT launch runs in, `<agent home>/<harness id>/<account>`
+/// (T18), refusing an agent home or a private home that holds a sign-in's record.
+/// Inputs: the agent's own 0700 home, the harness and the account. Output: the home,
+/// `launch_account_home_holds_sign_in`, or the private home's refusal.
+#[cfg(unix)]
+fn chatgpt_home(
+    base: &Path,
+    harness: &super::registry::Harness,
+    account: &crate::protocol::CredentialRef,
+) -> Result<PathBuf, LaunchError> {
+    holds_no_sign_in(base)?;
+    let home = super::home::private_home(base, &harness.manifest().id, account)?;
+    holds_no_sign_in(&home)?;
+    Ok(home)
+}
+
+/// Refuses a private home where its Unix owner and 0700 mode cannot be checked. Inputs:
+/// unused. Output: `launch_account_home_unavailable`.
+#[cfg(not(unix))]
+fn chatgpt_home(
+    base: &Path,
+    harness: &super::registry::Harness,
+    account: &crate::protocol::CredentialRef,
+) -> Result<PathBuf, LaunchError> {
+    let _ = (base, harness, account);
+    Err(failure("launch_account_home_unavailable"))
+}
+
+/// Refuses a folder that holds a native sign-in's own record, Codex's or Claude Code's,
+/// as a file, a link or anything else, so a listed harness never runs where it could read
+/// a sign-in's tokens. Input: the folder. Output: Ok, or
+/// `launch_account_home_holds_sign_in`, also when the folder cannot be looked into.
+#[cfg(unix)]
+fn holds_no_sign_in(folder: &Path) -> Result<(), LaunchError> {
+    use crate::engine::bootstrap::{CLAUDE_RECORD, CODEX_RECORD};
+    for record in [CODEX_RECORD, CLAUDE_RECORD] {
+        match std::fs::symlink_metadata(folder.join(record)) {
+            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(failure("launch_account_home_holds_sign_in")),
+        }
+    }
+    Ok(())
 }
 
 /// Builds the exact command a launch would spawn, without spawning it.

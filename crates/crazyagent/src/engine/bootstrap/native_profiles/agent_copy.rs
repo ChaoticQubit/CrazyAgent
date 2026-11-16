@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-pub(super) const CODEX_RECORD: &str = "auth.json";
-pub(super) const CLAUDE_RECORD: &str = ".credentials.json";
+pub(crate) const CODEX_RECORD: &str = "auth.json";
+pub(crate) const CLAUDE_RECORD: &str = ".credentials.json";
 const RECORD_BYTES_MAX: u64 = 65_536;
 const USABLE_MIN: Duration = Duration::from_secs(60);
 
