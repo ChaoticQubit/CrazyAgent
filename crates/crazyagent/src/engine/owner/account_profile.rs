@@ -19,8 +19,16 @@ impl AccountSecret {
         Ok(Self(bytes))
     }
 
-    pub(in crate::engine) fn into_bytes(self) -> Vec<u8> {
-        self.0
+    pub(in crate::engine) fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
+
+    fn wipe(&mut self) {}
+}
+
+impl Drop for AccountSecret {
+    fn drop(&mut self) {
+        self.wipe();
     }
 }
 
