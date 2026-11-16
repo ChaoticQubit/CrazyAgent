@@ -11,6 +11,17 @@ function handClock(start) {
   return { waits, clock: { now: () => time, wait: async (ms) => { waits.push(ms); time += ms; } } };
 }
 
+/** The System Events key lines in an ide-window source that do not go through realKey: every
+ * `keystroke`, `key code`, `key down` or `key up`, in any case and any quote, that does not open a
+ * realKey call's first argument, with block comments left out. Input: the source. Output: the
+ * offending snippets, empty when every key goes through realKey. */
+function keysPastRealKey(source) {
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, "");
+  return [...code.matchAll(/\b(?:keystroke|key\s+(?:code|down|up))\b/gi)]
+    .filter((key) => !/realKey\(\s*[`"']$/.test(code.slice(Math.max(0, key.index - 40), key.index)))
+    .map((key) => code.slice(Math.max(0, key.index - 40), key.index + 20));
+}
+
 test("a page plan ends at its latest step plus the settle time, whatever order its rows come in, so the next row waits out a plan its failed row left running", () => {
   const plan = [[0, "go", "#/projects/a/ide"], [232, "note", "closed"], [90, "note", "open"]];
   assert.equal(planEnd(plan, 1_000, 5), 1_000 + 237_000);
@@ -58,6 +69,29 @@ test("every ide-window row that sends a real System Events key is a keysIt row, 
     assert.ok(row.startsWith("keysIt("), `"${title}" is a keysIt row`);
   }
   for (const row of rows) assert.equal(/\b(?:realKey|commandKey)\(/.test(row), row.startsWith("keysIt("), row.slice(0, 120));
-  assert.doesNotMatch(source, /onApp\(`(?:keystroke|key code)/, "a key sent past realKey reaches whichever app is in front");
+  assert.deepEqual(keysPastRealKey(source), [], "a key sent past realKey reaches whichever app is in front");
   assert.match(source, /const REAL_KEYS = process\.platform !== "darwin" \|\| process\.env\.E2E_REAL_KEYS === "1";/);
+});
+
+test("the realKey guard catches a key line in any quote and a direct osascript keystroke, and passes realKey's own lines (IDE-WINDOW-GUARD-REGEX)", () => {
+  const past = [
+    "onApp(`keystroke \"n\" using command down`);",
+    "onApp(\"keystroke return\");",
+    "onApp('key code 36');",
+    "onApp(\"Keystroke \\\"w\\\" using command down\");",
+    "spawnSync(\"/usr/bin/osascript\", [\"-e\", 'tell application \"System Events\" to keystroke \"q\" using command down']);",
+    "const line = `key  code 53`;\n  onApp(line);",
+    "onApp(\"key down command\");",
+    "onApp('Key Up command');",
+  ];
+  for (const sample of past) assert.notDeepEqual(keysPastRealKey(sample), [], `caught: ${sample}`);
+  const through = [
+    "await realKey(`keystroke \"${key}\" using command down`);",
+    "await realKey(\"key code 36\");",
+    "await realKey('keystroke \"x\"');",
+    "await realKey(\"key down command\");",
+    "/** Sends one real System Events keystroke line through realKey. */\nfunction realKey(line) { onApp(line); }",
+    "onApp(\"set frontmost to true\");",
+  ];
+  for (const sample of through) assert.deepEqual(keysPastRealKey(sample), [], `passed: ${sample}`);
 });
