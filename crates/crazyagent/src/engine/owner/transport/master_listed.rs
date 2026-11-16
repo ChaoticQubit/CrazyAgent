@@ -7,7 +7,7 @@ use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::credentials::SecretString;
 use crate::engine::claude_host::MasterTools;
 use crate::harnesses::accounts::Handover;
-use crate::harnesses::launch::{LaunchError, LaunchEvent, LaunchRequest, listed_command};
+use crate::harnesses::launch::{LaunchError, LaunchEvent, LaunchRequest, Session, listed_command};
 use crate::harnesses::registry::Harness;
 use crate::launch_context::EngineServer;
 use crate::model_gateway::relay::Relay;
@@ -228,4 +228,17 @@ pub(super) fn collect(collected: &mut Collected, event: LaunchEvent) {
     };
     collected.ended = ended;
     assert!(collected.text.len() <= GATHERED_BYTES_MAX);
+}
+
+/// Drives one listed master turn on its running harness: sends the prompt, then folds every
+/// event until the turn ends, asking the harness once to stop the turn when `stop` says so.
+/// Inputs: the session, the prompt and the stop check. Output: what the turn gathered, with
+/// its end set, or the session's refusal code.
+pub(super) fn drive(
+    session: &mut Session,
+    prompt: &str,
+    stop: &dyn Fn() -> bool,
+) -> Result<Collected, EngineError> {
+    let _ = (session, prompt, stop);
+    Ok(Collected::default())
 }

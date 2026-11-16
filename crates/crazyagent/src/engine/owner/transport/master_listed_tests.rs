@@ -124,6 +124,8 @@ mod launch {
     const SENTINEL: &str = "sk-listed-master-saved-key-0123456789abcdef";
     const STANDIN: &str = include_str!("../../../../tests/fixtures/harness/standin-acp.yaml");
     const URL: &str = "http://127.0.0.1:9/v1";
+    const STANDIN_SH: &str = include_str!("../../../../tests/fixtures/harness/standin.sh");
+    const SESSION: &str = "sess-listed";
 
     /// The stand-in ACP master a test build's registry finds. Output: the harness.
     fn standin() -> &'static Harness {
@@ -302,6 +304,50 @@ mod launch {
         })
     }
 
+    /// One ACP session update line the stand-in prints. Input: the update. Output: the line.
+    fn update(update: serde_json::Value) -> String {
+        let params = serde_json::json!({"sessionId": SESSION, "update": update});
+        serde_json::json!({"jsonrpc": "2.0", "method": "session/update", "params": params})
+            .to_string()
+    }
+
+    /// The line of one reply chunk the stand-in streams. Input: the text. Output: the line.
+    fn chunk(text: &str) -> String {
+        let content = serde_json::json!({"type": "text", "text": text});
+        let part = serde_json::json!({"sessionUpdate": "agent_message_chunk", "content": content});
+        update(part)
+    }
+
+    /// The line of a usage update, which gives an ACP turn no tokens. Output: the line.
+    fn usage() -> String {
+        let used = serde_json::json!({"sessionUpdate": "usage_update", "used": 12, "size": 900});
+        update(used)
+    }
+
+    /// Makes one turn's program the stand-in and gives it its session id and the lines its
+    /// first turn prints, in its state folder below the private home. Inputs: the turn and
+    /// the lines.
+    fn script(turn: &Turn, lines: &[String]) {
+        std::fs::write(&turn.request.executable, STANDIN_SH).unwrap();
+        let state = turn.request.account.home().join("standin");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::write(state.join("session-id"), SESSION).unwrap();
+        let out: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        std::fs::write(state.join("turn-1.out"), out).unwrap();
+    }
+
+    /// Starts one keyless tools-off turn's stand-in from the command its listed launch built.
+    /// Input: the turn, whose request the session takes. Output: the running session, the
+    /// stand-in's state folder and the turn folder, kept while the session runs.
+    fn started(turn: Turn) -> (Session, PathBuf, tempfile::TempDir) {
+        let (handover, relay) = hand_over(standin(), &connection(false), None).unwrap();
+        let launch = launched(standin(), &turn, &handover).unwrap();
+        let state = turn.request.account.home().join("standin");
+        let session = Session::start_listed(turn.request, launch.command, relay, &launch.servers);
+        assert!(session.is_ok(), "{:?}", session.as_ref().err());
+        (session.unwrap(), state, turn.folder)
+    }
+
     /// DEC-180 Task 20 M2 (rv-sa241 ruling t20-q1, conditions 2 to 4 and 6): a keyed listed
     /// master's harness gets a relay started from its own connection, fresh for each start,
     /// and holds that relay's token in the one name its manifest lists, never the saved key;
@@ -469,5 +515,47 @@ mod launch {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), STARTUP);
         let mode = std::fs::metadata(&file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// DEC-180 Task 20 M1: a stand-in ACP master started from its listed launch answers one
+    /// prompt: the prompt reaches it in its ACP prompt, and its session id, its reply and its
+    /// turn end reach what the turn gathered; its usage update gives no tokens, so the turn's
+    /// usage reads not reported.
+    #[test]
+    fn a_listed_master_turn_drives_its_harness_to_the_reply() {
+        let turn = turn(false);
+        script(&turn, &[chunk("hi"), usage()]);
+        let (mut session, state, _folder) = started(turn);
+        let driven = drive(&mut session, "say hi", &|| false);
+        assert!(driven.is_ok(), "{:?}", driven.as_ref().err());
+        let collected = driven.unwrap();
+        assert_eq!(collected.session.as_deref(), Some(SESSION));
+        assert_eq!(collected.text, "hi");
+        assert_eq!(collected.tokens, None);
+        assert_eq!(collected.ended, Some(Ok(())));
+        assert!(session.stop().is_ok());
+        let sent = std::fs::read_to_string(state.join("stdin-1")).unwrap();
+        let prompted = |line: &str| line.contains("session/prompt") && line.contains("say hi");
+        assert!(sent.lines().any(prompted));
+    }
+
+    /// DEC-180 Task 20 M6: a stop while the stand-in works on its turn asks it to cancel the
+    /// turn through ACP, once, and the turn ends cancelled with the text streamed before the
+    /// stop and nothing after it.
+    #[test]
+    fn a_listed_master_turn_stopped_mid_turn_ends_cancelled() {
+        let turn = turn(false);
+        let lines = [chunk("hi"), "@standin wait".into(), chunk("never")];
+        script(&turn, &lines);
+        let (mut session, state, _folder) = started(turn);
+        let working = || state.join("turns").exists();
+        let driven = drive(&mut session, "stop me", &working);
+        assert!(driven.is_ok(), "{:?}", driven.as_ref().err());
+        let collected = driven.unwrap();
+        assert_eq!(collected.text, "hi");
+        assert_eq!(collected.ended, Some(Err(CANCELLED)));
+        assert!(session.stop().is_ok());
+        let sent = std::fs::read_to_string(state.join("stdin-1")).unwrap();
+        assert_eq!(sent.matches("session/cancel").count(), 1);
     }
 }
