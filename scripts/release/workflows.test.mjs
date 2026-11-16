@@ -68,14 +68,20 @@ function sharedLines(text) {
 }
 
 /**
+ * Matches workflow text that reads a secret, in any form GitHub expands: `secrets.NAME`,
+ * `secrets['NAME']`, a whole-context call such as `toJSON(secrets)`, or the bare context.
+ */
+const SECRET = /secrets\./;
+
+/**
  * Names the jobs of a workflow that read a secret, hand secrets to a called workflow or bind an
  * environment, whatever the file or job; a secret outside `jobs:` reaches every job. Input: the
  * workflow text. Output: the job names in file order.
  */
 function exposedJobs(text) {
   const jobs = jobsOf(text);
-  const shared = sharedLines(text).some((line) => line.includes("secrets."));
-  return jobs.filter(({ lines }) => shared || lines.some((line) => line.includes("secrets.") || /^ {4}(environment|secrets):/.test(line))).map(({ name }) => name);
+  const shared = sharedLines(text).some((line) => SECRET.test(line));
+  return jobs.filter(({ lines }) => shared || lines.some((line) => SECRET.test(line) || /^ {4}(environment|secrets):/.test(line))).map(({ name }) => name);
 }
 
 /**
@@ -118,7 +124,7 @@ test("CI runs for pull requests and as a reusable workflow; a pull request cance
     "  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.ref, github.sha) }}",
     "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
   ]);
-  assert.doesNotMatch(ci, /secrets\./);
+  assert.doesNotMatch(ci, SECRET);
 });
 
 test("a stable release ships only from a v* tag on a commit that master already holds", async () => {
@@ -139,7 +145,7 @@ test("signing secrets reach only the build job, which is bound to the release en
   const build = block(jobs, 2, "build");
   assert(build.includes("    environment: release"), "build runs in the release environment");
   assert.deepEqual(exposedJobs(release), ["build"], "every other job reads no secret and needs no environment");
-  assert(release.split("\n").filter((line) => line.includes("secrets.")).length > 0);
+  assert(release.split("\n").filter((line) => SECRET.test(line)).length > 0);
 });
 
 test("every release, dev or stable, builds only after the whole CI workflow passes, and CI gets no secrets", async () => {
@@ -657,7 +663,7 @@ test("macOS release signing keeps the certificate in a job keychain under RUNNER
   assert.match(cleanup, /keychain="\$\(cd "\$RUNNER_TEMP" && pwd -P\)\/crazyagent-signing\.keychain-db"/);
   assert.match(cleanup, /rm -rf "\$RUNNER_TEMP\/apple"/);
   assert.match(cleanup, /security delete-keychain "\$keychain"/);
-  assert.doesNotMatch(cleanup, /secrets\./);
+  assert.doesNotMatch(cleanup, SECRET);
   const edits = /security_line "create-keychain|security delete-keychain|security list-keychains -d user -s/;
   for (const [step, expected] of [[build, ["create-keychain", "list-keychains -d user -s"]], [cleanup, ["delete-keychain", "list-keychains -d user -s"]]]) {
     assert.match(step, /keychain_lock\(\) \{\n\s+exec 9>> "\$HOME\/\.crazyagent-keychain\.lock"\n\s+perl -MFcntl=:flock -e '[^'\n]*for \(1 \.\. 120\) \{ exit 0 if flock\(\$lock, LOCK_EX \| LOCK_NB\); sleep 1 \} exit 1' \|\|/);
@@ -1121,4 +1127,36 @@ test("a run block line that starts with # is script text GitHub still expands, s
   ].join("\n");
   assert.deepEqual(exposedJobs(scripted), ["publish"]);
   assert.deepEqual(runnerProblems(scripted), []);
+});
+
+test("the secret guard reads every form of the secrets context, an index, a whole-context call and the bare context, in a job or workflow-wide (B17)", () => {
+  for (const line of ["${{ secrets.TOKEN }}", "${{ secrets['TOKEN'] }}", '${{ secrets["TOKEN"] }}', "${{ toJSON(secrets) }}", "${{ secrets }}", "${{ format('{0}', secrets) }}"]) {
+    assert.match(line, SECRET, line);
+  }
+  const indexed = [
+    "jobs:",
+    "  lint:",
+    "    runs-on: ubuntu-22.04",
+    "    steps:",
+    "      - run: echo ${{ secrets['TOKEN'] }}",
+    "  dump:",
+    "    runs-on: ubuntu-22.04",
+    "    steps:",
+    "      - run: echo '${{ toJSON(secrets) }}'",
+    "  plain:",
+    "    runs-on: ubuntu-22.04",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(indexed), ["lint", "dump"]);
+  const inherited = [
+    "env:",
+    "  ALL: ${{ toJSON(secrets) }}",
+    "jobs:",
+    "  lint:",
+    "    runs-on: ubuntu-22.04",
+    "  test:",
+    "    runs-on: ubuntu-22.04",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(inherited), ["lint", "test"]);
 });
