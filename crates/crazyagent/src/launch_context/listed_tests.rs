@@ -203,11 +203,12 @@ fn a_listed_launch_refuses_a_manifest_whose_blocks_do_not_read_and_writes_nothin
     assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
 }
 
-/// T18 r2 F3 (rv-code4 A4): a team agent's launch carries project instruction files only
-/// the Codex and Claude Code homes know where to put, so a listed harness refuses it with
-/// `launch_harness_unsupported` and writes nothing into the private home.
+/// T18 r2 F3 (rv-code4 A4), under fix8 Q12 A: a team agent's owner text now goes into the
+/// listed harness's instruction file, but its hooks have nowhere to go, so a tools-on team
+/// agent whose project turned hooks on is refused before anything is written into the
+/// private home.
 #[test]
-fn a_team_agent_launch_of_a_listed_harness_is_refused_and_writes_nothing() {
+fn a_team_agent_launch_of_a_listed_harness_refused_for_its_hooks_writes_nothing() {
     let (_folder, home) = private_home();
     let project = tempfile::tempdir().unwrap();
     let mut context = context();
@@ -219,7 +220,14 @@ fn a_team_agent_launch_of_a_listed_harness_is_refused_and_writes_nothing() {
             mode: crate::instruction_files::Mode::Both,
             repeated: crate::agent_home::Repeated::LeaveOut,
         },
-        hooks: Vec::new(),
+        hooks: vec![EffectiveHook {
+            plugin: "guard".into(),
+            event: "PreToolUse".into(),
+            matcher: None,
+            command: "/usr/bin/true".into(),
+            timeout: None,
+            folder: PathBuf::from("/missing-hook-folder"),
+        }],
         agent: String::new(),
     }));
 
@@ -227,7 +235,7 @@ fn a_team_agent_launch_of_a_listed_harness_is_refused_and_writes_nothing() {
 
     assert_eq!(
         refused.err().map(|problem| problem.0),
-        Some("launch_harness_unsupported".to_owned())
+        Some("launch_listed_hooks_unsupported".to_owned())
     );
     assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
 }

@@ -9702,10 +9702,14 @@ impl TeamRuntime {
             terminal_display,
             task_start,
         };
+        let listed = matches!(kind, Some(crate::coord::settings::HarnessKind::Listed(_)));
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
                 account: AccountBinding::Url {
-                    home,
+                    home: match listed {
+                        true => listed_home(&home, launch, &account.connection)?,
+                        false => home,
+                    },
                     base_url: relay_url.unwrap_or_else(|| base_url.clone()),
                     key: relay_token,
                 },
@@ -14002,6 +14006,21 @@ pub fn agent_home(state: &Path, id: i64) -> PathBuf {
         .join("agents")
         .join(format!("agent-{id}"))
         .join("home")
+}
+
+/// The private home a team agent of a listed harness runs in on one account (T18 LEAD-1),
+/// `<agent home>/<harness id>/<account>`, made 0700 through no-follow steps inside the agent
+/// home its sandbox allows. Inputs: the agent home, the launch harness and the account.
+/// Output: the home, or the owner line with the private home's refusal code.
+fn listed_home(own: &Path, launch: &str, account: &CredentialRef) -> Result<PathBuf, String> {
+    let home = crate::harnesses::home::prepare(own, launch, account).map_err(|error| {
+        with_code(
+            "the agent's private harness home could not be made",
+            Some(&error.0),
+        )
+    })?;
+    assert!(home.starts_with(own) && home != own);
+    Ok(home)
 }
 
 /// The most bytes of a worktree's `.gitignore` read to see whether it ignores the graph.

@@ -1068,30 +1068,34 @@ impl AgentContext {
     }
 
     /// Writes this context into one agent's private home for one launch of `harness`.
-    /// Input: a harness id or alias whose manifest names the Codex, Claude Code, ACP,
-    /// jsonl-turn or text-turn driver ([`drivers::piped`]), else `launch_harness_unsupported`,
-    /// a harness of the last three written as its manifest asks ([`Self::install_listed`]),
-    /// the agent's 0700 home (its CODEX_HOME, CLAUDE_CONFIG_DIR or private home) and the
-    /// tools switch; with tools off no skill or MCP server is given. On macOS the files hold
-    /// the agent's own `getconf` ([`crate::sandbox::toolchains::write_getconf`]). Output: the
-    /// guard holding the files and the harness arguments, or `launch_home_busy` while another
-    /// launch uses the home.
+    /// Input: a harness id or alias, the agent's 0700 home (its CODEX_HOME,
+    /// CLAUDE_CONFIG_DIR or private home) and the tools switch; with tools off no skill or
+    /// MCP server is given. Codex and Claude Code are written as their drivers read them;
+    /// any other harness the registry lists, with no piped driver or the ACP, jsonl-turn or
+    /// text-turn one, as its manifest asks ([`Self::install_listed`]); the rcli and
+    /// jsonl-rpc drivers and an unknown harness get `launch_harness_unsupported`. On macOS
+    /// the files hold the agent's own `getconf`
+    /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
+    /// and the harness arguments, or `launch_home_busy` while another launch uses the home.
     pub fn install(
         &self,
         harness: &str,
         home: &Path,
         tools: bool,
     ) -> Result<Installed, LaunchError> {
-        let codex = match drivers::piped(harness)? {
-            Piped::Codex => true,
-            Piped::Claude => false,
-            Piped::Acp | Piped::JsonlTurn | Piped::TextTurn => {
-                let listed = crate::harnesses::registry::registry()
-                    .get(harness)
-                    .ok_or_else(|| failure("launch_harness_unsupported"))?;
+        use crate::harnesses::manifest::DriverKind;
+        let listed = crate::harnesses::registry::registry()
+            .get(harness)
+            .ok_or_else(|| failure("launch_harness_unsupported"))?;
+        let codex = match listed.manifest().piped {
+            Some(DriverKind::CodexAppServer) => true,
+            Some(DriverKind::ClaudeStreamJson) => false,
+            Some(DriverKind::Rcli | DriverKind::JsonlRpc) => {
+                return Err(failure("launch_harness_unsupported"));
+            }
+            Some(DriverKind::Acp | DriverKind::JsonlTurn | DriverKind::TextTurn) | None => {
                 return self.install_listed(listed.manifest(), home, tools);
             }
-            Piped::JsonlRpc => return Err(failure("launch_harness_unsupported")),
         };
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
@@ -1124,14 +1128,7 @@ impl AgentContext {
                 let harness = crate::harnesses::spec(harness)
                     .and_then(|spec| crate::agent_home::Harness::from_id(spec.id))
                     .ok_or_else(|| failure("launch_harness_unsupported"))?;
-                let mut given = crate::agent_home::text(&process.project)
-                    .map_err(|problem| LaunchError(problem.0, None))?;
-                assert!(given.section_bytes <= given.text.len());
-                let section = given.text.split_off(given.text.len() - given.section_bytes);
-                given.text =
-                    crate::agent_home::with_agent(std::mem::take(&mut given.text), &process.agent);
-                given.text.push_str(&section);
-                assert!(given.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
+                let given = process_text(process)?;
                 crate::agent_home::prepare(home, harness, &process.project, &given)
                     .map_err(|problem| LaunchError(problem.0, None))?;
                 given
@@ -1339,24 +1336,23 @@ impl AgentContext {
     }
 
     /// Writes this context into one private home for one launch of a listed harness, as its
-    /// manifest asks: the MCP servers and the instruction text into the files its `mcp` and
-    /// `instructions` blocks name, and the environment its `home` block sets, on the guard.
+    /// manifest asks: the MCP servers and the instruction text ([`Self::listed_instructions`],
+    /// with a team agent's owner text) into the files its `mcp` and `instructions` blocks
+    /// name, and the environment its `home` block sets, on the guard.
     /// Inputs: the manifest, the private home ([`crate::harnesses::home::prepare`]) and the
     /// tools switch; with tools off the MCP file holds no server, a server with any tool the
     /// owner switched off is left out whole, as the file cannot switch off one tool, and an
     /// ACP harness's file leaves out the engine's own servers, which its session opens with.
     /// Output: the guard that deletes those files, `launch_manifest_invalid` for blocks that
-    /// do not read, `launch_harness_unsupported` for a team agent's project files, or
-    /// `launch_home_busy`.
+    /// do not read, `launch_listed_hooks_unsupported` for a tools-on team agent whose project
+    /// turned hooks on, or `launch_home_busy`.
     pub fn install_listed(
         &self,
         manifest: &crate::harnesses::manifest::Manifest,
         home: &Path,
         tools: bool,
     ) -> Result<Installed, LaunchError> {
-        if self.process.is_some() {
-            return Err(failure("launch_harness_unsupported"));
-        }
+        let instructions = self.listed_instructions(tools)?;
         let invalid = |_: crate::harnesses::manifest::Refused| failure("launch_manifest_invalid");
         let renders = crate::harnesses::render::read(manifest).map_err(invalid)?;
         let asked = crate::harnesses::home::read(manifest).map_err(invalid)?;
@@ -1404,10 +1400,54 @@ impl AgentContext {
                     .iter()
                     .any(|(name, off)| *name == server.name && !off.is_empty())
         });
-        let written = crate::harnesses::render::write(&renders, home, servers, &self.instructions)?;
+        let written = crate::harnesses::render::write(&renders, home, servers, &instructions)?;
         assert_eq!(written.len(), count);
         Ok(installed)
     }
+
+    /// The text a listed harness's `instructions` render gets: this context's startup
+    /// instruction, then for a team agent the owner's app and project text with the owner's
+    /// text for this agent, as a native agent's instruction file holds them. A listed harness
+    /// runs no hooks, so a tools-on team agent whose project turned hooks on is refused, never
+    /// started with them dropped. Input: the tools switch. Output: the text,
+    /// `launch_listed_hooks_unsupported`, or the owner text's read failure.
+    fn listed_instructions(&self, tools: bool) -> Result<String, LaunchError> {
+        let Some(process) = &self.process else {
+            return Ok(self.instructions.clone());
+        };
+        if tools && !process.hooks.is_empty() {
+            return Err(failure("launch_listed_hooks_unsupported"));
+        }
+        let given = process_text(process)?;
+        let mut text = self.instructions.clone();
+        if !given.text.is_empty() {
+            if !text.is_empty() {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push('\n');
+            }
+            text.push_str(&given.text);
+        }
+        assert!(text.starts_with(self.instructions.as_str()));
+        assert!(text.len() <= self.instructions.len() + 2 + crate::agent_home::PROCESS_BYTES_MAX);
+        Ok(text)
+    }
+}
+
+/// The owner's text one team agent is given: the app and project instructions, with the
+/// owner's text for this agent before their instruction files section. Input: the agent's
+/// project and text. Output: the text, at most [`crate::agent_home::PROCESS_BYTES_MAX`]
+/// bytes, or the read failure.
+fn process_text(process: &Process) -> Result<crate::agent_home::Given, LaunchError> {
+    let mut given = crate::agent_home::text(&process.project)
+        .map_err(|problem| LaunchError(problem.0, None))?;
+    assert!(given.section_bytes <= given.text.len());
+    let section = given.text.split_off(given.text.len() - given.section_bytes);
+    given.text = crate::agent_home::with_agent(std::mem::take(&mut given.text), &process.agent);
+    given.text.push_str(&section);
+    assert!(given.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
+    Ok(given)
 }
 
 /// The engine's own server as an ACP session takes it: one `AgentContext` marked as its
