@@ -328,7 +328,18 @@ const WEBDRIVER_KEYS = { "\uE000": "Release", "\uE003": "Backspace", "\uE004": "
 const MODIFIERS = { Shift: "shiftKey", Control: "ctrlKey", Alt: "altKey", Meta: "metaKey" };
 const TERMINAL_BYTES = { Backspace: "\u007f", Tab: "\t", Escape: "\u001b", Enter: "\r" };
 const KEY_GAP_MS = 60;
+const WEBDRIVER_META = ["", ""];
 const typingInstalled = new WeakSet();
+
+/** Why browser.keys never sends a key sequence on this system, or null when it may. A sequence
+ * holding Meta (Cmd, U+E03D or U+E053) is refused on macOS before any key goes out, as browser.mjs
+ * refuses a DevTools Cmd key: test Cmd keys opened About This Mac on the owner's screen
+ * (ABOUT-THIS-MAC). Inputs: what browser.keys was given and the platform. Output: the reason. */
+export function refusedKeys(value, platform = process.platform) {
+  const parts = Array.isArray(value) ? value : [value];
+  if (platform !== "darwin" || !parts.some((part) => typeof part === "string" && WEBDRIVER_META.some((meta) => part.includes(meta)))) return null;
+  return "a WebDriver key sequence with Meta (Cmd) never goes out on macOS (ABOUT-THIS-MAC): dispatch a KeyboardEvent in the page, or run the row on Linux";
+}
 
 /** Turns what browser.keys was given into what the kit sends to a terminal: runs of typed
  * text with Control+letter as its control byte, Enter as a carriage return of its own, so a
@@ -418,12 +429,14 @@ export function pasteTerminal(text, scope = globalThis) {
 /** Routes browser.keys into a focused terminal through terminalKeys and sendTerminal, since
  * the WebDriver plugin's key actions type some characters twice and drop Shift from Enter
  * there (tauri-plugin-wdio-webdriver 1.5.0 executor.rs:1505, 1572-1592, 1310-1311 and 1477).
- * Keys sent anywhere else still go through WebDriver. Installs once per browser. Input: the
- * browser. */
+ * Keys sent anywhere else still go through WebDriver. A sequence refusedKeys names fails first,
+ * wherever the focus is. Installs once per browser. Input: the browser. */
 export function terminalTyping(browser) {
   if (typingInstalled.has(browser)) return;
   typingInstalled.add(browser);
   browser.overwriteCommand("keys", async function keys(webdriverKeys, value) {
+    const refused = refusedKeys(value);
+    if (refused !== null) throw new Error(`browser.keys: ${refused}`);
     const focused = await browser.execute(() => document.activeElement?.classList?.contains("xterm-helper-textarea") === true);
     if (!focused) return webdriverKeys(value);
     for (const [at, event] of terminalKeys(value).entries()) {
