@@ -98,6 +98,7 @@ fn sensors(power: PowerSource, battery_pct: Option<u8>) -> Sensors {
         battery_unread_twice: false,
         heat: Heat::Nominal,
         lid_closed: Some(false),
+        external_display: Some(false),
         lid_support: LidSupport::Held,
     }
 }
@@ -1102,4 +1103,55 @@ mod with_a_real_hold {
         assert_eq!(view.state.ended, None);
         keeper.release();
     }
+}
+
+/// fix5 QUESTION-01:45 A, leader 01:45 (KA-ED decides the Mac's reading): Freeze and Mute
+/// cover a closed lid only while no external display is in use. At a desk nothing is
+/// covered, unplugging the display covers, plugging it in again uncovers, an unread display
+/// covers as before, and an open lid or a hold that does not want the lid never covers.
+#[test]
+fn freeze_and_mute_cover_a_closed_lid_only_without_an_external_display() {
+    let cover = freeze::Cover {
+        freeze: true,
+        mute: true,
+        apps: vec![FreezeApp {
+            name: "Notes".into(),
+            id: "com.example.notes".into(),
+        }],
+    };
+    let read = |lid_closed: Option<bool>, external_display: Option<bool>| Sensors {
+        lid_closed,
+        external_display,
+        ..sensors(PowerSource::Ac, Some(80))
+    };
+    let desk = read(Some(true), Some(true));
+    let away = read(Some(true), Some(false));
+    let unread = read(Some(true), None);
+    let open = read(Some(false), Some(false));
+
+    assert_eq!(lid_cover(true, Some(&desk), cover.clone()), None, "at a desk");
+    assert_eq!(
+        lid_cover(true, Some(&away), cover.clone()),
+        Some(cover.clone()),
+        "the display unplugged"
+    );
+    assert_eq!(
+        lid_cover(true, Some(&desk), cover.clone()),
+        None,
+        "plugged in again"
+    );
+    assert_eq!(
+        lid_cover(true, Some(&unread), cover.clone()),
+        Some(cover.clone()),
+        "an unread display covers as before"
+    );
+    assert_eq!(lid_cover(true, Some(&open), cover.clone()), None);
+    assert_eq!(lid_cover(false, Some(&away), cover.clone()), None);
+    assert_eq!(lid_cover(true, None, cover.clone()), None);
+    let nothing = freeze::Cover {
+        freeze: false,
+        mute: false,
+        apps: Vec::new(),
+    };
+    assert_eq!(lid_cover(true, Some(&away), nothing), None);
 }

@@ -578,6 +578,7 @@ fn the_keeper_keeps_the_lid_through_failed_renewals_while_the_lease_runs() {
         battery_pct: Some(80),
         heat: Heat::Nominal,
         lid_closed: Some(false),
+        external_display: Some(false),
         lid_support: LidSupport::HelperMissing,
     });
     let mut keeper = Keeper::default().with_sensors(reader, Some(lid));

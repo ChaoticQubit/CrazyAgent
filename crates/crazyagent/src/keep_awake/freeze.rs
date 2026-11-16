@@ -3,6 +3,7 @@ use super::mute;
 use crate::engine::EngineError;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -303,20 +304,33 @@ impl Cover {
 pub use lane::Lane;
 
 #[cfg(unix)]
-pub use unix::{boot_session, freeze, identity, pickable, running, thaw};
+pub use unix::{
+    allowed, boot_session, freeze, identity, pickable, running, servers, thaw, thaw_with,
+};
 
 #[cfg(unix)]
 pub(super) use unix::run;
 
 #[cfg(not(unix))]
-pub use other::{boot_session, freeze, identity, pickable, running, thaw};
+pub use other::{
+    allowed, boot_session, freeze, identity, pickable, running, servers, thaw, thaw_with,
+};
 
 /// The engine read of the apps the owner may pick (Task 17): the running apps less every
 /// one that may never be frozen. Output: the apps by name, or why they cannot be listed.
 pub fn choices() -> Result<Vec<FreezeApp>, EngineError> {
     let running = running()?;
     assert!(running.len() <= RUNNING_MAX);
-    pickable(&running, std::process::id())
+    pickable(&running, std::process::id(), &BTreeSet::new())
+}
+
+/// Tells whether a tmux server's command line serves a socket in one of this engine's
+/// socket folders (leader 01:57, until T17b). Inputs: the command line and the folders.
+/// Output: true when it does.
+#[cfg(unix)]
+fn serves(args: &str, folders: &[PathBuf]) -> bool {
+    let _ = (args, folders);
+    false
 }
 
 /// Tells whether an executable may never be frozen: a system program, a desktop shell, or
@@ -343,6 +357,8 @@ fn kept_out(path: &Path, here: Option<&Path>) -> bool {
 mod other {
     use super::{EngineError, FreezeApp, Frozen, Journal, Proc, Running};
     use crate::keep_awake::journal::Entry;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
 
     fn unavailable() -> EngineError {
         EngineError("keep_awake_freeze_unavailable: Not available on Windows".into())
@@ -359,7 +375,12 @@ mod other {
     }
 
     /// Windows has no app freezing. Output: the refusal.
-    pub fn freeze(_journal: &mut Journal, _app: &str, _pid: u32) -> Result<Frozen, EngineError> {
+    pub fn freeze(
+        _journal: &mut Journal,
+        _app: &Running,
+        _engine: u32,
+        _roots: &BTreeSet<u32>,
+    ) -> Result<Frozen, EngineError> {
         Err(unavailable())
     }
 
@@ -369,7 +390,33 @@ mod other {
     }
 
     /// Windows has no app freezing. Output: the refusal.
-    pub fn pickable(_running: &[Running], _engine: u32) -> Result<Vec<FreezeApp>, EngineError> {
+    pub fn thaw_with(
+        _entry: &Entry,
+        _read: impl Fn(&[u32]) -> Result<BTreeMap<u32, Proc>, EngineError>,
+    ) -> Result<(), EngineError> {
+        Err(unavailable())
+    }
+
+    /// Windows has no app freezing. Output: the refusal.
+    pub fn allowed(
+        _running: &[Running],
+        _engine: u32,
+        _roots: &BTreeSet<u32>,
+    ) -> Result<Vec<Running>, EngineError> {
+        Err(unavailable())
+    }
+
+    /// Windows has no app freezing. Output: the refusal.
+    pub fn pickable(
+        _running: &[Running],
+        _engine: u32,
+        _roots: &BTreeSet<u32>,
+    ) -> Result<Vec<FreezeApp>, EngineError> {
+        Err(unavailable())
+    }
+
+    /// Windows has no app freezing. Output: the refusal.
+    pub fn servers(_root: &Path) -> Result<BTreeSet<u32>, EngineError> {
         Err(unavailable())
     }
 
@@ -627,7 +674,15 @@ mod unix {
     /// sends each SIGSTOP once its identity is read again and still matches. Inputs: the
     /// lane journal, the app's name and its main pid. Output: the record journaled, or why
     /// the app was left running.
-    pub fn freeze(journal: &mut Journal, app: &str, pid: u32) -> Result<Frozen, EngineError> {
+    pub fn freeze(
+        journal: &mut Journal,
+        listed: &Running,
+        engine: u32,
+        roots: &BTreeSet<u32>,
+    ) -> Result<Frozen, EngineError> {
+        let _ = (engine, roots);
+        let app = listed.app.name.as_str();
+        let pid = listed.pid;
         assert!(!app.is_empty());
         if pid <= 1 {
             return Err(error("keep_awake_freeze_pid", pid));
@@ -669,6 +724,16 @@ mod unix {
     /// process whose start time and executable, read again just before, still match. Any
     /// other pid is never signalled, and a record of another boot is only forgotten.
     /// Input: a `KIND` entry. Output: Ok when nothing is left to thaw, or why not.
+    pub fn thaw_with(
+        entry: &Entry,
+        read: impl Fn(&[u32]) -> Result<BTreeMap<u32, Proc>, EngineError>,
+    ) -> Result<(), EngineError> {
+        let _ = read;
+        thaw(entry)
+    }
+
+    /// Thaws one journaled app as `thaw_with` does, reading who runs now from the system.
+    /// Input: a `KIND` entry. Output: Ok when nothing is left to thaw, or why not.
     pub fn thaw(entry: &Entry) -> Result<(), EngineError> {
         assert_eq!(entry.kind, KIND);
         let frozen: Frozen = serde_json::from_str(&entry.restore)
@@ -701,7 +766,31 @@ mod unix {
     /// above or below the engine, another user's process, pid 1, a system program or a
     /// desktop shell. Inputs: the listed apps and the engine pid. Output: the pickable apps
     /// by name, one per id, or why the process list cannot be read.
-    pub fn pickable(running: &[Running], engine: u32) -> Result<Vec<FreezeApp>, EngineError> {
+    pub fn allowed(
+        running: &[Running],
+        engine: u32,
+        roots: &BTreeSet<u32>,
+    ) -> Result<Vec<Running>, EngineError> {
+        let _ = (engine, roots);
+        Ok(running.iter().take(RUNNING_MAX).cloned().collect())
+    }
+
+    /// The tmux servers this engine knows (leader 01:57, until T17b). Input: the engine
+    /// root. Output: their pids, or why the process list cannot be read.
+    pub fn servers(root: &std::path::Path) -> Result<BTreeSet<u32>, EngineError> {
+        let _ = root;
+        Ok(BTreeSet::new())
+    }
+
+    /// Keeps the running apps the owner may pick, one per id. Inputs: the listed apps, the
+    /// engine pid and the agent roots. Output: the pickable apps by name, or why the
+    /// process list cannot be read.
+    pub fn pickable(
+        running: &[Running],
+        engine: u32,
+        roots: &BTreeSet<u32>,
+    ) -> Result<Vec<FreezeApp>, EngineError> {
+        let _ = roots;
         assert!(engine > 1);
         let rows = table()?;
         let own = rustix::process::getuid().as_raw();
@@ -1094,6 +1183,12 @@ mod lane {
             let _ = self.orders.send(Order::Uncover);
         }
 
+        /// The kinds of entries the lane could not put back after three tries in a row,
+        /// for the owner's notice; empty once everything is back. Output: the kinds.
+        pub fn stuck(&self) -> Vec<String> {
+            Vec::new()
+        }
+
         /// Asks the lane to undo everything and end, without waiting.
         pub fn finish(&self) {
             let _ = self.orders.send(Order::Stop);
@@ -1184,8 +1279,10 @@ mod lane {
         /// now, not when it was chosen. Input: the chosen apps.
         fn freeze(&mut self, apps: &[FreezeApp]) {
             let engine = self.engine;
-            let listed = super::running()
-                .and_then(|running| super::pickable(&running, engine).map(|ok| (running, ok)));
+            let none = std::collections::BTreeSet::new();
+            let listed = super::running().and_then(|running| {
+                super::pickable(&running, engine, &none).map(|ok| (running, ok))
+            });
             let (running, allowed) = match listed {
                 Ok(listed) => listed,
                 Err(problem) => {
@@ -1202,7 +1299,7 @@ mod lane {
                 let Some(journal) = self.journal() else {
                     return;
                 };
-                match super::freeze(journal, &one.app.name, one.pid) {
+                match super::freeze(journal, one, engine, &none) {
                     Ok(_) => self.frozen.push(one.app.id.clone()),
                     Err(problem) => eprintln!("keep awake freeze: {}", problem.0),
                 }
@@ -1251,3 +1348,6 @@ mod lane {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests;

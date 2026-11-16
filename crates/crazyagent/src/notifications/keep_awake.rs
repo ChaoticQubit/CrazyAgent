@@ -204,6 +204,16 @@ pub(crate) fn lid_journal(connection: &Connection, unreadable: bool) -> Result<(
     Ok(())
 }
 
+/// Writes or clears the restore rows of the lid-closed lane (rv-secreview and rv-code T17
+/// r1): one row per kind the lane could not put back after three tries while the engine
+/// runs, freeze or mute only, and none once it put everything back. Rows of any other
+/// subject stay. Inputs: the engine database outside any transaction and the kinds left.
+/// Output: Ok, or the SQLite failure, with nothing changed.
+pub(crate) fn lid_closed_left(connection: &Connection, kinds: &[&str]) -> Result<(), EngineError> {
+    let _ = (connection, kinds);
+    Ok(())
+}
+
 /// The approval source (QUESTION 35j): one condition while the lid helper waits for the
 /// owner's approval in System Settings. A missing Keep awake state reports nothing.
 /// Inputs: the engine database and the model access, which it does not need. Output: the

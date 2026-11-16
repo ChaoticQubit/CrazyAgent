@@ -1,5 +1,6 @@
 use super::keep_awake::{
-    APPROVAL_TEXT, LID_JOURNAL_TEXT, ended_text, hot_text, left_over, lid_journal,
+    APPROVAL_TEXT, LID_JOURNAL_TEXT, ended_text, hot_text, left_over, lid_closed_left,
+    lid_journal,
 };
 use super::*;
 use crate::config::ModelAccess;
@@ -300,4 +301,45 @@ fn the_approval_notice_shows_while_the_lid_helper_waits_for_approval() {
     reconciled(&mut connection, NOW_MS + 1);
     assert!(approvals(&connection, NoticeFilter::Pending).is_empty());
     assert_eq!(approvals(&connection, NoticeFilter::Done).len(), 1);
+}
+
+/// rv-secreview and rv-code T17 r1: an app or the sound the lid-closed lane could not put
+/// back after three tries gets its own item while the engine runs. The lane's items change
+/// only their own rows: the engine start's undo item and the lid helper item stay, and the
+/// lane's items clear once it put everything back.
+#[test]
+fn the_lid_closed_lane_items_change_only_their_own_rows() {
+    let (_folder, mut connection) = store();
+    let freeze = crate::keep_awake::freeze::KIND;
+    let mute = crate::keep_awake::mute::KIND;
+    lid_journal(&connection, true).unwrap();
+    left_over(&connection, &kinds(&["sleep_disabled"])).unwrap();
+
+    lid_closed_left(&connection, &[freeze, mute]).unwrap();
+    lid_closed_left(&connection, &[freeze, mute]).unwrap();
+
+    reconciled(&mut connection, NOW_MS);
+    let texts: Vec<String> = restores(&connection, NoticeFilter::Pending)
+        .into_iter()
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(texts.len(), 4, "{texts:?}");
+    assert!(texts.iter().any(|text| text.contains("could not start an app again")));
+    assert!(texts.iter().any(|text| text.contains("could not put the sound back")));
+    assert!(texts.iter().any(|text| text == NOT_PUT_BACK));
+    assert!(texts.iter().any(|text| text == LID_JOURNAL_TEXT));
+
+    lid_closed_left(&connection, &[mute]).unwrap();
+    reconciled(&mut connection, NOW_MS + 1);
+    assert_eq!(restores(&connection, NoticeFilter::Pending).len(), 3);
+
+    lid_closed_left(&connection, &[]).unwrap();
+    reconciled(&mut connection, NOW_MS + 2);
+    let texts: Vec<String> = restores(&connection, NoticeFilter::Pending)
+        .into_iter()
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(texts.iter().any(|text| text == NOT_PUT_BACK));
+    assert!(texts.iter().any(|text| text == LID_JOURNAL_TEXT));
 }

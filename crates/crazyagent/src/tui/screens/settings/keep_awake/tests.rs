@@ -114,11 +114,13 @@ fn the_page_lists_the_eleven_settings_in_the_desktops_sections_and_words() {
         "Freeze apps while the lid is closed",
         "[Off]  On for the listed apps",
         "The listed apps pause while a hold runs with the lid closed and go on when the lid opens.",
+        "external",
         "crazyagent keep-awake restore",
         "Apps  None listed. Press a to choose apps.",
         "Mute audio while the lid is closed",
         "[Off]  On",
         "The sound goes off while a hold runs with the lid closed and comes back as it was",
+        "external",
     ];
     let mut from = 0;
     for part in in_order {

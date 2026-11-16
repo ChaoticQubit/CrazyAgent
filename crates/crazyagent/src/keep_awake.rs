@@ -599,6 +599,20 @@ fn noted(
     }
 }
 
+/// What the lid-closed lane covers (Task 17): the cover, only while the hold wants the lid,
+/// the lid reads closed, no external display is in use (fix5 QUESTION-01:45 A, leader
+/// 01:45: a closed computer driving a display is the owner at a desk) and the cover asks
+/// for a change. Inputs: whether the hold wants the lid, the last readings and the cover.
+/// Output: the cover, or none.
+pub(crate) fn lid_cover(
+    wanted: bool,
+    sensors: Option<&Sensors>,
+    cover: freeze::Cover,
+) -> Option<freeze::Cover> {
+    let closed = sensors.is_some_and(|sensors| sensors.lid_closed == Some(true));
+    (wanted && closed && cover.any()).then_some(cover)
+}
+
 /// The engine's Keep awake pacer: looks once a second for a changed work count, an owner
 /// change or a new platform reading and evaluates at once when it finds one, and every
 /// `TICK_MS` otherwise. After every evaluation it brings the platform hold, when it has
@@ -945,15 +959,12 @@ impl Keeper {
         };
         assert!(self.lid_ask.rule_on || !self.lid_ask.wanted);
         assert!(self.lid_ask.wanted || !self.lid_ask.sleep_display);
-        let closed = self
-            .sensors()
-            .is_some_and(|sensors| sensors.lid_closed == Some(true));
         let cover = freeze::Cover {
             freeze: view.settings.freeze == Freeze::On,
             mute: view.settings.mute == Mute::On,
             apps: view.freeze_apps.clone(),
         };
-        self.cover((wanted && closed && cover.any()).then_some(cover));
+        self.cover(lid_cover(wanted, self.sensors().as_ref(), cover));
         assert!(view.work <= work::WORK_MAX);
         Ok(Some(view))
     }

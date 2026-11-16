@@ -45,7 +45,8 @@ pub enum LidSupport {
 }
 
 /// What the platform readers last saw: power source, battery percent, whether the battery
-/// could not be read twice in a row, heat, lid position and lid support.
+/// could not be read twice in a row, heat, lid position, whether an external display is in
+/// use (none when unread, which counts as none in use) and lid support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sensors {
@@ -54,6 +55,8 @@ pub struct Sensors {
     pub battery_unread_twice: bool,
     pub heat: Heat,
     pub lid_closed: Option<bool>,
+    #[serde(default)]
+    pub external_display: Option<bool>,
     pub lid_support: LidSupport,
 }
 
@@ -74,6 +77,7 @@ impl Sensors {
             battery_unread_twice: false,
             heat: Heat::Unknown,
             lid_closed: None,
+            external_display: None,
             lid_support,
         }
     }

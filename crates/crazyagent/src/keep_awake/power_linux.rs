@@ -189,6 +189,7 @@ pub fn read_under(root: &Path) -> PowerReading {
         battery_pct,
         heat: heat(&root.join(THERMAL)),
         lid_closed: lid(&root.join(LIDS)),
+        external_display: None,
         lid_support: if root.join(SEATS).is_dir() {
             LidSupport::Held
         } else {
