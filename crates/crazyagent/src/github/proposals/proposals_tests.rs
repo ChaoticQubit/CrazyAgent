@@ -12,7 +12,9 @@ use rusqlite::TransactionBehavior;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
+use std::time::Duration;
 
 const PROJECT: &str = "alpha";
 const OTHER: &str = "beta";
@@ -752,4 +754,43 @@ fn a_start_refuses_and_tells_a_pending_proposal_whose_question_is_gone() {
     assert_eq!(start(&tx).unwrap(), 0);
     tx.commit().unwrap();
     assert_eq!(case.told().len(), 2);
+}
+
+/// rv-code N2: two apply passes started together, as two answers settling at once start
+/// them, send one rule change at a time, so one change's read of the repository and its
+/// record write never interleave with another's.
+#[test]
+fn two_apply_passes_at_once_send_one_rule_change_at_a_time() {
+    let case = Case::new();
+    case.done(REPO);
+    for (agent, rule) in [(4, GitHubRule::NoForcePush), (5, GitHubRule::NoDeletion)] {
+        let question = case.asked(&Asker::Agent(agent), rule, true);
+        assert_eq!(case.answer(question, vec![0]), Settlement::Settled);
+    }
+    assert_eq!(case.statuses(), ["approved", "approved"]);
+    let busy = Arc::new(AtomicUsize::new(0));
+    let most = Arc::new(AtomicUsize::new(0));
+    let start = Arc::new(Barrier::new(2));
+    let passes: Vec<_> = (0..2)
+        .map(|_| {
+            let (busy, most, start) = (Arc::clone(&busy), Arc::clone(&most), Arc::clone(&start));
+            let root = case.root.clone();
+            std::thread::spawn(move || {
+                let db = crate::questions::open(&root).unwrap();
+                let mut set = |_: &Path, _: &str, rule: GitHubRule, on: bool| {
+                    let now = busy.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(300));
+                    busy.fetch_sub(1, Ordering::SeqCst);
+                    Ok(page(rule, on, GitHubRuleState::Applied))
+                };
+                start.wait();
+                apply_approved(&db, &mut set).unwrap()
+            })
+        })
+        .collect();
+    let ended: usize = passes.into_iter().map(|pass| pass.join().unwrap()).sum();
+    assert_eq!(ended, 2, "each proposal ended once");
+    assert_eq!(most.load(Ordering::SeqCst), 1, "one rule change at a time");
+    assert_eq!(case.statuses(), ["applied", "applied"]);
 }
