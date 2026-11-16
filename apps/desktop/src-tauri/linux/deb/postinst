@@ -2,7 +2,8 @@
 set -e
 src=/usr/share/crazyagent/apparmor/crazyagent-landlock
 dst=/etc/apparmor.d/crazyagent-landlock
-if [ "$1" = configure ] && [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1 && [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] && apparmor_parser -QT "$src" >/dev/null 2>&1; then
-  install -m 0644 "$src" "$dst"
-  apparmor_parser -r -T -W "$dst" || true
+if [ "$1" = configure ] && [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1 && { [ -f "$dst" ] || [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; } && apparmor_parser -QT "$src" >/dev/null 2>&1; then
+  if install -m 0644 "$src" "$dst"; then
+    apparmor_parser -r -T -W "$dst" || true
+  fi
 fi
