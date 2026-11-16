@@ -4530,7 +4530,7 @@ fn a_master_stopped_for_another_reason_says_why_and_s_tries_again() {
 #[test]
 fn a_master_stopped_for_no_fitting_account_shows_the_engines_accounts_that_fit_line() {
     let line = "The live master was turned off: it could not start: No account in this \
-                project's pool can run Row Harness. Accounts that fit it: Gemini API";
+                project's pool can run Row Harness. Accounts that fit it: a Gemini API key";
     let mut shell = open_running_master();
     shell.arrive(stopped_master_graph());
     requests(&mut shell);
