@@ -216,6 +216,15 @@ fn both(way: SignInWith) -> ConnectorsView {
     read
 }
 
+/// The page with GitHub offering both ways and two secrets, like Atlassian, signing in the
+/// way given.
+fn both_two_secrets(way: SignInWith) -> ConnectorsView {
+    let mut read = both(way);
+    let site = secret("site", Binding::None);
+    read.connectors[1].secrets.push(site);
+    read
+}
+
 fn refused_file(name: &str, problem: Problem) -> ConnectorView {
     ConnectorView {
         name: name.into(),
@@ -991,10 +1000,10 @@ fn w_switches_a_connector_that_offers_both_between_a_key_and_the_browser() {
     assert!(said(&shell).contains("GitHub signs in with Browser."));
     assert!(shows(&mut shell, "Sign in with: Browser"));
     assert!(shows(&mut shell, "w Sign in with Key"));
-    assert!(!shows(&mut shell, "token: Key you entered"), "keys show only under Key");
-    assert!(!shows(&mut shell, "u Clear key") && !shows(&mut shell, "k Set key"));
-    keys(&mut shell, &[Key::Char('k'), Key::Char('u')]);
-    assert!(requests(&mut shell).is_empty(), "no key is set or cleared under Browser");
+    assert!(shows(&mut shell, "token: Key you entered"), "rv-sec2 F1: a saved key stays");
+    assert!(shows(&mut shell, "u Clear key") && !shows(&mut shell, "k Set key"));
+    keys(&mut shell, &[Key::Char('k')]);
+    assert!(requests(&mut shell).is_empty(), "no key is set under Browser");
     keys(&mut shell, &[Key::Char('w')]);
     assert!(matches!(
         one(&mut shell),
@@ -1008,4 +1017,52 @@ fn w_switches_a_connector_that_offers_both_between_a_key_and_the_browser() {
     assert!(!shows(&mut shell, "Sign in with"), "a connector with one way has nothing to switch");
     keys(&mut shell, &[Key::Char('w')]);
     assert!(requests(&mut shell).is_empty());
+}
+
+/// rv-code2 TP1-1: a connector on its second secret under Key that reads Browser next, by
+/// `w` here or by a switch on the desktop read again, draws with no secret selected and no
+/// panic, and Key again starts at the first secret.
+#[test]
+fn a_switch_to_browser_while_on_a_later_secret_moves_the_cursor_back() {
+    let mut shell = page(both_two_secrets(SignInWith::Key));
+    keys(&mut shell, &[Key::Down, Key::Enter, Key::Down]);
+    assert!(shows(&mut shell, "site: Not set"));
+    keys(&mut shell, &[Key::Char('w')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::SetSignInWith { way: SignInWith::Browser, .. }
+    ));
+    let read = both_two_secrets(SignInWith::Browser);
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
+    assert!(shows(&mut shell, "Sign in with: Browser"), "the TUI's own switch draws");
+    let read = both_two_secrets(SignInWith::Key);
+    keys(&mut shell, &[Key::Char('w')]);
+    one(&mut shell);
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
+    keys(&mut shell, &[Key::Char('k')]);
+    assert!(shows(&mut shell, "Key for token"), "Key again starts at the first secret");
+
+    let mut shell = page(both_two_secrets(SignInWith::Key));
+    keys(&mut shell, &[Key::Down, Key::Enter, Key::Down, Key::Char('r')]);
+    assert!(read_all(&one(&mut shell)));
+    let read = both_two_secrets(SignInWith::Browser);
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
+    assert!(shows(&mut shell, "Sign in with: Browser"), "a desktop switch read again draws");
+}
+
+/// rv-sec2 T10 pages Q1 F1, leader 02:04: under Browser a saved key is listed with Clear
+/// key, so it can be removed without making it live first; a secret with no key is not
+/// listed, and no key is set.
+#[test]
+fn under_browser_a_saved_key_can_be_cleared_without_switching_to_key() {
+    let mut shell = page(both_two_secrets(SignInWith::Browser));
+    keys(&mut shell, &[Key::Down, Key::Enter]);
+    assert!(shows(&mut shell, "token: Key you entered") && shows(&mut shell, "u Clear key"));
+    assert!(!shows(&mut shell, "site: Not set"), "a secret with no key is not listed");
+    assert!(!shows(&mut shell, "k Set key"));
+    keys(&mut shell, &[Key::Char('u')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::ClearKey { ref name, ref secret } if name == "github" && secret == "token"
+    ));
 }

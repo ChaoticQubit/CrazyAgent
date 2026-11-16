@@ -649,6 +649,18 @@ test("A connector that signs in with a key or the browser shows Sign in with as 
   });
 });
 
+test("Under Browser a saved key is listed with Clear key only, so it can be removed without making it live first (rv-sec2 T10 pages Q1 F1)", () => {
+  const saved = both("browser");
+  saved.secrets = [{ name: "api_key", binding: { kind: "key" } }, { name: "site", binding: { kind: "none" } }];
+  const markup = page({ view: { kind: "ok", value: { ...CATALOG, connectors: [saved] } }, open: "board" });
+  assert.ok(markup.includes("Clear key for api_key of Board"), "the saved key can be cleared");
+  assert.ok(!markup.includes("Set key for"), "no key is set under Browser");
+  assert.ok(!text(markup).includes("site:"), "a secret with no key is not listed");
+  assert.equal(typeof api.secretsShown, "function", "one rule lists the secrets");
+  assert.deepEqual(api.secretsShown(saved).map((secret) => secret.name), ["api_key"]);
+  assert.deepEqual(api.secretsShown(both("key")).map((secret) => secret.name), ["api_key"], "under Key every secret is listed");
+});
+
 test("The Connectors page types name the same fields and words as the engine's ConnectorView, OAuthView, OwnAppView, SignIn and SignInWith", () => {
   const rust = source("../../../crates/crazyagent/src/connectors.rs");
   const ts = source("../src/api-connectors.ts");
