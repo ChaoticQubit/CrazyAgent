@@ -427,11 +427,10 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
 }
 
 /// Tells whether one variable may reach an agent process with this value: a name
-/// [`agent_env_refused`] accepts, one of the fixed [`AGENT_GIT_ENV`] pairs, a model key
-/// name holding the local placeholder, never a real provider key, or the launch's lineage
-/// token in its own variable. No variable may hold a key relay token: any process of the
-/// owner's user can read another's environment, so a harness reads its token from the key
-/// file in its own home. Inputs: the name and value. Output: true when allowed.
+/// [`agent_env_refused`] accepts, a fixed [`AGENT_GIT_ENV`] pair, a model key name holding the
+/// placeholder or the lineage token in its own variable; never a real key or relay token, which
+/// other owner processes can read, save a launch's own token in [`Handed`] names on macOS only
+/// (its profile denies those reads; Linux is refused). Inputs: name, value. Output: allowed.
 pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     let token = crate::model_gateway::relay::TOKEN_PREFIX.as_bytes();
     if value
@@ -481,7 +480,7 @@ pub fn agent_env<'a>(
     base: &[(&str, &OsStr)],
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-    built_env(base, harness, &AGENT_HOME_ENV)
+    built_env(base, harness, &AGENT_HOME_ENV, None)
 }
 
 /// One launch's exception to the agent variable guard (DEC-180 Task 20, rv-sa241 ruling
@@ -500,7 +499,20 @@ impl<'a> Handed<'a> {
     /// hold. Output: the exception, or `Invalid` for a value that is neither a relay token
     /// nor the keyless placeholder, and off macOS.
     pub fn new(names: &'a [&'a str], value: &'a str) -> Result<Self, SandboxError> {
+        let handed = crate::model_gateway::relay::is_relay_token(value)
+            || value == crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        if !cfg!(target_os = "macos") || !handed {
+            return Err(invalid("a launch hands only its own relay token"));
+        }
+        assert!(crate::model_gateway::relay::is_placeholder(value));
         Ok(Self { names, value })
+    }
+
+    /// Tells whether this launch lets one harness variable hold a value: a name it lists
+    /// holding exactly its one value. Inputs: the name and the value. Output: true when it
+    /// does.
+    fn allows(&self, name: &OsStr, value: &OsStr) -> bool {
+        value == self.value && self.names.iter().any(|known| name == *known)
     }
 }
 
@@ -513,8 +525,14 @@ pub fn agent_env_handing<'a>(
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
     handed: Handed<'_>,
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-    let _ = handed;
-    agent_env(base, harness)
+    built_env(base, harness, &AGENT_HOME_ENV, Some(handed))
+}
+
+/// Tells whether one variable may reach an agent process of a launch with this exception:
+/// [`agent_variable_allowed`], or a name the exception lists holding its one value. Inputs:
+/// the launch's exception, if any, the name and the value. Output: true when allowed.
+fn handed_allowed(handed: Option<Handed<'_>>, name: &OsStr, value: &OsStr) -> bool {
+    agent_variable_allowed(name, value) || handed.is_some_and(|handed| handed.allows(name, value))
 }
 
 /// Builds the environment of the owner's confined IDE terminal as [`agent_env`] does for an
@@ -526,16 +544,18 @@ pub fn owner_terminal_env<'a>(
     base: &[(&str, &OsStr)],
     terminal: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-    built_env(base, terminal, &[])
+    built_env(base, terminal, &[], None)
 }
 
 /// Builds the environment [`agent_env`] describes, setting `home` after the fixed git and
-/// TLS settings. Inputs: the base and harness variables and the home settings. Output: the
-/// variables, or `Invalid` when any one fails [`agent_variable_allowed`].
+/// TLS settings. Inputs: the base and harness variables, the home settings and the launch's
+/// exception, if any. Output: the variables, or `Invalid` when any one fails
+/// [`agent_variable_allowed`] and is no variable the exception lets through.
 fn built_env<'a>(
     base: &[(&str, &OsStr)],
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
     home: &[(&'static str, &'static str)],
+    handed: Option<Handed<'_>>,
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
     let refused = || invalid("agent environment holds an owner secret");
     let mut env: Vec<(OsString, OsString)> = Vec::new();
@@ -557,7 +577,7 @@ fn built_env<'a>(
         set(&mut env, OsStr::new(name), Some(value));
     }
     for (name, value) in harness {
-        if value.is_some_and(|value| !agent_variable_allowed(name, value)) {
+        if value.is_some_and(|value| !handed_allowed(handed, name, value)) {
             return Err(refused());
         }
         let pinned_cache = TOOL_CACHE_ENV.iter().any(|pinned| name == *pinned)
@@ -586,7 +606,7 @@ fn built_env<'a>(
     }
     assert!(
         env.iter()
-            .all(|(name, value)| agent_variable_allowed(name, value))
+            .all(|(name, value)| handed_allowed(handed, name, value))
     );
     Ok(env)
 }
@@ -754,6 +774,29 @@ pub fn agent_command<'a>(
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Command, SandboxError> {
     let env = agent_env(base, harness)?;
+    Ok(confined_command(profile, program, env))
+}
+
+/// Builds the command [`agent_command`] does, with the environment [`agent_env_handing`]
+/// builds for one listed master's launch. Inputs: the installed profile, the absolute
+/// program, the base and harness variables and the launch's exception. Output: the command,
+/// or `Invalid` when a variable is refused.
+#[cfg(unix)]
+pub fn agent_command_handing<'a>(
+    profile: &Path,
+    program: &Path,
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    handed: Handed<'_>,
+) -> Result<Command, SandboxError> {
+    let env = agent_env_handing(base, harness, handed)?;
+    Ok(confined_command(profile, program, env))
+}
+
+/// The `sandbox-exec` command of [`agent_command`] around a built environment. Inputs: the
+/// installed profile, the absolute program and the checked variables. Output: the command.
+#[cfg(unix)]
+fn confined_command(profile: &Path, program: &Path, env: Vec<(OsString, OsString)>) -> Command {
     let mut command = Command::new(SANDBOX_EXEC);
     command
         .arg("-f")
@@ -769,7 +812,7 @@ pub fn agent_command<'a>(
         Some(program.as_os_str())
     );
     assert_eq!(command.get_envs().count(), env.len());
-    Ok(command)
+    command
 }
 
 /// Builds the command a Full access agent process starts from (DEC-102): the
