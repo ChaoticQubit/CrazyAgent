@@ -883,3 +883,10 @@ fn a_path_that_cannot_be_read_says_the_file_could_not_be_read() {
     assert!(shows(&mut shell, "CrazyAgent couldn't read that file."));
     assert!(!shows(&mut shell, "The engine could not do this."));
 }
+
+#[test]
+fn the_add_forms_manifest_box_draws_hidden_characters_as_escapes() {
+    let form = add_form();
+    assert!(form.yaml.multiline && form.yaml.escaped);
+    assert!(!form.path.escaped);
+}
