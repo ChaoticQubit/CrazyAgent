@@ -191,6 +191,10 @@ const CONFINED_UNAVAILABLE: &str = "an agent confined to its own worktree cannot
      neither Landlock nor bubblewrap can keep the worktree's git links and the existing git \
      objects read-only inside the git folders it must write";
 
+const CONFINED_NEEDS_HELPER: &str = "an agent confined to its own worktree needs the Landlock \
+     helper on Linux, and this computer has only the bubblewrap backend, which cannot give \
+     the git folders their own rights";
+
 const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/null",
     "/dev/zero",
@@ -2609,10 +2613,38 @@ mod tests {
             grants.read.contains(&project),
             "the object store is read through the project"
         );
+        let mut guarded = grants.guarded.clone();
+        guarded.sort();
+        let mut held = ["HEAD", "commondir", "gitdir", "config.worktree", "modules"]
+            .map(|name| admin.join(name))
+            .to_vec();
+        held.push(worktree.join(".git"));
+        held.sort();
         assert_eq!(
-            grants.guarded,
-            vec![admin.join("modules")],
-            "the admin folder's submodule store is left to the supervisor and the binds"
+            guarded, held,
+            "every entry macOS keeps by name under the two grants is left to the supervisor and the binds"
+        );
+    }
+
+    #[test]
+    fn a_confined_launch_on_the_bubblewrap_backend_is_refused_with_its_own_line() {
+        let (_temp, _project, sandbox, worktree) = linked();
+        let launch = LinuxSandbox {
+            sandbox: sandbox.confine_to_worktree(&worktree).unwrap(),
+            backend: LinuxBackend::Bubblewrap {
+                bwrap: PathBuf::from(BWRAP_PATHS[0]),
+                helper: helper(),
+            },
+            supervision: None,
+            routed: None,
+        };
+        let mut harness = Command::new("/bin/true");
+        harness.current_dir(&worktree);
+        let refused = launch.wrap(&harness).err();
+        assert!(
+            matches!(&refused, Some(SandboxError::Unavailable(reason))
+                if reason == CONFINED_NEEDS_HELPER),
+            "{refused:?}"
         );
     }
 
