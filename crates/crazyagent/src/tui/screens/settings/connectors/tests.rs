@@ -5,7 +5,8 @@ use crate::app_plugins::{
     Problem, ReadOnlyTrust, RunsView, SecretView, TrustView,
 };
 use crate::connectors::{
-    ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, SignIn, SizeCap,
+    ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, OAuthView, SignIn,
+    SignInWith, SizeCap,
 };
 use crate::engine::owner::ConnectorsSaved;
 use crate::tui::client::OwnerEvent;
@@ -194,6 +195,20 @@ fn typed(shell: &mut Shell, text: &str) {
 fn with_secret(binding: Binding, at: usize) -> ConnectorsView {
     let mut read = view();
     read.connectors[at].secrets[0].binding = binding;
+    read
+}
+
+/// The page with GitHub offering a key and a browser sign-in, signing in the way given.
+fn both(way: SignInWith) -> ConnectorsView {
+    let mut read = view();
+    read.connectors[1].sign_in = SignIn::Both;
+    read.connectors[1].oauth = Some(OAuthView {
+        signed_in: false,
+        own_app_allowed: true,
+        own_app: None,
+        redirect: "http://127.0.0.1/callback".into(),
+        using: way,
+    });
     read
 }
 
@@ -891,4 +906,43 @@ fn the_add_forms_manifest_box_draws_hidden_characters_as_escapes() {
     let form = add_form();
     assert!(form.yaml.multiline && form.yaml.escaped);
     assert!(!form.path.escaped);
+}
+
+/// QUESTION-23:34 Q1: a connector whose file offers a key and a browser sign-in shows the
+/// way it signs in, and `w` switches it; its keys are shown and set only while it signs in
+/// with a key, and a connector with one way has nothing to switch.
+#[test]
+fn w_switches_a_connector_that_offers_both_between_a_key_and_the_browser() {
+    let mut shell = page(both(SignInWith::Key));
+    keys(&mut shell, &[Key::Down, Key::Enter]);
+    assert!(shows(&mut shell, "Sign in with: Key"));
+    assert!(shows(&mut shell, "w Sign in with Browser"));
+    assert!(shows(&mut shell, "token: Key you entered"));
+    keys(&mut shell, &[Key::Char('w')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::SetSignInWith { ref name, way: SignInWith::Browser } if name == "github"
+    ));
+    let read = both(SignInWith::Browser);
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
+    assert!(said(&shell).contains("GitHub signs in with Browser."));
+    assert!(shows(&mut shell, "Sign in with: Browser"));
+    assert!(shows(&mut shell, "w Sign in with Key"));
+    assert!(!shows(&mut shell, "token: Key you entered"), "keys show only under Key");
+    assert!(!shows(&mut shell, "u Clear key"));
+    keys(&mut shell, &[Key::Char('k'), Key::Char('u')]);
+    assert!(requests(&mut shell).is_empty(), "no key is set or cleared under Browser");
+    keys(&mut shell, &[Key::Char('w')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::SetSignInWith { way: SignInWith::Key, .. }
+    ));
+    let read = both(SignInWith::Key);
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
+    assert!(shows(&mut shell, "token: Key you entered"));
+    keys(&mut shell, &[Key::Esc, Key::Up, Key::Enter]);
+    assert!(shows(&mut shell, "api_key: Not set"));
+    assert!(!shows(&mut shell, "Sign in with"), "a connector with one way has nothing to switch");
+    keys(&mut shell, &[Key::Char('w')]);
+    assert!(requests(&mut shell).is_empty());
 }

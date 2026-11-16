@@ -14,7 +14,7 @@ const router = await import("../src/ui/router.ts");
 const SETTINGS = { write: "ask_every_time", wait: "minutes10", native: "off", size_cap: "kib256", keep_log: "days30" };
 const HASH = "c0ffee".repeat(10) + "c0ff";
 const connector = (name, title, status, patch = {}) => ({
-  name, title, version: "1.0.0", description: `${title} through its own MCP server.`, origin: "bundled", status, sign_in: "key",
+  name, title, version: "1.0.0", description: `${title} through its own MCP server.`, origin: "bundled", status, sign_in: "key", oauth: null,
   runs: { kind: "connector", url: `https://mcp.${name}.example/mcp`, hosts: [`mcp.${name}.example`], oauth_hosts: [], vendor_read_only: true },
   secrets: [{ name: "api_key", binding: { kind: "key" } }], sha256: HASH, ...patch,
 });
@@ -108,7 +108,7 @@ test("Project Settings has a Connectors section right after Plugins and skills, 
 const PROBLEM = { code: "app_plugin_url_not_https", line: 7, field: "connector.url", message: "The address must start with https://." };
 const TAKEN = { code: "app_plugin_name_taken", line: null, field: "name", message: "a plugin with this name already exists; remove it or choose replace." };
 const refusedFile = (name, problem) => ({
-  name, title: name, version: "", description: "", origin: "user", status: { kind: "refused", problem }, sign_in: "not_yet",
+  name, title: name, version: "", description: "", origin: "user", status: { kind: "refused", problem }, sign_in: "not_yet", oauth: null,
   runs: null, secrets: [], sha256: HASH,
 });
 const CATALOG = {
@@ -354,6 +354,7 @@ test("Every refusal the Connectors protocol answers, past the owner codes, has a
     connector_request_invalid: "The request could not be read.",
     connector_request_bounds: "The request is too large.",
     connector_outcome_unknown: "The engine did not answer in time; check the list again.",
+    connector_sign_in_one_way: "This connector signs in one way only, so there is nothing to choose.",
   };
   for (const [code, sentence] of Object.entries(words)) {
     assert.equal(api.connectorProblem({ code, cause: code, message: "Something went wrong. Try again." }), sentence, code);
@@ -378,6 +379,7 @@ test("The Connectors commands, the harness rows' one included, are built, regist
     desktop_connector_set_key: "{ name, secret, key }",
     desktop_connector_clear_key: "{ name, secret }",
     desktop_connector_grant: "{ project, connector, enabled, who }",
+    desktop_connector_set_sign_in_with: "{ name, way }",
     desktop_connector_reach: "{}",
   };
   const apiSource = source("../src/api-connectors.ts");
@@ -524,4 +526,49 @@ test("A project's Connectors section has one row per name: the owner's refused f
   }
   const broken = { ...VIEW, connectors: [...VIEW.connectors, refusedFile("broken", PROBLEM)], grants: [{ connector: "broken", enabled: true, who: "both" }] };
   assert.deepEqual(api.projectRows(broken).rows.filter((row) => row.name === "broken").map((row) => row.word), ["Refused"], "a refused file of its own name keeps its switch, so it can be turned off");
+});
+
+const both = (using) => connector("board", "Board", { kind: using === "key" ? "needs_key" : "ready" }, {
+  origin: "user", sign_in: "both", secrets: [{ name: "api_key", binding: { kind: "none" } }],
+  oauth: { signed_in: false, own_app_allowed: true, own_app: null, redirect: "http://127.0.0.1/callback", using },
+});
+
+test("A connector that signs in with a key or the browser shows Sign in with as the engine reads it, its keys only under Key, and sends the choice as its name and way, in the TUI's words", async () => {
+  for (const using of ["key", "browser"]) {
+    const markup = page({ view: { kind: "ok", value: { ...CATALOG, connectors: [both(using)] } }, open: "board" });
+    assert.ok(markup.includes("data-setting=\"sign_in_with\""), `${using}: the choice is on the page`);
+    assert.deepEqual(radios(markup, "connector-sign-in-with"), [["key", using === "key"], ["browser", using === "browser"]], using);
+    assert.equal(markup.includes("Set key for api_key of Board"), using === "key", `${using}: keys show only under Key`);
+    assert.ok(text(markup).includes(api.CONNECTORS_PAGE.signInWithHelp), `${using}: the help says the other way stays saved`);
+  }
+  assert.ok(!page({ open: "linear" }).includes("data-setting=\"sign_in_with\""), "a connector with one way has nothing to choose");
+  assert.deepEqual(api.SIGN_IN_WITH_CHOICES, [{ choice: "key", label: "Key" }, { choice: "browser", label: "Browser" }]);
+  const tui = source("../../../crates/crazyagent/src/tui/screens/settings/connectors/words.rs");
+  for (const said of [api.CONNECTORS_PAGE.signInWith, api.CONNECTORS_PAGE.signInWithHelp]) {
+    assert.ok(typeof said === "string" && tui.includes(`"${said}"`), `the TUI says ${said}`);
+  }
+  assert.equal(typeof api.setConnectorSignInWith, "function", "the page can send the choice");
+  await bridged(CATALOG, async (sent) => {
+    const result = await api.setConnectorSignInWith("board", "browser");
+    assert.equal(result.kind, "ok");
+    assert.deepEqual(sent, [["desktop_connector_set_sign_in_with", { name: "board", way: "browser" }]]);
+  });
+});
+
+test("The Connectors page types name the same fields and words as the engine's ConnectorView, OAuthView, OwnAppView, SignIn and SignInWith", () => {
+  const rust = source("../../../crates/crazyagent/src/connectors.rs");
+  const ts = source("../src/api-connectors.ts");
+  const rustFields = (name) => [...(rust.match(new RegExp(`pub struct ${name} \\{\\n(.*?)\\n\\}`, "su"))?.[1] ?? "").matchAll(/^\s+pub (\w+):/gmu)].map((match) => match[1]).sort();
+  const tsFields = (name) => [...(ts.match(new RegExp(`export interface ${name} \\{(.*?)\\}`, "su"))?.[1] ?? "").matchAll(/(\w+):/gu)].map((match) => match[1]).sort();
+  for (const name of ["ConnectorView", "OAuthView", "OwnAppView"]) {
+    assert.ok(rustFields(name).length >= 2, `${name} is read from the engine`);
+    assert.deepEqual(tsFields(name), rustFields(name), `${name} names the engine's fields`);
+  }
+  const snake = (word) => word.replace(/[A-Z]/gu, (letter, at) => `${at === 0 ? "" : "_"}${letter.toLowerCase()}`);
+  const variants = (name) => [...(rust.match(new RegExp(`pub enum ${name} \\{\\n(.*?)\\n\\}`, "su"))?.[1] ?? "").matchAll(/^\s+(\w+),$/gmu)].map((match) => snake(match[1]));
+  const union = (name) => [...(ts.match(new RegExp(`export type ${name} = (.*);$`, "mu"))?.[1] ?? "").matchAll(/"(\w+)"/gu)].map((match) => match[1]);
+  for (const name of ["SignIn", "SignInWith"]) {
+    assert.ok(variants(name).length >= 2, `${name} is read from the engine`);
+    assert.deepEqual(union(name), variants(name), `${name} has the engine's words`);
+  }
 });
