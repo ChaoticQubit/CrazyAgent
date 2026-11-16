@@ -187,6 +187,7 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
     return <SessionContext.Provider value={session}>
       <Welcome profile={profile} onSaved={(_, next, note) => { if (note) session.showToast(note); void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
         onSkip={(next, note) => { if (note) session.showToast(note); navigate(next ?? { name: "home" }, true); }} />
+      <Toast message={session.toast} />
     </SessionContext.Provider>;
   }
   const asked = route.name === "settings" && isUserMenuTab(route.tab) ? route.tab : null;

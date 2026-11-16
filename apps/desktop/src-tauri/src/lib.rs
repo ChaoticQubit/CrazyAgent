@@ -250,20 +250,20 @@ static ENGINE_UPDATE_UNTOLD: AtomicBool = AtomicBool::new(false);
 /// Whether an engine reporting `engine` is older than an app at `app`, so the app may replace
 /// it on its own at launch (DEC-134 addendum 1). Inputs: both versions. Output: true only
 /// when both read as versions and the app's is newer; equal, newer and unreadable give false.
-fn engine_older(_engine: &str, _app: &str) -> bool {
-    false
+fn engine_older(engine: &str, app: &str) -> bool {
+    crazyagent::update::is_newer(app, engine).unwrap_or(false)
 }
 
 /// Takes this app run's one replacement of an older engine. Input: the run's flag. Output:
 /// true the first time, false after.
-fn first_replacement(_taken: &AtomicBool) -> bool {
-    false
+fn first_replacement(taken: &AtomicBool) -> bool {
+    !taken.swap(true, Ordering::SeqCst)
 }
 
 /// Takes a one-shot signal: true once after it was set, then false until it is set again.
 /// Input: the signal. Output: whether it was set.
-fn take_signal(_signal: &AtomicBool) -> bool {
-    false
+fn take_signal(signal: &AtomicBool) -> bool {
+    signal.swap(false, Ordering::SeqCst)
 }
 
 /// Whether this app replaced an older engine since the last connect reply said so. Reading
@@ -272,9 +272,24 @@ pub(crate) fn engine_update_untold() -> bool {
     take_signal(&ENGINE_UPDATE_UNTOLD)
 }
 
+/// Checks the default engine's version against this app's within 5 s. Input: the layout.
+/// Output: ready, a mismatch with the engine's version, or unavailable.
+async fn check_default_engine(
+    layout: &crazyagent::paths::Layout,
+) -> crazyagent::service::EngineCheck {
+    crazyagent::service::check_engine(
+        layout.root(),
+        crazyagent::engine::owner::OwnerClientKind::Desktop,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+}
+
 /// Makes sure the default engine runs before the bridge connects: when none answers it
-/// starts the login service, installing it for this app's sidecar on first launch. An
-/// engine of another version is refused with `engine_version_mismatch`. Skipped when
+/// starts the login service, installing it for this app's sidecar on first launch. An engine
+/// older than this app is replaced once per app run through Restart engine's path, without
+/// its confirm, and the next connect reply says so (DEC-134 addendum 1); any other version,
+/// or a replacement the service refuses, is `engine_version_mismatch`. Skipped when
 /// `CRAZYAGENT_DESKTOP_SOCKET` names an engine explicitly.
 async fn ensure_default_engine() -> Result<(), BridgeError> {
     if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
@@ -284,19 +299,31 @@ async fn ensure_default_engine() -> Result<(), BridgeError> {
     if !crazyagent::service::answering(&layout.socket()) {
         start_engine(&layout, &service, false).await?;
     }
-    match crazyagent::service::check_engine(
-        layout.root(),
-        crazyagent::engine::owner::OwnerClientKind::Desktop,
-        std::time::Duration::from_secs(5),
-    )
-    .await
+    let crazyagent::service::EngineCheck::Mismatch { version, .. } =
+        check_default_engine(&layout).await
+    else {
+        return Ok(());
+    };
+    if !engine_older(&version, crazyagent::version::VERSION) || !first_replacement(&ENGINE_REPLACED)
     {
-        crazyagent::service::EngineCheck::Mismatch { .. } => {
-            Err(engine_failure("engine_version_mismatch"))
-        }
-        crazyagent::service::EngineCheck::Ready { .. }
-        | crazyagent::service::EngineCheck::Unavailable { .. } => Ok(()),
+        return Err(engine_failure("engine_version_mismatch"));
     }
+    match start_engine(&layout, &service, true).await {
+        Err(error)
+            if matches!(
+                error.code,
+                "engine_newer_than_app" | "engine_app_not_installed"
+            ) =>
+        {
+            return Err(engine_failure("engine_version_mismatch"));
+        }
+        result => result?,
+    }
+    if let crazyagent::service::EngineCheck::Mismatch { .. } = check_default_engine(&layout).await {
+        return Err(engine_failure("engine_version_mismatch"));
+    }
+    ENGINE_UPDATE_UNTOLD.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]
