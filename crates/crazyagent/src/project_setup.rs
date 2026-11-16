@@ -2052,7 +2052,10 @@ pub(crate) fn execute(
             setup,
             kept.as_deref(),
         ),
-        SetupAction::Remove { project_id } => remove(tx, project_id, revision),
+        SetupAction::Remove { project_id } => match removed::room(tx)? {
+            Ok(()) => remove(tx, project_id, revision, true),
+            Err(code) => Ok(rejected(code)),
+        },
         SetupAction::Delete { .. } => Ok(rejected("project_delete_requires_transport")),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
         SetupAction::SetReadPaths {
@@ -2828,17 +2831,21 @@ fn set_agent_policy(
 /// switch, done-quiet choice, owner notifications, wake rules and ended agents are deleted, so a waiting step is never
 /// claimed and a running one stops; its read folders, agent access, agent settings and its
 /// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
-/// per-project switches are cleared too, and so are the memories its agents saved, so a new
-/// project reusing the id never inherits them. The versions of its read folders, agent access, agent settings, project
+/// per-project switches are cleared too, and so are the memories its agents saved. The
+/// removal is recorded with the project's folder (DEC-178 addendum 1): kept, from Remove
+/// from dashboard, keeps the owner's notes, imports and selections and lets that exact folder
+/// bring the project back; not kept, from Delete everything, forgets them and holds the id for
+/// good. The versions of its read folders, agent access, agent settings, project
 /// instructions, team settings and project wake rule move on once more, so a project added
 /// again under the same id refuses a save from a screen read before the removal (V2V-1,
 /// V2SYNC-2); agent ids are never reused, so its agents' instruction versions are dropped
-/// and their wake rule versions need no move. Returns `invalid_project` for an unknown
-/// project.
+/// and their wake rule versions need no move. Takes the transaction, the project, the
+/// revision and whether its notes are kept. Returns `invalid_project` for an unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     revision: u64,
+    kept: bool,
 ) -> Result<Outcome, EngineError> {
     let exists: bool = tx
         .query_row(
@@ -2850,6 +2857,7 @@ fn remove(
     if !exists {
         return Ok(rejected("invalid_project"));
     }
+    let folder = load_setup(tx, project_id)?.map(|stored| stored.project_folder());
     crate::storage::close_master_for_removal(tx, project_id, revision)?;
     for table in REMOVED_WITH_PROJECT {
         tx.execute(
@@ -2903,8 +2911,17 @@ fn remove(
         .map_err(error)?;
     assert_eq!(removed, 1);
     crate::memory::library::forget_orphan_agent_memories(tx)?;
+    if !kept {
+        crate::memory::library::forget_project_memories(tx, project_id)?;
+    }
     crate::memory::forget_project(tx, project_id)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
+    removed::record(
+        tx,
+        project_id,
+        folder.as_deref().and_then(Path::to_str),
+        kept,
+    )?;
     Ok(Outcome::Applied)
 }
 
@@ -2959,7 +2976,7 @@ pub(crate) fn record_delete(
     if let Err(code) = outcome {
         return Ok(rejected(code));
     }
-    remove(tx, project_id, revision)
+    remove(tx, project_id, revision, false)
 }
 
 /// The team a New Project gets and the folder it lands in, after the checks
@@ -2993,6 +3010,9 @@ fn check_new(
         .map_err(error)?;
     if exists {
         return Ok(Err("project_exists".into()));
+    }
+    if project_id.as_str() != crate::demo::PROJECT_ID && removed::held(tx, project_id)? {
+        return Ok(Err("project_id_removed".into()));
     }
     let team = match setup.team.clone() {
         Some(team) => team,
@@ -3161,6 +3181,9 @@ pub(crate) fn record_new(
     if checked.folder != staged.folder {
         return Ok(rejected("home_new_project_failed"));
     }
+    if project_id.as_str() == crate::demo::PROJECT_ID {
+        removed::clear(tx, project_id)?;
+    }
     let outcome = record(
         tx,
         config,
@@ -3230,7 +3253,11 @@ pub(crate) fn record(
         revision: FIRST_REVISION,
     };
     let spec = declared(spec, &stored)?;
-    let outcome = crate::storage::create_project(tx, project_id, &spec)?;
+    let own_folder = stored.project_folder();
+    let own_folder = own_folder
+        .to_str()
+        .ok_or_else(|| failure("project_folder_unwritable"))?;
+    let outcome = crate::storage::create_project_at(tx, project_id, &spec, Some(own_folder))?;
     if outcome != Outcome::Applied {
         return Ok(outcome);
     }
