@@ -312,19 +312,23 @@ fn hostile_private_files_leave_the_real_index_alone() {
     let before = fs::read(case.index()).unwrap();
     let refused = |slot: &str, code: &str| {
         let outcome = case.carried(slot);
-        assert_eq!(outcome.code, 1, "{code}");
+        assert_eq!(outcome.code, 1, "slot {slot}: {code}");
         assert!(
             outcome.stderr.contains(&format!("({code})")),
-            "{}",
+            "slot {slot}: {}",
             outcome.stderr
         );
-        assert_eq!(fs::read(case.index()).unwrap(), before, "{code}");
+        assert_eq!(
+            fs::read(case.index()).unwrap(),
+            before,
+            "slot {slot}: {code}"
+        );
         let left: Vec<_> = fs::read_dir(&case.engine)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .filter(|name| name.to_string_lossy().starts_with("carry-"))
             .collect();
-        assert!(left.is_empty(), "{left:?}");
+        assert!(left.is_empty(), "slot {slot}: {left:?}");
     };
 
     let work = case.seed("1");
