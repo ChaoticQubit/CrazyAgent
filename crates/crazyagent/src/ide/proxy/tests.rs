@@ -796,3 +796,23 @@ async fn a_wildcard_listener_beside_the_server_fails_no_request() {
         "the wildcard listener got nothing"
     );
 }
+
+/// A launch can list more than one process on its port at ready. One of them ending while
+/// another still listens on 127.0.0.1 fails no request and flags nothing: lsof exits 1 when a
+/// process it was asked for is gone, and that listing of the live one still counts.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_served_process_that_ended_beside_one_still_listening_fails_nothing() {
+    let (upstream, server_port) = bind(None).await.unwrap();
+    let ours = i32::try_from(std::process::id()).unwrap();
+    assert_ne!(ours, i32::MAX);
+    let (proxy, refused) = proxy_to(server_port, Some(vec![ours, i32::MAX])).await;
+    let served = tokio::spawn(fetched(proxy));
+    let head = answer_once(&upstream).await;
+    assert!(
+        head.starts_with("GET /static/app.js HTTP/1.1\r\n"),
+        "{head}"
+    );
+    assert!(served.await.unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(!flagged(&refused), "the launch is kept");
+}
