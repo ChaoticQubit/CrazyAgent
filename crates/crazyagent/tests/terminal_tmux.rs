@@ -1838,6 +1838,10 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
         lead.mates,
         "the lead's next start names a new teammates' socket"
     );
+    assert!(
+        std::fs::symlink_metadata(&lead.mates).is_err(),
+        "the lead's next start removes the ended server's socket (KA-T17B-R2-F1)"
+    );
 }
 
 #[cfg(target_os = "macos")]
