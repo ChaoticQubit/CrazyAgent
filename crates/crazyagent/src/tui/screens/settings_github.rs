@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 
 pub(in crate::tui) const PAGE_WIDTH: usize = 76;
 const PAGE_STEP: usize = 10;
-const ROWS_MIN: usize = 3;
+pub(in crate::tui) const ROWS_MIN: usize = 3;
 const UNREADABLE: [&str; 3] = [
     "github_state_invalid",
     "github_config_unsafe",

@@ -64,6 +64,15 @@ const OWN_GIT: &str = "--own-git";
 const GUARD_SIGNALS: &str = "--guard-signals";
 const PROBE_SUPERVISOR: &str = "--probe-supervisor";
 const PROBE_SUPERVISED: &str = "--probe-supervised";
+/// Where AppArmor says whether it keeps unprivileged programs out of user namespaces, as on
+/// Ubuntu 23.10 and newer: `1` when it does ([`restricts`]).
+const APPARMOR_USERNS: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
+/// Why the helper runs no mode while its environment holds a variable that makes glibc
+/// load code ([`loader_variable`]): every mode, and the bubblewrap a nest starts, runs in
+/// the helper's own AppArmor profile, which may make user namespaces, so the variable would
+/// load a caller's code there (DEC-179 SBX-3 fold, rv-sa241 MED-1, rv-ds241 F2). The engine
+/// never sets one.
+pub const LOADER_REFUSED: &str = "the helper refuses variables that load code";
 /// How long [`host_now`] keeps what it read: a policy view asks on every read, and each
 /// answer starts the helper twice.
 const HOST_AGE_MAX: Duration = Duration::from_secs(60);
@@ -919,11 +928,22 @@ fn die_with_parent(parent: u32) -> Result<(), String> {
 /// filter to itself, moves into a session of its own and then replaces itself with the
 /// harness, or with a guard stays as its parent and ends with its exit code ([`supervise`]);
 /// a nest becomes bubblewrap, which starts a run inside its namespaces ([`nest`]).
-/// Bridge flags may lead a nest and the run or probe inside it ([`Bridge::fits`]).
-/// Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold the policy,
-/// the session or the signal mask, or the process it dies with is gone, 126 when the
-/// harness or bubblewrap cannot start.
+/// Bridge flags may lead a nest and the run or probe inside it ([`Bridge::fits`]). No mode
+/// runs while the environment holds a variable that loads code ([`LOADER_REFUSED`]).
+/// Output: the exit code, 2 for refused arguments or such a variable, 3 when the kernel
+/// cannot hold the policy, the session or the signal mask, or the process it dies with is
+/// gone, 126 when the harness or bubblewrap cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
+    let loader = std::env::vars_os()
+        .map(|(name, _)| name)
+        .find(|name| loader_variable(name));
+    if let Some(name) = loader {
+        eprintln!(
+            "crazyagent-landlock: {LOADER_REFUSED}: {}",
+            name.to_string_lossy()
+        );
+        return ExitCode::from(2);
+    }
     let asked = Bridge::leading(args).and_then(|(bridge, args)| {
         let request = HelperRequest::parse(args)?;
         Bridge::fits(bridge.as_ref(), &request)?;
@@ -1146,7 +1166,8 @@ fn scoped() -> ExitCode {
     }
 }
 
-/// Starts bubblewrap for a nested agent, from outside its namespaces. It opens bubblewrap
+/// Starts bubblewrap for a nested agent, from outside its namespaces, with an environment
+/// [`helper_main`] has already cleared of loader variables. It opens bubblewrap
 /// once ([`trusted_file`]) and starts that open file, so the file it checked is the file
 /// that runs. It takes the session as [`own_session`] does, where a pane's first process
 /// can still be told apart, then blocks every signal: bubblewrap's outer process and its
@@ -1194,12 +1215,22 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
     ExitCode::from(126)
 }
 
+/// Tells whether glibc loads code through a variable of this name: every name that begins
+/// `LD_`, in that case, `GLIBC_TUNABLES`, and `GCONV_PATH`, which a static glibc still
+/// reads for its gconv modules. Input: the name. Output: true when it does, so the helper
+/// runs no mode with it ([`LOADER_REFUSED`]).
+pub fn loader_variable(name: &OsStr) -> bool {
+    let name = name.as_bytes();
+    name.starts_with(b"LD_") || name == b"GLIBC_TUNABLES" || name == b"GCONV_PATH"
+}
+
 /// Replaces this process with the open `program`, keeping its signal mask and its
 /// environment. `std`'s exec empties the mask first, which would undo [`nest`], and an exec
 /// by path could start another file than the one [`trusted_file`] checked. Inputs: the open
 /// program, the name it starts under and its arguments after that name. Output: only the
 /// reason the exec failed.
 fn exec_keeping_mask(program: &fs::File, name: &Path, args: &[OsString]) -> String {
+    assert!(std::env::vars_os().all(|(name, _)| !loader_variable(&name)));
     let words: Result<Vec<CString>, _> = std::iter::once(name.as_os_str())
         .chain(args.iter().map(OsString::as_os_str))
         .map(|word| CString::new(word.as_bytes()))
@@ -1630,11 +1661,20 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
         )
 }
 
+/// Tells whether AppArmor keeps unprivileged programs out of user namespaces, from what
+/// [`APPARMOR_USERNS`] reads: only `1`, with or without its newline, does. Input: the text,
+/// none where the file cannot be read (no AppArmor, or an older one). Output: true when it
+/// restricts them.
+fn restricts(setting: Option<&str>) -> bool {
+    setting.is_some_and(|text| text.strip_suffix('\n').unwrap_or(text) == "1")
+}
+
 /// Reads what this machine holds for an agent beyond its Landlock rules: whether the
 /// kernel scopes signals (the helper's `--scoped`), whether a launch gives the agent a
 /// process namespace ([`nests`], or the plain probe fails), whether the call supervisor
-/// holds ([`supervises`]) and whether this runs as root. Inputs: the helper and the
-/// engine's data folder, none where no probe may run. Output: the facts.
+/// holds ([`supervises`]), whether this runs as root and whether AppArmor's user namespace
+/// restriction, which never covers root, is why nothing nests ([`restricts`]). Inputs: the
+/// helper and the engine's data folder, none where no probe may run. Output: the facts.
 pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let usable = clean_absolute(helper) && helper.is_file();
     let scoped = usable && passes(Command::new(helper).arg(SCOPED));
@@ -1648,12 +1688,17 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let root = rustix::process::geteuid().is_root();
     let nest = bwrap.filter(|_| nested);
     let supervised = held && data.is_some_and(|data| supervises(helper, nest, data, root));
+    let setting = fs::read_to_string(APPARMOR_USERNS).ok();
+    let armored = !nested && !root && restricts(setting.as_deref());
     assert!(!(root && supervised));
+    assert!(!(armored && nested));
+    assert!(!(armored && root));
     super::LinuxHost {
         nested,
         scoped,
         supervised,
         root,
+        armored,
     }
 }
 
@@ -2722,6 +2767,7 @@ mod tests {
                 scoped: false,
                 supervised: false,
                 root: false,
+                armored: false,
             })
         };
         let launched = |remotes: &[SandboxRemote]| {
@@ -3173,6 +3219,49 @@ mod tests {
         assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "and no folder is made");
     }
 
+    /// AppArmor keeps unprivileged programs out of user namespaces only where its setting
+    /// reads 1; any other value, or no file, leaves them free, so the AppArmor line shows
+    /// only where it is the reason nothing nests (DEC-179 SBX-3).
+    #[test]
+    fn only_an_apparmor_setting_of_one_restricts_user_namespaces() {
+        assert_eq!(
+            APPARMOR_USERNS,
+            "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+        );
+        assert!(restricts(Some("1\n")));
+        assert!(restricts(Some("1")));
+        for free in [Some("0\n"), Some(""), Some("2\n"), Some("11\n"), Some("1 0"), None] {
+            assert!(!restricts(free), "{free:?}");
+        }
+    }
+
+    /// The helper refuses every variable that makes glibc load code, the dynamic loader's
+    /// and gconv's, and no other: a name that only starts with `LD`, holds `LD_` later, or
+    /// differs in case still passes (DEC-179 SBX-3 fold, rv-sa241 MED-1, rv-ds241 F2).
+    #[test]
+    fn the_helper_refuses_only_the_variables_that_load_code() {
+        for name in [
+            "LD_PRELOAD",
+            "LD_AUDIT",
+            "LD_LIBRARY_PATH",
+            "LD_BIND_NOW",
+            "GLIBC_TUNABLES",
+            "GCONV_PATH",
+        ] {
+            assert!(loader_variable(OsStr::new(name)), "{name}");
+        }
+        for name in [
+            "LDFLAGS",
+            "OLD_PWD",
+            "PATH",
+            "ld_preload",
+            "GLIBC_TUNABLES_X",
+            "",
+        ] {
+            assert!(!loader_variable(OsStr::new(name)), "{name}");
+        }
+    }
+
     /// A launch whose own probe fails with the setting On runs without the supervisor and
     /// marks the kept host as running none, so the next Agent access page read shows the
     /// wider lines; nothing kept stays nothing (rv-secreview linux-t4c F2).
@@ -3183,6 +3272,7 @@ mod tests {
             scoped: true,
             supervised: true,
             root: false,
+            armored: false,
         };
         let at = Instant::now();
         let kept: KeptHost = Mutex::new(Some((at, host)));

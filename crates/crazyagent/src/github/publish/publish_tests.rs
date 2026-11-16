@@ -272,6 +272,52 @@ fn inspect_reads_the_repository_state_and_refuses_a_remote_or_a_detached_head() 
 }
 
 #[test]
+fn the_config_is_read_once_through_an_open_that_follows_no_link_and_waits_on_no_pipe() {
+    let none = fixture();
+    git(&["init", "-q", "-b", "main"], &none.path());
+    std::fs::remove_file(none.path().join(".git/config")).unwrap();
+    assert_eq!(read_config(&none.path()).unwrap(), None);
+    let plain = fixture();
+    git(&["init", "-q", "-b", "main"], &plain.path());
+    git(
+        &["remote", "add", "origin", "https://github.com/o/r"],
+        &plain.path(),
+    );
+    let bytes = std::fs::read(plain.path().join(".git/config")).unwrap();
+    assert_eq!(read_config(&plain.path()).unwrap(), Some(bytes));
+    let linked = fixture();
+    git(&["init", "-q", "-b", "main"], &linked.path());
+    let config = linked.path().join(".git/config");
+    let elsewhere = linked.path().join("elsewhere");
+    std::fs::rename(&config, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &config).unwrap();
+    assert_eq!(
+        read_config(&linked.path()).unwrap_err().0,
+        "github_publish_not_plain_repo"
+    );
+    let piped = fixture();
+    git(&["init", "-q", "-b", "main"], &piped.path());
+    let fifo = piped.path().join(".git/config");
+    std::fs::remove_file(&fifo).unwrap();
+    let made = crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&fifo)).unwrap();
+    assert!(made.success());
+    let started = Instant::now();
+    assert_eq!(
+        read_config(&piped.path()).unwrap_err().0,
+        "github_publish_not_plain_repo"
+    );
+    assert!(started.elapsed() < LIMIT, "a pipe is never waited on");
+    let large = fixture();
+    git(&["init", "-q", "-b", "main"], &large.path());
+    let over = usize::try_from(CONFIG_BYTES_MAX).unwrap() + 1;
+    std::fs::write(large.path().join(".git/config"), vec![b'#'; over]).unwrap();
+    assert_eq!(
+        read_config(&large.path()).unwrap_err().0,
+        "github_publish_not_plain_repo"
+    );
+}
+
+#[test]
 fn prepare_initializes_main_hides_crazyagent_and_appends_the_ignore_lines_once() {
     let fixture = fixture();
     let project = fixture.path();

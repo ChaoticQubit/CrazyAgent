@@ -295,16 +295,26 @@ impl Watched {
 }
 
 /// Runs a git command to its end within `limit`, keeping at most `cap` bytes and one more
-/// of what it prints and draining the rest, so git never waits on a full pipe. Inputs:
-/// the command, the limit and the cap. Output: its status and what was kept, or
-/// `github_publish_failed`.
+/// of what it prints and draining the rest, so git never waits on a full pipe. Input for
+/// git's standard input is written by its own thread, so neither pipe holds the other.
+/// Inputs: the command, its input if any, the limit and the cap. Output: its status and
+/// what was kept, or `github_publish_failed`, also when git did not take all the input.
 fn collect(
     command: &mut Command,
+    input: Option<Vec<u8>>,
     limit: Duration,
     cap: u64,
 ) -> Result<(ExitStatus, Vec<u8>), EngineError> {
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let watched = Watched::start(command.stdout(Stdio::piped()), limit)?;
-    let stdout = watched.pipes().0.expect("git stdout is piped");
+    let (stdout, stdin) = watched.pipes();
+    let stdout = stdout.expect("git stdout is piped");
+    let writer = input.map(|input| {
+        let mut stdin = stdin.expect("git stdin is piped");
+        std::thread::spawn(move || stdin.write_all(&input).is_ok())
+    });
     let mut bytes = Vec::new();
     let mut source = stdout.take(cap + 1);
     let read = source.read_to_end(&mut bytes).is_ok()
@@ -313,7 +323,8 @@ fn collect(
         watched.stop();
     }
     let status = watched.finish()?;
-    if !read {
+    let fed = writer.is_none_or(|writer| writer.join().unwrap_or(false));
+    if !read || !fed {
         return Err(failure("github_publish_failed"));
     }
     Ok((status, bytes))
@@ -335,7 +346,7 @@ fn work(command: &mut Command) -> Result<Output, EngineError> {
 /// limit. Output: what it printed and its status, or `github_publish_failed` when it
 /// could not start, ran over or printed past 1 MiB.
 fn run_within(command: &mut Command, limit: Duration) -> Result<Output, EngineError> {
-    let (status, stdout) = collect(command, limit, OUTPUT_BYTES_MAX)?;
+    let (status, stdout) = collect(command, None, limit, OUTPUT_BYTES_MAX)?;
     if stdout.len() as u64 > OUTPUT_BYTES_MAX {
         return Err(failure("github_publish_failed"));
     }
@@ -361,7 +372,7 @@ fn listing_within(
     limit: Duration,
     cap: u64,
 ) -> Result<Vec<u8>, EngineError> {
-    let (status, bytes) = collect(command, limit, cap)?;
+    let (status, bytes) = collect(command, None, limit, cap)?;
     if bytes.len() as u64 > cap {
         return Err(failure("github_publish_too_large"));
     }
@@ -430,6 +441,26 @@ fn inspect_within(
         branch: Some(branch),
         history,
     })
+}
+
+/// Tells whether a project names no git remote, from its git config alone, for the publish
+/// prompt: no `.git` at all, or a plain `.git` folder whose config, includes skipped, names
+/// none. No git runs in the project. Inputs: the engine root, the project and the web host.
+/// Output: false also for a missing folder, a `.git` file or link, or a config git cannot
+/// read.
+pub(super) fn no_remote(root: &Path, project: &Path, host: &str) -> bool {
+    let folder = std::fs::symlink_metadata(project);
+    if !project.is_absolute() || !folder.is_ok_and(|metadata| metadata.is_dir()) {
+        return false;
+    }
+    match plain_repository(project) {
+        Ok(false) => true,
+        Ok(true) => match (git(), GitHome::new(root)) {
+            (Ok(git), Ok(home)) => remotes(&git, home.path(), project, host, LOOKUP_TIME).is_ok(),
+            _ => false,
+        },
+        Err(_) => false,
+    }
 }
 
 /// Tells whether a project holds its own repository: a plain `.git` folder, not a link
@@ -518,10 +549,38 @@ fn head_state(
     Ok((branch, history))
 }
 
+/// Reads a project's `.git/config` through one open that follows no link from the project
+/// down and never waits on a pipe, checked on the open file as a regular file of at most
+/// `CONFIG_BYTES_MAX`, so git lists these bytes and never opens the path again. Input: the
+/// project. Output: the bytes, none when there is no config, or
+/// `github_publish_not_plain_repo`.
+fn read_config(project: &Path) -> Result<Option<Vec<u8>>, EngineError> {
+    let invalid = || failure("github_publish_not_plain_repo");
+    let file = match crate::platform::open_plain_beneath(project, Path::new(".git/config")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(invalid()),
+        Ok(file) => file,
+    };
+    let metadata = file.metadata().map_err(|_| invalid())?;
+    if !metadata.is_file() || metadata.len() > CONFIG_BYTES_MAX {
+        return Err(invalid());
+    }
+    let mut bytes = Vec::new();
+    file.take(CONFIG_BYTES_MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid())?;
+    if bytes.len() as u64 > CONFIG_BYTES_MAX {
+        return Err(invalid());
+    }
+    Ok(Some(bytes))
+}
+
 /// Refuses a repository that already has a remote: one on GitHub is published already,
-/// and any other is another host's. git lists the keys of `.git/config` alone, includes
-/// left out. Inputs: git, its empty home, the project and GitHub's web host.
-/// Output: `()`, or `github_publish_on_github`, `github_publish_other_host`.
+/// and any other is another host's. git lists the keys of the `.git/config` bytes
+/// [`read_config`] read, on its standard input, includes left out, so the file is opened
+/// once and never again by path. Inputs: git, its empty home, the project, GitHub's web
+/// host and the limit. Output: `()`, or `github_publish_on_github`,
+/// `github_publish_other_host`, `github_publish_not_plain_repo`, `github_publish_failed`.
 fn remotes(
     git: &Path,
     home: &Path,
@@ -529,27 +588,23 @@ fn remotes(
     host: &str,
     limit: Duration,
 ) -> Result<(), EngineError> {
-    let config = project.join(".git").join("config");
-    match std::fs::symlink_metadata(&config) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Ok(metadata) if metadata.is_file() && metadata.len() <= CONFIG_BYTES_MAX => {}
-        _ => return Err(failure("github_publish_not_plain_repo")),
-    }
-    let listed = run_within(
+    let Some(config) = read_config(project)? else {
+        return Ok(());
+    };
+    let (status, listed) = collect(
         clone::git_command(git, home)
-            .args(["config", "--file"])
-            .arg(&config)
-            .args(["--no-includes", "-z", "--list"])
-            .stdin(Stdio::null())
+            .args(["config", "--file", "-", "--no-includes", "-z", "--list"])
             .stderr(Stdio::null()),
+        Some(config),
         limit,
+        OUTPUT_BYTES_MAX,
     )?;
-    if !listed.status.success() {
+    if listed.len() as u64 > OUTPUT_BYTES_MAX || !status.success() {
         return Err(failure("github_publish_failed"));
     }
     let mut remote = false;
     let mut on_github = false;
-    for entry in listed.stdout.split(|byte| *byte == 0) {
+    for entry in listed.split(|byte| *byte == 0) {
         let (key, value) = match entry.iter().position(|byte| *byte == b'\n') {
             Some(at) => (&entry[..at], &entry[at + 1..]),
             None => (entry, &entry[entry.len()..]),

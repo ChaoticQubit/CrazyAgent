@@ -1919,6 +1919,12 @@ fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) 
                 .into(),
             Step::Review,
         ),
+        "home_destination_exists" => (
+            "Could not create the project.",
+            "Your projects folder already has a folder with this name. Choose another project name."
+                .into(),
+            Step::About,
+        ),
         "pool_missing" => (
             "Could not create the project.",
             format!(
@@ -1972,6 +1978,17 @@ fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) 
             "CrazyAgent could not confirm the new project.",
             "Check Home for it before you create it again. Your draft is kept.".into(),
             Step::Review,
+        ),
+        "home_add_cancelled" => (
+            "Setting up the project stopped.",
+            "Nothing was kept. Press Enter to go back, then create the project again.".into(),
+            Step::Review,
+        ),
+        "project_folder_unavailable" => (
+            "Could not copy a document.",
+            "Documents can't be copied into a project on this computer yet. Remove them in Documents to create the project without documents."
+                .into(),
+            Step::Documents,
         ),
         "creation_not_ready" => (
             "Creating projects is not ready yet.",

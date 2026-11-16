@@ -380,3 +380,32 @@ fn a_cursor_key_in_the_panel_leaves_the_name_and_description_following_about() {
     type_text(&mut wizard, "y");
     assert_eq!(wizard.publish.shown_name("Tidepool"), "Tidepoolxy");
 }
+
+#[test]
+fn a_paste_that_adds_nothing_leaves_the_name_and_description_following_about() {
+    let mut wizard = signed_in("Tidepool", "Buoys");
+    wizard.focus_on(Control::Publish);
+    wizard.key(key(KeyCode::Enter));
+    wizard.key(key(KeyCode::Down));
+    wizard.key(key(KeyCode::Down));
+    assert_eq!(wizard.publish.panel, Some(PanelRow::Name));
+    for text in ["", "\u{1b}\u{7}", "\r\n"] {
+        assert_eq!(wizard.paste(text), Reply::Handled);
+    }
+    wizard.key(key(KeyCode::Down));
+    assert_eq!(wizard.publish.panel, Some(PanelRow::Description));
+    for text in ["", "\u{1b}"] {
+        assert_eq!(wizard.paste(text), Reply::Handled);
+    }
+    wizard.key(key(KeyCode::Esc));
+    assert_eq!(wizard.publish.name, None);
+    assert_eq!(wizard.publish.description, None);
+    assert_eq!(wizard.publish.shown_name("Tidewater"), "Tidewater");
+    assert_eq!(wizard.publish.shown_description("Reefs"), "Reefs");
+
+    wizard.key(key(KeyCode::Enter));
+    wizard.key(key(KeyCode::Down));
+    wizard.key(key(KeyCode::Down));
+    assert_eq!(wizard.paste("-v2"), Reply::Handled);
+    assert_eq!(wizard.publish.shown_name("Tidewater"), "Tidepool-v2");
+}

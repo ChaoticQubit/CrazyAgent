@@ -1,7 +1,7 @@
 use super::intake::{ask, copy, event, not_ready};
 use super::project_markdown::sanitize;
 use super::project_publish::{rule_label, rule_state_line};
-use super::settings_github::{PAGE_WIDTH, followed, list_room, moved};
+use super::settings_github::{PAGE_WIDTH, ROWS_MIN, followed, list_room, moved};
 use super::{Flow, Place, Screen};
 use crate::github::{GitHubRepoRules, GitHubRule, GitHubRuleOutcome, GitHubRuleState};
 use crate::protocol::ProjectId;
@@ -10,7 +10,7 @@ use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::Arrival;
-use crate::tui::text::{join, list_row, row, styled, wrap};
+use crate::tui::text::{cut, join, list_row, row, styled, width, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::checkbox;
 use ratatui::Frame;
@@ -26,6 +26,27 @@ pub(in crate::tui) const SENDING_TAIL: &str = " to GitHub. This can take a few m
 pub(in crate::tui) const REPO_TAIL: &str =
     ". Each switch changes the repository on GitHub at once, with your sign-in.";
 
+/// Cuts the selected rule's detail to the rows left for it, the last kept row ending in
+/// the ellipsis when any row was cut, so the lines below it stay on screen. Inputs: the
+/// detail rows with their roles, the room, the width and the ellipsis. Output: at most
+/// `room` rows.
+fn capped(
+    mut parts: Vec<(String, Role)>,
+    room: usize,
+    limit: usize,
+    ellipsis: &str,
+) -> Vec<(String, Role)> {
+    if parts.len() > room {
+        parts.truncate(room);
+        if let Some((text, _)) = parts.last_mut() {
+            let kept = cut(text, limit.saturating_sub(width(ellipsis)), "");
+            *text = format!("{kept}{ellipsis}");
+        }
+    }
+    assert!(parts.len() <= room);
+    parts
+}
+
 fn held(state: &GitHubRuleState) -> bool {
     matches!(
         state,
@@ -36,7 +57,9 @@ fn held(state: &GitHubRuleState) -> bool {
 /// Project > Settings > GitHub: the live rules of the repository a project was published
 /// to. Opening it only reads; each switch sends one change for the repository the page
 /// showed, one at a time, and a failed change reads the page again since it may have
-/// landed on GitHub. A rule that does not apply, or waits, never sends.
+/// landed on GitHub. The worker answers a switch at once as changing; the page keeps
+/// saying it sends until the switch's own result. A rule that does not apply, or waits,
+/// never sends.
 pub struct ProjectGitHub {
     project: ProjectId,
     name: String,
@@ -109,37 +132,32 @@ impl ProjectGitHub {
         self.selected = self.selected.min(page.rules.len().saturating_sub(1));
     }
 
-    fn detail(&self, page: &GitHubRepoRules, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
-        let theme = &ctx.theme;
-        let mut lines = Vec::new();
+    fn detail(&self, page: &GitHubRepoRules, limit: usize) -> Vec<(String, Role)> {
+        let mut parts = Vec::new();
         let Some(outcome) = page.rules.get(self.selected) else {
-            return lines;
+            return parts;
         };
         if let Some(line) = rule_state_line(&outcome.state) {
             let role = match outcome.state {
                 GitHubRuleState::Refused { .. } => Role::Error,
                 _ => Role::Muted,
             };
-            lines.push(Line::default());
-            lines.extend(
-                wrap(&line, limit)
-                    .into_iter()
-                    .map(|text| styled(text, role, theme)),
-            );
+            parts.push((String::new(), Role::Muted));
+            parts.extend(wrap(&line, limit).into_iter().map(|text| (text, role)));
         }
         if outcome.rule == GitHubRule::RequiredChecks && !page.checks.is_empty() {
             let names: Vec<String> = page.checks.iter().map(|name| sanitize(name)).collect();
-            lines.push(Line::default());
-            lines.extend(
+            parts.push((String::new(), Role::Muted));
+            parts.extend(
                 wrap(
                     &format!("Checks the first CI run named: {}.", names.join(", ")),
                     limit,
                 )
                 .into_iter()
-                .map(|text| styled(text, Role::Muted, theme)),
+                .map(|text| (text, Role::Muted)),
             );
         }
-        lines
+        parts
     }
 
     fn rows(
@@ -254,6 +272,9 @@ impl Screen for ProjectGitHub {
         self.pending = None;
         match (&reply.query, &reply.result) {
             (IntakeQuery::GitHubRules { .. }, Ok(IntakeView::Rules(page))) => self.arrived(page),
+            (IntakeQuery::GitHubRuleSet { .. }, Ok(IntakeView::RuleChanging)) => {
+                self.pending = Some(reply.query.clone());
+            }
             (IntakeQuery::GitHubRuleSet { .. }, Ok(IntakeView::Rules(page))) => {
                 self.problem = None;
                 self.arrived(page);
@@ -327,8 +348,18 @@ impl Screen for ProjectGitHub {
                     Role::Muted,
                 ));
                 lines.push(Line::default());
-                let detail = self.detail(page, limit, ctx);
                 let count = page.rules.len();
+                let list = if count == 0 {
+                    0
+                } else {
+                    count.min(ROWS_MIN) + 2
+                };
+                let spare = (area.height as usize).saturating_sub(lines.len() + list + below.len());
+                let detail: Vec<Line<'static>> =
+                    capped(self.detail(page, limit), spare, limit, ctx.glyphs.ellipsis)
+                        .into_iter()
+                        .map(|(text, role)| styled(text, role, theme))
+                        .collect();
                 if count > 0 {
                     let around = lines.len() + detail.len() + below.len() + 2;
                     let room = list_room(area.height, around).min(count);

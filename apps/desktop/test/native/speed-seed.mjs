@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
-import { POLL_MS, STEP_MS, bridgeCall, closedPort, start, stop, value } from "./e2e-harness.mjs";
+import { POLL_MS, STEP_MS, bridgeCall, closedPort, setUpProject, start, stop, value } from "./e2e-harness.mjs";
 import { poolForMaster, readyForAgents } from "./master-lease.mjs";
 import { privateFolder } from "./speed-budget.mjs";
 
@@ -59,13 +59,9 @@ export async function seedSide(bridge, projects, count = SESSIONS) {
   assert.equal((await value(bridge, "desktop_connect")).connected, true, "the bridge connects");
   applied("the profile is saved", await value(bridge, "desktop_save_owner_profile", { profile: { name: "Speed Owner" }, generation: next() }));
   applied("the projects folder is set", await value(bridge, "desktop_set_projects_home", { path: projects, generation: next() }));
-  const made = await value(bridge, "desktop_setup_project", {
-    spec: { name: PROJECT, repositories: [] },
-    setup: { about: "The project the speed rows open", tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [] },
-    generation: next(),
+  const project = await setUpProject(bridge, { name: PROJECT, repositories: [] }, {
+    about: "The project the speed rows open", tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [],
   });
-  applied("the project is made", made);
-  const project = made.project_id;
   await poolForMaster(bridge, project, next);
   await readyForAgents(bridge, next);
   const { ticket } = await value(bridge, "desktop_open_project", { id: project });

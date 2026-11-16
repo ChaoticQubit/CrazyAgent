@@ -1,11 +1,15 @@
 use super::intake::copy;
+use super::new_project_page::key_event;
+use super::new_project_publish::{GitHub, PUBLISH_LINE, PanelRow, Publish};
+use super::new_project_view::{Look, Row, panel_hints, publish_panel, wrap_words};
 use super::project_markdown::sanitize;
 use crate::github::{
-    GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishLeft, GitHubPublishStep, GitHubRule,
-    GitHubRuleState, GitHubSecretKind,
+    GitHubIgnoreDraft, GitHubPromptAnswer, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan,
+    GitHubPublishStep, GitHubRule, GitHubRuleState, GitHubSecretKind,
 };
 use crate::protocol::ProjectId;
-use crate::tui::client::intake::IntakeQuery;
+use crate::tui::client::intake::{IntakeEvent, IntakeQuery};
+use crate::tui::frame::Message;
 use crate::tui::keys::Key;
 use std::collections::BTreeSet;
 
@@ -24,6 +28,199 @@ const BLOCKED: &str = "These files look like they hold secrets, so nothing was p
 const MORE: &str = "There are more. Check again after these.";
 const DISCARD_ASK: &str = "Discard this publish? CrazyAgent forgets it so you can start again. Files it wrote in the project stay, and a repository it made stays on GitHub.";
 const REFUSAL_CHARS_MAX: usize = 300;
+const START_REFUSAL_LINES_MAX: usize = 5;
+pub(in crate::tui) const PROMPT_LINE: &str = "This project is not on GitHub. Publish it?";
+pub(in crate::tui) const PROMPT_KEY: (&str, &str) = ("G", "Publish on GitHub");
+pub(in crate::tui) const CHECKING: &str = "Checking your GitHub sign-in...";
+pub(in crate::tui) const SIGNED_OUT: &str = "Sign in to GitHub to publish this project.";
+pub(in crate::tui) const STATUS_FAILED: &str = "CrazyAgent couldn't read your GitHub sign-in.";
+
+/// What one key in the Overview's publish question or its form asks of the page: nothing
+/// more, close the pane, keep Not now or Don't ask again, send a GitHub read, open the
+/// GitHub sign-in, or start the publish with the plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::tui) enum AskKey {
+    Handled,
+    Close,
+    Answer(GitHubPromptAnswer),
+    Read(IntakeQuery),
+    SignIn,
+    Start(GitHubPublishPlan),
+}
+
+/// The question's or the form's words: the title, the body rows and the key hints, as key
+/// and label.
+pub(in crate::tui) struct AskText {
+    pub title: &'static str,
+    pub body: Vec<Row>,
+    pub hints: Vec<(&'static str, &'static str)>,
+}
+
+/// The Overview's question for a project with no GitHub publish (DEC-182 S5b): the question
+/// with Publish, Not now and Don't ask again, then the New project publish panel that
+/// Publish opens, with the GitHub read it waits on and why the engine refused its last Start.
+#[derive(Debug, Clone, Default)]
+pub(in crate::tui) struct AskPane {
+    form: Option<Publish>,
+    reading: Option<IntakeQuery>,
+    refusal: Option<Message>,
+}
+
+impl AskPane {
+    /// Says whether a reply answers the GitHub read the form waits on. Takes the query.
+    /// Returns the answer.
+    pub fn takes(&self, query: &IntakeQuery) -> bool {
+        self.reading.as_ref() == Some(query)
+    }
+
+    /// Says whether the pane shows the question, before Publish opened the form. Takes
+    /// nothing. Returns the answer.
+    pub fn asking(&self) -> bool {
+        self.form.is_none()
+    }
+
+    /// Keeps the form with what the owner chose and shows why the engine refused its Start,
+    /// until the next Start. Takes what the message line would have said. Returns nothing.
+    pub fn refused(&mut self, said: Message) {
+        self.refusal = Some(said);
+    }
+
+    /// Gives up the pane for the reason its last Start was refused, so the page can still
+    /// say it once a publish read closes the form. Takes the pane. Returns the reason, if any.
+    pub fn into_refusal(self) -> Option<Message> {
+        self.refusal
+    }
+
+    /// Handles a key: on the question Enter opens the form and reads the GitHub sign-in,
+    /// n keeps Not now, x keeps Don't ask again and Esc closes; in the form Esc closes,
+    /// Enter on Publish starts with the plan or moves to the row that stops it, Enter opens
+    /// the sign-in while signed out or reads it again after a failed read, and every other
+    /// key goes to the panel. Takes the key, the project's name and its about text.
+    /// Returns what the page does next.
+    pub fn key(&mut self, key: &Key, name: &str, about: &str) -> AskKey {
+        let reading = self.reading.is_some();
+        let Some(publish) = self.form.as_mut() else {
+            return match key {
+                Key::Enter => {
+                    self.form = Some(Publish::default());
+                    self.reading = Some(IntakeQuery::GitHubStatus);
+                    AskKey::Read(IntakeQuery::GitHubStatus)
+                }
+                Key::Char('n') => AskKey::Answer(GitHubPromptAnswer::NotNow),
+                Key::Char('x') => AskKey::Answer(GitHubPromptAnswer::Never),
+                Key::Esc => AskKey::Close,
+                _ => AskKey::Handled,
+            };
+        };
+        if *key == Key::Esc {
+            return AskKey::Close;
+        }
+        match (publish.github.clone(), publish.panel, key) {
+            (GitHub::SignedIn, Some(PanelRow::Done), Key::Enter) => {
+                if let Some(plan) = publish.plan(name, about) {
+                    self.refusal = None;
+                    return AskKey::Start(plan);
+                }
+                let stop = publish.problem(name, about).map(|(row, _)| row);
+                publish.panel = Some(stop.unwrap_or(PanelRow::Done));
+            }
+            (GitHub::SignedIn, Some(_), Key::Paste(text)) => {
+                publish.paste(text, name, about);
+            }
+            (GitHub::SignedIn, Some(_), _) => {
+                if let Some(event) = key_event(key) {
+                    publish.panel_key(event, name, about);
+                }
+            }
+            (GitHub::SignedOut, _, Key::Enter) => return AskKey::SignIn,
+            (GitHub::Failed(_), _, Key::Enter) if !reading => {
+                publish.set_github(GitHub::Checking);
+                self.reading = Some(IntakeQuery::GitHubStatus);
+                return AskKey::Read(IntakeQuery::GitHubStatus);
+            }
+            _ => {}
+        }
+        AskKey::Handled
+    }
+
+    /// Takes the reply to the form's GitHub read: the sign-in, then the accounts while
+    /// signed in, which opens the panel on its first row; a reply it did not ask for changes
+    /// nothing. Takes the reply. Returns the read to send next, if any.
+    pub fn arrived(&mut self, event: &IntakeEvent) -> Option<IntakeQuery> {
+        if !self.takes(&event.query) {
+            return None;
+        }
+        self.reading = None;
+        let publish = self.form.as_mut()?;
+        let next = publish.arrived(&event.query, &event.result);
+        if publish.github == GitHub::SignedIn && publish.panel.is_none() {
+            publish.panel = Some(PanelRow::Visibility);
+        }
+        self.reading.clone_from(&next);
+        next
+    }
+
+    /// The pane's words: the question, the sign-in being read, signed out, a read that
+    /// failed, or the publish panel with Publish as its last row, then why the last Start
+    /// was refused. Takes the project's name, its about text and the look. Returns the words.
+    pub fn text(&self, name: &str, about: &str, look: &Look) -> AskText {
+        let cancel = ("Esc", "Cancel");
+        let (mut body, hints) = match self.form.as_ref() {
+            None => (
+                vec![
+                    Row::of(PROMPT_LINE, look.fg),
+                    Row::default(),
+                    Row::of(PUBLISH_LINE, look.muted),
+                ],
+                vec![
+                    ("Enter", "Publish"),
+                    ("n", "Not now"),
+                    ("x", "Don't ask again"),
+                    ("Esc", "Close"),
+                ],
+            ),
+            Some(publish) => match &publish.github {
+                GitHub::Checking => (vec![Row::of(CHECKING, look.muted)], vec![cancel]),
+                GitHub::SignedOut => (
+                    vec![Row::of(SIGNED_OUT, look.fg)],
+                    vec![("Enter", "Sign in"), cancel],
+                ),
+                GitHub::Failed(problem) => {
+                    let mut body = vec![Row::of(STATUS_FAILED, look.error)];
+                    body.extend(
+                        wrap_words(&sanitize(problem), 64)
+                            .into_iter()
+                            .take(3)
+                            .map(|line| Row::of(line, look.muted)),
+                    );
+                    (body, vec![("Enter", "Try again"), cancel])
+                }
+                GitHub::SignedIn => (
+                    publish_panel(publish, name, about, "Publish", look),
+                    panel_hints(
+                        publish.panel.unwrap_or(PanelRow::Visibility),
+                        "Publish",
+                        "Cancel",
+                    ),
+                ),
+            },
+        };
+        if let Some(said) = self.refusal.as_ref().filter(|_| self.form.is_some()) {
+            body.push(Row::default());
+            body.extend(
+                wrap_words(&format!("{} {}", said.lead, said.rest), 64)
+                    .into_iter()
+                    .take(START_REFUSAL_LINES_MAX)
+                    .map(|line| Row::of(line, look.error)),
+            );
+        }
+        AskText {
+            title: PUBLISH_TITLE,
+            body,
+            hints,
+        }
+    }
+}
 
 /// What the owner asked for in the publish pane, before it becomes a query.
 #[derive(Debug, Clone, PartialEq, Eq)]

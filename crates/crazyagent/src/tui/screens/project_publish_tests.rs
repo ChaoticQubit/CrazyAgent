@@ -1,12 +1,14 @@
 use super::intake::copy;
+use super::new_project_view::{Look, Row};
 use super::project_publish::*;
 use crate::github::{
-    GitHubCommitted, GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishPlan, GitHubPublishStep,
-    GitHubRule, GitHubRuleOutcome, GitHubRuleState, GitHubSecretFinding, GitHubSecretKind,
-    GitHubSecretScan,
+    GitHubCommitted, GitHubIgnoreDraft, GitHubMethod, GitHubOwner, GitHubOwners,
+    GitHubPromptAnswer, GitHubPublishJob, GitHubPublishPlan, GitHubPublishStep, GitHubRule,
+    GitHubRuleOutcome, GitHubRuleState, GitHubSecretFinding, GitHubSecretKind, GitHubSecretScan,
+    GitHubStatus, default_description, default_repo_name,
 };
 use crate::protocol::ProjectId;
-use crate::tui::client::intake::IntakeQuery;
+use crate::tui::client::intake::{IntakeEvent, IntakeQuery, IntakeView};
 use crate::tui::keys::Key;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -26,6 +28,7 @@ fn job(step: GitHubPublishStep, stopped: Option<&str>) -> GitHubPublishJob {
         step,
         stopped: stopped.map(str::to_owned),
         made: None,
+        rules: GitHubRule::defaults(),
     }
 }
 
@@ -323,6 +326,179 @@ fn each_pane_answer_goes_to_the_engine_as_its_own_publish_query() {
     );
 }
 
+fn github(signed_in: bool) -> IntakeEvent {
+    IntakeEvent {
+        query: IntakeQuery::GitHubStatus,
+        result: Ok(IntakeView::GitHub(GitHubStatus {
+            signed_in,
+            login: signed_in.then(|| "me".to_owned()),
+            method: if signed_in {
+                GitHubMethod::Token
+            } else {
+                GitHubMethod::None
+            },
+            waiting: false,
+            problem: None,
+        })),
+    }
+}
+
+fn owners(owners: Vec<GitHubOwner>) -> IntakeEvent {
+    IntakeEvent {
+        query: IntakeQuery::GitHubOwners,
+        result: Ok(IntakeView::Owners(GitHubOwners {
+            owners,
+            problem: None,
+        })),
+    }
+}
+
+fn me() -> GitHubOwner {
+    GitHubOwner {
+        login: "me".into(),
+        personal: true,
+    }
+}
+
+fn ask_body(text: &AskText) -> String {
+    text.body
+        .iter()
+        .map(|row: &Row| {
+            row.0
+                .iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn the_publish_question_keeps_not_now_or_dont_ask_again_and_esc_closes_it() {
+    let look = Look::plain();
+    let mut pane = AskPane::default();
+    let text = pane.text("Notes", "", &look);
+    assert_eq!(text.title, PUBLISH_TITLE);
+    assert!(ask_body(&text).contains(PROMPT_LINE), "{}", ask_body(&text));
+    assert_eq!(
+        text.hints,
+        [
+            ("Enter", "Publish"),
+            ("n", "Not now"),
+            ("x", "Don't ask again"),
+            ("Esc", "Close"),
+        ]
+    );
+    assert_eq!(
+        pane.key(&Key::Char('n'), "Notes", ""),
+        AskKey::Answer(GitHubPromptAnswer::NotNow)
+    );
+    assert_eq!(
+        pane.key(&Key::Char('x'), "Notes", ""),
+        AskKey::Answer(GitHubPromptAnswer::Never)
+    );
+    assert_eq!(pane.key(&Key::Char('q'), "Notes", ""), AskKey::Handled);
+    assert_eq!(pane.key(&Key::Esc, "Notes", ""), AskKey::Close);
+}
+
+#[test]
+fn publish_reads_the_sign_in_and_its_panel_starts_with_the_plan_the_owner_sees() {
+    let look = Look::plain();
+    let (name, about) = ("Notes CLI", "Keeps notes.\nAnd more.");
+    let mut pane = AskPane::default();
+    assert_eq!(
+        pane.key(&Key::Enter, name, about),
+        AskKey::Read(IntakeQuery::GitHubStatus)
+    );
+    assert!(pane.takes(&IntakeQuery::GitHubStatus));
+    assert!(!pane.takes(&IntakeQuery::GitHubOwners));
+    let checking = pane.text(name, about, &look);
+    assert!(ask_body(&checking).contains("Checking your GitHub sign-in..."));
+    assert_eq!(checking.hints, [("Esc", "Cancel")]);
+    assert_eq!(pane.key(&Key::Enter, name, about), AskKey::Handled);
+    assert_eq!(pane.arrived(&github(true)), Some(IntakeQuery::GitHubOwners));
+    assert!(pane.takes(&IntakeQuery::GitHubOwners));
+    assert_eq!(pane.arrived(&owners(vec![me()])), None);
+    assert!(!pane.takes(&IntakeQuery::GitHubOwners));
+    let text = pane.text(name, about, &look);
+    let shown = ask_body(&text);
+    assert!(shown.contains("> Visibility"), "{shown}");
+    assert!(shown.contains("Account      < me (you) >"), "{shown}");
+    assert!(shown.contains("[ Publish ]"), "{shown}");
+    assert!(text.hints.contains(&("Esc", "Cancel")), "{:?}", text.hints);
+    assert_eq!(pane.key(&Key::Down, name, about), AskKey::Handled);
+    assert_eq!(pane.key(&Key::Down, name, about), AskKey::Handled);
+    assert_eq!(
+        pane.key(&Key::Paste("-2".into()), name, about),
+        AskKey::Handled
+    );
+    for _ in 0..3 {
+        assert_eq!(pane.key(&Key::Down, name, about), AskKey::Handled);
+    }
+    assert_eq!(
+        pane.key(&Key::Enter, name, about),
+        AskKey::Start(GitHubPublishPlan {
+            owner: "me".into(),
+            name: format!("{}-2", default_repo_name(name)),
+            description: default_description(about),
+            private: true,
+            docs: false,
+        })
+    );
+}
+
+#[test]
+fn esc_in_the_publish_form_starts_nothing_and_publish_moves_to_the_row_that_stops_it() {
+    let look = Look::plain();
+    let mut pane = AskPane::default();
+    pane.key(&Key::Enter, "Notes", "");
+    pane.arrived(&github(true));
+    pane.arrived(&owners(Vec::new()));
+    for _ in 0..5 {
+        pane.key(&Key::Down, "Notes", "");
+    }
+    assert_eq!(pane.key(&Key::Enter, "Notes", ""), AskKey::Handled);
+    let shown = ask_body(&pane.text("Notes", "", &look));
+    assert!(shown.contains("> Account"), "{shown}");
+    assert!(
+        shown.contains("Pick the GitHub account the repository goes under."),
+        "{shown}"
+    );
+    assert_eq!(pane.key(&Key::Esc, "Notes", ""), AskKey::Close);
+}
+
+#[test]
+fn signed_out_publish_opens_the_sign_in_and_a_failed_read_tries_again() {
+    let look = Look::plain();
+    let mut pane = AskPane::default();
+    pane.key(&Key::Enter, "Notes", "");
+    assert_eq!(pane.arrived(&github(false)), None);
+    let text = pane.text("Notes", "", &look);
+    assert!(ask_body(&text).contains("Sign in to GitHub to publish this project."));
+    assert_eq!(text.hints, [("Enter", "Sign in"), ("Esc", "Cancel")]);
+    assert_eq!(pane.key(&Key::Enter, "Notes", ""), AskKey::SignIn);
+    let mut failed = AskPane::default();
+    failed.key(&Key::Enter, "Notes", "");
+    let refused = IntakeEvent {
+        query: IntakeQuery::GitHubStatus,
+        result: Err("github_status_failed".into()),
+    };
+    assert_eq!(failed.arrived(&refused), None);
+    let text = failed.text("Notes", "", &look);
+    assert!(ask_body(&text).contains("CrazyAgent couldn't read your GitHub sign-in."));
+    assert_eq!(text.hints, [("Enter", "Try again"), ("Esc", "Cancel")]);
+    assert_eq!(
+        failed.key(&Key::Enter, "Notes", ""),
+        AskKey::Read(IntakeQuery::GitHubStatus)
+    );
+    assert!(failed.takes(&IntakeQuery::GitHubStatus));
+    assert_eq!(
+        failed.key(&Key::Enter, "Notes", ""),
+        AskKey::Handled,
+        "one read at a time"
+    );
+}
+
 #[test]
 fn a_discarded_publish_says_what_it_left_on_github() {
     use crate::github::GitHubPublishLeft;
@@ -338,5 +514,29 @@ fn a_discarded_publish_says_what_it_left_on_github() {
             full_name: "me/tool".into(),
         })),
         "GitHub may have made me/tool. Check GitHub and delete it if you don't want it."
+    );
+}
+
+/// QUESTION-23:31 R1 (DEC-141): the Overview publish form says the same sign-in words in
+/// both apps, and New project keeps its own sign-in wait in both.
+#[test]
+fn the_overview_publish_form_says_the_desktop_sign_in_words() {
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/desktop/src/screens/new-project/publish.ts"
+    ))
+    .unwrap();
+    let desktop = |name: &str| -> Option<String> {
+        let key = format!("export const {name} = \"");
+        let start = source.find(&key)? + key.len();
+        let rest = &source[start..];
+        Some(rest[..rest.find('"')?].to_owned())
+    };
+    assert_eq!(desktop("SIGN_IN_CHECKING").as_deref(), Some(CHECKING));
+    assert_eq!(desktop("OVERVIEW_SIGNED_OUT").as_deref(), Some(SIGNED_OUT));
+    assert_eq!(desktop("SIGN_IN_UNREAD").as_deref(), Some(STATUS_FAILED));
+    assert_eq!(
+        desktop("SIGN_IN_WAIT").as_deref(),
+        Some(super::new_project_publish::SIGN_IN_WAIT)
     );
 }

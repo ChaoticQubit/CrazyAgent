@@ -904,7 +904,7 @@ fn settings_show_the_linux_sockets_setting_and_its_risk() {
             .1
             .contains("Wrappers are judged by their first file, a script by its interpreter")
     );
-    assert!(bar(&rows).contains("l Linux sockets"));
+    assert!(bar(&rows).contains("l Sockets"));
     shell.key(Key::Char('l'));
     let rows = render(&mut shell, 120, 72);
     find(
@@ -994,7 +994,7 @@ fn settings_show_the_linux_call_supervisor_setting_and_what_each_option_does() {
     let rows = render(&mut shell, 120, 72);
     assert!(find(&rows, "Linux supervisor ").contains("On (recommended)"));
     find(&rows, "makes them for them");
-    assert!(bar(&rows).contains("v Linux supervisor"));
+    assert!(bar(&rows).contains("v Supervisor"));
     shell.key(Key::Char('v'));
     let rows = render(&mut shell, 120, 72);
     find(&rows, "Linux call supervisor:");
@@ -1121,7 +1121,7 @@ fn settings_show_finished_agents_one_day_after_by_default_and_what_stays() {
         &rows,
         "Only the worktree goes: the code checkout and its build files.",
     );
-    assert!(bar(&rows).contains("f Finished agents"));
+    assert!(bar(&rows).contains("f Finished"));
     shell.key(Key::Char('f'));
     let rows = render(&mut shell, 160, 60);
     find(
@@ -2207,6 +2207,63 @@ fn a_refused_tool_keeps_every_app_settings_hint_on_the_bar_from_80_by_24_to_240_
     }
 }
 
+/// Signed-in app settings show every key once at 80x24 in at most three bar rows, a
+/// refused tool's `p Fix` too and with questions waiting, so `u Unused` and `Esc Back`
+/// stay on the last row beside the badge; with no question waiting the whole bar is one
+/// row again at 240 columns. The keys are named here, not read from the wide bar, so a
+/// bar that grows past one row at 240 still fails this row.
+#[test]
+fn signed_in_app_settings_show_every_key_at_80_by_24_with_or_without_a_fix() {
+    let keys = [
+        "Space",
+        "Enter Install missing",
+        "d Remove",
+        "h Home",
+        "g Sign out of GitHub",
+        "l Sockets",
+        "v Supervisor",
+        "f Finished",
+        "q Quitting",
+        "e Retry",
+        "m Master steps",
+        "t Master time",
+        "z Master frame",
+        "u Unused",
+        "Esc Back",
+    ];
+    let mut shell = settings(240, 80);
+    for fix in [false, true] {
+        if fix {
+            shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+                crate::setup::RefusedTool::FixButton,
+            )))));
+        }
+        let mut wanted: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+        if fix {
+            wanted.push("p Fix".to_owned());
+        }
+        for waiting in [0, 12] {
+            shell.ctx.store.questions = Load::Ready(vec![(
+                crate::protocol::ProjectId::new("alpha").unwrap(),
+                waiting,
+            )]);
+            if waiting == 0 {
+                let rows = render(&mut shell, 240, 80);
+                let wide = crate::tui::screens::settings_accounts::tests::bar_rows(&rows);
+                assert_eq!(wide.len(), 1, "fix {fix}: {wide:?}");
+            }
+            for (width, height) in [(80, 24), (100, 24), (240, 80)] {
+                let rows = render(&mut shell, width, height);
+                crate::tui::screens::settings_accounts::tests::every_hint_once(
+                    &rows,
+                    &wanted,
+                    &format!("fix {fix}, {waiting} waiting, {width}x{height}"),
+                );
+            }
+        }
+    }
+}
+
 fn refused_status(choice: crate::setup::RefusedTool) -> SetupStatus {
     let mut status = installed_status();
     assert_eq!(status.dependencies[2].name, Dependency::Graphify);
@@ -2450,13 +2507,20 @@ fn below_80x24_no_key_reaches_setup_so_enter_installs_and_approves_nothing() {
     }
 }
 
-/// DEC-182 S6c: signed in, Setup shows G beside g and opens Settings / GitHub, the rules a
-/// new repository starts with; signed out, the bar has no G and G does nothing.
+/// DEC-182 S6c: signed in, G opens Settings / GitHub, the rules a new repository starts
+/// with, and the Keys overlay lists it while Setup's bar leaves it out for the settings
+/// it already carries; signed out, G does nothing and neither lists it.
 #[test]
 fn signed_in_setup_opens_the_github_rules_for_new_repositories_with_g_upper() {
+    let shows = |rows: &[String], text: &str| rows.iter().any(|row| row.contains(text));
+    let listed = format!("{:<10}GitHub rules", "G");
     let mut shell = settings(240, 80);
     let rows = render(&mut shell, 240, 80);
-    assert!(bar(&rows).contains("G GitHub rules"), "{}", bar(&rows));
+    assert!(!shows(&rows, "GitHub rules"), "{}", bar(&rows));
+    shell.key(Key::Char('?'));
+    let rows = render(&mut shell, 240, 80);
+    assert!(shows(&rows, &listed), "{rows:#?}");
+    shell.key(Key::Esc);
     shell.key(Key::Char('G'));
     assert_eq!(shell.place(), Some(Place::GitHubDefaults));
     let mut shell = settings(240, 80);
@@ -2465,7 +2529,11 @@ fn signed_in_setup_opens_the_github_rules_for_new_repositories_with_g_upper() {
         ..signed_in()
     }))));
     let rows = render(&mut shell, 240, 80);
-    assert!(!bar(&rows).contains("G GitHub rules"), "{}", bar(&rows));
+    assert!(!shows(&rows, "GitHub rules"), "{}", bar(&rows));
+    shell.key(Key::Char('?'));
+    let rows = render(&mut shell, 240, 80);
+    assert!(!shows(&rows, "GitHub rules"), "{rows:#?}");
+    shell.key(Key::Esc);
     shell.key(Key::Char('G'));
     assert_eq!(shell.place(), Some(Place::Setup { first_run: false }));
 }

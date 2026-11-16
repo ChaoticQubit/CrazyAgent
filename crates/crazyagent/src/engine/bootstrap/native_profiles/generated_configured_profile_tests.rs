@@ -428,3 +428,175 @@ fn a_save_stopped_at_any_step_never_strands_the_account_on_a_config_it_does_not_
     assert!(finished);
     assert!(stopped > 0);
 }
+
+/// Writes other bytes over a generated home's config and then its own bytes back, in place,
+/// and resets its modified time, the way a confined master can, so only its change time
+/// moves. Input: the config file. Output: none; the row's own asserts check the result.
+fn write_and_restore(config: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let bytes = std::fs::read(config).unwrap();
+    let before = std::fs::symlink_metadata(config).unwrap();
+    std::fs::write(config, b"{}").unwrap();
+    std::fs::write(config, &bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(config)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    let after = std::fs::symlink_metadata(config).unwrap();
+    assert_eq!(std::fs::read(config).unwrap(), bytes);
+    assert_eq!(
+        (after.dev(), after.ino(), after.mode(), after.nlink()),
+        (before.dev(), before.ino(), before.mode(), before.nlink())
+    );
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    assert_ne!(
+        (after.ctime(), after.ctime_nsec()),
+        (before.ctime(), before.ctime_nsec())
+    );
+}
+
+/// rv-sec3 G4 r2 F1: a master slot on an account's generated SDK home whose config was
+/// written and put back outside a save is refused by the master turn's re-pin with its own
+/// code, rcli_profile_changed_in_conversation (rv-code4 B22 F3), so the change stays
+/// visible; the owner's own registration still re-pins it, at the next generation.
+#[test]
+fn a_config_written_and_restored_outside_a_save_is_never_re_pinned_for_a_master() {
+    let mut case = ConfiguredCase::new(false, false);
+    let saved = case
+        .custody
+        .prepare_configured_rcli_profile(&case.host, &case.connection, &case.profile, None)
+        .unwrap();
+    let home = case.custody.generated_configured_home(&case.profile);
+    let master = reference("master-target-profile");
+    let first = case
+        .custody
+        .register_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+        .unwrap();
+    assert_eq!(first.profile_config_sha256, saved.profile_config_sha256);
+    write_and_restore(&home.join(".backboard/config.json"));
+
+    let refused = case
+        .custody
+        .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home);
+
+    assert_eq!(
+        refused.unwrap_err().0,
+        "rcli_profile_changed_in_conversation"
+    );
+    let owner = case
+        .custody
+        .register_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+        .unwrap();
+    assert_eq!(owner.profile_generation, first.profile_generation + 1);
+}
+
+/// rv-code4 B22 F3: a master slot on an account's generated SDK home whose config was
+/// replaced by another file of the same bytes, a new inode, keeps the refusal of a changed
+/// file, rcli_profile_identity_changed, and never the in-conversation code, whose advice to
+/// end the conversation would only loop: a new conversation's register refuses it too.
+#[test]
+fn a_master_slot_whose_config_was_replaced_keeps_the_changed_file_refusal() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let mut case = ConfiguredCase::new(false, false);
+    case.custody
+        .prepare_configured_rcli_profile(&case.host, &case.connection, &case.profile, None)
+        .unwrap();
+    let home = case.custody.generated_configured_home(&case.profile);
+    let master = reference("master-target-profile");
+    case.custody
+        .register_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+        .unwrap();
+    let config = home.join(".backboard/config.json");
+    let before = std::fs::symlink_metadata(&config).unwrap();
+    let copy = home.join(".backboard/config.json.copy");
+    std::fs::write(&copy, std::fs::read(&config).unwrap()).unwrap();
+    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(before.mode() & 0o7777))
+        .unwrap();
+    std::fs::rename(&copy, &config).unwrap();
+    assert_ne!(std::fs::symlink_metadata(&config).unwrap().ino(), before.ino());
+
+    let refused = case
+        .custody
+        .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home);
+
+    assert_eq!(refused.unwrap_err().0, "rcli_profile_identity_changed");
+}
+
+/// rv-code4 B22 R2-F1: a master slot on an account's generated SDK home whose config got
+/// other bytes is refused by the master turn's re-pin as a changed config,
+/// rcli_profile_config_changed, the code the owner's register gives it, never as a mere
+/// change of file.
+#[test]
+fn a_master_slot_whose_config_bytes_changed_is_refused_as_a_changed_config() {
+    let mut case = ConfiguredCase::new(false, false);
+    case.custody
+        .prepare_configured_rcli_profile(&case.host, &case.connection, &case.profile, None)
+        .unwrap();
+    let home = case.custody.generated_configured_home(&case.profile);
+    let master = reference("master-target-profile");
+    case.custody
+        .register_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+        .unwrap();
+    let config = home.join(".backboard/config.json");
+    let mut bytes = std::fs::read(&config).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(&config, &bytes).unwrap();
+
+    let refused = case
+        .custody
+        .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home);
+
+    assert_eq!(refused.unwrap_err().0, "rcli_profile_config_changed");
+}
+
+/// rv-sec3 G4 r2 F1 (RV-DS241-50 r1): a master slot on an account's generated SDK home
+/// re-pins, at its next turn, the config an account save stopped after its swap put back,
+/// the same file with a new change time, at the next generation.
+#[test]
+fn a_config_an_undone_save_put_back_is_re_pinned_for_a_master_slot_on_that_home() {
+    use std::os::unix::fs::MetadataExt;
+    let mut undone = 0;
+    for point in 1..=64 {
+        let mut case = ConfiguredCase::new(false, false);
+        case.custody
+            .prepare_configured_rcli_profile(&case.host, &case.connection, &case.profile, None)
+            .unwrap();
+        let home = case.custody.generated_configured_home(&case.profile);
+        let master = reference("master-target-profile");
+        let first = case
+            .custody
+            .register_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+            .unwrap();
+        let config = home.join(".backboard/config.json");
+        let bytes = std::fs::read(&config).unwrap();
+        let before = std::fs::symlink_metadata(&config).unwrap();
+        let mut changed = case.connection.clone();
+        changed.model.id = "another-local-model".into();
+        staging::INTERRUPT.set(point);
+        let saved =
+            case.custody
+                .prepare_configured_rcli_profile(&case.host, &changed, &case.profile, None);
+        staging::INTERRUPT.set(0);
+        if saved.is_ok() {
+            break;
+        }
+        let after = std::fs::symlink_metadata(&config).unwrap();
+        if std::fs::read(&config).unwrap() != bytes
+            || (after.ctime(), after.ctime_nsec()) == (before.ctime(), before.ctime_nsec())
+        {
+            continue;
+        }
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        undone += 1;
+
+        let repinned = case
+            .custody
+            .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+            .unwrap_or_else(|error| panic!("step {point}: the put-back is refused: {}", error.0));
+
+        assert_eq!(repinned.profile_generation, first.profile_generation + 1);
+    }
+    assert!(undone > 0, "no stopped save put the old config back");
+}

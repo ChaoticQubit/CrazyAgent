@@ -2625,29 +2625,40 @@ impl Screen for AppSetup {
             }
             _ => {}
         }
-        if self.fixable().is_some() && self.refused_tool() == Some(RefusedTool::FixButton) {
+        let fix = self.fixable().is_some() && self.refused_tool() == Some(RefusedTool::FixButton);
+        if fix && self.first_run {
             hints.push(hint("p", "Fix"));
         }
         if !self.first_run {
-            hints.push(hint("h", "Change home"));
+            hints.push(hint("h", "Home"));
             if matches!(&self.github, Load::Ready(github) if github.signed_in) {
                 hints.push(hint("g", "Sign out of GitHub"));
-                hints.push(hint("G", "GitHub rules"));
             }
-            hints.push(hint("l", "Linux sockets"));
-            hints.push(hint("v", "Linux supervisor"));
-            hints.push(hint("f", "Finished agents"));
+            hints.push(hint("l", "Sockets"));
+            hints.push(hint("v", "Supervisor"));
+            hints.push(hint("f", "Finished"));
             hints.push(hint("q", "Quitting"));
             hints.push(hint("e", "Retry"));
             hints.push(hint("m", "Master steps"));
             hints.push(hint("t", "Master time"));
             hints.push(hint("z", "Master frame"));
             hints.push(hint("u", "Unused"));
+            if fix {
+                hints.push(hint("p", "Fix"));
+            }
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
         }
         hints
+    }
+
+    fn keys(&self, ctx: &Ctx) -> Vec<Hint> {
+        let mut keys = self.hints(ctx);
+        if let Some(at) = keys.iter().position(|item| item.key == "g") {
+            keys.insert(at + 1, hint("G", "GitHub rules"));
+        }
+        keys
     }
 
     fn typing(&self) -> bool {

@@ -420,7 +420,8 @@ const copy: Record<string, string> = {
   master_scope_or_budget_denied: "The master's limits aren't allowed by your settings. Check the project's pool.",
   master_pool_missing: "This project needs a pool before the master can reply.",
   master_backend_account_denied: "The project's pool has no account the master can use. Check the pool's accounts.",
-  rcli_profile_identity_changed: "The local model's profile changed while the master started. Try again.",
+  rcli_profile_identity_changed: "The local model's config file or folder changed on disk, so the master can't use it.",
+  rcli_profile_changed_in_conversation: "The local model's config file changed since this conversation started, so the master can't use it. End the conversation, then send again.",
   stale_master: "The conversation changed. It was reloaded; send again.",
   resync_required: "The conversation changed while it loaded. Try again.",
   conversation_text_bounds: "Messages can be up to 8192 bytes.",
@@ -480,10 +481,6 @@ export function receiptState(receipt: IntentReceipt): ReceiptState {
 
 export function loadProjectCatalog(pool: string | null, research: ResearchKind[]): Promise<Result<ProjectCatalog>> {
   return call<ProjectCatalog>("desktop_project_catalog", { pool, research });
-}
-
-export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
 }
 
 /** Whether a New Project receipt gets one automatic reconcile, as the TUI does: the engine
@@ -820,6 +817,14 @@ export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddO
  * exact name as typed. Output: the started job, or the delete's refusal. */
 export function startDeleteJob(id: string, name: string): Promise<Result<IntakeJob>> {
   return call<IntakeJob>("desktop_delete_project_job", { id, name });
+}
+
+/** Starts the engine's job that sets up a New Project, followed on the New Project page and on
+ * Home: it builds the project's folder in the projects folder with its documents counted and
+ * records it, and leaving the page never stops it (DEC-177 add.2). Inputs: the name spec and
+ * the setup. Output: the started job, or New Project's refusal. */
+export function startSetupJob(spec: ProjectSpec, setup: ProjectSetup): Promise<Result<IntakeJob>> {
+  return call<IntakeJob>("desktop_setup_project_job", { spec, setup });
 }
 
 export const PAGES_MAX = 50;

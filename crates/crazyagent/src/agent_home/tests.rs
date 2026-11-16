@@ -1630,6 +1630,91 @@ fn a_teammates_home_keeps_no_skills_an_earlier_run_left() {
     );
 }
 
+/// B20 (B16 follow-up N3, RV-DS241-205): every home reset clears the auto-memory Claude Code
+/// keeps in each project folder of `projects`, since a build between the sign-in minimum and
+/// the one the auto-memory switches were proven on may ignore them. A `memory` folder, file or
+/// link goes, and so does a project folder that is a link, without what either link names,
+/// while the transcripts and the project folders stay. It holds for a Claude Code home, a
+/// Codex home and a native lead's teammates' home.
+#[cfg(unix)]
+#[test]
+fn a_reset_clears_each_projects_auto_memory_and_keeps_its_transcripts() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    let owned = [
+        "memory/MEMORY.md",
+        "project/memory/MEMORY.md",
+        "project/s.jsonl",
+    ];
+    for file in owned {
+        let path = outside.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "the owner's\n").unwrap();
+    }
+    let gone = [
+        "projects/p/memory",
+        "projects/q/memory",
+        "projects/r/memory",
+        "projects/s",
+        "projects/t/memory",
+    ];
+    let transcripts = ["projects/p/s.jsonl", "projects/u/s.jsonl"];
+    for name in ["claude", "codex", "mates"] {
+        let home = home(&root, name);
+        for file in transcripts.iter().chain(&[
+            "projects/p/memory/MEMORY.md",
+            "projects/t/memory/deep/note.md",
+        ]) {
+            let path = home.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "planted\n").unwrap();
+        }
+        fs::create_dir_all(home.join("projects/q")).unwrap();
+        fs::write(home.join("projects/q/memory"), "planted\n").unwrap();
+        fs::create_dir_all(home.join("projects/r")).unwrap();
+        std::os::unix::fs::symlink(outside.join("memory"), home.join("projects/r/memory")).unwrap();
+        std::os::unix::fs::symlink(outside.join("project"), home.join("projects/s")).unwrap();
+
+        let reset = match name {
+            "claude" => prepare(&home, Harness::Claude, &project, &given, KEEP_CACHES),
+            "codex" => prepare(&home, Harness::Codex, &project, &given, KEEP_CACHES),
+            _ => reset_mates_home(&home),
+        };
+
+        assert_eq!(reset, Ok(()), "{name}");
+        let left: Vec<&str> = gone
+            .into_iter()
+            .filter(|entry| fs::symlink_metadata(home.join(entry)).is_ok())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "{name}: the reset kept auto-memory: {left:?}"
+        );
+        for file in transcripts {
+            assert_eq!(
+                fs::read_to_string(home.join(file)).unwrap(),
+                "planted\n",
+                "{name}: {file}"
+            );
+        }
+        for folder in ["projects/q", "projects/r", "projects/t"] {
+            assert!(
+                fs::symlink_metadata(home.join(folder)).is_ok_and(|metadata| metadata.is_dir()),
+                "{name}: {folder}"
+            );
+        }
+    }
+    for file in owned {
+        assert_eq!(
+            fs::read_to_string(outside.join(file)).unwrap(),
+            "the owner's\n",
+            "{file}"
+        );
+    }
+}
+
 /// A launch never keeps a link in the place of what it keeps, nor follows one (RV-DS241-137):
 /// a `projects` folder, a `.claude.json` file and a `Library` folder that are links go
 /// without what they name, so the next run neither reads its transcripts nor finds its
@@ -1678,9 +1763,11 @@ fn a_launch_removes_a_link_in_the_place_of_a_kept_entry_without_what_it_names() 
 /// a folder outside the home while the reset walks it, never leads the reset outside
 /// (RV-DS241-137, sec F1 ds137-lock-linux): `.npm` swapped after the reset found it and
 /// before it lists it, `Library` swapped while the reset is in it and about to walk
-/// `Library/Preferences`, and `.npm` swapped while the reset is about to remove `.npm/_npx`.
-/// Every file in the folder the link names stays and the link goes as a link. It runs on
-/// plain folders, without the macOS profile's pin, so it holds where nothing pins them.
+/// `Library/Preferences`, and `.npm` swapped while the reset is about to remove `.npm/_npx`;
+/// and `projects`, then one of its project folders, swapped as the reset is about to walk in
+/// to clear auto-memory (B20). Every file in the folder the link names stays, a `memory`
+/// folder too, and the link goes as a link. It runs on plain folders, without the macOS
+/// profile's pin, so it holds where nothing pins them.
 #[cfg(unix)]
 #[test]
 fn a_kept_folder_swapped_for_a_link_mid_reset_never_leads_the_reset_outside() {
@@ -1688,12 +1775,16 @@ fn a_kept_folder_swapped_for_a_link_mid_reset_never_leads_the_reset_outside() {
         (".npm", ".npm", ".npm/junk"),
         ("Library/Preferences", "Library", "Library/Preferences/junk"),
         (".npm/_npx", ".npm", ".npm/_npx/0"),
+        ("projects", "projects", "projects/p/memory"),
+        ("projects/p", "projects/p", "projects/p/memory"),
     ];
     let owned = [
         "owner.txt",
         "junk/owner.txt",
         "Preferences/owner.plist",
         "_npx/owner.js",
+        "memory/MEMORY.md",
+        "p/memory/MEMORY.md",
     ];
     for (step, swapped, planted) in legs {
         let (_directory, root) = folder();
@@ -1825,9 +1916,10 @@ fn a_cargo_cache_an_agent_made_goes_at_each_launch_and_only_a_link_stays() {
 
 /// A flag an agent set in its own home never keeps its next launch from starting
 /// (RV-DS241-138): an immutable hook file in an immutable Claude Code session folder, an
-/// append-only startup file, an immutable cargo config in an immutable `.cargo` and an
-/// immutable home itself all give way, so the launch removes what it removes and writes
-/// what it writes, while the harness state it keeps stays.
+/// append-only startup file, an immutable cargo config in an immutable `.cargo`, an
+/// immutable auto-memory file in an immutable `memory` in an immutable project folder of
+/// `projects` (B20) and an immutable home itself all give way, so the launch removes what it
+/// removes and writes what it writes, while the harness state it keeps stays.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
@@ -1836,6 +1928,12 @@ fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     let project = project(&root);
     let given = text(&project).unwrap();
     let home = home(&root, "claude");
+    let transcripts = home.join("projects").join("p");
+    let memory = transcripts.join("memory");
+    let note = memory.join("MEMORY.md");
+    fs::create_dir_all(&memory).unwrap();
+    fs::write(&note, "planted\n").unwrap();
+    fs::write(transcripts.join("s.jsonl"), "planted\n").unwrap();
     let session = home.join("session-env").join("0b6f1c2e-5d4a");
     let hook = session.join("sessionstart-hook-0.sh");
     fs::create_dir_all(&session).unwrap();
@@ -1855,6 +1953,9 @@ fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
         (startup.as_path(), FileFlag::UF_APPEND),
         (config.as_path(), FileFlag::UF_IMMUTABLE),
         (cargo.as_path(), FileFlag::UF_IMMUTABLE),
+        (note.as_path(), FileFlag::UF_IMMUTABLE),
+        (memory.as_path(), FileFlag::UF_IMMUTABLE),
+        (transcripts.as_path(), FileFlag::UF_IMMUTABLE),
         (home.as_path(), FileFlag::UF_IMMUTABLE),
     ];
     for (path, flag) in pinned {
@@ -1866,11 +1967,13 @@ fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     let kept_flags = fs::symlink_metadata(&claude).map(|metadata| {
         FileFlag::from_bits_retain(std::os::macos::fs::MetadataExt::st_flags(&metadata))
     });
+    let transcript = fs::read_to_string(transcripts.join("s.jsonl"));
     let left: Vec<&Path> = [
         hook.as_path(),
         session.as_path(),
         startup.as_path(),
         config.as_path(),
+        memory.as_path(),
     ]
     .into_iter()
     .filter(|path| fs::symlink_metadata(path).is_ok())
@@ -1880,6 +1983,7 @@ fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     }
     assert_eq!(prepared, Ok(()));
     assert!(left.is_empty(), "a flag kept {left:?} from the launch");
+    assert_eq!(transcript.ok().as_deref(), Some("planted\n"));
     assert_eq!(fs::read_to_string(&claude).unwrap(), "{}\n");
     assert!(
         kept_flags

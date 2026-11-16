@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
-import { cliArchiveName, collectDesktop, packageCli, sidecars, signFile, stageSidecars, verifySignature } from "./assets.mjs";
+import { cliArchiveName, collectDesktop, needsLoader, packageCli, sidecars, signFile, stageSidecars, verifySignature } from "./assets.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const TAURI = join(REPO, "apps/desktop/node_modules/@tauri-apps/cli/tauri.js");
@@ -112,6 +112,66 @@ test("staging takes the bundled tmux from its own build, never from Cargo, and r
     assert.deepEqual(JSON.parse(await readFile(config, "utf8")).bundle.externalBin.filter((name) => name.includes("tmux")), ["binaries/crazyagent-tmux"]);
     await assert.rejects(stageSidecars({ ...given, tmux: undefined }), /release_sidecar_missing:crazyagent-tmux/);
     await assert.rejects(stageSidecars({ ...given, tmux: join(root, "absent") }), /release_sidecar_missing:crazyagent-tmux/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Builds the bytes of a 64-bit little-endian x86_64 ELF file whose program headers have the
+ * given types, standing in for a built helper. Input: the header types. Output: the bytes.
+ */
+function elf(types) {
+  const header = 64;
+  const entry = 56;
+  const bytes = Buffer.alloc(header + entry * types.length);
+  bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0);
+  bytes.writeUInt16LE(3, 16);
+  bytes.writeUInt16LE(62, 18);
+  bytes.writeUInt32LE(1, 20);
+  bytes.writeBigUInt64LE(BigInt(header), 32);
+  bytes.writeUInt16LE(header, 52);
+  bytes.writeUInt16LE(entry, 54);
+  bytes.writeUInt16LE(types.length, 56);
+  types.forEach((type, index) => bytes.writeUInt32LE(type, header + entry * index));
+  return bytes;
+}
+
+test("a Linux helper needs the dynamic loader only when a program header names an interpreter, and bytes that are no x86_64 ELF file are refused (DEC-179 SBX-3 fold)", () => {
+  const stack = 0x6474e551;
+  assert.equal(needsLoader(elf([1, 1, 2, stack])), false, "static-pie: loads and a dynamic table, no interpreter");
+  assert.equal(needsLoader(elf([1, 1, stack])), false, "static");
+  assert.equal(needsLoader(elf([6, 3, 1, 1, 2])), true, "dynamic: an interpreter");
+  const narrow = elf([1]);
+  narrow[4] = 1;
+  const arm = elf([1]);
+  arm.writeUInt16LE(183, 18);
+  const none = elf([]);
+  for (const bad of [Buffer.from("#!/bin/sh\necho landlock\n"), elf([1]).subarray(0, 63), elf([1, 3]).subarray(0, 150), narrow, arm, none]) {
+    assert.throws(() => needsLoader(bad), /release_helper_not_static/);
+  }
+});
+
+test("staging refuses a Linux helper that needs the dynamic loader, so no shipped helper reads a caller's loader variables (DEC-179 SBX-3 fold, rv-ds241 F1)", async () => {
+  const root = await scratch("release-stage-static-");
+  try {
+    const cargo = join(root, "cargo");
+    const tauri = join(root, "src-tauri");
+    await mkdir(cargo);
+    await mkdir(tauri);
+    for (const name of ["crazyagent", "crazyagent-runner"]) await executable(join(cargo, name), name);
+    await executable(join(root, "crazyagent-rcli"), "rcli");
+    await executable(join(root, "built-tmux"), "tmux");
+    const target = "x86_64-unknown-linux-gnu";
+    const helper = join(cargo, "crazyagent-landlock");
+    const given = { target, cargoDir: cargo, rcli: join(root, "crazyagent-rcli"), tmux: join(root, "built-tmux"), tauriDir: tauri };
+    await writeFile(helper, elf([1, 1, 2]));
+    const { staged } = await stageSidecars(given);
+    assert.ok(staged.includes(join(tauri, `binaries/crazyagent-landlock-${target}`)), "a static helper is staged");
+    await writeFile(helper, elf([6, 3, 1, 1, 2]));
+    await assert.rejects(stageSidecars(given), /release_helper_not_static/);
+    await executable(helper, "landlock");
+    await assert.rejects(stageSidecars(given), /release_helper_not_static/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

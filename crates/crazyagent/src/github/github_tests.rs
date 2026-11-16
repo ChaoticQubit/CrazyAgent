@@ -2313,6 +2313,173 @@ fn publish_job_falls_back_to_the_baseline_and_says_why_no_agent_drafted() {
     assert!(creates(&server).is_empty());
 }
 
+fn unused_server() -> Server {
+    Server::start(|_, _| Answer::json(404, serde_json::json!({})))
+}
+
+fn project_id(id: &str) -> crate::protocol::ProjectId {
+    crate::protocol::ProjectId::new(id).unwrap()
+}
+
+#[test]
+fn the_publish_prompt_asks_a_project_without_a_remote_and_not_now_waits_exactly_seven_days() {
+    let scratch = Scratch::new();
+    let server = unused_server();
+    let account = scratch.account(&server);
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let (_other, other) = new_project(&[("main.rs", "fn main() {}\n")]);
+    git(&["init", "-q", "-b", "main"], &other);
+    let (alpha, beta) = (project_id("alpha"), project_id("beta"));
+    let now = 1_800_000_000_000_i64;
+    assert!(account.publish_prompt(&alpha, &project, now).unwrap());
+    assert!(account.publish_prompt(&beta, &other, now).unwrap());
+    account
+        .publish_prompt_set(&alpha, GitHubPromptAnswer::NotNow, now)
+        .unwrap();
+    assert!(!account.publish_prompt(&alpha, &project, now).unwrap());
+    assert!(
+        !account
+            .publish_prompt(&alpha, &project, now + SNOOZE_MS - 1)
+            .unwrap()
+    );
+    assert!(
+        account
+            .publish_prompt(&alpha, &project, now + SNOOZE_MS)
+            .unwrap()
+    );
+    assert!(
+        account.publish_prompt(&beta, &other, now).unwrap(),
+        "a Not now is kept for its own project only"
+    );
+    assert_eq!(SNOOZE_MS, 604_800_000);
+}
+
+#[test]
+fn dont_ask_again_never_asks_and_a_later_not_now_does_not_undo_it() {
+    let scratch = Scratch::new();
+    let server = unused_server();
+    let account = scratch.account(&server);
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let alpha = project_id("alpha");
+    let now = 1_800_000_000_000_i64;
+    assert!(account.publish_prompt(&alpha, &project, now).unwrap());
+    account
+        .publish_prompt_set(&alpha, GitHubPromptAnswer::Never, now)
+        .unwrap();
+    account
+        .publish_prompt_set(&alpha, GitHubPromptAnswer::NotNow, now)
+        .unwrap();
+    for later in [now, now + SNOOZE_MS, now + 100 * SNOOZE_MS] {
+        assert!(!account.publish_prompt(&alpha, &project, later).unwrap());
+    }
+    let reopened = scratch.account(&server);
+    assert!(
+        !reopened
+            .publish_prompt(&alpha, &project, now + SNOOZE_MS)
+            .unwrap(),
+        "the answer is kept in the engine database"
+    );
+}
+
+#[test]
+fn a_project_with_any_remote_or_a_git_that_is_not_a_plain_folder_is_never_asked() {
+    let scratch = Scratch::new();
+    let server = unused_server();
+    let account = scratch.account(&server);
+    let now = 1_800_000_000_000_i64;
+    let alpha = project_id("alpha");
+    for url in [
+        "https://github.com/octo-cat/tool.git",
+        "git@github.com:octo-cat/tool.git",
+        "https://gitlab.com/octo-cat/tool.git",
+    ] {
+        let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+        git(&["init", "-q", "-b", "main"], &project);
+        assert!(account.publish_prompt(&alpha, &project, now).unwrap());
+        git(&["remote", "add", "origin", url], &project);
+        assert!(
+            !account.publish_prompt(&alpha, &project, now).unwrap(),
+            "{url}"
+        );
+    }
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    assert!(account.publish_prompt(&alpha, &project, now).unwrap());
+    std::fs::write(project.join(".git"), "gitdir: /elsewhere/.git\n").unwrap();
+    assert!(!account.publish_prompt(&alpha, &project, now).unwrap());
+    let gone = project.join("gone");
+    assert!(!account.publish_prompt(&alpha, &gone, now).unwrap());
+}
+
+#[test]
+fn a_project_with_a_publish_recorded_is_not_asked() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let alpha = project_id("alpha");
+    let now = 1_800_000_000_000_i64;
+    assert!(account.publish_prompt(&alpha, &project, now).unwrap());
+    drop(account.publish_begin(&project, &plan("tool")).unwrap());
+    assert!(account.publish_status(&project).unwrap().is_some());
+    assert!(!account.publish_prompt(&alpha, &project, now).unwrap());
+}
+
+#[test]
+fn a_spawned_draft_answers_with_the_job_at_drafting_while_the_agent_still_drafts() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let (asked, answered) = std::sync::mpsc::channel::<bool>();
+    let started = account
+        .publish_begin(&project, &plan("tool"))
+        .unwrap()
+        .spawn(move |_| {
+            let released = held.recv_timeout(Duration::from_secs(5)).is_ok();
+            let _ = asked.send(released);
+            Ok("node_modules/\n".to_owned())
+        });
+    assert_eq!(started.step, GitHubPublishStep::Drafting, "{started:?}");
+    assert_eq!(
+        account
+            .publish_start(&project, &plan("tool"), no_draft)
+            .unwrap_err()
+            .0,
+        "github_publish_running"
+    );
+    let _ = release.send(());
+    assert_eq!(
+        answered.recv_timeout(Duration::from_secs(10)),
+        Ok(true),
+        "the Start answered while the agent still drafted"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let drafted = loop {
+        match account.publish_status(&project).unwrap() {
+            Some(job) if job.step != GitHubPublishStep::Drafting => break job,
+            _ => {
+                assert!(Instant::now() < deadline, "the draft was never saved");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    };
+    assert!(
+        matches!(
+            &drafted.step,
+            GitHubPublishStep::Lines {
+                draft: GitHubIgnoreDraft::Agent,
+                ..
+            }
+        ),
+        "{drafted:?}"
+    );
+}
+
 #[test]
 fn publish_start_records_the_job_at_drafting_and_holds_the_publish_while_the_agent_drafts() {
     let scratch = Scratch::new();

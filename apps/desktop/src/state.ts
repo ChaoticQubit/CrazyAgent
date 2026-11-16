@@ -145,6 +145,9 @@ export interface Session {
   found: Loaded<FoundProject[]>;
   retry: () => void;
   refreshIntake: (started?: IntakeJob) => void;
+  /** Names the job a page follows and says the end of itself, so the end toast stays quiet for
+   * it; null once the page lets go. */
+  followIntake: (id: string | null) => void;
   refreshFound: () => void;
   checkUnconfirmed: () => Promise<void>;
   checkProfile: () => Promise<void>;
@@ -179,6 +182,7 @@ export function useSession(): Session {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [intake, setIntake] = useState<IntakeJob | null>(null);
   const intakeSeen = useRef<IntakeJob | null>(null);
+  const followed = useRef<string | null>(null);
   const [intakeTick, setIntakeTick] = useState(0);
   const [found, setFound] = useState<Loaded<FoundProject[]>>({ kind: "loading" });
   const [foundTick, setFoundTick] = useState(0);
@@ -315,10 +319,10 @@ export function useSession(): Session {
         const job = result.value;
         setIntake((shown) => keptRead(shown, job));
         if (line && result.value) {
-          showToast(line, { name: "home" });
+          if (result.value.id !== followed.current) showToast(line, { name: "home" });
           setFoundTick((value) => value + 1);
           void notifyIntake(result.value.id);
-          if (result.value.kind === "move_project" || result.value.kind === "delete") void refreshProjects();
+          if (result.value.kind === "move_project" || result.value.kind === "delete" || result.value.kind === "setup") void refreshProjects();
           if (result.value.kind === "delete" && result.value.state.state === "done" && result.value.project_id) void api.closeProjectWalls(result.value.project_id);
         }
       }
@@ -355,6 +359,7 @@ export function useSession(): Session {
       }
       setIntakeTick((value) => value + 1);
     },
+    followIntake: (id: string | null) => { followed.current = id; },
     refreshFound: () => setFoundTick((value) => value + 1),
     checkUnconfirmed: async () => { await settle(api.checkUnconfirmed); },
     checkProfile: async () => { await checkProfile(); },

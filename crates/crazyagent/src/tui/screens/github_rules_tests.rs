@@ -413,6 +413,119 @@ fn a_failed_switch_keeps_its_problem_and_reads_the_page_again() {
     }
 }
 
+/// At 80x24 a long required-checks detail gives way to the sending line and to a failed
+/// switch's problem: the detail is cut and ends in an ellipsis, and the selected rule, the
+/// sending line and the problem all stay on screen (rv-ds241 gh-s6c LOW).
+#[test]
+fn a_long_required_checks_detail_keeps_the_sending_line_and_the_problem_at_80_by_24() {
+    let long = || {
+        page(|page| {
+            page.checks = (1..=40)
+                .map(|index| format!("ci-check-number-{index:02}"))
+                .collect();
+            set(
+                page,
+                GitHubRule::RequiredChecks,
+                false,
+                GitHubRuleState::Refused {
+                    status: 422,
+                    message: "Validation Failed: the status check contexts must each name a check that reported on the default branch".into(),
+                },
+            );
+        })
+    };
+    let label = rule_label(GitHubRule::RequiredChecks);
+    let ellipsis = |shell: &Shell, rows: &[String]| {
+        rows.iter()
+            .any(|row| row.trim_end().ends_with(shell.ctx.glyphs.ellipsis))
+    };
+    let (mut shell, id) = project(80, 24, long());
+    go(&mut shell, GitHubRule::RequiredChecks);
+    let rows = render(&mut shell, 80, 24);
+    assert!(selected(&rows).contains(label), "{rows:#?}");
+    assert!(
+        flat(&rows).contains("Checks the first CI run named: ci-check-number-01"),
+        "{rows:#?}"
+    );
+    assert!(!flat(&rows).contains("ci-check-number-40"), "{rows:#?}");
+    assert!(ellipsis(&shell, &rows), "{rows:#?}");
+    shell.key(Key::Char(' '));
+    let [sent] = <[IntakeQuery; 1]>::try_from(asked(&mut shell)).unwrap();
+    let rows = render(&mut shell, 80, 24);
+    assert!(
+        flat(&rows).contains(&format!("Sending {label}{SENDING_TAIL}")),
+        "{rows:#?}"
+    );
+    assert!(selected(&rows).contains(label), "{rows:#?}");
+    assert!(ellipsis(&shell, &rows), "{rows:#?}");
+    shell.arrive(arrival(sent, Err("github_outcome_unknown".into())));
+    let read = IntakeQuery::GitHubRules { project: id };
+    assert_eq!(asked(&mut shell), [read.clone()]);
+    shell.arrive(arrival(read, Ok(IntakeView::Rules(Box::new(long())))));
+    let rows = render(&mut shell, 80, 24);
+    assert!(
+        flat(&rows).contains(&copy("github_outcome_unknown")),
+        "{rows:#?}"
+    );
+    assert!(selected(&rows).contains(label), "{rows:#?}");
+    assert!(ellipsis(&shell, &rows), "{rows:#?}");
+}
+
+/// The worker answers a switch at once as changing (rv-ds241 gh-s6c N1): the page keeps
+/// saying it sends, reads nothing and sends nothing more, and takes the switch's own
+/// result when it comes; a switch refused because another still runs says so in words
+/// and reads the page again.
+#[test]
+fn a_switch_answered_as_changing_waits_for_its_own_result() {
+    let (mut shell, id) = project(80, 24, page(|_| {}));
+    let read = IntakeQuery::GitHubRules {
+        project: id.clone(),
+    };
+    let sending = format!("Sending {}{SENDING_TAIL}", rule_label(GitHubRule::WikiOff));
+    go(&mut shell, GitHubRule::WikiOff);
+    shell.key(Key::Char(' '));
+    let [sent] = <[IntakeQuery; 1]>::try_from(asked(&mut shell)).unwrap();
+    shell.arrive(arrival(sent.clone(), Ok(IntakeView::RuleChanging)));
+    assert!(
+        asked(&mut shell).is_empty(),
+        "the changing answer reads nothing"
+    );
+    let rows = render(&mut shell, 80, 24);
+    assert!(flat(&rows).contains(&sending), "{rows:#?}");
+    assert!(
+        !flat(&rows).contains(&copy("github_reply_invalid")),
+        "{rows:#?}"
+    );
+    go(&mut shell, GitHubRule::IssuesOn);
+    shell.key(Key::Char(' '));
+    assert!(asked(&mut shell).is_empty(), "one switch in flight");
+    shell.arrive(arrival(
+        sent,
+        Ok(IntakeView::Rules(Box::new(page(|page| {
+            set(page, GitHubRule::WikiOff, true, GitHubRuleState::Applied);
+        })))),
+    ));
+    assert!(asked(&mut shell).is_empty(), "the result is the page");
+    go(&mut shell, GitHubRule::WikiOff);
+    let rows = render(&mut shell, 80, 24);
+    assert!(!flat(&rows).contains("Sending "), "{rows:#?}");
+    assert!(
+        shows(&rows, &checkbox(true, rule_label(GitHubRule::WikiOff))),
+        "{rows:#?}"
+    );
+    let busy = known("github_rule_busy").unwrap_or_default();
+    assert!(!busy.is_empty(), "the refusal has words");
+    go(&mut shell, GitHubRule::IssuesOn);
+    shell.key(Key::Char(' '));
+    let [sent] = <[IntakeQuery; 1]>::try_from(asked(&mut shell)).unwrap();
+    shell.arrive(arrival(sent, Err("github_rule_busy".into())));
+    assert_eq!(asked(&mut shell), [read.clone()]);
+    shell.arrive(arrival(read, Ok(IntakeView::Rules(Box::new(page(|_| {}))))));
+    let rows = render(&mut shell, 80, 24);
+    assert!(flat(&rows).contains(busy), "{rows:#?}");
+    assert!(!shows(&rows, "github_rule_busy"), "{rows:#?}");
+}
+
 /// A project CrazyAgent did not publish says where its rules show; a build without the
 /// read says so; any other failed read offers r to read again.
 #[test]
@@ -492,6 +605,9 @@ fn the_tui_github_rules_words_match_the_desktop_word_for_word() {
         "github_rule_invalid",
         "github_rules_repo_mismatch",
         "github_repo_unreadable",
+        "github_request_bounds",
+        "github_reply_bounds",
+        "github_request_invalid",
     ] {
         let sentence = known(code).unwrap_or_default();
         assert!(!sentence.is_empty(), "{code}");

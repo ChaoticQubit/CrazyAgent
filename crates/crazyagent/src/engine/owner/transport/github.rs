@@ -49,6 +49,13 @@ pub(super) enum Action {
     PublishContinue {
         project: ProjectId,
     },
+    PublishPrompt {
+        project: ProjectId,
+    },
+    PublishPromptSet {
+        project: ProjectId,
+        answer: crate::github::GitHubPromptAnswer,
+    },
     PublishStatus {
         project: ProjectId,
     },
@@ -99,6 +106,8 @@ enum Reply {
     Repos { page: GitHubRepoPage },
     Cloned { receipt: CloneReceipt },
     Owners { owners: GitHubOwners },
+    Prompt { ask: bool },
+    PromptKept,
     Publish { job: GitHubPublishJob },
     PublishStatus { job: Option<GitHubPublishJob> },
     Discarded { left: Option<GitHubPublishLeft> },
@@ -233,6 +242,35 @@ impl OwnerClient {
     ) -> Result<GitHubPublishJob, EngineError> {
         self.github_publish(Action::PublishContinue { project })
             .await
+    }
+
+    /// Tells whether a project's Overview asks to publish it on GitHub (DEC-182 S5b).
+    /// Input: the project. Output: true to ask, or `github_publish_project_unknown`.
+    pub async fn github_publish_prompt(&self, project: ProjectId) -> Result<bool, EngineError> {
+        match self
+            .github_exchange(Action::PublishPrompt { project }, None)
+            .await?
+        {
+            Reply::Prompt { ask } => Ok(ask),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Keeps the owner's answer to a project's publish prompt, Not now or Don't ask
+    /// again. Inputs: the project and the answer. Output: nothing, or
+    /// `github_publish_project_unknown`.
+    pub async fn github_publish_prompt_set(
+        &self,
+        project: ProjectId,
+        answer: crate::github::GitHubPromptAnswer,
+    ) -> Result<(), EngineError> {
+        match self
+            .github_exchange(Action::PublishPromptSet { project, answer }, None)
+            .await?
+        {
+            Reply::PromptKept => Ok(()),
+            _ => Err(unknown()),
+        }
     }
 
     /// Reads where a project's publish stands. Input: the project. Output: the job, or
@@ -515,28 +553,24 @@ async fn handle(
             Action::PublishStart { project, plan } => {
                 let (settings, codex, claude) = drafting.ok_or_else(unknown)?;
                 let draft = account.publish_begin(&project_folder(&root, &project)?, &plan)?;
-                let job = draft.job().clone();
                 let draft_root = root.clone();
-                let _ = std::thread::Builder::new()
-                    .name("github-draft".into())
-                    .spawn(move || {
-                        let _ = draft.run(|prompt| {
-                            let (global, local) = settings
-                                .as_ref()
-                                .ok_or(crate::instruction_cleanup::UNAVAILABLE)?;
-                            crate::instruction_cleanup::run(&crate::instruction_cleanup::Request {
-                                root: &draft_root,
-                                settings: (global, local),
-                                codex: codex.as_deref(),
-                                claude: claude.as_deref(),
-                                project: Some(&project),
-                                pool: None,
-                                prompt,
-                                agent: DRAFT_AGENT,
-                            })
-                        });
-                    });
-                Reply::Publish { job }
+                Reply::Publish {
+                    job: draft.spawn(move |prompt| {
+                        let (global, local) = settings
+                            .as_ref()
+                            .ok_or(crate::instruction_cleanup::UNAVAILABLE)?;
+                        crate::instruction_cleanup::run(&crate::instruction_cleanup::Request {
+                            root: &draft_root,
+                            settings: (global, local),
+                            codex: codex.as_deref(),
+                            claude: claude.as_deref(),
+                            project: Some(&project),
+                            pool: None,
+                            prompt,
+                            agent: DRAFT_AGENT,
+                        })
+                    }),
+                }
             }
             Action::PublishApprove { project, lines } => Reply::Publish {
                 job: account.publish_approve(
@@ -564,6 +598,18 @@ async fn handle(
                     &crate::projects_home::owner_home()?,
                 )?,
             },
+            Action::PublishPrompt { project } => Reply::Prompt {
+                ask: account.publish_prompt(
+                    &project,
+                    &project_folder(&root, &project)?,
+                    crate::team::now_ms(),
+                )?,
+            },
+            Action::PublishPromptSet { project, answer } => {
+                project_folder(&root, &project)?;
+                account.publish_prompt_set(&project, answer, crate::team::now_ms())?;
+                Reply::PromptKept
+            }
             Action::PublishStatus { project } => Reply::PublishStatus {
                 job: account.publish_status(&project_folder(&root, &project)?)?,
             },
@@ -688,6 +734,7 @@ fn public_code(error: EngineError) -> String {
 /// Input: the request. Output: its name, None for a request that changes something.
 fn read_kind(action: &Action) -> Option<&'static str> {
     match action {
+        Action::PublishPrompt { .. } => Some("github.publish_prompt"),
         Action::Status => Some("github.status"),
         Action::Repos { .. } => Some("github.repos"),
         Action::Owners => Some("github.owners"),
