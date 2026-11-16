@@ -42,7 +42,7 @@ let slot: { setup: StartedSetup; outcome: Promise<string> | null } | null = null
 /** Keeps the job Create started until its follow-ups run, in place of any kept before; the
  * engine runs one New Project job at a time. Input: the started setup. */
 export function keepStarted(setup: StartedSetup): void {
-  assert(setup.id !== "" && setup.name !== "", "a started setup names its job and project");
+  assert(setup.id !== "" && setup.project !== "" && setup.name !== "", "a started setup names its job and project");
   slot = { setup, outcome: null };
 }
 
@@ -58,11 +58,12 @@ export function dropStarted(): void {
 
 /** Runs a started New Project's follow-ups once its job is done (DEC-177 add.2 Q1 B), whether
  * or not its page is open: the pool, then the agent access. The first caller starts them and
- * every later caller shares that run. Inputs: the job id, the project it made and the calls.
- * Output: the carry, or null for a job not started here. */
+ * every later caller shares that run, all on the project the kept job makes and no other.
+ * Inputs: the job id, the project it made and the calls. Output: the carry, or null for a job
+ * not started here. */
 export function carryFollowUps(job: string, project: string, deps: CarryDeps = LIVE): Carry | null {
   if (slot === null || slot.setup.id !== job) return null;
-  assert(project !== "", "a done New Project names its project");
+  assert(project === slot.setup.project, `the follow-ups apply only to the project the kept job makes, ${slot.setup.project}, not ${project}`);
   slot.outcome ??= followUps(job, project, slot.setup, deps);
   return { setup: slot.setup, outcome: slot.outcome };
 }

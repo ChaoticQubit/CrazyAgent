@@ -246,15 +246,18 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   }
 
   /** Ends a New Project on its page once its job is done: the shared pool and agent access
-   * follow-ups (DEC-177 add.2 Q1 B), which finish even if the owner leaves, then, only while the
-   * page stays open, its publish, the job leaving Home and the project opening. Inputs: the new
-   * project's id, the job's id and the carry. */
+   * follow-ups (DEC-177 add.2 Q1 B), which finish even if the owner leaves, a toast then saying
+   * how they ended, then, only while the page stays open, its publish, the job leaving Home and
+   * the project opening. Inputs: the new project's id, the job's id and the carry. */
   async function finish(id: string, job: string, carried: Carry) {
     kept = null;
     setFinishing(true);
     const draft = carried.setup.draft;
     let message = await carried.outcome;
-    if (!mounted.current) return;
+    if (!mounted.current) {
+      session?.showToast(message, { name: "home" });
+      return;
+    }
     const publishing = startPublish(id, draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered);
     const started = publishing ? await publishing : null;
     const outcome = publishOutcome(started);
