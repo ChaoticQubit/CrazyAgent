@@ -17,6 +17,10 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
 /// it started: a busy machine took close to a minute to bring the owner's engine up.
 pub const START_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// The launchd plist keys that lift launchd's default resource limits off the engine: with
+/// `ProcessType` unset, launchd throttles a job's CPU and I/O (`man launchd.plist`), and a
+/// start on a busy machine took minutes (ENGINE-START-PRE-READY).
+const PROCESS_TYPE: &str = "\t<key>ProcessType</key>\n\t<string>Interactive</string>\n";
 const LAUNCHCTL: &str = "/bin/launchctl";
 const SYSTEMCTL: &str = "systemctl";
 const SCHTASKS: &str = "schtasks";
@@ -321,6 +325,7 @@ impl Service {
 \t</dict>\n\
 \t<key>ExitTimeOut</key>\n\
 \t<integer>30</integer>\n\
+{PROCESS_TYPE}\
 \t<key>StandardOutPath</key>\n\
 \t<string>{log}</string>\n\
 \t<key>StandardErrorPath</key>\n\
@@ -574,10 +579,21 @@ WantedBy=default.target\n",
     /// only when this service runs a private copy in place of the `bundled` engine and the
     /// file on disk is not [`Service::current`], as with a unit naming the copy with another
     /// PATH. A definition naming a gone or other program is decided before this in
-    /// [`Service::repair`]. Any other installed service starts as it is, so a launch PATH
-    /// that differs never stops or restarts a running engine. Input: the bundled engine.
+    /// [`Service::repair`]. Any other installed service starts as it is unless it is
+    /// [`Service::throttled`], so a launch PATH that differs never stops or restarts a
+    /// running engine. Input: the bundled engine.
     pub fn stale(&self, bundled: &Path) -> bool {
         self.executable != bundled && !self.current()
+    }
+
+    /// Whether the installed definition is a launchd plist without the `ProcessType`
+    /// Interactive key, as every install before 2.4.2 wrote, so launchd throttles the
+    /// engine's CPU and I/O until it is rewritten. Output: false off macOS and when no
+    /// readable definition is installed.
+    pub fn throttled(&self) -> bool {
+        self.platform == Platform::MacOs
+            && bounded_text(&self.definition)
+                .is_some_and(|installed| !installed.contains(PROCESS_TYPE))
     }
 
     /// The program the installed definition runs when it is gone or [`transient`], as after
@@ -618,9 +634,10 @@ WantedBy=default.target\n",
     /// path every AppImage shares, which keeps a newer engine's bytes while one is known there
     /// ([`newer_engine_at`], [`persistable`], DS-118 r3 F1). Else this definition is installed
     /// when asked, when none is installed, when the installed one names a broken program
-    /// ([`Self::broken_program`]) or another program, or when it is [`Self::stale`]; otherwise
-    /// the installed one starts as it is. An engine that is itself [`transient`] is never
-    /// installed: it starts a usable installed definition and is refused otherwise. Inputs:
+    /// ([`Self::broken_program`]) or another program, or when it is [`Self::stale`] or
+    /// [`Self::throttled`]; otherwise the installed one starts as it is. An engine that is
+    /// itself [`transient`] is never installed: it starts a usable installed definition and
+    /// is refused otherwise. Inputs:
     /// the bundled engine, whether a definition is installed and whether the owner asked for a
     /// reinstall. Output: the repair.
     pub fn repair(&self, bundled: &Path, installed: bool, reinstall: bool) -> Repair {
@@ -641,7 +658,8 @@ WantedBy=default.target\n",
                 Repair::Start
             };
         }
-        let replace = reinstall || !installed || broken || another || self.stale(bundled);
+        let replace =
+            reinstall || !installed || broken || another || self.stale(bundled) || self.throttled();
         if !replace {
             return Repair::Start;
         }
