@@ -38,6 +38,30 @@ test("DEC-187: a switch back shows the kept terminal with the output it got whil
   assert.equal(seen.attachesAfterEnded, 2, "an ended terminal attaches once more when shown again");
 });
 
+test("DEC-187: a kept terminal shown again sends its size once after the frame, so a size another window set while it was hidden is put back, and attaches nothing (#134 r1 F1)", async () => {
+  const harness = coord.COORD_HARNESSES[0];
+  const settle = "new Promise((done) => setTimeout(done, 400))";
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(harnessPanel);
+    await evaluate(`Fixture.open("master", ${JSON.stringify(harness)})`);
+    assert.equal(await evaluate("Fixture.until(() => Fixture.view().live)"), true, "the terminal went live");
+    await evaluate('Fixture.output("the attach drew its screen\\r\\n")');
+    await evaluate(settle);
+    const before = await evaluate("Fixture.resizes()");
+    await evaluate("Fixture.away()");
+    await evaluate(settle);
+    const away = await evaluate("Fixture.resizes().length");
+    const atMount = await evaluate(`(Fixture.back("master", ${JSON.stringify(harness)}), Fixture.resizes().length)`);
+    await evaluate(settle);
+    return { before, away, atMount, after: await evaluate("Fixture.resizes()"), attaches: await evaluate("Fixture.attaches()") };
+  });
+  assert.ok(seen.before.length >= 1, "the view sent its size once it settled");
+  assert.equal(seen.away, seen.before.length, "a hidden view sends no size");
+  assert.equal(seen.atMount, seen.before.length, "nothing is sent before the first frame");
+  assert.deepEqual(seen.after.slice(seen.before.length), [seen.before.at(-1)], "shown again, the view sends its own columns and rows once");
+  assert.equal(seen.attaches, 1, "a switch back attaches nothing");
+});
+
 /** Moves the page to a local http origin, where the page's storage works. Inputs: the page's
  * evaluate and send. Output: the server, for the caller to close. */
 async function httpPage(evaluate, send) {
