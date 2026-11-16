@@ -1,5 +1,5 @@
 use super::*;
-use crate::app_plugins::{Listing, PluginKind, Preview, Problem, store};
+use crate::app_plugins::{Listing, PluginKind, PluginStatus, Preview, Problem, store};
 use crate::engine::owner::AccountSecret;
 use crate::protocol::encode_frame;
 use crate::semantic::{SearchChoice, SearchView};
@@ -562,18 +562,19 @@ fn on_page(root: &Path, name: &str) -> Result<(), EngineError> {
 
 /// Runs one authenticated App plugins or Search request against the engine database and
 /// folders in the engine root. The page lists, previews, adds and changes embedding
-/// plugins only; a remove under a bundled name goes to the store, which removes only a
-/// file of the owner's that the bundled plugin shadows. Inputs: the engine root, the
-/// action and the key that came with a `set_key`. Output: the reply, or the store's
-/// refusal.
+/// plugins only, and also lists every refused file so the owner can remove one here; a
+/// remove under a bundled name goes to the store, which removes only a file of the
+/// owner's that the bundled plugin shadows. Inputs: the engine root, the action and the
+/// key that came with a `set_key`. Output: the reply, or the store's refusal.
 fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply, EngineError> {
     let db = crate::questions::open(root)?;
     let now = crate::semantic::now_ms();
     let listing = |db: &rusqlite::Connection| -> Result<Reply, EngineError> {
         let mut listing = store::list(db, root)?;
-        listing
-            .plugins
-            .retain(|plugin| plugin.kind != PluginKind::Connector);
+        listing.plugins.retain(|plugin| {
+            plugin.kind != PluginKind::Connector
+                || matches!(plugin.status, PluginStatus::Refused { .. })
+        });
         Ok(Reply::Plugins {
             listing: Box::new(listing),
         })

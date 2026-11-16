@@ -19,12 +19,12 @@ fn connector(name: &str, title: &str, status: PluginStatus) -> ConnectorView {
         origin: Origin::Bundled,
         status,
         sign_in: SignIn::Key,
-        runs: RunsView::Connector {
+        runs: Some(RunsView::Connector {
             url: format!("https://{name}.example.com/mcp"),
             hosts: vec![format!("{name}.example.com")],
             oauth_hosts: Vec::new(),
             vendor_read_only: false,
-        },
+        }),
         secrets: vec![SecretView {
             name: "api_key".into(),
             binding: Binding::Key,

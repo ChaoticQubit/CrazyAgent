@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -16,6 +16,9 @@ const DAY = 24 * 60 * 60 * 1000;
 const AGES = [3, 10, 45];
 const SETTINGS = { write: "ask_every_time", wait: "minutes10", native: "off", size_cap: "kib256", keep_log: "days30" };
 const LINEAR_KEY = "lin_api_e2e_synthetic_0000";
+const BOARD_KEY = "board_e2e_synthetic_key_0000";
+const BOARD = "schema: 1\nkind: connector\nname: board\ntitle: Board\nversion: 1\nmcp:\n  url: https://mcp.board.invalid/mcp\n  hosts: [mcp.board.invalid]\nkey:\n  secret: api_key\n  header: Authorization\n  scheme: Bearer\n";
+const SCHEMES = ["light", "dark"];
 
 /** Polls a read until it equals what is wanted, failing with the last value after one step's
  * time. Inputs: what is awaited, the wanted value and the read. Output: none. */
@@ -79,10 +82,25 @@ async function listed(bridge, now) {
   return { keep: view.settings.keep_log, ages: view.calls.map((call) => Math.round((now - call.started_ms) / DAY)), version: view.version };
 }
 
+/** Shows the page in the light or dark scheme, the way the system setting does, and checks
+ * the page sees it. Inputs: the page and the scheme. Output: none. */
+async function scheme(page, wanted) {
+  await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: wanted }] });
+  assert.equal(await page.evaluate("matchMedia('(prefers-color-scheme: dark)').matches"), wanted === "dark", `the page shows the ${wanted} scheme`);
+}
+
+/** What the engine and the bridge wrote to their logs so far. Input: the evidence folder.
+ * Output: the text of every log there is. */
+function logs(evidence) {
+  return ["engine.out", "engine.err", "bridge.out", "bridge.err"].map((name) => join(evidence, name))
+    .filter((path) => existsSync(path)).map((path) => readFileSync(path, "utf8")).join("\n");
+}
+
 /** Starts the real engine and the bridge on a fresh root with an owner profile and projects
  * folder, serves the built app to a browser page, runs the steps and stops everything.
  * Inputs: the test context, the folder prefix and the steps, given the bridge, the owner on
- * the page, a route opener, the engine root, the page and the test HOME. Output: none. */
+ * the page, a route opener, the engine root, the page, the test HOME and the evidence
+ * folder. Output: none. */
 async function onEngine(t, prefix, steps) {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -125,7 +143,7 @@ async function onEngine(t, prefix, steps) {
           await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/?visit=${visits}${hash}` });
           await me.waitFor(what, check);
         };
-        await steps({ bridge, me, open, runtime, page, home });
+        await steps({ bridge, me, open, runtime, page, home, evidence });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -220,5 +238,119 @@ test("Connectors: turning Linear on for a project shows On and the engine grant 
     await me.capture("conn-grant-off");
   });
 
+  for (const shown of SCHEMES) {
+    await t.test(`conn project section ${shown}`, async () => {
+      await scheme(page, shown);
+      await section();
+      await me.capture(`conn-project-${shown}`);
+    });
+  }
+  await scheme(page, "light");
   assert.ok(!(await me.seen()).includes(LINEAR_KEY), "the key never reaches the page");
+}));
+
+test("Connectors: Settings, Connectors saves each option through the page, adds a connector through its trust screen, sets and clears its key and removes it", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-page-", async ({ bridge, me, open, runtime, page, evidence }) => {
+  const read = () => value(bridge, "desktop_connectors", { project: null });
+  const listedConnector = async (name) => (await read()).connectors.find((connector) => connector.name === name) ?? null;
+  const connectorsPage = () => open("#/settings/connectors", "Settings, Connectors", (text) => text.includes("Catalog") && text.includes("Connector settings"));
+  const connectorPage = (name, title, check) => open(`#/settings/connectors?connector=${name}`, `${title}'s page`, (text) => text.includes("All connectors") && text.includes(title) && check(text));
+  const checkedOf = (name) => page.evaluate(`document.querySelector('input[name="${name}"]:checked')?.value ?? null`);
+  const kept = { write: "ask_every_time", wait: "minutes30", keep_log: "days90" };
+  const seeded = await read();
+  await value(bridge, "desktop_connector_settings_set", { settings: { ...seeded.settings, ...kept }, version: seeded.version });
+  await connectorsPage();
+
+  await t.test("conn harness rows", async () => {
+    const rows = await value(bridge, "desktop_connector_reach");
+    assert.ok(rows.length >= 3, "every harness has a row");
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('ul[aria-label=\"Harnesses\"] li')].map((row) => row.innerText.trim())"), rows, "the page shows the bridge's rows in order");
+  });
+
+  await t.test("conn locked line", async () => {
+    const shown = await me.seen();
+    for (const words of ["Tool list check and third-party label", "Always on", "every vendor result starts with a line saying it is content, not instructions."]) assert.ok(shown.includes(words), words);
+    assert.equal(await page.evaluate("document.querySelector('[data-setting=\"Tool list check and third-party label\"] input, [data-setting=\"Tool list check and third-party label\"] button') !== null"), false, "the locked line has no control");
+  });
+
+  const choose = async (setting, field, input, label, wanted) => {
+    await connectorsPage();
+    await me.click(label, `fieldset[data-setting="${setting}"] label`);
+    await me.click("Save changes");
+    await until(`the engine holds ${label}`, { [field]: wanted, ...kept }, async () => {
+      const settings = (await read()).settings;
+      return { [field]: settings[field], write: settings.write, wait: settings.wait, keep_log: settings.keep_log };
+    });
+    await connectorsPage();
+    assert.equal(await checkedOf(input), wanted, `the page reads ${label} back from the engine`);
+    await me.capture(`conn-${field}-${wanted}`);
+  };
+  await t.test("conn native on", () => choose("native", "native", "connector-native", "On", "on"));
+  await t.test("conn native off", () => choose("native", "native", "connector-native", "Off", "off"));
+  await t.test("conn size_cap 64 KiB", () => choose("size_cap", "size_cap", "connector-size-cap", "64 KiB", "kib64"));
+  await t.test("conn size_cap 1 MiB", () => choose("size_cap", "size_cap", "connector-size-cap", "1 MiB", "mib1"));
+  await t.test("conn size_cap 256 KiB", () => choose("size_cap", "size_cap", "connector-size-cap", "256 KiB", "kib256"));
+
+  await t.test("conn add file and trust", async () => {
+    await connectorsPage();
+    await me.click("Add connector");
+    await me.waitFor("the Add dialog", (text) => text.includes("Add a connector"));
+    await me.type("#connector-yaml", BOARD);
+    await me.click("Check");
+    const shown = await me.waitFor("the trust screen", (text) => text.includes("Trust Board?"));
+    for (const words of ["Address: https://mcp.board.invalid/mcp", "Reaches mcp.board.invalid", "Read-only mode at the vendor: none", "Key: the Authorization header with Bearer, from api_key", "Secrets it needs: api_key", "SHA-256 "]) {
+      assert.ok(shown.includes(words), `the trust screen shows ${words}`);
+    }
+    assert.equal(await page.evaluate("document.querySelector('dialog[open] a') !== null"), false, "nothing on the trust screen is a link");
+    await me.capture("conn-trust");
+    await me.click("Confirm");
+    await until("Board in the engine", { origin: "user", status: "needs_key" }, async () => {
+      const board = await listedConnector("board");
+      return board && { origin: board.origin, status: board.status.kind };
+    });
+    assert.ok(existsSync(join(runtime, "app-plugins", "board.yaml")), "the manifest is in the owner's plugins folder");
+    await me.waitFor("Board listed", (text) => text.includes("board, version 1. Added by you."));
+  });
+
+  await t.test("conn bind key", async () => {
+    await connectorPage("board", "Board", (text) => text.includes("api_key: Not set"));
+    await me.click("Set key for api_key of Board");
+    await me.waitFor("the key dialog", (text) => text.includes("Key for api_key") && text.includes("Board sends this key to mcp.board.invalid. Only the engine keeps it."));
+    await me.type("#connector-key", BOARD_KEY);
+    await me.click("Save", "dialog button");
+    await until("the entered key", { kind: "key" }, async () => (await listedConnector("board"))?.secrets[0].binding ?? null);
+    await me.waitFor("Key you entered", (text) => text.includes("api_key: Key you entered"));
+    const html = await page.evaluate("document.documentElement.outerHTML + [...document.querySelectorAll('input, textarea')].map((field) => field.value).join(' ')");
+    assert.ok(!html.includes(BOARD_KEY), "the key is nowhere on the page");
+    assert.ok(!JSON.stringify(await read()).includes(BOARD_KEY), "the page read never carries the key");
+    await me.capture("conn-key-set");
+  });
+
+  await t.test("conn clear key", async () => {
+    await me.click("Clear key for api_key of Board");
+    await until("the key cleared", { kind: "none" }, async () => (await listedConnector("board"))?.secrets[0].binding ?? null);
+    await me.waitFor("Not set", (text) => text.includes("api_key: Not set"));
+  });
+
+  await t.test("conn remove", async () => {
+    await me.click("Remove Board");
+    await me.waitFor("the remove confirm", (text) => text.includes("Remove Board?") && text.includes("with its keys and its switch in every project."));
+    await me.click("Remove", "dialog button");
+    await until("Board gone", null, () => listedConnector("board"));
+    assert.ok(!existsSync(join(runtime, "app-plugins", "board.yaml")), "the manifest is deleted");
+    await me.waitFor("the catalog again", (text) => text.includes("Catalog") && !text.includes("Added by you"));
+    assert.equal(await page.evaluate("location.hash"), "#/settings/connectors", "a removed connector's page goes back to the catalog");
+  });
+
+  for (const shown of SCHEMES) {
+    await t.test(`conn pages ${shown}`, async () => {
+      await scheme(page, shown);
+      await connectorsPage();
+      await me.capture(`conn-settings-${shown}`);
+      await connectorPage("linear", "Linear", (text) => text.includes("Reaches"));
+      await me.capture(`conn-connector-${shown}`);
+    });
+  }
+  await scheme(page, "light");
+  await pause(POLL_MS);
+  assert.ok(!logs(evidence).includes(BOARD_KEY), "no engine or bridge log holds the key");
 }));

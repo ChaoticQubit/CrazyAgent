@@ -510,6 +510,136 @@ fn a_bundled_connector_never_inherits_an_older_plugin_of_its_name() {
 }
 
 #[test]
+fn a_refused_connector_file_is_listed_with_its_reason_and_one_whose_kind_cannot_be_read_is_not() {
+    let case = case();
+    add(&case, BOARD, false);
+    let folder = case.root.join(FOLDER);
+    for (file, text) in [
+        (
+            "broken.yaml",
+            "schema: 1\nkind: connector\nname: broken\n".to_owned(),
+        ),
+        (
+            "linear.yaml",
+            BOARD.replacen("name: board\n", "name: linear\n", 1),
+        ),
+        ("odd.yaml", "schema: 1\nkind: 7\nname: odd\n".to_owned()),
+    ] {
+        std::fs::write(folder.join(file), text).unwrap();
+        std::fs::set_permissions(folder.join(file), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+    }
+
+    let page = view(&case.db, &case.root, None).unwrap();
+    let listed: Vec<(&str, Origin)> = page
+        .connectors
+        .iter()
+        .map(|connector| (connector.name.as_str(), connector.origin))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("linear", Origin::Bundled),
+            ("github", Origin::Bundled),
+            ("atlassian", Origin::Bundled),
+            ("board", Origin::User),
+            ("broken", Origin::User),
+            ("linear", Origin::User),
+        ]
+    );
+    for (name, code) in [("broken", None), ("linear", Some("app_plugin_name_taken"))] {
+        let refused = page
+            .connectors
+            .iter()
+            .find(|connector| connector.name == name && connector.origin == Origin::User)
+            .unwrap();
+        assert!(
+            refused.runs.is_none(),
+            "{name}: a refused file has no address"
+        );
+        assert_eq!(refused.title, name, "{name}: listed under its file name");
+        let PluginStatus::Refused { problem } = &refused.status else {
+            panic!("{name}: {:?}", refused.status);
+        };
+        if let Some(code) = code {
+            assert_eq!(problem.code, code, "{name}");
+        }
+    }
+    assert!(
+        page.connectors
+            .iter()
+            .filter(|connector| connector.runs.is_none())
+            .all(|connector| matches!(connector.status, PluginStatus::Refused { .. })),
+        "only a refused file has no address"
+    );
+
+    let listing = store::list(&case.db, &case.root).unwrap();
+    let kind = |name: &str| {
+        listing
+            .plugins
+            .iter()
+            .find(|plugin| plugin.name == name && plugin.origin == Origin::User)
+            .map(|plugin| plugin.kind)
+    };
+    assert_eq!(kind("broken"), Some(PluginKind::Connector));
+    assert_eq!(kind("linear"), Some(PluginKind::Connector));
+    assert_eq!(
+        kind("odd"),
+        Some(PluginKind::Embedding),
+        "a file whose kind can't be read stays an App plugins row"
+    );
+}
+
+#[test]
+fn a_connector_file_torn_after_its_kind_line_is_listed_and_one_torn_before_it_is_not() {
+    let case = case();
+    add(&case, BOARD, false);
+    let folder = case.root.join(FOLDER);
+    for (file, text) in [
+        (
+            "torn.yaml",
+            "schema: 1\nkind: connector\nname: torn\n\ttitle: Torn\n",
+        ),
+        ("early.yaml", "schema: 1\n\tkind: connector\nname: early\n"),
+    ] {
+        std::fs::write(folder.join(file), text).unwrap();
+        std::fs::set_permissions(folder.join(file), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+    }
+
+    let page = view(&case.db, &case.root, None).unwrap();
+    let torn = page
+        .connectors
+        .iter()
+        .find(|connector| connector.name == "torn")
+        .expect("a file whose kind line reads before the YAML breaks is a connector's");
+    let PluginStatus::Refused { problem } = &torn.status else {
+        panic!("{:?}", torn.status);
+    };
+    assert_eq!(
+        (problem.code.as_str(), problem.line),
+        ("app_plugin_yaml_tab", Some(4))
+    );
+    assert!(torn.runs.is_none());
+    assert!(
+        page.connectors
+            .iter()
+            .all(|connector| connector.name != "early"),
+        "a file that breaks before its kind line stays an App plugins row"
+    );
+    let listing = store::list(&case.db, &case.root).unwrap();
+    let kind = |name: &str| {
+        listing
+            .plugins
+            .iter()
+            .find(|plugin| plugin.name == name)
+            .map(|plugin| plugin.kind)
+    };
+    assert_eq!(kind("torn"), Some(PluginKind::Connector));
+    assert_eq!(kind("early"), Some(PluginKind::Embedding));
+}
+
+#[test]
 fn grant_rows_of_connectors_that_are_gone_never_fill_a_project() {
     let case = case();
     add(&case, BOARD, false);

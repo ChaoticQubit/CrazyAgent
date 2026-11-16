@@ -275,7 +275,7 @@ impl ConnectorsPage {
         self.open = Open::Key(Box::new(KeyForm {
             name: connector.name.clone(),
             title: safe(&connector.title),
-            hosts: hosts(&connector.runs),
+            hosts: connector.runs.as_ref().map(hosts).unwrap_or_default(),
             secret: secret.name.clone(),
             key: TextField::secret(KEY_FIELD, KEY_CHARS_MAX),
         }));

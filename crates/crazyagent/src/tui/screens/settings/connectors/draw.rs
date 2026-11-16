@@ -180,11 +180,11 @@ impl ConnectorsPage {
         let mut lines = vec![list_row(head, width, selected, true, theme, ctx.glyphs)];
         let mut texts = vec![origin_line(connector)];
         texts.extend(line);
-        texts.push(reaches_line(&connector.runs));
+        texts.extend(connector.runs.as_ref().map(reaches_line));
         for text in texts {
             lines.extend(under(&text, width, ctx));
         }
-        assert!(lines.len() >= 3, "a title, its origin and what it reaches");
+        assert!(lines.len() >= 2, "a title and its origin");
         lines
     }
 
@@ -233,8 +233,10 @@ impl ConnectorsPage {
         if let Some(line) = line {
             lines.extend(wrap(&line, width).into_iter().map(|part| styled(part, role, theme)));
         }
-        lines.extend(wrap(&reaches_line(&connector.runs), width).into_iter().map(Line::raw));
-        if let RunsView::Connector { url, .. } = &connector.runs {
+        if let Some(runs) = &connector.runs {
+            lines.extend(wrap(&reaches_line(runs), width).into_iter().map(Line::raw));
+        }
+        if let Some(RunsView::Connector { url, .. }) = &connector.runs {
             let address = format!("Address: {}", safe(url));
             lines.extend(wrap(&address, width).into_iter().map(Line::raw));
         }

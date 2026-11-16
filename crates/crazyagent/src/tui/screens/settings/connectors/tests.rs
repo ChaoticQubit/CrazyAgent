@@ -47,12 +47,12 @@ fn connector(
         origin,
         status,
         sign_in: SignIn::Key,
-        runs: RunsView::Connector {
+        runs: Some(RunsView::Connector {
             url: format!("https://{host}/mcp"),
             hosts: vec![host.into()],
             oauth_hosts: Vec::new(),
             vendor_read_only: false,
-        },
+        }),
         secrets: vec![secret],
         sha256: SHA.into(),
     }
