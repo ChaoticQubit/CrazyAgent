@@ -195,14 +195,15 @@ fn check_env(env: &Value, path: &str) -> Result<(), Refused> {
 /// Checks the `accounts` block of a manifest, which says how a listed harness is given an
 /// account of each wire format it lists: each entry is named after one wire format the
 /// manifest lists, and its `env` sets plain variables, none the shared env-name rule owns
-/// (search path, home, temp folder, shell, locale, proxy, git, TLS, the package managers and
-/// toolchains, the native harness homes, the code-loading runtimes and the engine's own), to
-/// text that holds no placeholder but `{relay_url}`, `{token}` and `{model}`. That rule runs
-/// at load time and is not the launch guard: `sandbox::agent_env` sets the engine's pins
-/// (git, home, TLS and the zsh temp prefix) after the harness's own variables, so an entry
-/// never replaces one. A harness on a shared driver lists each wire format by its full name
-/// and has an entry for every one; the engine's own adapters need none. Input: the
-/// manifest. Output: Ok, or a refusal that names the setting.
+/// (search path, home, temp folder, shell, locale, the XDG folders, proxy, git, TLS, the
+/// package managers, package indexes and toolchains, the native harness homes, the
+/// code-loading runtimes and the engine's own), to text that holds no placeholder but
+/// `{relay_url}`, `{token}` and `{model}`. That rule runs at load time and is not the launch
+/// guard: `sandbox::agent_env` sets the engine's pins (git, home, TLS and the zsh temp
+/// prefix) after the harness's own variables, so an entry never replaces one. A harness on a
+/// shared driver lists each wire format by its full name and has an entry for every one; the
+/// engine's own adapters need none. Input: the manifest. Output: Ok, or a refusal that names
+/// the setting.
 pub fn check(manifest: &Manifest) -> Result<(), Refused> {
     let shared = !own_adapter(manifest);
     if shared
