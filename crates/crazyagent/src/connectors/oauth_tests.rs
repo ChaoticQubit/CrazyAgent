@@ -1201,3 +1201,30 @@ fn a_failed_refresh_raises_one_sign_in_notice() {
     let now = fresh_at(&sign, clock());
     assert!(matches!(now, Ok(Credential::OAuth { .. })), "{now:?}");
 }
+
+/// Removing a connector resolves its "Sign in again" item with it.
+#[test]
+fn removing_a_connector_resolves_its_sign_in_notice() {
+    let mut sign = signing(
+        Shape {
+            renewal: Arc::new(Mutex::new("400 Bad Request")),
+            ..shape()
+        },
+        &["127.0.0.1"],
+    );
+    let pending = begun(&sign, false);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    assert_eq!(
+        fresh_at(&sign, clock() + 2 * 3_600_000),
+        Err(OAuthError("connector_sign_in_needed"))
+    );
+    assert_eq!(notices(&mut sign.case).len(), 1);
+    crate::app_plugins::store::remove(&sign.case.db, &sign.case.root, "board").unwrap();
+    assert!(
+        notices(&mut sign.case).is_empty(),
+        "a removed connector leaves no item behind"
+    );
+}
