@@ -481,7 +481,8 @@ impl Job<'_> {
     }
 
     /// Takes a copy of a caller's descriptor that a call acts on as an open file, refusing
-    /// an `O_PATH` one with `EBADF` as the kernel's `fdget` does (LINUX-TEAM-TIME-CALLS).
+    /// an `O_PATH` one with `EBADF` as the kernel's `fdget` does (LINUX-TEAM-TIME-CALLS,
+    /// SUPERVISOR-OPATH-EBADF).
     /// Input: the descriptor register. Output: the copy, or the error.
     fn taken_open(&self, register: u64) -> Result<OwnedFd, Errno> {
         let file = self.taken(register)?;
@@ -915,17 +916,17 @@ impl Job<'_> {
     }
 
     /// Changes a file's mode, owner or times for the caller once the held guard lets it: a
-    /// path form pins the file its call names ([`Job::pinned`]), a descriptor form (a null
-    /// path on a time call, refused for an `O_PATH` one) takes a copy of the caller's
-    /// descriptor, the pin is judged ([`Job::kept_pin`]) and the change is made on that pin.
+    /// path form pins the file its call names ([`Job::pinned`]), a descriptor form (`fchmod`,
+    /// `fchown`, a null path on a time call) takes a copy of the caller's descriptor, refused
+    /// for an `O_PATH` one, the pin is judged ([`Job::kept_pin`]) and the change is made on it.
     /// An owner or group of -1 stays as it is. Input: which call. Output: zero, or the error.
     fn change(&self, call: Call) -> Result<Answer, Errno> {
         let a = self.notice.args;
         let here = AT_FDCWD as u32 as u64;
         let text = |at: u64| self.caller.text(at);
         let (pin, change) = match call {
-            Call::Fchmod => (self.taken(a[0])?, Change::Mode(a[1])),
-            Call::Fchown => (self.taken(a[0])?, Change::Owner(a[1], a[2])),
+            Call::Fchmod => (self.taken_open(a[0])?, Change::Mode(a[1])),
+            Call::Fchown => (self.taken_open(a[0])?, Change::Owner(a[1], a[2])),
             Call::Chmod => (self.pinned(here, text(a[0])?, true)?, Change::Mode(a[1])),
             Call::Fchmodat => (self.pinned(a[0], text(a[1])?, true)?, Change::Mode(a[2])),
             Call::Chown => (
