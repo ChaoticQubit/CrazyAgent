@@ -617,8 +617,9 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
 /// Refusals: `launch_chatgpt_unsupported` for an own adapter, a harness that does not list
 /// `openai-responses`, another account or a request not bound to a sign-in,
 /// `launch_chatgpt_sandbox_premade` for a request that already carries a sandbox profile,
-/// `launch_account_home_holds_sign_in` where a sign-in's record lies, or the private
-/// home's refusal.
+/// `launch_chatgpt_home_is_managed` for an agent home that is the sign-in's managed home,
+/// lies inside it or holds it, `launch_account_home_holds_sign_in` where a sign-in's record
+/// lies, or the private home's refusal.
 pub fn route_chatgpt(
     mut request: LaunchRequest,
     harness: &super::registry::Harness,
@@ -626,8 +627,10 @@ pub fn route_chatgpt(
     base: &Path,
     source: std::sync::Arc<crate::model_gateway::relay::chatgpt::ChatGptSource>,
 ) -> Result<(LaunchRequest, Relay), LaunchError> {
-    let routed = matches!(request.account, AccountBinding::Subscription { .. })
-        && harness.takes_chatgpt_sign_in()
+    let AccountBinding::Subscription { home: managed } = &request.account else {
+        return Err(failure("launch_chatgpt_unsupported"));
+    };
+    let routed = harness.takes_chatgpt_sign_in()
         && harness.named(&request.harness)
         && super::registry::is_chatgpt_sign_in(connection);
     if !routed {
@@ -643,6 +646,9 @@ pub fn route_chatgpt(
         source.profile() == profile_ref,
         "a ChatGPT relay serves only the sign-in it was read from"
     );
+    if overlaps(base, managed) {
+        return Err(failure("launch_chatgpt_home_is_managed"));
+    }
     let home = chatgpt_home(base, harness, &connection.id)?;
     let relay = Relay::start_chatgpt(source).map_err(|error| LaunchError(error.0, None))?;
     request.account = AccountBinding::Url {
@@ -659,6 +665,15 @@ pub fn route_chatgpt(
             .is_some_and(|key| is_placeholder(key.reveal()))
     );
     Ok((request, relay))
+}
+
+/// Whether two folders overlap: one is the other or lies inside it, as written or as their
+/// real paths where they exist, so neither a link nor a folder made later hides it.
+/// Inputs: the two folders. Output: the answer.
+fn overlaps(left: &Path, right: &Path) -> bool {
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let within = |left: &Path, right: &Path| left.starts_with(right) || right.starts_with(left);
+    within(left, right) || within(&real(left), &real(right))
 }
 
 /// Makes the private home a ChatGPT launch runs in, `<agent home>/<harness id>/<account>`
