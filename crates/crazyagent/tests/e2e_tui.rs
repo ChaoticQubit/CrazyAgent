@@ -2467,6 +2467,36 @@ fn the_tui_saves_the_heat_notice_kind_on() {
 }
 
 #[test]
+fn the_tui_saves_the_apps_not_paused_notice_kind_as_bell_only() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeAppsNotPaused,
+        Delivery::On,
+        1,
+        Delivery::BellOnly,
+    );
+}
+
+#[test]
+fn the_tui_saves_the_apps_not_paused_notice_kind_off() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeAppsNotPaused,
+        Delivery::On,
+        2,
+        Delivery::Off,
+    );
+}
+
+#[test]
+fn the_tui_saves_the_apps_not_paused_notice_kind_on() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeAppsNotPaused,
+        Delivery::Off,
+        1,
+        Delivery::On,
+    );
+}
+
+#[test]
 fn the_tui_saves_the_days_done_items_stay() {
     let saved = notice_settings_after(NoticeSettings::default(), &["End", "4", "5"]);
     assert_eq!(

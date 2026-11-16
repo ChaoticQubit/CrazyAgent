@@ -1553,6 +1553,11 @@ mod lane {
                 .clone()
         }
 
+        /// Red stub for QUESTION-03:02 A: the lane's latest whole refusal. Output: none yet.
+        pub fn refused(&self) -> Option<(u64, String)> {
+            None
+        }
+
         /// Asks the lane to undo everything and end, without waiting.
         pub fn finish(&self) {
             let _ = self.orders.send(Order::Stop);

@@ -1171,6 +1171,51 @@ fn the_lane_mutes_while_covered_and_puts_the_sound_back_when_uncovered() {
     assert!(lane.wait(Instant::now() + WAIT), "finish ends the lane");
 }
 
+/// QUESTION-03:02 A: a cover the lane cannot check for agents pauses nothing and names
+/// why, once per refusal, for the owner's "Apps not paused" notice.
+#[test]
+fn a_lane_that_cannot_tell_agents_apart_pauses_nothing_and_says_why() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::getuid().is_root() {
+        eprintln!("skipped: root reads every folder");
+        return;
+    }
+    let disk = tempfile::tempdir().unwrap();
+    let root = disk.path().canonicalize().unwrap();
+    let agents = root.join("team").join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let program = PathBuf::from(env!("CARGO_BIN_EXE_crazyagent"));
+    let mut lane = freeze::Lane::start(root.clone(), program, None, std::process::id()).unwrap();
+    let cover = || freeze::Cover {
+        freeze: true,
+        mute: false,
+        apps: vec![FreezeApp {
+            name: "Notes".into(),
+            id: "com.example.notes".into(),
+        }],
+    };
+
+    lane.cover(cover());
+
+    assert!(settles(|| lane.refused().is_some()), "the refusal is named");
+    let (first, code) = lane.refused().unwrap();
+    assert!(
+        code.starts_with("keep_awake_freeze_agents_unknown"),
+        "{code}"
+    );
+    assert_eq!(journaled(&root), Some(0), "nothing was frozen");
+    lane.uncover();
+    lane.cover(cover());
+    assert!(
+        settles(|| lane.refused().is_some_and(|(next, _)| next == first + 1)),
+        "a second refusal is a new one"
+    );
+    std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
+    lane.finish();
+    assert!(lane.wait(Instant::now() + WAIT));
+}
+
 /// rv-secreview r1 F2 retry, rv-code r1 F1: a put back that fails stays journaled, the lane
 /// tries it again on its own while the engine runs, says so after three failed tries, and
 /// clears that once a later try puts everything back.

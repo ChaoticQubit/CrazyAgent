@@ -130,6 +130,19 @@ pub(crate) fn hold_ended(connection: &Connection, ended: EndReason, since_ms: i6
     note(connection, &info, now);
 }
 
+/// Red stub for QUESTION-03:02 A: the words of an "Apps not paused" notice. Input:
+/// whether agents could not be told apart. Output: nothing yet.
+pub fn apps_not_paused_text(agents_unknown: bool) -> &'static str {
+    let _ = agents_unknown;
+    ""
+}
+
+/// Red stub for QUESTION-03:02 A: records nothing yet. Inputs: the connection, whether
+/// agents could not be told apart, and the time.
+pub(crate) fn apps_not_paused(connection: &Connection, agents_unknown: bool, now: i64) {
+    let _ = (connection, agents_unknown, now);
+}
+
 /// Records heat a hold runs on through, once per hold. Inputs: the connection inside the
 /// change's transaction, the End at heat setting, when the hold started and the time.
 /// Output: none; a write that fails is logged.

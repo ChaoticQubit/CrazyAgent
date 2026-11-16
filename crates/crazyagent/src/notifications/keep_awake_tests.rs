@@ -1,5 +1,6 @@
 use super::keep_awake::{
-    APPROVAL_TEXT, LID_JOURNAL_TEXT, ended_text, hot_text, left_over, lid_closed_left, lid_journal,
+    APPROVAL_TEXT, LID_JOURNAL_TEXT, apps_not_paused, apps_not_paused_text, ended_text, hot_text,
+    left_over, lid_closed_left, lid_journal,
 };
 use super::*;
 use crate::config::ModelAccess;
@@ -11,7 +12,7 @@ const NOT_PUT_BACK: &str = "Keep awake could not put back a sleep setting it cha
                             again when the engine starts.";
 const NOT_READ: &str = "Keep awake could not read its list of sleep settings to put back. It \
                         tries again when the engine starts.";
-const KEEP_AWAKE_KINDS: [(NoticeKind, &str, &str, NoticeClass); 4] = [
+const KEEP_AWAKE_KINDS: [(NoticeKind, &str, &str, NoticeClass); 5] = [
     (
         NoticeKind::KeepAwakeRestore,
         "keep_awake_restore",
@@ -34,6 +35,12 @@ const KEEP_AWAKE_KINDS: [(NoticeKind, &str, &str, NoticeClass); 4] = [
         NoticeKind::KeepAwakeHeat,
         "keep_awake_heat",
         "Hot during Keep awake",
+        NoticeClass::Info,
+    ),
+    (
+        NoticeKind::KeepAwakeAppsNotPaused,
+        "keep_awake_apps_not_paused",
+        "Apps not paused",
         NoticeClass::Info,
     ),
 ];
@@ -67,7 +74,7 @@ fn kinds(names: &[&str]) -> Leftover {
 }
 
 #[test]
-fn the_four_keep_awake_kinds_have_their_names_labels_and_classes() {
+fn the_keep_awake_kinds_have_their_names_labels_and_classes() {
     for (kind, name, label, class) in KEEP_AWAKE_KINDS {
         assert_eq!(kind.name(), name);
         assert_eq!(kind.label(), label);
@@ -86,7 +93,11 @@ fn the_four_keep_awake_kinds_have_their_names_labels_and_classes() {
     );
     assert_eq!(
         NoticeKind::ALL[22..],
-        [NoticeKind::KeepAwakeEnded, NoticeKind::KeepAwakeHeat]
+        [
+            NoticeKind::KeepAwakeEnded,
+            NoticeKind::KeepAwakeHeat,
+            NoticeKind::KeepAwakeAppsNotPaused
+        ]
     );
     assert_eq!(NoticeTarget::KeepAwake.project(), None);
 }
@@ -121,6 +132,42 @@ fn settings_saved_before_the_keep_awake_kinds_read_them_as_on() {
         }
     }
     assert!(!refused.valid(), "an Action kind is never Off");
+}
+
+/// QUESTION-03:02 A: a lid close that paused nothing because the lane could not check it
+/// tells the owner why, once per refusal, as an Info item that opens Keep awake.
+#[test]
+fn a_refused_freeze_tells_the_owner_why_once_per_refusal() {
+    let (_folder, connection) = store();
+    let agents = "Keep awake did not pause the apps you chose while the lid was closed: it \
+                  could not tell which processes belong to agents. They kept running.";
+    let unread = "Keep awake did not pause the apps you chose while the lid was closed: it \
+                  could not read which apps are running. They kept running.";
+    assert_eq!(apps_not_paused_text(true), agents);
+    assert_eq!(apps_not_paused_text(false), unread);
+
+    apps_not_paused(&connection, true, NOW_MS);
+    apps_not_paused(&connection, true, NOW_MS);
+    apps_not_paused(&connection, false, NOW_MS + 1);
+
+    let query = NoticeQuery {
+        filter: NoticeFilter::All,
+        project_id: None,
+        kind: Some(NoticeKind::KeepAwakeAppsNotPaused),
+        fold: false,
+        before: None,
+        after: None,
+        limit: PAGE_MAX,
+    };
+    let items = page(&connection, &query).unwrap().items;
+    let mut texts: Vec<String> = items.iter().map(|item| item.text.clone()).collect();
+    texts.sort();
+    assert_eq!(texts, vec![unread.to_owned(), agents.to_owned()]);
+    assert!(
+        items
+            .iter()
+            .all(|item| item.target == NoticeTarget::KeepAwake)
+    );
 }
 
 #[test]

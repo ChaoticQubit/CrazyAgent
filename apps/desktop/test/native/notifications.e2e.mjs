@@ -345,6 +345,9 @@ const KEEP_AWAKE_NOTICES = [
   ["keep_awake_heat", "Hot during Keep awake", "on", "bell_only"],
   ["keep_awake_heat", "Hot during Keep awake", "on", "off"],
   ["keep_awake_heat", "Hot during Keep awake", "off", "on"],
+  ["keep_awake_apps_not_paused", "Apps not paused", "on", "bell_only"],
+  ["keep_awake_apps_not_paused", "Apps not paused", "on", "off"],
+  ["keep_awake_apps_not_paused", "Apps not paused", "off", "on"],
 ];
 
 for (const [kind, label, from, to] of KEEP_AWAKE_NOTICES) {
