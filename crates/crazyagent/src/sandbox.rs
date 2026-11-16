@@ -941,12 +941,12 @@ pub fn linux_unbridged_line(port: u16) -> String {
 }
 
 /// What a launch tells the owner in the agent's messages when a Linux that nests agents
-/// still leaves it, with a port on this computer, on this computer's network:
-/// [`LINUX_UNROUTED_LINE`] for an agent with such a port that could have a network of its
-/// own on a host that cannot route ([`ProjectSandbox::routed`]), none when it routes, then
-/// [`linux_unbridged_line`] for a port below [`BRIDGE_PORT_MIN`], else under None, whose
-/// page drops it, [`LINUX_PORTS_ANY_HOST_LINE`]. Inputs: what this Linux holds, the
-/// project's network choice, the sandbox as launched. Output: the sentences, or none.
+/// still leaves it on this computer's network: for an agent that could have a network of
+/// its own ([`ProjectSandbox::routed`]) on a host that does not route, [`LINUX_UNROUTED_LINE`]
+/// or, with no loopback port or the supervisor on, [`LINUX_UNROUTED_ANY_HOST_LINE`]; none
+/// when it routes; then [`linux_unbridged_line`] for the lowest port below
+/// [`BRIDGE_PORT_MIN`], else under None [`LINUX_PORTS_ANY_HOST_LINE`]. Inputs: this Linux,
+/// the network choice, the sandbox as launched. Output: the sentences, or none.
 pub fn linux_unbridged_notice_on(
     host: Option<LinuxHost>,
     choice: policy::AgentNetwork,
@@ -955,10 +955,33 @@ pub fn linux_unbridged_notice_on(
     let Some(host) = host.filter(|host| host.nested) else {
         return None;
     };
-    let reaches = matches!(&sandbox.network, SandboxNetwork::Only(remotes)
-        if remotes.iter().any(|remote| matches!(remote, SandboxRemote::Loopback(_))));
+    let SandboxNetwork::Only(remotes) = &sandbox.network else {
+        return None;
+    };
+    let reaches = remotes
+        .iter()
+        .any(|remote| matches!(remote, SandboxRemote::Loopback(_)));
     if sandbox.routed().is_some() {
-        return (reaches && !host.routed).then(|| LINUX_UNROUTED_LINE.to_owned());
+        if host.routed {
+            return None;
+        }
+        let wide = reaches && !host.supervised;
+        let line = if wide { LINUX_UNROUTED_LINE } else { LINUX_UNROUTED_ANY_HOST_LINE };
+        return Some(line.to_owned());
+    }
+    let low = remotes
+        .iter()
+        .filter_map(|remote| match remote {
+            SandboxRemote::Loopback(port) if *port < BRIDGE_PORT_MIN => Some(*port),
+            _ => None,
+        })
+        .min();
+    let any = remotes
+        .iter()
+        .any(|remote| matches!(remote, SandboxRemote::AnyHost(_)));
+    let tcp = sandbox.linux_sockets == LinuxSockets::TcpOnly;
+    if let Some(port) = low.filter(|_| host.routed && any && tcp) {
+        return Some(linux_unbridged_line(port));
     }
     if let Some(port) = sandbox.unbridged_port() {
         assert!(port < BRIDGE_PORT_MIN);
@@ -968,25 +991,29 @@ pub fn linux_unbridged_notice_on(
     (reaches && unsaid).then(|| LINUX_PORTS_ANY_HOST_LINE.to_owned())
 }
 
-/// [`linux_unbridged_notice_on`] for this computer as it was last read. Inputs: the
-/// project's network choice and the agent's sandbox as launched. Output: the sentences, or
-/// none.
+/// [`linux_unbridged_notice_on`] for this computer as it was last read, under the owner's
+/// call supervisor setting ([`LinuxHost::under`]). Inputs: the project's network choice,
+/// the agent's sandbox as launched and the setting, none when it cannot be read, which
+/// counts as no supervisor. Output: the sentences, or none.
 pub fn linux_unbridged_notice(
     choice: policy::AgentNetwork,
     sandbox: &ProjectSandbox,
+    calls: Option<LinuxSupervisor>,
 ) -> Option<String> {
-    linux_unbridged_notice_on(linux_host_kept(), choice, sandbox)
+    let host = linux_host_kept().map(|host| host.under(calls));
+    linux_unbridged_notice_on(host, choice, sandbox)
 }
 
 /// What a launch tells the owner in the agent's messages when this Linux nests agents but
 /// could not give this one the network of its own its ports allow (DEC-179 SBX-2): why it
-/// has none, and what that leaves open.
-pub const LINUX_UNROUTED_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, or did not start, so every port it may reach on this computer is open to it on every host.";
+/// has none, the AppArmor profile and root included (rv-sa241 NOTE-2, NOTE-3), and what
+/// that leaves open.
+pub const LINUX_UNROUTED_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, did not start or is kept out by this computer's AppArmor profile, or CrazyAgent runs as root, so every port it may reach is open to it on every host, this computer included.";
 
 /// [`LINUX_UNROUTED_LINE`] for an agent with no loopback port, or one the call supervisor
 /// keeps to this computer (rv-sa241 7b LOW-1 and N1): its ports on any host then reach
 /// this computer too.
-pub const LINUX_UNROUTED_ANY_HOST_LINE: &str = "";
+pub const LINUX_UNROUTED_ANY_HOST_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, did not start or is kept out by this computer's AppArmor profile, or CrazyAgent runs as root, so the ports it may reach on any host include this computer's own.";
 
 /// What a limited network cannot hold on Linux, shown there only, under the network choice
 /// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
