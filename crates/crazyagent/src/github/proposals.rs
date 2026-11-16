@@ -281,6 +281,19 @@ pub(crate) fn start_store(db: &Connection) -> Result<usize, EngineError> {
     Ok(ended)
 }
 
+/// Forgets a removed project's proposals inside the removal's transaction, so none is
+/// applied or told after it. Inputs: the transaction and the project. Output: done, or
+/// `github_rule_requests_unavailable`.
+pub(crate) fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    table(tx).map_err(|_| failure(UNAVAILABLE))?;
+    tx.execute(
+        "DELETE FROM github_rule_requests WHERE project=?1",
+        [project.as_str()],
+    )
+    .map_err(|_| failure(UNAVAILABLE))?;
+    Ok(())
+}
+
 /// Reads the proposal id from a rule proposal question's asker name. Input: the stored
 /// asker. Output: the id, or none for any other asker.
 pub fn request_id(asker: &str) -> Option<i64> {

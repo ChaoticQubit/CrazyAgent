@@ -624,12 +624,17 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                     "additionalProperties": false,
                 },
             })];
-            tools.extend([
-                questions::ask_listing(),
-                questions::record_listing(),
-                questions::withdraw_listing(),
-                questions::request_listing(),
-            ]);
+            tools.extend(
+                [
+                    questions::ask_listing(),
+                    questions::record_listing(),
+                    questions::withdraw_listing(),
+                    questions::request_listing(),
+                    questions::propose_listing(),
+                ]
+                .into_iter()
+                .filter(|tool| !off.iter().any(|name| tool["name"] == name.as_str())),
+            );
             if waking {
                 tools.push(wake_listing());
             }
@@ -641,7 +646,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                         .map(|name| spec(name)),
                 );
             }
-            assert!(tools.len() <= 6 + MEMORY_TOOLS.len());
+            assert!(tools.len() <= 7 + MEMORY_TOOLS.len());
             json!({ "tools": tools })
         }
         Some("tools/call") => match (mailbox, name) {
@@ -654,8 +659,12 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
             _ => match call(params, drop)
                 .or_else(|| waking.then(|| wake_call(params, drop)).flatten())
                 .map(|(text, error)| (text.to_owned(), error))
-                .or_else(|| questions::drop_call(params, drop))
-            {
+                .or_else(|| {
+                    let left_out = name.is_some_and(|name| off.iter().any(|tool| tool == name));
+                    (!left_out)
+                        .then(|| questions::drop_call(params, drop))
+                        .flatten()
+                }) {
                 Some((text, error)) => tool_result(&text, error),
                 None => return Some(failure(id, -32602, "Unknown tool")),
             },

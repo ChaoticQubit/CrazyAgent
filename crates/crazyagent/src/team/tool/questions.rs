@@ -1,4 +1,7 @@
-use super::{ASK_TOOL, CALLS_PER_TICK_MAX, Call, RECORD_TOOL, REQUEST_ACCESS_TOOL, WITHDRAW_TOOL};
+use super::{
+    ASK_TOOL, CALLS_PER_TICK_MAX, Call, PROPOSE_RULE_TOOL, RECORD_TOOL, REQUEST_ACCESS_TOOL,
+    WITHDRAW_TOOL,
+};
 use crate::engine::EngineError;
 use crate::protocol::{ProjectId, SessionId};
 use crate::questions::{Asker, Settlement};
@@ -15,10 +18,11 @@ pub const ASK_DROP_BYTES_MAX: u64 = ASKS_PER_REPLY_MAX as u64 * super::CALL_BYTE
 const ASK_LOGGED: &str = "Recorded. When your reply ends, the engine logs this question in the project's questions and notifies the owner, unless 8 of your questions are still open. Their answer or dismissal comes back to you once on a later turn, so do not ask it again.";
 const RECORD_TAKEN: &str = "Noted. When your reply ends, the engine records the owner's message as the answer, taking the words from that message and never from yours, if the question is still open and the message is the owner's.";
 const REQUEST_TAKEN: &str = "Recorded. When your reply ends, the engine checks the request and raises it as a question in the owner's Questions view. If the owner allows it, it joins the project's Agent access and you get it at your next start; do not ask again.";
+const PROPOSE_TAKEN: &str = "Recorded. When your reply ends, the engine checks the proposal and raises it as a question in the owner's Questions view. You get one message saying only whether it was approved and applied, refused or declined, so do not propose it again meanwhile.";
 const REQUEST_HELD: &str = "The project already allows that, so nothing was asked. If your sandbox still blocks it, you get it at your next start.";
 const WITHDRAW_TAKEN: &str = "Noted. When your reply ends, the engine takes the question off the owner's list if it is still open and was asked by you or by a sub-agent of this project.";
 const RELAY_LIVE_ONLY: &str = "Not sent: only a master in the owner's terminal records an answer as its own words. Name the owner's message with owner_turn instead.";
-const ASK_ONLY: &str = "Not sent: this tool only takes a question, a recorded answer, a withdrawal or an access request.";
+const ASK_ONLY: &str = "Not sent: this tool only takes a question, a recorded answer, a withdrawal, an access request or a GitHub rule proposal.";
 const ASKS_FULL: &str = "Not sent: the engine takes at most 8 question calls from one reply. Make the next one in a later reply.";
 const ASK_UNWRITABLE: &str = "Not sent: the engine's question record could not be written.";
 const AGENT_ASKS_ONLY: &str = "Not recorded: the owner answers a sub-agent's questions in the Questions view, so only the master records an answer from chat.";
@@ -78,6 +82,14 @@ pub(super) fn request_listing() -> Value {
     listed
 }
 
+/// The `propose_github_rule` tool's listing, as the live master's list shows it (DEC-182
+/// S7). Output: the tool's JSON entry, named `PROPOSE_RULE_TOOL`.
+pub(super) fn propose_listing() -> Value {
+    let listed = super::propose_rule_tool();
+    assert_eq!(listed["name"], PROPOSE_RULE_TOOL);
+    listed
+}
+
 /// The `record_answer` tool's listing, as the live master's list shows it. Output: the
 /// tool's JSON entry, named `RECORD_TOOL`.
 pub(super) fn record_listing() -> Value {
@@ -93,8 +105,8 @@ pub fn ask_file(drop: &Path) -> PathBuf {
     drop.with_file_name(ASK_DROP_FILE)
 }
 
-/// Answers one `tools/call` of the `ask`, `record_answer`, `withdraw_question` or
-/// `request_access` tool on the drop-file server: the call is checked as the live server checks it and recorded for
+/// Answers one `tools/call` of the `ask`, `record_answer`, `withdraw_question`,
+/// `request_access` or `propose_github_rule` tool on the drop-file server: the call is checked as the live server checks it and recorded for
 /// the engine, which takes it when the reply ends. An answer given as the master's own
 /// words is refused, since a drop-file master has no terminal the owner types into. Inputs:
 /// the call's params and the absolute drop file. Output: none for another tool, else the
@@ -102,7 +114,15 @@ pub fn ask_file(drop: &Path) -> PathBuf {
 pub(super) fn drop_call(params: Option<&Value>, drop: &Path) -> Option<(String, bool)> {
     let params = params?;
     let name = params.get("name")?.as_str()?;
-    if ![ASK_TOOL, RECORD_TOOL, WITHDRAW_TOOL, REQUEST_ACCESS_TOOL].contains(&name) {
+    if ![
+        ASK_TOOL,
+        RECORD_TOOL,
+        WITHDRAW_TOOL,
+        REQUEST_ACCESS_TOOL,
+        PROPOSE_RULE_TOOL,
+    ]
+    .contains(&name)
+    {
         return None;
     }
     Some(match super::live_call(name, params.get("arguments"))? {
@@ -114,6 +134,7 @@ pub(super) fn drop_call(params: Option<&Value>, drop: &Path) -> Option<(String, 
                     Call::Ask { .. } => ASK_LOGGED,
                     Call::Withdraw { .. } => WITHDRAW_TAKEN,
                     Call::RequestAccess { .. } => REQUEST_TAKEN,
+                    Call::ProposeGitHubRule { .. } => PROPOSE_TAKEN,
                     _ => RECORD_TAKEN,
                 }
                 .to_owned(),
@@ -127,8 +148,8 @@ pub(super) fn drop_call(params: Option<&Value>, drop: &Path) -> Option<(String, 
 }
 
 /// Says whether a question call is one the engine takes from a drop-file or conversation
-/// master's record: an ask, an answer recorded from the owner's message, a withdrawal or an
-/// access request. Input: the call. Output: the answer.
+/// master's record: an ask, an answer recorded from the owner's message, a withdrawal, an
+/// access request or a GitHub rule proposal. Input: the call. Output: the answer.
 fn taken(call: &Call) -> bool {
     matches!(
         call,
@@ -136,6 +157,7 @@ fn taken(call: &Call) -> bool {
             | Call::RecordAnswer { .. }
             | Call::Withdraw { .. }
             | Call::RequestAccess { .. }
+            | Call::ProposeGitHubRule { .. }
     )
 }
 
@@ -244,6 +266,9 @@ pub fn apply_master_calls(
     applied(take_asks(drop), |call| match call {
         Call::Ask { .. } => logged_ask(db, project, &asker, call),
         Call::RequestAccess { grant, reason } => not_raised(db, project, &asker, &grant, &reason),
+        Call::ProposeGitHubRule { rule, on, why } => {
+            not_proposed(db, project, &asker, rule, on, &why)
+        }
         Call::RecordAnswer {
             question,
             version,
@@ -284,6 +309,9 @@ pub fn apply_session_calls(
     applied(calls, |call| match call {
         Call::Ask { .. } => logged_ask(db, project, &asker, call),
         Call::RequestAccess { grant, reason } => not_raised(db, project, &asker, &grant, &reason),
+        Call::ProposeGitHubRule { rule, on, why } => {
+            not_proposed(db, project, &asker, rule, on, &why)
+        }
         Call::RecordAnswer {
             question,
             version,
@@ -335,6 +363,29 @@ fn not_raised(
             "Your access request for {} was not raised: {}",
             grant.label(),
             grants::refusal_text(&code)
+        )),
+    }
+}
+
+/// Raises a drop-file master's GitHub rule proposal when its reply ends, as
+/// [`propose_reply`] does; a conversation master's is refused by the proposal's own check,
+/// since only a team agent proposes. Inputs: the engine connection, the project, the
+/// master as asker, the rule, whether it is to be on and the reason. Output: none once
+/// raised, else the sentence for its next turn.
+fn not_proposed(
+    db: &Connection,
+    project: &ProjectId,
+    asker: &Asker,
+    rule: crate::github::GitHubRule,
+    on: bool,
+    why: &str,
+) -> Option<String> {
+    match crate::github::proposals::request(db, project, asker, rule, on, why) {
+        Ok(_) => None,
+        Err(code) => Some(format!(
+            "Your GitHub rule proposal for {} was not raised: {}",
+            crate::github::proposals::rule_name(rule),
+            propose_refusal(&code)
         )),
     }
 }
