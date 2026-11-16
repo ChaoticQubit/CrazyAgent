@@ -366,6 +366,56 @@ pub(in crate::team) fn request_reply(
     }
 }
 
+/// Raises one GitHub rule proposal (DEC-182 S7) for the owner and says how it went, in
+/// words that never name the repository or anything from the owner's sign-in. Inputs: the
+/// engine connection, the project, who asked, the rule, whether it is to be on and the
+/// reason. Output: the sentence the caller reads and whether it is an error.
+pub(in crate::team) fn propose_reply(
+    db: &Connection,
+    project: &ProjectId,
+    asker: &Asker,
+    rule: crate::github::GitHubRule,
+    on: bool,
+    why: &str,
+) -> (String, bool) {
+    let name = crate::github::proposals::rule_name(rule);
+    let switch = if on { "on" } else { "off" };
+    match crate::github::proposals::request(db, project, asker, rule, on, why) {
+        Ok(question) => (
+            format!(
+                "Proposal raised as question {question} in the owner's Questions view. You get one message saying only whether turning {name} {switch} was approved and applied, refused or declined, so do not propose it again meanwhile."
+            ),
+            false,
+        ),
+        Err(code) => (format!("Not proposed: {}", propose_refusal(&code)), true),
+    }
+}
+
+/// The plain reason an agent reads when its GitHub rule proposal was not raised. Input:
+/// the refusal code. Output: the sentence.
+fn propose_refusal(code: &str) -> &'static str {
+    match code {
+        "github_rules_not_published" => {
+            "this project has not been published to GitHub, so it has no repository rules to change."
+        }
+        "github_rule_invalid" => {
+            "that rule is a file in the project, not a GitHub setting, so change the file instead."
+        }
+        "github_rule_why_invalid" => "give why in plain words of up to 300 bytes.",
+        "github_rule_request_open" => {
+            "your proposal for that rule is still open, so wait for its outcome."
+        }
+        "github_rule_requests_full" => {
+            "4 GitHub rule proposals of this project are still open. Wait for their outcomes before proposing more."
+        }
+        "github_rule_asker_invalid" => "only a team agent of this project proposes GitHub rules.",
+        "questions_full" => {
+            "64 questions of this project are still open. Wait for the owner's answers before proposing."
+        }
+        _ => "the engine could not record it. Try again later.",
+    }
+}
+
 fn applied(calls: Vec<Call>, apply: impl FnMut(Call) -> Option<String>) -> Vec<String> {
     assert!(calls.len() <= ASKS_PER_REPLY_MAX);
     let refused: Vec<String> = calls.into_iter().filter_map(apply).collect();
@@ -489,8 +539,9 @@ pub fn clear_asks(drop: &Path) {
 
 /// Logs the question a sub-agent asked through the `ask` tool of its team server, with the
 /// Logs a sub-agent's `ask` with it as the asker, in place of an old free-text question of
-/// its own when it names one, raises its `request_access` as [`request_reply`] does and
-/// refuses its `record_answer` and `withdraw_question`. Inputs: the engine connection, the
+/// its own when it names one, raises its `request_access` as [`request_reply`] does and its
+/// `propose_github_rule` as [`propose_reply`] does, and refuses its `record_answer` and
+/// `withdraw_question`. Inputs: the engine connection, the
 /// project, the sub-agent's team id and its checked question call. Output: the sentence
 /// the sub-agent reads and whether it is an error.
 pub(in crate::team) fn agent_ask(
@@ -512,6 +563,9 @@ pub(in crate::team) fn agent_ask(
         Call::Withdraw { .. } => (AGENT_WITHDRAW_REFUSED.to_owned(), true),
         Call::RequestAccess { grant, reason } => {
             request_reply(db, project, &Asker::Agent(agent), &grant, &reason)
+        }
+        Call::ProposeGitHubRule { rule, on, why } => {
+            propose_reply(db, project, &Asker::Agent(agent), rule, on, &why)
         }
         _ => unreachable!("only question calls reach agent_ask"),
     }

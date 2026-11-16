@@ -275,9 +275,35 @@ async fn handle(
         }
     }
     let root = super::changes::engine_root(authority)?;
-    tokio::task::spawn_blocking(move || run(&root, action))
+    let answered = matches!(action, Action::Answer { .. });
+    let running = root.clone();
+    let reply = tokio::task::spawn_blocking(move || run(&running, action))
         .await
-        .map_err(|_| failure("questions_unavailable"))?
+        .map_err(|_| failure("questions_unavailable"))??;
+    let settled = matches!(
+        reply,
+        Reply::Settled {
+            settlement: Settlement::Settled
+        }
+    );
+    if answered && settled {
+        drop(tokio::task::spawn_blocking(move || apply_proposals(&root)));
+    }
+    Ok(reply)
+}
+
+/// Applies the GitHub rule proposals the owner approved (DEC-182 S7) after the answer's
+/// reply is sent, with the owner's sign-in, so the owner never waits on GitHub. A failure
+/// is logged by its code alone. Input: the engine root.
+fn apply_proposals(root: &Path) {
+    let applied = questions::open(root).and_then(|db| {
+        crate::github::proposals::apply_approved(&db, &mut |folder, rule, on| {
+            crate::github::GitHub::open(root)?.set_repo_rule(folder, rule, on)
+        })
+    });
+    if let Err(problem) = applied {
+        eprintln!("github_rule_proposals_not_applied code={}", problem.0);
+    }
 }
 
 /// Reads one Questions request from an owner frame body, at most REQUEST_BYTES_MAX bytes.

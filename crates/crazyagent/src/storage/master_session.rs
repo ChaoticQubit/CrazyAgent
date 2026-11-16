@@ -3035,7 +3035,10 @@ fn bundle(
         .ok_or_else(|| error("master_attempt_missing"))?;
     let tools = turn_tools(tx, &session)?;
     let tools_off = match tools {
-        true => crate::team::master::switched_off_tools(tx, &session.project_id)?,
+        true => crate::team::tool::console_off(crate::team::master::switched_off_tools(
+            tx,
+            &session.project_id,
+        )?),
         false => Vec::new(),
     };
     let instructions = crate::launch_context::for_master(

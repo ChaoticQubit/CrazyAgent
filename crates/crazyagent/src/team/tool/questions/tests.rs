@@ -246,7 +246,8 @@ fn a_sub_agent_server_lists_only_ask_and_logs_its_question_as_the_agent() {
     let listed = super::super::team_tools(&sub_agent);
     let tools = listed["tools"].as_array().unwrap();
     assert!(tools.contains(&super::super::ask_tool()));
-    assert_eq!(tools.last(), Some(&super::super::request_access_tool()));
+    assert!(tools.contains(&super::super::request_access_tool()));
+    assert_eq!(tools.last(), Some(&super::super::propose_rule_tool()));
     assert!(tools.iter().all(|tool| tool["name"] != RECORD_TOOL));
     assert!(tools.iter().all(|tool| tool["name"] != WITHDRAW_TOOL));
     assert!(super::super::known_tools(&sub_agent));

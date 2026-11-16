@@ -2,8 +2,9 @@ use crazyagent::plugins::check::{CHECK_TIME, check_stdio};
 use crazyagent::team::Delegation;
 use crazyagent::team::tool::{
     AGENT_SERVER_COMMAND, ASK_TOOL, CALLS_PER_TICK_MAX, Call, DROP_FILE, LIVE_SERVER_COMMAND,
-    MAILBOX_FOLDER, QUESTION_TOOLS, RECALL_TOOL, RECORD_TOOL, REMEMBER_TOOL, REQUEST_ACCESS_TOOL,
-    SERVER_COMMAND, TEAM_TOOLS, TOOL_NAME, WAKE_TOOL, WITHDRAW_TOOL, answer_call, take, take_calls,
+    MAILBOX_FOLDER, PROPOSE_RULE_TOOL, QUESTION_TOOLS, RECALL_TOOL, RECORD_TOOL, REMEMBER_TOOL,
+    REQUEST_ACCESS_TOOL, SERVER_COMMAND, TEAM_TOOLS, TOOL_NAME, WAKE_TOOL, WITHDRAW_TOOL,
+    answer_call, take, take_calls,
 };
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -556,7 +557,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
         check_stdio(engine, &arguments, &[], CHECK_TIME).unwrap(),
         TEAM_TOOLS
             .iter()
-            .chain(&[ASK_TOOL, REQUEST_ACCESS_TOOL])
+            .chain(&[ASK_TOOL, REQUEST_ACCESS_TOOL, PROPOSE_RULE_TOOL])
             .copied()
             .collect::<Vec<_>>(),
     );
