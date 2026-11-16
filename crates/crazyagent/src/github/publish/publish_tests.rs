@@ -369,8 +369,8 @@ fn prepare_initializes_main_hides_crazyagent_and_appends_the_ignore_lines_once()
         );
     }
     assert_eq!(fixture.read(".gitignore"), ignore);
-    let linked = fixture();
-    let outside = fixture();
+    let linked = self::fixture();
+    let outside = self::fixture();
     outside.write("kept", "keep\n");
     std::os::unix::fs::symlink(
         outside.path().join("kept"),

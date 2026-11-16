@@ -1099,7 +1099,7 @@ fn cleanup_chosen(shell: &mut Shell) -> CleanupSettings {
     *settings
 }
 
-fn stored(shell: &mut Shell, mode: CleanupMode, days: u16) {
+fn stored_cleanup(shell: &mut Shell, mode: CleanupMode, days: u16) {
     shell.arrive(event(AppSetupEvent::Cleanup(Ok(CleanupSettings {
         mode,
         days,
@@ -1191,7 +1191,7 @@ fn after_n_days_saves_the_typed_days_and_refuses_days_outside_one_to_365() {
 #[test]
 fn once_its_work_lands_saves_it_and_keeps_the_stored_days() {
     let mut shell = settings(120, 60);
-    stored(&mut shell, CleanupMode::AfterDays, 7);
+    stored_cleanup(&mut shell, CleanupMode::AfterDays, 7);
     assert!(
         find(&render(&mut shell, 120, 60), "Finished agents  ")
             .contains("7 days after the agent finishes")
@@ -1230,7 +1230,7 @@ fn only_when_i_click_clean_up_saves_manual_and_a_refused_save_says_why() {
     shell.arrive(event(AppSetupEvent::CleanupSet(Err("busy".into()))));
     assert_ne!(lead(&shell), "Finished agents: Only when I click Clean up.");
     assert!(!lead(&shell).is_empty());
-    stored(&mut shell, CleanupMode::Manual, 1);
+    stored_cleanup(&mut shell, CleanupMode::Manual, 1);
     assert!(
         find(&render(&mut shell, 120, 60), "Finished agents  ")
             .contains("Only when I click Clean up")
