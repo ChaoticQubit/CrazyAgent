@@ -1271,6 +1271,64 @@ fn the_owners_app_is_bound_once_when_two_sign_ins_race() {
     );
 }
 
+/// Saving another own app ends the sign-in made with the one saved before and drops its
+/// sign-ins still waiting: the old issuer gets no request after the save, so it never
+/// sees the new app's id or secret, by a renewal or by a code, and one Action item asks
+/// the owner to sign in again.
+#[test]
+fn saving_another_own_app_ends_the_sign_in_made_with_the_last_one() {
+    let mut own = prepared(
+        shape(),
+        &["127.0.0.1"],
+        &[Registration::Own],
+        Some((CLIENT, Some(SECRET))),
+    );
+    let pending = begun(&own, false);
+    assert_eq!(finished(&own, &pending.state, Some(&own.issuer())), Ok(()));
+    let waiting = begun(&own, false);
+    let sent = own.vendor.seen().len();
+    assert_eq!(
+        set_own_client(
+            &own.case.db,
+            &own.case.root,
+            "board",
+            "board-own-client-2",
+            Some("own-secret-0002")
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        fresh_at(&own, clock() + 2 * 3_600_000),
+        Err(OAuthError("connector_sign_in_needed")),
+        "the last app's sign-in is never renewed with the new app"
+    );
+    assert_eq!(
+        finished(&own, &waiting.state, Some(&own.issuer())),
+        Err(OAuthError("connector_oauth_state_unknown")),
+        "a sign-in begun with the last app is never redeemed"
+    );
+    assert_eq!(
+        own.vendor.seen().len(),
+        sent,
+        "the old issuer is asked nothing after the save"
+    );
+    assert!(saved(&own.case, "connector-token-board-").is_empty());
+    assert_eq!(
+        notices(&mut own.case),
+        vec![(
+            NoticeKind::ConnectorSignIn,
+            NoticeClass::Action,
+            "Board needs you to sign in again.".to_owned(),
+            json!({"page": "connectors"}),
+        )]
+    );
+    let again = begun(&own, false);
+    assert_eq!(
+        query(&again.authorize_url)["client_id"],
+        "board-own-client-2"
+    );
+}
+
 /// The Action items waiting on the owner after one reconcile, as kind, class, text and
 /// the page a click opens.
 fn notices(case: &mut Case) -> Vec<(NoticeKind, NoticeClass, String, serde_json::Value)> {
