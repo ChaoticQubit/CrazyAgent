@@ -387,14 +387,14 @@ pub(super) struct Repo {
 /// The Seatbelt profile of one engine git step on an agent's work tree (SECAUDIT
 /// unconfined-git-add-reads-through-raced-symlink, unconfined-read-tree-u): it reads only the
 /// system, its own toolchain, the work tree, the repository's git folder, the owner's ignore
-/// file and the index it works on, and writes only what the step names and that index, the
-/// worktree's own or the engine's private one, never the repository's `hooks` or `config`,
-/// whatever an agent swaps a path for during the step. Paths reach it as parameters, so no
-/// path text is read as profile text.
+/// file and the index it works on with its lock, which git opens read-write, and writes only
+/// what the step names and that index, the worktree's own or the engine's private one, never
+/// the repository's `hooks` or `config`, whatever an agent swaps a path for during the step.
+/// Paths reach it as parameters, so no path text is read as profile text.
 #[cfg(target_os = "macos")]
 const WORK_TREE_PROFILE: &str = "(version 1)\n\
 (allow default)\n\
-(deny file-read-data (require-not (require-any (literal \"/\") (subpath \"/System\") (subpath \"/usr/lib\") (subpath \"/usr/share\") (subpath \"/dev\") (subpath (param \"TOOLS\")) (subpath (param \"WORK\")) (subpath (param \"COMMON\")) (literal (param \"EXCLUDES\")) (literal (param \"INDEX\")))))\n\
+(deny file-read-data (require-not (require-any (literal \"/\") (subpath \"/System\") (subpath \"/usr/lib\") (subpath \"/usr/share\") (subpath \"/dev\") (subpath (param \"TOOLS\")) (subpath (param \"WORK\")) (subpath (param \"COMMON\")) (literal (param \"EXCLUDES\")) (literal (param \"INDEX\")) (literal (param \"INDEX_LOCK\")))))\n\
 (deny file-write* (require-not (require-any (literal \"/dev/null\") (subpath (param \"WRITE\")) (literal (param \"INDEX\")) (literal (param \"INDEX_LOCK\")))))\n";
 
 /// What one confined git step may write besides the index it works on: the object store,
