@@ -259,8 +259,8 @@ fn engine_older(engine: &str, app: &str) -> bool {
 /// the service's engine and never installs a service beside an engine started by hand
 /// (DEC-134 addendum 1, #111 F1). Inputs: both versions and the service's status. Output:
 /// the answer.
-fn swap_on_launch(_engine: &str, _app: &str, _service: &crazyagent::service::Status) -> bool {
-    false
+fn swap_on_launch(engine: &str, app: &str, service: &crazyagent::service::Status) -> bool {
+    service.installed && service.running && engine_older(engine, app)
 }
 
 /// Takes this app run's one replacement of an older engine. Input: the run's flag. Output:
@@ -296,8 +296,9 @@ async fn check_default_engine(
 
 /// Makes sure the default engine runs before the bridge connects: when none answers it
 /// starts the login service, installing it for this app's sidecar on first launch. An engine
-/// older than this app is replaced once per app run through Restart engine's path, without
-/// its confirm, and the next connect reply says so (DEC-134 addendum 1); any other version,
+/// older than this app that the running login service runs is replaced once per app run
+/// through Restart engine's path, without its confirm, and once it answers on this app's
+/// version the next connect reply says so (DEC-134 addendum 1); any other version or engine,
 /// or a replacement the service refuses, is `engine_version_mismatch`. Skipped when
 /// `CRAZYAGENT_DESKTOP_SOCKET` names an engine explicitly.
 async fn ensure_default_engine() -> Result<(), BridgeError> {
@@ -313,7 +314,11 @@ async fn ensure_default_engine() -> Result<(), BridgeError> {
     else {
         return Ok(());
     };
-    if !engine_older(&version, crazyagent::version::VERSION) || !first_replacement(&ENGINE_REPLACED)
+    let running = service
+        .status()
+        .map_err(|_| engine_failure("engine_version_mismatch"))?;
+    if !swap_on_launch(&version, crazyagent::version::VERSION, &running)
+        || !first_replacement(&ENGINE_REPLACED)
     {
         return Err(engine_failure("engine_version_mismatch"));
     }
@@ -328,10 +333,15 @@ async fn ensure_default_engine() -> Result<(), BridgeError> {
         }
         result => result?,
     }
-    if let crazyagent::service::EngineCheck::Mismatch { .. } = check_default_engine(&layout).await {
-        return Err(engine_failure("engine_version_mismatch"));
+    match check_default_engine(&layout).await {
+        crazyagent::service::EngineCheck::Mismatch { .. } => {
+            return Err(engine_failure("engine_version_mismatch"));
+        }
+        crazyagent::service::EngineCheck::Ready { .. } => {
+            ENGINE_UPDATE_UNTOLD.store(true, Ordering::SeqCst);
+        }
+        crazyagent::service::EngineCheck::Unavailable { .. } => {}
     }
-    ENGINE_UPDATE_UNTOLD.store(true, Ordering::SeqCst);
     Ok(())
 }
 
