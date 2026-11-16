@@ -87,6 +87,15 @@ export const APP_PLUGIN_REFUSALS: Record<string, string> = {
 /** What the Search page says after a save named a version another window had replaced. */
 export const SEARCH_STALE = "Search settings changed in another window. This page now shows the saved ones; choose again.";
 
+/** The line under a listed file the engine refused: an owner's file a built-in plugin or
+ * connector took the name of says which file is set aside, why, that it stays on disk and
+ * how to use it again; any other refusal is its problem line. The TUI uses the same words.
+ * Inputs: the listed name, where it came from and the refusal. Output: the line. */
+export function refusedLine(name: string, origin: Origin, problem: Problem): string {
+  if (origin !== "user" || problem.code !== "app_plugin_name_taken") return problemText(problem);
+  return `${name}.yaml is set aside: a built-in plugin or connector now has the name ${name}. The file stays in your plugins folder, and its keys and switches were cleared. Rename the file and the name in it to use it.`;
+}
+
 /** One plain line for a plugin or manifest problem: the engine's sentence, then its code and,
  * when known, the manifest line and field. Input: the problem. Output: the line. */
 export function problemText(problem: Problem): string {
@@ -99,7 +108,7 @@ export function problemText(problem: Problem): string {
  * Input: the plugin. Output: the word, its tone and the line under it, if any. */
 export function pluginState(plugin: PluginView): { word: string; tone: Tone; detail: string | null } {
   const status = plugin.status;
-  if (status.kind === "refused") return { word: "Refused", tone: "danger", detail: problemText(status.problem) };
+  if (status.kind === "refused") return { word: "Refused", tone: "danger", detail: refusedLine(plugin.name, plugin.origin, status.problem) };
   if (status.kind === "needs_review") return { word: "Needs review", tone: "warn", detail: "Review this plugin before it runs." };
   if (status.kind === "needs_key") return { word: "Needs a key", tone: "warn", detail: "Set a key for each secret it needs." };
   if (status.kind === "needs_sign_in") return { word: "Needs sign-in", tone: "warn", detail: "Sign in on its page before it runs." };

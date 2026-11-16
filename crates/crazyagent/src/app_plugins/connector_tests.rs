@@ -617,7 +617,15 @@ mod stored {
                 "linear",
                 "github",
                 "atlassian",
-                "notion"
+                "notion",
+                "slack",
+                "asana",
+                "box",
+                "canva",
+                "dropbox",
+                "gmail",
+                "google-drive",
+                "google-calendar"
             ]
         );
         let case = case();
@@ -635,7 +643,7 @@ mod stored {
                 "github",
                 "https://api.githubcopilot.com/mcp/",
                 "api.githubcopilot.com",
-                json!([]),
+                json!(["github.com"]),
                 true,
                 json!(["token"]),
             ),
@@ -684,25 +692,85 @@ mod stored {
                 "{name}"
             );
         }
-        let notion = plugin(&listing, "notion");
-        assert_eq!(
-            (notion.origin, &notion.status, notion.enabled),
-            (Origin::Bundled, &PluginStatus::NeedsSignIn, false),
-            "an OAuth-only connector needs no key, and reads Needs sign-in until it signs in"
-        );
-        let view = serde_json::to_value(notion).unwrap();
-        assert_eq!(view["runs"]["url"], "https://mcp.notion.com/mcp");
-        assert_eq!(view["runs"]["hosts"], json!(["mcp.notion.com"]));
-        assert_eq!(view["runs"]["oauth_hosts"], json!(["mcp.notion.com"]));
-        assert_eq!(view["runs"]["vendor_read_only"], false);
-        assert!(notion.secrets.is_empty());
-        store::set_enabled(&case.db, &case.root, "notion", true).unwrap();
-        let ready = store::ready(&case.db, &case.root, "notion");
-        assert!(ready.is_ok(), "{:?}", ready.err());
-        assert_eq!(
-            store::remove(&case.db, &case.root, "notion").unwrap_err().0,
-            "app_plugin_bundled"
-        );
+        let google = json!(["accounts.google.com", "oauth2.googleapis.com"]);
+        let oauth_only = [
+            (
+                "notion",
+                "https://mcp.notion.com/mcp",
+                "mcp.notion.com",
+                json!(["mcp.notion.com"]),
+            ),
+            (
+                "slack",
+                "https://mcp.slack.com/mcp",
+                "mcp.slack.com",
+                json!(["mcp.slack.com", "slack.com"]),
+            ),
+            (
+                "asana",
+                "https://mcp.asana.com/v2/mcp",
+                "mcp.asana.com",
+                json!(["app.asana.com"]),
+            ),
+            (
+                "box",
+                "https://mcp.box.com/",
+                "mcp.box.com",
+                json!(["api.box.com", "account.box.com"]),
+            ),
+            (
+                "canva",
+                "https://mcp.canva.com/mcp",
+                "mcp.canva.com",
+                json!(["mcp.canva.com"]),
+            ),
+            (
+                "dropbox",
+                "https://mcp.dropbox.com/mcp",
+                "mcp.dropbox.com",
+                json!(["www.dropbox.com", "api.dropboxapi.com"]),
+            ),
+            (
+                "gmail",
+                "https://gmailmcp.googleapis.com/mcp/v1",
+                "gmailmcp.googleapis.com",
+                google.clone(),
+            ),
+            (
+                "google-drive",
+                "https://drivemcp.googleapis.com/mcp/v1",
+                "drivemcp.googleapis.com",
+                google.clone(),
+            ),
+            (
+                "google-calendar",
+                "https://calendarmcp.googleapis.com/mcp/v1",
+                "calendarmcp.googleapis.com",
+                google,
+            ),
+        ];
+        for (name, url, host, oauth_hosts) in oauth_only {
+            let connector = plugin(&listing, name);
+            assert_eq!(
+                (connector.origin, &connector.status, connector.enabled),
+                (Origin::Bundled, &PluginStatus::NeedsSignIn, false),
+                "{name}: needs no key, and reads Needs sign-in until it signs in"
+            );
+            let view = serde_json::to_value(connector).unwrap();
+            assert_eq!(view["runs"]["url"], url, "{name}");
+            assert_eq!(view["runs"]["hosts"], json!([host]), "{name}");
+            assert_eq!(view["runs"]["oauth_hosts"], oauth_hosts, "{name}");
+            assert_eq!(view["runs"]["vendor_read_only"], false, "{name}");
+            assert!(connector.secrets.is_empty(), "{name}");
+            store::set_enabled(&case.db, &case.root, name, true).unwrap();
+            let ready = store::ready(&case.db, &case.root, name);
+            assert!(ready.is_ok(), "{name}: {:?}", ready.err());
+            assert_eq!(
+                store::remove(&case.db, &case.root, name).unwrap_err().0,
+                "app_plugin_bundled",
+                "{name}"
+            );
+        }
         assert!(!case.root.join(crate::app_plugins::FOLDER).exists());
     }
 

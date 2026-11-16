@@ -179,12 +179,28 @@ pub(in crate::tui) fn runs_line(runs: &RunsView) -> String {
     }
 }
 
+/// The line under a listed file the engine refused, the desktop's words: an owner's file a
+/// built-in plugin or connector took the name of says which file is set aside, why, that it
+/// stays on disk and how to use it again; any other refusal is its problem line. Inputs:
+/// the listed plugin and its refusal. Output: the line.
+fn refused_line(plugin: &PluginView, problem: &Problem) -> String {
+    if plugin.origin != Origin::User || problem.code != "app_plugin_name_taken" {
+        return problem_text(problem);
+    }
+    let name = &plugin.name;
+    format!(
+        "{name}.yaml is set aside: a built-in plugin or connector now has the name {name}. The file stays in your plugins folder, and its keys and switches were cleared. Rename the file and the name in it to use it."
+    )
+}
+
 /// The one label a plugin row shows, in a fixed order: Refused (with its problem), Needs
 /// review, Needs a key, Needs sign-in, then Enabled or Off. Input: the plugin. Output: the
 /// word, its role and the line under it, if any.
 pub(in crate::tui) fn plugin_state(plugin: &PluginView) -> (&'static str, Role, Option<String>) {
     match &plugin.status {
-        PluginStatus::Refused { problem } => ("Refused", Role::Error, Some(problem_text(problem))),
+        PluginStatus::Refused { problem } => {
+            ("Refused", Role::Error, Some(refused_line(plugin, problem)))
+        }
         PluginStatus::NeedsReview => (
             "Needs review",
             Role::Warning,

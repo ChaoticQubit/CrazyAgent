@@ -1,5 +1,5 @@
 import { call, knownError, namedFailure, type Result } from "./api";
-import { problemText, shown, type Origin, type PluginStatus, type Preview, type Problem, type SecretView } from "./api-app-plugins";
+import { refusedLine, shown, type Origin, type PluginStatus, type Preview, type Problem, type SecretView } from "./api-app-plugins";
 import { displayText } from "./screens/conversation";
 import type { Tone } from "./ui";
 
@@ -251,7 +251,7 @@ export function settingsToSave(read: ConnectorSettings, picks: SettingPicks): Co
 export function connectorState(connector: ConnectorView): { word: string; tone: Tone; detail: string | null } {
   const status = connector.status;
   const word = connectorWord(connector);
-  if (status.kind === "refused") return { word, tone: "danger", detail: problemText(status.problem) };
+  if (status.kind === "refused") return { word, tone: "danger", detail: refusedLine(connector.name, connector.origin, status.problem) };
   if (status.kind === "needs_review") return { word, tone: "warn", detail: "Review this connector before a project can use it." };
   if (connector.sign_in === "not_yet") return { word, tone: "warn", detail: CONNECTORS_PAGE.oauthNotYet };
   if (status.kind === "needs_key") return { word, tone: "warn", detail: "Set a key for each secret it needs." };

@@ -3,11 +3,16 @@ kind: connector
 name: github
 title: GitHub
 version: 1.0.0
-description: Repositories, issues and pull requests on GitHub through GitHub's hosted MCP server. While writes are off the app calls its read-only address.
+description: Repositories, issues and pull requests on GitHub through GitHub's hosted MCP server. While writes are off the app calls its read-only address. To sign in instead of using a token, create a GitHub OAuth app with the callback URL http://127.0.0.1/callback and save its client ID and secret here. GitHub has no read-only repository scope, so that sign-in can write; a fine-grained token is narrower.
 mcp:
   url: https://api.githubcopilot.com/mcp/
   read_only_url: https://api.githubcopilot.com/mcp/readonly
   hosts: [api.githubcopilot.com]
+oauth:
+  hosts: [github.com]
+  registration: [own]
+  scopes_read: [repo, read:org, read:user, read:project]
+  scopes_write: [project, gist, notifications]
 key:
   secret: token
   header: Authorization

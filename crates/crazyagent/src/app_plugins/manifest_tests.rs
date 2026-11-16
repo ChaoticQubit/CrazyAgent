@@ -49,7 +49,15 @@ fn every_bundled_manifest_is_valid_and_named_as_its_entry() {
             "linear",
             "github",
             "atlassian",
-            "notion"
+            "notion",
+            "slack",
+            "asana",
+            "box",
+            "canva",
+            "dropbox",
+            "gmail",
+            "google-drive",
+            "google-calendar"
         ]
     );
     for (index, (name, text)) in bundled.iter().enumerate() {

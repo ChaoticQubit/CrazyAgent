@@ -1,0 +1,12 @@
+schema: 1
+kind: connector
+name: box
+title: Box
+version: 1.0.0
+description: Files and folders in Box through Box's hosted MCP server. This connector takes only your own app. A Box admin opens Admin Console, Integrations, Box MCP server, Configure, and adds integration credentials with the redirect URI http://127.0.0.1/callback and the access scopes to allow. Then save the client ID and client secret here.
+mcp:
+  url: https://mcp.box.com/
+  hosts: [mcp.box.com]
+oauth:
+  hosts: [api.box.com, account.box.com]
+  registration: [own]

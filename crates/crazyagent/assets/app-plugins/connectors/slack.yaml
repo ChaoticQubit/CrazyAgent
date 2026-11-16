@@ -1,0 +1,14 @@
+schema: 1
+kind: connector
+name: slack
+title: Slack
+version: 1.0.0
+description: Channels, messages, canvases and files in Slack through Slack's hosted MCP server. Slack takes only your own app. Create a Slack app at api.slack.com/apps, add the redirect URL http://127.0.0.1/callback under OAuth and Permissions, then save its client ID and client secret here.
+mcp:
+  url: https://mcp.slack.com/mcp
+  hosts: [mcp.slack.com]
+oauth:
+  hosts: [mcp.slack.com, slack.com]
+  registration: [own]
+  scopes_read: [channels:history, channels:read, groups:history, groups:read, im:history, im:read, mpim:history, mpim:read, users:read, search:read.public, search:read.private, search:read.im, search:read.mpim, search:read.files, canvases:read, files:read]
+  scopes_write: [chat:write, canvases:write, files:write, reactions:write, channels:write, groups:write, im:write, mpim:write, lists:write]
