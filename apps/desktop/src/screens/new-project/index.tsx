@@ -204,7 +204,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
       if (carried) void finish(follow.project, following, carried);
       return;
     }
-    if (follow.kind === "ended") void dismissIntake(following);
+    if (follow.kind === "ended") void leave(following);
     setCreateError(follow.kind === "ended" ? `${KEPT_LINE} ${follow.words}` : "We couldn't confirm the project was created. Check your projects before trying again.");
   }, [following, follow?.kind]);
 
@@ -245,6 +245,13 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     session?.refreshIntake();
   }
 
+  /** Takes the page's ended job off Home: waits for the engine to drop it, then reads the job
+   * again, so Home's panel clears at once instead of at the idle read. Input: the job's id. */
+  async function leave(job: string) {
+    await dismissIntake(job);
+    session?.refreshIntake();
+  }
+
   /** Ends a New Project on its page once its job is done: the shared pool and agent access
    * follow-ups (DEC-177 add.2 Q1 B), which finish even if the owner leaves, a toast then saying
    * how they ended, then, only while the page stays open, its publish, the job leaving Home and
@@ -263,7 +270,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     const outcome = publishOutcome(started);
     if (startReplyLost(started)) noteLostStart(id, Date.now());
     if (outcome) message = `${message} ${outcome}`;
-    void dismissIntake(job);
+    void leave(job);
     kept = null;
     await session?.refreshProjects();
     flash(message);

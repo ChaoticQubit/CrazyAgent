@@ -4936,6 +4936,7 @@ mod overview_read {
             checked_ms: None,
             failure: None,
             waiting_for_account: false,
+            due_in_ms: None,
             refresh: Refresh::AfterLanding,
             apply: Apply::AlwaysAsk,
             needs_home: false,

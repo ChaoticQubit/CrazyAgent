@@ -710,8 +710,13 @@ pub async fn run(root: &Path) -> io::Result<()> {
         .map_err(|error| invalid(format!("runner_bind: {error}")))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     let metadata = std::fs::symlink_metadata(&path)?;
-    assert!(metadata.file_type().is_socket());
-    assert_eq!(metadata.mode() & 0o777, 0o600);
+    if !metadata.file_type().is_socket() || metadata.mode() & 0o777 != 0o600 {
+        drop(listener);
+        if metadata.file_type().is_socket() {
+            let _ = std::fs::remove_file(&path);
+        }
+        return Err(invalid("runner_endpoint_unsafe"));
+    }
     if let Err(error) = state.journal.append(&Record::Endpoint {
         device: metadata.dev(),
         inode: metadata.ino(),

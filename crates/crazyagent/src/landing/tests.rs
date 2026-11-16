@@ -15405,10 +15405,11 @@ fn a_confined_git_step_cannot_read_a_file_behind_a_link() {
     assert_ne!(hash("link"), 0, "a step read the file behind the link");
 }
 
-/// SA vid 2, with no timing: on Linux a step on the work tree cannot read the owner's ignore
-/// file behind a link either, so a file an agent swaps for a link to it during the turn end
-/// never puts its bytes in the object store, while a plain file in the work tree still reads.
-#[cfg(target_os = "linux")]
+/// SA vid 2, with no timing: on macOS and Linux a step on the work tree cannot read the
+/// owner's ignore file behind a link either, so a file an agent swaps for a link to it during
+/// the turn end never puts its bytes in the object store, while a plain file in the work tree
+/// still reads (LINUX-LANDING note 1, macOS left).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_confined_git_step_cannot_read_the_owners_ignore_file_behind_a_link() {
     let case = Case::new();
@@ -16529,15 +16530,15 @@ fn a_confined_read_tree_on_linux_leaves_an_index_the_next_move_can_put_back() {
     );
 }
 
-/// SA vid 2 r1 (rv-sec3 F1): a confined Linux step's git takes no excludes file, so a
-/// `read-tree -u -m` counts an untracked file only the owner's ignore file names as the agent's,
-/// as it does any untracked file: where the target tracks that path the move refuses and changes
-/// nothing, the file and the index left as they were, instead of writing over the file as the
-/// step did while it read the owner's file. The refusal fails closed; macOS, whose step still
-/// reads that file, writes over it.
-#[cfg(target_os = "linux")]
+/// SA vid 2 r1 (rv-sec3 F1), LINUX-LANDING note 1 on macOS: a confined step that writes the
+/// work tree takes no excludes file on macOS and Linux alike, so a `read-tree -u -m` counts an
+/// untracked file only the owner's ignore file names as the agent's, as it does any untracked
+/// file: where the target tracks that path the move refuses and changes nothing, the file and
+/// the index left as they were, instead of writing over the file as the step did while it read
+/// the owner's file. The refusal fails closed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn a_confined_read_tree_on_linux_keeps_an_untracked_file_only_the_owners_ignore_file_names() {
+fn a_confined_read_tree_keeps_an_untracked_file_only_the_owners_ignore_file_names() {
     let case = Case::new();
     let worktree = case.workspace.worktree.clone();
     let index = case.workspace.git_dir.join("index");

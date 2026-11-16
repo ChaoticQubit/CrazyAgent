@@ -3,13 +3,14 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
-import { footprintMb, webkitHelpers } from "./speed-budget.mjs";
+import { clickUntilUsable, footprintMb, webkitHelpers } from "./speed-budget.mjs";
 
 const evidence = process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE;
 const LOOK_MS = 10;
 const LAUNCH_MS_MAX = 60000;
 const USABLE_MS_MAX = 25000;
 const SETTLE_MS = 1000;
+const IDLE_MS = 60000;
 const HOME_HASHES = ["", "#/", "#/home"];
 const PROJECT_LINK = ".sidebar .nav-projects a.nav-item";
 const SWITCHES = [
@@ -57,40 +58,7 @@ async function reloadHome(before) {
  * and a 4 ms check both look, so a hidden window that draws no frames still finishes. Inputs:
  * the element's selector and the extra condition. Output: the ms from click to usable. */
 async function timedClick(selector, extra = null, want = 0) {
-  const result = await browser.executeAsync((selector, extra, want, limitMs, done) => {
-    const target = document.querySelector(selector);
-    if (!target) {
-      done({ error: `nothing matches ${selector}` });
-      return;
-    }
-    const hash = target.getAttribute("href") ?? location.hash;
-    const marked = () => {
-      const now = document.querySelector(selector);
-      return Boolean(now) && (now.getAttribute("aria-current") === "page" || now.getAttribute("aria-selected") === "true"
-        || now.getAttribute("aria-expanded") === "true");
-    };
-    const ready = () => location.hash === hash && marked() && Boolean(document.querySelector("main h1"))
-      && !document.querySelector("main .skeleton") && (extra === null || document.querySelectorAll(extra).length >= want);
-    let ended = false;
-    let timer = 0;
-    let limit = 0;
-    const observer = new MutationObserver(() => finish());
-    const end = (value) => {
-      if (ended) return;
-      ended = true;
-      observer.disconnect();
-      clearInterval(timer);
-      clearTimeout(limit);
-      done(value);
-    };
-    const began = performance.now();
-    const finish = () => { if (ready()) end({ ms: performance.now() - began }); };
-    target.click();
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
-    timer = setInterval(finish, 4);
-    limit = setTimeout(() => end({ error: `not usable in ${limitMs} ms`, text: document.body.innerText.slice(0, 1500) }), limitMs);
-    finish();
-  }, selector, extra, want, USABLE_MS_MAX);
+  const result = await browser.executeAsync(clickUntilUsable, selector, extra, want, USABLE_MS_MAX);
   assert.ok(!result.error, `${selector}: ${result.error} ${result.text ?? ""}`);
   assert.ok(Number.isFinite(result.ms) && result.ms >= 0, `a time for ${selector}`);
   return result.ms;
@@ -135,6 +103,7 @@ describe("speed rows on the real desktop app and the real engine (DEC-169)", () 
     assert.ok(others >= 1, "the big project has sessions besides the live one");
     result.big.open_ms = await timedClick(PROJECT_LINK);
     result.big.conversation_ms = await timedClick("a#tab-conversation", '[data-testid="sessions-toggle"]', 1);
+    await browser.waitUntil(() => browser.execute(() => document.querySelector('[data-testid="sessions-toggle"]')?.disabled === false), { timeout: USABLE_MS_MAX, interval: LOOK_MS, timeoutMsg: "the Sessions button never became enabled" });
     result.big.sessions_ms = await timedClick('[data-testid="sessions-toggle"]', '[data-testid="resume-session"]', others);
     await timedClick('.sidebar nav.app-nav a[href="#/home"]');
     await pause(SETTLE_MS);
@@ -142,12 +111,21 @@ describe("speed rows on the real desktop app and the real engine (DEC-169)", () 
       for (const [page, selector] of SWITCHES) store[page] = await timedClick(selector);
       await pause(SETTLE_MS);
     }
-    const helpers = webkitHelpers().filter((helper) => !launch.helpers.includes(helper));
+    const helpers = webkitHelpers().filter((helper) => !launch.helpers.includes(helper.pid));
+    const app = appPid();
     result.memory = {
       engine_mb: footprintMb(Number(process.env.SPEED_ENGINE_PID)),
-      app_mb: footprintMb(appPid()),
-      webkit_mb: helpers.map((helper) => footprintMb(helper)),
-      webkit_pids: helpers,
+      app_mb: footprintMb(app),
+      webkit_mb: helpers.map((helper) => footprintMb(helper.pid)),
+      webkit_pids: helpers.map((helper) => helper.pid),
+      webkit_kinds: helpers.map((helper) => helper.kind),
+    };
+    await pause(IDLE_MS);
+    assert.ok(HOME_HASHES.includes(await browser.execute(() => location.hash)), "the idle wait stays on Home");
+    const running = new Set(webkitHelpers().map((helper) => helper.pid));
+    result.memory.idle = {
+      app_mb: footprintMb(app),
+      webkit_mb: helpers.map((helper) => running.has(helper.pid) ? footprintMb(helper.pid) : 0),
     };
     writeFileSync(join(evidence, "speed-app.json"), JSON.stringify(result, null, 1), { flag: "wx", mode: 0o600 });
   });

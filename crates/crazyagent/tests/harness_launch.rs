@@ -957,17 +957,96 @@ fn stopping_a_full_access_headless_agent_names_what_left_its_session_and_parent(
     drop(leftover);
 }
 
-const FAST_ORPHANING_AGENT: &str = r#"#!/bin/sh
+const SEEN_PARENT_ORPHANING_AGENT: &str = r#"#!/bin/sh
 [ "$1" = first-exec ] && exit 3
-/usr/bin/perl -mPOSIX -e 'defined(my $child = fork()) or exit 1; if ($child == 0) { POSIX::setsid() > 0 or exit 1; open(my $file, ">", "orphan.pid") or exit 1; print $file "$$\n"; close($file); sleep 60; exit 0 } POSIX::_exit(0)' < /dev/null > /dev/null 2>&1 &
+/usr/bin/perl -mPOSIX -e 'sleep 4; defined(my $child = fork()) or exit 1; if ($child == 0) { POSIX::setsid() > 0 or exit 1; open(my $file, ">", "orphan.pid") or exit 1; print $file "$$\n"; close($file); sleep 60; exit 0 } POSIX::_exit(0)' < /dev/null > /dev/null 2>&1 &
 echo $$ > leader.pid
 exec /bin/sleep 30
 "#;
 
-/// SETSID-L2 r1 L2, the SECAUDIT-SETSID-LEFTOVER option (a) residual: a Full access headless
-/// agent's process that leaves its session and loses its parent within microseconds, between
-/// two tables the follower takes, running a program whose environment macOS hides, is never
-/// known, so the stop reports clean, or unchecked under load, naming nothing, while it keeps
+/// SETSID-A-RESIDUAL, as `ssh -f` and an ssh ControlPersist master detach: a Full access
+/// headless agent's process that runs long enough for the follower's tables to show it, then
+/// forks and exits at once, leaves a child that setsids and goes to launchd before any table
+/// shows it, running a program whose environment macOS hides. The stop still names that
+/// child: it was forked from a process the lineage knew, by the unique id the kernel keeps.
+#[test]
+fn a_full_access_headless_stop_names_a_setsid_child_whose_seen_parent_exited_at_its_fork() {
+    let root = private_dir("crazyagent-seen-parent-orphan-");
+    let project = private_folder(root.path(), "project");
+    let home = private_folder(root.path(), "home");
+    let bin = private_folder(root.path(), "bin");
+    let harness = bin.join("claude");
+    std::fs::write(&harness, SEEN_PARENT_ORPHANING_AGENT).unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let first = crazyagent::spawn_gate::status(
+        std::process::Command::new(&harness)
+            .arg("first-exec")
+            .current_dir(&bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(first.code(), Some(3));
+    let session = Session::start(LaunchRequest {
+        harness: "claude-code".into(),
+        executable: harness,
+        working_dir: project.clone(),
+        account: AccountBinding::Subscription { home },
+        model: None,
+        tools: false,
+        sandbox_profile: None,
+        unconfined: true,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    })
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let (leader, orphan) = loop {
+        if let (Some(leader), Some(orphan)) = (
+            written_pid(&project, "leader.pid"),
+            written_pid(&project, "orphan.pid"),
+        ) && parent_of(orphan) == Some(1)
+        {
+            break (leader, orphan);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in agent left no orphan"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let leftover = Leftover(vec![orphan]);
+    assert_ne!(rustix::process::getsid(Some(orphan)), Ok(leader));
+
+    let left = match session.stop() {
+        Err(Unstopped::Left(left)) => left,
+        other => panic!(
+            "the stop of a Full access agent was reported {other:?} while its orphan {orphan:?} kept running"
+        ),
+    };
+    let report = left.plain();
+    assert_eq!(
+        named_in(&report).get(&orphan.as_raw_nonzero().get()),
+        Some(&"perl".to_owned()),
+        "{report}"
+    );
+    drop(leftover);
+}
+
+const FAST_ORPHANING_AGENT: &str = r#"#!/bin/sh
+[ "$1" = first-exec ] && exit 3
+/usr/bin/perl -mPOSIX -e 'defined(my $middle = fork()) or exit 1; if ($middle == 0) { POSIX::setsid() > 0 or POSIX::_exit(1); defined(my $child = fork()) or POSIX::_exit(1); if ($child == 0) { open(my $file, ">", "orphan.pid") or exit 1; print $file "$$\n"; close($file); sleep 60; exit 0 } POSIX::_exit(0) } POSIX::_exit(0)' < /dev/null > /dev/null 2>&1 &
+echo $$ > leader.pid
+exec /bin/sleep 30
+"#;
+
+/// SETSID-L2 r1 L2, the SECAUDIT-SETSID-LEFTOVER option (a) residual the owner accepted
+/// (SETSID-A-RESIDUAL): a Full access headless agent's double fork whose middle process
+/// setsids, forks and exits within microseconds, between two tables the follower takes,
+/// leaves a grandchild running a program whose environment macOS hides. No table showed the
+/// middle, so neither the grandchild's parent nor the unique id it was forked from links it to
+/// the agent: the stop reports clean, or unchecked under load, naming nothing, while it keeps
 /// running. Pins today's result; a later fix that catches it turns this row red on purpose.
 #[test]
 fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {

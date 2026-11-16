@@ -45,15 +45,20 @@ test("an intake job offers stop while it runs, retry only when nothing landed, a
   assert.deepEqual(intake.jobActions(job({ state: "needs_answer", code: "home_move_worktrees" })), ["answer", "dismiss"]);
 });
 
-test("the app reads the job every second while it runs and at the found-folder pace otherwise", () => {
+test("the app reads the job every second while it runs and every 30 s otherwise", () => {
   assert.equal(intake.INTAKE_POLL_MS, 1000);
-  assert.equal(intake.intakePollMs(null), intake.FOUND_POLL_MS);
+  assert.equal(intake.intakePollMs(null), 30_000);
   assert.equal(intake.intakePollMs(job(downloading(0, 0))), intake.INTAKE_POLL_MS);
   assert.equal(intake.intakePollMs(job({ state: "clearing" })), intake.INTAKE_POLL_MS);
-  assert.equal(intake.intakePollMs(job({ state: "done" })), intake.FOUND_POLL_MS);
+  assert.equal(intake.intakePollMs(job({ state: "done" })), 30_000);
   assert.equal(intake.jobRunning(job(copying(1))), true);
   assert.equal(intake.jobRunning(job({ state: "cancelled", phase: "copying" })), false);
   assert.equal(intake.jobRunning(null), false);
+});
+
+test("the app reads the found folders every 3 s while Home shows them and every 30 s on other pages", () => {
+  assert.equal(intake.foundPollMs(true), 3_000);
+  assert.equal(intake.foundPollMs(false), 30_000);
 });
 
 test("a failed start goes Home only for a job adding this folder that runs, or ended done and is not the job read before the start", () => {

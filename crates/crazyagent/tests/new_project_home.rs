@@ -878,7 +878,8 @@ async fn the_demo_lands_once_as_a_seeded_project_with_the_engines_own_question()
 
 /// rv-sec2 22:51 F1 (DEC-178 addendum 1): a demo made again after Delete everything inherits
 /// nothing of the old one: not its notes, not a standing connector allow a V3 build kept for
-/// it, and not its removal record. The connector table is made here as that build makes it.
+/// it, and not its removal record. The connector table is made here as that build makes it,
+/// and the usage store opens as the engine opens it before a late count lands in it.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_demo_made_again_inherits_nothing_of_the_old_one() {
@@ -942,6 +943,7 @@ async fn a_demo_made_again_inherits_nothing_of_the_old_one() {
         1,
         "the deleted demo's id is held until a demo is made again"
     );
+    crazyagent::usage::open(engine.root.path()).unwrap();
     db.execute_batch(
         "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,model,
             input,output,cache_read,cache_write,cost_nanos)

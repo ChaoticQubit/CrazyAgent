@@ -1096,3 +1096,31 @@ fn dropping_a_key_file_whose_path_now_holds_more_than_a_key_keeps_it() {
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 16 << 20);
     assert!(took < Duration::from_secs(1), "the drop took {took:?}");
 }
+
+/// WRITE-KEY-UNLINK-BY-PATH: a guard whose account home was swapped for a link to another
+/// folder holding the same key removes the key in the home it guards and leaves the other
+/// folder's, where it used to follow the link by path.
+#[cfg(unix)]
+#[test]
+fn dropping_a_key_file_after_its_home_was_swapped_removes_the_key_where_it_was_written() {
+    let folder = key_folder();
+    let home = folder.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join(interactive::KEY_FILE), longest_key()).unwrap();
+    let key = KeyFile::new(home.join(interactive::KEY_FILE), longest_key().as_bytes());
+    let moved = folder.path().join("moved");
+    std::fs::rename(&home, &moved).unwrap();
+    let other = folder.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join(interactive::KEY_FILE), longest_key()).unwrap();
+    std::os::unix::fs::symlink(&other, &home).unwrap();
+    drop(key);
+    assert!(
+        !moved.join(interactive::KEY_FILE).exists(),
+        "the key stayed in the home it was written to"
+    );
+    assert!(
+        other.join(interactive::KEY_FILE).exists(),
+        "the drop removed the key file in the folder swapped in"
+    );
+}
