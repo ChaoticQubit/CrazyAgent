@@ -17,7 +17,7 @@ export function assembleClosedController(input: Pick<AgentControllerDeps, "confi
   const session = new Session(sessionId);
   const registry = new ToolRegistry();
   const skillController = new SkillController({ cwd: input.cwd, homeDir: input.homeDir, bus });
-  const gateway = input.gateway === undefined ? null : new GatewayTools(input.gateway, input.cwd, registry, bus);
+  const gateway = input.gateway === undefined ? null : new GatewayTools(input.gateway, input.cwd, registry, bus, input.permissions);
   const syncDynamicTools = gateway === null ? {} : { syncDynamicTools: (signal: AbortSignal) => gateway.sync(signal) };
   const controller = new AgentController({ config: input.config, client: input.client, permissions: input.permissions, bus, session, registry, skillController, startupEnvironmentPrompt: input.startupEnvironmentPrompt, ...syncDynamicTools });
   return { controller, bus, session, gateway };

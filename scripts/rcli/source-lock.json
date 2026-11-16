@@ -363,8 +363,8 @@
   "host_files": [
     {
       "path": "scripts/rcli/host.ts",
-      "sha256": "d470940b7b2f32742031fcd439c344d467bc4bd0d610171aa3a9f3142c4e7e2b",
-      "bytes": 1876
+      "sha256": "a6212441ae565da628844e5876df58d8e2672a9d203c66e75eb6d036df15ec30",
+      "bytes": 1895
     },
     {
       "path": "scripts/rcli/host.test.ts",
@@ -413,8 +413,8 @@
     },
     {
       "path": "scripts/rcli/host.mcp.ts",
-      "sha256": "edf14557cb372d29c2141b49230720ab6c929936a3b9be4534a8a9df70822901",
-      "bytes": 5089
+      "sha256": "c0b92c3f3df5d5aefd6286558b8cfced56d0c20b234862029c7c5a10d7c39e9e",
+      "bytes": 6091
     },
     {
       "path": "scripts/rcli/host.mcp.test.ts",
