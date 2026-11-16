@@ -357,6 +357,7 @@ function helperPins(file, pattern) {
 }
 
 const helperTeam = () => helperPins("caller.rs", /\\"([A-Z0-9]{10})\\" and identifier \\"crazyagent\\"/g);
+const DEVELOPER_ID_CATEGORY = 6;
 
 test("the_macos_bundle_carries_the_signed_power_helper_and_its_daemon_plist", async () => {
   for (const target of ["aarch64-apple-darwin", "x86_64-apple-darwin"]) {
@@ -399,6 +400,8 @@ test("the_macos_bundle_carries_the_signed_power_helper_and_its_daemon_plist", as
   assert(check.includes(`grep -E -q "^Identifier=$name\\$" <<< "$display"`), "each is signed under its own name, which the caller check and the launch constraint pin");
   assert(check.includes(`grep -E -q '^TeamIdentifier=${helperTeam()}$' <<< "$display"`), "each is signed by the team the helper pins");
   assert(check.includes(`grep -E -q 'flags=.*runtime' <<< "$display"`), "each runs under the hardened runtime");
+  assert(check.includes(`grep -E -q '^Authority=Developer ID Application: ' <<< "$display"`), "each leaf is Developer ID, as the caller check and the launch constraint demand");
+  assert(check.includes(`grep -E -q '^Authority=Developer ID Certification Authority$' <<< "$display"`), "each chains to the Developer ID intermediate");
   assert(check.includes('entitlements="$(codesign --display --entitlements - --xml "$binary" 2> /dev/null)"'));
   assert(check.includes(`if grep -q '<key>' <<< "$entitlements"; then`), "neither carries an entitlement");
   assert.match(check, /codesign --verify --deep --strict --verbose=2 "\$app"/);
@@ -425,8 +428,9 @@ test("the_daemon_plist_runs_at_load_with_its_socket_and_no_environment", () => {
 
 test("the_daemon_plist_carries_the_helper_launch_constraint", () => {
   const team = helperTeam();
-  assert.deepEqual(daemonPlist().SpawnConstraint, { "team-identifier": team, "signing-identifier": POWER_HELPER });
+  assert.deepEqual(daemonPlist().SpawnConstraint, { "team-identifier": team, "signing-identifier": POWER_HELPER, "validation-category": DEVELOPER_ID_CATEGORY });
   assert.equal(team, "GK729B5HZQ");
+  assert.equal(DEVELOPER_ID_CATEGORY, 6, "Apple's validation category for an executable signed using Developer ID");
 });
 
 test("every badal job refuses to run under Rosetta before anything else", async () => {
