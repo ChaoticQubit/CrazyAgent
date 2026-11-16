@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -7,12 +8,15 @@ const FAILED_SHOWN = 300;
 const ENTITIES = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
 
 /**
- * Decodes the five XML entities and numeric references in an attribute value.
- * Input: the raw attribute text. Output: the plain text.
+ * Decodes the five XML entities and numeric references in an attribute value; a numeric
+ * reference outside Unicode stays as written. Input: the raw attribute text. Output: the plain text.
  */
 function decode(text) {
-  return text.replace(/&(lt|gt|amp|quot|apos|#\d+|#x[0-9a-fA-F]+);/g, (_, name) =>
-    name.startsWith("#x") ? String.fromCodePoint(parseInt(name.slice(2), 16)) : name.startsWith("#") ? String.fromCodePoint(Number(name.slice(1))) : ENTITIES[name]);
+  return text.replace(/&(lt|gt|amp|quot|apos|#\d+|#x[0-9a-fA-F]+);/g, (whole, name) => {
+    if (!name.startsWith("#")) return ENTITIES[name];
+    const code = name.startsWith("#x") ? parseInt(name.slice(2), 16) : Number(name.slice(1));
+    return Number.isSafeInteger(code) && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+  });
 }
 
 /**
@@ -42,13 +46,18 @@ export function count(xml) {
 }
 
 /**
- * Builds the job summary for one farm run. Inputs: the expected part names and a map from part
- * name to its JUnit texts. Output: { ok, text }; ok only when every expected part, and no other,
- * reported at least one test case and none failed.
+ * Builds the job summary for one farm run. Inputs: the expected part names, a map from part name
+ * to its JUnit texts, and the needed jobs' results ({ job: { result } }). Output: { ok, text }; ok
+ * only when every expected part, and no other, reported a test case, none failed, and every job succeeded.
  */
-export function summarize(expected, files) {
+export function summarize(expected, files, needs) {
+  assert(needs !== null && typeof needs === "object" && !Array.isArray(needs), "needs is an object of job results");
   const rows = ["| part | tests | failed | skipped | seconds |", "| - | - | - | - | - |"];
   const problems = [];
+  for (const [job, { result }] of Object.entries(needs)) {
+    assert(typeof result === "string" && result.length > 0, `job ${job} has a result`);
+    if (result !== "success") problems.push(`job ${job}: ${result}`);
+  }
   const failed = [];
   const total = { tests: 0, failed: 0, skipped: 0 };
   for (const part of expected) {
@@ -89,19 +98,24 @@ function xmlFiles(folder) {
 
 /**
  * Prints the summary of the farm-junit-<part> folders under argv[2] for the parts in FARM_PARTS
- * and sets exit status 1 unless the run is ok. Inputs: argv and the environment. Output: stdout.
+ * and the jobs in FARM_NEEDS (the workflow's toJSON(needs)), and sets exit status 1 unless the run
+ * is ok. Inputs: argv and the environment. Output: stdout.
  */
 function main(argv, env) {
   const root = argv[2];
   if (!root) throw new Error("usage: junit-summary.mjs <folder holding farm-junit-<part> folders>");
   if (!env.FARM_PARTS?.trim()) throw new Error("FARM_PARTS is not set");
+  if (!env.FARM_NEEDS?.trim()) throw new Error("FARM_NEEDS is not set");
+  const needs = JSON.parse(env.FARM_NEEDS);
+  if (needs === null || typeof needs !== "object" || Array.isArray(needs)) throw new Error("FARM_NEEDS is not an object of job results");
+  for (const [job, value] of Object.entries(needs)) if (typeof value?.result !== "string") throw new Error(`FARM_NEEDS has no result for ${job}`);
   const expected = env.FARM_PARTS.split(/\s+/).filter(Boolean);
   const files = new Map();
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory() || !entry.name.startsWith(PREFIX)) continue;
     files.set(entry.name.slice(PREFIX.length), xmlFiles(join(root, entry.name)).map((path) => readFileSync(path, "utf8")));
   }
-  const { ok, text } = summarize(expected, files);
+  const { ok, text } = summarize(expected, files, needs);
   process.stdout.write(text);
   process.exitCode = ok ? 0 : 1;
 }

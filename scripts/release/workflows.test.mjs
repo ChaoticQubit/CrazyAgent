@@ -913,6 +913,43 @@ test("every test farm part is one matrix entry that uploads one JUnit report, ev
   assert(builds.length + rust.length + node.length + 2 <= 20, "at most 20 jobs at once, typecheck and report included");
 });
 
+test("the test farm report needs every other job and fails on any that did not succeed, so a red typecheck or build never reads green in the summary (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  const others = jobsOf(farm).map(({ name }) => name).filter((name) => name !== "report");
+  assert(block(block(farm, 0, "jobs").join("\n"), 2, "report").includes(`    needs: [${others.join(", ")}]`));
+  const summary = steps(farm, "report").find((step) => step.includes("scripts/ci/junit-summary.mjs"));
+  assert(summary.includes("        env:\n          FARM_NEEDS: ${{ toJSON(needs) }}\n"), "the summary reads every needed job's result");
+});
+
+test("every test farm Rust shard installs the build job's toolchain, Windows SQLite and debug settings and fetches the locked crates before it runs, so rows that spawn the cargo that built them build offline (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  const build = steps(farm, "build");
+  const rust = steps(farm, "rust");
+  const named = (all, name) => all.findIndex((step) => step.startsWith(`      - name: ${name}\n`));
+  const shard = rust.findIndex((step) => step.includes("bash scripts/ci/farm-rust-shard.sh "));
+  assert(shard >= 0, "the shard step exists");
+  for (const name of ["Install Rust toolchain", "Install SQLite for Windows", "Set debug info for the platform's disk", "Fetch Rust dependencies"]) {
+    const at = named(rust, name);
+    assert(at >= 0 && at < shard, `${name} runs before the shard`);
+    assert.equal(rust[at], build[named(build, name)], `${name} is the build job's own step`);
+  }
+  assert(rust[named(rust, "Fetch Rust dependencies")].endsWith("run: cargo fetch --locked"));
+  assert(named(rust, "Install Rust toolchain") < named(rust, "Fetch Rust dependencies"), "crates are fetched with the pinned cargo");
+});
+
+test("the test farm installs tmux only from pinned, checked sources: the Linux tarball by sha256, the macOS build by the release's pinned script, never from Homebrew (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  assert.doesNotMatch(farm, /brew install/);
+  const rust = steps(farm, "rust");
+  const linux = rust.find((step) => step.startsWith("      - name: Install tmux on Linux\n"));
+  assert(linux.includes('echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -'));
+  const macos = rust.find((step) => step.startsWith("      - name: Install tmux on macOS\n"));
+  assert(macos.includes("scripts/release/build-tmux.sh --target aarch64-apple-darwin "));
+  assert(macos.includes('test "$(tmux -V)" = "tmux $TMUX_VERSION"'));
+  const pinned = (await readFile(new URL("./build-tmux.sh", import.meta.url), "utf8")).match(/^TMUX_VERSION=(\S+)$/m)[1];
+  assert(farm.includes(`  TMUX_VERSION: "${pinned}"\n`), "the Linux build and the release script pin one tmux version");
+});
+
 test("CI runs the price snapshot script's check on Linux, so a bad refresh fails a pull request", async () => {
   const linux = steps(await workflow("ci.yml"), "linux");
   assert(

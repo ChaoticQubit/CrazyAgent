@@ -225,6 +225,31 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: ${{ env.NODE_VERSION }}
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Install SQLite for Windows
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
+      - name: Set debug info for the platform's disk
+        run: |
+          set -euo pipefail
+          debug=0
+          if [ "$RUNNER_OS" = Linux ]; then debug=line-tables-only; fi
+          {
+            echo "CARGO_PROFILE_DEV_DEBUG=$debug"
+            echo "CARGO_PROFILE_TEST_DEBUG=$debug"
+          } >> "$GITHUB_ENV"
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
       - name: Install cargo-nextest
         run: bash scripts/ci/install-nextest.sh
       - name: Install Linux packages
@@ -261,16 +286,17 @@ jobs:
           echo "$work/bin" >> "$GITHUB_PATH"
       - name: Install tmux on macOS
         if: matrix.os == 'macos'
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        timeout-minutes: 20
         run: |
           set -euo pipefail
-          command -v tmux >/dev/null || brew install tmux
-          version="$(tmux -V)"
-          [[ "$version" =~ ^tmux\ ([0-9]+)\.([0-9]+) ]] || { echo "::error::unexpected tmux version: $version"; exit 1; }
-          (( BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 4) )) || { echo "::error::tmux 3.4 or later is required: $version"; exit 1; }
-          echo "the engine uses $(command -v tmux) ($version)"
+          test "$(uname -m)" = arm64
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
+          sudo mkdir -p /usr/local/bin
+          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
+          test "$(command -v tmux)" = /usr/local/bin/tmux
+          test "$(tmux -V)" = "tmux $TMUX_VERSION"
       - name: Install Claude Code and Codex
         if: matrix.os != 'windows'
         run: bash scripts/ci/install-harnesses.sh
@@ -544,7 +570,7 @@ jobs:
 
   report:
     name: Test farm report
-    needs: [rust, node, typecheck]
+    needs: [build, rust, node, typecheck]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
@@ -564,6 +590,8 @@ jobs:
           pattern: farm-junit-*
           path: ${{ runner.temp }}/junit
       - name: Write the summary table
+        env:
+          FARM_NEEDS: ${{ toJSON(needs) }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/junit"

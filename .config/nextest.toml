@@ -10,3 +10,7 @@ archive.include = [
 
 [profile.farm.junit]
 path = "junit.xml"
+
+[[profile.farm.overrides]]
+filter = "binary_id(=crazyagent::cargo_entrypoint)"
+slow-timeout = { period = "60s", terminate-after = 30 }

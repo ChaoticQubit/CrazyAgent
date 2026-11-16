@@ -55,8 +55,24 @@ test("a raw > inside a quoted attribute, as node's JUnit reporter writes it, nei
   assert.deepEqual(count(NODE_RAW_GT), { tests: 3, failed: ["test a build-<version> tag row"], skipped: 0, seconds: null });
 });
 
+test("a numeric entity outside Unicode stays as written instead of stopping the report", () => {
+  const xml = '<testsuites><testcase name="a &#x110000; b &#99999999999; c &#65;" classname="t"><failure/></testcase></testsuites>';
+  assert.deepEqual(count(xml).failed, ["t a &#x110000; b &#99999999999; c A"]);
+});
+
+test("a job the report needs that did not succeed fails the run and is named, even when every part's JUnit passed", () => {
+  const pass = NEXTEST.replace(/<failure[^]*?<\/failure>/, "");
+  const files = new Map([["linux-rust-1", [pass]]]);
+  assert.equal(summarize(["linux-rust-1"], files, { rust: { result: "success" }, typecheck: { result: "success" } }).ok, true);
+  const red = summarize(["linux-rust-1"], files, { rust: { result: "success" }, typecheck: { result: "failure" }, node: { result: "cancelled" } });
+  assert.equal(red.ok, false);
+  assert.match(red.text, /^job typecheck: failure$/m);
+  assert.match(red.text, /^job node: cancelled$/m);
+  assert.doesNotMatch(red.text, /^job rust:/m);
+});
+
 test("the summary is one table row per expected part, a part with no JUnit is missing and fails the run", () => {
-  const result = summarize(["linux-rust-1", "linux-node-1", "macos-rust-1"], new Map([["linux-rust-1", [NEXTEST]], ["linux-node-1", [NODE]]]));
+  const result = summarize(["linux-rust-1", "linux-node-1", "macos-rust-1"], new Map([["linux-rust-1", [NEXTEST]], ["linux-node-1", [NODE]]]), {});
   assert.equal(result.ok, false);
   assert.match(result.text, /^\| part \| tests \| failed \| skipped \| seconds \|$/m);
   assert.match(result.text, /^\| linux-rust-1 \| 3 \| 1 \| 1 \| 813 \|$/m);
@@ -70,25 +86,30 @@ test("the summary is one table row per expected part, a part with no JUnit is mi
 
 test("a run whose every part passed is ok, and an empty JUnit file is a failure, not a pass", () => {
   const pass = NEXTEST.replace(/<failure[^]*?<\/failure>/, "");
-  assert.equal(summarize(["linux-rust-1"], new Map([["linux-rust-1", [pass]]])).ok, true);
-  const empty = summarize(["linux-rust-1"], new Map([["linux-rust-1", ["<testsuites></testsuites>"]]]));
+  assert.equal(summarize(["linux-rust-1"], new Map([["linux-rust-1", [pass]]]), {}).ok, true);
+  const empty = summarize(["linux-rust-1"], new Map([["linux-rust-1", ["<testsuites></testsuites>"]]]), {});
   assert.equal(empty.ok, false);
   assert.match(empty.text, /no test case: linux-rust-1/);
 });
 
-test("the command line reads farm-junit-<part> folders for FARM_PARTS and exits 1 on a failure or a missing part", () => {
+test("the command line reads farm-junit-<part> folders for FARM_PARTS and the needed jobs' results from FARM_NEEDS, and exits 1 on a failure, a missing part or a red job", () => {
   const root = mkdtempSync(join(tmpdir(), "farm-junit-"));
   try {
     mkdirSync(join(root, "farm-junit-linux-rust-1"));
     writeFileSync(join(root, "farm-junit-linux-rust-1", "junit.xml"), NEXTEST.replace(/<failure[^]*?<\/failure>/, ""));
-    const run = (parts) => spawnSync(process.execPath, [SCRIPT, root], { env: { PATH: process.env.PATH, FARM_PARTS: parts }, encoding: "utf8" });
+    const green = JSON.stringify({ rust: { result: "success", outputs: {} }, typecheck: { result: "success", outputs: {} } });
+    const run = (parts, needs = green) => spawnSync(process.execPath, [SCRIPT, root], { env: { PATH: process.env.PATH, FARM_PARTS: parts, FARM_NEEDS: needs }, encoding: "utf8" });
     const good = run("linux-rust-1");
     assert.equal(good.status, 0, good.stderr);
     assert.match(good.stdout, /^\| linux-rust-1 \| 3 \| 0 \| 1 \| 813 \|$/m);
     const short = run("linux-rust-1\n  windows-rust-1");
     assert.equal(short.status, 1);
     assert.match(short.stdout, /^\| windows-rust-1 \| missing \|/m);
-    assert.notEqual(spawnSync(process.execPath, [SCRIPT, root], { env: { PATH: process.env.PATH } }).status, 0);
+    const typecheck = run("linux-rust-1", JSON.stringify({ rust: { result: "success" }, typecheck: { result: "failure" } }));
+    assert.equal(typecheck.status, 1);
+    assert.match(typecheck.stdout, /^job typecheck: failure$/m);
+    for (const needs of ["", "[]", "null", '{"rust":{}}', "{"]) assert.notEqual(run("linux-rust-1", needs).status, 0, `FARM_NEEDS ${needs}`);
+    assert.notEqual(spawnSync(process.execPath, [SCRIPT, root], { env: { PATH: process.env.PATH, FARM_NEEDS: green } }).status, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
