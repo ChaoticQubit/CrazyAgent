@@ -408,11 +408,19 @@ pub fn command_with(
             if installed.is_some() {
                 return Err(failure("launch_context_unsupported"));
             }
+            if !records::json_files::session_shaped(run.session_id) {
+                return Err(failure("launch_session_id_invalid"));
+            }
             argv.extend(launch);
             let (model, place) = (request.model.as_deref(), text(&cwd)?);
             let arguments = settings.arguments(run.resume, &home, run.session_id, &place, model)?;
             argv.extend(arguments);
-            Transcript::Records(settings.records(request.account.home(), run.session_id)?)
+            let record = if run.resume || settings.takes_session() {
+                settings.records(request.account.home(), run.session_id)?
+            } else {
+                settings.learned_records(request.account.home())?
+            };
+            Transcript::Records(record)
         }
         (None, Ok(Reader::CodexRollouts)) => {
             let resume = if run.resume {

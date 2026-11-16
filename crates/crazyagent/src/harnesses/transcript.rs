@@ -294,8 +294,9 @@ impl TranscriptReader {
             if found.as_deref() != Some(record) {
                 return Err(unavailable());
             }
+            let id = records.session_of(record).ok_or_else(unavailable)?;
             reader.start = followed.position();
-            reader.found = Some((records.session.clone(), record.to_path_buf()));
+            reader.found = Some((id, record.to_path_buf()));
             reader.followed = Some(followed);
             return Ok(reader);
         }
@@ -530,7 +531,7 @@ impl TranscriptReader {
         };
         let (objects, moved) = followed.read()?;
         if let Some(path) = followed.record() {
-            self.found = Some((records.session.clone(), path));
+            self.found = records.session_of(&path).map(|id| (id, path));
         }
         let facts: Vec<TranscriptEvent> = objects
             .iter()

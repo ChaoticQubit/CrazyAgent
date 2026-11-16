@@ -80,11 +80,33 @@ fn each_stand_in_manifest_gives_its_terminal_settings() {
         let trust = Step {
             seen: "Trust this folder?".to_owned(),
             press: Key::Enter,
+            optional: false,
         };
         assert_eq!(settings.first_screen(), [trust]);
         assert_eq!(settings.rules().len(), 6);
         assert!(settings.harness().starts_with("standin-"));
     }
+}
+
+/// DEC-180 Task 16 r2 (T16-Q1): a first-screen step may be marked optional, yes or no, and
+/// is needed when not marked.
+#[test]
+fn a_first_screen_step_may_be_optional_and_is_needed_unless_marked() {
+    let marked = format!("{PRESS_LINE}      optional: true\n");
+    let settings = read_ok(&swap(APPEND, PRESS_LINE, &marked));
+    let steps = settings.first_screen();
+    assert_eq!(steps.len(), 1);
+    assert!(steps[0].optional);
+    let unmarked = format!("{PRESS_LINE}      optional: false\n");
+    let settings = read_ok(&swap(APPEND, PRESS_LINE, &unmarked));
+    assert!(!settings.first_screen()[0].optional);
+    let worded = format!("{PRESS_LINE}      optional: \"yes\"\n");
+    let refused = settings_of(&swap(APPEND, PRESS_LINE, &worded)).err();
+    let named = refused.as_ref().map(|refused| refused.code);
+    assert_eq!(named, Some(manifest::TYPE), "{refused:?}");
+    let message = refused.map(|refused| refused.message).unwrap_or_default();
+    let place = "terminal.first_screen.trust.optional:";
+    assert!(message.starts_with(place), "{message}");
 }
 
 /// DEC-180 Task 16: a fresh run gets `terminal.argv` and a resumed one the whole

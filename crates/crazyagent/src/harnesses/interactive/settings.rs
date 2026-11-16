@@ -20,7 +20,7 @@ const KEYS: [&str; 6] = [
     "first_screen",
     "record",
 ];
-const STEP_KEYS: [&str; 2] = ["seen", "press"];
+const STEP_KEYS: [&str; 3] = ["seen", "press", "optional"];
 const TYPED_ONLY: [&str; 4] = ["prompt", "relay_url", "token", "key_file"];
 
 /// One key the engine presses in a harness's terminal, from a fixed list, so a manifest
@@ -57,12 +57,14 @@ impl Key {
     }
 }
 
-/// One step of a harness's first screen: the text the engine waits to see on the screen
-/// and the key it then presses, once.
+/// One step of a harness's first screen: the text the engine waits to see on the screen,
+/// the key it then presses, once, and whether the step is optional: pressed when its text
+/// shows, never waited for, as a screen a harness shows only on its first run in a home.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Step {
     pub seen: String,
     pub press: Key,
+    pub optional: bool,
 }
 
 /// The terminal settings of a harness whose live terminal the engine runs from its
@@ -170,6 +172,21 @@ impl TerminalSettings {
         &self.manifest.id
     }
 
+    /// The harness's name as its manifest gives it, for the sentences an owner reads.
+    /// Output: the name.
+    pub fn name(&self) -> &str {
+        &self.manifest.name
+    }
+
+    /// Tells whether a fresh run takes the engine's session id: whether `terminal.argv`
+    /// names `{session}`. A harness started without it picks its own id, which the engine
+    /// reads back from the record. Output: the answer.
+    pub fn takes_session(&self) -> bool {
+        self.argv
+            .iter()
+            .any(|argument| argument.contains("{session}"))
+    }
+
     /// The key that sends a typed prompt. Output: the key.
     pub fn submit(&self) -> Key {
         self.submit
@@ -199,17 +216,32 @@ impl TerminalSettings {
     /// its session id. Output: the record as the run's transcript follows it, or a plain
     /// refusal code.
     pub fn records(&self, home: &Path, session: &str) -> Result<Records, LaunchError> {
+        self.records_for(home, Some(session))
+    }
+
+    /// Fills the record path for a fresh run whose harness picks its own session id:
+    /// `{session}` matches any name, and the record found names the id. Input: the run's
+    /// private home, absolute. Output: the record as the run's transcript follows it, or a
+    /// plain refusal code.
+    pub fn learned_records(&self, home: &Path) -> Result<Records, LaunchError> {
+        self.records_for(home, None)
+    }
+
+    fn records_for(&self, home: &Path, session: Option<&str>) -> Result<Records, LaunchError> {
         assert!(home.is_absolute());
         let reader = records::of(self.record)?;
         assert!(matches!(reader, Reader::JsonlAppend | Reader::JsonRewrite));
-        let pattern = Pattern::read(&self.manifest, home, session)
-            .map_err(|_| failure("launch_session_id_invalid"))?;
+        let pattern = match session {
+            Some(session) => Pattern::read(&self.manifest, home, session),
+            None => Pattern::learning(&self.manifest, home),
+        }
+        .map_err(|_| failure("launch_session_id_invalid"))?;
         Ok(Records {
             harness: self.manifest.id.clone(),
             kind: self.record,
             pattern,
             rules: self.rules.clone(),
-            session: session.to_owned(),
+            session: session.map(str::to_owned),
         })
     }
 
@@ -398,7 +430,21 @@ fn steps(terminal: &Yaml) -> Result<Vec<Step>, Refused> {
                 format!("{place}.press: this setting is needed."),
             );
         };
-        steps.push(Step { seen, press });
+        let optional = match step.get("optional") {
+            None | Some(Yaml::Null) => false,
+            Some(Yaml::Bool(optional)) => *optional,
+            Some(_) => {
+                return refuse(
+                    manifest::TYPE,
+                    format!("{place}.optional: this must be true or false."),
+                );
+            }
+        };
+        steps.push(Step {
+            seen,
+            press,
+            optional,
+        });
     }
     assert!(!steps.is_empty() && steps.len() <= STEPS_MAX);
     Ok(steps)

@@ -110,7 +110,9 @@ pub struct KeeperPin {
 impl PaneRecord {
     /// Describes a pane the engine just started. Takes the harness's session record,
     /// its canonical working folder, the start time, the pane's first process and the
-    /// key file written for it. Returns none for a harness with no session record.
+    /// key file written for it. Returns none for a harness with no session record, and for
+    /// a manifest harness that picks its own session id, whose record a later engine could
+    /// not tell from another run's.
     pub fn new(
         transcript: &Transcript,
         cwd: &Path,
@@ -128,7 +130,7 @@ impl PaneRecord {
             Transcript::Records(records) => RecordSource::Manifest {
                 harness: records.harness.clone(),
                 home: records.pattern.home().to_path_buf(),
-                session: records.session.clone(),
+                session: records.session.clone()?,
             },
             Transcript::Unavailable => return None,
         };
@@ -517,6 +519,7 @@ impl TerminalSession {
             first: None,
             folder: on_menu.then_some(FolderStep::Waiting),
             steps: VecDeque::new(),
+            harness_name: settings.as_ref().map(|settings| settings.name().to_owned()),
             submit_key,
             interrupt_key,
             turn: false,
@@ -556,11 +559,15 @@ impl TerminalSession {
     }
 
     /// Lets go of the pane without ending it, as the engine quits with this agent kept alive.
-    /// Generated context and key files stay for the harness that still runs. A pane on an
-    /// engine key relay keeps its lifeline held until this engine exits, so it still ends
-    /// with the engine whose relay it reaches.
+    /// Generated context and key files stay for the harness that still runs, and a pane on
+    /// an engine key relay keeps its lifeline held, so it still ends with this engine. A
+    /// pane with no record, which no later engine could adopt, is stopped instead.
     /// Takes the session; a later engine adopts the pane from its record.
     pub fn leave(mut self) {
+        if self.record.is_none() {
+            let _ = self.stop();
+            return;
+        }
         self.stopped = true;
         if let Some(key) = self._key.take() {
             std::mem::forget(key);

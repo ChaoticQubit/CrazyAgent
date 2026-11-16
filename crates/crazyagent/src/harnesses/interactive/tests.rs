@@ -2143,3 +2143,31 @@ fn a_manifest_command_refuses_a_keyed_account_tools_off_and_full_access() {
     let refused = command_with(&full, None, &run(None), Some(&settings));
     assert_eq!(refused.err(), Some(failure("launch_harness_unsupported")));
 }
+
+/// DEC-180 Task 16 r2 (T16-2): a manifest harness's session id fills its arguments only
+/// as a plain word that starts with a letter or digit, so no id adds an option, fresh or
+/// resumed.
+#[test]
+fn a_manifest_command_refuses_a_session_id_that_is_no_plain_word() {
+    let case = Case::new();
+    let settings = standin_settings();
+    let request = case.request("standin-jsonl-append", keyless(&case), true);
+    let long = "a".repeat(65);
+    for session_id in ["--exec", "-x", "_x", "", "a b", "a/b", long.as_str()] {
+        for resume in [false, true] {
+            let given = Run {
+                session_id,
+                key_file: None,
+                resume,
+            };
+            let refused = command_with(&request, None, &given, Some(&settings));
+            let invalid = Some(failure("launch_session_id_invalid"));
+            assert_eq!(refused.err(), invalid, "{session_id:?} {resume}");
+        }
+    }
+    let plain = Run {
+        session_id: "standin-1",
+        ..run(None)
+    };
+    assert!(command_with(&request, None, &plain, Some(&settings)).is_ok());
+}

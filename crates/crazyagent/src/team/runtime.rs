@@ -11686,8 +11686,10 @@ fn live_serve(
                     let _ = reports.send(Report::InputReady);
                 }
                 Err(problem) if problem.0 == "launch_closed" => reads_keys = true,
-                Err(found) if crate::harnesses::codex_folder::ended_the_launch(&found) => {
-                    problem = Some(with_code(PROCESS_CLOSED, Some(&found.0)));
+                Err(found) if crate::harnesses::terminal_session::ended_the_launch(&found) => {
+                    let reason = session.first_screen_reason();
+                    let sentence = reason.as_deref().unwrap_or(PROCESS_CLOSED);
+                    problem = Some(with_code(sentence, Some(&found.0)));
                     break;
                 }
                 Err(_) => {}

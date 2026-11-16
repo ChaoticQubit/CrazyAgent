@@ -1,5 +1,29 @@
 use super::*;
 
+/// DEC-180 Task 16 r2 (T16-3, T16-4): a first screen that never showed ends a launch for
+/// good, as Codex's folder access failures do, and the owner reads a plain sentence that
+/// names the harness, the screen's text and the wait.
+#[test]
+fn a_first_screen_never_shown_ends_the_launch_with_a_plain_sentence() {
+    let ended = [
+        "launch_first_screen_missing",
+        "launch_folder_screen_missing",
+        "launch_folder_box_missing",
+    ];
+    for code in ended {
+        assert!(ended_the_launch(&failure(code)), "{code}");
+    }
+    for code in ["launch_closed", "launch_cancelled", "terminal_closed"] {
+        assert!(!ended_the_launch(&failure(code)), "{code}");
+    }
+    let sentence = first_screen_missing("Stand-in", "Trust this folder?");
+    let plain = concat!(
+        "Stand-in did not show its first screen (\"Trust this folder?\") ",
+        "within 30 seconds."
+    );
+    assert_eq!(sentence, plain);
+}
+
 fn unframed(parts: &[String]) -> String {
     let joined = parts.concat();
     assert!(joined.starts_with(PASTE_START), "{joined:?}");
