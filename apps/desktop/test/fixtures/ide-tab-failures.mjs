@@ -2,7 +2,8 @@ import { createElement as h } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import css from "../../src/screens/project/ide.css?inline";
-import { IdeTab, useCloseIde } from "../../src/screens/project/ide.tsx";
+import { ideView } from "../../src/api-ide.ts";
+import { IdeTab } from "../../src/screens/project/ide.tsx";
 
 const READY = { state: { build: { state: "ready", version: "1.0.0", root: "/ide" }, unqualified: null }, platform: "macos" };
 const CALL_WAIT_MS = 5_000;
@@ -19,11 +20,13 @@ let out = false;
 let leftOver = null;
 let held = {};
 let windowAsks = [];
+let kept = false;
 
 function answer(command) {
   if (command === "desktop_ide_window_open") out = true;
   if (command === "desktop_ide_window_out") return out;
   if (command === "desktop_ide_open") return { ownWindow: out, left: leftOver };
+  if (command === "desktop_ide_show") return { shown: kept, left: kept ? leftOver : null };
   return command === "desktop_ide_state" ? READY : null;
 }
 
@@ -41,15 +44,15 @@ window.__TAURI_INTERNALS__ = {
 };
 
 function Page() {
-  useCloseIde("project-one", (line) => reported.push(`close: ${line}`));
   return h(IdeTab, { projectId: "project-one", onView: () => {}, onHideProblem: (line) => reported.push(`hide: ${line}`) });
 }
 
 /** Opens the real IDE tab with its stylesheet and the native answers stubbed. Inputs: the
  * commands that refuse, the commands this build does not have, whether each place waits
- * for [`answerPlace`], whether the IDE already sits in its own window and what the open says
- * the last IDE left running. */
-export function mount(refusing, missing = [], holdPlaces = false, startsOut = false, left = null) {
+ * for [`answerPlace`], whether the IDE already sits in its own window, what the open says
+ * the last IDE left running, and whether the IDE is kept loaded from before. */
+export function mount(refusing, missing = [], holdPlaces = false, startsOut = false, left = null, keptBefore = false) {
+  kept = keptBefore;
   refused = refusing;
   leftOver = left;
   absent = missing;
@@ -165,7 +168,18 @@ export function refusePlace() {
 export async function leave() {
   flushSync(() => root.unmount());
   await called("desktop_ide_hide");
-  await called("desktop_ide_close");
+}
+
+/** Reads the IDE state once, as an earlier visit to a project page did, so the page keeps it.
+ * Output: once it was read. */
+export async function seed() {
+  await ideView();
+  calls = [];
+}
+
+/** Every native command asked for, oldest first. Output: their names. */
+export function asked() {
+  return calls;
 }
 
 /** What the owner is told. Output: the tab's alert text or null, and what reached the page. */

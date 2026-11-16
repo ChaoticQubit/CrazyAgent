@@ -27,7 +27,37 @@ const READ: &str = "JSON.stringify({ origin: location.origin, answer: window.__i
 const WINDOWS_FILE: &str = "ide-own-window.jsonl";
 const WINDOWS_EVERY: Duration = Duration::from_millis(500);
 const WINDOWS_ROWS: usize = 2_400;
-const LOOK: &str = "JSON.stringify({ origin: performance.timeOrigin, editors: document.querySelectorAll('.tabs-container .tab').length, height: innerHeight })";
+/// What each IDE page reports every half second: its time origin, its open editor tabs, its
+/// height, the wall-clock stamps of the first task after each frame that follows a pause in
+/// frames (a hidden page draws none, so each stamp is a show), and the largest gap seen between
+/// the page's two clocks, so a spec can time a switch to the IDE from the click (DEC-187).
+const LOOK: &str = r#"JSON.stringify({
+  origin: performance.timeOrigin,
+  editors: document.querySelectorAll('.tabs-container .tab').length,
+  height: innerHeight,
+  shows: (() => {
+    if (!window.__ideShows) {
+      window.__ideShows = [];
+      window.__ideSkew = 0;
+      let last = 0;
+      const frame = () => {
+        const now = Date.now();
+        window.__ideSkew = Math.max(window.__ideSkew, Math.abs(performance.timeOrigin + performance.now() - now));
+        if (last && now - last > 100) {
+          setTimeout(() => {
+            window.__ideShows.push(Date.now());
+            if (window.__ideShows.length > 96) window.__ideShows.shift();
+          }, 0);
+        }
+        last = now;
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    }
+    return window.__ideShows;
+  })(),
+  skew: window.__ideSkew ?? null,
+})"#;
 
 static ASKED: Once = Once::new();
 static WATCHING: Once = Once::new();

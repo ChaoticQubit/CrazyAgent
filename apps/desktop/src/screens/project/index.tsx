@@ -6,7 +6,7 @@ import { loadQuestionCounts, pendingByProject } from "../../api-questions";
 import { SessionContext, readQuestionsShown, saveLastProject, useLoad, type Loaded } from "../../state";
 import { Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
-import { HEARTBEAT_MS, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
+import { HEARTBEAT_MS, cachedIdeView, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
 import type { IdeView } from "../../api-ide";
 import { ChangesTab } from "../changes";
 import { MetricsView } from "../metrics/view";
@@ -14,7 +14,7 @@ import { WaitingChanges } from "../changes/waiting";
 import { AgentsTab, usePauseAll } from "./agents";
 import { ContextTab } from "./context";
 import { IdeExtensionConfirm } from "./ide-extensions";
-import { IDE_POLL_MS, IdeTab, IdeUnavailable, useCloseIde } from "./ide";
+import { IDE_POLL_MS, IdeTab, IdeUnavailable } from "./ide";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { ProjectHead, useProjectHead, type HeadMeta } from "./head";
@@ -203,7 +203,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
 }) {
   const { data, toast, session } = useProject(projectId, navigate, name);
   useEffect(() => saveLastProject(projectId), [projectId]);
-  const [ide, setIde] = useState<Result<IdeView>>();
+  const [ide, setIde] = useState<Result<IdeView> | undefined>(cachedIdeView);
   const [busy, setBusy] = useState(false);
   const [ideHideProblem, setIdeHideProblem] = useState<string | null>(null);
   const view = ide?.kind === "ok" ? ide.value : undefined;
@@ -222,8 +222,6 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
     navigate(`/projects/${encodeURIComponent(projectId)}/settings?section=remove&ask=delete`);
     setDeleteAsks((count) => count + 1);
   };
-
-  useCloseIde(projectId, data.notify);
 
   useEffect(() => {
     let live = true;

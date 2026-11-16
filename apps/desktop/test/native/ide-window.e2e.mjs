@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { onScreen, planEnd } from "./ide-window-kit.mjs";
+import { SWITCHES, line, report, stampSample } from "./switch-time-kit.mjs";
 import { go, until } from "./trial-kit.mjs";
 
 const root = process.env.MS_ROOT;
@@ -211,6 +212,10 @@ function startPlan(plan) {
         if (kind === "note") void note(value);
         if (kind === "shift") document.querySelector(".pj-tab-panel").style.marginTop = value;
         if (kind === "press") [...document.querySelectorAll("button")].find((node) => node.textContent.trim() === value)?.click();
+        if (kind === "click") {
+          log.push({ step: "click", at: Date.now(), selector: value });
+          document.querySelector(value)?.click();
+        }
       }, at * 1000);
     }
   }, plan);
@@ -315,6 +320,9 @@ const WINDOW_GONE_MS = 90000;
 const REOPEN_MS = 60000;
 const RESTORE_MS = 120000;
 const LEAVE_S = 320;
+const TAB_TURN_S = 3;
+const PAGE_TURN_S = 5;
+const CLOCK_SKEW_MS = 2;
 
 /** Fails the row unless two rows show one page. WebKit's time origin wobbles by a millisecond or
  * so, while a reload would move it by the many seconds since the page first loaded. Inputs: the
@@ -328,6 +336,13 @@ function samePage(row, other, message) {
 function serverUp(project) {
   const pattern = `server-data-dir ${root}/[^ ]*/ide/${project}/`;
   return spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" }).stdout.trim() !== "";
+}
+
+/** The process number of a project's IDE server under this run's test root. Input: the
+ * project. Output: it as text, empty when none runs. */
+function serverPid(project) {
+  const pattern = `server-data-dir ${root}/[^ ]*/ide/${project}/`;
+  return spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" }).stdout.trim().split("\n")[0];
 }
 
 /** Opens a project's IDE tab, waits for the workbench and presses the window button, all on the
@@ -485,6 +500,60 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     await until(() => walls() === 0, OWN_WINDOW_MS, "the wall stayed open after its project was removed");
   });
 
+  it("a kept IDE comes back on a tab or a page switch within 50 ms, with no reload, no new webview and the same server (DEC-187)", async function () {
+    const project = await newProject("ide-switch");
+    await buildReady();
+    const page = (tab) => `#/projects/${encodeURIComponent(project)}/${tab}`;
+    await go(page("overview"));
+    await until(() => browser.execute(() => Boolean(document.querySelector("#tab-ide"))), 60000, "the project page never listed the IDE tab");
+    const plan = [[0, "go", page("ide")]];
+    const tabFrom = WORKBENCH_MS + 5;
+    for (let turn = 0; turn <= SWITCHES; turn += 1) {
+      const at = tabFrom + turn * TAB_TURN_S;
+      plan.push([at, "go", page("overview")], [at + 1, "click", "#tab-ide"]);
+    }
+    const pageFrom = tabFrom + (SWITCHES + 1) * TAB_TURN_S;
+    for (let turn = 0; turn <= SWITCHES; turn += 1) {
+      const at = pageFrom + turn * PAGE_TURN_S;
+      plan.push([at, "go", "#/"], [at + 1, "go", page("overview")], [at + 3, "click", "#tab-ide"]);
+    }
+    const end = pageFrom + (SWITCHES + 1) * PAGE_TURN_S;
+    plan.push([end, "note", "switched"]);
+    const started = Date.now();
+    await startPlan(plan);
+    await pause(Math.max(0, started + (tabFrom - 2) * 1000 - Date.now()));
+    const server = serverPid(project);
+    assert.ok(server, "the IDE's server runs once the workbench loaded");
+    let log = null;
+    for (const deadline = started + end * 1000 + BACK_MS; log === null; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, "the webdriver session never saw the main window again after the switches");
+      log = await browser.execute(() => (window.__ideWindowLog?.some((row) => row.step === "switched") ? window.__ideWindowLog : null)).catch(() => null);
+    }
+    assert.equal(serverPid(project), server, "every switch kept the same server: nothing reconnected");
+    const rows = windowRows().filter((row) => row.at > started && row.view?.webview?.startsWith("ide-") && row.look);
+    assert.ok(rows.length > 0, "the test build wrote the IDE page's rows");
+    const labels = [...new Set(rows.map((row) => row.view.webview))];
+    assert.equal(labels.length, 1, `one webview for every switch, none built again: ${labels}`);
+    samePage(rows.at(-1), rows[0], "no switch reloaded the IDE page");
+    const shows = rows.at(-1).look.shows ?? [];
+    const skew = Math.max(...rows.map((row) => row.look.skew ?? 0));
+    const clicks = log.filter((row) => row.step === "click");
+    assert.equal(clicks.length, 2 * (SWITCHES + 1), "every planned click ran");
+    const evidenceRow = { shows: shows.length, clicks: clicks.length, skew, labels };
+    if (shows.length < clicks.length || skew > CLOCK_SKEW_MS) {
+      writeFileSync(join(evidence, "switch-time-ide.json"), JSON.stringify({ verdict: "INCONCLUSIVE", ...evidenceRow }, null, 2));
+      console.log(`SWITCH-TIME ide INCONCLUSIVE: ${shows.length} shows for ${clicks.length} clicks, clock skew ${skew} ms`);
+      this.skip();
+    }
+    const judged = [["ide-tab", clicks.slice(1, SWITCHES + 1)], ["ide-page", clicks.slice(SWITCHES + 2)]].map(([name, timed]) => {
+      const result = report(timed.map((click) => stampSample(click.at, shows)));
+      console.log(line(name, result));
+      return { name, result };
+    });
+    writeFileSync(join(evidence, "switch-time-ide.json"), JSON.stringify({ judged, ...evidenceRow }, null, 2));
+    for (const { name, result } of judged) assert.ok(result.pass, line(name, result));
+  });
+
   it("moves to its own window with no reload, comes back, and closes with its project and the main window", async () => {
     const first = await newProject("ide-own-one");
     const second = await newProject("ide-own-two");
@@ -555,11 +624,13 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     const leaving = Date.now();
     await closeTitled("IDE");
     await rowWhere((row) => row.windows && !row.windows.some((label) => OWN_WINDOW.test(label)), "closing the window after the page left kept the window", OWN_WINDOW_MS, leaving);
-    await until(() => !serverUp(fourth), OWN_WINDOW_MS, "closing the window after its page had left kept the IDE's server running");
+    await pause(POLL_MS);
+    assert.ok(serverUp(fourth), "closing the window keeps the IDE loaded with its server as the last used one (DEC-187)");
 
     await go(`#/projects/${encodeURIComponent(second)}/overview`);
     await moveOut(second);
     assert.ok(serverUp(second), "the second IDE's server runs while the IDE is in its own window");
+    await until(() => !serverUp(fourth), SERVER_GONE_MS, "opening another project's IDE dropped the last one with its server (DEC-187)");
     await go("#/");
     await pause(POLL_MS);
     const removing = Date.now();

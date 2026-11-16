@@ -2135,6 +2135,15 @@ fn desktop_close_project_walls<R: Runtime>(
     terminal_window_for(&webview, &id)?;
     let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
     close_walls(&app, Some(&project));
+    let (kept_app, removed) = (app.clone(), project.clone());
+    tauri::async_runtime::spawn(async move {
+        if let (Some(state), Some(views)) = (
+            kept_app.try_state::<NativeState>(),
+            kept_app.try_state::<ide::IdeViews>(),
+        ) {
+            let _ = close_ide(&kept_app, &state, &views, &removed).await;
+        }
+    });
     ide::shut_own_windows(app, Some(project));
     Ok(())
 }
@@ -4694,7 +4703,65 @@ async fn desktop_ide_open(
     let window = webview.window();
     let bounds = bounds.in_window(&window)?;
     let own_window = ide::show(&app, &window, &views, &project, workbench, bounds, ticket)?;
+    for other in views.others(&project) {
+        let _ = close_ide(&app, &state, &views, &other).await;
+    }
     Ok(ide::Opened { own_window, left })
+}
+
+/// Shows a project's kept IDE over its panel with no engine call, so a tab or page switch back
+/// is instant (DEC-187). Inputs: the project and the panel. Output: whether it was shown, false
+/// when none is kept so the tab opens it, and what the last IDE left running, named once.
+#[tauri::command]
+async fn desktop_ide_show<R: Runtime>(
+    webview: Webview<R>,
+    app: AppHandle<R>,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+    bounds: ide::Bounds,
+) -> Result<ide::Shown, BridgeError> {
+    main_window(&webview)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    let bounds = bounds.checked()?.in_window(&webview.window())?;
+    ide::show_kept(&app, &views, &project, bounds)
+}
+
+/// Loads the last used project's IDE hidden at app start, through the same engine open as the
+/// tab, giving way to any open that came meanwhile; a preload that gave way to another project
+/// stops the server it started. Inputs: the project and its last panel. Output: whether it
+/// loaded, or the refusal.
+#[tauri::command]
+async fn desktop_ide_preload(
+    webview: Webview,
+    app: AppHandle,
+    state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+    bounds: ide::Bounds,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    let bounds = bounds.checked()?;
+    let (ticket, turn) = views.begin(&project);
+    let opened = {
+        let _turn = turn.lock().await;
+        let call = read(&state).await?.ide_open(project.clone())?;
+        call.await?
+    };
+    let left = opened.left.clone();
+    let workbench = ide::workbench(&opened)?;
+    let window = webview.window();
+    let bounds = bounds.in_window(&window)?;
+    match ide::preload(
+        &app, &window, &views, &project, workbench, bounds, ticket, left,
+    )? {
+        ide::Preload::Admitted => Ok(true),
+        ide::Preload::Superseded => Ok(false),
+        ide::Preload::Refused => {
+            close_ide(&app, &state, &views, &project).await?;
+            Ok(false)
+        }
+    }
 }
 
 #[tauri::command]
@@ -4722,23 +4789,8 @@ async fn desktop_ide_hide<R: Runtime>(
     ide::hide(&app, &views, &bridge::ide::ide_project(&project_id)?)
 }
 
-#[tauri::command]
-async fn desktop_ide_close<R: Runtime>(
-    webview: Webview<R>,
-    app: AppHandle<R>,
-    state: State<'_, NativeState>,
-    views: State<'_, ide::IdeViews>,
-    project_id: String,
-) -> Result<(), BridgeError> {
-    main_window(&webview)?;
-    let project = bridge::ide::ide_project(&project_id)?;
-    if views.keep_for_own_window(&project) {
-        return Ok(());
-    }
-    close_ide(&app, &state, &views, &project).await
-}
-
-/// Closes a project's IDE webview and stops its server, in the project's turn. Inputs: the app,
+/// Closes a project's IDE webview and stops its server, in the project's turn: when another
+/// project's IDE replaces it, a preload gave way, or its project is removed. Inputs: the app,
 /// the engine bridge, the views and the project. Output: Ok, or the engine's refusal.
 async fn close_ide<R: Runtime>(
     app: &AppHandle<R>,
@@ -5597,7 +5649,8 @@ native_commands! {
     desktop_ide_open,
     desktop_ide_place,
     desktop_ide_hide,
-    desktop_ide_close,
+    desktop_ide_show,
+    desktop_ide_preload,
     desktop_ide_touch,
     desktop_ide_window_open,
     desktop_ide_window_focus,
@@ -5924,7 +5977,7 @@ mod tests {
             .invoke_handler(admit_pages(tauri::generate_handler![
                 desktop_ide_place,
                 desktop_ide_hide,
-                desktop_ide_close,
+                desktop_ide_show,
             ]))
             .build(mock_context(noop_assets()))
             .unwrap();
@@ -5948,7 +6001,7 @@ mod tests {
         let calls = [
             ("desktop_ide_place", &placed),
             ("desktop_ide_hide", &project),
-            ("desktop_ide_close", &project),
+            ("desktop_ide_show", &placed),
         ];
         for (command, args) in calls {
             assert_eq!(
