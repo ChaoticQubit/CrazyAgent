@@ -466,7 +466,7 @@ async fn a_prompt_held_as_its_view_ends_is_still_recorded_as_heard() {
     let (requests, mut asked) = tokio::sync::mpsc::channel(REQUESTS_QUEUED);
     let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
     let viewing = Arc::new(Open::default());
-    let pumping = {
+    let mut pumping = {
         let viewing = viewing.clone();
         tokio::spawn(async move { pump(&mut ours, viewer, &mut asked, host, &*viewing).await })
     };
@@ -481,6 +481,12 @@ async fn a_prompt_held_as_its_view_ends_is_still_recorded_as_heard() {
     );
 
     drop(feed);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut pumping)
+            .await
+            .is_err(),
+        "a view whose terminal ended waits for its running send"
+    );
     release.send(()).unwrap();
     release.send(()).unwrap();
     assert_eq!(
