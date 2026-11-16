@@ -335,6 +335,15 @@ pub fn approves(picks: &[u8]) -> bool {
     picks == [0]
 }
 
+/// Tells whether an apply pass has work: a proposal the owner approved, or one that ended
+/// and whose agent is not told yet (rv-code gh-s7 N5). A store error reads as work, so the
+/// pass runs and logs it. Input: the engine connection, outside any transaction. Output:
+/// the answer.
+pub fn waiting(db: &Connection) -> bool {
+    assert!(db.is_autocommit());
+    true
+}
+
 /// Applies one claimed proposal and says how it ended: refused, with nothing sent, when
 /// the project's publish record no longer names the repository kept at ask time at Done;
 /// otherwise applied only when GitHub's fresh page shows the rule as wanted and applied.

@@ -108,6 +108,10 @@ impl Case {
     }
 
     fn told(&self) -> Vec<String> {
+        self.told_in(PROJECT)
+    }
+
+    fn told_in(&self, project: &str) -> Vec<String> {
         let mut statement = self
             .db
             .prepare(
@@ -115,10 +119,46 @@ impl Case {
             )
             .unwrap();
         statement
-            .query_map([PROJECT], |row| row.get(0))
+            .query_map([project], |row| row.get(0))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
+    }
+
+    /// Records one proposal of the project that already ended declined and is not told yet.
+    fn ended(&self, project: &str, at: i64) {
+        table(&self.db).unwrap();
+        self.db
+            .execute(
+                "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,\
+                 created_ms) VALUES (?1,'agent:4','wiki_off',0,'Docs live in the repository.',\
+                 ?2,'declined',?3)",
+                params![project, REPO, at],
+            )
+            .unwrap();
+    }
+
+    /// Fills the project's team conversation with owner messages until it takes no more.
+    fn fill(&self, project: &ProjectId) {
+        let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate).unwrap();
+        let mut full = false;
+        for at in 0..=crate::team::MESSAGES_WAITING_MAX {
+            let appended = crate::team::append_message(
+                &tx,
+                project,
+                crate::team::MessageAuthor::Owner,
+                &format!("waiting {at}"),
+                crate::team::MessageState::Pending,
+                at,
+            )
+            .unwrap();
+            full = appended.is_err();
+            if full {
+                break;
+            }
+        }
+        tx.commit().unwrap();
+        assert!(full, "the conversation takes no more");
     }
 
     fn answer(&self, question: u64, picks: Vec<u8>) -> Settlement {
@@ -613,6 +653,75 @@ fn an_outcome_a_full_conversation_cannot_take_is_told_at_the_next_pass() {
     assert!(told[0].ends_with(": declined."), "{}", told[0]);
     assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 0);
     assert_eq!(case.told().len(), 1, "an outcome is told once");
+}
+
+/// rv-code gh-s7 N4: a project whose full conversation cannot take its outcomes holds no
+/// other project's back. A pass tells at most `PASS_MAX`, oldest first, project by project,
+/// and a message the full conversation refuses ends only its own project's turn.
+#[test]
+fn a_full_conversation_holds_back_only_its_own_projects_outcomes() {
+    let case = Case::new();
+    let full = PASS_MAX + 1;
+    for at in 0..full {
+        case.ended(PROJECT, at);
+    }
+    case.ended(OTHER, full);
+    case.fill(&case.project);
+    let mut set = |_: &Path, _: &str, rule: GitHubRule, on: bool| {
+        Ok(page(rule, on, GitHubRuleState::Applied))
+    };
+    assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 0);
+    assert_eq!(case.told_in(OTHER).len(), 1, "the other project is told");
+    assert!(
+        case.told().is_empty(),
+        "the full conversation takes nothing"
+    );
+    case.db
+        .execute(
+            "UPDATE team_messages SET state='answered' WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 0);
+    assert_eq!(
+        case.told().len(),
+        PASS_MAX as usize,
+        "one pass tells at most PASS_MAX"
+    );
+    assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 0);
+    assert_eq!(
+        case.told().len(),
+        full as usize,
+        "the rest at the next pass"
+    );
+    assert_eq!(case.told_in(OTHER).len(), 1, "each outcome is told once");
+}
+
+/// rv-code gh-s7 N5: a pass has work only while a proposal is approved, or has ended with
+/// its agent not told yet, so an answer to any other question starts no apply pass.
+#[test]
+fn a_pass_waits_only_on_an_approved_or_untold_proposal() {
+    let case = Case::new();
+    case.done(REPO);
+    assert!(!waiting(&case.db), "no proposal");
+    let approved = case.asked(&Asker::Agent(4), GitHubRule::NoForcePush, true);
+    assert!(!waiting(&case.db), "a proposal the owner has not answered");
+    assert_eq!(case.answer(approved, vec![0]), Settlement::Settled);
+    assert!(waiting(&case.db), "an approved proposal");
+    let mut set = |_: &Path, _: &str, rule: GitHubRule, on: bool| {
+        Ok(page(rule, on, GitHubRuleState::Applied))
+    };
+    assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 1);
+    assert!(!waiting(&case.db), "applied and told");
+    let declined = case.asked(&Asker::Agent(5), GitHubRule::WikiOff, false);
+    assert_eq!(case.answer(declined, vec![1]), Settlement::Settled);
+    assert!(waiting(&case.db), "declined and not told yet");
+    case.fill(&case.project);
+    assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 0);
+    assert!(
+        waiting(&case.db),
+        "an outcome the full conversation refused"
+    );
 }
 
 /// DEC-182 S7: a reason with a hidden character, such as a direction override or a
