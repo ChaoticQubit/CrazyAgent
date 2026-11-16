@@ -75,6 +75,14 @@ fn refused(socket: &Path) -> bool {
     )
 }
 
+/// Whether a lead's teammates' socket names no file now, as once its project was deleted with
+/// the record of that name: [`Servers::mates`] then reads no server by the file alone, so a
+/// keeper held for it decides nothing. Takes the engine root and the lead. Returns the
+/// answer; a lead whose start named no socket counts.
+fn teammates_socket_gone(root: &Path, lead: &AgentId) -> bool {
+    !teammates_socket(root, lead).is_ok_and(|socket| listening(&socket))
+}
+
 /// How the keeper an engine holds for one of a lead's servers stands: none when none is held,
 /// true once it exited cleanly, the exit `end_keeper` reads as the server's end confirmed,
 /// and false while it runs, after any other exit, or when the keepers cannot be read. Takes
@@ -252,9 +260,12 @@ impl Servers {
     /// that reads it never waits on a start (MR-1). Other leads' keepers stay, also exited
     /// ones, so each lead's servers are still read through their keepers; only a full map
     /// drops the keepers that exited cleanly, whose leads then read the socket alone, which
-    /// keeps a refused one theirs. A running keeper or one that exited otherwise is never
-    /// dropped here, since its lead would then read a gone socket as no server; a lead's end
-    /// takes it out (`end_kept_server`, `end_mates_keeper`).
+    /// keeps a refused one theirs, and of the teammates' map also those that exited otherwise
+    /// whose socket names no file, which their leads read as no server whatever is held
+    /// (MRR2-1). A running keeper, or a lead's own keeper that exited otherwise, is never
+    /// dropped here, since its lead would then read a gone socket as no server and its end
+    /// as confirmed; a lead's end takes it out (`end_kept_server`, and `kill` through
+    /// `end_mates_keeper`).
     /// Takes the lead, its socket, which server and whether the lead is relayed. Returns
     /// whether a keeper started now, `terminal_folder_unsafe` for a socket path that is not
     /// this user's socket, or `terminal_unavailable`.
@@ -326,7 +337,13 @@ impl Servers {
                 let _ = earlier.wait();
             }
             if keepers.len() >= LEADS_KEPT_MAX {
-                keepers.retain(|_, keeper| !ended_cleanly(keeper));
+                keepers.retain(|known, keeper| {
+                    let spent = ended_cleanly(keeper)
+                        || (mates
+                            && !keeper_runs(keeper)
+                            && teammates_socket_gone(&self.root, known));
+                    !spent
+                });
             }
             if keepers.len() >= LEADS_KEPT_MAX {
                 return Err(failure("terminal_unavailable"));
@@ -414,10 +431,11 @@ impl Servers {
     }
 
     /// Ends a native lead's teammates' server through the keeper this engine started it
-    /// under, as a start that failed after it does: the keeper's warden kills every process
-    /// in the teammates' sandbox. It waits for a start in progress, so no start counts the
-    /// map while this keeper is out of it. Takes the lead. Returns whether the keeper
-    /// confirmed in time; false when none is known.
+    /// under, as a start that failed after it does and as a kill of the lead does: the
+    /// keeper's warden kills every process in the teammates' sandbox. The keeper leaves the
+    /// map unless it still runs, also after an exit that confirmed nothing. It waits for a
+    /// start in progress, so no start counts the map while this keeper is out of it. Takes
+    /// the lead. Returns whether the keeper confirmed in time; false when none is known.
     fn end_mates_keeper(&self, lead: &AgentId) -> bool {
         let _start = self
             .starts
@@ -779,6 +797,53 @@ impl Servers {
             _ => Ok(()),
         }
     }
+    /// Ends an agent's terminal on the servers that hold it: a lead's own server and its
+    /// teammates' server whole, forgetting their clients, else its pane as an adopted
+    /// teammate, on the engine's server, or on a listening lead's server that holds it.
+    /// Takes the agent. Returns Ok once it ended, `terminal_agent_unknown` when no server
+    /// holds it, or the failure.
+    fn kill_routed(&self, agent: &AgentId) -> Result<(), HostError> {
+        let mates = self.mates(agent)?;
+        if let Some(server) = self.own(agent)? {
+            server.close(&[])?;
+            if let Some(mates) = mates {
+                mates.close(&[])?;
+            }
+            self.forget(agent);
+            return Ok(());
+        }
+        if let Some(mates) = mates {
+            mates.close(&[])?;
+            self.forget(agent);
+            return Ok(());
+        }
+        if let Some(server) = self.member(agent)? {
+            return server.kill(agent);
+        }
+        match self.engine.kill(agent) {
+            Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+            done => return done,
+        }
+        let mut ended = false;
+        for lead in self.leads_listening() {
+            let server = match self.team_mates(&lead) {
+                Ok(Some(mates)) => Some(mates),
+                Ok(None) => self.own(&lead).ok().flatten(),
+                Err(_) => None,
+            };
+            if let Some(server) = server
+                && server.holds(agent)
+                && server.kill(agent).is_ok()
+            {
+                ended = true;
+            }
+        }
+        if ended {
+            Ok(())
+        } else {
+            Err(failure("terminal_agent_unknown"))
+        }
+    }
 }
 
 impl Host for Servers {
@@ -867,47 +932,22 @@ impl Host for Servers {
         Ok(())
     }
 
+    /// Ends an agent's terminal as [`Self::kill_routed`] does, then, for a native lead whose
+    /// teammates' keeper this engine holds, ends that keeper through
+    /// [`Self::end_mates_keeper`] whatever the kill answered, as a lead's end takes its own
+    /// keeper out (`end_kept_server`): no later start of an ended lead replaces it, so one that
+    /// exited without confirming its end would stay for the engine's life (MRR2-1). The kill's
+    /// answer is kept. Takes the agent. Returns that answer.
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
-        let mates = self.mates(agent)?;
-        if let Some(server) = self.own(agent)? {
-            server.close(&[])?;
-            if let Some(mates) = mates {
-                mates.close(&[])?;
-            }
-            self.forget(agent);
-            return Ok(());
+        let killed = self.kill_routed(agent);
+        if self
+            .mates_keepers
+            .lock()
+            .is_ok_and(|keepers| keepers.contains_key(agent))
+        {
+            let _ = self.end_mates_keeper(agent);
         }
-        if let Some(mates) = mates {
-            mates.close(&[])?;
-            self.forget(agent);
-            return Ok(());
-        }
-        if let Some(server) = self.member(agent)? {
-            return server.kill(agent);
-        }
-        match self.engine.kill(agent) {
-            Err(problem) if problem.0 == "terminal_agent_unknown" => {}
-            done => return done,
-        }
-        let mut ended = false;
-        for lead in self.leads_listening() {
-            let server = match self.team_mates(&lead) {
-                Ok(Some(mates)) => Some(mates),
-                Ok(None) => self.own(&lead).ok().flatten(),
-                Err(_) => None,
-            };
-            if let Some(server) = server
-                && server.holds(agent)
-                && server.kill(agent).is_ok()
-            {
-                ended = true;
-            }
-        }
-        if ended {
-            Ok(())
-        } else {
-            Err(failure("terminal_agent_unknown"))
-        }
+        killed
     }
 
     fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
