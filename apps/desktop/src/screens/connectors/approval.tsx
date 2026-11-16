@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { APPROVAL_PAGE, answerApproval, answeredLine, approvalLines, loadApproval, timeLeft, type ApprovalView } from "../../api-connectors";
+import { APPROVAL_PAGE, answerApproval, answeredLine, approvalLines, loadApproval, shownState, timeLeft, type ApprovalView } from "../../api-connectors";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, NotReady, Notice, PageHeader, Skeleton } from "../../ui";
 
@@ -13,9 +13,9 @@ export interface ApprovalActions {
 }
 
 /** The approval page for one connector write: what asks and what it sends as plain text,
- * the time left with Allow and Deny while it waits, else where it stands, and the full
- * arguments in a closed fold. Inputs: the approval as read, now in epoch milliseconds, a
- * busy flag, the last failure and the actions. Output: the page. */
+ * the time left with Allow and Deny while it waits and its wait has not run out, else where
+ * it stands, and the full arguments in a closed fold. Inputs: the approval as read, now in
+ * epoch milliseconds, a busy flag, the last failure and the actions. Output: the page. */
 export function ApprovalPageView({ view, now, busy, failure, actions }: {
   view: Loaded<ApprovalView>;
   now: number;
@@ -28,19 +28,20 @@ export function ApprovalPageView({ view, now, busy, failure, actions }: {
   if (view.kind === "not_ready") return <>{top}<NotReady what={APPROVAL_PAGE.title} /></>;
   if (view.kind === "error") return <>{top}<LoadError message={view.message} onRetry={actions.onRetry} /></>;
   const approval = view.value;
+  const state = shownState(approval, now);
   return <>
     {top}
     <div className="stack">
       {failure && <Notice tone="danger" alert>{failure}</Notice>}
       {approval.hidden && <Notice>{APPROVAL_PAGE.hidden}</Notice>}
       <ul className="pj-rows" aria-label={APPROVAL_PAGE.title}>{approvalLines(approval).map((line) => <li key={line}>{line}</li>)}</ul>
-      {approval.state === "waiting"
+      {state === "waiting"
         ? <div className="pj-row">
           <span>{`Time left: ${timeLeft(now, approval.expires_ms)}`}</span>
           <Button variant="primary" disabled={busy} onClick={() => actions.onAnswer(true)}>{APPROVAL_PAGE.allow}</Button>
           <Button variant="danger" disabled={busy} onClick={() => actions.onAnswer(false)}>{APPROVAL_PAGE.deny}</Button>
         </div>
-        : <p>{answeredLine(approval)}</p>}
+        : <p>{answeredLine({ ...approval, state })}</p>}
       <details className="set-body"><summary>{APPROVAL_PAGE.fold}</summary><pre className="mono small">{approval.arguments}</pre></details>
     </div>
   </>;

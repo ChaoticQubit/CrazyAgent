@@ -532,8 +532,7 @@ export function timeLeft(nowMs: number, expiresMs: number): string {
  * as expired, since the engine refuses an answer from then on. Inputs: the approval and now
  * in epoch milliseconds. Output: the state to show. */
 export function shownState(approval: ApprovalView, now: number): ApprovalState {
-  void now;
-  return approval.state;
+  return approval.state === "waiting" && now >= approval.expires_ms ? "expired" : approval.state;
 }
 
 /** Where an answered write stands: "Allowed <stamp>", "Denied <stamp>" or "Expired".
