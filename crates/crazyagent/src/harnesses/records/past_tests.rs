@@ -625,3 +625,33 @@ fn each_refused_import_setting_names_its_setting() {
     let empty = manifest_of("screen", "import:\n  conversations: null\n", "", "");
     assert_eq!(import(&empty, &home.path()), Ok(Imported::default()));
 }
+
+/// rv-sa241 RULING-19:21-t20-q1 residual: a relay token a tool printed into a conversation,
+/// `crazyagent-relay-` and 64 lowercase hex digits, never reaches the record set, whatever
+/// follows it; a shorter token, an upper-case one and a bare prefix stay as written.
+#[test]
+fn a_relay_token_in_an_imported_message_is_redacted() {
+    let home = Home::new();
+    let token = format!("crazyagent-relay-{}", "a1".repeat(32));
+    let short = format!("crazyagent-relay-{}", "a".repeat(63));
+    let upper = format!("crazyagent-relay-{}", "A".repeat(64));
+    let typed = format!("KEY={token} and {token}f; {short}; {upper}; crazyagent-relay-");
+    let session = [
+        claude("user", json!(typed)),
+        claude("assistant", json!(format!("saw {token}"))),
+    ];
+    home.write(".standin/s/a.jsonl", &lines(&session), OLD);
+
+    let imported = import(&sessions(".standin/s/*.jsonl"), &home.path()).unwrap();
+    let kept = format!(
+        "KEY={RELAY_REDACTED} and {RELAY_REDACTED}f; {short}; {upper}; crazyagent-relay-"
+    );
+    let reply = format!("saw {RELAY_REDACTED}");
+    assert_eq!(
+        said(&imported),
+        [vec![
+            (Speaker::Input, kept.as_str()),
+            (Speaker::Agent, reply.as_str())
+        ]]
+    );
+}

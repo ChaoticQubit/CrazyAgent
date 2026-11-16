@@ -23,6 +23,9 @@ pub const TOO_LARGE: &str = "import_record_too_large";
 pub const BROKEN: &str = "import_record_broken";
 /// A record that could be read and holds no message.
 pub const EMPTY: &str = "import_record_empty";
+/// What stands in imported text for a relay token, `crazyagent-relay-` and 64 lowercase hex
+/// digits, which a tool the harness ran may have printed into a conversation.
+pub const RELAY_REDACTED: &str = "crazyagent-relay-[redacted]";
 
 /// How much one import reads: records, folder entries scanned, bytes of one record, bytes of
 /// one line, messages of one conversation and bytes in all.
