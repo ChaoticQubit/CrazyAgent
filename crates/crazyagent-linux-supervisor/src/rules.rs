@@ -217,6 +217,31 @@ impl GitOwn {
     }
 }
 
+/// The entries an agent may not write, truncate, move, link or remove (DEC-185 S2): each
+/// path in `entries`, and each path in `trees` with everything below it. Paths are real and
+/// absolute, as the engine names them from the launch's guarded list.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Held {
+    pub entries: Vec<PathBuf>,
+    pub trees: Vec<PathBuf>,
+}
+
+impl Held {
+    /// Tells whether a path is held. Input: the real, absolute path of an entry, its folder
+    /// resolved. Output: true for an entry, a path in a tree, and any path not in that form.
+    pub fn holds(&self, real: &Path) -> bool {
+        let _ = real;
+        false
+    }
+
+    /// Tells whether moving a path away would carry a held entry with it. Input: the real,
+    /// absolute source path. Output: true when it is held or a folder above a held entry.
+    pub fn pins(&self, real: &Path) -> bool {
+        let _ = real;
+        false
+    }
+}
+
 /// Whom a signal call names: one process, one process group, the caller's own group, or
 /// every process the caller may signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -689,6 +714,71 @@ mod tests {
         }
         assert!(!moved("work/project/src"), "not a real path");
         assert!(GitOwn::default().moves(Path::new("/work/project")));
+    }
+
+    fn held() -> Held {
+        Held {
+            entries: vec![
+                PathBuf::from("/p/.git/worktrees/a/HEAD"),
+                PathBuf::from("/p/.git/worktrees/a/commondir"),
+                PathBuf::from("/p/worktrees/a/.git"),
+            ],
+            trees: vec![PathBuf::from("/p/.git/worktrees/a/modules")],
+        }
+    }
+
+    #[test]
+    fn a_held_entry_and_everything_in_a_held_tree_is_held_and_a_neighbour_is_not() {
+        let held = held();
+        for path in [
+            "/p/.git/worktrees/a/HEAD",
+            "/p/.git/worktrees/a/commondir",
+            "/p/worktrees/a/.git",
+            "/p/.git/worktrees/a/modules",
+            "/p/.git/worktrees/a/modules/sub/config",
+        ] {
+            assert!(held.holds(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/p/.git/worktrees/a/HEAD.lock",
+            "/p/.git/worktrees/a/HEADS",
+            "/p/.git/worktrees/a/modulesx",
+            "/p/.git/worktrees/a/index",
+            "/p/worktrees/a/.gitignore",
+            "/p/worktrees/a/src/.git",
+        ] {
+            assert!(!held.holds(Path::new(path)), "{path}");
+        }
+        for path in ["p/.git/worktrees/a/index", "/p/.git/worktrees/b/../a/index"] {
+            assert!(held.holds(Path::new(path)), "{path} is not a real path");
+        }
+        assert!(!Held::default().holds(Path::new("/p/.git/worktrees/a/HEAD")));
+    }
+
+    #[test]
+    fn a_held_entry_or_a_folder_above_one_is_never_moved_away() {
+        let held = held();
+        for path in [
+            "/p/.git/worktrees/a",
+            "/p/.git/worktrees",
+            "/p/worktrees/a",
+            "/p",
+            "/",
+            "/p/.git/worktrees/a/modules",
+            "/p/.git/worktrees/a/modules/sub",
+            "/p/.git/worktrees/a/HEAD",
+        ] {
+            assert!(held.pins(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/p/worktrees/a/src",
+            "/p/.git/worktrees/a/index",
+            "/p/.git/worktrees/a/index.lock",
+            "/p/worktrees/b",
+        ] {
+            assert!(!held.pins(Path::new(path)), "{path}");
+        }
+        assert!(held.pins(Path::new("p/worktrees/a/src")), "not a real path");
     }
 
     #[test]

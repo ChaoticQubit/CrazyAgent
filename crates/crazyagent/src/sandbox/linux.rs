@@ -295,6 +295,7 @@ impl Guard {
             reach: Some(reach).filter(|_| !self.loopback.is_empty()),
             git: self.git.clone(),
             signals: self.signals,
+            held: None,
         }
     }
 }

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use crate::filter::{self, Call, Calls, Guards};
-use crate::rules::{self, Dest, GitOwn, Reach, Target};
+use crate::rules::{self, Dest, GitOwn, Held, Reach, Target};
 use crate::sys::{self, Notice};
 use rustix::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, RenameFlags};
@@ -31,13 +31,14 @@ const F_OWNER_PGRP: i32 = 2;
 const CREAT_FLAGS: u64 = 0o1101;
 
 /// What one agent's supervisor holds: the ports it may reach and where, when its connects
-/// are guarded; its own git folders, when new entries are guarded; and whether its
-/// signals stay inside the programs it started.
+/// are guarded; its own git folders, when new entries are guarded; whether its signals
+/// stay inside the programs it started; and the entries it may not change (DEC-185 S2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Supervised {
     pub reach: Option<Reach>,
     pub git: Option<GitOwn>,
     pub signals: bool,
+    pub held: Option<Held>,
 }
 
 impl Supervised {
@@ -47,6 +48,7 @@ impl Supervised {
             connect: self.reach.is_some(),
             create: self.git.is_some(),
             signal: self.signals,
+            held: self.held.is_some(),
         }
     }
 }

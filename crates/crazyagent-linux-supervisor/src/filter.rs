@@ -9,7 +9,9 @@ pub const ERRNO: u32 = 0x0005_0000;
 pub const X32_BIT: u32 = 0x4000_0000;
 pub const ENOSYS: u32 = 38;
 pub const EOPNOTSUPP: u32 = 95;
+pub const EPERM: u32 = 1;
 pub const O_CREAT: u32 = 0o100;
+pub const O_WRITES: u32 = 0o1103;
 pub const MSG_FASTOPEN: u32 = 0x2000_0000;
 pub const F_SETOWN: u32 = 8;
 pub const F_SETOWN_EX: u32 = 15;
@@ -59,6 +61,11 @@ pub enum Call {
     Rename,
     Renameat,
     Renameat2,
+    Unlink,
+    Unlinkat,
+    Rmdir,
+    Truncate,
+    OpenByHandleAt,
     Kill,
     Tkill,
     Tgkill,
@@ -84,6 +91,10 @@ pub const CREATING: [Call; 12] = [
     Call::Renameat,
     Call::Renameat2,
 ];
+
+/// The calls that remove an entry or cut a file by its name, which a held entry never
+/// allows (DEC-185 S2).
+pub const REMOVING: [Call; 4] = [Call::Unlink, Call::Unlinkat, Call::Rmdir, Call::Truncate];
 
 /// The calls that send a signal to a process, a thread or a process group.
 pub const SIGNALLING: [Call; 6] = [
@@ -117,10 +128,13 @@ impl Calls {
             (Call::Sendmsg, 46),
             (Call::Kill, 62),
             (Call::Fcntl, 72),
+            (Call::Truncate, 76),
             (Call::Rename, 82),
             (Call::Mkdir, 83),
+            (Call::Rmdir, 84),
             (Call::Creat, 85),
             (Call::Link, 86),
+            (Call::Unlink, 87),
             (Call::Symlink, 88),
             (Call::RtSigqueueinfo, 129),
             (Call::Mknod, 133),
@@ -129,10 +143,12 @@ impl Calls {
             (Call::Openat, 257),
             (Call::Mkdirat, 258),
             (Call::Mknodat, 259),
+            (Call::Unlinkat, 263),
             (Call::Renameat, 264),
             (Call::Linkat, 265),
             (Call::Symlinkat, 266),
             (Call::RtTgsigqueueinfo, 297),
+            (Call::OpenByHandleAt, 304),
             (Call::Sendmmsg, 307),
             (Call::Renameat2, 316),
             (Call::PidfdSendSignal, 424),
@@ -148,9 +164,11 @@ impl Calls {
             (Call::Ioctl, 29),
             (Call::Mknodat, 33),
             (Call::Mkdirat, 34),
+            (Call::Unlinkat, 35),
             (Call::Symlinkat, 36),
             (Call::Linkat, 37),
             (Call::Renameat, 38),
+            (Call::Truncate, 45),
             (Call::Openat, 56),
             (Call::Kill, 129),
             (Call::Tkill, 130),
@@ -160,6 +178,7 @@ impl Calls {
             (Call::Sendto, 206),
             (Call::Sendmsg, 211),
             (Call::RtTgsigqueueinfo, 240),
+            (Call::OpenByHandleAt, 265),
             (Call::Sendmmsg, 269),
             (Call::Renameat2, 276),
             (Call::PidfdSendSignal, 424),
@@ -193,13 +212,15 @@ impl Calls {
 }
 
 /// Which guards an agent's filter carries: the connect guard (a port on this computer is
-/// reached on loopback only), the create guard (no new `.git` entry) and the signal guard
-/// (signals stay inside the agent).
+/// reached on loopback only), the create guard (no new `.git` entry), the signal guard
+/// (signals stay inside the agent) and the held guard (no write, move, link or removal of
+/// a held entry, DEC-185 S2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Guards {
     pub connect: bool,
     pub create: bool,
     pub signal: bool,
+    pub held: bool,
 }
 
 /// What a rule asks of a call's arguments, read from the registers only: nothing, any bit
@@ -369,14 +390,18 @@ mod tests {
         connect: true,
         create: true,
         signal: true,
+        held: false,
     };
 
+    const HELD: Guards = Guards { held: true, ..ALL };
+
     fn every_guard_set() -> Vec<Guards> {
-        (0..8u8)
+        (0..16u8)
             .map(|bits| Guards {
                 connect: bits & 1 != 0,
                 create: bits & 2 != 0,
                 signal: bits & 4 != 0,
+                held: bits & 8 != 0,
             })
             .collect()
     }
@@ -430,10 +455,13 @@ mod tests {
             for guards in every_guard_set() {
                 let on = |held: bool, action| if held { action } else { ALLOW };
                 for (call, _) in calls.numbers {
+                    let names = guards.create || guards.held;
                     let wanted = match call {
                         Call::Connect => on(guards.connect, NOTIFY),
-                        Call::Openat2 => on(guards.create, ERRNO | ENOSYS),
-                        call if CREATING.contains(call) => on(guards.create, NOTIFY),
+                        Call::Openat2 => on(names, ERRNO | ENOSYS),
+                        Call::OpenByHandleAt => on(guards.held, ERRNO | EPERM),
+                        call if CREATING.contains(call) => on(names, NOTIFY),
+                        call if REMOVING.contains(call) => on(guards.held, NOTIFY),
                         call if SIGNALLING.contains(call) => on(guards.signal, NOTIFY),
                         _ => ALLOW,
                     };
@@ -492,6 +520,85 @@ mod tests {
                 ..ALL
             };
             assert_eq!(told(&calls, unguarded, nr, [0, 0, create, 0, 0, 0]), ALLOW);
+        }
+    }
+
+    #[test]
+    fn a_held_guard_traps_every_open_that_may_write_and_lets_a_read_run() {
+        let writes = [0o1, 0o2, 0o1000, u64::from(O_CREAT), 0o2000 | 0o1];
+        let reads = [0, 0o2000, 0o200000, 0o4000, 0o10000000];
+        for calls in [Calls::X86_64, Calls::AARCH64] {
+            let nr = calls.number(Call::Openat).unwrap();
+            let openat = |guards, flags| told(&calls, guards, nr, [0, 0, flags, 0, 0, 0]);
+            for flags in writes {
+                assert_eq!(openat(HELD, flags), NOTIFY, "{flags:#o}");
+                assert_eq!(
+                    openat(
+                        Guards {
+                            held: false,
+                            ..HELD
+                        },
+                        flags
+                    ),
+                    on_create(flags),
+                    "{flags:#o}"
+                );
+            }
+            for flags in reads {
+                assert_eq!(openat(HELD, flags), ALLOW, "{flags:#o}");
+            }
+            let handle = calls.number(Call::OpenByHandleAt).unwrap();
+            assert_eq!(told(&calls, HELD, handle, [0; 6]), ERRNO | EPERM);
+            assert_eq!(told(&calls, ALL, handle, [0; 6]), ALLOW);
+            for call in REMOVING {
+                if let Some(nr) = calls.number(call) {
+                    assert_eq!(told(&calls, HELD, nr, [0; 6]), NOTIFY, "{call:?}");
+                    assert_eq!(told(&calls, ALL, nr, [0; 6]), ALLOW, "{call:?}");
+                }
+            }
+        }
+        let open = |guards, flags| told(&Calls::X86_64, guards, 2, [0, flags, 0, 0, 0, 0]);
+        assert_eq!(
+            open(HELD, 0o1),
+            NOTIFY,
+            "open's flags are its second register"
+        );
+        assert_eq!(open(HELD, 0), ALLOW);
+        let held_only = Guards {
+            held: true,
+            ..Guards::default()
+        };
+        for call in CREATING {
+            if let Some(nr) = Calls::X86_64.number(call) {
+                assert_eq!(
+                    told(&Calls::X86_64, held_only, nr, [0; 6]),
+                    NOTIFY,
+                    "{call:?}"
+                );
+            }
+        }
+    }
+
+    fn on_create(flags: u64) -> u32 {
+        if flags & u64::from(O_CREAT) != 0 {
+            NOTIFY
+        } else {
+            ALLOW
+        }
+    }
+
+    #[test]
+    fn the_held_calls_carry_the_numbers_the_kernel_gives_them() {
+        let pinned = [
+            (Call::Unlink, Some(87), None),
+            (Call::Unlinkat, Some(263), Some(35)),
+            (Call::Rmdir, Some(84), None),
+            (Call::Truncate, Some(76), Some(45)),
+            (Call::OpenByHandleAt, Some(304), Some(265)),
+        ];
+        for (call, x86, arm) in pinned {
+            assert_eq!(Calls::X86_64.number(call), x86, "{call:?}");
+            assert_eq!(Calls::AARCH64.number(call), arm, "{call:?}");
         }
     }
 
@@ -563,6 +670,8 @@ mod tests {
             Call::Symlink,
             Call::Link,
             Call::Rename,
+            Call::Unlink,
+            Call::Rmdir,
         ];
         for call in absent {
             assert_eq!(arm.number(call), None, "{call:?}");
