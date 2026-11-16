@@ -57,12 +57,14 @@ impl Key {
     }
 }
 
-/// One step of a harness's first screen: the text the engine waits to see on the screen
-/// and the key it then presses, once.
+/// One step of a harness's first screen: the text the engine waits to see on the screen,
+/// the key it then presses, once, and whether the step is optional: pressed when its text
+/// shows, never waited for, as a screen a harness shows only on its first run in a home.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Step {
     pub seen: String,
     pub press: Key,
+    pub optional: bool,
 }
 
 /// The terminal settings of a harness whose live terminal the engine runs from its
@@ -398,7 +400,11 @@ fn steps(terminal: &Yaml) -> Result<Vec<Step>, Refused> {
                 format!("{place}.press: this setting is needed."),
             );
         };
-        steps.push(Step { seen, press });
+        steps.push(Step {
+            seen,
+            press,
+            optional: false,
+        });
     }
     assert!(!steps.is_empty() && steps.len() <= STEPS_MAX);
     Ok(steps)

@@ -206,6 +206,66 @@ fn a_session_id_that_is_no_plain_word_is_refused_before_it_reaches_a_path() {
     assert!(Pattern::read(&standin, &home.path(), &longest).is_ok());
 }
 
+/// DEC-180 Task 16 r2 (T16-2): a session id is safe in a path and in arguments only as a
+/// plain word that starts with a letter or digit, so no id can read as an option.
+#[test]
+fn a_session_id_is_shaped_only_as_a_plain_word_that_starts_with_a_letter_or_digit() {
+    for odd in ["", "-", "--exec", "-x", "_x", "a b", "a.b", "a/b"] {
+        assert!(!session_shaped(odd), "{odd:?}");
+    }
+    assert!(!session_shaped(&"a".repeat(SESSION_BYTES_MAX + 1)));
+    for plain in ["s", "standin-1", "0f0e5c1e-3a5b", "A_b-9"] {
+        assert!(session_shaped(plain), "{plain}");
+    }
+    assert!(session_shaped(&"a".repeat(SESSION_BYTES_MAX)));
+}
+
+/// DEC-180 Task 16 r2 (T16-1): a run whose harness picks its own session id matches any
+/// name where `{session}` stands and reads the id back from the record's place, past a
+/// `**` too. A place the path does not fit, an id that is no plain word, or a path that
+/// holds `{session}` twice or beside another wildcard names none.
+#[test]
+fn a_harness_s_own_session_id_is_read_back_from_the_record_s_place() {
+    let home = Home::new();
+    let path = home.path();
+    let learning = |written: &str| Pattern::learning(&manifest_with(written), &path);
+    let standin = learning(STANDIN_PATH);
+    assert!(standin.is_ok(), "{standin:?}");
+    let standin = standin.unwrap();
+    let own = home.write("standin/records/standin-1.jsonl", "", NEW);
+    let found = standin.newest(&[]);
+    assert!(found.is_some());
+    let (_, below, _) = found.unwrap();
+    assert_eq!(standin.full(&below), own);
+    assert_eq!(standin.session_of(&own).as_deref(), Some("standin-1"));
+    let odd = [
+        "standin/records/-exec.jsonl",
+        "standin/records/a.b.jsonl",
+        "standin/records/standin-1.json",
+        "other/standin-1.jsonl",
+        "standin/records/x/standin-1.jsonl",
+    ];
+    for below in odd {
+        assert_eq!(standin.session_of(&path.join(below)), None, "{below}");
+    }
+    let outside = Path::new("/elsewhere/standin/records/s.jsonl");
+    assert_eq!(standin.session_of(outside), None);
+    let deep = learning("{home}/agent/**/run-{session}.jsonl").unwrap();
+    for below in ["agent/2026/11/run-abc.jsonl", "agent/run-abc.jsonl"] {
+        let learned = deep.session_of(&path.join(below));
+        assert_eq!(learned.as_deref(), Some("abc"), "{below}");
+    }
+    assert_eq!(deep.session_of(&path.join("other/run-abc.jsonl")), None);
+    let unclear = [
+        ("{home}/{session}/{session}.jsonl", "x/x.jsonl"),
+        ("{home}/a/*-{session}.jsonl", "a/1-x.jsonl"),
+    ];
+    for (written, below) in unclear {
+        let pattern = learning(written).unwrap();
+        assert_eq!(pattern.session_of(&path.join(below)), None, "{written}");
+    }
+}
+
 #[test]
 fn a_wildcard_stands_for_any_run_of_characters_within_one_name() {
     assert!(fits("*_s.jsonl", "2026-11-15_s.jsonl"));

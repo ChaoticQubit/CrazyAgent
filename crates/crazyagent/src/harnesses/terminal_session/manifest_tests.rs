@@ -240,6 +240,148 @@ fn a_first_screen_never_shown_fails_the_first_prompt_with_a_plain_reason() {
     assert_eq!(session.send("hello"), missing);
     assert!(asked.elapsed() >= READY_WAIT);
     assert_eq!(standin.log("stdin-1"), "");
+    let plain = first_screen_missing("Stand-in JSON lines record", "Trust this folder?");
+    assert_eq!(session.first_screen_reason(), Some(plain));
+}
+
+/// Sets up the jsonl-append stand-in with one piece of its manifest changed. Inputs: the
+/// piece, which the manifest holds once, its replacement and whether the stand-in shows
+/// its first screen. Output: the stand-in, not started.
+fn changed(piece: &str, with: &str, first_screen: bool) -> Standin {
+    assert_eq!(APPEND.matches(piece).count(), 1, "{piece}");
+    let text = APPEND.replace(piece, with);
+    let read = TerminalSettings::read(&manifest::parse(text.as_bytes()).unwrap());
+    assert!(read.is_ok(), "{read:?}");
+    Standin {
+        settings: read.unwrap(),
+        ..standin("jsonl-append", first_screen)
+    }
+}
+
+/// DEC-180 Task 16 r2 (T16-1): a stand-in whose arguments name no session picks its own
+/// id. Its run reports none at start, keeps no pane record and offers no resume until its
+/// record shows; the record's file name then names the conversation, and a resume carries
+/// that id.
+#[test]
+fn a_stand_in_that_picks_its_own_session_id_is_named_by_its_record_and_resumed_by_it() {
+    let standin = changed("    - \"--session\"\n    - \"{session}\"\n", "", true);
+    for (turn, text) in [(1, "one"), (2, "two")] {
+        let record = [
+            json!({"type": "started"}),
+            json!({"type": "text", "delta": text}),
+            json!({"type": "done"}),
+        ];
+        standin.put(&format!("turn-{turn}.jsonl"), &jsonl(&record));
+    }
+    let mut first = standin.start("manifest-own-id", None);
+    let started = first.next_event(Duration::from_secs(1)).unwrap();
+    let unnamed = LaunchEvent::Ready {
+        native_session: None,
+    };
+    assert_eq!(started, Some(unnamed));
+    assert_eq!(first.conversation(), None);
+    assert!(first.record().is_none());
+    first.send("one").unwrap();
+    assert_eq!(turn(&mut first), [said("one"), DONE]);
+    let record = standin.home.join("standin/records/standin-1.jsonl");
+    let conversation = Resume {
+        id: "standin-1".to_owned(),
+        record,
+    };
+    assert_eq!(first.conversation().as_ref(), Some(&conversation));
+    drop(first);
+    let mut second = standin.start("manifest-own-id-again", Some(&conversation));
+    assert_eq!(ready(&mut second), conversation.id);
+    second.send("two").unwrap();
+    assert_eq!(turn(&mut second), [said("two"), DONE]);
+    let home = standin.home_text();
+    assert_eq!(standin.argv(1), ["--home", home.as_str()]);
+    let resumed = ["--home", home.as_str(), "--resume", "standin-1"];
+    assert_eq!(standin.argv(2), resumed);
+}
+
+/// DEC-180 Task 16 r2 (T16-5): a first screen that keeps changing, as a spinner does, is
+/// answered once its text shows, without waiting for the screen to go quiet.
+#[test]
+fn a_first_screen_that_keeps_changing_is_answered_once_its_text_shows() {
+    let standin = standin("jsonl-append", false);
+    standin.put("first-screen.out", "Trust this folder?\n@standin tick\n");
+    let record = [
+        json!({"type": "started"}),
+        json!({"type": "text", "delta": "hello back"}),
+        json!({"type": "done"}),
+    ];
+    standin.put("turn.jsonl", &jsonl(&record));
+    let mut session = standin.start("manifest-ticking", None);
+    ready(&mut session);
+    let asked = Instant::now();
+    assert_eq!(session.send("hello"), Ok(()));
+    assert!(asked.elapsed() < READY_WAIT);
+    assert_eq!(turn(&mut session), [said("hello back"), DONE]);
+    let typed = standin.log("stdin-1");
+    let lines: Vec<&str> = typed.lines().collect();
+    assert_eq!(lines.len(), 2, "{typed:?}");
+    assert_eq!(lines[0], "", "{typed:?}");
+    assert!(lines[1].contains("hello"), "{typed:?}");
+}
+
+/// DEC-180 Task 16 r2 (T16-Q1): an optional first-screen step whose text never shows is
+/// passed over, so the needed step after it is answered once, and its key is never pressed.
+#[test]
+fn an_optional_step_never_shown_is_passed_over_for_the_needed_step_after_it() {
+    let theme = concat!(
+        "  first_screen:\n",
+        "    theme:\n",
+        "      seen: \"Pick a theme\"\n",
+        "      press: \"tab\"\n",
+        "      optional: true\n",
+        "    trust:\n",
+    );
+    let standin = changed("  first_screen:\n    trust:\n", theme, true);
+    let record = [
+        json!({"type": "started"}),
+        json!({"type": "text", "delta": "hello back"}),
+        json!({"type": "done"}),
+    ];
+    standin.put("turn.jsonl", &jsonl(&record));
+    let mut session = standin.start("manifest-theme", None);
+    ready(&mut session);
+    assert_eq!(session.send("hello"), Ok(()));
+    assert_eq!(turn(&mut session), [said("hello back"), DONE]);
+    let typed = standin.log("stdin-1");
+    let lines: Vec<&str> = typed.lines().collect();
+    assert_eq!(lines.len(), 2, "{typed:?}");
+    assert_eq!(lines[0], "", "{typed:?}");
+    assert!(lines[1].contains("hello"), "{typed:?}");
+}
+
+/// DEC-180 Task 16 r2 (T16-Q1): an optional first-screen step is pressed once when its
+/// text shows, and a launch whose optional step never shows is never held for it.
+#[test]
+fn an_optional_step_is_pressed_when_shown_and_never_waited_for() {
+    let optional = "      press: \"enter\"\n      optional: true\n";
+    let record = [
+        json!({"type": "started"}),
+        json!({"type": "text", "delta": "hello back"}),
+        json!({"type": "done"}),
+    ];
+    for shown in [true, false] {
+        let standin = changed("      press: \"enter\"\n", optional, shown);
+        standin.put("turn.jsonl", &jsonl(&record));
+        let mut session = standin.start("manifest-optional", None);
+        ready(&mut session);
+        let asked = Instant::now();
+        assert_eq!(session.send("hello"), Ok(()), "shown {shown}");
+        assert!(asked.elapsed() < READY_WAIT, "shown {shown}");
+        assert_eq!(turn(&mut session), [said("hello back"), DONE]);
+        let typed = standin.log("stdin-1");
+        let lines: Vec<&str> = typed.lines().collect();
+        let pressed = usize::from(shown);
+        assert_eq!(lines.len(), pressed + 1, "{typed:?}");
+        let presses = &lines[..pressed];
+        assert!(presses.iter().all(|line| line.is_empty()), "{typed:?}");
+        assert!(lines[pressed].contains("hello"), "{typed:?}");
+    }
 }
 
 /// DEC-180 Task 16: the interrupt key the manifest names, Ctrl-C for the stand-in, stops

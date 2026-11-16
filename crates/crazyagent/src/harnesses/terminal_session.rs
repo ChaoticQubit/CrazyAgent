@@ -57,6 +57,20 @@ fn keys(settings: Option<&TerminalSettings>) -> (&'static [u8], &'static [u8]) {
     })
 }
 
+/// Tells whether a launch failure ends the launch for good, since no later look can mend
+/// it: a first screen its manifest names never showed, or Codex's folder access screen or
+/// its input box never came. Input: the failure. Output: whether it does.
+pub(crate) fn ended_the_launch(problem: &LaunchError) -> bool {
+    codex_folder::ended_the_launch(problem)
+}
+
+/// The plain sentence an owner reads for a launch whose first screen never showed. Inputs:
+/// the harness's name and the text the missing step waits for. Output: the sentence.
+pub(crate) fn first_screen_missing(harness: &str, seen: &str) -> String {
+    let _ = (harness, seen);
+    String::new()
+}
+
 /// A harness running its own interactive app in a terminal pane of the engine's host.
 /// Prompts are typed into the pane; replies, tool use and turn ends are read from the
 /// harness's own session record, never from the screen. Stop or drop ends the pane.
@@ -500,6 +514,13 @@ impl TerminalSession {
         self.reader
             .conversation()
             .map(|(id, record)| Resume { id, record })
+    }
+
+    /// The plain reason this launch is stuck before its first screen: the sentence of
+    /// [`first_screen_missing`] for the needed step it still waits on. Output: the
+    /// sentence, none when no needed step is left.
+    pub fn first_screen_reason(&self) -> Option<String> {
+        None
     }
 
     /// Returns the pane's first process, which leads the process group of the harness.

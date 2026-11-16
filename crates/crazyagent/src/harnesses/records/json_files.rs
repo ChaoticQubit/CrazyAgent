@@ -114,6 +114,15 @@ impl Pattern {
         Ok(Self { home, parts })
     }
 
+    /// Reads a manifest's record path for a run whose harness picks its own session id:
+    /// `{session}` matches any name, and the id is read back from the record found (see
+    /// [`Self::session_of`]). Inputs: the manifest and the absolute private home. Output:
+    /// the pattern, or the refusals of [`Self::read`].
+    pub fn learning(manifest: &Manifest, home: &Path) -> Result<Self, Refused> {
+        let _ = (manifest, home);
+        refused(VALUE, "a harness's own session id is not read back yet")
+    }
+
     /// Lists the files this record path matches, never following a link, looking at no more
     /// than `ENTRIES_SCANNED_MAX` folder entries and no deeper than `DEPTH_MAX` levels.
     /// Only regular files count. Output: each file's place below the home, last change and
@@ -216,6 +225,15 @@ impl Pattern {
         &self.home
     }
 
+    /// Names the session of a record a [`Self::learning`] path found: the text `{session}`
+    /// stands for in the record's place, kept only when the path holds `{session}` once, in
+    /// a part with no other wildcard, the place fits the whole path and the text is a plain
+    /// word (see [`session_shaped`]). Input: the record's full path. Output: the id, or none.
+    pub fn session_of(&self, record: &Path) -> Option<String> {
+        let _ = record;
+        None
+    }
+
     /// The identities of every file this record path matches now, which a reader started
     /// before its harness never takes. Output: the identities.
     pub(super) fn keys(&self) -> Vec<FileKey> {
@@ -264,6 +282,13 @@ impl Pattern {
 fn refused<T>(code: &'static str, problem: &str) -> Result<T, Refused> {
     let message = format!("{SETTING}: {problem}.");
     Err(Refused { code, message })
+}
+
+/// Tells whether a session id is safe in a record path and in a harness's arguments: 1 to
+/// `SESSION_BYTES_MAX` letters, digits, `-` or `_`, the first a letter or digit, so it can
+/// never read as an option. Input: the id. Output: true when it is.
+pub fn session_shaped(session: &str) -> bool {
+    session_fits(session)
 }
 
 fn session_fits(session: &str) -> bool {
