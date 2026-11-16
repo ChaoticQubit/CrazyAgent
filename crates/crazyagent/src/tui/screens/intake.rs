@@ -515,10 +515,20 @@ mod tests {
         };
         let intake = read("api-intake.ts");
         let moved = read("screens/project/move-home.tsx");
+        assert_eq!(
+            copy("home_copy_names_fold"),
+            "Two names in the folder differ only in case or accents, and your projects folder can't keep both. Rename one of them, then try again. The original is untouched."
+        );
+        assert_eq!(
+            copy("home_copy_entry_swapped"),
+            "Something replaced a file or folder in it while it was being copied, so the copy stopped. The original is untouched. Try again once nothing else is changing the folder."
+        );
         for code in [
             "home_add_unverified",
             "home_copy_unverified",
             "home_add_interrupted",
+            "home_copy_names_fold",
+            "home_copy_entry_swapped",
         ] {
             assert_eq!(copy(code), desktop(&intake, code), "{code}");
         }

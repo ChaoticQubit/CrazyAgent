@@ -102,7 +102,13 @@ test("/usage in a project's console opens that project's own Metrics tab, not ev
       assert.ok(Date.now() < deadline, "the engine never kept Live terminal Off");
     }
     const prompt = 'textarea[aria-label="Message the master"]';
-    await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/conversation` });
+    const conversation = `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/conversation`;
+    await page.send("Page.navigate", { url: conversation });
+    for (const deadline = Date.now() + USAGE_MS; ; await pause(POLL_MS)) {
+      const { currentIndex, entries } = await page.send("Page.getNavigationHistory");
+      if (entries[currentIndex]?.url === conversation) break;
+      assert.ok(Date.now() < deadline, `Chrome never committed the move to the Conversation route, so a reload would open ${entries[currentIndex]?.url}`);
+    }
     await page.send("Page.reload");
     for (const deadline = Date.now() + USAGE_MS; ; await pause(POLL_MS * 20)) {
       if (await page.evaluate(`document.querySelector(${JSON.stringify(prompt)}) !== null`).catch(() => false)) break;

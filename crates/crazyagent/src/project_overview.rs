@@ -789,8 +789,21 @@ pub fn offer(
     tab: Tab,
     text: &str,
 ) -> Result<Offered, EngineError> {
-    checked(text)?;
     let _writing = writing();
+    offer_held(db, project, folder, tab, text)
+}
+
+/// [`offer`] for a caller that already holds the one-writer lock, as a run's finish does
+/// for all of its tabs at once. Inputs: the connection, the project, its folder, the tab
+/// and the text. Output: what the text became, or the refusal.
+fn offer_held(
+    db: &Connection,
+    project: &ProjectId,
+    folder: &Path,
+    tab: Tab,
+    text: &str,
+) -> Result<Offered, EngineError> {
+    checked(text)?;
     let place = place(folder)?;
     let now = match found_in(&place, tab) {
         Found::Blocked(_) => return Err(failure(TAB_BLOCKED)),

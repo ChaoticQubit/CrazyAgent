@@ -70,6 +70,7 @@ impl NodeKind {
 /// counts and flags come from its transcript like any other agent's (OQ-8). `message_note`
 /// is its agent row's sentence when the Delivery setting leaves it no way to get messages.
 /// `started_ms` is when the earliest of its running tasks started, none while no task runs on it.
+/// `sees_hidden` marks a running agent that can still open a folder hidden after it started.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: String,
@@ -105,6 +106,8 @@ pub struct GraphNode {
     pub message_note: Option<String>,
     #[serde(default)]
     pub started_ms: Option<i64>,
+    #[serde(default)]
+    pub sees_hidden: bool,
 }
 
 /// Where one handed-out task stands, as the graph draws it.
@@ -489,6 +492,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         hookless: master.is_some_and(|agent| agent.hookless),
         message_note: master.and_then(|agent| agent.message_note.clone()),
         started_ms: master.and_then(|agent| running_since(agent.id)),
+        sees_hidden: master.is_some_and(|agent| agent.sees_hidden),
     }];
     let listed: Vec<&TeamAgent> = status.agents.iter().filter(|agent| shown(agent)).collect();
     let adopted: BTreeSet<(i64, &str)> = status
@@ -552,6 +556,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
             hookless: agent.hookless,
             message_note: agent.message_note.clone(),
             started_ms: running_since(agent.id),
+            sees_hidden: agent.sees_hidden,
         });
         for mate in agent.teammates.iter().filter(|mate| {
             (status.show_finished || !mate.ended)
@@ -588,6 +593,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
                 hookless: agent.hookless,
                 message_note: None,
                 started_ms: None,
+                sees_hidden: false,
             });
         }
     }

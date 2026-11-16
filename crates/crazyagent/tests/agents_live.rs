@@ -81,6 +81,7 @@ fn replied(view: &AgentView) -> bool {
 /// stop. That the harness reports the turn as interrupted is checked at the session level
 /// by harness_launch.rs live_interrupt_stops_a_running_turn_through_the_harness_protocol.
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_codex_and_claude_agents_reply_take_an_interrupt_and_stop_through_the_supervisor() {
     for (harness, base_url) in [("codex", OLLAMA_OPENAI), ("claude-code", OLLAMA_ANTHROPIC)] {
         let root = private_dir("ca-agents-live-");

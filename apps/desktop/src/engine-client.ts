@@ -238,6 +238,7 @@ export function errorMessage(error: unknown): string {
     linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
     linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
     linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+    linux_sandbox_not_full: "This Linux cannot give this agent the full sandbox and the setting 'Refuse agents without the full Linux sandbox' is on, so it does not start. The lines under Agent access say what this Linux lacks. Turn the setting off in Settings to start agents with what this Linux holds.",
     pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
     pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
     pool_name_bounds: "Use a pool name of 1 to 64 characters, without control characters.",
@@ -778,6 +779,7 @@ export interface TeamAgent {
   pane?: string | null;
   hookless?: boolean;
   message_note?: string | null;
+  sees_hidden?: boolean;
 }
 
 /** One teammate a harness split off in its own pane of the harness's terminal: its pane id,
@@ -904,7 +906,7 @@ export interface RoleSkills {
 
 /** How every agent terminal of a project draws, whatever harness runs in it (DEC-141): Classic
  * on the normal screen, so the app's view scrolls with the wheel and a plain drag selects, or
- * Fullscreen, the harness's own view, which takes the mouse. */
+ * Fullscreen, the harness's own view, which takes the mouse, the default. */
 export type TerminalDisplay = "classic" | "fullscreen";
 
 /** Whether the first turn of each task of a team agent carries the Task-start reminder: the
@@ -1299,6 +1301,13 @@ export function teamRename(id: string, agent: number, handle: string, generation
  * commit receipt; an agent that cannot wake is rejected with a plain code. */
 export function teamWakeAgent(id: string, agent: number, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
+}
+
+/** Restarts the project's running agents that can still open a folder hidden after they
+ * started, as one team action. Inputs: project id and a generation. Output: the commit receipt;
+ * with no such agent it is rejected as `team_no_hidden_seers`. */
+export function teamRestartHiddenSeers(id: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_restart_hidden_seers", { id, generation });
 }
 
 /** Changes a project's name, description, stack, platforms, research, pool and team.

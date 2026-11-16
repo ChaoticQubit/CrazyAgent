@@ -1001,14 +1001,9 @@ fn job_report(db: &Connection, folder: &std::path::Path, text: &str) -> String {
     let report = folder.join(".crazyagent").join(&stored);
     std::fs::create_dir_all(report.parent().unwrap()).unwrap();
     std::fs::write(&report, text).unwrap();
-    db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS research_jobs(id INTEGER PRIMARY KEY, project TEXT,
-           kind TEXT, status TEXT, report_path TEXT);",
-    )
-    .unwrap();
     db.execute(
-        "INSERT INTO research_jobs(project,kind,status,report_path)
-         VALUES('alpha','competitor_research','done',?1)",
+        "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
+         VALUES('alpha','competitor_research','codex',0,'done',?1,0)",
         [stored.as_str()],
     )
     .unwrap();
@@ -1068,10 +1063,11 @@ fn competitors_is_the_report_of_the_newest_finished_competitor_research_job() {
     link_competitor_research(&mut db, &project, folder.path(), "docs/competitors.md");
     let stored = job_report(&db, folder.path(), "Gamma leads.\n");
     db.execute_batch(
-        "INSERT INTO research_jobs(project,kind,status,report_path) VALUES
-           ('alpha','competitor_research','running',NULL),
-           ('alpha','market_research','done','context/research/market_research.md'),
-           ('beta','competitor_research','done','context/research/beta.md');",
+        "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
+         VALUES
+           ('alpha','competitor_research','codex',0,'running',NULL,0),
+           ('alpha','market_research','codex',0,'done','context/research/market_research.md',0),
+           ('beta','competitor_research','codex',0,'done','context/research/beta.md',0);",
     )
     .unwrap();
     assert_eq!(
@@ -2278,4 +2274,50 @@ fn an_engine_start_forgets_the_overview_rows_of_projects_that_are_gone() {
     close_orphans(&db).unwrap();
 
     assert_eq!(rows(&db), ["alpha", "alpha"]);
+}
+
+/// A page read that lands while a run ends, after its claim is checked and before its first
+/// tab is written, sees the run still running or wholly ended, never closed as unfinished
+/// with no tab, which stops the desktop page reading (gate race 2, bridge-overview-tabs at
+/// 31fe8b547).
+#[test]
+fn a_page_read_while_a_run_ends_sees_it_running_or_ended_never_half_way() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let (db, page, project, folder) = shared();
+    crate::project_setup::initialize(&db).unwrap();
+    db.execute("INSERT INTO project_setups VALUES ('alpha', '{}')", [])
+        .unwrap();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 1_000).unwrap();
+    assert_eq!(tick(&db, &mut runs, 1_000).unwrap(), 1);
+    let seen: Rc<RefCell<Option<Overview>>> = Rc::new(RefCell::new(None));
+    {
+        let seen = seen.clone();
+        let (project, path) = (project.clone(), folder.path().to_path_buf());
+        BEFORE_REPLACE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                if seen.borrow().is_none() {
+                    let shown = read(&page, &project, &path, 2_000).unwrap();
+                    *seen.borrow_mut() = Some(shown);
+                }
+            }));
+        });
+    }
+    let ended = runs.end(&db, folder.path(), REPLIED, 2_000);
+    BEFORE_REPLACE.with(|hook| *hook.borrow_mut() = None);
+    assert_eq!(ended, 1);
+    let seen = seen.borrow_mut().take().expect("the run wrote a tab");
+    assert!(
+        seen.running || tab_of(&seen, Tab::QuickInfo).text.is_some(),
+        "a read while the run ended saw it closed with no tab: {seen:?}"
+    );
+    assert_ne!(seen.failure.as_deref(), Some(UNFINISHED), "{seen:?}");
+    let done = read(&db, &project, folder.path(), 3_000).unwrap();
+    assert!(!done.running && done.failure.is_none(), "{done:?}");
+    assert_eq!(done.checked_ms, Some(2_000));
+    assert_eq!(
+        tab_of(&done, Tab::QuickInfo).text.as_deref(),
+        Some("Alpha reads papers.\n")
+    );
 }

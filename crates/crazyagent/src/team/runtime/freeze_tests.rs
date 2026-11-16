@@ -77,8 +77,10 @@ impl Proxied {
     }
 
     /// Starts and keeps the pane as [`Proxied::keep`] does, its stand-in killing its warden
-    /// when `kill` says. Inputs: the fixture, the host, the agent, its proxy port and when
-    /// the warden is killed. Output: the pane.
+    /// when `kill` says. The stand-in finds the warden, the shim's `perl` child of its shell,
+    /// with `pgrep`, since the setuid `/bin/ps` cannot start inside `sandbox-exec`. Inputs:
+    /// the fixture, the host, the agent, its proxy port and when the warden is killed.
+    /// Output: the pane.
     fn keep_killing(
         fixture: &Fixture,
         host: &Arc<dyn Host>,
@@ -92,7 +94,7 @@ impl Proxied {
         std::fs::write(&profile, CONFINED_SIGNALS).unwrap();
         let dir = folder.display();
         let warden = format!(
-            "for p in $(/bin/ps -ax -o pid= -o ppid= -o comm= | /usr/bin/awk -v sh=$$ '$2==sh && $3 ~ /perl/ {{print $1}}'); do kill -9 $p && echo $p > '{dir}/warden.killed'; done"
+            "for p in $(/usr/bin/pgrep -P $$ perl); do kill -9 $p && echo $p > '{dir}/warden.killed'; done"
         );
         let (started, dialing) = match kill {
             WardenKill::Never => (String::new(), String::new()),

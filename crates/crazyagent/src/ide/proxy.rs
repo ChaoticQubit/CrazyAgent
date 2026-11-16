@@ -54,8 +54,9 @@ const PAGE_DROPPED: [&str; 5] = [
 
 /// What one project's proxy serves: its own loopback port, the IDE server's port behind it,
 /// the build's [`PRE`] folder, the launch's connection token, which never leaves the engine
-/// except toward the server, the engine's workspace file the workbench is pinned to, and the
-/// processes the open saw listening on the server port once it was ready, unset until then.
+/// except toward the server, the engine's workspace file the workbench is pinned to, the
+/// processes the open saw listening on the server port once it was ready, unset until then,
+/// and the flag the proxy sets once none of them holds that port, so the launch is stopped.
 pub struct Site {
     pub port: u16,
     pub upstream: u16,
@@ -63,6 +64,7 @@ pub struct Site {
     pub token: String,
     pub workspace: String,
     pub served: Arc<std::sync::OnceLock<Vec<i32>>>,
+    pub refused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The template the workbench builds each webview's origin from: every webview gets its own
@@ -107,6 +109,7 @@ pub async fn serve(listener: TcpListener, site: Site) {
     assert_eq!(site.token.len(), 2 * super::token::TOKEN_BYTES);
     assert!(site.workspace.starts_with('/'));
     assert!(site.served.get().is_none_or(|served| !served.is_empty()));
+    assert!(!site.refused.load(std::sync::atomic::Ordering::SeqCst));
     let site = Arc::new(site);
     let mut connections = tokio::task::JoinSet::new();
     loop {
@@ -548,7 +551,8 @@ async fn connection(mut client: TcpStream, site: Arc<Site>) {
 /// Opens one request's connection to the IDE server. Nothing goes upstream before the open
 /// has seen the server ready, and each connection is checked before anything is sent on it
 /// ([`super::server::served_by`]), so a process that took the port after the server exited
-/// gets no request and no token (rv-sa241 LEAD-1). Input: the site. Output: the connection.
+/// gets no request and no token (rv-sa241 LEAD-1), and the site is flagged ([`Site::refused`])
+/// so the launch is stopped. Input: the site. Output: the connection.
 async fn upstream(site: &Site) -> io::Result<TcpStream> {
     let Some(served) = site.served.get() else {
         return Err(io::Error::other("ide_proxy_not_ready"));
@@ -559,9 +563,13 @@ async fn upstream(site: &Site) -> io::Result<TcpStream> {
     )
     .await
     .map_err(|_| io::Error::other("ide_proxy_upstream_timeout"))??;
-    super::server::served_by(site.upstream, served)
-        .await
-        .map_err(|refused| io::Error::other(refused.0))?;
+    if let Err(refused) = super::server::served_by(site.upstream, served).await {
+        if refused.0 == "ide_server_port_taken" {
+            site.refused
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        return Err(io::Error::other(refused.0));
+    }
     assert_eq!(server.peer_addr()?.port(), site.upstream);
     Ok(server)
 }

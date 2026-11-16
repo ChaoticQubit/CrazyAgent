@@ -9,7 +9,9 @@ pub const ERRNO: u32 = 0x0005_0000;
 pub const X32_BIT: u32 = 0x4000_0000;
 pub const ENOSYS: u32 = 38;
 pub const EOPNOTSUPP: u32 = 95;
+pub const EPERM: u32 = 1;
 pub const O_CREAT: u32 = 0o100;
+pub const O_WRITES: u32 = 0o1103;
 pub const MSG_FASTOPEN: u32 = 0x2000_0000;
 pub const F_SETOWN: u32 = 8;
 pub const F_SETOWN_EX: u32 = 15;
@@ -59,6 +61,27 @@ pub enum Call {
     Rename,
     Renameat,
     Renameat2,
+    Unlink,
+    Unlinkat,
+    Rmdir,
+    Truncate,
+    OpenByHandleAt,
+    Chmod,
+    Fchmod,
+    Fchmodat,
+    Fchmodat2,
+    Chown,
+    Fchown,
+    Lchown,
+    Fchownat,
+    Setxattr,
+    Lsetxattr,
+    Fsetxattr,
+    Removexattr,
+    Lremovexattr,
+    Fremovexattr,
+    Setxattrat,
+    Removexattrat,
     Kill,
     Tkill,
     Tgkill,
@@ -83,6 +106,36 @@ pub const CREATING: [Call; 12] = [
     Call::Rename,
     Call::Renameat,
     Call::Renameat2,
+];
+
+/// The calls that remove an entry or cut a file by its name, which a held entry never
+/// allows (DEC-185 S2).
+pub const REMOVING: [Call; 4] = [Call::Unlink, Call::Unlinkat, Call::Rmdir, Call::Truncate];
+
+/// The calls that change a file's mode or owner, which the supervisor makes itself on a
+/// file it judged (DEC-185 S2a). `fchmodat2` is refused instead, so the C library falls
+/// back to these.
+pub const CHANGING: [Call; 7] = [
+    Call::Chmod,
+    Call::Fchmod,
+    Call::Fchmodat,
+    Call::Chown,
+    Call::Fchown,
+    Call::Lchown,
+    Call::Fchownat,
+];
+
+/// The calls that set or remove an extended attribute, refused whole under the held guard
+/// with the answer a filesystem without extended attributes gives (DEC-185 S2a).
+pub const MARKING: [Call; 8] = [
+    Call::Setxattr,
+    Call::Lsetxattr,
+    Call::Fsetxattr,
+    Call::Removexattr,
+    Call::Lremovexattr,
+    Call::Fremovexattr,
+    Call::Setxattrat,
+    Call::Removexattrat,
 ];
 
 /// The calls that send a signal to a process, a thread or a process group.
@@ -117,26 +170,47 @@ impl Calls {
             (Call::Sendmsg, 46),
             (Call::Kill, 62),
             (Call::Fcntl, 72),
+            (Call::Truncate, 76),
             (Call::Rename, 82),
             (Call::Mkdir, 83),
+            (Call::Rmdir, 84),
             (Call::Creat, 85),
             (Call::Link, 86),
+            (Call::Unlink, 87),
             (Call::Symlink, 88),
+            (Call::Chmod, 90),
+            (Call::Fchmod, 91),
+            (Call::Chown, 92),
+            (Call::Fchown, 93),
+            (Call::Lchown, 94),
             (Call::RtSigqueueinfo, 129),
             (Call::Mknod, 133),
+            (Call::Setxattr, 188),
+            (Call::Lsetxattr, 189),
+            (Call::Fsetxattr, 190),
+            (Call::Removexattr, 197),
+            (Call::Lremovexattr, 198),
+            (Call::Fremovexattr, 199),
             (Call::Tkill, 200),
             (Call::Tgkill, 234),
             (Call::Openat, 257),
             (Call::Mkdirat, 258),
             (Call::Mknodat, 259),
+            (Call::Fchownat, 260),
+            (Call::Unlinkat, 263),
             (Call::Renameat, 264),
             (Call::Linkat, 265),
             (Call::Symlinkat, 266),
+            (Call::Fchmodat, 268),
             (Call::RtTgsigqueueinfo, 297),
+            (Call::OpenByHandleAt, 304),
             (Call::Sendmmsg, 307),
             (Call::Renameat2, 316),
             (Call::PidfdSendSignal, 424),
             (Call::Openat2, 437),
+            (Call::Fchmodat2, 452),
+            (Call::Setxattrat, 463),
+            (Call::Removexattrat, 466),
         ],
     };
 
@@ -144,13 +218,25 @@ impl Calls {
         arch: ARCH_AARCH64,
         x32: false,
         numbers: &[
+            (Call::Setxattr, 5),
+            (Call::Lsetxattr, 6),
+            (Call::Fsetxattr, 7),
+            (Call::Removexattr, 14),
+            (Call::Lremovexattr, 15),
+            (Call::Fremovexattr, 16),
             (Call::Fcntl, 25),
             (Call::Ioctl, 29),
             (Call::Mknodat, 33),
             (Call::Mkdirat, 34),
+            (Call::Unlinkat, 35),
             (Call::Symlinkat, 36),
             (Call::Linkat, 37),
             (Call::Renameat, 38),
+            (Call::Truncate, 45),
+            (Call::Fchmod, 52),
+            (Call::Fchmodat, 53),
+            (Call::Fchownat, 54),
+            (Call::Fchown, 55),
             (Call::Openat, 56),
             (Call::Kill, 129),
             (Call::Tkill, 130),
@@ -160,10 +246,14 @@ impl Calls {
             (Call::Sendto, 206),
             (Call::Sendmsg, 211),
             (Call::RtTgsigqueueinfo, 240),
+            (Call::OpenByHandleAt, 265),
             (Call::Sendmmsg, 269),
             (Call::Renameat2, 276),
             (Call::PidfdSendSignal, 424),
             (Call::Openat2, 437),
+            (Call::Fchmodat2, 452),
+            (Call::Setxattrat, 463),
+            (Call::Removexattrat, 466),
         ],
     };
 
@@ -193,13 +283,15 @@ impl Calls {
 }
 
 /// Which guards an agent's filter carries: the connect guard (a port on this computer is
-/// reached on loopback only), the create guard (no new `.git` entry) and the signal guard
-/// (signals stay inside the agent).
+/// reached on loopback only), the create guard (no new `.git` entry), the signal guard
+/// (signals stay inside the agent) and the held guard (no write, move, link or removal of
+/// a held entry, DEC-185 S2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Guards {
     pub connect: bool,
     pub create: bool,
     pub signal: bool,
+    pub held: bool,
 }
 
 /// What a rule asks of a call's arguments, read from the registers only: nothing, any bit
@@ -222,7 +314,9 @@ pub struct Rule {
 
 /// The rules the chosen guards need. A call whose deciding argument lies behind a pointer
 /// is never tested here: it is trapped whole, or refused whole where a trap could not be
-/// served (`openat2`, a send that opens a connection). Input: the guards. Output: the rules.
+/// served (`openat2`, `open_by_handle_at`, `fchmodat2`, the extended attribute calls, a
+/// send that opens a connection). Under the held guard every open that may write is
+/// trapped, not only one that may create. Input: the guards. Output: the rules.
 pub fn rules(guards: Guards) -> Vec<Rule> {
     let mut rules = Vec::new();
     let mut add = |call, test, action| rules.push(Rule { call, test, action });
@@ -236,14 +330,25 @@ pub fn rules(guards: Guards) -> Vec<Rule> {
         add(Call::Sendmsg, opens(2), ERRNO | EOPNOTSUPP);
         add(Call::Sendmmsg, opens(3), ERRNO | EOPNOTSUPP);
     }
-    if guards.create {
-        let creates = |arg| Test::AnySet { arg, mask: O_CREAT };
+    if guards.create || guards.held {
+        let mask = if guards.held { O_WRITES } else { O_CREAT };
+        let opens = |arg| Test::AnySet { arg, mask };
         for call in CREATING {
             add(call, Test::Always, NOTIFY);
         }
-        add(Call::Open, creates(1), NOTIFY);
-        add(Call::Openat, creates(2), NOTIFY);
+        add(Call::Open, opens(1), NOTIFY);
+        add(Call::Openat, opens(2), NOTIFY);
         add(Call::Openat2, Test::Always, ERRNO | ENOSYS);
+    }
+    if guards.held {
+        for call in REMOVING.into_iter().chain(CHANGING) {
+            add(call, Test::Always, NOTIFY);
+        }
+        for call in MARKING {
+            add(call, Test::Always, ERRNO | EOPNOTSUPP);
+        }
+        add(Call::Fchmodat2, Test::Always, ERRNO | ENOSYS);
+        add(Call::OpenByHandleAt, Test::Always, ERRNO | EPERM);
     }
     if guards.signal {
         for call in SIGNALLING {
@@ -369,14 +474,18 @@ mod tests {
         connect: true,
         create: true,
         signal: true,
+        held: false,
     };
 
+    const HELD: Guards = Guards { held: true, ..ALL };
+
     fn every_guard_set() -> Vec<Guards> {
-        (0..8u8)
+        (0..16u8)
             .map(|bits| Guards {
                 connect: bits & 1 != 0,
                 create: bits & 2 != 0,
                 signal: bits & 4 != 0,
+                held: bits & 8 != 0,
             })
             .collect()
     }
@@ -430,10 +539,16 @@ mod tests {
             for guards in every_guard_set() {
                 let on = |held: bool, action| if held { action } else { ALLOW };
                 for (call, _) in calls.numbers {
+                    let names = guards.create || guards.held;
                     let wanted = match call {
                         Call::Connect => on(guards.connect, NOTIFY),
-                        Call::Openat2 => on(guards.create, ERRNO | ENOSYS),
-                        call if CREATING.contains(call) => on(guards.create, NOTIFY),
+                        Call::Openat2 => on(names, ERRNO | ENOSYS),
+                        Call::OpenByHandleAt => on(guards.held, ERRNO | EPERM),
+                        call if CREATING.contains(call) => on(names, NOTIFY),
+                        call if REMOVING.contains(call) => on(guards.held, NOTIFY),
+                        Call::Fchmodat2 => on(guards.held, ERRNO | ENOSYS),
+                        call if CHANGING.contains(call) => on(guards.held, NOTIFY),
+                        call if MARKING.contains(call) => on(guards.held, ERRNO | EOPNOTSUPP),
                         call if SIGNALLING.contains(call) => on(guards.signal, NOTIFY),
                         _ => ALLOW,
                     };
@@ -492,6 +607,125 @@ mod tests {
                 ..ALL
             };
             assert_eq!(told(&calls, unguarded, nr, [0, 0, create, 0, 0, 0]), ALLOW);
+        }
+    }
+
+    #[test]
+    fn a_held_guard_traps_every_open_that_may_write_and_lets_a_read_run() {
+        let writes = [0o1, 0o2, 0o1000, u64::from(O_CREAT), 0o2000 | 0o1];
+        let reads = [0, 0o2000, 0o200000, 0o4000, 0o10000000];
+        for calls in [Calls::X86_64, Calls::AARCH64] {
+            let nr = calls.number(Call::Openat).unwrap();
+            let openat = |guards, flags| told(&calls, guards, nr, [0, 0, flags, 0, 0, 0]);
+            for flags in writes {
+                assert_eq!(openat(HELD, flags), NOTIFY, "{flags:#o}");
+                assert_eq!(
+                    openat(
+                        Guards {
+                            held: false,
+                            ..HELD
+                        },
+                        flags
+                    ),
+                    on_create(flags),
+                    "{flags:#o}"
+                );
+            }
+            for flags in reads {
+                assert_eq!(openat(HELD, flags), ALLOW, "{flags:#o}");
+            }
+            let handle = calls.number(Call::OpenByHandleAt).unwrap();
+            assert_eq!(told(&calls, HELD, handle, [0; 6]), ERRNO | EPERM);
+            assert_eq!(told(&calls, ALL, handle, [0; 6]), ALLOW);
+            for call in REMOVING {
+                if let Some(nr) = calls.number(call) {
+                    assert_eq!(told(&calls, HELD, nr, [0; 6]), NOTIFY, "{call:?}");
+                    assert_eq!(told(&calls, ALL, nr, [0; 6]), ALLOW, "{call:?}");
+                }
+            }
+        }
+        let open = |guards, flags| told(&Calls::X86_64, guards, 2, [0, flags, 0, 0, 0, 0]);
+        assert_eq!(
+            open(HELD, 0o1),
+            NOTIFY,
+            "open's flags are its second register"
+        );
+        assert_eq!(open(HELD, 0), ALLOW);
+        let held_only = Guards {
+            held: true,
+            ..Guards::default()
+        };
+        for call in CREATING {
+            if let Some(nr) = Calls::X86_64.number(call) {
+                assert_eq!(
+                    told(&Calls::X86_64, held_only, nr, [0; 6]),
+                    NOTIFY,
+                    "{call:?}"
+                );
+            }
+        }
+    }
+
+    fn on_create(flags: u64) -> u32 {
+        if flags & u64::from(O_CREAT) != 0 {
+            NOTIFY
+        } else {
+            ALLOW
+        }
+    }
+
+    #[test]
+    fn the_held_calls_carry_the_numbers_the_kernel_gives_them() {
+        let pinned = [
+            (Call::Unlink, Some(87), None),
+            (Call::Unlinkat, Some(263), Some(35)),
+            (Call::Rmdir, Some(84), None),
+            (Call::Truncate, Some(76), Some(45)),
+            (Call::OpenByHandleAt, Some(304), Some(265)),
+            (Call::Chmod, Some(90), None),
+            (Call::Fchmod, Some(91), Some(52)),
+            (Call::Fchmodat, Some(268), Some(53)),
+            (Call::Fchmodat2, Some(452), Some(452)),
+            (Call::Chown, Some(92), None),
+            (Call::Fchown, Some(93), Some(55)),
+            (Call::Lchown, Some(94), None),
+            (Call::Fchownat, Some(260), Some(54)),
+            (Call::Setxattr, Some(188), Some(5)),
+            (Call::Lsetxattr, Some(189), Some(6)),
+            (Call::Fsetxattr, Some(190), Some(7)),
+            (Call::Removexattr, Some(197), Some(14)),
+            (Call::Lremovexattr, Some(198), Some(15)),
+            (Call::Fremovexattr, Some(199), Some(16)),
+            (Call::Setxattrat, Some(463), Some(463)),
+            (Call::Removexattrat, Some(466), Some(466)),
+        ];
+        for (call, x86, arm) in pinned {
+            assert_eq!(Calls::X86_64.number(call), x86, "{call:?}");
+            assert_eq!(Calls::AARCH64.number(call), arm, "{call:?}");
+        }
+    }
+
+    #[test]
+    fn a_held_guard_traps_mode_and_owner_changes_and_refuses_extended_attributes() {
+        for calls in [Calls::X86_64, Calls::AARCH64] {
+            for call in CHANGING {
+                if let Some(nr) = calls.number(call) {
+                    assert_eq!(told(&calls, HELD, nr, [0; 6]), NOTIFY, "{call:?}");
+                    assert_eq!(told(&calls, ALL, nr, [0; 6]), ALLOW, "{call:?}");
+                }
+            }
+            for call in MARKING {
+                let nr = calls.number(call).unwrap();
+                assert_eq!(
+                    told(&calls, HELD, nr, [0; 6]),
+                    ERRNO | EOPNOTSUPP,
+                    "{call:?}"
+                );
+                assert_eq!(told(&calls, ALL, nr, [0; 6]), ALLOW, "{call:?}");
+            }
+            let two = calls.number(Call::Fchmodat2).unwrap();
+            assert_eq!(told(&calls, HELD, two, [0; 6]), ERRNO | ENOSYS);
+            assert_eq!(told(&calls, ALL, two, [0; 6]), ALLOW);
         }
     }
 
@@ -563,6 +797,11 @@ mod tests {
             Call::Symlink,
             Call::Link,
             Call::Rename,
+            Call::Unlink,
+            Call::Rmdir,
+            Call::Chmod,
+            Call::Chown,
+            Call::Lchown,
         ];
         for call in absent {
             assert_eq!(arm.number(call), None, "{call:?}");

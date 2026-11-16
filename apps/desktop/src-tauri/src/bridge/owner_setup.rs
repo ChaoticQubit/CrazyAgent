@@ -9,7 +9,7 @@ use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::pools::PoolSummary;
 use crazyagent::provider_retry::{ProviderRetry, ProviderRetryView};
 use crazyagent::quit_settings::QuitSettings;
-use crazyagent::sandbox_settings::SandboxSettings;
+use crazyagent::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 
 fn profile_code(code: &str) -> &'static str {
     match code {
@@ -66,9 +66,10 @@ impl NativeBridge {
         self.deliver_intent(false).await
     }
 
-    /// Reads the owner's sandbox settings. Input: none. Output: the stored settings, or the
-    /// defaults before the first save.
-    pub async fn sandbox_settings(&mut self) -> Result<SandboxSettings, BridgeError> {
+    /// Reads the owner's sandbox settings. Input: none. Output: the stored settings and the
+    /// version a save from this read names, or the defaults at version 0 before the first
+    /// save.
+    pub async fn sandbox_settings(&mut self) -> Result<StoredSandboxSettings, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
@@ -79,10 +80,12 @@ impl NativeBridge {
     }
 
     /// Saves the owner's sandbox settings as one retained owner intent. Inputs: the full
-    /// settings and a fresh draft generation. Output: the intent receipt.
+    /// settings, the version of the read they change and a fresh draft generation. Output:
+    /// the intent receipt.
     pub async fn set_sandbox_settings(
         &mut self,
         settings: SandboxSettings,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.allow_new_auth().await?;
@@ -97,7 +100,10 @@ impl NativeBridge {
             .await
             .map_err(|error| caused("owner_read_failed", &error.0))?;
         self.controller()?
-            .begin_mutation(OwnerMutation::SetSandboxSettings { settings }, generation)
+            .begin_mutation(
+                OwnerMutation::SetSandboxSettings { settings, version },
+                generation,
+            )
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await

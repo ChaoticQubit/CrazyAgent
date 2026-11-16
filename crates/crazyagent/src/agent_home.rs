@@ -41,6 +41,7 @@ pub(crate) const SH_STARTUP: [&str; 5] = [
 ];
 /// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
 /// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
+#[cfg(unix)]
 pub(crate) const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
 /// The most passes a launch makes over one folder of an agent home it keeps only part of,
 /// each removing what the last left: a second finds what a listing skipped as entries went,

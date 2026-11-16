@@ -1066,6 +1066,7 @@ fn group_alive(group: u32) -> bool {
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_groups() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()
@@ -1103,6 +1104,7 @@ fn live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_group
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_interrupt_stops_a_running_turn_through_the_harness_protocol() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()
@@ -1150,6 +1152,7 @@ fn live_interrupt_stops_a_running_turn_through_the_harness_protocol() {
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()
@@ -1191,6 +1194,59 @@ fn live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_
     }
 }
 
+/// A keyed launch of Codex or Claude Code hands its harness a 0600 key file in the account
+/// home that holds the relay's placeholder, never the key, and goes when the session stops.
+/// A stand-in that only sleeps takes the harness's place and the provider is a loopback port
+/// that refuses, so the row needs no model and no network (rv-sec3 engine-hermetic F1).
+#[test]
+fn a_keyed_launch_writes_a_private_placeholder_key_file_that_ends_with_its_session() {
+    let (_refusing, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    assert!(!crazyagent::sandbox::OWNER_PORTS.contains(&port), "{port}");
+    for (harness, name, base_url) in [
+        ("codex", "codex", format!("http://127.0.0.1:{port}/v1")),
+        ("claude-code", "claude", format!("http://127.0.0.1:{port}")),
+    ] {
+        let root = private_dir("ca-launch-keyed-");
+        let home = private_folder(root.path(), "home");
+        let work = private_folder(root.path(), "work");
+        let bin = private_folder(root.path(), "bin");
+        let executable = bin.join(name);
+        std::fs::write(&executable, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let session = Session::start(LaunchRequest {
+            harness: harness.into(),
+            executable,
+            working_dir: work.clone(),
+            account: AccountBinding::Url {
+                home: home.clone(),
+                base_url,
+                key: Some(Secret::new(DUMMY_KEY.into()).unwrap()),
+            },
+            model: Some(LOCAL_MODEL.into()),
+            tools: false,
+            sandbox_profile: Some(project_profile(&work, &home)),
+            unconfined: false,
+            git_identity: None,
+            limits: LaunchLimits::default(),
+        })
+        .unwrap();
+        let key_file = home.join(KEY_FILE);
+        let written = std::fs::read_to_string(&key_file).unwrap();
+        assert!(is_placeholder(&written), "{harness}");
+        assert!(!written.contains(DUMMY_KEY), "{harness}");
+        assert_eq!(
+            std::fs::metadata(&key_file).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "{harness}"
+        );
+        session.stop().unwrap();
+        assert!(
+            !key_file.exists(),
+            "{harness}: the key file ends with its session"
+        );
+    }
+}
+
 fn project_profile(work: &Path, home: &Path) -> PathBuf {
     let profile = work.join("project.sb");
     let rules = format!(
@@ -1203,6 +1259,7 @@ fn project_profile(work: &Path, home: &Path) -> PathBuf {
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_tools_on_turn_completes_inside_the_project_sandbox() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()

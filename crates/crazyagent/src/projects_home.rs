@@ -1397,6 +1397,12 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "The folder could not be added. Nothing was removed."
         }
         "home_copy_unverified" => "The copy didn't match the original, so the original was kept.",
+        "home_copy_names_fold" => {
+            "Two names in the folder differ only in case or accents, and your projects folder can't keep both. Rename one of them, then try again. The original is untouched."
+        }
+        "home_copy_entry_swapped" => {
+            "Something replaced a file or folder in it while it was being copied, so the copy stopped. The original is untouched. Try again once nothing else is changing the folder."
+        }
         "home_move_source_left" => {
             "The folder was added, but part of the original couldn't be removed. What's left there may be newer than the copy, so check it before you delete anything."
         }

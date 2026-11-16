@@ -1463,7 +1463,7 @@ pub(crate) fn release_acls<'a>(entries: impl IntoIterator<Item = &'a Path>) {
 
 /// Leaves ACLs alone where no deny entry an agent may set keeps an entry from going. Input:
 /// unused.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn release_acls<'a>(_entries: impl IntoIterator<Item = &'a Path>) {}
 
 /// Runs `/bin/chmod` with `flags`, which end in `--`, on the entries, its output dropped,

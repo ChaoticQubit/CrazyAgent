@@ -105,6 +105,31 @@ async fn the_tui_controller_lists_the_harness_catalog_from_a_discovered_engine()
     }));
 }
 
+/// A folder for the row's Claude install where an owner's install would be: outside the
+/// engine's data folder and every folder the agent space holds, the shared temp folder's
+/// `ca-` folders among them; this user's cache folder on macOS, the temp folder elsewhere.
+/// Input: the folder name's prefix. Output: the folder, removed when dropped.
+fn owner_folder(prefix: &str) -> tempfile::TempDir {
+    if !cfg!(target_os = "macos") {
+        return tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+    }
+    let cache = crazyagent::spawn_gate::output(
+        std::process::Command::new("/usr/bin/getconf")
+            .arg("DARWIN_USER_CACHE_DIR")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let cache = std::fs::canonicalize(String::from_utf8(cache.stdout).unwrap().trim()).unwrap();
+    let folder = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(cache)
+        .unwrap();
+    assert!(folder.path().is_absolute());
+    folder
+}
+
 #[tokio::test]
 async fn an_owner_attaching_after_a_claude_update_sees_the_new_install() {
     let root = tempfile::Builder::new()
@@ -125,11 +150,13 @@ async fn an_owner_attaching_after_a_claude_update_sees_the_new_install() {
     )
     .await
     .unwrap();
+    let owner = owner_folder("harness-update-owner-");
     let host = root.path().join("crazyagent-pin-only");
-    let old = root.path().join("cask/2.1.309/claude");
-    let new = root.path().join("cask/2.1.322/claude");
-    let link = root.path().join("bin/claude");
-    for path in [&host, &old, &new] {
+    let old = owner.path().join("cask/2.1.309/claude");
+    let new = owner.path().join("cask/2.1.322/claude");
+    let link = owner.path().join("bin/claude");
+    let planted = root.path().join("agent/claude");
+    for path in [&host, &old, &new, &planted] {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, path.as_os_str().as_encoded_bytes()).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -159,10 +186,22 @@ async fn an_owner_attaching_after_a_claude_update_sees_the_new_install() {
         OwnerController::attach(root.path(), OwnerClientKind::Tui, Duration::from_secs(5))
             .await
             .unwrap();
-    let entries = reopened.harness_catalog(false).await;
+    let updated = reopened.harness_catalog(false).await;
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&planted, &link).unwrap();
+    let replanted =
+        OwnerController::attach(root.path(), OwnerClientKind::Tui, Duration::from_secs(5))
+            .await
+            .unwrap();
+    let entries = replanted.harness_catalog(false).await;
     tokio::time::timeout(Duration::from_secs(5), service.shutdown())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(claude(entries.unwrap()), Some(link));
+    assert_eq!(claude(updated.unwrap()), Some(link.clone()));
+    assert_ne!(
+        claude(entries.unwrap()),
+        Some(link),
+        "the re-pin's start checks refuse an entry now leading into the engine's data"
+    );
 }

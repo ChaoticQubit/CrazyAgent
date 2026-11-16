@@ -334,6 +334,8 @@ pub(in crate::tui) fn project_screen(
             56,
         )
         .into_iter()
+        .chain(std::iter::once(String::new()))
+        .chain(wrap_words(HIDDEN_SEERS_COVER, 56))
         .map(|line| Row::of(line, look.muted))
         .collect();
         if screen
@@ -2630,6 +2632,25 @@ fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
     Row::of(text, look.fg).push("   f Edit read-only folders", look.muted)
 }
 
+/// What the hidden-folders editor says the Settings list of agents that can still open a
+/// hidden folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A
+/// r1): team agents, taken-over panes included, and not the engine's other sandboxed runs.
+const HIDDEN_SEERS_COVER: &str = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named under Hidden with h Restart them. A research, overview, roadmap or onboarding run that started before keeps its access until it ends.";
+
+/// The Settings line naming the running agents that can still open a folder hidden after
+/// they started, with the key that restarts them (SA-VID14-A). Takes the screen and look.
+/// Returns the row, or none while no agent is listed.
+fn seers_line(screen: &ProjectScreen, look: &Look) -> Option<Row> {
+    let seers = screen.hidden_seers();
+    (!seers.is_empty()).then(|| {
+        Row::of(
+            format!("{} can still open a hidden folder", seers.join(", ")),
+            look.warning,
+        )
+        .push("   h Restart them", look.muted)
+    })
+}
+
 /// The Settings line for a project's hidden folders: how many, or loading.
 /// Takes the screen and look. Returns the row with its edit key.
 fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
@@ -2689,6 +2710,9 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
         entry("Hidden", hidden_line(screen, look)),
+    ];
+    lines.extend(seers_line(screen, look).map(|row| entry("", row)));
+    lines.extend([
         entry(
             "Access",
             Row::of(
@@ -2711,7 +2735,7 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
             },
         ),
         entry("Status", screen.roadmap.value(look, screen.now_ms)),
-    ];
+    ]);
     if room.saturating_sub(lines.len()) > screen.plugins.floor() {
         lines.push(Row::default());
     }

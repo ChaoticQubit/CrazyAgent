@@ -346,7 +346,8 @@ fn updated(
     outcome(ran, UPDATE_FAILED, from, to)
 }
 
-/// Asks a harness for its version only when the tool resolver would run it and every
+/// Asks a harness for its version only when it is a file this user can trust to start, as an
+/// update's program must be ([`super::trusted`]), and the tool resolver would run it and every
 /// interpreter its first line names, with no refused copy of one in its own folder
 /// ([`super::vetted`]), so a file agents can write, or one whose program is missing, is never
 /// started for a version. It runs the real file the resolver checked, once that file passes
@@ -359,6 +360,7 @@ pub(super) fn version_if_runs(
     home: &Path,
     places: &crate::tools::Places,
 ) -> Option<String> {
+    super::trusted(executable).ok()?;
     let entry = version_command(executable)?;
     let real = super::vetted(&entry, places).ok()?;
     let fixed = Fixed {

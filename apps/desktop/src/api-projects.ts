@@ -343,6 +343,7 @@ const copy: Record<string, string> = {
   team_agent_range_invalid: "At most must be at least 1 and not less than At least.",
   team_task_missing: "That task is gone already.",
   team_wake_cap_invalid: "Set the hourly limit between 0 and 500 wakes.",
+  team_no_hidden_seers: "No running agent can still open a hidden folder.",
   team_time_limits_invalid: "Pick a listed time limit; an agent session may not be shorter than a task.",
   team_rounds_invalid: "Pick a listed number of sub-agent rounds, or Until the goal is done.",
   team_run_time_invalid: "Pick a listed master run time, or No limit.",
@@ -594,6 +595,13 @@ export function renameTeamAgent(id: string, agent: number, handle: string, gener
  * Output: the engine receipt. */
 export function wakeTeamAgent(id: string, agent: number, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
+}
+
+/** Restarts the project's running agents that can still open a folder hidden after they
+ * started (SA-VID14-A): each starts again in its own worktree and conversation, kept out of
+ * every hidden folder. Inputs: the project id and a generation. Output: the engine receipt. */
+export function restartHiddenSeers(id: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_restart_hidden_seers", { id, generation });
 }
 
 /** Stops one harness with the teammates in its terminal; it stays stopped until the owner wakes
