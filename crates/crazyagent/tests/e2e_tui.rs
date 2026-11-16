@@ -270,7 +270,7 @@ fn reach_home(pty: &Pty, home: impl Fn(&str) -> bool) {
         let screen = pty.until("the TUI shows Home or a first-run step", |screen| {
             home(screen)
                 || screen.contains("Welcome to CrazyAgent")
-                || screen.contains("c Continue without")
+                || screen.contains("c Skip for now")
         });
         if home(&screen) {
             return;
@@ -1263,7 +1263,7 @@ fn script_home(pty: &mut ScriptPty) {
             pty.screen()
         );
         pty.until("the TUI shows Home or a first-run step", |screen| {
-            at_home(screen, PROJECT) || screen.contains("c Continue without")
+            at_home(screen, PROJECT) || screen.contains("c Skip for now")
         });
         let screen = pty.screen();
         if at_home(&screen, PROJECT) {
@@ -1612,7 +1612,7 @@ fn reach_accounts_step(engine: &Engine, home: &Path) -> ScriptPty {
     });
     pty.type_bytes(b"\r");
     pty.until("Setup offers to continue without installing", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty.type_bytes(b"c");
     pass_harness_step(&mut pty);
@@ -1660,7 +1660,7 @@ fn first_run_shows_the_harness_step_with_only_rcli_picked() {
     });
     pty.type_bytes(b"\r");
     pty.until("Setup offers to continue without installing", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty.type_bytes(b"c");
     pty.until(
@@ -1723,7 +1723,7 @@ fn first_run_installs_node_for_a_codex_that_cannot_run_and_its_row_leaves_cant_r
     });
     pty.type_bytes(b"\r");
     pty.until("Setup offers to continue without installing", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty.type_bytes(b"c");
     pty.until_within(
@@ -1893,7 +1893,7 @@ fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_th
     });
     pty.type_bytes(b"\r");
     pty.until("Setup offers to continue without installing", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty.type_bytes(b"c");
     pass_harness_step(&mut pty);
@@ -2339,7 +2339,7 @@ fn first_run_setup_page(engine: &Engine, home: &Path) -> ScriptPty {
     });
     pty.type_bytes(b"\r");
     pty.until("the Setup page opens", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty
 }
