@@ -2389,6 +2389,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_known_process_keeps_the_unique_ids_first_read_when_a_reused_id_reads_others() {
+        let mut lineage = bare(500, Some(FIRST));
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(600, 500, 500, FIRST, 9_100, 9_000),
+        ]);
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(600, 500, 500, FIRST, 9_900, 7_000),
+        ]);
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(601, 1, 601, FIRST, 9_101, 9_100),
+            forked(602, 1, 602, FIRST, 9_902, 9_900),
+        ]);
+        let pids: Vec<i32> = lineage.known.iter().map(|process| process.pid).collect();
+        assert_eq!(
+            pids,
+            [500, 601],
+            "a stranger that reused 600's id between the listing and the read brings nothing"
+        );
+    }
+
+    #[test]
     fn a_stranger_that_reuses_a_dead_leaders_id_brings_no_session_members() {
         let mut live = bare(500, Some(FIRST));
         live.apply(&[row(500, 1, 500, FIRST), row(777, 1, 500, FIRST)]);
