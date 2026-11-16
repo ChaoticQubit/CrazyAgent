@@ -174,3 +174,40 @@ test("the refusal runs notice a fetch made before the checks, so a refusal test 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a failed build step prints the end of its log after the failure code, so a release job that keeps no work folder still shows why (release run 43840451293)", () => {
+  const text = readFileSync(SCRIPT, "utf8");
+  const lines = Number(pin(text, "LOG_TAIL_LINES"));
+  assert(Number.isInteger(lines) && lines >= 20 && lines <= 200, `a log tail is long enough to hold a configure error and short enough to read: ${lines}`);
+  const failure = text.match(/^fail\(\) \{\n[\s\S]*?\n\}\n/m);
+  assert(failure, "fail() is defined on lines of its own");
+  const root = mkdtempSync(join(tmpdir(), "build-tmux-fail-"));
+  try {
+    const log = join(root, "tmux.log");
+    const written = 150;
+    writeFileSync(log, Array.from({ length: written }, (_, index) => `log line ${String(index + 1).padStart(4, "0")}`).join("\n") + "\n");
+    const run = spawnSync("/bin/bash", ["-c", `LOG_TAIL_LINES=${lines}\n${failure[0]}fail "build_tmux_tmux_failed: $1" "$1"`, "fail", log], { encoding: "utf8", timeout: 10000 });
+    assert.equal(run.status, 1, run.stderr);
+    assert(run.stderr.startsWith(`build-tmux: build_tmux_tmux_failed: ${log}\n`), run.stderr);
+    const shown = run.stderr.match(/log line \d{4}/g) ?? [];
+    assert.equal(shown.length, lines, run.stderr);
+    assert.equal(shown[0], `log line ${String(written - lines + 1).padStart(4, "0")}`, "the tail starts where the last lines start");
+    assert.equal(shown.at(-1), `log line ${String(written).padStart(4, "0")}`, "and ends at the log's last line");
+    assert.equal(run.stdout, "", "the tail goes to stderr with the failure");
+    const bare = spawnSync("/bin/bash", ["-c", `LOG_TAIL_LINES=${lines}\n${failure[0]}fail "build_tmux_tmux_failed: no program" "$1"`, "fail", join(root, "missing.log")], { encoding: "utf8", timeout: 10000 });
+    assert.equal(bare.status, 1, bare.stderr);
+    assert.equal(bare.stderr, "build-tmux: build_tmux_tmux_failed: no program\n", "a log that was never written adds nothing");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("every build step that writes a log hands that log to fail(), so each step's failure prints its own tail", () => {
+  const text = readFileSync(SCRIPT, "utf8");
+  const calls = [...text.matchAll(/fail "build_tmux_([a-z0-9]+)_failed: (\$tree\/[a-z0-9]+\.log)"([^\n]*)/g)];
+  assert.deepEqual(calls.map((call) => call[1]).sort(), ["jemalloc", "libevent", "ncurses", "tmux", "utf8proc"], "each step names its log");
+  for (const [whole, step, log, rest] of calls) {
+    assert(rest.startsWith(` "${log}"`), `${step}: ${whole}`);
+    assert(text.includes(`> "${log}" 2>&1`), `${step} writes the log it hands on`);
+  }
+});
