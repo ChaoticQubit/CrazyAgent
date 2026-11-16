@@ -1,9 +1,9 @@
-import { harnessCatalog, nextGeneration, poolSummaries } from "../../api";
+import { harnessCatalog, poolSummaries } from "../../api";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
 import { dismissIntake, loadIntakeJob, newProjectCopy, stopIntake } from "../../api-intake";
 import {
-  failureCopy, loadAgentPolicy, loadPools, loadProjectCatalog, loadProjects, pickDocuments, receiptState, saveAgentPolicy, setProjectPool, startSetupJob,
+  failureCopy, loadPools, loadProjectCatalog, loadProjects, pickDocuments, startSetupJob,
 } from "../../api-projects";
 import type { PoolChoice, ProjectCatalog, ProjectSetup, ProjectSpec } from "../../api-projects";
 import type { IntakeJob } from "../../engine-client";
@@ -14,10 +14,12 @@ import { jobActions, jobLine, refusalLine, setupFollow } from "../intake/intake"
 import { flash, go } from "../project/flash";
 import { homePath } from "../settings/harnesses";
 import { NotReady } from "../project/shared";
-import { AccessLevels, accessLabel, policyOf } from "../project/access";
+import { AccessLevels } from "../project/access";
+import { carryFollowUps, dropStarted, keepStarted, startedJob, type Carry } from "./carry";
 import { PoolPicker } from "./pool-picker";
 import { BasicsFields, PublishFields, ResearchSwitches, RoadmapSwitch, useGitHubPublish } from "./fields";
-import { createWait, emptyPublish, publishOutcome, startPublish } from "./publish";
+import { noteLostStart } from "../project/publish-job";
+import { createWait, emptyPublish, publishOutcome, startPublish, startReplyLost } from "./publish";
 import { TeamEditor } from "./team-editor";
 import {
   STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, draftAccess, emptyDraft, levelUnavailable, poolName, preselectPool,
@@ -27,13 +29,12 @@ import type { ProjectDraft, StepId } from "./wizard";
 import "../project/projects.css";
 
 let kept: { draft: ProjectDraft; step: StepId } | null = null;
-let startedSetup: { id: string; project: string; draft: ProjectDraft } | null = null;
 
-/** Forgets the kept New Project draft and the job it started, whose follow-ups then never run.
- * Input: none. Output: none. */
+/** Forgets the kept New Project draft and the job it started, whose follow-ups then never run
+ * unless they already started. Input: none. Output: none. */
 export function discardKeptDraft(): void {
   kept = null;
-  startedSetup = null;
+  dropStarted();
 }
 
 function valueOf<T>(result: Result<T> | undefined): T | null {
@@ -79,15 +80,16 @@ export function reopened(job: IntakeJob | null, started: { id: string; project: 
 
 /** Reads the New Project job this page started before the owner left it, as the page opens
  * again, by `reopened`: it follows one still building, else lets go, dropping the answers of a
- * project already made, its follow-ups skipped, Home saying how it ended. Inputs: Home's read
- * of the engine's job and the project ids the session lists. Output: the job id to follow, or
- * null. */
+ * project already made, whose follow-ups Home's poll ran, Home saying how it ended. Inputs:
+ * Home's read of the engine's job and the project ids the session lists. Output: the job id to
+ * follow, or null. */
 function resumeSetup(job: IntakeJob | null, projects: readonly string[]): string | null {
-  if (startedSetup === null) return null;
-  const now = reopened(job, startedSetup, projects);
+  const started = startedJob();
+  if (started === null) return null;
+  const now = reopened(job, started, projects);
   if (now.follow !== null) return now.follow;
   if (!now.keep) kept = null;
-  startedSetup = null;
+  dropStarted();
   return null;
 }
 
@@ -195,11 +197,11 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
 
   useEffect(() => {
     if (following === null || follow === null || follow.kind === "running") return;
-    const snapshot = startedSetup;
-    startedSetup = null;
+    const carried = follow.kind === "done" ? carryFollowUps(following, follow.project) : null;
+    dropStarted();
     setFollowing(null);
     if (follow.kind === "done") {
-      if (snapshot?.id === following) void finish(follow.project, following, snapshot.draft);
+      if (carried) void finish(follow.project, following, carried);
       return;
     }
     if (follow.kind === "ended") void dismissIntake(following);
@@ -228,7 +230,11 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
       setCreateError(result.note);
       return;
     }
-    startedSetup = { id: result.job.id, project: result.job.project_id ?? "", draft };
+    keepStarted({
+      id: result.job.id, project: result.job.project_id ?? "", draft, name: request.spec.name, pool: draft.pool,
+      poolLabel: chosenPool ? poolName(chosenPool.pool) : draft.pool ?? "", access: draftAccess(draft, catalogValue?.agent_access),
+      research: request.setup.research.length,
+    });
     session?.refreshIntake(result.job);
     setFollowing(result.job.id);
   }
@@ -239,38 +245,23 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     session?.refreshIntake();
   }
 
-  /** Runs a New Project's follow-ups once its job is done, only while the page stays open
-   * (DEC-177 add.2 Q1 A): its pool, then its agent access, then the project opens and the job
-   * leaves Home. Inputs: the new project's id, the job's id and the answers it started with. */
-  async function finish(id: string, job: string, draft: ProjectDraft) {
+  /** Ends a New Project on its page once its job is done: the shared pool and agent access
+   * follow-ups (DEC-177 add.2 Q1 B), which finish even if the owner leaves, a toast then saying
+   * how they ended, then, only while the page stays open, its publish, the job leaving Home and
+   * the project opening. Inputs: the new project's id, the job's id and the carry. */
+  async function finish(id: string, job: string, carried: Carry) {
     kept = null;
     setFinishing(true);
-    const request = buildRequest(draft);
-    const chosen = poolValue?.find((choice) => choice.pool.id === draft.pool) ?? null;
-    const name = request.spec.name;
-    const count = request.setup.research.length;
-    let message = draft.pool
-      ? `${name} created.${count ? ` ${count} research ${count === 1 ? "agent is" : "agents are"} starting.` : ""}`
-      : `${name} created. Research starts when you choose a pool.`;
-    if (draft.pool && mounted.current) {
-      const assigned = await setProjectPool(id, draft.pool, nextGeneration());
-      if (assigned.kind !== "ok" || assigned.value.kind !== "applied") {
-        message = `${name} created. Couldn't assign ${chosen ? poolName(chosen.pool) : draft.pool}. Choose it again in the project's Settings, Pool.`;
-      }
+    const draft = carried.setup.draft;
+    let message = await carried.outcome;
+    if (!mounted.current) {
+      session?.showToast(message, { name: "home" });
+      return;
     }
-    const access = draftAccess(draft, catalogValue?.agent_access);
-    if (access !== "sandboxed" && mounted.current) {
-      const read = await loadAgentPolicy(id);
-      const saved = read.kind === "ok" ? await saveAgentPolicy(id, policyOf(read.value, access, read.value.network, read.value.toolchains.map((row) => row.allowed), read.value.ide_git_hooks, read.value.ide_agent_files), read.value.version, nextGeneration()) : read;
-      const state = saved.kind === "ok" ? receiptState(saved.value) : null;
-      if (state?.kind !== "applied") {
-        const why = saved.kind === "error" ? ` ${failureCopy(saved)}` : state?.kind === "rejected" ? ` ${failureCopy(state)}` : "";
-        message = `${message} Its agents stay Sandboxed: ${accessLabel(access)} wasn't saved.${why} Choose it again in the project's Settings, Agent access.`;
-      }
-    }
-    if (!mounted.current) return;
     const publishing = startPublish(id, draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered);
-    const outcome = publishOutcome(publishing ? await publishing : null);
+    const started = publishing ? await publishing : null;
+    const outcome = publishOutcome(started);
+    if (startReplyLost(started)) noteLostStart(id, Date.now());
     if (outcome) message = `${message} ${outcome}`;
     void dismissIntake(job);
     kept = null;

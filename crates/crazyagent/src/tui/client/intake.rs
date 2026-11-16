@@ -19,6 +19,7 @@ mod tests;
 /// Built by the first run, Home, Add project and onboarding screens, and by Settings for the home folder.
 /// Runs on the owner worker; the reply arrives as `OwnerEvent::Intake` with this query.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub(in crate::tui) enum IntakeQuery {
     Home,
     SetHome {
@@ -119,6 +120,7 @@ pub(in crate::tui) fn start_id() -> Result<RequestId, String> {
 /// One intake job for the owner worker: a plain query or a pasted GitHub token.
 /// The token travels only here, never in a query, so no reply, log or Debug output can echo it.
 /// The token job answers as a `GitHubStatus` query.
+#[allow(clippy::large_enum_variant)]
 pub(in crate::tui) enum IntakeJob {
     Query(IntakeQuery),
     GitHubToken(AccountSecret),
@@ -343,14 +345,13 @@ impl NativeOwner {
                 pool,
                 generation,
             } => {
-                let project = started(&path)?;
-                applied(
+                let result = applied(
                     controller
                         .start_onboarding(path, pool, generation)
                         .await
                         .map_err(problem)?,
                 )?;
-                IntakeView::OnboardingStarted(project)
+                IntakeView::OnboardingStarted(onboarded(result)?)
             }
             IntakeQuery::Onboarding { project } => IntakeView::Onboarding(Box::new(
                 controller.onboarding(project).await.map_err(problem)?,
@@ -492,7 +493,13 @@ fn applied(response: OwnerResponse) -> Result<OwnerResult, String> {
     }
 }
 
-fn started(path: &str) -> Result<ProjectId, String> {
-    crate::onboarding::project_id_for(std::path::Path::new(path))
-        .map_err(|error| bounded_problem(&error.0))
+/// Reads the project a started onboarding opens from the engine's answer: the id the engine
+/// gave, or `intake_change_outcome_unknown` for a plain Applied, never an id guessed from the
+/// folder. Input: the applied result. Output: the project id, or the code.
+fn onboarded(result: OwnerResult) -> Result<ProjectId, String> {
+    match result {
+        OwnerResult::OnboardingStarted { project_id } => Ok(project_id),
+        OwnerResult::Applied => Err("intake_change_outcome_unknown".into()),
+        _ => Err("unexpected_reply".into()),
+    }
 }

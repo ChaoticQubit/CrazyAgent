@@ -763,13 +763,27 @@ fn publish_row(draw: &mut Draw) {
     draw.add(Row::of(format!("    {line}"), look.muted));
 }
 
-fn shown_tail(text: &str, width: usize) -> String {
-    let count = text.chars().count();
-    if count <= width {
+/// Fits a text into `width` terminal cells by keeping its end behind a leading ellipsis, so a
+/// path still shows its own name; wide characters count two cells. Inputs: the text and the
+/// cells. Output: the text whole when it fits, else the ellipsis and the longest tail that fits.
+pub(in crate::tui) fn shown_tail(text: &str, width: usize) -> String {
+    if cells(text) <= width {
         return text.to_owned();
     }
-    let tail: String = text.chars().skip(count - (width - 1)).collect();
-    format!("\u{2026}{tail}")
+    let mut room = width.saturating_sub(1);
+    let mut kept = Vec::new();
+    for character in text.chars().rev() {
+        let need = char_cells(character);
+        if need > room {
+            break;
+        }
+        room -= need;
+        kept.push(character);
+    }
+    let tail: String = kept.into_iter().rev().collect();
+    let shown = format!("\u{2026}{tail}");
+    assert!(cells(&shown) <= width.max(1));
+    shown
 }
 
 /// The keys of the GitHub panel for its open row: that row's own key, moving between rows

@@ -1354,15 +1354,21 @@ fn write_capability(path: &Path, token: &[u8; 32]) -> Result<(u64, u64), EngineE
         .mode(0o600)
         .open(path)
         .map_err(unavailable)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .map_err(unavailable)?;
-    file.write_all(hex(token).as_bytes()).map_err(unavailable)?;
-    file.sync_all().map_err(unavailable)?;
-    let metadata = file.metadata().map_err(unavailable)?;
-    assert!(metadata.is_file());
-    assert_eq!(metadata.len(), 64);
-    assert_eq!(metadata.mode() & 0o7777, 0o600);
-    Ok((metadata.dev(), metadata.ino()))
+    let written = file
+        .set_permissions(std::fs::Permissions::from_mode(0o600))
+        .and_then(|()| file.write_all(hex(token).as_bytes()))
+        .and_then(|()| file.sync_all())
+        .and_then(|()| file.metadata());
+    if let Ok(metadata) = &written
+        && metadata.len() == 64
+        && metadata.mode() & 0o7777 == 0o600
+    {
+        assert!(metadata.is_file());
+        return Ok((metadata.dev(), metadata.ino()));
+    }
+    drop(file);
+    let _ = std::fs::remove_file(path);
+    Err(failure("ide_capability_unavailable"))
 }
 
 /// Refuses capability files where the engine has no Unix mode checks.
@@ -1403,7 +1409,7 @@ mod comments;
 pub(crate) mod engine_step;
 mod extensions;
 #[cfg(unix)]
-mod remote_git;
+pub(crate) mod remote_git;
 #[cfg(unix)]
 mod terminal;
 #[cfg(all(test, unix))]

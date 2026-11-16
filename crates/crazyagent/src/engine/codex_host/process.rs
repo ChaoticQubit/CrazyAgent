@@ -4,6 +4,7 @@ use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::protocol::ProjectId;
 use crate::routing::ResourceBudget;
+use crate::sandbox::LineageCheck;
 use std::collections::VecDeque;
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -88,21 +89,29 @@ impl CodexHostProcess {
         budget: &ResourceBudget,
     ) -> Result<Self, EngineError> {
         let run_time = Duration::from_millis(budget.wall_time_ms);
-        Self::spawn_guarded(command, budget, Some(run_time), None, false).await
+        Self::spawn_guarded(
+            command,
+            budget,
+            Some(run_time),
+            None,
+            LineageCheck::Unneeded,
+        )
+        .await
     }
 
-    /// Starts the harness under custody with its account lease. A Full access harness,
-    /// `unconfined`, has what it left outside its group checked when it ends, which a close
-    /// waits `STOP_TIME` longer for. Inputs: the wrapped command, the budget, the wall clock
-    /// the harness runs under, none for no clock, the lease with the project whose leftover
-    /// setting and owner view what it leaves running follow, and whether the harness runs
-    /// unconfined. Output: the running process or a plain code.
+    /// Starts the harness under custody with its account lease. A harness whose boundary
+    /// leaves processes outside its group running, Full access or the plain Linux Landlock
+    /// helper (`check`), has what it left checked when it ends, which a close waits
+    /// `STOP_TIME` longer for. Inputs: the wrapped command, the budget, the wall clock the
+    /// harness runs under, none for no clock, the lease with the project whose leftover
+    /// setting and owner view what it leaves running follow, and the boundary's check.
+    /// Output: the running process or a plain code.
     pub(super) async fn spawn_guarded(
         command: Command,
         budget: &ResourceBudget,
         run_time: Option<Duration>,
         lease: Option<(NativeProfileUse, ProjectId)>,
-        unconfined: bool,
+        check: LineageCheck,
     ) -> Result<Self, EngineError> {
         budget.validate().map_err(EngineError)?;
         let deadline = match run_time {
@@ -133,13 +142,11 @@ impl CodexHostProcess {
         let worker = std::thread::Builder::new()
             .name("codex-host-custody".into())
             .spawn(move || {
-                process_custody::run(
-                    command, lease, unconfined, receiver, retained, deadline, limit,
-                );
+                process_custody::run(command, lease, check, receiver, retained, deadline, limit);
             })
             .map_err(|_| EngineError("codex_host_custodian_unavailable".into()))?;
         let close_time = CLOSE_TIME
-            + if unconfined {
+            + if check != LineageCheck::Unneeded {
                 crate::harnesses::leftovers::STOP_TIME
             } else {
                 Duration::ZERO

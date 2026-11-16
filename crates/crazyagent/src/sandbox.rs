@@ -968,6 +968,63 @@ pub enum LinuxSupervisor {
     Off,
 }
 
+/// Whether a Linux launch that does not hold the full Linux sandbox is refused, the owner's
+/// setting "Refuse agents without the full Linux sandbox" (DEC-185). `Off` (the default)
+/// starts it with what this Linux holds and the lines that say what it cannot; `On` refuses
+/// it unless [`linux_holds_fully`] does. Team agents need the full sandbox whatever it says.
+/// Other systems ignore it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinuxStrict {
+    #[default]
+    Off,
+    On,
+}
+
+/// The engine refusal code of a Linux launch the strict setting refuses ([`LinuxStrict`]).
+pub const LINUX_NOT_FULL: &str = "linux_sandbox_not_full";
+
+/// Why [`InstalledSandbox::install`] refuses a Linux launch under [`LinuxStrict::On`]: it
+/// does not hold the full Linux sandbox ([`linux_holds_fully`]).
+pub const LINUX_NOT_FULL_LINE: &str = "this Linux does not hold the full sandbox for this launch, and the setting 'Refuse agents without the full Linux sandbox' is on";
+
+/// Tells whether a launch holds the full Linux sandbox (DEC-185): a process space of its own
+/// (the nested backend), the call supervisor running, and its network limits held, so none
+/// of the gap lines would show for it. An open network has no limit to hold; a limited one
+/// needs TCP-only sockets and, for a port on any host, a network of its own (DEC-179 SBX-2).
+/// Inputs: what the launch got and its sandbox. Output: true when it holds all of it.
+pub fn linux_holds_fully(
+    nested: bool,
+    supervised: bool,
+    routed: bool,
+    sandbox: &ProjectSandbox,
+) -> bool {
+    assert!(
+        !routed || nested,
+        "only a nested launch has a network of its own"
+    );
+    if !nested || !supervised {
+        return false;
+    }
+    let SandboxNetwork::Only(remotes) = &sandbox.network else {
+        return true;
+    };
+    if sandbox.linux_sockets != LinuxSockets::TcpOnly {
+        return false;
+    }
+    remotes.iter().all(|remote| match remote {
+        SandboxRemote::Loopback(port) => *port >= BRIDGE_PORT_MIN,
+        SandboxRemote::AnyHost(_) => routed,
+    })
+}
+
+/// Tells whether a launch refusal is the strict setting's ([`LINUX_NOT_FULL_LINE`]), so a
+/// caller can give it its own code ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the
+/// answer.
+pub fn linux_not_full(error: &SandboxError) -> bool {
+    matches!(error, SandboxError::Unavailable(reason) if reason == LINUX_NOT_FULL_LINE)
+}
+
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
 pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
 
@@ -1012,6 +1069,17 @@ pub const GIT_STATE_FILES: [&str; 6] = [
     "config.worktree",
 ];
 
+/// The links in a linked worktree's admin folder that tie it to the project and to its
+/// worktree: no confined agent rewrites, removes or relinks one. Seatbelt denies each by
+/// name, letting a worktree-adding profile create one, and the Linux call supervisor holds
+/// each (DEC-185 S2a).
+pub const ADMIN_LINKS: [&str; 2] = ["commondir", "gitdir"];
+
+/// The files in a linked worktree's admin folder no confined agent writes: the branch it
+/// stands on and the config git reads for that worktree alone. Seatbelt denies each by name
+/// and the Linux call supervisor holds each (DEC-185 S2a).
+pub const ADMIN_WRITES: [&str; 2] = ["HEAD", "config.worktree"];
+
 /// The lowest port a loopback bridge carries on Linux: inside a network namespace of its
 /// own an agent's helper has no capability to listen below it.
 pub const BRIDGE_PORT_MIN: u16 = 1024;
@@ -1027,37 +1095,81 @@ pub fn linux_unbridged_line(port: u16) -> String {
 }
 
 /// What a launch tells the owner in the agent's messages when a Linux that nests agents
-/// still leaves it, with a port on this computer, on this computer's network:
-/// [`linux_unbridged_line`] for a port below [`BRIDGE_PORT_MIN`], else under None, whose
-/// page drops it, [`LINUX_PORTS_ANY_HOST_LINE`]. Inputs: what this Linux holds, the
-/// project's network choice, the sandbox as launched. Output: the sentences, or none.
+/// still leaves it on this computer's network: for an agent that could have a network of
+/// its own ([`ProjectSandbox::routed`]) on a host that does not route, [`LINUX_UNROUTED_LINE`]
+/// or, with no loopback port or the supervisor on, [`LINUX_UNROUTED_ANY_HOST_LINE`]; none
+/// when it routes; then [`linux_unbridged_line`] for the lowest port below
+/// [`BRIDGE_PORT_MIN`], else under None [`LINUX_PORTS_ANY_HOST_LINE`]. Inputs: this Linux,
+/// the network choice, the sandbox as launched. Output: the sentences, or none.
 pub fn linux_unbridged_notice_on(
     host: Option<LinuxHost>,
     choice: policy::AgentNetwork,
     sandbox: &ProjectSandbox,
 ) -> Option<String> {
-    if !host.is_some_and(|host| host.nested) {
+    let host = host.filter(|host| host.nested)?;
+    let SandboxNetwork::Only(remotes) = &sandbox.network else {
         return None;
+    };
+    let reaches = remotes
+        .iter()
+        .any(|remote| matches!(remote, SandboxRemote::Loopback(_)));
+    if sandbox.routed().is_some() {
+        if host.routed {
+            return None;
+        }
+        let wide = reaches && !host.supervised;
+        let line = if wide {
+            LINUX_UNROUTED_LINE
+        } else {
+            LINUX_UNROUTED_ANY_HOST_LINE
+        };
+        return Some(line.to_owned());
+    }
+    let low = remotes
+        .iter()
+        .filter_map(|remote| match remote {
+            SandboxRemote::Loopback(port) if *port < BRIDGE_PORT_MIN => Some(*port),
+            _ => None,
+        })
+        .min();
+    let any = remotes
+        .iter()
+        .any(|remote| matches!(remote, SandboxRemote::AnyHost(_)));
+    let tcp = sandbox.linux_sockets == LinuxSockets::TcpOnly;
+    if let Some(port) = low.filter(|_| host.routed && any && tcp) {
+        return Some(linux_unbridged_line(port));
     }
     if let Some(port) = sandbox.unbridged_port() {
         assert!(port < BRIDGE_PORT_MIN);
         return Some(linux_unbridged_line(port));
     }
-    let reaches = matches!(&sandbox.network, SandboxNetwork::Only(remotes)
-        if remotes.iter().any(|remote| matches!(remote, SandboxRemote::Loopback(_))));
     let unsaid = choice == policy::AgentNetwork::None && sandbox.bridged_ports().is_none();
     (reaches && unsaid).then(|| LINUX_PORTS_ANY_HOST_LINE.to_owned())
 }
 
-/// [`linux_unbridged_notice_on`] for this computer as it was last read. Inputs: the
-/// project's network choice and the agent's sandbox as launched. Output: the sentences, or
-/// none.
+/// [`linux_unbridged_notice_on`] for this computer as it was last read, under the owner's
+/// call supervisor setting ([`LinuxHost::under`]). Inputs: the project's network choice,
+/// the agent's sandbox as launched and the setting, none when it cannot be read, which
+/// counts as no supervisor. Output: the sentences, or none.
 pub fn linux_unbridged_notice(
     choice: policy::AgentNetwork,
     sandbox: &ProjectSandbox,
+    calls: Option<LinuxSupervisor>,
 ) -> Option<String> {
-    linux_unbridged_notice_on(linux_host_kept(), choice, sandbox)
+    let host = linux_host_kept().map(|host| host.under(calls));
+    linux_unbridged_notice_on(host, choice, sandbox)
 }
+
+/// What a launch tells the owner in the agent's messages when this Linux nests agents but
+/// could not give this one the network of its own its ports allow (DEC-179 SBX-2): why it
+/// has none, the AppArmor profile and root included (rv-sa241 NOTE-2, NOTE-3), and what
+/// that leaves open.
+pub const LINUX_UNROUTED_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, did not start or is kept out by this computer's AppArmor profile, or CrazyAgent runs as root, so every port it may reach is open to it on every host, this computer included.";
+
+/// [`LINUX_UNROUTED_LINE`] for an agent with no loopback port, or one the call supervisor
+/// keeps to this computer (rv-sa241 7b LOW-1 and N1): its ports on any host then reach
+/// this computer too.
+pub const LINUX_UNROUTED_ANY_HOST_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, did not start or is kept out by this computer's AppArmor profile, or CrazyAgent runs as root, so the ports it may reach on any host include this computer's own.";
 
 /// What a limited network cannot hold on Linux, shown there only, under the network choice
 /// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
@@ -1079,7 +1191,8 @@ pub const LINUX_SIGNALS_LINE: &str = "On this Linux, agents can see which progra
 /// What a Linux agent can still see where the kernel scopes its signals but this machine
 /// gives it no process namespace of its own, shown there only, under the access level in
 /// the desktop and the TUI (RV-DS241-86).
-pub const LINUX_PROCESS_LIST_LINE: &str = "On this Linux, agents can see which programs you run and how they were started.";
+pub const LINUX_PROCESS_LIST_LINE: &str =
+    "On this Linux, agents can see which programs you run and how they were started.";
 
 /// What a writable project folder still cannot hold where the call supervisor runs: it
 /// refuses every new `.git` entry but the agent's own, yet an agent may change a git
@@ -1100,7 +1213,8 @@ pub const LINUX_ROOT_LINE: &str = "CrazyAgent runs as root on this Linux, so it 
 /// What a limited network that reaches websites still cannot hold where the call supervisor
 /// keeps ports on this computer to it (DEC-179 T4c): agents look up names over TCP, so port
 /// 53 is open to them on every host.
-pub const LINUX_DNS_ANY_HOST_LINE: &str = "On this Linux, agents can also reach port 53, used to look up names, on every host.";
+pub const LINUX_DNS_ANY_HOST_LINE: &str =
+    "On this Linux, agents can also reach port 53, used to look up names, on every host.";
 
 /// Why agents share the owner's process space where AppArmor keeps unprivileged programs
 /// out of user namespaces (Ubuntu 23.10 and newer) and this machine nests none, shown before
@@ -1112,8 +1226,9 @@ pub const LINUX_APPARMOR_LINE: &str = "On this Linux, AppArmor keeps agents from
 /// when it starts agents in a process namespace of their own, `scoped` when the kernel
 /// keeps their signals inside their own Landlock domain (Linux 6.12 or newer),
 /// `supervised` when the call supervisor holds every guard here, as launches start it,
-/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1), and
-/// `armored` when AppArmor's user namespace restriction is why it nests none (SBX-3).
+/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1),
+/// `armored` when AppArmor's user namespace restriction is why it nests none (SBX-3), and
+/// `routed` when it gives an agent limited to ports on any host a network of its own (SBX-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinuxHost {
     pub nested: bool,
@@ -1121,6 +1236,17 @@ pub struct LinuxHost {
     pub supervised: bool,
     pub root: bool,
     pub armored: bool,
+    pub routed: bool,
+}
+
+/// The network a Linux that nests agents gives one limited to ports on any host
+/// ([`ProjectSandbox::routed`]): `any`, the ports it leaves through on any host, and
+/// `bridged`, the loopback ports carried to this computer as for a bridged agent, each list
+/// rising and each port once (DEC-179 SBX-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Routed {
+    pub any: Vec<u16>,
+    pub bridged: Vec<u16>,
 }
 
 impl LinuxHost {
@@ -2791,6 +2917,41 @@ impl ProjectSandbox {
         Some(ports)
     }
 
+    /// The network a Linux that nests agents gives this one of its own, leaving only
+    /// through its ports on any host: the sockets setting is `TcpOnly`, the limited network
+    /// names at least one port on any host and every other remote is a loopback port
+    /// [`BRIDGE_PORT_MIN`] or higher, bridged as [`ProjectSandbox::bridged_ports`] does.
+    /// Output: the ports, or none when the agent keeps the shared network.
+    pub fn routed(&self) -> Option<Routed> {
+        let SandboxNetwork::Only(remotes) = &self.network else {
+            return None;
+        };
+        if self.linux_sockets != LinuxSockets::TcpOnly || remotes.len() > REMOTES_MAX {
+            return None;
+        }
+        let mut any = Vec::with_capacity(remotes.len());
+        let mut bridged = Vec::with_capacity(remotes.len());
+        for remote in remotes {
+            match remote {
+                SandboxRemote::AnyHost(port) => any.push(*port),
+                SandboxRemote::Loopback(port) if *port >= BRIDGE_PORT_MIN => bridged.push(*port),
+                SandboxRemote::Loopback(_) => return None,
+            }
+        }
+        if any.is_empty() {
+            return None;
+        }
+        any.sort_unstable();
+        any.dedup();
+        bridged.sort_unstable();
+        bridged.dedup();
+        assert!(!any.contains(&0));
+        assert!(any.len() + bridged.len() <= REMOTES_MAX);
+        assert!(self.bridged_ports().is_none());
+        assert!(self.resolves_over_tcp());
+        Some(Routed { any, bridged })
+    }
+
     /// The port that alone keeps this agent on this computer's network on a Linux that
     /// nests agents: the sockets setting is `TcpOnly` and the limited network names
     /// loopback ports only, but one lies below [`BRIDGE_PORT_MIN`]. Output: the lowest such
@@ -3077,10 +3238,10 @@ impl ProjectSandbox {
         text.push_str(&self.ancestry_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
+            let [head, _] = ADMIN_WRITES.map(any_case);
             text.push_str(&format!(
-                "(deny file-write*\n  (regex #\"^{}/{}$\"))\n",
-                seatbelt_pattern(&checkout.admin),
-                any_case("HEAD")
+                "(deny file-write*\n  (regex #\"^{}/{head}$\"))\n",
+                seatbelt_pattern(&checkout.admin)
             ));
         }
         if let Some(clone) = &self.clone {
@@ -3334,10 +3495,9 @@ impl ProjectSandbox {
         } else {
             " file-write-create"
         };
+        let [commondir, gitdir] = ADMIN_LINKS.map(any_case);
         let mut links = format!(
-            "(deny file-write-unlink file-write-data file-write-mode file-write-flags file-write-acl file-link{create}\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
-            any_case("commondir"),
-            any_case("gitdir")
+            "(deny file-write-unlink file-write-data file-write-mode file-write-flags file-write-acl file-link{create}\n  (regex #\"^{admin}/({commondir}|{gitdir})$\")\n  (regex #\"^{checkouts}/{git}$\")"
         );
         for worktree in &self.worktrees {
             moves.push_str(&format!("\n  (literal \"{}\")", worktree.display()));
@@ -3346,9 +3506,9 @@ impl ProjectSandbox {
                 seatbelt_pattern(worktree)
             ));
         }
+        let [_, worktree_config] = ADMIN_WRITES.map(any_case);
         let text = format!(
-            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/{}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{pattern}/{git}/\") (vnode-type SYMLINK)))\n",
-            any_case("config.worktree")
+            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/{worktree_config}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{pattern}/{git}/\") (vnode-type SYMLINK)))\n"
         );
         assert_eq!(
             text.matches("(regex #\"^/").count(),
@@ -3717,6 +3877,17 @@ pub trait Sandbox: Send + Sync {
     fn wrap(&self, harness: &Command) -> Result<Command, SandboxError>;
 }
 
+/// What a run's stop checks, once its process group is killed, of the processes the run
+/// left outside that group: nothing where its boundary ends them all, its Full access
+/// lineage, or a sandboxed lineage where a confined process that starts its own session
+/// outlives the group kill (LINUX-KILL-GROUP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineageCheck {
+    Unneeded,
+    FullAccess,
+    Sandboxed,
+}
+
 /// A project sandbox whose profile is already installed on disk. Launch paths take
 /// this instead of a bare command, so no agent process can start outside its
 /// boundary: Seatbelt on macOS, Landlock or bubblewrap on Linux, AppContainer with a job
@@ -3738,15 +3909,18 @@ impl InstalledSandbox {
     /// Linux, picks the Landlock helper next to the engine's executable or bubblewrap; on
     /// Windows, checks the helper next to the engine's executable first, then writes its
     /// boundary profile with the engine's grants folder (see
-    /// [`windows::WindowsSandbox::install`]). `calls` is the owner's "Linux call supervisor"
-    /// choice, which every launch must pass and only Linux acts on. Output: the sandbox
-    /// bound to that profile, the install refusal, or `Unavailable` where this system has no
-    /// boundary.
+    /// [`windows::WindowsSandbox::install`]). `calls` and `strict` are the owner's "Linux call
+    /// supervisor" and [`LinuxStrict`] choices, which every launch must pass and only Linux
+    /// acts on. Output: the sandbox bound to that profile, the install refusal, or
+    /// `Unavailable` where this system has no boundary.
     pub fn install(
         sandbox: ProjectSandbox,
         profile: &Path,
         calls: LinuxSupervisor,
+        strict: LinuxStrict,
     ) -> Result<Self, SandboxError> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = strict;
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
         {
@@ -3792,6 +3966,10 @@ impl InstalledSandbox {
                 let data = crate::tools::engine_root();
                 linux::LinuxSandbox::detect(sandbox.clone(), &helper)?.supervise(calls, data)
             };
+            #[cfg(target_os = "linux")]
+            if strict == LinuxStrict::On && !linux.holds_fully() {
+                return Err(SandboxError::Unavailable(LINUX_NOT_FULL_LINE.into()));
+            }
             Ok(Self {
                 sandbox,
                 profile: profile.to_path_buf(),
@@ -3816,6 +3994,22 @@ impl InstalledSandbox {
     /// Whether this boundary runs its commands with no Seatbelt profile.
     pub fn is_unconfined(&self) -> bool {
         self.unconfined
+    }
+
+    /// What a run's stop inside this boundary checks of the processes it left outside its
+    /// group: its Full access lineage when unconfined, a sandboxed one on Linux where the
+    /// backend leaves a process in a session of its own running (`LinuxSandbox::ends_every_session`),
+    /// else nothing, as the warden, a process namespace or the job ends them all. Output: the
+    /// check.
+    pub fn lineage_check(&self) -> LineageCheck {
+        if self.unconfined {
+            return LineageCheck::FullAccess;
+        }
+        #[cfg(target_os = "linux")]
+        if !self.linux.ends_every_session() {
+            return LineageCheck::Sandboxed;
+        }
+        LineageCheck::Unneeded
     }
 
     /// The program every wrapped command starts: `sandbox-exec` on macOS, or the session
@@ -4159,7 +4353,10 @@ fn spelled_char(character: char) -> String {
     }
     if alternatives.len() == 1 {
         character.to_string()
-    } else if alternatives.iter().all(|alternative| alternative.is_ascii()) {
+    } else if alternatives
+        .iter()
+        .all(|alternative| alternative.is_ascii())
+    {
         format!("[{}]", alternatives.concat())
     } else {
         format!("({})", alternatives.join("|"))
@@ -4209,7 +4406,11 @@ fn spelled_run(run: &[char], before: bool, after: bool, exact: bool) -> String {
             .map(|(start, end, point)| (start, end, point.to_string())),
     );
     let cuts: Vec<usize> = (0..=count)
-        .filter(|&cut| !pieces.iter().any(|(start, end, _)| *start < cut && cut < *end))
+        .filter(|&cut| {
+            !pieces
+                .iter()
+                .any(|(start, end, _)| *start < cut && cut < *end)
+        })
         .collect();
     let mut pattern = String::new();
     for stretch in cuts.windows(2) {
@@ -4752,16 +4953,13 @@ fn make_config_parents(home: &Path, clear: bool) -> Result<(), SandboxError> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     let refused = || invalid("a config folder of the agent home could not be made");
     let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let parent = rustix::fs::open(home, folder, Mode::empty())
-        .map_err(|_| refused())?;
+    let parent = rustix::fs::open(home, folder, Mode::empty()).map_err(|_| refused())?;
     let is_folder = |name: &str| {
         rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)
             .map(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory)
     };
-    let remove = |name: &str| {
-        crate::team::cleanup::remove_home_entry(&parent, name)
-            .map_err(|_| refused())
-    };
+    let remove =
+        |name: &str| crate::team::cleanup::remove_home_entry(&parent, name).map_err(|_| refused());
     for name in CONFIG_PARENTS {
         match is_folder(name) {
             Ok(true) => continue,
@@ -5397,6 +5595,124 @@ mod linux_sockets_tests {
         }
         let open = sandbox(&case, SandboxNetwork::Open, LinuxSockets::Refuse);
         assert_eq!(open.linux_refusal(&case.root.join("glibc")), None);
+    }
+
+    #[test]
+    fn only_a_nested_supervised_launch_with_its_network_held_is_full() {
+        let case = case();
+        let tcp = |network| sandbox(&case, network, LinuxSockets::TcpOnly);
+        for held in [
+            SandboxNetwork::Open,
+            SandboxNetwork::Only(Vec::new()),
+            local(),
+        ] {
+            let held = tcp(held);
+            assert!(linux_holds_fully(true, true, false, &held));
+            assert!(
+                !linux_holds_fully(false, true, false, &held),
+                "no process space"
+            );
+            assert!(
+                !linux_holds_fully(true, false, false, &held),
+                "no supervisor"
+            );
+        }
+        let hosted = tcp(model());
+        assert!(linux_holds_fully(true, true, true, &hosted), "routed");
+        assert!(
+            !linux_holds_fully(true, true, false, &hosted),
+            "a port on any host from this computer's network"
+        );
+        let low = tcp(SandboxNetwork::Only(vec![
+            SandboxRemote::AnyHost(443),
+            SandboxRemote::Loopback(80),
+        ]));
+        assert!(low.routed().is_none());
+        assert!(
+            !linux_holds_fully(true, true, true, &low),
+            "a loopback port below the bridge keeps it on this computer's network"
+        );
+        for sockets in [LinuxSockets::TcpPorts, LinuxSockets::Refuse] {
+            let other = sandbox(&case, local(), sockets);
+            assert!(!linux_holds_fully(true, true, true, &other), "{sockets:?}");
+        }
+        let open = sandbox(&case, SandboxNetwork::Open, LinuxSockets::TcpPorts);
+        assert!(
+            linux_holds_fully(true, true, false, &open),
+            "an open network has no limit to hold"
+        );
+        let below = tcp(SandboxNetwork::Only(vec![SandboxRemote::Loopback(80)]));
+        assert!(
+            !linux_holds_fully(true, true, false, &below),
+            "a loopback port below the bridge is not bridged"
+        );
+    }
+
+    #[test]
+    fn a_full_launch_is_one_no_network_line_names_on_a_host_that_holds_everything() {
+        let case = case();
+        let host = LinuxHost {
+            nested: true,
+            scoped: true,
+            supervised: true,
+            root: false,
+            armored: false,
+            routed: true,
+        };
+        let networks = [
+            SandboxNetwork::Open,
+            SandboxNetwork::Only(Vec::new()),
+            local(),
+            model(),
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(80)]),
+            SandboxNetwork::Only(vec![
+                SandboxRemote::AnyHost(443),
+                SandboxRemote::Loopback(80),
+            ]),
+            SandboxNetwork::Only(vec![
+                SandboxRemote::AnyHost(443),
+                SandboxRemote::Loopback(8080),
+            ]),
+        ];
+        for network in networks {
+            let launched = sandbox(&case, network, LinuxSockets::TcpOnly);
+            let routed = launched.routed().is_some();
+            let full = linux_holds_fully(true, true, routed, &launched);
+            for choice in [
+                policy::AgentNetwork::None,
+                policy::AgentNetwork::Https,
+                policy::AgentNetwork::Open,
+            ] {
+                let line = linux_unbridged_notice_on(Some(host), choice, &launched);
+                assert_eq!(
+                    full,
+                    line.is_none(),
+                    "{:?} under {choice:?}: {line:?}",
+                    launched.network
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_strict_refusal_has_its_own_code_and_reads_plainly() {
+        assert!(linux_not_full(&SandboxError::Unavailable(
+            LINUX_NOT_FULL_LINE.into()
+        )));
+        assert!(!linux_not_full(&SandboxError::Unavailable("other".into())));
+        assert!(!linux_not_full(&SandboxError::Invalid(
+            LINUX_NOT_FULL_LINE.into()
+        )));
+        let line = crate::config::plain_problem(LINUX_NOT_FULL);
+        assert!(line.is_some(), "the strict refusal has a plain sentence");
+        let line = line.unwrap();
+        for part in [
+            "Refuse agents without the full Linux sandbox",
+            "Agent access",
+            "Settings",
+        ] {
+            assert!(line.contains(part), "{line}");
+        }
     }
 
     #[test]

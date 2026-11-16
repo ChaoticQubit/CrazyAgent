@@ -110,7 +110,7 @@ impl Store for Keychain {
         )
         .into_bytes();
         let ran = run(&["-i".as_ref()], Some(&line), None);
-        line.fill(0);
+        crate::credentials::wipe(&mut line);
         if ran?.code != Some(0) {
             return Err(unavailable());
         }
@@ -142,7 +142,7 @@ impl Store for Keychain {
             Some(ITEM_MISSING) => Err(StoreError::code("credential_missing")),
             _ => Err(unavailable()),
         };
-        ran.stdout.fill(0);
+        crate::credentials::wipe(&mut ran.stdout);
         found
     }
 
@@ -281,7 +281,7 @@ fn run(
     };
     let (read, mut stdout) = reader.join().map_err(|_| unavailable())?;
     if read.is_err() || stdout.len() > OUTPUT_BYTES_MAX {
-        stdout.fill(0);
+        crate::credentials::wipe(&mut stdout);
         return Err(unavailable());
     }
     Ok(Ran {

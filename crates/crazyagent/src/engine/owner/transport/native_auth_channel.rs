@@ -490,7 +490,7 @@ impl Drop for NativeAuthCustodyLaunch {
             slot.attached = true;
             slot.live.store(false, Ordering::SeqCst);
         }
-        self.token.fill(0);
+        crate::credentials::wipe(&mut self.token);
     }
 }
 
@@ -872,6 +872,7 @@ impl OwnerRuntimeHandle {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn register_rcli_master_executable(
         &self,
         host: RegisteredNativeAuthHost,
@@ -896,7 +897,11 @@ impl OwnerRuntimeHandle {
         Ok(())
     }
 
-    pub(crate) fn register_rcli_private_key_executable(
+    /// Registers the RCLI host for master turns and API-key writes from one capture: the one
+    /// pinned host fills both roles under one lock, so the two can never be two files
+    /// (rv-sec2 B1 N2). Input: the captured host. Output: Ok, or the refusal, which
+    /// registers neither role.
+    pub(crate) fn register_rcli_executables(
         &self,
         host: RegisteredNativeAuthHost,
     ) -> Result<(), EngineError> {
@@ -912,11 +917,14 @@ impl OwnerRuntimeHandle {
             .map_err(|_| failure("native_auth_recovery_required"))?;
         if registration.frozen
             || registration.disabled
+            || registration.rcli_master_executable.is_some()
             || registration.rcli_private_key_executable.is_some()
         {
             return Err(failure("native_auth_host_registration_frozen"));
         }
-        registration.rcli_private_key_executable = Some(Arc::new(host));
+        let host = Arc::new(host);
+        registration.rcli_master_executable = Some(Arc::clone(&host));
+        registration.rcli_private_key_executable = Some(host);
         Ok(())
     }
 
@@ -2277,9 +2285,9 @@ impl NativeAuthCustodyChannel {
         let mut packet = [0; 37];
         packet[..4].copy_from_slice(b"CAN1");
         packet[5..].copy_from_slice(&token);
-        token.fill(0);
+        crate::credentials::wipe(&mut token);
         stream.write_all(&packet).await.map_err(io_error)?;
-        packet.fill(0);
+        crate::credentials::wipe(&mut packet);
         let frame = encode_frame(&Attach {
             protocol_version: PROTOCOL_VERSION,
             kind: AttachKind::Attach,

@@ -16,6 +16,9 @@ pub(in crate::tui) const CHECKING_WAIT: &str =
     "Checking your GitHub sign-in. Create waits for it, or turn publishing off.";
 pub(in crate::tui) const PUBLISH_STARTED: &str = "Publishing on GitHub has started.";
 pub(in crate::tui) const PUBLISH_NOT_STARTED: &str = "Publishing on GitHub didn't start.";
+pub(in crate::tui) const PUBLISH_MAY_HAVE_STARTED: &str = "Publishing on GitHub may have started.";
+pub(in crate::tui) const PUBLISH_WHERE_IT_STANDS: &str =
+    "The project's Overview shows where it stands.";
 const NAME_BYTES_MAX: usize = 100;
 const DESCRIPTION_BYTES_MAX: usize = 350 * 4;
 

@@ -140,7 +140,7 @@ pub fn answer_git_credential(
     parts(&reference)?;
     let mut request = Vec::new();
     let read = input.take(GIT_REQUEST_BYTES_MAX).read_to_end(&mut request);
-    request.fill(0);
+    crate::credentials::wipe(&mut request);
     read.map_err(|_| StoreError::code("credential_helper_io_failed"))?;
     if operation != "get" {
         return Ok(());
@@ -148,7 +148,7 @@ pub fn answer_git_credential(
     let secret = platform_store(namespace)?.get(&reference)?;
     let mut answer = format!("username={username}\npassword={}\n", secret.expose()).into_bytes();
     let written = output.write_all(&answer).and_then(|()| output.flush());
-    answer.fill(0);
+    crate::credentials::wipe(&mut answer);
     written.map_err(|_| StoreError::code("credential_helper_io_failed"))
 }
 

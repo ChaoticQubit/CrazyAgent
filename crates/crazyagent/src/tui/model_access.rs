@@ -854,6 +854,9 @@ impl State {
                                 OwnerResult::DispatchPrepared { .. } => {
                                     return Err("Unexpected dispatch result for metadata".into());
                                 }
+                                OwnerResult::OnboardingStarted { .. } => {
+                                    return Err("Unexpected onboarding result for metadata".into());
+                                }
                                 OwnerResult::RcliProfileRegistered { .. } => {
                                     return Err(
                                         "Unexpected profile registration result for metadata"

@@ -294,7 +294,7 @@ fn a_tools_off_codex_runs_its_app_without_the_shared_app_server() {
             built.cwd.display()
         ),
     ]));
-    argv.extend(strings(&["-c", "tui.alternate_screen=\"never\""]));
+    argv.extend(strings(&["-c", "tui.alternate_screen=\"always\""]));
     assert_eq!(built.argv, argv);
     let home = case.home().to_str().unwrap().to_owned();
     assert_eq!(
@@ -699,10 +699,8 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
                 "1".to_owned()
             ),
             ("CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_owned(), "1".to_owned()),
-            (
-                "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
-                "1".to_owned()
-            ),
+            ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
+            ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned()),
         ])
     );
     let folder = claude_project_folder(&case.path().join("work")).unwrap();
@@ -852,6 +850,108 @@ fn the_key_file_is_private_and_replaced_never_followed() {
         "launch_key_file_unsafe"
     );
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
+}
+
+const NARROW_UMASK_HOME: &str = "CRAZYAGENT_TEST_NARROW_UMASK_HOME";
+
+/// Runs only in the process the row below starts: writes a key under umask 0277, which
+/// clears the owner's write bit as an owner's shell may, and records what it got beside
+/// the home. Input: the home named by `NARROW_UMASK_HOME`; without it the row does nothing.
+#[test]
+#[ignore]
+fn a_key_written_under_a_narrow_umask_in_its_own_process() {
+    let Some(home) = std::env::var_os(NARROW_UMASK_HOME) else {
+        return;
+    };
+    let home = PathBuf::from(home);
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
+    let key = Secret::new(KEY.into()).unwrap();
+    let outcome = match write_key(&home, &key) {
+        Ok(path) => format!(
+            "ok {:o}",
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777
+        ),
+        Err(error) => format!("err {}", error.0),
+    };
+    std::fs::write(home.parent().unwrap().join("outcome"), outcome).unwrap();
+}
+
+/// WRITE-KEY-ASSERT: an engine that inherited a umask clearing the owner's write bit still
+/// writes a private 0600 key file the harness reads, where it used to panic on the file's
+/// mode after writing.
+#[test]
+fn a_key_written_under_a_narrow_umask_is_still_a_private_file() {
+    let case = Case::new();
+    let status = crate::spawn_gate::status(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "harnesses::interactive::tests::a_key_written_under_a_narrow_umask_in_its_own_process",
+                "--ignored",
+                "--test-threads",
+                "1",
+            ])
+            .env(NARROW_UMASK_HOME, case.home())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(
+        status.success(),
+        "the key write under umask 0277 ended in {status}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.path().join("outcome")).unwrap(),
+        "ok 600"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.home().join(KEY_FILE)).unwrap(),
+        KEY
+    );
+}
+
+const NO_FILE_SPACE_HOME: &str = "CRAZYAGENT_TEST_NO_FILE_SPACE_HOME";
+
+/// Runs only in the process the row below starts, under a file size limit of zero with
+/// SIGXFSZ ignored, so the key write fails after the file was made. Input: the home named
+/// by `NO_FILE_SPACE_HOME`; without it the row does nothing.
+#[test]
+#[ignore]
+fn a_key_write_cut_short_in_its_own_process() {
+    let Some(home) = std::env::var_os(NO_FILE_SPACE_HOME) else {
+        return;
+    };
+    let key = Secret::new(KEY.into()).unwrap();
+    assert_eq!(
+        write_key(Path::new(&home), &key).unwrap_err().0,
+        "launch_key_file_unavailable"
+    );
+}
+
+/// WRITE-KEY-ASSERT: a key write that fails part way leaves no key file in the home, where
+/// it used to leave the partial file behind.
+#[test]
+fn a_key_write_cut_short_leaves_no_key_file() {
+    let case = Case::new();
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "trap '' XFSZ; ulimit -f 0; exec \"$0\" --exact harnesses::interactive::tests::a_key_write_cut_short_in_its_own_process --ignored --test-threads 1",
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .env(NO_FILE_SPACE_HOME, case.home())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(
+        status.success(),
+        "the key write under a zero file size limit ended in {status}"
+    );
+    assert!(std::fs::symlink_metadata(case.home().join(KEY_FILE)).is_err());
 }
 
 #[test]
@@ -1187,11 +1287,48 @@ fn display_variables(built: &InteractiveCommand) -> Vec<(String, String)> {
         .collect()
 }
 
-/// A Claude Code terminal at the Classic display, the default and the display of a launch
-/// without a project context, turns Claude Code's alternate screen off (N-D9), so Claude
-/// Code draws on the normal screen and leaves the wheel and a plain drag to the terminal,
-/// and never asks for Claude Code's fullscreen renderer. A native lead's teammates get the
-/// same variables through their script.
+/// A terminal whose project never chose a display, and a launch without a project context,
+/// starts at Fullscreen, the default (DEC-174 add. 2): Claude Code asks for its fullscreen
+/// renderer at 3 rows a notch and keeps its alternate screen, so a resize of the pane leaves
+/// no repainted copy of a reply in the pane's history; Codex starts its own view with
+/// `tui.alternate_screen="always"` on both launch shapes.
+#[test]
+fn a_terminal_without_a_chosen_display_starts_fullscreen() {
+    use crate::coord::settings::TerminalDisplay;
+    assert_eq!(TerminalDisplay::default(), TerminalDisplay::Fullscreen);
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let fullscreen = [
+        ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
+        ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned()),
+    ];
+    let bare = command(&request, None, &run(None)).unwrap();
+    assert_eq!(display_variables(&bare), fullscreen, "{:?}", bare.env);
+    let plain = project_context(&case, "plain")
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&plain), &run(None)).unwrap();
+    assert_eq!(display_variables(&built), fullscreen, "{:?}", built.env);
+    drop(plain);
+
+    let always = ["\"always\"".to_owned()];
+    for tools in [false, true] {
+        let request = case.request("codex", case.subscription(), tools);
+        let bare = command(&request, None, &run(None)).unwrap();
+        assert_eq!(codex_screen(&bare), always, "{tools}: {:?}", bare.argv);
+        let plain = project_context(&case, &format!("codex-plain-{tools}"))
+            .install("codex", &case.home(), tools)
+            .unwrap();
+        let built = command(&request, Some(&plain), &run(None)).unwrap();
+        assert_eq!(codex_screen(&built), always, "{tools}: {:?}", built.argv);
+    }
+}
+
+/// A Claude Code terminal at the Classic display, which the owner chose for the project,
+/// turns Claude Code's alternate screen off (N-D9), so Claude Code draws on the normal screen
+/// and leaves the wheel and a plain drag to the terminal, and never asks for Claude Code's
+/// fullscreen renderer. A native lead's teammates get the same variables through their
+/// script.
 #[test]
 fn a_classic_claude_code_terminal_turns_the_alternate_screen_off() {
     let case = Case::new();
@@ -1200,15 +1337,13 @@ fn a_classic_claude_code_terminal_turns_the_alternate_screen_off() {
         "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
         "1".to_owned(),
     )];
-    let bare = command(&request, None, &run(None)).unwrap();
-    assert_eq!(display_variables(&bare), classic, "{:?}", bare.env);
-
-    let plain = project_context(&case, "plain")
+    let chosen = project_context(&case, "chosen")
+        .with_terminal_display(crate::coord::settings::TerminalDisplay::Classic)
         .install("claude-code", &case.home(), true)
         .unwrap();
-    let built = command(&request, Some(&plain), &run(None)).unwrap();
+    let built = command(&request, Some(&chosen), &run(None)).unwrap();
     assert_eq!(display_variables(&built), classic, "{:?}", built.env);
-    drop(plain);
+    drop(chosen);
 
     let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
     let lead = project_context(&case, "lead")
@@ -1769,7 +1904,7 @@ fn every_harness_kind_maps_every_terminal_display() {
         TerminalDisplay::ALL,
         [TerminalDisplay::Classic, TerminalDisplay::Fullscreen]
     );
-    assert_eq!(TerminalDisplay::default(), TerminalDisplay::Classic);
+    assert_eq!(TerminalDisplay::default(), TerminalDisplay::Fullscreen);
     let starts = |switches: DisplaySwitches| (switches.variables, switches.arguments);
     let case = Case::new();
     let mut launched = 0;
@@ -1865,21 +2000,17 @@ fn the_displays_of_each_harness_kind_are_named_for_the_settings() {
     assert_eq!(displays(HarnessKind::Rcli), [TerminalDisplay::Classic]);
 }
 
-/// OB-8: a Codex terminal at the Classic display, the default and the display of a launch
-/// without a project context, starts with `tui.alternate_screen="never"`, so Codex draws on
-/// the normal screen with no mouse reporting and a plain drag in the app's terminal view
-/// selects text. The setting is a `-c` setting among the others, ahead of `resume`, because
-/// the bridge script hands the same arguments to `codex app-server`, which takes `-c` and
-/// exits on `--no-alt-screen`.
+/// OB-8: a Codex terminal at the Classic display, which the owner chose for the project,
+/// starts with `tui.alternate_screen="never"`, so Codex draws on the normal screen with no
+/// mouse reporting and a plain drag in the app's terminal view selects text. The setting is a
+/// `-c` setting among the others, ahead of `resume`, because the bridge script hands the same
+/// arguments to `codex app-server`, which takes `-c` and exits on `--no-alt-screen`.
 #[test]
 fn a_classic_codex_terminal_draws_on_the_normal_screen_on_both_launch_shapes() {
     use crate::coord::settings::TerminalDisplay;
     let case = Case::new();
     let never = ["\"never\"".to_owned()];
     for tools in [false, true] {
-        let request = case.request("codex", case.subscription(), tools);
-        let bare = command(&request, None, &run(None)).unwrap();
-        assert_eq!(codex_screen(&bare), never, "{tools}: {:?}", bare.argv);
         for resume in [false, true] {
             let name = format!("classic-{tools}-{resume}");
             let built = codex_at(&case, &name, TerminalDisplay::Classic, tools, resume);
@@ -2009,6 +2140,36 @@ fn a_shim_harness_starts_its_real_install_or_else_itself_unless_agents_can_write
     stand_in(&inside);
     let places = crate::tools::Places::new(Vec::new(), Some(inside_home));
     assert!(launch_tool(&inside, &places).is_err());
+}
+
+/// rv-sa241 B1 L1: a shim that finds no real install starts as given only when the resolver
+/// would run its file, every link on its way included. A shim that links through a link in a
+/// project, which agents can move, while both its ends sit in owner folders, is refused.
+#[test]
+fn a_shim_reached_through_a_link_agents_can_move_never_starts_as_given() {
+    let scratch = tempfile::tempdir().unwrap();
+    let base = scratch.path().canonicalize().unwrap();
+    let name = "crazyagent-shim-hop-row";
+    let home = base.join("home");
+    let real = base.join("owner").join(name);
+    stand_in(&real);
+    let project = base.join("project");
+    std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+    let hop = project.join("tools").join(name);
+    std::fs::create_dir_all(hop.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &hop).unwrap();
+    let shim = home.join(".volta/bin").join(name);
+    std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&hop, &shim).unwrap();
+    let places = crate::tools::Places::new(Vec::new(), Some(home));
+    assert!(crate::harnesses::is_shim(places.home(), &shim));
+    assert!(
+        !places.agent_writable(&shim),
+        "both ends sit in owner folders"
+    );
+    assert!(places.agent_writable(&hop));
+    assert!(launch_tool(&shim, &places).is_err());
+    assert_eq!(launch_tool(&real, &places).unwrap().entry, real);
 }
 
 /// F2 (r2): a pinned harness file inside a project is refused with a line that names the
@@ -2205,4 +2366,78 @@ fn a_claude_terminal_launch_and_its_teammates_run_with_auto_memory_off() {
         "{written}"
     );
     drop(installed);
+}
+
+/// LL-1: every Claude launch passes `--system-prompt-snapshot off` ([`CLAUDE_PROMPT_FRESH`]),
+/// which Claude Code has had since 2.1.267 (Anthropic's CHANGELOG), so the sign-in floor never
+/// falls below that version and a signed-in Claude always knows the flag at start.
+#[test]
+fn the_claude_sign_in_floor_never_falls_below_the_first_claude_with_the_snapshot_flag() {
+    use crate::harnesses::update::{below, plain_version};
+    const SNAPSHOT_FLAG_MIN: &str = "2.1.267";
+    let floor = crate::adapters::claude::SIGN_IN_MIN;
+    assert_eq!(CLAUDE_PROMPT_FRESH, ["--system-prompt-snapshot", "off"]);
+    assert!(below("2.1.266", SNAPSHOT_FLAG_MIN));
+    assert!(
+        plain_version(floor),
+        "the sign-in floor {floor:?} is a plain version"
+    );
+    assert!(
+        !below(floor, SNAPSHOT_FLAG_MIN),
+        "the sign-in floor {floor} has the flag"
+    );
+}
+
+/// Runs only in the process the row below starts: builds a native lead's command, then
+/// writes its teammate command under umask 0277, which clears the owner's write bit, and
+/// reports what it got. Input: the folder named in `ROW_FOLDER`; without it, nothing.
+#[test]
+#[ignore]
+fn a_teammate_command_written_under_a_narrow_umask_in_its_own_process() {
+    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+        return;
+    };
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let lead = project_context(&case, "lead")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&lead), &run(None)).unwrap();
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
+    let written = write_teammate_command(&case.home(), &built, &request, lead.native().unwrap());
+    let outcome = match written {
+        Ok(()) => format!(
+            "ok {:o}",
+            std::fs::metadata(crate::launch_context::teammate_command(&case.home()))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        ),
+        Err(error) => format!("err {}", error.0),
+    };
+    std::fs::write(Path::new(&folder).join("outcome"), outcome).unwrap();
+}
+
+/// UMASK-MODE-ASSERTS: an engine that inherited a umask clearing the owner's write bit
+/// still writes a native lead's teammate command as a private 0700 program, where it used
+/// to panic on the file's mode after writing.
+#[test]
+fn a_teammate_command_written_under_a_narrow_umask_is_a_private_program() {
+    let folder = tempfile::tempdir().unwrap();
+    let status = crate::spawn_gate::row_alone(
+        "harnesses::interactive::tests::a_teammate_command_written_under_a_narrow_umask_in_its_own_process",
+        ":",
+        folder.path(),
+    );
+    assert!(
+        status.success(),
+        "the write under umask 0277 ended in {status}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.path().join("outcome")).unwrap(),
+        "ok 700"
+    );
 }

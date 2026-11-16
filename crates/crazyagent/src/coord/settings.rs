@@ -211,13 +211,15 @@ pub enum Overlaps {
 /// How every agent terminal of the project draws, whatever harness runs in it (N-D9,
 /// DEC-141): Classic on the normal screen, so the app's terminal view scrolls with the
 /// wheel at once and a plain drag selects text, or Fullscreen, the harness's own view, which
-/// takes the mouse. Classic is the default. Each harness kind's own switches for a display
-/// are `harnesses::interactive::display_switches`.
+/// takes the mouse. Fullscreen is the default (DEC-174 add. 2): Claude Code's Classic view
+/// leaves a repainted copy of its reply in the pane history each time the pane is resized.
+/// Each harness kind's own switches for a display are
+/// `harnesses::interactive::display_switches`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalDisplay {
-    #[default]
     Classic,
+    #[default]
     Fullscreen,
 }
 
@@ -429,7 +431,7 @@ pub fn resource_name_valid(name: &str) -> bool {
 }
 
 /// A project's coordination settings. Every option is the owner's choice; the defaults
-/// are Lead, Warn, nudges Off, `COUNTED_TOOLS_DEFAULT`, the Classic terminal display, the
+/// are Lead, Warn, nudges Off, `COUNTED_TOOLS_DEFAULT`, the Fullscreen terminal display, the
 /// Task-start reminder On, a heavy lane of One and no shared resources. A row stored before
 /// DEC-141 names the display `claude_display`; it reads as `terminal_display`, so the
 /// owner's choice is kept. A row stored before F28 reads with the lane defaults.
@@ -460,7 +462,7 @@ impl Default for CoordSettings {
             nudges: Nudges::Off,
             counted_tools: COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec(),
             role_skills: RoleSkills::default(),
-            terminal_display: TerminalDisplay::Classic,
+            terminal_display: TerminalDisplay::default(),
             task_start: TaskStart::On,
             heavy_lane: HeavyLane::One,
             shared_resources: Vec::new(),

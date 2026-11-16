@@ -18,6 +18,7 @@ const CHFLAGS = "/usr/bin/chflags";
 const KEEP = "Remove from dashboard (keep files)";
 const DELETE = "Delete everything";
 const CUT_SHORT = "A delete was cut short. Some folders may already be in the Trash.";
+const NOTE = "Deploys go out on Tuesdays.";
 const JOB_MS = 90000;
 /** How long after a delete starts a row may still change its stand-in agents: inside the engine's
  * 30 s DELETE_STOP_WAIT, with room left for the job's own start, so a slow run fails as timing. */
@@ -191,6 +192,70 @@ function rowButtons(page) {
 function inVolumeTrash(folder) {
   const volumeTrash = join(realpathSync(run.volume), ".Trashes", String(process.getuid()));
   return readdirSync(volumeTrash).some((entry) => entry.startsWith(basename(folder)));
+}
+
+/** Saves the owner's note for one project through the bridge, as the project's Context tab
+ * does. Input: the project id. Output: none. */
+async function note(id) {
+  const receipt = await value(run.bridge, "desktop_add_memory", { project: id, text: NOTE, generation: ++run.generation });
+  assert.equal(receipt.outcome, "applied", JSON.stringify(receipt));
+}
+
+/** Tells whether a project's approved notes hold the note. Input: the project id. Output: the
+ * answer. */
+async function noted(id) {
+  return (await value(run.bridge, "desktop_approved_memories", { project: id })).items.some((item) => item.text === NOTE);
+}
+
+/** Removes a project from the dashboard through the bridge, as Remove project does with its
+ * preselected choice. Input: the project id. Output: none. */
+async function removeKeepingFiles(id) {
+  const receipt = await value(run.bridge, "desktop_remove_project", { id, generation: ++run.generation });
+  assert.equal(receipt.outcome, "applied", JSON.stringify(receipt));
+  assert.equal(await listed(id), false, "the engine no longer lists the project");
+}
+
+/** Waits until the page's hash route passes `check`. Inputs: the page, what is waited for and
+ * the check. Output: the hash. */
+async function hashUntil(page, what, check) {
+  const deadline = Date.now() + JOB_MS;
+  for (;;) {
+    const now = await page.evaluate("location.hash");
+    if (check(now)) return now;
+    assert.ok(Date.now() < deadline, `the page never reached ${what}: ${now}`);
+    await pause(POLL_MS);
+  }
+}
+
+/** Sets up a folder of the projects folder from Home's Found row as the owner does: Set up this
+ * project, the test pool the dialog picks, Start setup. Inputs: the page, its helpers and the
+ * folder. Output: the id of the project whose setup review opens. */
+async function setUpFromHome(page, me, folder) {
+  const name = basename(folder);
+  await openHome(page);
+  await me.waitFor(`Home's row for ${name}`, (text) => text.includes(name) && text.includes("Set up this project"), JOB_MS);
+  const marked = await page.evaluate(`(() => {
+    const row = [...document.querySelectorAll("li.in-row")].find((item) => item.querySelector("strong")?.innerText.trim() === ${JSON.stringify(name)});
+    const button = row ? [...row.querySelectorAll("button")].find((item) => item.innerText.trim() === "Set up this project") : null;
+    if (!button) return false;
+    button.dataset.e2ePick = "setup";
+    return true;
+  })()`);
+  assert.ok(marked, `Home's row for ${name} offers Set up this project`);
+  await me.follow("button[data-e2e-pick=setup]");
+  await me.waitFor(`the Set up ${name} dialog`, (text) => text.includes(`Set up ${name}`) && text.includes("Start setup"));
+  await me.click("Start setup", "dialog[open] button");
+  const opened = await hashUntil(page, "the setup review", (now) => /^#\/projects\/[^/?]+\/setup/.test(now));
+  return decodeURIComponent(opened.split("/")[2]);
+}
+
+/** Waits until the engine's delete job ends done. Input: the started job. Output: none. */
+async function deleted(job) {
+  for (const deadline = Date.now() + JOB_MS; ; await pause(POLL_MS)) {
+    const now = await value(run.bridge, "desktop_intake_status");
+    if (now?.id === job.id && now.state.state === "done") return;
+    assert.ok(Date.now() < deadline, `the delete never ended done: ${JSON.stringify(now)}`);
+  }
 }
 
 before(async () => {
@@ -589,4 +654,55 @@ test("Keep the project on Home clears the project's cut-short banner, and the ba
   assert.equal(await value(run.bridge, "desktop_intake_status"), null, "the banner's Keep the project forgets Home's job");
   assert.equal(await listed(first.id), true);
   assert.equal(await listed(second.id), true);
+});
+
+test("a project removed from the dashboard comes back with its note when Home sets up its own folder again (DEC-178)", { timeout: 300000 }, async () => {
+  const name = "Comes Back";
+  const { id, folder } = await made(name);
+  await note(id);
+  await removeKeepingFiles(id);
+  assert.ok(existsSync(join(folder, ".crazyagent")), "the folder stays with its files");
+  await onPage("return", async (page, me) => {
+    const back = await setUpFromHome(page, me, folder);
+    assert.equal(back, id, "its own folder brings the same project back");
+    await me.capture("return-setup");
+  });
+  assert.ok(await noted(id), "its note comes back with it");
+});
+
+test("another folder with a removed project's name is set up as a new project with none of its notes (DEC-178)", { timeout: 300000 }, async () => {
+  const name = "Same Name";
+  const { id, folder } = await made(name);
+  await note(id);
+  await removeKeepingFiles(id);
+  const other = join(run.root, "elsewhere", basename(folder));
+  mkdirSync(other, { recursive: true, mode: 0o700 });
+  writeFileSync(join(other, "notes.md"), "another folder\n");
+  const receipt = await value(run.bridge, "desktop_start_onboarding", { path: other, pool: "local-pool", generation: ++run.generation });
+  assert.equal(receipt.outcome, "applied", JSON.stringify(receipt));
+  assert.equal(receipt.project_id, `${id}-2`, `the window opens the id the engine gave: ${JSON.stringify(receipt)}`);
+  await onPage("same-name", async (page, me) => {
+    await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/projects/${encodeURIComponent(receipt.project_id)}/setup` });
+    await me.waitFor("the new project's setup review", (text) => text.includes("Build the code graph"), JOB_MS);
+    await me.capture("same-name-setup");
+  });
+  assert.equal(await noted(receipt.project_id), false, "the new project gets none of the notes");
+});
+
+test("after Delete everything the same folder made again is set up from Home as a new project with none of its notes (DEC-178)", { timeout: 300000 }, async () => {
+  const name = "Gone For Good";
+  const { id, folder } = await made(name);
+  await note(id);
+  await deleted(await startDelete(id, name));
+  assert.equal(await listed(id), false, "the engine no longer lists the project");
+  assert.ok(!existsSync(folder) && inVolumeTrash(folder), "the folder went to the test volume's Trash");
+  mkdirSync(folder, { mode: 0o700 });
+  writeFileSync(join(folder, "notes.md"), "made again\n");
+  let again = null;
+  await onPage("deleted-again", async (page, me) => {
+    again = await setUpFromHome(page, me, folder);
+    await me.capture("deleted-again-setup");
+  });
+  assert.equal(again, `${id}-2`, "a deleted project's id is never given out again");
+  assert.equal(await noted(again), false, "the new project gets none of the notes");
 });

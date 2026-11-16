@@ -1573,22 +1573,24 @@ fn keep_left(groups: &mut Vec<Ending>, left: &mut impl FnMut(rustix::process::Pi
     });
 }
 
-/// Reads an attach's pane line: its ids, cursor, size, input modes, history size, and its
-/// screen and mouse modes. A screen or mouse flag that an older tmux leaves empty reads as
-/// off. Takes the reply lines. Returns the pane, or none for a reply of another shape.
+/// Reads an attach's pane line: its height and history size first, as [`counted`] reads
+/// them, then its ids, cursor, width, input modes, and its screen and mouse modes. A screen
+/// or mouse flag that an older tmux leaves empty reads as off. Takes the reply lines.
+/// Returns the pane, or none for a line tmux cut short or a reply of another shape.
 fn located(lines: &[Vec<u8>]) -> Option<Located> {
     let text = std::str::from_utf8(whole(lines.first()?)?).ok()?;
+    let (rows, history) = counted(lines)?;
     let fields: Vec<&str> = text.split(' ').collect();
     let [
+        _,
+        _,
         pane,
         window,
         x,
         y,
         cols,
-        rows,
         paste,
         keys,
-        history,
         alternate,
         standard,
         button,
@@ -1619,7 +1621,7 @@ fn located(lines: &[Vec<u8>]) -> Option<Located> {
         pane: pane.as_bytes().to_vec(),
         window: window.as_bytes().to_vec(),
         cols: number(cols)?,
-        rows: number(rows)?,
+        rows,
         cursor: (number(x)?, number(y)?),
         modes: Modes {
             bracketed_paste: flag(paste)?,
@@ -1631,8 +1633,25 @@ fn located(lines: &[Vec<u8>]) -> Option<Located> {
             mouse_utf8: mode(utf8)?,
             mouse_sgr: mode(sgr)?,
         },
-        history: history.parse::<usize>().ok()?.min(HISTORY_ROWS_MAX),
+        history,
     })
+}
+
+/// Reads the pane height and history size that open an attach's pane line, also from a line
+/// tmux cut short: tmux stops a format at the first item it reaches once the time is up and
+/// answers with the text so far, each value already in it whole, so both counts are whole
+/// once the space after the second is there. Takes the reply lines. Returns the height and
+/// the history size held to `HISTORY_ROWS_MAX`, or none for a line cut before that.
+fn counted(lines: &[Vec<u8>]) -> Option<(u16, usize)> {
+    let mut fields = lines.first()?.splitn(3, |byte| *byte == b' ');
+    let rows = std::str::from_utf8(fields.next()?)
+        .ok()?
+        .parse::<u16>()
+        .ok()?;
+    let history = std::str::from_utf8(fields.next()?).ok()?;
+    let history = history.parse::<usize>().ok()?.min(HISTORY_ROWS_MAX);
+    fields.next()?;
+    Some((rows, history))
 }
 
 fn viewer(
@@ -1772,10 +1791,12 @@ enum Rows {
 /// attach's capture holds the history rows the attach read just before, then the screen
 /// rows; capture-pane prints one line per pane row and the pane's own text can look like any
 /// control line, including the block's closing guard, so those rows are counted as data,
-/// never searched for a guard. An attach whose located reply was cut, so its rows cannot be
-/// counted, leaves the queue failing with `REPLY_CUT`, so its caller asks again, and its
-/// capture is drained; so are the blocks after a located reply too large to keep. Takes the
-/// state. Returns how to read the block.
+/// never searched for a guard. The counts open the located line, so a line tmux cut after
+/// both is still counted: that capture is read whole and the attach, failing on the cut line,
+/// is asked again. An attach whose located reply was cut before both counts leaves the queue
+/// failing with `REPLY_CUT`, so its caller asks again, and its capture is drained; so are the
+/// blocks after a located reply too large to keep. Takes the state. Returns how to read the
+/// block.
 fn opening(state: &mut State) -> Rows {
     match state.pending.pop_front() {
         Some(Pending::Marker(marker)) => Rows::Drained(marker),
@@ -1787,11 +1808,11 @@ fn opening(state: &mut State) -> Rows {
             reply,
             marker,
         }) => {
-            let Some(found) = located(&lines) else {
+            let Some((rows, found)) = counted(&lines) else {
                 let _ = reply.send(Err(failure(REPLY_CUT)));
                 return Rows::Drained(marker);
             };
-            let rows = found.history.min(history) + usize::from(found.rows);
+            let rows = found.min(history) + usize::from(rows);
             state.pending.push_front(Pending::Attach {
                 agent,
                 located: Some(lines),
@@ -2090,7 +2111,7 @@ impl Tmux {
             format!("-{history}")
         };
         let asked = format!(
-            "list-panes -t {target} -f '{filter}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{history_size}} #{{alternate_on}} #{{mouse_standard_flag}} #{{mouse_button_flag}} #{{mouse_all_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}}{FORMAT_END}' ; capture-pane {} -S {start} -t {target}",
+            "list-panes -t {target} -f '{filter}' -F '#{{pane_height}} #{{history_size}} #{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{alternate_on}} #{{mouse_standard_flag}} #{{mouse_button_flag}} #{{mouse_all_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}}{FORMAT_END}' ; capture-pane {} -S {start} -t {target}",
             control.capture
         );
         let until = Instant::now() + REPLY_TIME;

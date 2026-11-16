@@ -23,6 +23,9 @@ const socket = join(runtime, "engine.sock");
  * Input: the environment. Output: the folder. */
 export const home = chooseHome(join(root, "home")).home;
 assert(Buffer.byteLength(socket) < 100, "MS_ROOT must be short enough for the engine socket path");
+/** The file a test build writes its windows' levels to, which the spec reads to see that
+ * every app window floats above other apps' windows. */
+export const WINDOW_LEVELS = join(evidence, "window-levels.jsonl");
 const ENGINE_READY_MS = 60000;
 const ENGINE_STOP_MS = 20000;
 
@@ -190,7 +193,7 @@ export const config = {
   services: [["@wdio/tauri-service", {
     driverProvider: "embedded", autoInstallTauriDriver: false, embeddedPort: port,
     appArgs: [], startTimeout: 60000, captureBackendLogs: true, backendLogLevel: "info",
-    env: { CRAZYAGENT_DESKTOP_SOCKET: socket, HOME: home, CFFIXED_USER_HOME: home },
+    env: { CRAZYAGENT_DESKTOP_SOCKET: socket, HOME: home, CFFIXED_USER_HOME: home, CRAZYAGENT_E2E_WINDOW_LEVELS: WINDOW_LEVELS },
   }]],
   framework: "mocha",
   reporters: ["spec"],

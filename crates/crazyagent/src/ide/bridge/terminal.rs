@@ -192,12 +192,27 @@ pub(super) fn terminal_level(
     Ok(asked)
 }
 
+/// The code a pane refuses with when its sandbox will not be set up. Input: the sandbox
+/// error. Output: `ide_terminal_unavailable` where no sandbox runs, `cleanup_walk_too_long`
+/// when removing a name of its cargo home ran past its walk budget, which the terminal shows
+/// (RESET-WALK-CODE code r1 F1), else `ide_terminal_refused`.
+pub(super) fn shell_refusal(error: SandboxError) -> EngineError {
+    match error {
+        SandboxError::Unavailable(_) => failure("ide_terminal_unavailable"),
+        SandboxError::Io(error) if crate::team::cleanup::walk_too_long_io(&error) => {
+            failure(crate::team::cleanup::WALK_TOO_LONG)
+        }
+        SandboxError::Invalid(_) | SandboxError::Io(_) => failure("ide_terminal_refused"),
+    }
+}
+
 /// Builds the pane command for the owner's login shell under the project's agent sandbox,
 /// starting in the project folder. Inputs: the engine root, the project, the level asked for
 /// and the engine's settings files. Output: the command, or
 /// `ide_terminal_project_unavailable`, `ide_terminal_above_project`,
 /// `ide_terminal_level_refused`, `ide_settings_unavailable`, `ide_terminal_shell_unknown`,
-/// `ide_terminal_unavailable` or `ide_terminal_refused`.
+/// `ide_terminal_unavailable`, `cleanup_walk_too_long` or `ide_terminal_refused`
+/// ([`shell_refusal`]).
 pub(super) fn prepare(
     root: &Path,
     project: &ProjectId,
@@ -240,10 +255,7 @@ pub(super) fn prepare(
         },
         place.access,
     )
-    .map_err(|error| match error {
-        SandboxError::Unavailable(_) => failure("ide_terminal_unavailable"),
-        SandboxError::Invalid(_) | SandboxError::Io(_) => failure("ide_terminal_refused"),
-    })?;
+    .map_err(shell_refusal)?;
     assert_eq!(
         command.argv.first().map(String::as_str),
         Some(crate::sandbox::SANDBOX_EXEC)

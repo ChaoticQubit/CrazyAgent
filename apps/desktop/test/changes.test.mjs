@@ -118,6 +118,7 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   assert.equal(client.changesRefusal({ code: "changes_conflict", files: [] }), "These changes conflict with your branch. Ask the agent to update, or discard.");
   assert.equal(client.changesRefusal({ code: "changes_stale" }), "These changes moved on since you opened them. Review them again, then accept.");
   assert.equal(client.changesRefusal({ code: "changes_branch_moved" }), "Your branch moved while these changes were landing, so nothing changed. Review and accept again.");
+  assert.equal(client.changesRefusal({ code: "changes_git_include" }), "Your project's Git config includes a file inside your project folder, where accepted changes can rewrite it. Move that file outside the project folder and include it by its full path, then try again.");
   assert.equal(client.changesRefusal({ code: "changes_git_unsupported" }), "The Git on this computer can't land changes. Update Git, then try again.");
   assert.equal(client.changesRefusal({ code: "changes_merge_unsafe" }), "These changes can't land as a merge commit: an agent commit isn't safe to keep in your history (too many commits, hidden characters, another author's name, or files Git treats specially). Switch Landing to Squash, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_restore_expired" }), "These changes can no longer be restored. Discarded changes are kept for 7 days.");

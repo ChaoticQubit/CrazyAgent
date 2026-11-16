@@ -167,7 +167,7 @@ fn perform(
     if metadata.len() > 8192 || work.receipt.profile_generation > 9_007_199_254_740_991 {
         return Err(unknown());
     }
-    let mut secret = work.secret.take().ok_or_else(unknown)?.into_bytes();
+    let secret = work.secret.take().ok_or_else(unknown)?;
     let path = executable.verified_path()?;
     let _digest = executable.verified_sha256()?;
     let mut command = Command::new(path);
@@ -198,10 +198,11 @@ fn perform(
         let flags = fcntl_getfl(descriptor).map_err(|_| unknown())?;
         fcntl_setfl(descriptor, flags | OFlags::NONBLOCK).map_err(|_| unknown())?;
     }
+    let mut secret = secret.into_bytes();
     let mut frame = Vec::with_capacity(secret.len() + 4);
     frame.extend_from_slice(&(secret.len() as u32).to_be_bytes());
     frame.extend_from_slice(&secret);
-    secret.fill(0);
+    crate::credentials::wipe(&mut secret);
     let deadline = WallInstant::now() + Duration::from_secs(5);
     let mut sent = 0;
     let mut stdout = Vec::new();
@@ -232,7 +233,7 @@ fn perform(
         }
         Ok(false)
     })();
-    frame.fill(0);
+    crate::credentials::wipe(&mut frame);
     drop(input);
     let okay = observed?;
     if !okay || stdout.len() < 5 {
@@ -320,7 +321,7 @@ fn drain_errors(
         4096usize.saturating_sub(*count),
     )?;
     *count += bytes.len();
-    bytes.fill(0);
+    crate::credentials::wipe(&mut bytes);
     Ok(())
 }
 

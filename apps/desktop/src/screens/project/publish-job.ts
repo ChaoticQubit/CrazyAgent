@@ -35,6 +35,8 @@ export const RULE_LABELS: Readonly<Record<string, string>> = {
 };
 
 export const DRAFT_POLL_MS = 2000;
+export const START_LOST_WAIT_MS = 140_000;
+export const PUBLISH_NOT_SEEN = "No publish has shown up. Try Publish again.";
 export const DRAFT_AGENT = "The project's agent drafted these lines from file names only. Check them before you approve.";
 export const DRAFT_STOPPED = "The draft stopped, so CrazyAgent's standard lines are shown.";
 export const DRAFT_BASELINE = "No agent drafted these lines, so CrazyAgent's standard lines are shown.";
@@ -126,4 +128,55 @@ export const ENGINE_STARTING = "CrazyAgent's engine is still starting. Try again
 export function readKept(kept: Result<GitHubPublishJob | null> | null, result: Result<GitHubPublishJob | null>): { read: Result<GitHubPublishJob | null> | null; failed: string | null } {
   if (result.kind === "ok") return { read: result, failed: null };
   return { read: kept, failed: result.kind === "error" ? result.message : ENGINE_STARTING };
+}
+
+const lostStarts = new Map<string, number>();
+
+/** Whether the Overview has waited out a Start whose reply was lost: as long as the engine
+ * gives a Start, START_LOST_WAIT_MS, has passed since the reply came. Inputs: when the reply
+ * came and now, in epoch milliseconds. Output: the answer. */
+export function lostStartOver(since: number, now: number): boolean {
+  return now - since >= START_LOST_WAIT_MS;
+}
+
+/** Marks a project whose publish Start, from Create or the Overview form, lost its reply,
+ * so its Overview reads the publish until it shows, also after the Overview is opened
+ * again. Inputs: the project id and when the reply came. Output: none. */
+export function noteLostStart(projectId: string, at: number): void {
+  lostStarts.set(projectId, at);
+}
+
+/** When a project's lost Start reply came, as Create marked it. Input: the project id.
+ * Output: the time, or null when none is marked. */
+export function lostStartSince(projectId: string): number | null {
+  return lostStarts.get(projectId) ?? null;
+}
+
+/** Forgets a project's lost Start once its publish shows or the wait is over. Input: the
+ * project id. Output: none. */
+export function forgetLostStart(projectId: string): void {
+  lostStarts.delete(projectId);
+}
+
+/** What the Overview does next about a Start whose reply was lost: nothing, stop waiting
+ * because a publish shows, say none showed, or read again in DRAFT_POLL_MS. */
+export type LostStep = "idle" | "seen" | "over" | "read";
+
+/** Decides the Overview's next step while a Start whose reply was lost may still land
+ * (GSB-1, GSB2-2): nothing until this mount's first read is back, and none showed only
+ * once the latest read answered with no publish after the Start's budget. Inputs: when the
+ * reply was lost, this mount's answered reads, the read kept, whether the latest read
+ * failed, and now in epoch milliseconds. Output: the step. */
+export function lostStartStep(since: number | null, answered: number, read: Result<GitHubPublishJob | null> | null, failed: boolean, now: number): LostStep {
+  assert(Number.isSafeInteger(answered), "lost Start reads answered is not a count");
+  assert(answered >= 0, "lost Start reads answered is below zero");
+  if (since === null || answered === 0) return "idle";
+  if (publishView(read?.kind === "ok" ? read.value : null).kind !== "none") return "seen";
+  const noJob = !failed && read?.kind === "ok" && read.value === null;
+  if (noJob && lostStartOver(since, now)) return "over";
+  return "read";
+}
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
 }

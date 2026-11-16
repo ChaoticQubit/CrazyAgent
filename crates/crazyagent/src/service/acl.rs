@@ -30,10 +30,20 @@ const LIST_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(target_os = "macos")]
 const KEPT_MAX: usize = 4096;
 
-/// An entry as it was when its access list was read: device, inode and change time to the
-/// nanosecond, which any change to its access list, mode or owner moves.
+/// An entry as it was when its access list was read: device, inode and change time, which
+/// any change to its access list, mode or owner moves; to the nanosecond on APFS, to the
+/// whole second on HFS+.
 #[cfg(target_os = "macos")]
 type Stamp = (u64, u64, i64, i64);
+
+/// Whether an access answer read for an entry may be kept: only when its listing started in
+/// a later second than the entry last changed, so any later change moves the stamp even
+/// where change times keep whole seconds (HFS-CTIME). Inputs: the entry's stamp and the
+/// whole second the listing started. Output: the answer.
+#[cfg(target_os = "macos")]
+pub(super) fn settled(stamp: &Stamp, listed_secs: i64) -> bool {
+    stamp.2 < listed_secs
+}
 
 /// The access-list answers read so far, by entry, each with the stamp it was read at.
 #[cfg(target_os = "macos")]
@@ -43,7 +53,8 @@ static KEPT: std::sync::LazyLock<
 
 /// Whether each entry carries an access-list entry that lets someone other than this user or
 /// root change it. An answer kept for an entry whose stamp has not moved is reused, and the
-/// rest are read in one `/bin/ls -lde` ([`list`]); only answers read are kept. Input: the
+/// rest are read in one `/bin/ls -lde` ([`list`]); only answers read are kept, and only
+/// [`settled`] ones. Input: the
 /// entries, none a link, each with what `lstat` read of it first. Output: one answer per
 /// entry, in order; none when it cannot be read, which counts as changeable.
 #[cfg(target_os = "macos")]
@@ -74,17 +85,25 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
         return answers;
     }
     let listed: Vec<&Path> = missed.iter().map(|index| entries[*index].0).collect();
+    let listed_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok())
+        .unwrap_or(0);
     let read = list(&listed);
     assert_eq!(read.len(), missed.len());
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
     for (index, answer) in missed.into_iter().zip(read) {
         answers[index] = answer;
-        if let Some(answer) = answer {
+        let (entry, metadata) = entries[index];
+        let read_at = stamp(metadata);
+        if let Some(answer) = answer
+            && settled(&read_at, listed_secs)
+        {
             if kept.len() >= KEPT_MAX {
                 kept.clear();
             }
-            let (entry, metadata) = entries[index];
-            kept.insert(entry.to_path_buf(), (stamp(metadata), answer));
+            kept.insert(entry.to_path_buf(), (read_at, answer));
         }
     }
     assert!(kept.len() <= KEPT_MAX);

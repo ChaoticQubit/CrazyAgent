@@ -306,14 +306,15 @@ pub fn scopes(
     user(endpoints, token).map(|(_, _, scopes)| scopes)
 }
 
+/// The account a token belongs to: its login, its numeric id and the scopes GitHub names for
+/// a classic token, each None when GitHub sent none.
+type Account = (String, Option<u64>, Option<Vec<String>>);
+
 /// Reads the account the token belongs to: its login, which also proves GitHub accepts
 /// the token, its numeric id, and the scopes GitHub names for a classic token. Inputs:
 /// endpoints and token. Output: the login, the id and the scopes, each None when GitHub
 /// sent none, or `github_token_refused`.
-fn user(
-    endpoints: &Endpoints,
-    token: &SecretString,
-) -> Result<(String, Option<u64>, Option<Vec<String>>), EngineError> {
+fn user(endpoints: &Endpoints, token: &SecretString) -> Result<Account, EngineError> {
     #[derive(Deserialize)]
     struct User {
         login: String,
@@ -750,7 +751,7 @@ pub fn cli_token(gh: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Result<SecretSt
     };
     let (read, mut bytes) = reader.join().map_err(|_| unavailable())?;
     if read.is_err() || !status.success() {
-        bytes.fill(0);
+        crate::credentials::wipe(&mut bytes);
         return Err(unavailable());
     }
     while bytes.last().is_some_and(u8::is_ascii_whitespace) {

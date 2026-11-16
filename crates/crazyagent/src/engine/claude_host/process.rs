@@ -177,9 +177,7 @@ pub(super) fn run(
     };
     assert!(child.id() > 1);
     group.store(child.id(), Ordering::Release);
-    let follower = sandbox
-        .is_unconfined()
-        .then(|| Follower::start(child.id(), Some(token)));
+    let follower = Follower::start(child.id(), Some(token), sandbox.lineage_check());
     let mut process = Process {
         group: Pid::from_child(&child),
         group_absent: false,
@@ -588,7 +586,8 @@ impl Process {
     }
 
     /// Ends the harness and everything it left in its group, then releases the account
-    /// lease. At Full access no warden reaches processes that left the group, so the
+    /// lease. At Full access, and under the plain Linux Landlock helper, no warden reaches
+    /// processes that left the group (LINUX-KILL-GROUP), so the
     /// harness's lineage, followed from its start, is taken before the kill and checked after
     /// it; while some still run, the turn ends with their code and a hold ends them by the
     /// default leftover setting, keeping the lease until none run or the owner signs the

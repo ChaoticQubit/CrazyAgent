@@ -150,8 +150,30 @@ test("the made project's message follows the publish Start's reply", () => {
   assert.equal(publish.publishOutcome({ kind: "error", code: "github_not_signed_in", message: "Sign in with GitHub first." }), "Publishing on GitHub didn't start. Sign in with GitHub first.");
   assert.equal(publish.publishOutcome({ kind: "not_ready" }), "Publishing on GitHub didn't start. CrazyAgent's engine is still starting.");
   const page = read("src/screens/new-project/index.tsx");
-  assert.match(page, /const outcome = publishOutcome\(publishing \? await publishing : null\);/);
+  assert.match(page, /const outcome = publishOutcome\(started\);/);
   assert.doesNotMatch(page, /PUBLISH_STARTED/);
   const client = read("src/engine-client.ts");
   assert.match(client, /\| \{ step: "drafting" \}\n/);
+});
+
+test("a Start whose reply was lost after the engine ran it says it may have started and where to look, the TUI's words", () => {
+  const maybe = "Publishing on GitHub may have started. The project's Overview shows where it stands.";
+  assert.equal(publish.publishOutcome({ kind: "error", code: "github_outcome_unknown", message: "We couldn't confirm what GitHub did. Check the list again." }), maybe);
+  assert.equal(publish.publishOutcome({ kind: "error", code: "github_reply_bounds", message: "GitHub's reply was too large to show. Try again." }), maybe);
+  assert.equal(publish.publishOutcome({ kind: "error", code: "github_publish_running", message: "A publish is already running." }), "Publishing on GitHub didn't start. A publish is already running.");
+  const tui = read("../../crates/crazyagent/src/tui/screens/new_project_publish.rs");
+  assert.match(tui, /"Publishing on GitHub may have started\."/);
+  assert.match(tui, /"The project's Overview shows where it stands\."/);
+});
+
+test("Create marks a Start whose reply was lost, so the project's Overview reads it until it shows", () => {
+  assert.equal(typeof publish.startReplyLost, "function");
+  assert.equal(publish.startReplyLost(null), false);
+  assert.equal(publish.startReplyLost({ kind: "error", code: "github_outcome_unknown", message: "" }), true);
+  assert.equal(publish.startReplyLost({ kind: "error", code: "github_reply_bounds", message: "" }), true);
+  assert.equal(publish.startReplyLost({ kind: "error", code: "github_not_signed_in", message: "" }), false);
+  assert.equal(publish.startReplyLost({ kind: "not_ready" }), false);
+  assert.equal(publish.startReplyLost({ kind: "ok", value: { step: { step: "drafting" } } }), false);
+  const page = read("src/screens/new-project/index.tsx");
+  assert.match(page, /const started = publishing \? await publishing : null;\n\s+const outcome = publishOutcome\(started\);\n\s+if \(startReplyLost\(started\)\) noteLostStart\(id, Date\.now\(\)\);/);
 });

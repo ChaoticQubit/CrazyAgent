@@ -828,6 +828,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "chatgpt_sign_in_expired" => {
             Some(crate::model_gateway::relay::chatgpt::SIGN_IN_EXPIRED_LINE)
         }
+        "linux_sandbox_not_full" => Some(
+            "This Linux cannot give this agent the full sandbox and the setting 'Refuse agents without the full Linux sandbox' is on, so it does not start. The lines under Agent access say what this Linux lacks. Turn the setting off in Settings to start agents with what this Linux holds.",
+        ),
         "team_master_no_terminal" => Some(
             "This master harness has no terminal app. Its conversation stays on the Conversation tab.",
         ),

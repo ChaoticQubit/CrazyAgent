@@ -764,6 +764,21 @@ impl NativeBridge {
             .await
     }
 
+    /// Restarts the project's running agents that can still open a folder hidden after they
+    /// started (SA-VID14-A) as one team action: each stops and starts again in its own
+    /// worktree and conversation, kept out of every hidden folder. Takes the project id and
+    /// the client generation. Returns the actual commit receipt; with no such agent it is the
+    /// plain rejection `team_no_hidden_seers`.
+    pub async fn team_restart_hidden_seers(
+        &mut self,
+        id: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::RestartHiddenSeers { project_id }, generation)
+            .await
+    }
+
     /// Stops one harness, a sub-agent the master started, with the teammates in its
     /// terminal; it stays stopped across restarts until the owner wakes it. Takes the project
     /// id, the team agent id and the client generation. Returns the actual commit receipt; the

@@ -55,7 +55,7 @@ fn repeats_names_lines_said_twice_in_one_place_and_app_lines_only_when_given_the
     let text = "# One\n- A.\n- B.\n- A.\n# Two\n- A.\n";
     let note = "Line 4 repeats line 2.";
     let within = Finding::new(FindingKind::Duplicate, vec![2, 4], note);
-    assert_eq!(repeats(text, None), [within.clone()]);
+    assert_eq!(repeats(text, None), std::slice::from_ref(&within));
     let had = "The app instructions already have this line.";
     let in_app = Finding::new(FindingKind::Duplicate, vec![3], had);
     assert_eq!(

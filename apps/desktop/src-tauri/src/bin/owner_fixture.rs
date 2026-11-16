@@ -7,6 +7,7 @@ use crazyagent::engine::owner::{
     OwnerClient, OwnerClientKind, OwnerData, OwnerOperation, OwnerRead, OwnerRequest,
     OwnerResponse, OwnerResult,
 };
+use crazyagent::harnesses::Search;
 use crazyagent::protocol::*;
 use crazyagent::usage::service::{UsageService, start_for_engine};
 use serde_json::json;
@@ -127,6 +128,10 @@ async fn serve(root: &Path, projects: &Path, metadata: bool) -> FixtureResult<()
         let config = resolve_config(&root.join("g"), &root.join("p"))?;
         EngineService::start(root, "e.sock", &config, &stopped).await?
     };
+    if let Err(error) = service.set_harness_search(Search::from_environment().with_engine(root)) {
+        service.shutdown().await?;
+        return Err(error.into());
+    }
     let upkeep = match usage_upkeep(root) {
         Ok(upkeep) => upkeep,
         Err(error) => {

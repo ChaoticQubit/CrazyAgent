@@ -197,7 +197,7 @@ async fn stand_in_host_at(
     };
     let clock = Some(Duration::from_millis(limits.wall_time_ms));
     let lease = Some((profile, fixture.project_id.clone()));
-    CodexHostProcess::spawn_guarded(command, &limits, clock, lease, unconfined)
+    CodexHostProcess::spawn_guarded(command, &limits, clock, lease, sandbox.lineage_check())
         .await
         .unwrap()
 }

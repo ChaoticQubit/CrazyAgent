@@ -2175,17 +2175,21 @@ fn the_edit_names_a_skill_its_agents_do_not_get() {
                - Name `plain-word` in prose.\n- Use the `superpowers:grill-me` skill.\n";
     save(&root, Some(project.clone()), own, 0).unwrap();
     let seen = check_prompt(&root, Some(&project));
-    assert!(seen.contains(
-        "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
-    ));
+    assert!(
+        seen.contains(
+            "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
+        )
+    );
     assert!(!seen.contains("`grill-me` is not"), "{seen}");
     assert!(!seen.contains("`superpowers:grill-me` is not"), "{seen}");
     assert!(!seen.contains("`plain-word`"), "{seen}");
     save(&root, None, own, 0).unwrap();
     let app = check_prompt(&root, None);
-    assert!(app.contains(
-        "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
-    ));
+    assert!(
+        app.contains(
+            "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
+        )
+    );
     assert!(!app.contains("`grill-me` is not"), "{app}");
 }
 
@@ -2380,10 +2384,7 @@ fn process_import_never_labels_the_project_text() {
         assert!(done.status.success(), "{done:?}");
     }
     let project = with_project(&root, &folder);
-    let action = Action::ConfirmImport {
-        project: project.clone(),
-    };
-    run(&root, action, None).unwrap();
+    crate::instruction_files::import(&project_folder(&root, &project).unwrap()).unwrap();
     assert_eq!(
         crate::agent_home::read_project(&folder).unwrap(),
         "OWNER-TEXT-7\n\n### Imported from CLAUDE.md\n\nREPO-RULE-7\n"

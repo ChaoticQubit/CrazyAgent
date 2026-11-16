@@ -24,6 +24,8 @@ test("an intake job line says what it does now, with counts as files land", () =
   assert.equal(intake.jobLine(job({ state: "done" })), "shop is in your projects folder. Set it up from Home.");
   assert.equal(intake.jobLine(job({ state: "cancelled", phase: "copying" })), "Adding shop stopped. Nothing was moved or copied.");
   assert.equal(intake.jobLine(job(failed("home_copy_failed", "copying"))), "shop: Couldn't copy the folder. The original is untouched. Try again.");
+  assert.equal(intake.jobLine(job(failed("home_copy_names_fold", "copying"))), "shop: Two names in the folder differ only in case or accents, and your projects folder can't keep both. Rename one of them, then try again. The original is untouched.");
+  assert.equal(intake.jobLine(job(failed("home_copy_entry_swapped", "copying"))), "shop: Something replaced a file or folder in it while it was being copied, so the copy stopped. The original is untouched. Try again once nothing else is changing the folder.");
   assert.equal(intake.jobLine(job(failed("home_move_source_left", "clearing"))),
     "shop: The folder was added, but part of the original couldn't be removed. What's left there may be newer than the copy, so check it before you delete anything.");
   assert.equal(intake.jobLine(job({ state: "needs_answer", code: "home_move_worktrees" })), "shop needs your answer before it is moved.");

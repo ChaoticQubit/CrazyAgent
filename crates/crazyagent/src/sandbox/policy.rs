@@ -826,7 +826,8 @@ pub struct NetworkView {
 /// What a network choice cannot hold on this Linux, for the Agent access page: a port agents
 /// may reach on this computer is open on every host. Under `TcpOnly` the call supervisor
 /// keeps those ports to this computer, though Https reaches port 53 on any host; without it
-/// a nesting host's bridge does under None, unless a granted port is below its lowest.
+/// a nesting host's bridge does under None, unless a granted port is below its lowest; a
+/// host that routes keeps Https to its ports in a network of its own (DEC-179 SBX-2).
 /// Inputs: the choice, the host under the setting, sockets, grants. Output: the line, or none.
 pub fn linux_network_gap(
     network: AgentNetwork,
@@ -836,6 +837,13 @@ pub fn linux_network_gap(
 ) -> Option<String> {
     let host = host?;
     let tcp = sockets == Some(crate::sandbox::LinuxSockets::TcpOnly);
+    let low = grants.iter().any(|grant| {
+        matches!(grant, AccessGrant::Port { port } if *port < crate::sandbox::BRIDGE_PORT_MIN)
+    });
+    if host.routed && tcp && network == AgentNetwork::Https && !low {
+        assert!(host.nested);
+        return None;
+    }
     if host.supervised && tcp && network != AgentNetwork::Open {
         return (network == AgentNetwork::Https)
             .then(|| crate::sandbox::LINUX_DNS_ANY_HOST_LINE.to_owned());
@@ -1720,6 +1728,7 @@ mod tests {
                 supervised: false,
                 root: false,
                 armored: false,
+                routed: false,
             })
         };
         let port = |port| AccessGrant::Port { port };
@@ -1729,22 +1738,37 @@ mod tests {
             linux_network_gap(AgentNetwork::None, host(nested), sockets, grants)
         };
         for network in AgentNetwork::ALL {
-            assert_eq!(linux_network_gap(network, None, tcp, &[]), None, "not Linux");
+            assert_eq!(
+                linux_network_gap(network, None, tcp, &[]),
+                None,
+                "not Linux"
+            );
             assert_eq!(linux_network_gap(network, host(false), tcp, &[]), line);
         }
         for network in [AgentNetwork::Open, AgentNetwork::Https] {
             assert_eq!(linux_network_gap(network, host(true), tcp, &[]), line);
         }
         assert_eq!(none(true, tcp, &[]), None);
-        assert_eq!(none(true, tcp, &[port(8080), AccessGrant::TempFolder]), None);
+        assert_eq!(
+            none(true, tcp, &[port(8080), AccessGrant::TempFolder]),
+            None
+        );
         assert_eq!(none(true, tcp, &[port(1024)]), None);
-        for sockets in [Some(LinuxSockets::TcpPorts), Some(LinuxSockets::Refuse), None] {
+        for sockets in [
+            Some(LinuxSockets::TcpPorts),
+            Some(LinuxSockets::Refuse),
+            None,
+        ] {
             assert_eq!(none(true, sockets, &[]), line, "{sockets:?}");
         }
         let named = none(true, tcp, &[port(8080), port(443), port(80)]).unwrap();
         assert_eq!(named, crate::sandbox::linux_unbridged_line(80));
         assert!(named.contains("port 80 is below 1024"), "{named}");
-        assert_eq!(none(false, tcp, &[port(80)]), line, "no nest, the plain line");
+        assert_eq!(
+            none(false, tcp, &[port(80)]),
+            line,
+            "no nest, the plain line"
+        );
         let stored = r#"{"network":"none","label":"None"}"#;
         let old: NetworkView = serde_json::from_str(stored).unwrap();
         assert_eq!(old.gap, None, "a view an older engine stored");
@@ -1762,9 +1786,13 @@ mod tests {
                 supervised: true,
                 root: false,
                 armored: false,
+                routed: false,
             })
         };
-        let low = [AccessGrant::Port { port: 80 }, AccessGrant::Port { port: 53 }];
+        let low = [
+            AccessGrant::Port { port: 80 },
+            AccessGrant::Port { port: 53 },
+        ];
         let ports = Some(LINUX_PORTS_ANY_HOST_LINE.to_owned());
         let dns = Some(LINUX_DNS_ANY_HOST_LINE.to_owned());
         let tcp = Some(LinuxSockets::TcpOnly);
@@ -1773,12 +1801,77 @@ mod tests {
             assert_eq!(gap(AgentNetwork::None, tcp), None, "nested {nested}");
             assert_eq!(gap(AgentNetwork::Https, tcp), dns, "nested {nested}");
             assert_eq!(gap(AgentNetwork::Open, tcp), ports, "nested {nested}");
-            for sockets in [Some(LinuxSockets::TcpPorts), Some(LinuxSockets::Refuse), None] {
+            for sockets in [
+                Some(LinuxSockets::TcpPorts),
+                Some(LinuxSockets::Refuse),
+                None,
+            ] {
                 for network in [AgentNetwork::None, AgentNetwork::Https] {
                     assert_eq!(gap(network, sockets), ports, "{network:?} {sockets:?}");
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
+        use crate::sandbox::{
+            LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets,
+        };
+        let host = |supervised, routed| {
+            Some(LinuxHost {
+                nested: true,
+                scoped: false,
+                supervised,
+                root: false,
+                armored: false,
+                routed,
+            })
+        };
+        let ports = Some(LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        let tcp = Some(LinuxSockets::TcpOnly);
+        let high = [AccessGrant::Port { port: 8080 }, AccessGrant::TempFolder];
+        let low = [
+            AccessGrant::Port { port: 8080 },
+            AccessGrant::Port { port: 80 },
+        ];
+        for supervised in [false, true] {
+            let gap = |routed, network, sockets, grants: &[AccessGrant]| {
+                linux_network_gap(network, host(supervised, routed), sockets, grants)
+            };
+            let https = AgentNetwork::Https;
+            assert_eq!(gap(true, https, tcp, &[]), None, "supervised {supervised}");
+            assert_eq!(
+                gap(true, https, tcp, &high),
+                None,
+                "supervised {supervised}"
+            );
+            assert_eq!(
+                gap(true, https, tcp, &low),
+                gap(false, https, tcp, &low),
+                "a port below 1024 keeps the shared network: supervised {supervised}"
+            );
+            for sockets in [
+                Some(LinuxSockets::TcpPorts),
+                Some(LinuxSockets::Refuse),
+                None,
+            ] {
+                assert_eq!(gap(true, https, sockets, &[]), ports, "{sockets:?}");
+            }
+            assert_eq!(gap(true, AgentNetwork::Open, tcp, &[]), ports);
+            assert_eq!(
+                gap(true, AgentNetwork::None, tcp, &high),
+                gap(false, AgentNetwork::None, tcp, &high)
+            );
+        }
+        let unrouted =
+            |supervised| linux_network_gap(AgentNetwork::Https, host(supervised, false), tcp, &[]);
+        assert_eq!(unrouted(false), ports, "today's line");
+        assert_eq!(
+            unrouted(true),
+            Some(LINUX_DNS_ANY_HOST_LINE.to_owned()),
+            "today's line"
+        );
     }
 
     #[test]
@@ -1793,6 +1886,7 @@ mod tests {
                 supervised: false,
                 root: false,
                 armored: false,
+                routed: false,
             })
         };
         let gaps = |access, nested, scoped| linux_gaps(access, host(nested, scoped), false);
@@ -1804,7 +1898,11 @@ mod tests {
             assert_eq!(gaps(access, false, true), [git, LINUX_PROCESS_LIST_LINE]);
             assert_eq!(gaps(access, false, false), [git, LINUX_SIGNALS_LINE]);
             let found = linux_gaps(access, host(false, false), true);
-            assert_eq!(found, gaps(access, false, false), "unsupervised, a repository adds none");
+            assert_eq!(
+                found,
+                gaps(access, false, false),
+                "unsupervised, a repository adds none"
+            );
         }
         assert!(gaps(AgentAccess::Full, false, false).is_empty());
         let levels = LevelView::on(host(false, false), true);
@@ -1813,7 +1911,11 @@ mod tests {
             let told: Vec<&str> = level.gaps.iter().map(String::as_str).collect();
             assert_eq!(told, gaps(level.access, false, false), "{:?}", level.access);
         }
-        assert!(LevelView::on(None, true).iter().all(|level| level.gaps.is_empty()));
+        assert!(
+            LevelView::on(None, true)
+                .iter()
+                .all(|level| level.gaps.is_empty())
+        );
         let stored = r#"{"access":"sandboxed","label":"Sandboxed","unavailable":null}"#;
         let old: LevelView = serde_json::from_str(stored).unwrap();
         assert!(old.gaps.is_empty(), "a view an older engine stored");
@@ -1831,6 +1933,7 @@ mod tests {
             supervised: true,
             root: false,
             armored: false,
+            routed: false,
         };
         let root = LinuxHost {
             nested: false,
@@ -1838,6 +1941,7 @@ mod tests {
             supervised: false,
             root: true,
             armored: false,
+            routed: false,
         };
         let sandboxed = |host, found| linux_gaps(AgentAccess::Sandboxed, Some(host), found);
         let (kept, said) = (LINUX_KEPT_GIT_LINE, LINUX_SUPERVISED_LINE);
@@ -1845,7 +1949,11 @@ mod tests {
         assert_eq!(sandboxed(held(true, true), true), [kept, said]);
         for scoped in [false, true] {
             let listed = [kept, said, LINUX_PROCESS_LIST_LINE];
-            assert_eq!(sandboxed(held(false, scoped), true), listed, "scoped {scoped}");
+            assert_eq!(
+                sandboxed(held(false, scoped), true),
+                listed,
+                "scoped {scoped}"
+            );
         }
         let open = [LINUX_ROOT_LINE, LINUX_NESTED_GIT_LINE, LINUX_SIGNALS_LINE];
         assert_eq!(sandboxed(root, true), open);
@@ -1856,14 +1964,24 @@ mod tests {
         let (on, off) = (Some(LinuxSupervisor::On), Some(LinuxSupervisor::Off));
         assert_eq!(held(true, false).under(on), held(true, false));
         assert!(!held(true, false).under(off).supervised);
-        assert!(!held(true, false).under(None).supervised, "unreadable shows every line");
+        assert!(
+            !held(true, false).under(None).supervised,
+            "unreadable shows every line"
+        );
         assert_eq!(root.under(on), root);
         assert_eq!(root.under(None), root);
-        assert!(!root.under(off).root, "with the supervisor Off, root changes nothing");
+        assert!(
+            !root.under(off).root,
+            "with the supervisor Off, root changes nothing"
+        );
         let catalog = LevelView::on(Some(held(true, false)), true);
         assert_eq!(catalog[0].access, AgentAccess::Sandboxed);
         let told: Vec<&str> = catalog[0].gaps.iter().map(String::as_str).collect();
-        assert_eq!(told, [kept, said], "the catalog has no project to rule one out");
+        assert_eq!(
+            told,
+            [kept, said],
+            "the catalog has no project to rule one out"
+        );
         let unread = LevelView::other_git(Some(held(true, false)), Path::new("/nonexistent"));
         assert!(unread, "a folder that cannot be read rules out none");
         let quiet = LevelView::on(Some(held(true, false)), false);
@@ -1889,6 +2007,7 @@ mod tests {
             supervised,
             root,
             armored: true,
+            routed: false,
         };
         let (git, said, armor) = (
             LINUX_NESTED_GIT_LINE,
@@ -1899,24 +2018,42 @@ mod tests {
         for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
             let gaps = |host, other_git| linux_gaps(access, Some(host), other_git);
             assert_eq!(gaps(host(true, false, false), false), [git, armor, listed]);
-            assert_eq!(gaps(host(false, false, false), false), [git, armor, signals]);
+            assert_eq!(
+                gaps(host(false, false, false), false),
+                [git, armor, signals]
+            );
             assert_eq!(gaps(host(false, true, false), false), [said, armor, listed]);
             let kept = [LINUX_KEPT_GIT_LINE, said, armor, listed];
-            assert_eq!(gaps(host(false, true, false), true), kept, "four lines at most");
+            assert_eq!(
+                gaps(host(false, true, false), true),
+                kept,
+                "four lines at most"
+            );
             let root = [LINUX_ROOT_LINE, git, signals];
-            assert_eq!(gaps(host(false, false, true), false), root, "root: no AppArmor line");
+            assert_eq!(
+                gaps(host(false, false, true), false),
+                root,
+                "root: no AppArmor line"
+            );
             let free = LinuxHost {
                 armored: false,
                 ..host(true, false, false)
             };
-            assert_eq!(gaps(free, false), [git, listed], "no restriction, no AppArmor line");
+            assert_eq!(
+                gaps(free, false),
+                [git, listed],
+                "no restriction, no AppArmor line"
+            );
         }
         let full = linux_gaps(AgentAccess::Full, Some(host(false, false, false)), true);
         assert!(full.is_empty());
         let levels = LevelView::on(Some(host(true, false, false)), false);
         let told: Vec<&str> = levels[0].gaps.iter().map(String::as_str).collect();
         assert_eq!(told, [git, armor, listed], "both clients get the line");
-        assert!(armor.contains("sudo dpkg-reconfigure crazy-agent"), "{armor}");
+        assert!(
+            armor.contains("sudo dpkg-reconfigure crazy-agent"),
+            "{armor}"
+        );
     }
 
     /// The Agent access page reads the project folder for another git repository before its
@@ -1935,6 +2072,7 @@ mod tests {
             supervised,
             root: false,
             armored: false,
+            routed: false,
         };
         assert!(LevelView::other_git(Some(host(true)), &project));
         assert!(LevelView::other_git(Some(host(true)), &missing));

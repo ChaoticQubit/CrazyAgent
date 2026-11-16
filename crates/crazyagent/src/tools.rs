@@ -40,7 +40,6 @@ pub(crate) const INTERPRETER_DEPTH_MAX: usize = 2;
 const VERSION_ENTRIES_MAX: usize = 64;
 const VERSIONS_PER_MANAGER_MAX: usize = 4;
 const ANCESTORS_MAX: usize = 128;
-const PROJECT_ROOTS_MAX: usize = 1024;
 const PROJECTS_READ_TIME: std::time::Duration = std::time::Duration::from_secs(2);
 const TEMP_FOLDERS: [&str; 7] = [
     "/tmp",
@@ -93,6 +92,7 @@ pub fn record_engine_root(root: &Path) {
 
 /// The data root this process's engine recorded at its start ([`record_engine_root`]),
 /// none in a process that runs no engine. No input. Output: the absolute root.
+#[cfg(target_os = "linux")]
 pub(crate) fn engine_root() -> Option<&'static Path> {
     let root = ENGINE_ROOT.get().map(PathBuf::as_path);
     assert!(root.is_none_or(Path::is_absolute));
@@ -503,12 +503,14 @@ impl Places {
 }
 
 /// Every folder agents can write whole that `engine.db` names, as recorded and real: set-up
-/// project folders, declared repositories, team and leased worktrees with their repositories
-/// ([`crate::harnesses::finding::AGENT_TABLES`]), read read-only. No database or table names
-/// none; a failed read or a table past [`PROJECT_ROOTS_MAX`] rows gives none; a row naming no
-/// folder is skipped alone and counted in the log. Input: the data folder. Output: the folders.
+/// project folders, declared repositories, team and leased worktrees with their repositories,
+/// read read-only through engine start's own reader
+/// ([`crate::harnesses::finding::named_folders`]). No database or table names none; a failed
+/// read or a table past [`crate::harnesses::finding::AGENT_ROWS_MAX`] rows gives none; a row
+/// it cannot read is skipped alone and counted in the log. Input: the data folder. Output:
+/// the folders.
 fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
-    use crate::harnesses::finding::{AGENT_TABLES, Names, PROJECT_REPOSITORIES_MAX, folders_in};
+    use crate::harnesses::finding::{BadRow, NAMED_FOLDERS_MAX, named_folders};
     let database = data_root.join("engine.db");
     match std::fs::symlink_metadata(&database) {
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
@@ -524,70 +526,23 @@ fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
     .ok()?;
     connection.busy_timeout(PROJECTS_READ_TIME).ok()?;
     let tx = connection.unchecked_transaction().ok()?;
-    let limit = i64::try_from(PROJECT_ROOTS_MAX + 1).ok()?;
+    let (named, skipped) = named_folders(&tx, BadRow::Skip).ok()?;
     let mut roots = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut skipped = 0usize;
-    for (table, names, query) in AGENT_TABLES {
-        let tables: i64 = tx
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                [table],
-                |row| row.get(0),
-            )
-            .ok()?;
-        if tables == 0 {
-            continue;
-        }
-        let rows: Vec<Option<String>> = tx
-            .prepare(query)
-            .ok()?
-            .query_map([limit], |row| {
-                Ok(row.get_ref(0)?.as_str().ok().map(str::to_owned))
-            })
-            .ok()?
-            .collect::<Result<_, _>>()
-            .ok()?;
-        if rows.len() > PROJECT_ROOTS_MAX {
-            return None;
-        }
-        for row in rows {
-            let folders = match (names, row.as_deref()) {
-                (Names::Setup, Some(body)) => setup_folder(body).map(|folder| vec![folder]),
-                (_, Some(text)) => folders_in(names, text).ok(),
-                (_, None) => None,
-            };
-            let Some(folders) = folders else {
-                skipped += 1;
-                continue;
-            };
-            for folder in folders.into_iter().filter(|folder| folder.is_absolute()) {
-                let real = folder.canonicalize().ok();
-                for root in std::iter::once(folder).chain(real) {
-                    if seen.insert(root.clone()) {
-                        roots.push(root);
-                    }
-                }
+    for folder in named.into_iter().filter(|folder| folder.is_absolute()) {
+        let real = folder.canonicalize().ok();
+        for root in std::iter::once(folder).chain(real) {
+            if seen.insert(root.clone()) {
+                roots.push(root);
             }
         }
     }
     if skipped > 0 {
         eprintln!("engine_places_setup_rows_skipped count={skipped}");
     }
-    assert!(skipped <= AGENT_TABLES.len() * PROJECT_ROOTS_MAX);
-    assert!(roots.len() <= 2 * PROJECT_ROOTS_MAX * (PROJECT_REPOSITORIES_MAX + 3));
+    assert!(roots.len() <= 2 * NAMED_FOLDERS_MAX);
     assert!(roots.iter().all(|root| root.is_absolute()));
     Some(roots)
-}
-
-/// The project folder one stored setup names, read from its `folder` field alone so any
-/// other field another version added or dropped changes nothing
-/// ([`crate::project_setup::project_folder_of`]). Input: the stored body. Output: the
-/// folder, or none for a body that is not JSON or names no folder.
-fn setup_folder(body: &str) -> Option<PathBuf> {
-    let body: serde_json::Value = serde_json::from_str(body).ok()?;
-    let folder = body.get("folder")?.as_str()?;
-    Some(crate::project_setup::project_folder_of(Path::new(folder)))
 }
 
 /// Whether a path lies in the engine's data folder outside its `setup` folder, where the
@@ -1425,7 +1380,7 @@ fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refus
 /// or group past a sticky store, or as leading into a temp folder: the file as found and
 /// real first, then each link and `..` folder on its way, as it runs by its path
 /// ([`Places::hop_refusal`], B1). Inputs: the places and the file. Output: the check.
-fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
+pub(crate) fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
     if !executable_file(candidate) {
         return None;
     }

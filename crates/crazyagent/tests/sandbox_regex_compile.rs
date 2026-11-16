@@ -149,7 +149,8 @@ fn log_caught_up(folder: &Path) {
 /// SANDBOX-REGEX: the LL-2 deny on flags in Codex's `skills/.system` compiles with no
 /// libsandbox error, and an agent still cannot set the immutable flag on `.system` or a file
 /// in it under any spelling that reaches it: plain, upper, mixed, long s, Kelvin sign or the
-/// Data volume path, while it can flag a plain file in its home.
+/// Data volume path. No file in its home takes a flag at all (RV-DS241-137, -138), while a
+/// plain file in its own worktree still does.
 #[test]
 fn the_codex_system_skills_flag_deny_compiles_clean_and_holds_for_every_spelling() {
     let case = case();
@@ -157,7 +158,9 @@ fn the_codex_system_skills_flag_deny_compiles_clean_and_holds_for_every_spelling
     fs::create_dir_all(&system).unwrap();
     let skill = system.join("SKILL.md");
     fs::write(&skill, "skill").unwrap();
-    let own = case.home.join("own.txt");
+    let homed = case.home.join("own.txt");
+    fs::write(&homed, "own").unwrap();
+    let own = case.own.join("own.txt");
     fs::write(&own, "own").unwrap();
     let sandbox = sandbox(&case);
     let profile = case.profiles.join("flags.sb");
@@ -193,10 +196,22 @@ fn the_codex_system_skills_flag_deny_compiles_clean_and_holds_for_every_spelling
         &sandbox,
         &profile,
         "/usr/bin/chflags",
+        &["uchg", homed.to_str().unwrap()],
+    );
+    pids.push(pid);
+    assert!(!flagged, "a file in the agent's home takes no flag");
+    assert_eq!(fs::metadata(&homed).unwrap().st_flags() & UF_IMMUTABLE, 0);
+    let (flagged, pid) = run(
+        &sandbox,
+        &profile,
+        "/usr/bin/chflags",
         &["uchg", own.to_str().unwrap()],
     );
     pids.push(pid);
-    assert!(flagged);
+    assert!(
+        flagged,
+        "a plain file in the agent's own worktree still takes one"
+    );
     assert_eq!(
         fs::metadata(&own).unwrap().st_flags() & UF_IMMUTABLE,
         UF_IMMUTABLE

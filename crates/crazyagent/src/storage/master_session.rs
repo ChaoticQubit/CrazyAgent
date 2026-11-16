@@ -6048,9 +6048,13 @@ auth = { method = "none" }"#;
     }
 
     async fn owner_apply(storage: &Storage, started: &Started, id: &str, mutation: OwnerMutation) {
-        assert_eq!(
-            owner_result(storage, started, id, mutation).await,
-            OwnerResult::Applied
+        let result = owner_result(storage, started, id, mutation).await;
+        assert!(
+            matches!(
+                result,
+                OwnerResult::Applied | OwnerResult::OnboardingStarted { .. }
+            ),
+            "{result:?}"
         );
     }
 
@@ -7001,10 +7005,16 @@ auth = { method = "none" }"#;
         let before = std::fs::symlink_metadata(config).unwrap();
         let copy = config.with_extension("json.copy");
         std::fs::write(&copy, std::fs::read(config).unwrap()).unwrap();
-        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(before.mode() & 0o7777))
-            .unwrap();
+        std::fs::set_permissions(
+            &copy,
+            std::fs::Permissions::from_mode(before.mode() & 0o7777),
+        )
+        .unwrap();
         std::fs::rename(&copy, config).unwrap();
-        assert_ne!(std::fs::symlink_metadata(config).unwrap().ino(), before.ino());
+        assert_ne!(
+            std::fs::symlink_metadata(config).unwrap().ino(),
+            before.ino()
+        );
     }
 
     /// Runs the preparation of a master turn that must be refused. Inputs: the fixture, the
@@ -7391,7 +7401,11 @@ auth = { method = "none" }"#;
         let refused = refused_cause(&case, prepare, "a write-and-restore and a rebind").await;
 
         let (session, _) = case.view().await;
-        assert_ne!(session.binding().0, &before, "the outside edit rebound the session");
+        assert_ne!(
+            session.binding().0,
+            &before,
+            "the outside edit rebound the session"
+        );
         assert_eq!(
             refused.as_deref(),
             Some("rcli_profile_changed_in_conversation")
@@ -7422,7 +7436,11 @@ auth = { method = "none" }"#;
         let refused = refused_cause(&case, prepare, "a replaced config and a rebind").await;
 
         let (session, _) = case.view().await;
-        assert_ne!(session.binding().0, &before, "the outside edit rebound the session");
+        assert_ne!(
+            session.binding().0,
+            &before,
+            "the outside edit rebound the session"
+        );
         assert_eq!(refused.as_deref(), Some("rcli_profile_identity_changed"));
         assert_master_generation(&case, 1);
         case.close().await;

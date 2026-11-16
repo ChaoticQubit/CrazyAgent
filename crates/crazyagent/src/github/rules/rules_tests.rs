@@ -342,6 +342,7 @@ fn a_refused_rule_is_listed_with_githubs_reason_and_the_others_still_apply() {
             ("PATCH", format!("{r}/code-scanning/default-setup")),
         ],
         keep_wiki: true,
+        security_reply: None,
     });
     let outcomes = applied(&server, &GitHubRule::defaults(), &private());
     assert_eq!(outcomes.len(), 23);

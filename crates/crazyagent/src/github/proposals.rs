@@ -3,7 +3,7 @@ use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::questions::{Ask, Asker, EngineSource, QuestionKind};
 use crate::team::{MessageAuthor, MessageState};
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, Params, Transaction, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
@@ -22,6 +22,9 @@ pub const WHY_BYTES_MAX: usize = 300;
 pub const OPEN_PER_PROJECT_MAX: i64 = 4;
 /// The most proposals one pass applies or tells, so a pass stays bounded.
 pub const PASS_MAX: i64 = 16;
+/// The most projects one pass tries to tell, oldest outcome first; a project whose full
+/// conversation refuses its outcome costs that pass one try (rv-code gh-s7 N4).
+const TOLD_PROJECTS_MAX: i64 = 256;
 
 const UNAVAILABLE: &str = "github_rule_requests_unavailable";
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS github_rule_requests (
@@ -43,6 +46,7 @@ const OPEN: &str = "status IN ('pending','approved','applying')";
 const ENDED: &str = "status IN ('applied','refused','declined')";
 
 const _: () = assert!(OPEN_PER_PROJECT_MAX <= PASS_MAX);
+const _: () = assert!(PASS_MAX <= TOLD_PROJECTS_MAX);
 const _: () = assert!(WHY_BYTES_MAX <= crate::questions::CONTEXT_BYTES_MAX / 4);
 
 /// How a proposal ended for the agent that made it: applied after the owner approved it,
@@ -222,20 +226,23 @@ pub(crate) fn decide(
 /// writes the repository's record, so two at once could lose one's record.
 static APPLYING: Mutex<()> = Mutex::new(());
 
+/// The rule change a pass sends with the owner's sign-in. Inputs: the project folder, the
+/// repository kept at ask time, the rule and its on value. Output: GitHub's fresh rules page
+/// for that repository, or the refusal.
+pub type RuleSetter<'a> =
+    dyn FnMut(&Path, &str, GitHubRule, bool) -> Result<GitHubRepoRules, EngineError> + 'a;
+
 /// Applies every approved proposal, each with the rule, the on value and the repository
 /// kept at ask time, and tells each agent how it ended. A proposal is claimed before its
 /// change is sent, so two passes never send one twice, and no transaction is open while
 /// GitHub answers. One whose project no longer has that repository published at Done is
 /// refused with nothing sent. Inputs: the engine connection and the rule change, which
 /// runs with the owner's sign-in. Output: how many proposals ended, or the store error.
-pub fn apply_approved(
-    db: &Connection,
-    set: &mut dyn FnMut(&Path, &str, GitHubRule, bool) -> Result<GitHubRepoRules, EngineError>,
-) -> Result<usize, EngineError> {
+pub fn apply_approved(db: &Connection, set: &mut RuleSetter<'_>) -> Result<usize, EngineError> {
     let _one = APPLYING.lock().unwrap_or_else(PoisonError::into_inner);
     table(db).map_err(|_| failure(UNAVAILABLE))?;
     let root = crate::sandbox::grants::data_root(db).ok_or_else(|| failure(UNAVAILABLE))?;
-    let approved = rows(db, "status='approved'")?;
+    let approved = rows(db, "status='approved'", [])?;
     assert!(approved.len() as i64 <= PASS_MAX);
     let mut ended = 0;
     for row in approved {
@@ -335,15 +342,28 @@ pub fn approves(picks: &[u8]) -> bool {
     picks == [0]
 }
 
+/// Tells whether an apply pass has work: a proposal the owner approved, or one that ended
+/// and whose agent is not told yet (rv-code gh-s7 N5). A store error reads as work, so the
+/// pass runs and logs it. Input: the engine connection, outside any transaction. Output:
+/// the answer.
+pub fn waiting(db: &Connection) -> bool {
+    assert!(db.is_autocommit());
+    if table(db).is_err() {
+        return true;
+    }
+    let query = format!(
+        "SELECT EXISTS(SELECT 1 FROM github_rule_requests \
+         WHERE status='approved' OR ({ENDED} AND told=0))"
+    );
+    let waits = db.query_row(&query, [], |row| row.get::<_, bool>(0));
+    assert!(db.is_autocommit());
+    waits.unwrap_or(true)
+}
+
 /// Applies one claimed proposal and says how it ended: refused, with nothing sent, when
 /// the project's publish record no longer names the repository kept at ask time at Done;
 /// otherwise applied only when GitHub's fresh page shows the rule as wanted and applied.
-fn applied(
-    root: &Path,
-    db: &Connection,
-    row: &Row,
-    set: &mut dyn FnMut(&Path, &str, GitHubRule, bool) -> Result<GitHubRepoRules, EngineError>,
-) -> Ended {
+fn applied(root: &Path, db: &Connection, row: &Row, set: &mut RuleSetter<'_>) -> Ended {
     let Ok(folder) = folder(db, &row.project) else {
         return Ended::Refused;
     };
@@ -369,45 +389,88 @@ fn applied(
     }
 }
 
-/// Tells the agents of up to `PASS_MAX` ended proposals how each ended, as one engine
-/// message each in the project's team conversation. A message the full conversation
-/// refuses stays untold for the next pass. Nothing about GitHub's answer, the repository
-/// or the sign-in is in it.
+/// Tells the agents of up to `PASS_MAX` ended proposals how each ended, oldest first,
+/// project by project (rv-code gh-s7 N4). A message a full conversation refuses stays
+/// untold for the next pass and ends only its own project's turn, so it holds no other
+/// project back.
 fn tell_untold(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    let untold = rows(tx, &format!("{ENDED} AND told=0"))?;
-    for row in untold {
-        let status: String = tx
-            .query_row(
-                "SELECT status FROM github_rule_requests WHERE id=?1",
-                [row.id],
-                |found| found.get(0),
-            )
-            .map_err(|_| failure(UNAVAILABLE))?;
-        let ended = match status.as_str() {
-            "applied" => Ended::Applied,
-            "declined" => Ended::Declined,
-            _ => Ended::Refused,
-        };
-        let text = told(&row, ended);
-        let appended = crate::team::append_message(
-            tx,
-            &row.project,
-            MessageAuthor::Engine,
-            &text,
-            MessageState::Pending,
-            crate::team::now_ms(),
-        )?;
-        if appended.is_err() {
-            eprintln!("github_rule_outcome_waiting id={}", row.id);
-            continue;
+    let filter = format!("{ENDED} AND told=0 AND project=?1");
+    let mut sent = 0;
+    for project in untold_projects(tx)? {
+        if sent == PASS_MAX {
+            break;
         }
-        tx.execute(
+        for row in rows(tx, &filter, [project.as_str()])? {
+            assert_eq!(row.project.as_str(), project);
+            if sent == PASS_MAX || !tell_one(tx, &row)? {
+                break;
+            }
+            sent += 1;
+        }
+    }
+    assert!(sent <= PASS_MAX);
+    Ok(())
+}
+
+/// Lists the projects with an ended proposal whose agent is not told yet, the one whose
+/// oldest such proposal is oldest first, at most `TOLD_PROJECTS_MAX`. Input: the
+/// transaction. Output: the projects, or `github_rule_requests_unavailable`.
+fn untold_projects(tx: &Transaction<'_>) -> Result<Vec<String>, EngineError> {
+    assert!(!tx.is_autocommit());
+    let mut statement = tx
+        .prepare(&format!(
+            "SELECT project FROM github_rule_requests WHERE {ENDED} AND told=0 \
+             GROUP BY project ORDER BY MIN(id) LIMIT {TOLD_PROJECTS_MAX}"
+        ))
+        .map_err(|_| failure(UNAVAILABLE))?;
+    let projects = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| failure(UNAVAILABLE))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| failure(UNAVAILABLE))?;
+    assert!(projects.len() as i64 <= TOLD_PROJECTS_MAX);
+    Ok(projects)
+}
+
+/// Tells one ended proposal's agent how it ended, as one engine message in the project's
+/// team conversation, and marks it told. Nothing about GitHub's answer, the repository or
+/// the sign-in is in it. Inputs: the transaction and the proposal. Output: whether it was
+/// told, false while the full conversation refuses it, or the store error.
+fn tell_one(tx: &Transaction<'_>, row: &Row) -> Result<bool, EngineError> {
+    assert!(row.id > 0);
+    let status: String = tx
+        .query_row(
+            "SELECT status FROM github_rule_requests WHERE id=?1",
+            [row.id],
+            |found| found.get(0),
+        )
+        .map_err(|_| failure(UNAVAILABLE))?;
+    let ended = match status.as_str() {
+        "applied" => Ended::Applied,
+        "declined" => Ended::Declined,
+        _ => Ended::Refused,
+    };
+    let text = told(row, ended);
+    let appended = crate::team::append_message(
+        tx,
+        &row.project,
+        MessageAuthor::Engine,
+        &text,
+        MessageState::Pending,
+        crate::team::now_ms(),
+    )?;
+    if appended.is_err() {
+        eprintln!("github_rule_outcome_waiting id={}", row.id);
+        return Ok(false);
+    }
+    let marked = tx
+        .execute(
             "UPDATE github_rule_requests SET told=1 WHERE id=?1",
             [row.id],
         )
         .map_err(|_| failure(UNAVAILABLE))?;
-    }
-    Ok(())
+    assert_eq!(marked, 1);
+    Ok(true)
 }
 
 /// Words how a proposal ended for the agent that made it: the proposal, the asker, the
@@ -423,14 +486,14 @@ fn told(row: &Row, ended: Ended) -> String {
     )
 }
 
-fn rows(db: &Connection, filter: &str) -> Result<Vec<Row>, EngineError> {
+fn rows(db: &Connection, filter: &str, values: impl Params) -> Result<Vec<Row>, EngineError> {
     let mut statement = db
         .prepare(&format!(
             "SELECT id,project,asker,rule,turn_on,repo FROM github_rule_requests WHERE {filter} ORDER BY id LIMIT {PASS_MAX}"
         ))
         .map_err(|_| failure(UNAVAILABLE))?;
     let read = statement
-        .query_map([], |row| {
+        .query_map(values, |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,

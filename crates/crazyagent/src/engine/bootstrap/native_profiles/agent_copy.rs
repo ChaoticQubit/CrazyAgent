@@ -429,7 +429,7 @@ impl NativeProfileUse {
             let renewal = self.renewal(harness, executable)?;
             record = off_worker(|| renewal.renew(record.expires))?;
             if record.expires <= since_epoch()? + USABLE_MIN {
-                record.copy.fill(0);
+                crate::credentials::wipe(&mut record.copy);
                 return Err(match harness {
                     Harness::Codex => codex_expired(),
                     Harness::Claude => renewal_failed(),
@@ -437,7 +437,7 @@ impl NativeProfileUse {
             }
         }
         let credential = poll_credential(harness, &record.copy);
-        record.copy.fill(0);
+        crate::credentials::wipe(&mut record.copy);
         credential
     }
 

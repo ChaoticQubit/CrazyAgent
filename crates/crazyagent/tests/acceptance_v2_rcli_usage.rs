@@ -601,6 +601,7 @@ async fn rescanned(
 /// given explicitly; without one the test fails as UNAVAILABLE. The engine runs on its own
 /// root with no provider key and never reads the owner's profile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "live qualification: needs CRAZYAGENT_RCLI, a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b, and Codex or Claude Code installed"]
 async fn the_usage_page_shows_an_rcli_master_turn_under_rcli_counted_once() {
     let bundle = rcli_bundle();
     let (flag, harness) = scanning_harness();

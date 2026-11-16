@@ -400,7 +400,7 @@ allowed_destinations = []
 [model_access]
 accounts = ["local-1"]
 connections = [
-  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
+  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://LOCAL_ADDRESS/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
 ]
 pools = [
   { id = "pool-a", name = "Main", members = ["local-a"], projects = [], roles = [], fallback_allowed = false },
@@ -413,6 +413,7 @@ pools = [
         service: EngineService,
         native: NativeOwner,
         _stop: tokio::sync::watch::Sender<bool>,
+        _refusing: [std::net::TcpStream; 2],
     }
 
     impl Live {
@@ -422,8 +423,9 @@ pools = [
                 .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
                 .unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (refusing, settings) = crate::tui::test_home::refusing_settings(SETTINGS);
             let global = root.path().join("global.toml");
-            std::fs::write(&global, SETTINGS).unwrap();
+            std::fs::write(&global, &settings).unwrap();
             std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
             let (stop, stopped) = tokio::sync::watch::channel(false);
             let service = EngineService::start_with_settings_sources(
@@ -445,6 +447,7 @@ pools = [
                     service,
                     native,
                     _stop: stop,
+                    _refusing: refusing,
                 },
                 access,
             )
@@ -646,6 +649,16 @@ pools = [
             ),
             Err("pool_member_limit".into())
         );
+    }
+
+    /// L388: the pools test engine seeds its local account where no model server the host
+    /// runs can answer, so no row here reaches the owner's Ollama.
+    #[tokio::test]
+    async fn the_pools_test_engine_seeds_its_local_account_where_no_host_model_server_answers() {
+        let (live, _) = Live::start().await;
+        crate::tui::test_home::assert_no_host_model_server(&live.root.path().join("global.toml"))
+            .await;
+        live.close().await;
     }
 
     #[tokio::test]

@@ -265,6 +265,22 @@ test("(your time) follows only a reset time the owner set that the card shows, n
   assert.doesNotMatch(passed, /\(your time\)/, "a reset the owner set that has passed is not shown, so no suffix");
 });
 
+test("a card read over 5 h ago says on its 5-hour line how old the read is, not that the next reset is unknown (N-D16, leader 03:00)", () => {
+  const card = (patch) => text(render({ report: { kind: "ok", value: report({ limits: [limits(patch)] }) } }));
+  const lapsed = { used_percent: 34.4, resets_at_ms: NOW - 12 * HOUR };
+  const stale = card({ observed_ms: NOW - 14 * HOUR, checked_ms: NOW - 14 * HOUR, five_hour: lapsed });
+  assert.match(stale, /5-hour 0% used Last read 14 h ago, so the next reset is not known/);
+  assert.doesNotMatch(stale, /Next reset not known yet/);
+  const fresh = card({ observed_ms: NOW - 4 * HOUR, five_hour: { used_percent: 12, resets_at_ms: null } });
+  assert.match(fresh, /5-hour 12% used Next reset not known yet/, "a read under 5 h old keeps the words");
+  assert.doesNotMatch(fresh, /Last read/);
+  const owned = card({ observed_ms: NOW - 14 * HOUR, five_hour: lapsed, five_hour_reset_override_ms: NOW + 45 * MINUTE });
+  assert.match(owned, /Resets at (?:[A-Z][a-z]{2} )?\d\d:\d\d, in 45 min \(your time\)/, "a reset the owner set still shows");
+  assert.doesNotMatch(owned, /Last read/);
+  const weekly = card({ observed_ms: NOW - 14 * HOUR, five_hour: lapsed, weekly: { used_percent: 30, resets_at_ms: null } });
+  assert.match(weekly, /Weekly 30% used Next reset not known yet/, "only the 5-hour line names the read's age");
+});
+
 test("a manual reset, a failed check and a passed reset show on the account's card", () => {
   const words = text(render({ report: { kind: "ok", value: report({ limits: [limits({
     five_hour_reset_override_ms: NOW + 45 * MINUTE, weekly: { used_percent: 90, resets_at_ms: NOW - MINUTE }, failure: "usage_rate_limited",

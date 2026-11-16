@@ -86,6 +86,7 @@ fn agent(
         hookless: false,
         instructions_changed: false,
         message_note: None,
+        sees_hidden: false,
     }
 }
 
@@ -3736,21 +3737,22 @@ fn the_task_start_reminder_shows_on_by_default_and_space_flips_it() {
     }
 }
 
-/// The one Terminal display of every harness shows Classic in the coordination editor of a
-/// project with no saved settings, read from a real engine database, on row 6 under every
-/// harness kind's rows (N-D9, DEC-141), and Space on the row flips it to Fullscreen and back:
-/// each press sends the whole settings with the other display, the engine's answer names it
-/// and the row shows the stored one. Fullscreen says rcli stays Classic, as the engine's view
-/// lists no Fullscreen for it; Classic says nothing more.
+/// The one Terminal display of every harness shows Fullscreen, the default (DEC-174 add. 2),
+/// in the coordination editor of a project with no saved settings, read from a real engine
+/// database, on row 6 under every harness kind's rows (N-D9, DEC-141), as the desktop shows
+/// it, and Space on the row flips it to Classic and back: each press sends the whole settings
+/// with the other display, the engine's answer names it and the row shows the stored one.
+/// Fullscreen says rcli stays Classic, as the engine's view lists no Fullscreen for it;
+/// Classic says nothing more.
 #[test]
-fn the_terminal_display_shows_classic_by_default_and_space_flips_it() {
+fn the_terminal_display_shows_fullscreen_by_default_and_space_flips_it() {
     let folder = tempfile::tempdir().unwrap();
     let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
     crate::storage::initialize_authority_schemas(&connection).unwrap();
     let coordination = crate::team::coordination(&connection, &project()).unwrap();
     assert_eq!(
         coordination.settings.terminal_display,
-        TerminalDisplay::Classic
+        TerminalDisplay::Fullscreen
     );
     let mut view = TeamView::new(project());
     let query = view.next_query(NOW).unwrap();
@@ -3759,8 +3761,11 @@ fn the_terminal_display_shows_classic_by_default_and_space_flips_it() {
     view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
     assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
     let display = |view: &TeamView| find(&frame(view, 120, 40), "Terminal display").to_owned();
-    assert!(display(&view).contains("Classic"), "{}", display(&view));
-    assert!(!display(&view).contains("stays"), "{}", display(&view));
+    assert!(
+        display(&view).contains("Fullscreen. rcli stays Classic"),
+        "{}",
+        display(&view)
+    );
     assert!(
         !frame(&view, 120, 40)
             .iter()
@@ -3773,11 +3778,11 @@ fn the_terminal_display_shows_classic_by_default_and_space_flips_it() {
     assert_eq!(view.coord.as_ref().unwrap().row, 6);
     let mut at = NOW;
     for (next, words) in [
+        (TerminalDisplay::Classic, "Classic"),
         (
             TerminalDisplay::Fullscreen,
             "Fullscreen. RCLI stays Classic",
         ),
-        (TerminalDisplay::Classic, "Classic"),
     ] {
         let mut settings = coordination.settings.clone();
         settings.terminal_display = next;
@@ -3796,6 +3801,12 @@ fn the_terminal_display_shows_classic_by_default_and_space_flips_it() {
             Some(Notice::plain(format!("Terminals now open {words}.")))
         );
         assert!(display(&view).contains(words), "{}", display(&view));
+        assert_eq!(
+            display(&view).contains("stays"),
+            next == TerminalDisplay::Fullscreen,
+            "{}",
+            display(&view)
+        );
     }
 }
 
@@ -5271,6 +5282,61 @@ fn team_settings_at_80_by_24_keep_the_plan_line_and_scroll_to_every_setting() {
     let below = plan_line_and_settings_in_order(&bottom);
     assert!(find(&bottom, "more settings").contains("PgUp  more settings above"));
     every_setting_across(&above, &below);
+}
+
+/// DEC-117 Q4 in the TUI (MASTER-OVERLAY): team settings stay open through the team read
+/// that follows a saved switch of the master to rcli, a master with no live terminal, with
+/// Live terminal on or off, as the desktop keeps its Master settings drawer open over the
+/// view that switch swaps; the shell acts only on the top screen's flow.
+#[test]
+fn team_settings_stay_open_through_the_read_after_the_master_is_saved_as_rcli() {
+    use crate::team::{AgentRole, TeamHarness};
+    use crate::tui::client::{OwnerEvent, SetupEvent};
+    use crate::tui::screens::settings_accounts::tests::ctx;
+    use crate::tui::screens::team_settings::TeamSettings;
+    use crate::tui::screens::{Flow, Place, Screen as _};
+    use crate::tui::seam::{Arrival, Request};
+    for live in [true, false] {
+        let mut ctx = ctx(80, 24);
+        let mut screen = TeamSettings::new(project(), "Tidepool".into());
+        screen.shown(&mut ctx);
+        let mut queries = Vec::new();
+        while let Some(request) = ctx.next_request() {
+            if let Request::Setup(query) = request {
+                queries.push(query);
+            }
+        }
+        assert_eq!(queries.len(), 1, "{queries:?}");
+        let mut status = team();
+        status.master_live_terminal = live;
+        status
+            .harnesses
+            .retain(|harness| harness.role != AgentRole::Master);
+        status.harnesses.push(TeamHarness {
+            harness: "rcli".into(),
+            role: AgentRole::Master,
+            agents_max: 1,
+            tools: true,
+            live: 1,
+            delegation: None,
+            delegation_label: None,
+            runnable: true,
+        });
+        assert!(!master_runs_live(&status), "rcli has no live terminal");
+        let read = Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(SetupEvent {
+            query: queries.remove(0),
+            result: Ok(SetupView::Team(Box::new(status))),
+        }))));
+        let flow = screen.arrive(&read, &mut ctx);
+        assert!(
+            matches!(flow, Flow::Handled),
+            "the settings stay open with Live terminal {live}"
+        );
+        assert!(matches!(
+            screen.place(),
+            Some(Place::TeamSettings { id, .. }) if id == project()
+        ));
+    }
 }
 
 /// The settings keep one order at every width and when a value widens a row (backlog 42):

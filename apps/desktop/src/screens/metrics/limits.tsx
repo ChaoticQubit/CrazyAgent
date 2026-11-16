@@ -1,14 +1,15 @@
 import { useState, type ReactNode } from "react";
 import type { AccountView } from "../../api";
-import { pollFailure, type AccountLimits, type LimitExtras, type WindowKind } from "../../api-usage";
+import { pollFailure, type AccountLimits, type LimitExtras, type LimitWindow, type WindowKind } from "../../api-usage";
 import { Button, Notice, Panel, TextField } from "../../ui";
 import { atText } from "../settings/account-choice";
 import { extrasLine } from "./extras";
-import { API_KEY_ACCOUNT, manualReset, missingWindow, readLine, untilText, windowNow } from "./usage-model";
+import { agoText, API_KEY_ACCOUNT, manualReset, missingWindow, readLine, untilText, windowNow } from "./usage-model";
 import "../project/projects.css";
 import "./metrics.css";
 
 const NEAR_LIMIT_PERCENT = 80;
+const FIVE_HOUR_MS = 5 * 60 * 60_000;
 
 /** What the app page's limits need from the page around them: pool names, the last failed
  * action, the action in flight, the next accounts panel, a number that moves after each
@@ -33,6 +34,17 @@ export function nearLimit(usedPercent: number): boolean {
 export function resetAtText(atMs: number | null, nowMs: number): string {
   if (atMs === null) return "Next reset not known yet";
   return `Resets at ${atText(atMs, nowMs)}, ${untilText(atMs, nowMs)}`;
+}
+
+/** A 5-hour window's reset words: with no reset time on a card read over 5 h ago, how old
+ * that read is, since any reset it gave has passed (N-D16); else resetAtText's words.
+ * Inputs: the window as it stands now, when the limits were read, null when never, and now.
+ * Output: "Last read 14 h ago, so the next reset is not known" or resetAtText's words. */
+export function fiveHourResetText(window: LimitWindow, observedMs: number | null, nowMs: number): string {
+  if (window.resets_at_ms === null && observedMs !== null && nowMs - observedMs > FIVE_HOUR_MS) {
+    return `Last read ${agoText(observedMs, nowMs)}, so the next reset is not known`;
+  }
+  return resetAtText(window.resets_at_ms, nowMs);
 }
 
 function ResetEditor({ id, override, nowMs, pending, onSave }: {
@@ -84,7 +96,7 @@ function WindowLine({ limits, kind, nowMs, pending, onSetReset }: {
       <span>{current ? `${Math.round(current.used_percent)}% used` : missing}{current && nearLimit(current.used_percent) && <> <span className="badge">Near limit</span></>}</span>
     </div>
     {current && <meter className="usage-meter" min={0} max={100} low={70} high={90} optimum={0} value={current.used_percent} aria-label={`${label} limit used`} />}
-    <span className="muted small">{current ? resetAtText(current.resets_at_ms, nowMs) : why}{current !== null && override !== null && current.resets_at_ms === override ? " (your time)" : ""}</span>
+    <span className="muted small">{current ? (kind === "five_hour" ? fiveHourResetText(current, limits.observed_ms, nowMs) : resetAtText(current.resets_at_ms, nowMs)) : why}{current !== null && override !== null && current.resets_at_ms === override ? " (your time)" : ""}</span>
     <ResetEditor id={`usage-reset-${limits.account}-${kind}`} override={override} nowMs={nowMs} pending={pending}
       onSave={(at) => onSetReset(limits.account, kind, at)} />
   </div>;

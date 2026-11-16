@@ -196,8 +196,8 @@ fn distinct(ports: &[u16]) -> Result<(), String> {
 /// refused.
 pub(super) fn broker_request(args: Vec<OsString>) -> Result<HelperRequest, String> {
     let mut rest = args.into_iter().skip(1);
-    let parent = super::parent(rest.next())
-        .map_err(|_| format!("{BROKER} needs a process id above 1"))?;
+    let parent =
+        super::parent(rest.next()).map_err(|_| format!("{BROKER} needs a process id above 1"))?;
     let ports = rest
         .map(|port| bridged(Some(port)))
         .collect::<Result<Vec<u16>, String>>()?;
@@ -222,8 +222,7 @@ pub(super) fn open(ports: &[u16], args: &[OsString]) -> Result<(OwnedFd, Vec<OsS
     let wait = TimeVal::seconds(ANSWER_TIME_S);
     setsockopt(&inside, sockopt::ReceiveTimeout, &wait)
         .map_err(|error| format!("bridge socket: {error}"))?;
-    let helper = std::env::current_exe()
-        .map_err(|error| format!("this helper: {error}"))?;
+    let helper = std::env::current_exe().map_err(|error| format!("this helper: {error}"))?;
     let args = inner(args, inside.as_raw_fd(), ports, &helper)?;
     let mut broker = Command::new(&helper);
     broker
@@ -234,8 +233,7 @@ pub(super) fn open(ports: &[u16], args: &[OsString]) -> Result<(OwnedFd, Vec<OsS
         .stdin(Stdio::from(outside))
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    crate::spawn_gate::spawn(&mut broker)
-        .map_err(|error| format!("bridge broker: {error}"))?;
+    crate::spawn_gate::spawn(&mut broker).map_err(|error| format!("bridge broker: {error}"))?;
     fcntl(inside.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::empty()))
         .map_err(|error| format!("bridge socket: {error}"))?;
     assert!(inside.as_raw_fd() > 2);
@@ -253,16 +251,7 @@ pub(super) fn inner(
     ports: &[u16],
     helper: &Path,
 ) -> Result<Vec<OsString>, String> {
-    let named = args
-        .iter()
-        .skip(NEST_ARGS.len())
-        .position(|arg| arg == "--")
-        .map(|at| at + NEST_ARGS.len() + 1);
-    let own = named
-        .and_then(|at| args.get(at))
-        .and_then(|word| std::fs::canonicalize(word).ok())
-        .is_some_and(|path| path == helper);
-    let (Some(at), true) = (named, own) else {
+    let Some(at) = own_command(args, helper) else {
         return Err(format!("{BRIDGE} needs this helper as the nest's command"));
     };
     let mut written = args[..=at].to_vec();
@@ -276,6 +265,23 @@ pub(super) fn inner(
     assert_eq!(written.len(), args.len() + 2 + 2 * ports.len());
     assert_eq!(written[at + 1], BRIDGE_FD);
     Ok(written)
+}
+
+/// Finds where the nest names its command: the word after the nest's `--`, past
+/// [`NEST_ARGS`], when that word is this helper. Inputs: the nest's arguments and this
+/// helper. Output: the word's index, or none for another program or no command.
+pub(super) fn own_command(args: &[OsString], helper: &Path) -> Option<usize> {
+    let at = args
+        .iter()
+        .skip(NEST_ARGS.len())
+        .position(|arg| arg == "--")?
+        + NEST_ARGS.len()
+        + 1;
+    let own = args
+        .get(at)
+        .and_then(|word| std::fs::canonicalize(word).ok())
+        .is_some_and(|path| path == helper);
+    own.then_some(at)
 }
 
 /// Writes the handover's text: for each listener its family (4 or 6) and its port, high
@@ -309,7 +315,9 @@ fn listed(text: &[u8], fds: &[RawFd], ports: &[u16]) -> Result<Vec<Listener>, St
             .iter()
             .any(|(had, at, _)| (*had, *at) == (family, port));
         if !known || twice {
-            return Err(format!("the handover names a listener of no bridged port ({port})"));
+            return Err(format!(
+                "the handover names a listener of no bridged port ({port})"
+            ));
         }
         listeners.push((family, port, *fd));
     }
@@ -612,7 +620,11 @@ mod tests {
             let mut flags = words(&["--nest", "--", "/usr/bin/bwrap"]);
             flags.extend(words(&NEST_ARGS));
             flags.extend(words(net));
-            flags.extend(words(&["--", "/opt/crazyagent/crazyagent-landlock", "--probe"]));
+            flags.extend(words(&[
+                "--",
+                "/opt/crazyagent/crazyagent-landlock",
+                "--probe",
+            ]));
             asked(flags)
         };
         let (apart, shared) = (nest(&[UNSHARE_NET]), nest(&[]));

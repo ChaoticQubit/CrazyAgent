@@ -391,13 +391,17 @@ fn node_command(
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
     #[cfg(target_os = "linux")]
-    let calls = crate::sandbox_settings::stored(root)
-        .map_err(refused)?
-        .linux_supervisor;
+    let (calls, strict) = {
+        let settings = crate::sandbox_settings::stored(root).map_err(refused)?;
+        (settings.linux_supervisor, settings.linux_strict)
+    };
     #[cfg(not(target_os = "linux"))]
-    let calls = crate::sandbox::LinuxSupervisor::On;
+    let (calls, strict) = (
+        crate::sandbox::LinuxSupervisor::On,
+        crate::sandbox::LinuxStrict::Off,
+    );
     let profile = scratch.join("node.sb");
-    let sandbox = InstalledSandbox::install(sandbox, &profile, calls).map_err(refused)?;
+    let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(refused)?;
     let mut node = std::process::Command::new(bin.join("node"));
     node.arg("--version").current_dir(&folders[0]);
     sandbox.wrap(&node).map_err(refused)
@@ -669,8 +673,23 @@ fn npm_command(
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
     let profile = parent.join(format!("{PACKAGE}@{version}.sb"));
-    sandbox.install(&profile).map_err(refused)?;
-    let mut command = sandbox.command(&profile, &bin.join("npm"));
+    #[cfg(not(target_os = "linux"))]
+    let mut command = {
+        sandbox.install(&profile).map_err(refused)?;
+        sandbox.command(&profile, &bin.join("npm"))
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let settings = crate::sandbox_settings::stored(root).map_err(refused)?;
+        let sandbox = sandbox.limit_sockets(settings.linux_sockets);
+        let calls = settings.linux_supervisor;
+        let strict = settings.linux_strict;
+        let sandbox = crate::sandbox::InstalledSandbox::install(sandbox, &profile, calls, strict)
+            .map_err(refused)?;
+        let mut npm = std::process::Command::new(bin.join("npm"));
+        npm.current_dir(canonical(staged)?);
+        sandbox.wrap(&npm).map_err(refused)?
+    };
     let path = command
         .get_envs()
         .find(|(name, _)| *name == "PATH")

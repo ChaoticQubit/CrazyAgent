@@ -2202,33 +2202,6 @@ mod import {
             );
         }
     }
-}
-
-#[test]
-fn names_a_case_insensitive_volume_opens_as_instruction_files_are_marked() {
-    for path in [
-        "AGENT\u{17F}.md",
-        "web/agent\u{17F}.md",
-        "AGENTS.overr\u{131}de.md",
-        "docs/CLAUDE\u{200D}.md",
-        "CLA\u{FEFF}UDE.local.md",
-        ".codex\u{200C}/config.toml",
-        "notes/.CLAUDE\u{202E}/x.md",
-    ] {
-        assert!(instruction_file(path), "{path:?} is an instruction file");
-    }
-    for path in [
-        "AGENTS\u{FF33}.md",
-        "\u{FF21}GENTS.md",
-        "notes.md",
-        "docs/AGENTS.md.txt",
-        "codex/config.toml",
-    ] {
-        assert!(
-            !instruction_file(path),
-            "{path:?} is not an instruction file"
-        );
-    }
 
     /// SA vid 7 residual (leader 14:22 A): an import with the engine data root records what it
     /// wrote as the app's own text only after text the app wrote, so text from outside keeps
@@ -2255,5 +2228,32 @@ fn names_a_case_insensitive_volume_opens_as_instruction_files_are_marked() {
         let pulled = crate::agent_home::read_project(folder).unwrap();
         assert!(pulled.starts_with("PULLED-RULE\n"), "{pulled}");
         assert!(crate::agent_home::outside(&data, folder, &pulled));
+    }
+}
+
+#[test]
+fn names_a_case_insensitive_volume_opens_as_instruction_files_are_marked() {
+    for path in [
+        "AGENT\u{17F}.md",
+        "web/agent\u{17F}.md",
+        "AGENTS.overr\u{131}de.md",
+        "docs/CLAUDE\u{200D}.md",
+        "CLA\u{FEFF}UDE.local.md",
+        ".codex\u{200C}/config.toml",
+        "notes/.CLAUDE\u{202E}/x.md",
+    ] {
+        assert!(instruction_file(path), "{path:?} is an instruction file");
+    }
+    for path in [
+        "AGENTS\u{FF33}.md",
+        "\u{FF21}GENTS.md",
+        "notes.md",
+        "docs/AGENTS.md.txt",
+        "codex/config.toml",
+    ] {
+        assert!(
+            !instruction_file(path),
+            "{path:?} is not an instruction file"
+        );
     }
 }

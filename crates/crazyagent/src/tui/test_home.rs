@@ -63,6 +63,91 @@ pub(in crate::tui) fn engine_config() -> crate::config::EffectiveConfig {
     config
 }
 
+/// Stands for the seeded local account's address in test settings. A test engine swaps it
+/// for a loopback port that refuses every connect at once, so no row reaches a model server
+/// the host runs (a host Ollama on 127.0.0.1:11434 made the account read ready).
+pub(in crate::tui) const LOCAL_ADDRESS: &str = "LOCAL_ADDRESS";
+
+/// Holds a loopback port that refuses every connect at once on macOS and Linux, through
+/// `spawn_gate::refusing_tcp_port`: one connection of this process keeps the port in use with
+/// nothing listening on it, so no port-0 bind gets it and a bind naming it without
+/// `SO_REUSEADDR` fails. Output: the connection's two ends, which the test engine holds while
+/// it runs, and the port's address.
+pub(in crate::tui) fn refusing_port() -> ([std::net::TcpStream; 2], std::net::SocketAddr) {
+    let (held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    assert!(port != 0, "{address}");
+    (held, address)
+}
+
+/// Swaps `LOCAL_ADDRESS` in test engine settings for a loopback port that refuses every
+/// connect at once. Input: settings that name `LOCAL_ADDRESS`. Output: the port's held ends,
+/// which the caller keeps for as long as its engine runs, and the settings to start it with.
+pub(in crate::tui) fn refusing_settings(settings: &str) -> ([std::net::TcpStream; 2], String) {
+    assert!(settings.contains(LOCAL_ADDRESS), "{settings}");
+    let (held, address) = refusing_port();
+    let settings = settings.replace(LOCAL_ADDRESS, &address.to_string());
+    assert!(!settings.contains(LOCAL_ADDRESS), "{settings}");
+    (held, settings)
+}
+
+/// rv-sec2 L388 F1: the port a TUI test engine seeds turns a connect away at once on macOS
+/// and Linux, so each account probe takes the refused path in well under its 400 ms budget,
+/// never a dropped SYN that waits the probe out.
+#[test]
+fn the_seeded_port_refuses_a_connect_within_a_tenth_of_a_second() {
+    let (_held, address) = refusing_port();
+    let started = std::time::Instant::now();
+    let refused =
+        crate::spawn_gate::connect_tcp_std_timeout(&address, std::time::Duration::from_secs(1))
+            .unwrap_err();
+    let took = started.elapsed();
+    assert_eq!(
+        refused.kind(),
+        std::io::ErrorKind::ConnectionRefused,
+        "{refused} after {took:?}"
+    );
+    assert!(took < std::time::Duration::from_millis(100), "{took:?}");
+}
+
+/// Asserts that every http model endpoint in a test engine's settings names a loopback port
+/// that is none of the owner's tool ports and refuses connections, so the engine never
+/// reaches a model server the host runs, such as Ollama on 11434 (backlog L388).
+/// Input: the settings file the engine started with. Output: none; panics on a breach.
+pub(in crate::tui) async fn assert_no_host_model_server(global: &std::path::Path) {
+    let text = std::fs::read_to_string(global).unwrap();
+    let settings: toml::Value = toml::from_str(&text).unwrap();
+    let connections = settings
+        .get("model_access")
+        .and_then(|access| access.get("connections"))
+        .and_then(toml::Value::as_array)
+        .expect("the settings list model connections");
+    let mut checked = 0;
+    for connection in connections {
+        let Some(url) = connection
+            .get("endpoint")
+            .and_then(|endpoint| endpoint.get("url"))
+            .and_then(toml::Value::as_str)
+        else {
+            continue;
+        };
+        let url = url::Url::parse(url).unwrap();
+        let port = url.port_or_known_default().unwrap();
+        assert!(
+            !crate::sandbox::OWNER_PORTS.contains(&port),
+            "{url} names a port the owner's tools listen on"
+        );
+        let host: std::net::IpAddr = url.host_str().unwrap().parse().unwrap();
+        assert!(host.is_loopback(), "{url} is not a loopback address");
+        assert!(
+            !crate::accounts::probe::reachable(&url, std::time::Duration::from_millis(400)).await,
+            "{url} accepted a connection"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no http endpoint was checked: {text}");
+}
+
 /// Runs real git in a folder with no system, global or hook config, for tests that build
 /// a project checkout. Inputs: the folder and the git arguments. Output: git's standard
 /// output; panics when git fails.

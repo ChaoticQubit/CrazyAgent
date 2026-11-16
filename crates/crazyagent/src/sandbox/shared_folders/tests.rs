@@ -765,7 +765,11 @@ fn an_engine_name_in_any_spelling_the_volume_opens_is_never_written_or_chosen() 
     ] {
         assert!(never_written(root, name), "{name}");
     }
-    for name in ["\u{feff}.git", "\u{200c}.crazyagent", "graphify\u{feff}-out"] {
+    for name in [
+        "\u{feff}.git",
+        "\u{200c}.crazyagent",
+        "graphify\u{feff}-out",
+    ] {
         assert!(!plain_name(name), "{name}");
     }
 }

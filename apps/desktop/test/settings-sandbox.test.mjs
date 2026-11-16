@@ -5,7 +5,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { LINUX_SOCKETS, LINUX_SUPERVISOR, LINUX_SUPERVISOR_DEFAULT, SandboxSettingsView, sandboxDraft } = await import("../src/screens/settings/sandbox.tsx");
+const { LINUX_SOCKETS, LINUX_STRICT, LINUX_STRICT_DEFAULT, LINUX_SUPERVISOR, LINUX_SUPERVISOR_DEFAULT, SandboxSettingsView, sandboxDraft } = await import("../src/screens/settings/sandbox.tsx");
 const { knownError } = await import("../src/api.ts");
 const { SETTINGS_TABS } = await import("../src/ui/router.ts");
 
@@ -17,8 +17,10 @@ const view = (settings, extra = {}) => renderToStaticMarkup(createElement(Sandbo
 const checked = (markup) => [...markup.matchAll(/<input type="radio" name="linux-sockets"[^>]*>/g)]
   .filter(([input]) => / checked=""/.test(input)).map(([input]) => input.match(/ value="([a-z_]+)"/)[1]);
 const saveDisabled = (markup) => /<button type="submit"[^>]*disabled=""/.test(markup);
-const stored = (linux_sockets, linux_supervisor) => ({ kind: "ok", value: { linux_sockets, linux_supervisor } });
+const stored = (linux_sockets, linux_supervisor, linux_strict = "off") => ({ kind: "ok", value: { linux_sockets, linux_supervisor, linux_strict } });
 const supervised = (markup) => [...markup.matchAll(/<input type="radio" name="linux-supervisor"[^>]*>/g)]
+  .filter(([input]) => / checked=""/.test(input)).map(([input]) => input.match(/ value="([a-z_]+)"/)[1]);
+const strictly = (markup) => [...markup.matchAll(/<input type="radio" name="linux-strict"[^>]*>/g)]
   .filter(([input]) => / checked=""/.test(input)).map(([input]) => input.match(/ value="([a-z_]+)"/)[1]);
 
 test("Settings, Sandbox lists every Linux sockets option with what it allows and risks", () => {
@@ -96,14 +98,62 @@ test("each supervisor option is checked as stored, and picking the other enables
   }
 });
 
-test("Save sends both Linux settings, each as picked or else as stored", () => {
-  const both = { linux_sockets: "refuse", linux_supervisor: "on" };
-  assert.deepEqual(sandboxDraft(both, null, null), both);
-  assert.deepEqual(sandboxDraft(both, null, "off"), { linux_sockets: "refuse", linux_supervisor: "off" });
-  assert.deepEqual(sandboxDraft(both, "tcp_only", null), { linux_sockets: "tcp_only", linux_supervisor: "on" });
-  assert.deepEqual(sandboxDraft(both, "tcp_ports", "off"), { linux_sockets: "tcp_ports", linux_supervisor: "off" });
+test("Save sends every Linux setting, each as picked or else as stored", () => {
+  const all = { linux_sockets: "refuse", linux_supervisor: "on", linux_strict: "on" };
+  assert.deepEqual(sandboxDraft(all, null, null, null), all);
+  assert.deepEqual(sandboxDraft(all, null, "off", null), { ...all, linux_supervisor: "off" });
+  assert.deepEqual(sandboxDraft(all, "tcp_only", null, null), { ...all, linux_sockets: "tcp_only" });
+  assert.deepEqual(sandboxDraft(all, null, null, "off"), { ...all, linux_strict: "off" });
+  assert.deepEqual(sandboxDraft(all, "tcp_ports", "off", "off"), { linux_sockets: "tcp_ports", linux_supervisor: "off", linux_strict: "off" });
   const source = readFileSync(new URL("../src/screens/settings/sandbox.tsx", import.meta.url), "utf8");
-  assert.match(source, /saveSandboxSettings\(sandboxDraft\(settings\.value, picked, pickedSupervisor\)\)/);
+  assert.match(source, /saveSandboxSettings\(sandboxDraft\(read\.value\.settings, picked, pickedSupervisor, pickedStrict\), read\.value\.version\)/);
+});
+
+test("A sandbox save names the version of the read it changes, and a stale save reads again (rv-sec2 F1)", () => {
+  const api = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(api, /export interface StoredSandboxSettings \{\n  settings: SandboxSettings;\n  version: number;\n\}/);
+  assert.match(api, /export function getSandboxSettings\(\): Promise<Result<StoredSandboxSettings>>/);
+  assert.match(api, /export function saveSandboxSettings\(settings: SandboxSettings, version: number\): Promise<Result<void>>/);
+  assert.match(api, /change\("desktop_set_sandbox_settings", \{ settings, version, generation: nextGeneration\(\) \}\)/);
+  const source = readFileSync(new URL("../src/screens/settings/sandbox.tsx", import.meta.url), "utf8");
+  assert.match(source, /if \(result\.code === "stale_revision"\) reload\(\);/);
+  assert.match(source, /setPickedStrict\(null\); \}, \[read\]\);/, "the picks reset when a new read arrives, not on every render");
+  assert.equal(knownError("stale_revision"), "This changed since you opened it. Review and save again.");
+});
+
+test("Settings, Sandbox lists Refuse agents without the full Linux sandbox, Off by default, in the TUI's words (DEC-185)", () => {
+  const markup = view(stored("tcp_only", "on"));
+  assert.match(markup, /Refuse agents without the full Linux sandbox/);
+  assert.deepEqual(LINUX_STRICT.map((option) => option.value), ["off", "on"]);
+  assert.equal(LINUX_STRICT_DEFAULT, "off");
+  assert.deepEqual(strictly(markup), ["off"]);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/app_setup.rs", import.meta.url), "utf8");
+  for (const option of LINUX_STRICT) {
+    assert.ok(markup.includes(option.title.replaceAll("'", "&#x27;")), option.title);
+    assert.ok(markup.includes(option.detail.replaceAll("'", "&#x27;")), option.detail);
+    assert.ok(tui.includes(`"${option.title}"`), `the TUI says ${option.title}`);
+    assert.ok(tui.includes(`"${option.detail}"`), `the TUI says ${option.detail}`);
+  }
+  assert.match(LINUX_STRICT[1].detail, /process space of its own/);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const body = engine.match(/#\[serde\(rename_all = "snake_case"\)\]\s*pub enum LinuxStrict \{([^}]*)\}/);
+  assert.ok(body, "sandbox.rs declares LinuxStrict in snake case");
+  const names = [...body[1].matchAll(/^\s*([A-Z][A-Za-z]*),/gm)].map(([, name]) => name.toLowerCase());
+  assert.deepEqual(names, LINUX_STRICT.map((option) => option.value));
+  assert.match(engine, /pub enum LinuxStrict \{\s*#\[default\]\s*Off,/, "Off is the engine's default");
+});
+
+test("each strict option is checked as stored, and picking the other enables Save with the other choices kept", () => {
+  for (const [value, other] of [["off", "on"], ["on", "off"]]) {
+    const markup = view(stored("tcp_ports", "off", value));
+    assert.deepEqual(strictly(markup), [value]);
+    assert.ok(saveDisabled(markup), `${value} saves nothing until changed`);
+    const picked = view(stored("tcp_ports", "off", value), { pickedStrict: other });
+    assert.deepEqual(strictly(picked), [other]);
+    assert.deepEqual(checked(picked), ["tcp_ports"], "the sockets choice stays");
+    assert.deepEqual(supervised(picked), ["off"], "the supervisor choice stays");
+    assert.ok(!saveDisabled(picked));
+  }
 });
 
 test("the supervisor options are the engine's LinuxSupervisor names", () => {
@@ -125,6 +175,7 @@ test("each Linux launch refusal reads plainly and names the setting", () => {
   assert.match(knownError("linux_resolver_needs_udp"), /cannot look up names over TCP[\s\S]*'TCP only'[\s\S]*'TCP ports only'[\s\S]*UDP and other sockets reach any host/);
   assert.match(knownError("linux_harness_unchecked"), /cannot check[\s\S]*'TCP only'[\s\S]*does not start[\s\S]*'TCP ports only'[\s\S]*reach any host/);
   assert.match(knownError("linux_limited_network_off"), /Linux limited-network sockets[\s\S]*does not start/);
+  assert.match(knownError("linux_sandbox_not_full"), /'Refuse agents without the full Linux sandbox'[\s\S]*Agent access[\s\S]*Settings/);
 });
 
 test("the options are the engine's LinuxSockets names", () => {

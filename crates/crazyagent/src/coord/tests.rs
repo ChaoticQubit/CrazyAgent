@@ -2841,8 +2841,9 @@ fn role_skill_choices_validate_save_and_default_for_rows_saved_before_them() {
 /// DEC-141: a row saved while the display was the Claude Code display holds it as
 /// `claude_display`. It reads as the project's terminal display, so the owner's Fullscreen is
 /// kept, the next save stores it as `terminal_display` only, a row with neither name reads as
-/// Classic, each display is stored by its own name and reads back, and a row holding both
-/// names is refused instead of one silently winning.
+/// the default, Fullscreen (DEC-174 add. 2), each display is stored by its own name and reads
+/// back, so a project that chose Classic keeps it, and a row holding both names is refused
+/// instead of one silently winning.
 #[cfg(unix)]
 #[test]
 fn a_stored_claude_display_reads_as_the_terminal_display() {
@@ -2874,8 +2875,12 @@ fn a_stored_claude_display_reads_as_the_terminal_display() {
         )
     };
     assert_eq!(
+        CoordSettings::default().terminal_display,
+        TerminalDisplay::Fullscreen
+    );
+    assert_eq!(
         stored(&old("")).unwrap().terminal_display,
-        TerminalDisplay::Classic
+        TerminalDisplay::Fullscreen
     );
     for (name, display) in [
         ("classic", TerminalDisplay::Classic),
@@ -2912,6 +2917,8 @@ fn a_stored_claude_display_reads_as_the_terminal_display() {
 
 /// DEC-141: the coordination view names, for every harness kind, the terminal displays its
 /// terminals can draw, so the one Terminal display setting can say which kind stays Classic.
+/// A project with no saved settings shows the default display, Fullscreen (DEC-174 add. 2),
+/// the one both apps show.
 #[cfg(unix)]
 #[test]
 fn the_coordination_view_names_the_displays_each_harness_kind_can_draw() {
@@ -2932,7 +2939,7 @@ fn the_coordination_view_names_the_displays_each_harness_kind_can_draw() {
             (HarnessKind::Rcli, vec![TerminalDisplay::Classic]),
         ]
     );
-    assert_eq!(view.settings.terminal_display, TerminalDisplay::Classic);
+    assert_eq!(view.settings.terminal_display, TerminalDisplay::Fullscreen);
 }
 
 /// Settings saved before the nudge options (DEC-111 R4) held `nudges` as a bool: a stored

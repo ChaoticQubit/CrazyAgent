@@ -2,9 +2,9 @@ import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api"
 import type { Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type ReadPaths } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, restartHiddenSeers, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type ReadPaths } from "../../api-projects";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
-import type { IntakeJob, IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
+import type { IntakeJob, IntentReceipt, MessageSettings, SwitchApply, TeamAgent, TeamStatus } from "../../engine-client";
 import { loadIntakeJob } from "../../api-intake";
 import { refusalLine } from "../intake/intake";
 import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, HomeCachesChoices, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, networkGap, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
@@ -215,7 +215,7 @@ export function ApplySwitch({ data }: { data: Pick<ProjectData, "id" | "team" | 
  * null when the project has no saved setup. Output: one plain paragraph. */
 export function removeLine(folder: string | null): string {
   const where = folder ? `at ${folderLabel(folder)}` : "where it is";
-  return `Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk ${where}, with every file in it.`;
+  return `Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk ${where}, with every file in it.`;
 }
 
 /** Takes the ask a route to Remove project carries, once: the choice the Remove dialog opens on,
@@ -502,6 +502,24 @@ function SandboxSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+/** What the hidden folders section says its list of agents that can still open a hidden
+ * folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A r1): team
+ * agents, taken-over ones included, and not the engine's other sandboxed runs. */
+export const HIDDEN_SEERS_COVER = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named here with Restart them. A research, overview, roadmap or onboarding run that started before keeps its access until it ends.";
+
+/** The running agents a team status lists as able to open a folder hidden after they
+ * started (SA-VID14-A). Input: the team status, or null before it is read. Output: those
+ * agents in the status order. */
+export function hiddenSeers(status: TeamStatus | null): TeamAgent[] {
+  return status === null ? [] : status.agents.filter((agent) => agent.sees_hidden === true);
+}
+
+/** What the hidden folders section says about the agents that can still open a hidden
+ * folder. Input: the agents, at least one. Output: the line naming them. */
+export function seersLine(agents: TeamAgent[]): string {
+  return `${agents.map((agent) => agent.label).join(", ")} started before a folder was hidden and can still open it.`;
+}
+
 function HiddenSection({ data }: { data: ProjectData }) {
   const [saved, setSaved] = useState<HiddenPaths | null>(null);
   const [paths, setPaths] = useState<string[]>([]);
@@ -509,6 +527,8 @@ function HiddenSection({ data }: { data: ProjectData }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [fullAccess, setFullAccess] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const seers = hiddenSeers(data.team.result?.kind === "ok" ? data.team.result.value : null);
   const notReady = "Not ready yet: hidden folders aren't in this build.";
   useEffect(() => {
     let live = true;
@@ -559,11 +579,28 @@ function HiddenSection({ data }: { data: ProjectData }) {
     data.notify("Hidden folders saved. Agents started from now on can't open them.");
   }
 
+  async function restart() {
+    setRestarting(true);
+    const result = await restartHiddenSeers(data.id, nextGeneration());
+    setRestarting(false);
+    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    const state = receiptState(result.value);
+    if (state.kind !== "applied") return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm the restart. Check the agents and try again.");
+    setNote("");
+    data.notify("Restarting them. Each starts again in its own worktree and conversation, kept out of every hidden folder.");
+    data.reloadTeam();
+  }
+
   const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Folders agents can't open</h2>
     <p className="pj-secondary">Folders inside the project that agents, the master and research jobs can't read, write or run while access is Sandboxed. Use it for a secrets folder or a vendored dump you don't want touched. Each must be a folder inside the project that git does not track.</p>
     {fullAccess && <p className="pj-note warn" role="status">Full access runs agents without a sandbox, so hidden folders do not apply.</p>}
+    {!fullAccess && <p className="pj-secondary">{HIDDEN_SEERS_COVER}</p>}
+    {!fullAccess && seers.length > 0 && <div className="pj-note warn" role="status">
+      <p>{seersLine(seers)}</p>
+      <Button pending={restarting} pendingLabel="Restarting..." disabled={restarting} onClick={() => void restart()}>Restart them</Button>
+    </div>}
     {saved === null && !note && <p className="pj-muted" role="status">Loading...</p>}
     {saved !== null && <ul className="pj-paths" aria-label="Hidden folders">
       {paths.length === 0 && <li className="pj-muted">No hidden folders.</li>}

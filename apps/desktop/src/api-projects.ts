@@ -343,6 +343,7 @@ const copy: Record<string, string> = {
   team_agent_range_invalid: "At most must be at least 1 and not less than At least.",
   team_task_missing: "That task is gone already.",
   team_wake_cap_invalid: "Set the hourly limit between 0 and 500 wakes.",
+  team_no_hidden_seers: "No running agent can still open a hidden folder.",
   team_time_limits_invalid: "Pick a listed time limit; an agent session may not be shorter than a task.",
   team_rounds_invalid: "Pick a listed number of sub-agent rounds, or Until the goal is done.",
   team_run_time_invalid: "Pick a listed master run time, or No limit.",
@@ -437,6 +438,7 @@ const copy: Record<string, string> = {
   delete_unavailable: "The engine couldn't check the project's agents. Nothing was deleted.",
   delete_in_progress: "This project is already being deleted. Wait for that to finish; nothing else was changed.",
   delete_not_recorded: "Nothing was deleted. CrazyAgent couldn't record the delete before starting it. Try again; if it keeps failing, restart CrazyAgent.",
+  projects_removed_full: "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash.",
   home_trash_failed: "The folder couldn't be moved to the Trash. Nothing was deleted.",
   home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
   project_delete_interrupted: "Deleting the project stopped part way. Check the Trash and the project list before trying again.",
@@ -593,6 +595,13 @@ export function renameTeamAgent(id: string, agent: number, handle: string, gener
  * Output: the engine receipt. */
 export function wakeTeamAgent(id: string, agent: number, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
+}
+
+/** Restarts the project's running agents that can still open a folder hidden after they
+ * started (SA-VID14-A): each starts again in its own worktree and conversation, kept out of
+ * every hidden folder. Inputs: the project id and a generation. Output: the engine receipt. */
+export function restartHiddenSeers(id: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_restart_hidden_seers", { id, generation });
 }
 
 /** Stops one harness with the teammates in its terminal; it stays stopped until the owner wakes

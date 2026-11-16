@@ -2,7 +2,8 @@ use super::console;
 use super::new_project::{any_harness_total, display_path, harness_name, size_label, team_summary};
 use super::new_project_input::cells;
 use super::new_project_view::{
-    Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
+    Look, Row, Screen, columns, list_row, modal, research_glyph, shown_tail, spread, tab_strip,
+    wrap_words,
 };
 use super::planning_line::{planning, planning_value};
 use super::project::{
@@ -32,6 +33,9 @@ const REMOVE_BOX: usize = 64;
 const REMOVE_BOX_MIN: usize = 32;
 const REMOVE_FOLDERS_SHOWN: usize = 3;
 const REMOVE_LOSSES_SHOWN: usize = 6;
+const REMOVE_WORDS: &str = "Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk, with every file in it.";
+const DELETE_WORDS: &str = "Stops its agents, moves its folders to the Trash and removes its records, your notes, imports and saved selections for it included. Its token counts stay under Removed projects.";
+const DELETE_NOTE: &str = "Your notes, imports and saved selections go too.";
 
 /// The project tabs for the tab strip: each label after its section glyph, with the count of
 /// running agents on Agents. When the labels with glyphs and the narrowest gaps do not fit
@@ -330,6 +334,8 @@ pub(in crate::tui) fn project_screen(
             56,
         )
         .into_iter()
+        .chain(std::iter::once(String::new()))
+        .chain(wrap_words(HIDDEN_SEERS_COVER, 56))
         .map(|line| Row::of(line, look.muted))
         .collect();
         if screen
@@ -417,7 +423,7 @@ pub(in crate::tui) fn project_screen(
     }
     if screen.confirm_remove {
         let box_width = REMOVE_BOX.min(width).max(REMOVE_BOX_MIN);
-        let (body, keys) = remove_ask(screen, box_width - 4, look);
+        let (body, keys) = remove_ask(screen, box_width - 4, body_height.saturating_sub(4), look);
         rows = modal(&rows, width, box_width, "Remove project", body, 2, look);
         help = keys;
     }
@@ -619,11 +625,12 @@ fn move_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> Vec<Row> {
     body
 }
 
-/// Draws the remove ask: Remove from dashboard, which keeps every file, and Delete everything
-/// when the engine's preview allows it, with the folders it moves to the Trash, what would be
-/// lost and the name typed so far, or else the engine's reason it is not offered. Inputs: the
-/// screen, the box's inner width and the look. Output: the box rows and the help keys.
-fn remove_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> (Vec<Row>, Help) {
+/// Draws the remove ask in at most `room` rows: with Remove from dashboard chosen, both choices
+/// in the owner's words; with Delete everything chosen, the folders it moves to the Trash, what
+/// would be lost and the name typed so far, cut to the rows left; or the engine's reason Delete
+/// everything is not offered. Inputs: the screen, the box's inner width and rows, and the look.
+/// Output: the box rows and the help keys.
+fn remove_ask(screen: &ProjectScreen, inner: usize, room: usize, look: &Look) -> (Vec<Row>, Help) {
     assert!(inner >= REMOVE_BOX_MIN - 4);
     let removal = screen.removal.as_ref();
     let can_delete = removal.is_some_and(|removal| removal.can_delete);
@@ -636,19 +643,20 @@ fn remove_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> (Vec<Row>, H
         Row::of(format!("{mark} {label}"), style)
     };
     let indented = |line: &str, style: Style| Row::of(format!("    {line}"), style);
+    let words = |text: &str| -> Vec<Row> {
+        wrap_words(text, inner - 4)
+            .iter()
+            .map(|line| indented(line, look.muted))
+            .collect()
+    };
     let mut body = vec![
         Row::of(format!("Remove {name} from CrazyAgent?"), look.fg),
         Row::default(),
         pick(!everything, "Remove from dashboard (keep files)"),
     ];
-    body.extend(
-        wrap_words(
-            "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
-            inner - 4,
-        )
-        .iter()
-        .map(|line| indented(line, look.muted)),
-    );
+    if !everything {
+        body.extend(words(REMOVE_WORDS));
+    }
     match removal {
         None => {
             body.push(Row::default());
@@ -657,37 +665,17 @@ fn remove_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> (Vec<Row>, H
         Some(removal) if removal.can_delete => {
             body.push(Row::default());
             body.push(pick(everything, "Delete everything"));
-            body.push(indented("Moves to the Trash:", look.muted));
-            for folder in removal.folders.iter().take(REMOVE_FOLDERS_SHOWN) {
-                for line in wrap_words(folder, inner - 6) {
-                    body.push(indented(&format!("  {line}"), look.fg));
+            if everything {
+                let mut rows = room.saturating_sub(body.len() + 2);
+                if rows >= 3 {
+                    body.push(indented(DELETE_NOTE, look.muted));
+                    rows -= 1;
                 }
+                let typed = &screen.remove_typed;
+                body.extend(delete_details(removal, typed, inner, rows, look));
+            } else {
+                body.extend(words(DELETE_WORDS));
             }
-            if removal.folders.len() > REMOVE_FOLDERS_SHOWN {
-                let more = removal.folders.len() - REMOVE_FOLDERS_SHOWN;
-                body.push(indented(&format!("  and {more} more"), look.muted));
-            }
-            let losses = crate::team::cleanup::loss_lines(removal);
-            if losses.is_empty() {
-                body.push(indented(
-                    "No agent is running and no work is unlanded.",
-                    look.muted,
-                ));
-            }
-            for loss in losses.iter().take(REMOVE_LOSSES_SHOWN) {
-                for line in wrap_words(loss, inner - 4) {
-                    body.push(indented(&line, look.warning));
-                }
-            }
-            if losses.len() > REMOVE_LOSSES_SHOWN {
-                let more = losses.len() - REMOVE_LOSSES_SHOWN;
-                body.push(indented(&format!("and {more} more"), look.warning));
-            }
-            let typed = if everything { look.fg } else { look.muted };
-            body.push(indented(
-                &format!("Type the project name: {}", screen.remove_typed),
-                typed,
-            ));
         }
         Some(removal) => {
             let blocked = removal.blocked.as_deref().unwrap_or_default();
@@ -725,6 +713,122 @@ fn remove_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> (Vec<Row>, H
         (false, false) => vec![("y", "Remove"), ("n", "Keep"), ("Esc", "Keep")],
     };
     (body, help)
+}
+
+/// Lists what Delete everything does in at most `rows` rows: the folders it moves to the Trash,
+/// what would be lost and the name typed so far, wrapped when every line fits, else one line
+/// each, the two lists sharing the rows and each counting what it does not show. Inputs: the
+/// preview, the typed name, the box's inner width, the rows and the look. Output: the rows.
+fn delete_details(
+    removal: &crate::team::cleanup::RemovalPreview,
+    typed: &str,
+    inner: usize,
+    rows: usize,
+    look: &Look,
+) -> Vec<Row> {
+    let indented = |line: &str, style: Style| Row::of(format!("    {line}"), style);
+    let losses = crate::team::cleanup::loss_lines(removal);
+    let wrapped = wrapped_details(removal, &losses, typed, inner, look);
+    if wrapped.len() <= rows {
+        return wrapped;
+    }
+    let lists = rows.saturating_sub(2);
+    let loss_need = losses.len().clamp(1, REMOVE_LOSSES_SHOWN + 1);
+    let folder_need = removal.folders.len().min(REMOVE_FOLDERS_SHOWN + 1);
+    let folder_room = folder_need.min(lists.saturating_sub(loss_need.min(lists / 2)));
+    let loss_room = (lists - folder_room).min(REMOVE_LOSSES_SHOWN + 1);
+    let mut body = vec![indented(&trash_header(removal), look.muted)];
+    let (shown, more) = fitted(removal.folders.len(), folder_room);
+    for folder in removal.folders.iter().take(shown) {
+        let tail = shown_tail(folder, inner - 6);
+        body.push(indented(&format!("  {tail}"), look.fg));
+    }
+    if more {
+        let more = removal.folders.len() - shown;
+        body.push(indented(&format!("  and {more} more"), look.muted));
+    }
+    if losses.is_empty() && loss_room > 0 {
+        body.push(indented(
+            "No agent is running and no work is unlanded.",
+            look.muted,
+        ));
+    }
+    let (shown, more) = fitted(losses.len(), loss_room);
+    for loss in losses.iter().take(shown) {
+        body.push(indented(loss, look.warning));
+    }
+    if more {
+        let more = losses.len() - shown;
+        body.push(indented(&format!("and {more} more"), look.warning));
+    }
+    body.push(indented(
+        &format!("Type the project name: {typed}"),
+        look.fg,
+    ));
+    assert!(body.len() <= rows.max(2));
+    body
+}
+
+/// Lists what Delete everything does with every folder and loss wrapped to the box: up to
+/// three folders and six losses, each list counting the rest, then the name typed so far.
+/// Inputs: the preview, its loss lines, the typed name, the box's inner width and the look.
+/// Output: the rows, however many they take.
+fn wrapped_details(
+    removal: &crate::team::cleanup::RemovalPreview,
+    losses: &[String],
+    typed: &str,
+    inner: usize,
+    look: &Look,
+) -> Vec<Row> {
+    let indented = |line: &str, style: Style| Row::of(format!("    {line}"), style);
+    let mut body = vec![indented(&trash_header(removal), look.muted)];
+    for folder in removal.folders.iter().take(REMOVE_FOLDERS_SHOWN) {
+        for line in wrap_words(folder, inner - 6) {
+            body.push(indented(&format!("  {line}"), look.fg));
+        }
+    }
+    if removal.folders.len() > REMOVE_FOLDERS_SHOWN {
+        let more = removal.folders.len() - REMOVE_FOLDERS_SHOWN;
+        body.push(indented(&format!("  and {more} more"), look.muted));
+    }
+    if losses.is_empty() {
+        body.push(indented(
+            "No agent is running and no work is unlanded.",
+            look.muted,
+        ));
+    }
+    for loss in losses.iter().take(REMOVE_LOSSES_SHOWN) {
+        for line in wrap_words(loss, inner - 4) {
+            body.push(indented(&line, look.warning));
+        }
+    }
+    if losses.len() > REMOVE_LOSSES_SHOWN {
+        let more = losses.len() - REMOVE_LOSSES_SHOWN;
+        body.push(indented(&format!("and {more} more"), look.warning));
+    }
+    body.push(indented(
+        &format!("Type the project name: {typed}"),
+        look.fg,
+    ));
+    body
+}
+
+/// The heading over the folders Delete everything moves to the Trash, counting them all, so a
+/// list cut short still says how many go. Input: the preview. Output: the heading.
+fn trash_header(removal: &crate::team::cleanup::RemovalPreview) -> String {
+    let count = removal.folders.len();
+    let noun = if count == 1 { "folder" } else { "folders" };
+    format!("Moves to the Trash ({count} {noun}):")
+}
+
+/// How many of `len` lines fit in `rows`, one row kept to count the rest when not all fit.
+/// Inputs: the line count and the rows. Output: the lines shown and whether a count follows.
+fn fitted(len: usize, rows: usize) -> (usize, bool) {
+    if len <= rows {
+        (len, false)
+    } else {
+        (rows.saturating_sub(1), rows > 0)
+    }
 }
 type Drawn = (Vec<Row>, Option<(usize, usize)>, Help);
 
@@ -2528,6 +2632,25 @@ fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
     Row::of(text, look.fg).push("   f Edit read-only folders", look.muted)
 }
 
+/// What the hidden-folders editor says the Settings list of agents that can still open a
+/// hidden folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A
+/// r1): team agents, taken-over panes included, and not the engine's other sandboxed runs.
+const HIDDEN_SEERS_COVER: &str = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named under Hidden with h Restart them. A research, overview, roadmap or onboarding run that started before keeps its access until it ends.";
+
+/// The Settings line naming the running agents that can still open a folder hidden after
+/// they started, with the key that restarts them (SA-VID14-A). Takes the screen and look.
+/// Returns the row, or none while no agent is listed.
+fn seers_line(screen: &ProjectScreen, look: &Look) -> Option<Row> {
+    let seers = screen.hidden_seers();
+    (!seers.is_empty()).then(|| {
+        Row::of(
+            format!("{} can still open a hidden folder", seers.join(", ")),
+            look.warning,
+        )
+        .push("   h Restart them", look.muted)
+    })
+}
+
 /// The Settings line for a project's hidden folders: how many, or loading.
 /// Takes the screen and look. Returns the row with its edit key.
 fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
@@ -2587,6 +2710,9 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
         entry("Hidden", hidden_line(screen, look)),
+    ];
+    lines.extend(seers_line(screen, look).map(|row| entry("", row)));
+    lines.extend([
         entry(
             "Access",
             Row::of(
@@ -2609,7 +2735,7 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
             },
         ),
         entry("Status", screen.roadmap.value(look, screen.now_ms)),
-    ];
+    ]);
     if room.saturating_sub(lines.len()) > screen.plugins.floor() {
         lines.push(Row::default());
     }

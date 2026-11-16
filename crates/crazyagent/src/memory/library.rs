@@ -482,9 +482,10 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
 }
 
 /// Deletes the memories agents saved for projects CrazyAgent no longer has, so a trial or
-/// removed project's agent notes never reach a project added later under the same id. Owner
-/// notes, research, selections, imports, memories waiting for approval and app-wide memories
-/// stay. Input: the engine connection or an open transaction. Output: the rows deleted.
+/// removed project's agent notes never come back with it. Owner notes, research, selections,
+/// imports, memories waiting for approval and app-wide memories stay for a project removed
+/// from the dashboard, which brings them back from its own folder (DEC-178 addendum 1).
+/// Input: the engine connection or an open transaction. Output: the rows deleted.
 pub(crate) fn forget_orphan_agent_memories(
     connection: &rusqlite::Connection,
 ) -> Result<usize, EngineError> {
@@ -505,6 +506,30 @@ pub(crate) fn forget_orphan_agent_memories(
         )
         .map_err(error)?;
     assert!(i64::try_from(forgotten).is_ok_and(|count| count <= orphans));
+    Ok(forgotten)
+}
+
+/// Deletes every saved memory of one project, the owner's notes, imports and selections
+/// included, as Delete everything does (DEC-178). App-wide memories stay. Inputs: the open
+/// transaction and the project. Output: the rows deleted.
+pub(crate) fn forget_project_memories(
+    connection: &rusqlite::Connection,
+    project: &ProjectId,
+) -> Result<usize, EngineError> {
+    let forgotten = connection
+        .execute(
+            "DELETE FROM memory_library WHERE project=?1",
+            [project.as_str()],
+        )
+        .map_err(error)?;
+    let left: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM memory_library WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    assert_eq!(left, 0);
     Ok(forgotten)
 }
 

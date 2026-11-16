@@ -29,6 +29,7 @@ fn node(id: &str, kind: NodeKind, label: &str) -> GraphNode {
         hookless: false,
         message_note: None,
         started_ms: None,
+        sees_hidden: false,
     }
 }
 

@@ -87,6 +87,15 @@ test("intake failures read as plain sentences", () => {
   assert.equal(api.intakeCopy({ code: "setup_busy", cause: "engine_detail" }), "Setup is already running. Wait for it to finish. (engine_detail)");
 });
 
+test("an id a removal holds and a folder name with every id taken read as plain sentences (DEC-178 addendum 1)", () => {
+  assert.equal(api.intakeCopy("onboarding_project_ids_used"),
+    "Every id this folder's name can get, 99 in all, is taken by your projects or ones you removed. Rename the folder first.");
+  assert.equal(api.intakeCopy("project_id_removed"),
+    "A project you removed used this name, so it can't be used again. Choose another project name.");
+  assert.equal(api.intakeCopy("projects_removed_full"),
+    "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash.");
+});
+
 test("setup takes at most 64 pack entries and its failures read as plain sentences", async () => {
   assert.throws(() => api.runSetup(Array.from({ length: 65 }, (_, index) => `entry-${index}`)), /64/);
   assert.equal((await api.runSetup(["superpowers"])).code, "engine_unreachable");
@@ -164,4 +173,10 @@ test("an iCloud refusal reads as a plain sentence that keeps the folder safe", (
   assert.equal(api.intakeCopy("home_icloud_not_downloaded"), "Some files are still only in iCloud, so the folder wasn't added. Nothing was removed. Download them and try again.");
   assert.match(api.intakeCopy("home_permission_denied"), /System Settings > Privacy & Security > Files and Folders/);
   assert.equal(api.intakeCopy("icloud_download_busy"), "Another iCloud download is running. Wait for it to finish.");
+});
+
+test("a started onboarding's kept change guesses no project from the folder name, so only the engine's id names it (rv-secreview S2 F1)", () => {
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge.rs", import.meta.url), "utf8");
+  assert.match(bridge, /OwnerMutation::StartOnboarding \{ \.\. \} => \("start_onboarding", None, None\)/);
+  assert.ok(!bridge.includes("onboarded_project("), "no folder-name guess is left in the bridge");
 });
