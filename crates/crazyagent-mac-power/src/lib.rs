@@ -8,6 +8,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod caller;
+pub mod client;
 #[allow(unsafe_code)]
 mod ffi;
 pub mod floor;
@@ -19,3 +20,4 @@ pub mod pin;
 pub mod pmset;
 pub mod protocol;
 pub mod server;
+pub mod service;
