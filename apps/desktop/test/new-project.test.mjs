@@ -8,7 +8,7 @@ const wizard = await import("../src/screens/new-project/wizard.ts");
 const available = { kind: "available" };
 const noReader = { kind: "unavailable", reason: "CrazyAgent cannot read its replies yet" };
 const harness = (id, name, status, tools = { kind: "switchable" }, kinds = ["subscription", "api_key"], team = available, aliases = []) => ({
-  id, name, status, status_label: "", executable: null, headless: "", tools, model_selection: true, account_kinds: kinds, team, aliases,
+  id, name, status, status_label: "", executable: null, headless: "", tools, model_selection: true, account_kinds: kinds, team, aliases, account_protocols: ["openai*", "anthropic-messages"],
 });
 const ready = { kind: "ready" };
 const missing = { kind: "not_installed" };
@@ -344,7 +344,7 @@ test("the summary says how many research agents start and where", () => {
 });
 
 test("pools are summarised by provider and the biggest pool is preselected", () => {
-  const member = (id, harness, auth, url) => ({ id, provider: "p", harness, protocol: "x", account_ref: id, endpoint: url ? { kind: "http", url } : { kind: "native" }, model: { id: "m", author: "a" }, auth });
+  const member = (id, harness, auth, url) => ({ id, provider: "p", harness, protocol: url ? "openai-chat" : "native", account_ref: id, endpoint: url ? { kind: "http", url } : { kind: "native" }, model: { id: "m", author: "a" }, auth });
   const managed = { method: "native_managed", profile_ref: "r" };
   const members = [member("a", "codex", managed), member("b", "codex", managed), member("c", "claude", managed),
     member("d", "codex", { method: "api_key", credential_ref: "k" }, "https://api.openai.com/v1"), member("e", "codex", { method: "none" }, "http://127.0.0.1:11434/v1")];
@@ -366,6 +366,23 @@ test("Claude subscriptions fit Claude Code under the catalog id and aliases the 
   assert.equal(wizard.poolFits(claudeCode, [account("c5", "claude-code")]), true);
   assert.equal(wizard.poolFits(claudeCode, [account("x1", "codex")]), false);
   assert.equal(wizard.poolFits(harness("codex", "Codex", ready), claudes), false);
+});
+
+test("Task 21: a pool fits a harness by the engine's rule: a sign-in only its own harness, a key or URL account by the wire format the harness lists", () => {
+  const http = (id, protocol, auth = { method: "api_key", credential_ref: id }) => ({ id, provider: "p", harness: "rcli", protocol, account_ref: id,
+    endpoint: { kind: "http", url: "https://models.example.invalid/v1" }, model: { id: "m", author: "a" }, auth });
+  const codex = { ...harness("codex", "Codex", ready), account_protocols: ["openai*"] };
+  const claudeCode = { ...harness("claude-code", "Claude Code", ready, undefined, ["subscription", "api_key"], available, ["claude"]), account_protocols: ["anthropic-messages"] };
+  const geminiRow = { ...harness("gemini-row", "Gemini Row", ready, undefined, ["api_key"]), account_protocols: ["gemini"] };
+  const gemini = http("g1", "gemini");
+  assert.equal(wizard.poolFits(codex, [gemini]), false, "a Gemini key runs no OpenAI harness");
+  assert.equal(wizard.poolFits(claudeCode, [gemini]), false, "a Gemini key runs no Anthropic harness");
+  assert.equal(wizard.poolFits(geminiRow, [gemini]), true);
+  assert.equal(wizard.poolFits(claudeCode, [http("o1", "openai-chat")]), false, "an OpenRouter key runs no Anthropic harness");
+  assert.equal(wizard.poolFits(codex, [http("o1", "openai-chat")]), true, "openai* stands for every OpenAI format");
+  assert.equal(wizard.poolFits(claudeCode, [http("a1", "anthropic-messages")]), true);
+  assert.equal(wizard.poolFits(codex, [http("l1", "openai-chat", { method: "none" })]), true, "a local model needs no key");
+  assert.equal(wizard.poolFits(codex, [http("x1", "openai-chat", { method: "oauth", credential_ref: "x1" })]), false, "the engine runs no OAuth endpoint account");
 });
 
 test("a pool shows its name from the engine and falls back to its id", () => {
@@ -439,7 +456,7 @@ test("a pool with one account runs every agent of the team and never tells them 
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { TeamEditor } = await import("../src/screens/new-project/team-editor.tsx");
   const managed = { method: "native_managed", profile_ref: "r" };
-  const member = { id: "solo", provider: "p", harness: "codex", protocol: "x", account_ref: "solo", endpoint: { kind: "native" }, model: { id: "m", author: "a" }, auth: managed };
+  const member = { id: "solo", provider: "p", harness: "codex", protocol: "native", account_ref: "solo", endpoint: { kind: "native" }, model: { id: "m", author: "a" }, auth: managed };
   const pool = { pool: { id: "solo-pool", name: "Solo", members: ["solo"], projects: [], roles: [], fallback_allowed: false }, members: [member] };
   const team = engineTeam("codex", 2);
   assert.equal(team.max_agents, 3);
@@ -471,7 +488,7 @@ test("a master stored as the alias claude gets the pool warning and the fixed To
   const { TeamEditor } = await import("../src/screens/new-project/team-editor.tsx");
   const limited = { kind: "limited", reason: "tools can't be turned off" };
   const named = [harness("codex", "Codex", ready), harness("claude-code", "Claude Code", ready, limited, undefined, undefined, ["claude"])];
-  const member = { id: "cx", provider: "openai", harness: "codex", protocol: "x", account_ref: "cx", endpoint: { kind: "native" }, model: { id: "m", author: "a" }, auth: { method: "native_managed", profile_ref: "r" } };
+  const member = { id: "cx", provider: "openai", harness: "codex", protocol: "native", account_ref: "cx", endpoint: { kind: "native" }, model: { id: "m", author: "a" }, auth: { method: "native_managed", profile_ref: "r" } };
   const pool = { pool: { id: "codex-pool", name: "Codex only", members: ["cx"], projects: [], roles: [], fallback_allowed: false }, members: [member] };
   for (const master of ["claude-code", "claude"]) {
     const team = { master, master_tools: false, sub_harnesses: [], min_agents: 1, max_agents: 2 };

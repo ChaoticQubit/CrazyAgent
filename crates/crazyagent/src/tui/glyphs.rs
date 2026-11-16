@@ -133,7 +133,7 @@ pub struct Glyphs {
     pub ascii: bool,
     status: [&'static str; 9],
     sections: [&'static str; 7],
-    providers: [&'static str; 8],
+    providers: [&'static str; 9],
     pub hline: &'static str,
     pub vline: &'static str,
     pub tee: &'static str,
@@ -158,7 +158,7 @@ pub static UNICODE: Glyphs = Glyphs {
     ascii: false,
     status: ["✓", "✗", "!", "▸", "◌", "⊘", "◧", "?", "✧"],
     sections: ["@", "⊞", "❯", "✦", "⁂", "◉", "§"],
-    providers: ["⬡", "⬡", "✻", "✻", "⇄", "⌁", "⌂", "•"],
+    providers: ["⬡", "⬡", "✻", "✻", "⇄", "⌁", "⌂", "✧", "•"],
     hline: "─",
     vline: "│",
     tee: "├",
@@ -183,7 +183,7 @@ pub static ASCII: Glyphs = Glyphs {
     ascii: true,
     status: ["+", "x", "!", ">", "o", "-", "~", "?", "*"],
     sections: ["@", "#", "$", "&", "*", "o", "%"],
-    providers: ["O", "O", "C", "A", "R", "U", "L", "*"],
+    providers: ["O", "O", "C", "A", "R", "U", "L", "G", "*"],
     hline: "-",
     vline: "|",
     tee: "+",
@@ -251,7 +251,8 @@ impl Glyphs {
             "OpenRouter" => 4,
             "OpenAI-compatible URL" => 5,
             "Local model" => 6,
-            _ => 7,
+            "Gemini API" => 7,
+            _ => 8,
         };
         self.providers[index]
     }
@@ -378,6 +379,8 @@ mod tests {
         assert_eq!(UNICODE.provider("Claude"), "✻");
         assert_eq!(ASCII.provider("Anthropic API"), "A");
         assert_eq!(ASCII.provider("Somewhere new"), "*");
+        assert_eq!(UNICODE.provider("Gemini API"), "✧");
+        assert_eq!(ASCII.provider("Gemini API"), "G");
         assert_eq!(ASCII.section(Section::Pools), "#");
         assert_eq!(UNICODE.spin(4), "⠼");
         assert_eq!(ASCII.spin(5), "/");

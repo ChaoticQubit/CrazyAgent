@@ -42,14 +42,16 @@ fn every_account() -> Vec<(Provider, SignInMethod, AccountKind, ModelConnection)
     accounts
 }
 
-/// The owner-visible answer DEC-141 asks for: which harness runs on which account. Inputs:
+/// The owner-visible answer DEC-141 asks for: which harness runs on which account; a Gemini
+/// API key, in its own wire format, runs on none of the three (Task 17, Task 21). Inputs:
 /// the harness kind, the provider and the sign-in method. Output: whether it runs there.
 fn runs_on(harness: HarnessKind, provider: Provider, method: SignInMethod) -> bool {
-    use Provider::{AnthropicApi, Chatgpt, Claude};
+    use Provider::{AnthropicApi, Chatgpt, Claude, Gemini};
     match (harness, provider, method) {
         (HarnessKind::Codex, Chatgpt, SignInMethod::Subscription) => true,
         (HarnessKind::ClaudeCode, Claude, SignInMethod::Subscription) => true,
         (_, _, SignInMethod::Subscription) => false,
+        (_, Gemini, _) => false,
         (HarnessKind::Rcli, ..) => true,
         (HarnessKind::ClaudeCode, Claude | AnthropicApi, SignInMethod::ApiKey) => true,
         (HarnessKind::ClaudeCode, ..) => false,
@@ -289,8 +291,9 @@ fn a_gemini_api_key_fits_only_a_harness_that_lists_the_gemini_wire_format() {
 }
 
 /// Task 17: every endpoint account the Add account screens can make fits a listed harness
-/// that lists the wire format the account stores, and no listed harness that lists another;
-/// a sign-in fits no listed harness, whichever format it lists.
+/// that lists the wire format the account stores, and no listed harness that lists another.
+/// A sign-in fits none of these: no endpoint account stores `openai-responses`, the one
+/// format a ChatGPT sign-in fits through the ChatGPT relay (T22).
 #[test]
 fn every_endpoint_account_fits_a_listed_harness_by_the_wire_format_it_stores() {
     let accounts = every_account();
@@ -314,6 +317,127 @@ fn every_endpoint_account_fits_a_listed_harness_by_the_wire_format_it_stores() {
                 harness.account_fits(connection),
                 expected,
                 "{format} on {provider:?} {method:?}"
+            );
+        }
+    }
+}
+
+fn native_sign_in(provider: Provider) -> ModelConnection {
+    every_account()
+        .into_iter()
+        .find(|(found, method, ..)| *found == provider && *method == SignInMethod::Subscription)
+        .map(|(.., connection)| connection)
+        .expect("the provider has a sign-in")
+}
+
+/// T22 R6 (DEC-180 addendum 2, answer 2): a ChatGPT sign-in fits Codex, as it always did,
+/// and a listed harness that lists the `openai-responses` wire format, through the ChatGPT
+/// relay; not a listed harness of another format, not another own adapter, and not once it
+/// is stored with another harness. A Claude subscription still fits Claude Code only, and
+/// an OpenAI API key still fits by the wire format it stores.
+#[test]
+fn a_chatgpt_sign_in_fits_a_listed_harness_that_lists_openai_responses_and_no_other() {
+    let chatgpt = native_sign_in(Provider::Chatgpt);
+    let claude = native_sign_in(Provider::Claude);
+    let built = super::registry::Registry::build(&[
+        (
+            "responses-row",
+            &fit_manifest(
+                "responses-row",
+                "jsonl-turn",
+                "openai-responses",
+                &handed("openai-responses"),
+            ),
+        ),
+        (
+            "chat-row",
+            &fit_manifest(
+                "chat-row",
+                "jsonl-turn",
+                "openai-chat",
+                &handed("openai-chat"),
+            ),
+        ),
+        (
+            "own-row",
+            &fit_manifest("own-row", "codex-app-server", "openai-responses", ""),
+        ),
+    ])
+    .expect("ChatGPT fit row manifests load");
+    let fits =
+        |id: &str, connection: &ModelConnection| built.get(id).unwrap().account_fits(connection);
+    assert!(fits("responses-row", &chatgpt));
+    assert!(!fits("chat-row", &chatgpt));
+    assert!(!fits("own-row", &chatgpt));
+    for id in ["responses-row", "chat-row", "own-row"] {
+        assert!(!fits(id, &claude), "{id}");
+    }
+    assert!(account_fits("codex", &chatgpt));
+    assert!(!account_fits("claude-code", &chatgpt));
+    assert!(account_fits("claude-code", &claude));
+    assert!(!account_fits("codex", &claude));
+    let mut moved = chatgpt.clone();
+    moved.harness = CredentialRef::new("responses-row").unwrap();
+    assert!(!fits("responses-row", &moved));
+    let (openai_key, _) = AccountDraft {
+        provider: Provider::OpenaiApi,
+        method: SignInMethod::ApiKey,
+        name: String::new(),
+        url: None,
+        model: Some("gpt-5".to_owned()),
+    }
+    .build(true, NONCE)
+    .expect("an OpenAI key account builds");
+    assert!(fits("chat-row", &openai_key));
+    assert!(!fits("responses-row", &openai_key));
+    for harness in super::registry::registry().all() {
+        let expected = harness.id() == "codex"
+            || harness
+                .account_protocols()
+                .iter()
+                .any(|listed| listed == "openai-responses");
+        assert_eq!(harness.account_fits(&chatgpt), expected, "{}", harness.id());
+    }
+}
+
+/// T22 (tokens never reach agents): only the harness a sign-in was made with runs on that
+/// sign-in's own credential copy. A listed harness a ChatGPT sign-in fits through the relay
+/// does not, so a team never hands it the copy; endpoint accounts have no copy at all.
+#[test]
+fn only_the_harness_a_sign_in_was_made_with_runs_on_its_credential_copy() {
+    let chatgpt = native_sign_in(Provider::Chatgpt);
+    let claude = native_sign_in(Provider::Claude);
+    let built = super::registry::Registry::build(&[(
+        "responses-row",
+        &fit_manifest(
+            "responses-row",
+            "jsonl-turn",
+            "openai-responses",
+            &handed("openai-responses"),
+        ),
+    )])
+    .expect("ChatGPT fit row manifest loads");
+    let listed = built.get("responses-row").unwrap();
+    assert!(listed.account_fits(&chatgpt));
+    assert!(!listed.signs_in_natively(&chatgpt));
+    let bundled = super::registry::registry();
+    let (codex, claude_code) = (
+        bundled.get("codex").unwrap(),
+        bundled.get("claude-code").unwrap(),
+    );
+    assert!(codex.signs_in_natively(&chatgpt));
+    assert!(claude_code.signs_in_natively(&claude));
+    assert!(!codex.signs_in_natively(&claude));
+    assert!(!claude_code.signs_in_natively(&chatgpt));
+    for (.., connection) in every_account()
+        .into_iter()
+        .filter(|(.., connection)| connection.endpoint != ModelEndpoint::Native {})
+    {
+        for harness in bundled.all().iter().chain([listed]) {
+            assert!(
+                !harness.signs_in_natively(&connection),
+                "{}",
+                harness.manifest().id
             );
         }
     }

@@ -825,6 +825,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "linux_harness_unchecked" => Some(
             "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
         ),
+        "chatgpt_sign_in_expired" => {
+            Some(crate::model_gateway::relay::chatgpt::SIGN_IN_EXPIRED_LINE)
+        }
         "team_master_no_terminal" => Some(
             "This master harness has no terminal app. Its conversation stays on the Conversation tab.",
         ),

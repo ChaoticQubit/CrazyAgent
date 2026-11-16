@@ -7703,6 +7703,13 @@ fn a_waiting_task_says_why_it_waits_in_one_text_for_every_client() {
         wait_line(TaskStatus::Queued, Some("Waits:  codex\nis not installed")).as_deref(),
         Some("Waits: codex is not installed")
     );
+    let gemini = "Waits: No account in this project's pool can run Row Harness. \
+                  Accounts that fit it: a Gemini API key";
+    assert_eq!(
+        wait_line(TaskStatus::Queued, Some(gemini)).as_deref(),
+        Some(gemini),
+        "Task 21: the accounts that fit read word for word"
+    );
     let long = "x".repeat(WAIT_BYTES_MAX * 2);
     assert!(wait_line(TaskStatus::Queued, Some(&long)).unwrap().len() <= WAIT_BYTES_MAX + 3);
     for status in [

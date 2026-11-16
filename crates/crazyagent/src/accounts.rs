@@ -119,9 +119,10 @@ const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 const OLLAMA_URL: &str = "http://127.0.0.1:11434/v1";
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com";
 
-const PROVIDERS: [Provider; 7] = [
+const PROVIDERS: [Provider; 8] = [
     Provider::Chatgpt,
     Provider::Claude,
+    Provider::Gemini,
     Provider::Openrouter,
     Provider::OpenaiApi,
     Provider::AnthropicApi,
@@ -145,6 +146,24 @@ pub fn provider_name(provider: Provider) -> &'static str {
         Provider::OpenaiCompatible => "Any OpenAI-compatible URL",
         Provider::Local => "Local models (Ollama)",
         Provider::Gemini => "Gemini API",
+    }
+}
+
+/// The kind of account one Add account choice makes, in the words a sentence asks the owner
+/// to add it with: the sign-in for a subscription, the key's provider for an API key, the
+/// address kind for a URL. Two choices that store the same kind share the phrase.
+/// Inputs: the provider and its sign-in method. Output: the phrase, such as
+/// "an OpenAI API key".
+pub fn account_phrase(provider: Provider, method: SignInMethod) -> &'static str {
+    match (provider, method) {
+        (Provider::Chatgpt, SignInMethod::Subscription) => "a ChatGPT sign-in",
+        (_, SignInMethod::Subscription) => "a Claude sign-in",
+        (Provider::Chatgpt | Provider::OpenaiApi, _) => "an OpenAI API key",
+        (Provider::Claude | Provider::AnthropicApi, _) => "an Anthropic API key",
+        (Provider::Openrouter, _) => "an OpenRouter API key",
+        (Provider::Gemini, _) => "a Gemini API key",
+        (Provider::OpenaiCompatible, _) => "an OpenAI-compatible URL",
+        (Provider::Local, _) => "a local model (Ollama)",
     }
 }
 

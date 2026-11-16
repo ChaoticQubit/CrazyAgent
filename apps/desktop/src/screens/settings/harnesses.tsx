@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { harnessCatalog, type HarnessAccountKind, type HarnessEntry, type Result } from "../../api";
 import { openLink } from "../../api-projects";
 import {
-  harnessVersions, installedWith, installHarness, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, setHarnessUpdateSettings, updateCopy, updateHarness, versionLine,
+  harnessVersions, installedWith, installHarness, loadHarnessUpdateSettings, needsNewerLine, pollWhileRunning, readForConfirm, setHarnessUpdateSettings, updateCopy, updateHarness, versionLine,
   UPDATE_POLL_MS, UPDATE_POLLS_MAX, UPDATE_SETTINGS_DEFAULT, type CheckWhen, type HarnessJob, type HarnessVersions, type InstallFromApp, type OnlineLookup, type UpdateMode, type UpdateSettings,
 } from "../../api-harness-updates";
 import { installDependency, loadSetupStatus } from "../../api-intake";
@@ -166,6 +166,7 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
   const absent = missing ? versions : null;
   const checkable = shown !== null && shown.method.kind !== "with_app" && shown.method.kind !== "unknown";
   const updatable = shown !== null && mode === "check_and_update" && shown.command !== null;
+  const old = shown !== null ? needsNewerLine(entry.name, shown) : null;
   const installable = absent !== null && absent.install !== null;
   const read = shown ?? absent;
   const running = read?.running === true;
@@ -180,6 +181,7 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
         <span>Tools: {entry.tools.kind === "switchable" ? "Can turn on or off" : entry.tools.reason}</span>
         <span>Accounts it can use: {entry.account_kinds.map((kind) => KIND_LABEL[kind]).join(", ") || "None"}</span>
         {blocked !== null && <span className="pj-error">{blocked}</span>}
+        {old !== null && <span className="pj-error">{old}</span>}
         {shown !== null && shown.method.kind !== "with_app" && <span>{versionLine(shown)}</span>}
         {versions?.sign_in_min && <span>{`Sign-in needs ${versions.sign_in_min} or newer.`}</span>}
         {refusal !== null && <span>{refusal}</span>}

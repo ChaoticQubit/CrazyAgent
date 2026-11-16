@@ -1,6 +1,10 @@
+use super::drivers::rules;
 use super::interactive::Transcript;
 use super::launch::{LaunchError, failure, rate_limited};
-use super::records::{self, Reader};
+use super::manifest::{Fact, RecordKind, Rule};
+use super::records::json_rewrite::JsonRewrite;
+use super::records::jsonl_append::JsonlAppend;
+use super::records::{self, Reader, Records};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -130,6 +134,77 @@ pub struct TranscriptReader {
     dropped: bool,
     consumed: u64,
     codex_calls: CodexExecCalls,
+    followed: Option<Follow>,
+}
+
+/// The reader of a manifest harness's record, by the record kind its manifest names.
+enum Follow {
+    Lines(JsonlAppend),
+    List(JsonRewrite),
+}
+
+impl Follow {
+    /// Starts following a manifest record: a record written after now for a fresh run,
+    /// else the newest record its path finds, from `position`. Inputs: the record, whether
+    /// the run is fresh and the position. Output: the reader, none for a kind no manifest
+    /// reader follows.
+    fn of(records: &Records, fresh: bool, position: u64) -> Option<Self> {
+        let pattern = records.pattern.clone();
+        let entries = usize::try_from(position).unwrap_or(usize::MAX);
+        let followed = match records.kind {
+            RecordKind::JsonlAppend if fresh => Self::Lines(JsonlAppend::new(pattern)),
+            RecordKind::JsonlAppend => Self::Lines(JsonlAppend::resumed(pattern, position)),
+            RecordKind::JsonRewrite if fresh => Self::List(JsonRewrite::new(pattern)),
+            RecordKind::JsonRewrite => Self::List(JsonRewrite::resumed(pattern, entries)),
+            _ => return None,
+        };
+        Some(followed)
+    }
+
+    /// Reads what the record holds past this reader, with how far the read moved it: the
+    /// objects read, plus the bytes a jsonl-append record gave, so a read that took only
+    /// lines passed over or half a line still shows it moved. Output: the objects and the
+    /// count, or a plain code when the record cannot be read.
+    fn read(&mut self) -> Result<(Vec<Value>, u64), LaunchError> {
+        let (objects, taken) = match self {
+            Self::Lines(reader) => {
+                let before = reader.taken();
+                let objects = reader.read()?;
+                (objects, reader.taken().saturating_sub(before))
+            }
+            Self::List(reader) => (reader.read()?, 0),
+        };
+        let moved = taken + objects.len() as u64;
+        Ok((objects, moved))
+    }
+
+    fn record(&self) -> Option<PathBuf> {
+        match self {
+            Self::Lines(reader) => reader.record(),
+            Self::List(reader) => reader.record(),
+        }
+    }
+
+    fn find(&mut self) -> Option<PathBuf> {
+        match self {
+            Self::Lines(reader) => reader.find(),
+            Self::List(reader) => reader.find(),
+        }
+    }
+
+    fn position(&self) -> u64 {
+        match self {
+            Self::Lines(reader) => reader.position(),
+            Self::List(reader) => reader.position() as u64,
+        }
+    }
+
+    fn skip_to_end(&mut self) -> Result<(), LaunchError> {
+        match self {
+            Self::Lines(reader) => reader.skip_to_end(),
+            Self::List(reader) => reader.skip_to_end(),
+        }
+    }
 }
 
 impl TranscriptReader {
@@ -150,14 +225,14 @@ impl TranscriptReader {
             }
             _ => Vec::new(),
         };
-        Self::with_earlier(source, cwd, since, earlier)
+        Self::with_earlier(source, cwd, since, earlier, true)
     }
 
     /// Follows the session record of a harness that is already running, such as a pane the
     /// engine adopts after a restart, whose record may already exist. Inputs: as for `new`.
     /// Output: the reader at the record's start.
     pub fn adopted(source: Transcript, cwd: &Path, since: SystemTime) -> Self {
-        Self::with_earlier(source, cwd, since, Vec::new())
+        Self::with_earlier(source, cwd, since, Vec::new(), false)
     }
 
     fn with_earlier(
@@ -165,7 +240,12 @@ impl TranscriptReader {
         cwd: &Path,
         since: SystemTime,
         earlier: Vec<FileKey>,
+        fresh: bool,
     ) -> Self {
+        let followed = match &source {
+            Transcript::Records(records) => Follow::of(records, fresh, 0),
+            _ => None,
+        };
         Self {
             source,
             cwd: cwd.to_string_lossy().into_owned(),
@@ -182,6 +262,7 @@ impl TranscriptReader {
             dropped: false,
             consumed: 0,
             codex_calls: CodexExecCalls::default(),
+            followed,
         }
     }
 
@@ -199,7 +280,26 @@ impl TranscriptReader {
         from: Option<u64>,
     ) -> Result<Self, LaunchError> {
         let unavailable = || failure("launch_resume_unavailable");
-        let mut reader = Self::with_earlier(source, cwd, SystemTime::now(), Vec::new());
+        let mut reader = Self::with_earlier(source, cwd, SystemTime::now(), Vec::new(), false);
+        if let Transcript::Records(records) = &reader.source {
+            let start = from.unwrap_or(0);
+            let mut followed = Follow::of(records, false, start).ok_or_else(unavailable)?;
+            let found = match from {
+                Some(_) => followed.find(),
+                None => {
+                    followed.skip_to_end().map_err(|_| unavailable())?;
+                    followed.record()
+                }
+            };
+            if found.as_deref() != Some(record) {
+                return Err(unavailable());
+            }
+            let id = records.session_of(record).ok_or_else(unavailable)?;
+            reader.start = followed.position();
+            reader.found = Some((id, record.to_path_buf()));
+            reader.followed = Some(followed);
+            return Ok(reader);
+        }
         let (mut file, id) = match &reader.source {
             Transcript::CodexRollouts { sessions } if plain_below(sessions, record) => {
                 let file = open_rollout(record).ok_or_else(unavailable)?;
@@ -256,7 +356,8 @@ impl TranscriptReader {
     }
 
     /// Counts the bytes read from the record so far, the lines passed over included, so a
-    /// caller can tell the record grew. Output: the total since the reader started.
+    /// caller can tell the record grew; for a manifest record, the objects read plus the
+    /// bytes a jsonl-append record gave. Output: the total since the reader started.
     pub fn bytes(&self) -> u64 {
         self.consumed
     }
@@ -293,6 +394,13 @@ impl TranscriptReader {
     /// `drop_turn`). Takes the reader. Returns nothing, or a plain code when the record
     /// cannot be read.
     pub fn skip_to_end(&mut self) -> Result<(), LaunchError> {
+        if let Some(followed) = self.followed.as_mut() {
+            followed.skip_to_end()?;
+            self.in_turn = false;
+            self.aside = false;
+            self.dropped = true;
+            return Ok(());
+        }
         let unavailable = |_: std::io::Error| failure("launch_transcript_unavailable");
         let Some(file) = self.file.as_mut() else {
             return Ok(());
@@ -330,6 +438,9 @@ impl TranscriptReader {
     /// Output: the facts in order, none while the record does not exist yet, or a plain code
     /// when the record cannot be read.
     pub fn read(&mut self) -> Result<Vec<TranscriptEvent>, LaunchError> {
+        if self.followed.is_some() {
+            return self.read_records();
+        }
         if self.file.is_none() {
             let opened = match &self.source {
                 Transcript::CodexRollouts { sessions } => {
@@ -338,7 +449,7 @@ impl TranscriptReader {
                 Transcript::ClaudeSession { file } => {
                     open_plain(file).map(|opened| (opened, claude_id(file), file.clone()))
                 }
-                Transcript::Unavailable => None,
+                Transcript::Records(_) | Transcript::Unavailable => None,
             };
             if let Some((file, id, path)) = opened {
                 self.found = id.map(|id| (id, path));
@@ -387,19 +498,10 @@ impl TranscriptReader {
                     codex_facts(&value, exec)
                 }
                 Transcript::ClaudeSession { .. } => self.claude_line(&value),
-                Transcript::Unavailable => Vec::new(),
+                Transcript::Records(_) | Transcript::Unavailable => Vec::new(),
             };
             for fact in facts {
-                let works = matches!(
-                    fact,
-                    TranscriptEvent::Text { .. } | TranscriptEvent::ToolUse { .. }
-                );
-                if works && self.dropped && !self.in_turn {
-                    events.extend(self.track(TranscriptEvent::TurnStarted));
-                }
-                if let Some(fact) = self.track(fact) {
-                    events.push(fact);
-                }
+                self.take(fact, &mut events);
             }
         }
         self.pending.drain(..used);
@@ -414,6 +516,51 @@ impl TranscriptReader {
         assert!(self.scanned <= self.pending.len());
         assert!(events.len() >= EVENTS_PER_READ_MAX || self.scanned == self.pending.len());
         Ok(events)
+    }
+
+    /// Reads the objects a manifest record gained since the last read, at most
+    /// `EVENTS_PER_READ_MAX`, and turns each into at most one fact by the manifest's rules.
+    /// The record's place names the conversation once it is found. Output: the facts in
+    /// order, or a plain code when the record cannot be read or is no list.
+    fn read_records(&mut self) -> Result<Vec<TranscriptEvent>, LaunchError> {
+        let Transcript::Records(records) = &self.source else {
+            return Ok(Vec::new());
+        };
+        let Some(followed) = self.followed.as_mut() else {
+            return Ok(Vec::new());
+        };
+        let (objects, moved) = followed.read()?;
+        if let Some(path) = followed.record() {
+            self.found = records.session_of(&path).map(|id| (id, path));
+        }
+        let facts: Vec<TranscriptEvent> = objects
+            .iter()
+            .filter_map(|object| record_fact(&records.rules, object))
+            .collect();
+        self.consumed += moved;
+        let mut events = Vec::new();
+        for fact in facts {
+            self.take(fact, &mut events);
+        }
+        assert!(objects.len() <= EVENTS_PER_READ_MAX);
+        assert!(events.len() <= 2 * objects.len());
+        Ok(events)
+    }
+
+    /// Adds one fact to a read's facts, starting the turn first when the model works in a
+    /// turn the reader dropped, so it is followed and ends like any other. Inputs: the fact
+    /// and the read's facts. Output: none.
+    fn take(&mut self, fact: TranscriptEvent, events: &mut Vec<TranscriptEvent>) {
+        let works = matches!(
+            fact,
+            TranscriptEvent::Text { .. } | TranscriptEvent::ToolUse { .. }
+        );
+        if works && self.dropped && !self.in_turn {
+            events.extend(self.track(TranscriptEvent::TurnStarted));
+        }
+        if let Some(fact) = self.track(fact) {
+            events.push(fact);
+        }
     }
 
     /// Reads one Claude Code line with what the reader knows. The model's first line after
@@ -450,6 +597,28 @@ impl TranscriptReader {
             }
             other => Some(other),
         }
+    }
+}
+
+/// Turns one object of a manifest record into the fact of the first rule that matches it,
+/// with Task 11's defaults: an end succeeds and an error is not rate limited unless a
+/// rule's path says so. Ready, usage and exit say nothing a turn follows, and text or a
+/// tool without its value give none. Inputs: the rules and the object. Output: the fact.
+fn record_fact(rules: &[Rule], object: &Value) -> Option<TranscriptEvent> {
+    let found = rules::matched(rules, object)?;
+    match found.fact {
+        Fact::TurnStarted => Some(TranscriptEvent::TurnStarted),
+        Fact::Text => found.text.map(|text| TranscriptEvent::Text { text }),
+        Fact::ToolUse => found.name.map(|name| TranscriptEvent::ToolUse { name }),
+        Fact::Waiting => Some(TranscriptEvent::Waiting),
+        Fact::Interrupted => Some(TranscriptEvent::Interrupted),
+        Fact::TurnFinished => Some(TranscriptEvent::TurnFinished {
+            success: found.success.unwrap_or(true),
+        }),
+        Fact::TurnError => Some(TranscriptEvent::TurnError {
+            rate_limited: found.rate_limited.unwrap_or(false),
+        }),
+        Fact::Ready | Fact::Usage | Fact::Exited => None,
     }
 }
 
@@ -520,7 +689,9 @@ pub(crate) fn open_rollout(record: &Path) -> Option<File> {
 pub(crate) fn open_record(harness: &str, record: &Path) -> Option<File> {
     match records::stored(harness) {
         Some(Reader::CodexRollouts) => open_rollout(record),
-        Some(Reader::ClaudeSession) | None => open_plain(record),
+        Some(Reader::ClaudeSession | Reader::JsonlAppend | Reader::JsonRewrite) | None => {
+            open_plain(record)
+        }
     }
 }
 
@@ -1073,7 +1244,7 @@ pub fn conversation_messages(harness: &str, record: &Path) -> Vec<(Speaker, Stri
         let said = match reader {
             Some(Reader::CodexRollouts) => codex_message(&value),
             Some(Reader::ClaudeSession) => claude_message(&value),
-            None => None,
+            Some(Reader::JsonlAppend | Reader::JsonRewrite) | None => None,
         };
         if let Some(said) = said {
             if messages.len() == EXCERPT_MESSAGES_MAX {
@@ -1106,6 +1277,7 @@ pub fn record_message(harness: &str, line: &[u8]) -> Option<(&'static str, Strin
     match reader {
         Reader::CodexRollouts => codex_entry(&value),
         Reader::ClaudeSession => claude_entry(&value),
+        Reader::JsonlAppend | Reader::JsonRewrite => None,
     }
 }
 
@@ -1310,7 +1482,9 @@ fn capped(text: &str) -> String {
     format!("{}...", &text[..end])
 }
 
-fn codex_message(value: &Value) -> Option<(Speaker, String)> {
+/// The typed message or reply one Codex rollout line holds, without the context Codex
+/// injects. Takes the line. Returns who said what, or none for any other line.
+pub(crate) fn codex_message(value: &Value) -> Option<(Speaker, String)> {
     let payload = &value["payload"];
     if value["type"] != "response_item" || payload["type"] != "message" {
         return None;
@@ -1341,7 +1515,9 @@ fn codex_text(payload: &Value) -> Option<String> {
     )
 }
 
-fn claude_message(value: &Value) -> Option<(Speaker, String)> {
+/// The typed message or reply one Claude Code session line holds, without meta lines,
+/// compaction summaries or API errors. Takes the line. Returns who said what, or none.
+pub(crate) fn claude_message(value: &Value) -> Option<(Speaker, String)> {
     let speaker = match value["type"].as_str()? {
         "user" if value["isMeta"] != true && !claude_summary(value) => Speaker::Input,
         "assistant" if value["isApiErrorMessage"] != true => Speaker::Agent,
@@ -1393,7 +1569,7 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
         let said = match reader {
             Some(Reader::CodexRollouts) => codex_message(&value),
             Some(Reader::ClaudeSession) => claude_message(&value),
-            None => None,
+            Some(Reader::JsonlAppend | Reader::JsonRewrite) | None => None,
         };
         if let Some((Speaker::Input, text)) = said {
             typed.push(text);
@@ -1483,7 +1659,7 @@ fn typed_line(reader: Option<Reader>, line: &[u8]) -> Option<String> {
         {
             claude_message(&value)
         }
-        Reader::ClaudeSession => None,
+        Reader::ClaudeSession | Reader::JsonlAppend | Reader::JsonRewrite => None,
     };
     match said {
         Some((Speaker::Input, text)) => Some(text),
@@ -1493,3 +1669,7 @@ fn typed_line(reader: Option<Reader>, line: &[u8]) -> Option<String> {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "transcript/records_tests.rs"]
+mod records_tests;
