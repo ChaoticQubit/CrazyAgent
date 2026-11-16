@@ -532,3 +532,12 @@ fn a_job_read_with_a_count_past_its_total_shows_its_plain_line_with_no_count() {
         Some("Deleting Notes/2026 plans was cut short. Finish delete or keep the project.")
     );
 }
+
+/// The code of a refused job request arrives from the engine, so an empty one is input,
+/// not an invariant: its line is the plain fallback sentence, and the TUI keeps running.
+#[test]
+fn a_refused_job_request_with_an_empty_code_says_the_plain_fallback() {
+    let said = std::panic::catch_unwind(|| refusal("", None)).ok();
+    assert_eq!(said, Some(copy("")));
+    assert!(copy("").starts_with("Something went wrong. Try again."));
+}
