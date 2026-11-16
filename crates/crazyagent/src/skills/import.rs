@@ -419,6 +419,48 @@ mod tests {
         );
     }
 
+    /// RV-DS241-92: a folder with no SKILL.md is not a skill, so it is never listed, even
+    /// one that fails an earlier check first, such as a bundle of nested skills holding more
+    /// files than one skill may; a folder whose SKILL.md is there and that fails that check
+    /// is still listed as Can't import, so the list counts skills only.
+    #[test]
+    fn a_folder_without_skill_md_is_never_listed_whatever_check_it_fails_first() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let claude = home.join(".claude/skills");
+        skill(&claude.join("fmt"), "fmt", "Formats changed files.");
+        let crowded = claude.join("crowded");
+        skill(&crowded, "crowded", "Holds too many files.");
+        for index in 0..skill_folder::FILES_MAX + 50 {
+            let part = claude
+                .join("bundle")
+                .join(format!("part-{:02}", index % 10));
+            fs::create_dir_all(&part).unwrap();
+            fs::write(part.join(format!("note-{index:03}.md")), "Note.\n").unwrap();
+            fs::write(crowded.join(format!("note-{index:03}.md")), "Note.\n").unwrap();
+        }
+
+        let list = scan(&home, &[]).unwrap();
+        let listed: Vec<(&str, &ImportState)> = list
+            .found
+            .iter()
+            .map(|found| (found.name.as_str(), &found.state))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (
+                    "crowded",
+                    &ImportState::Unusable {
+                        code: "skill_too_many_files".into()
+                    }
+                ),
+                ("fmt", &ImportState::New),
+            ]
+        );
+        assert_eq!(list.more, 0);
+    }
+
     #[test]
     fn a_scan_lists_both_skills_folders_with_each_state_and_changes_nothing() {
         let root = tempfile::tempdir().unwrap();
