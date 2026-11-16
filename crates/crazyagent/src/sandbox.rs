@@ -995,6 +995,10 @@ pub const ADMIN_LINKS: [&str; 2] = ["commondir", "gitdir"];
 /// and the Linux call supervisor holds each (DEC-185 S2a).
 pub const ADMIN_WRITES: [&str; 2] = ["HEAD", "config.worktree"];
 
+/// The lowest port a loopback bridge carries on Linux: inside a network namespace of its
+/// own an agent's helper has no capability to listen below it.
+pub const BRIDGE_PORT_MIN: u16 = 1024;
+
 /// The cloud metadata and credential services a VM reaches outside the link-local range,
 /// which no routed agent and no engine tunnel may reach (CLOUD-METADATA-ADDRS): Alibaba ECS
 /// and Azure's WireServer over IPv4; AWS IMDS, AWS EKS Pod Identity, Google, OCI, Akamai and
@@ -1010,10 +1014,6 @@ pub(crate) const CLOUD_METADATA: [IpAddr; 8] = [
     IpAddr::V6(Ipv6Addr::new(0xfd00, 0xa9fe, 0xa9fe, 0, 0, 0, 0, 0x0001)),
     IpAddr::V6(Ipv6Addr::new(0xfd00, 0x0042, 0, 0, 0, 0, 0, 0x0042)),
 ];
-
-/// The lowest port a loopback bridge carries on Linux: inside a network namespace of its
-/// own an agent's helper has no capability to listen below it.
-pub const BRIDGE_PORT_MIN: u16 = 1024;
 
 /// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
 /// computer's network on a Linux that could give them one of their own: on the project's
