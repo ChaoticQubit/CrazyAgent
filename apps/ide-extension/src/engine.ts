@@ -127,14 +127,16 @@ export function readCapability(path: string): Buffer {
  * keeps in memory and in its token store for a window reload. A new file means a new
  * launch and is swapped again. `request` sends one call on its own connection; `on`
  * delivers events from one shared subscription that reconnects after a drop and stops
- * for good once the capability is refused or revoked. Dispose it to close the
- * subscription.
+ * for good once the capability is refused or revoked. A swap the engine refuses with
+ * `ide_session_taken` calls `taken` once: something else in this IDE used the capability
+ * first (CA-SEC-004). Dispose it to close the subscription.
  */
 export class Engine implements Disposable {
   readonly project: string;
   readonly #socket: string;
   readonly #capability: string;
   readonly #store: TokenStore | undefined;
+  readonly #taken: (() => void) | undefined;
   readonly #handlers = new Map<EngineEvent["name"], Set<(event: EngineEvent) => void>>();
   #session: Promise<Buffer> | undefined;
   #taking = false;
@@ -142,24 +144,30 @@ export class Engine implements Disposable {
   #subscription: Socket | undefined;
   #retry: ReturnType<typeof setTimeout> | undefined;
   #closed = false;
+  #told = false;
 
-  constructor(socket: string, capability: string, store?: TokenStore) {
+  constructor(socket: string, capability: string, store?: TokenStore, taken?: () => void) {
     this.#socket = socket;
     this.#capability = capability;
     this.#store = store;
+    this.#taken = taken;
     this.project = basename(dirname(capability));
   }
 
   /**
    * The bridge the engine set up for this IDE server through its launch environment.
-   * Input: the environment and where to keep the session token. Output: the bridge, or
-   * undefined when either variable is missing, which means CrazyAgent did not launch
-   * this server.
+   * Input: the environment, where to keep the session token and what to call once when
+   * the session was taken. Output: the bridge, or undefined when either variable is
+   * missing, which means CrazyAgent did not launch this server.
    */
-  static fromEnv(env: Record<string, string | undefined>, store?: TokenStore): Engine | undefined {
+  static fromEnv(
+    env: Record<string, string | undefined>,
+    store?: TokenStore,
+    taken?: () => void,
+  ): Engine | undefined {
     const capability = env[CAPABILITY_ENV];
     const socket = env[SOCKET_ENV];
-    return capability && socket ? new Engine(socket, capability, store) : undefined;
+    return capability && socket ? new Engine(socket, capability, store, taken) : undefined;
   }
 
   /**
@@ -209,6 +217,7 @@ export class Engine implements Disposable {
       return Buffer.from(stored, "hex");
     }
     const reply = await this.#exchange<{ token?: unknown }>(readCapability(this.#capability), "ide.session", {});
+    if (reply.kind === "rejected" && reply.code === "ide_session_taken" && this.#told) this.#taken?.();
     if (reply.kind === "rejected") throw new Error(reply.code);
     const token = reply.kind === "ok" ? reply.data?.token : undefined;
     if (typeof token !== "string" || !HEX_TOKEN.test(token)) throw new Error("ide_session_invalid");

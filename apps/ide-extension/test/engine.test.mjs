@@ -154,3 +154,24 @@ test("the first call swaps the capability file for a session the bridge keeps", 
     assert.equal(connections, 4);
   });
 });
+
+test("a swap refused as taken tells the owner once, and no other refusal does", { timeout: 10_000 }, async () => {
+  await withServer(async (server, socket, capability) => {
+    let told = 0;
+    const engine = new Engine(socket, capability, memoryStore(), () => (told += 1));
+    for (const code of ["ide_capability_refused", "ide_session_taken", "ide_session_taken"]) {
+      writeFileSync(capability, fixture.token, { mode: 0o600 });
+      const swapped = once(server, "connection");
+      const refused = engine.request("ide.workspace");
+      const [swap] = await swapped;
+      const swapping = reading(swap);
+      await swapping.take(37);
+      assert.equal((await swapping.frame()).toString("hex"), fixture.session.request.frame);
+      swap.end(encodeFrame({ kind: "rejected", code }));
+      await assert.rejects(refused, new RegExp(code));
+    }
+    assert.equal(told, 1, "the built-in extension says why once (CA-SEC-004 B, leader 02:29)");
+    assert.equal(Engine.fromEnv({}, memoryStore(), () => (told += 1)), undefined);
+  });
+});
+
