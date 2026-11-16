@@ -375,6 +375,7 @@ fn a_real_tools_on_claude_master_keeps_its_default_tools_but_no_built_in_sub_age
             drop: &drop,
             mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
+            connector: None,
         },
         &crate::harness_settings::apply::Applied::default(),
     )
@@ -1027,6 +1028,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
                 drop,
                 mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
                 off: &[],
+                connector: None,
             },
             &crate::harness_settings::apply::Applied::default(),
         )
@@ -1151,6 +1153,7 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
         drop: &drop,
         mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
         off: &[],
+        connector: None,
     };
     let on = tools_launch_command(
         Path::new("/approved/claude"),
@@ -1213,6 +1216,154 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
 }
 
 #[test]
+fn a_tools_on_master_names_its_connector_server_and_the_host_runs_it_only_as_built() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let profile = fixture.lease("claude-connector-validate", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let engine = fixture.root.path().join("crazyagent");
+    let drop = home.join(crate::team::tool::DROP_FILE);
+    let mailbox = drop.with_file_name(crate::team::tool::MAILBOX_FOLDER);
+    let launches = fixture
+        .root
+        .path()
+        .join(crate::connectors::gateway::LAUNCHES_FOLDER);
+    let folder = launches.join("a".repeat(32));
+    let other = launches.join("b".repeat(32));
+    let plain = MasterTools {
+        engine: &engine,
+        drop: &drop,
+        mailbox: &mailbox,
+        off: &[],
+        connector: None,
+    };
+    let with = MasterTools {
+        connector: Some(&folder),
+        ..plain
+    };
+    let elsewhere = MasterTools {
+        connector: Some(&other),
+        ..plain
+    };
+    let build = |tools: MasterTools<'_>| {
+        tools_launch_command(
+            Path::new("/approved/claude"),
+            &fixture.project,
+            &home,
+            "native-default",
+            None,
+            tools,
+            &crate::harness_settings::apply::Applied::default(),
+        )
+        .unwrap()
+    };
+    let on = build(with);
+    let args = arguments(&on);
+    let at = args.iter().position(|arg| arg == "--mcp-config").unwrap() + 1;
+    let config: serde_json::Value = serde_json::from_str(&args[at]).unwrap();
+    assert_eq!(
+        config["mcpServers"].as_object().unwrap().len(),
+        2,
+        "{config}"
+    );
+    assert_eq!(
+        config["mcpServers"][crate::connectors::launch::SERVER_NAME],
+        serde_json::json!({
+            "type": "stdio",
+            "command": engine,
+            "args": [crate::connectors::shim::SERVER_COMMAND, folder],
+        })
+    );
+    assert_eq!(validate_command(&on, &profile, &home).ok(), Some(true));
+    assert_eq!(require_delegate(&on, Some(with)), Ok(()));
+    for expected in [None, Some(plain), Some(elsewhere)] {
+        assert!(
+            require_delegate(&on, expected).is_err(),
+            "{:?}",
+            expected.map(|tools| tools.connector)
+        );
+    }
+    let without = build(plain);
+    assert_eq!(validate_command(&without, &profile, &home).ok(), Some(true));
+    assert!(require_delegate(&without, Some(with)).is_err());
+    let changed = |servers: serde_json::Value| {
+        let mut config = config.clone();
+        config["mcpServers"][crate::connectors::launch::SERVER_NAME] = servers;
+        let mut args = arguments(&on);
+        args[at] = config.to_string();
+        let mut changed = std::process::Command::new(on.get_program());
+        changed
+            .args(args)
+            .current_dir(on.get_current_dir().unwrap());
+        changed.env_clear();
+        for (key, value) in on.get_envs() {
+            changed.env(key, value.unwrap());
+        }
+        changed
+    };
+    let server = crate::connectors::shim::SERVER_COMMAND;
+    for (name, refused) in [
+        (
+            "another executable",
+            changed(
+                serde_json::json!({"type": "stdio", "command": "/bin/sh", "args": [server, folder]}),
+            ),
+        ),
+        (
+            "an extra argument",
+            changed(
+                serde_json::json!({"type": "stdio", "command": engine, "args": [server, folder, "--verbose"]}),
+            ),
+        ),
+        (
+            "another server command",
+            changed(
+                serde_json::json!({"type": "stdio", "command": engine, "args": ["team-mcp", folder]}),
+            ),
+        ),
+        (
+            "an environment",
+            changed(
+                serde_json::json!({"type": "stdio", "command": engine, "args": [server, folder], "env": {"A": "b"}}),
+            ),
+        ),
+        (
+            "a relative folder",
+            changed(
+                serde_json::json!({"type": "stdio", "command": engine, "args": [server, "connector-launches/x"]}),
+            ),
+        ),
+    ] {
+        assert!(
+            matches!(
+                validate_command(&refused, &profile, &home),
+                Err(Fault::Host(
+                    "claude_host_unapproved_command" | "claude_host_invalid_command"
+                ))
+            ),
+            "{name}"
+        );
+        assert!(require_delegate(&refused, Some(with)).is_err(), "{name}");
+    }
+    let mut third = config.clone();
+    third["mcpServers"]["extra"] =
+        serde_json::json!({"type": "stdio", "command": "/bin/sh", "args": []});
+    let mut args = arguments(&on);
+    args[at] = third.to_string();
+    let mut widened = std::process::Command::new(on.get_program());
+    widened
+        .args(args)
+        .current_dir(on.get_current_dir().unwrap());
+    widened.env_clear();
+    for (key, value) in on.get_envs() {
+        widened.env(key, value.unwrap());
+    }
+    assert!(validate_command(&widened, &profile, &home).is_err());
+    assert!(require_delegate(&widened, Some(with)).is_err());
+}
+
+#[test]
 fn every_key_a_claude_master_sets_is_locked_in_the_shipped_catalog() {
     use crate::harness_settings::{apply::Applied, catalog, resolve, tests};
     let shipped = catalog::builtin("claude-code").unwrap().unwrap();
@@ -1247,6 +1398,7 @@ fn every_key_a_claude_master_sets_is_locked_in_the_shipped_catalog() {
             drop: &drop,
             mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
+            connector: None,
         },
         &settings,
     )
@@ -1408,6 +1560,7 @@ fn the_host_runs_a_tools_on_master_under_each_step_limit_the_owner_can_pick() {
             drop: &drop,
             mailbox: &mailbox,
             off: &[],
+            connector: None,
         };
         tools_launch_command(
             Path::new("/approved/claude"),
@@ -1495,6 +1648,7 @@ fn the_host_runs_a_master_under_each_retry_choice_and_no_other_variable() {
                 drop: &drop,
                 mailbox: &mailbox,
                 off: &[],
+                connector: None,
             };
             tools_launch_command(
                 Path::new("/approved/claude"),
@@ -1593,6 +1747,7 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
             drop: &drop,
             mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
+            connector: None,
         },
         &crate::harness_settings::apply::Applied::default(),
     )
@@ -1684,6 +1839,7 @@ async fn held_turn(
                 drop: &drop,
                 mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
                 off: &[],
+                connector: None,
             },
             &crate::harness_settings::apply::Applied::default(),
         )
@@ -2028,6 +2184,7 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
             drop: &drop,
             mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
+            connector: None,
         },
         &crate::harness_settings::apply::Applied::default(),
     )

@@ -322,7 +322,7 @@ fn native_connectors_off_adds_the_switch_for_claude_code_and_codex() {
 }
 
 #[test]
-fn an_rcli_launch_gets_no_connector_and_the_view_says_not_yet() {
+fn an_rcli_agent_install_gets_no_connector_entry_and_no_native_switch() {
     let case = granted();
     let launch = gateway::prepare(&case.db, &case.root, PROJECT, AGENT_ROLE, AGENT)
         .unwrap()

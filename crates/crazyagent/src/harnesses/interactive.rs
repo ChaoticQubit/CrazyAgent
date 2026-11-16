@@ -687,6 +687,9 @@ fn claude(
             &CLAUDE_ENGINE_KEYS,
         );
     }
+    if installed.is_some_and(Installed::native_connectors_off) {
+        settings["disableClaudeAiConnectors"] = true.into();
+    }
     let mut arguments = vec![
         "--strict-mcp-config".to_owned(),
         "--setting-sources".to_owned(),

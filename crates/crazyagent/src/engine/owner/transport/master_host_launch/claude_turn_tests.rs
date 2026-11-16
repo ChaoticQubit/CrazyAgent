@@ -209,6 +209,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         StepLimit::Steps50,
         &crate::harness_settings::apply::Applied::default(),
         crate::provider_retry::ProviderRetry::StopAtOnce,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -291,6 +292,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         StepLimit::NoLimit,
         &crate::harness_settings::apply::Applied::default(),
         crate::provider_retry::ProviderRetry::HarnessDefault,
+        None,
     );
     assert_eq!(
         refused.err().map(|error| error.0),
@@ -335,6 +337,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         StepLimit::Steps100,
         &crate::harness_settings::apply::Applied::default(),
         crate::provider_retry::ProviderRetry::StopAtOnce,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -399,6 +402,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         drop: &record,
         mailbox: &mailbox,
         off: &off,
+        connector: None,
     };
     let delegate = |command: &Command, tools| {
         crate::engine::claude_host::require_delegate(command, tools).map_err(|error| error.0)
@@ -641,7 +645,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
     };
     let checked_off = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>, off: &[String]| {
         let engine = engine.map(registered);
-        require_master_delegate(backend, turn, engine.as_ref(), off).map_err(|error| error.0)
+        require_master_delegate(backend, turn, engine.as_ref(), off, None).map_err(|error| error.0)
     };
     let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
         checked_off(backend, turn, engine, &off)

@@ -16943,6 +16943,10 @@ fn an_adopted_agent_keeps_the_session_time_it_ran_before_the_engine_restarted() 
 #[path = "untrusted_tests.rs"]
 mod untrusted_tests;
 
+#[cfg(target_os = "macos")]
+#[path = "connectors_tests.rs"]
+mod connectors_tests;
+
 /// Runs `agent_git_dir` on its own thread for at most five seconds; past that it opens the
 /// FIFO for writing so the blocked reader can end. Inputs: the root, the worktree and the
 /// FIFO an agent planted. Output: the answer, or None when the read waited on the FIFO.

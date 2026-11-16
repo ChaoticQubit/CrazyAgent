@@ -89,6 +89,7 @@ fn untrusted_master_turn() -> Turn {
         &AgentPolicy::default(),
         crate::trust::Trust::Untrusted,
         &[],
+        None,
     )
     .unwrap();
     assert!(sandbox.sandbox().hides_repository_config());

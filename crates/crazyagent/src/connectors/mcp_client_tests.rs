@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub(in crate::connectors) const KEY: &str = "sk-test-key-0001";
+pub(crate) const KEY: &str = "sk-test-key-0001";
 pub(in crate::connectors) const USER: &str = "ada@example.com";
 
-pub(in crate::connectors) const BOARD: &str = "schema: 1
+pub(crate) const BOARD: &str = "schema: 1
 kind: connector
 name: board
 title: Board

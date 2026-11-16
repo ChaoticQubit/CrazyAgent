@@ -1416,6 +1416,64 @@ fn the_engines_gateway_thread_answers_a_launchs_call_and_stops_when_told() {
 }
 
 #[test]
+fn an_idle_gateway_keeps_one_connection_and_a_new_launch_wakes_it() {
+    let bench = bench();
+    grant(&bench, "board", true);
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let serving = {
+        let (root, opens, stop) = (bench.case.root.clone(), opens.clone(), stop.clone());
+        std::thread::spawn(move || {
+            serve_with(&root, &stop, &|root: &Path| {
+                opens.fetch_add(1, Ordering::SeqCst);
+                crate::storage::versioned::open(root)
+            });
+        })
+    };
+    std::thread::sleep(20 * TICK);
+    assert_eq!(
+        opens.load(Ordering::SeqCst),
+        1,
+        "a gateway with no launch keeps the one connection it opened and reads nothing more"
+    );
+    let launch = launch(&bench);
+    let clock = Instant::now();
+    let input = lines(&[request(
+        1,
+        "tools/call",
+        json!({"name": "nothing", "arguments": {}}),
+    )]);
+    let mut output = Vec::new();
+    shim::serve_with(
+        std::io::Cursor::new(input),
+        &mut output,
+        &launch.folder,
+        WAIT,
+    )
+    .unwrap();
+    let replies = parsed(&output);
+    assert_eq!(replies.len(), 1);
+    let (text, error) = shown(&replies[0]);
+    assert!(
+        error && text.starts_with("connector_tool_unknown"),
+        "{text}"
+    );
+    assert!(
+        clock.elapsed() < Duration::from_secs(5),
+        "a new launch wakes the waiting gateway at once"
+    );
+    assert_eq!(opens.load(Ordering::SeqCst), 1, "on the same connection");
+    stop.store(true, Ordering::SeqCst);
+    wake();
+    let clock = Instant::now();
+    serving.join().unwrap();
+    assert!(
+        clock.elapsed() < 10 * TICK + Duration::from_secs(1),
+        "a waiting loop ends as soon as it is told"
+    );
+}
+
+#[test]
 fn an_agent_home_has_no_connector_key_after_launch_and_the_call_still_reaches_the_vendor() {
     use crate::connectors::launch::{SERVER_NAME, entry};
     use std::os::unix::fs::DirBuilderExt;
