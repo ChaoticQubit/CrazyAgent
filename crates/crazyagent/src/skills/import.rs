@@ -14,7 +14,11 @@ pub const LIST_BYTES_MAX: usize = 48 * 1024;
 pub const FOLDER_NAME_BYTES_MAX: usize = 255;
 const ROOT_ENTRIES_MAX: usize = 1024;
 const DIGEST_ENTRIES_MAX: usize = 4096;
-const IMPORT_KEYS: [(&str, &str); 2] = [("skills", "folder"), ("instructions", "file")];
+const IMPORT_KEYS: [(&str, &str); 3] = [
+    ("skills", "folder"),
+    ("instructions", "file"),
+    ("conversations", "pattern"),
+];
 
 /// Where a found skill lives: the owner's Claude Code or Codex skills folder, or the skills
 /// folder a listed harness's manifest names in `import.skills`, with that harness's catalog
@@ -134,10 +138,10 @@ impl<'de> Deserialize<'de> for ImportFrom {
     }
 }
 
-/// Checks a manifest's `import` block: only its two keys, `import.skills` (the skills folder
-/// the skills import reads) and `import.instructions` (the harness's own instruction file),
-/// each a path inside one of the same manifest's `home.owner_folders`, so a manifest never
-/// points an import at another harness's folders or anything else in the owner's home.
+/// Checks a manifest's `import` block: only `import.skills` (the skills folder),
+/// `import.instructions` (the harness's instruction file) and `import.conversations` (the
+/// pattern of its past conversation records), each inside one of the manifest's own
+/// `home.owner_folders`, never another harness's folders or anything else in the home.
 /// Input: a parsed manifest. Output: Ok, or a refusal that names the setting.
 pub fn check(manifest: &Manifest) -> Result<(), Refused> {
     let Some(import) = manifest.block("import") else {

@@ -47,3 +47,5 @@ piped:
 terminal:
   record:
     reader: "codex-rollouts"
+import:
+  conversations: ".codex/sessions/**/rollout-*.jsonl"

@@ -651,7 +651,7 @@ fn a_relay_token_in_an_imported_message_is_redacted() {
         said(&imported),
         [vec![
             (Speaker::Input, kept.as_str()),
-            (Speaker::Agent, reply.as_str())
+            (Speaker::Agent, reply.as_str()),
         ]]
     );
 }
