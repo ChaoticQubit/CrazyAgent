@@ -1407,6 +1407,9 @@ fn the_engines_gateway_thread_answers_a_launchs_call_and_stops_when_told() {
         text.starts_with("connector_tool_unknown"),
         "the gateway thread answered the call: {text}"
     );
+    let name = launch.folder.file_name().unwrap().to_str().unwrap();
+    end(&bench.case.db, &bench.case.root, name).unwrap();
+    std::thread::sleep(5 * TICK);
     let clock = Instant::now();
     running.stop();
     assert!(
@@ -1463,6 +1466,9 @@ fn an_idle_gateway_keeps_one_connection_and_a_new_launch_wakes_it() {
         "a new launch wakes the waiting gateway at once"
     );
     assert_eq!(opens.load(Ordering::SeqCst), 1, "on the same connection");
+    let name = launch.folder.file_name().unwrap().to_str().unwrap();
+    end(&bench.case.db, &bench.case.root, name).unwrap();
+    std::thread::sleep(5 * TICK);
     stop.store(true, Ordering::SeqCst);
     wake();
     let clock = Instant::now();
@@ -1473,6 +1479,10 @@ fn an_idle_gateway_keeps_one_connection_and_a_new_launch_wakes_it() {
     );
 }
 
+/// Plan row 2, kept as a characterization row: it covers the launch entry and the Task 7
+/// gateway, both written before it, so it passed from its first commit and never ran red.
+/// It guards that a real Codex install with the ca-connectors entry leaves no key in the
+/// agent home while the server it configures still reaches the vendor with the engine's key.
 #[test]
 fn an_agent_home_has_no_connector_key_after_launch_and_the_call_still_reaches_the_vendor() {
     use crate::connectors::launch::{SERVER_NAME, entry};
