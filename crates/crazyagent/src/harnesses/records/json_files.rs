@@ -3,7 +3,7 @@ use super::super::transcript::{FileKey, file_key};
 use crate::app_plugins::yaml::Value as Yaml;
 use serde_json::Value;
 use std::fs::{File, Metadata};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 /// The most levels below the private home a record lies, the record itself included.
@@ -32,11 +32,23 @@ enum Part {
 
 /// Where a harness writes its terminal record: the manifest's `terminal.record.path` with
 /// `{home}` and `{session}` filled in, always below the private home. A part is a plain
-/// name, a name with `*` wildcards, or `**` for any number of folders, at most once.
+/// name, a name with `*` wildcards, or `**` for any number of folders, at most once. For a
+/// harness that picks its own session id, `{session}` is a wildcard and `learn` says where
+/// the id is read back from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pattern {
     home: PathBuf,
     parts: Vec<Part>,
+    learn: Option<Learn>,
+}
+
+/// Where `{session}` stood in a record path for a harness that picks its own session id:
+/// the part's place and the fixed text before and after it in that part.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Learn {
+    at: usize,
+    before: String,
+    after: String,
 }
 
 /// One file a record path matches: its place below the home, its last change and which
@@ -60,6 +72,22 @@ impl Pattern {
     /// setting: no path, a path not below `{home}/`, an empty, `.` or `..` part, another
     /// placeholder, a misplaced `**`, too many parts, or a session id that is no plain word.
     pub fn read(manifest: &Manifest, home: &Path, session: &str) -> Result<Self, Refused> {
+        Self::filled(manifest, home, Some(session))
+    }
+
+    /// Reads a manifest's record path for a run whose harness picks its own session id:
+    /// `{session}` matches any name, and the id is read back from the record found (see
+    /// [`Self::session_of`]). Inputs: the manifest and the absolute private home. Output:
+    /// the pattern, or the refusals of [`Self::read`].
+    pub fn learning(manifest: &Manifest, home: &Path) -> Result<Self, Refused> {
+        Self::filled(manifest, home, None)
+    }
+
+    /// Reads a manifest's record path with `{session}` filled with the session id, or a
+    /// wildcard when none, whose place is kept when `{session}` stands once, in a part with
+    /// no other wildcard. Inputs: the manifest, the absolute private home and the id.
+    /// Output: the pattern, or the refusals of [`Self::read`].
+    fn filled(manifest: &Manifest, home: &Path, session: Option<&str>) -> Result<Self, Refused> {
         assert!(home.is_absolute());
         let written = manifest
             .block("terminal")
@@ -70,9 +98,12 @@ impl Pattern {
             Some(Yaml::Str(text)) => text,
             Some(_) => return refused(TYPE, "this must be text"),
         };
-        if !session_fits(session) {
+        if let Some(session) = session
+            && !session_shaped(session)
+        {
             let rule = format!("1 to {SESSION_BYTES_MAX} letters, digits, - or _");
-            return refused(VALUE, &format!("the session id must be {rule}"));
+            let first = "the first a letter or digit";
+            return refused(VALUE, &format!("the session id must be {rule}, {first}"));
         }
         if text.len() > PATH_BYTES_MAX {
             let most = format!("this must be at most {PATH_BYTES_MAX} bytes");
@@ -82,6 +113,8 @@ impl Pattern {
             return refused(VALUE, "the record must be below {home}/");
         };
         let mut parts = Vec::new();
+        let mut learn = None;
+        let mut sessions = 0;
         for part in rest.split('/') {
             if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
                 return refused(VALUE, "each part must be a plain name");
@@ -89,16 +122,28 @@ impl Pattern {
             if part.replace(SESSION, "").contains(['{', '}']) {
                 return refused(VALUE, "only {home} and {session} are filled in here");
             }
-            let part = part.replace(SESSION, session);
-            if part.contains(DEEP) && part != DEEP {
+            let probe = part.replace(SESSION, session.unwrap_or("s"));
+            if probe.contains(DEEP) && probe != DEEP {
                 return refused(VALUE, "** must be a whole part");
             }
-            parts.push(if part == DEEP {
+            let named = part.matches(SESSION).count();
+            if let Some((before, after)) = part.split_once(SESSION)
+                && session.is_none()
+                && named == 1
+                && !probe.contains('*')
+            {
+                let (before, after) = (before.to_owned(), after.to_owned());
+                let at = parts.len();
+                learn = Some(Learn { at, before, after });
+            }
+            sessions += named;
+            let filled = part.replace(SESSION, session.unwrap_or("*"));
+            parts.push(if probe == DEEP {
                 Part::Deep
-            } else if part.contains('*') {
-                Part::Glob(part)
+            } else if filled.contains('*') {
+                Part::Glob(filled)
             } else {
-                Part::Name(part)
+                Part::Name(filled)
             });
         }
         if parts.len() > DEPTH_MAX {
@@ -109,18 +154,11 @@ impl Pattern {
         if deep > 1 || parts.last() == Some(&Part::Deep) {
             return refused(VALUE, "** may stand once, and never for the file itself");
         }
+        let learn = learn.filter(|_| sessions == 1);
         assert!(!parts.is_empty());
+        assert!(session.is_none() || learn.is_none());
         let home = home.to_path_buf();
-        Ok(Self { home, parts })
-    }
-
-    /// Reads a manifest's record path for a run whose harness picks its own session id:
-    /// `{session}` matches any name, and the id is read back from the record found (see
-    /// [`Self::session_of`]). Inputs: the manifest and the absolute private home. Output:
-    /// the pattern, or the refusals of [`Self::read`].
-    pub fn learning(manifest: &Manifest, home: &Path) -> Result<Self, Refused> {
-        let _ = (manifest, home);
-        refused(VALUE, "a harness's own session id is not read back yet")
+        Ok(Self { home, parts, learn })
     }
 
     /// Lists the files this record path matches, never following a link, looking at no more
@@ -230,8 +268,41 @@ impl Pattern {
     /// a part with no other wildcard, the place fits the whole path and the text is a plain
     /// word (see [`session_shaped`]). Input: the record's full path. Output: the id, or none.
     pub fn session_of(&self, record: &Path) -> Option<String> {
-        let _ = record;
-        None
+        let learn = self.learn.as_ref()?;
+        assert!(learn.at < self.parts.len());
+        let below = record.strip_prefix(&self.home).ok()?;
+        let names = below
+            .components()
+            .map(|component| match component {
+                Component::Normal(name) => name.to_str(),
+                _ => None,
+            })
+            .collect::<Option<Vec<&str>>>()?;
+        let deep = self.parts.iter().position(|part| *part == Part::Deep);
+        let fixed = self.parts.len() - usize::from(deep.is_some());
+        let placed = match deep {
+            Some(_) => names.len() >= fixed,
+            None => names.len() == fixed,
+        };
+        if !placed {
+            return None;
+        }
+        let place = |at: usize| match deep {
+            Some(deep) if at > deep => names.len() + at - self.parts.len(),
+            _ => at,
+        };
+        let fitting = self.parts.iter().enumerate().all(|(at, part)| match part {
+            Part::Deep => true,
+            Part::Name(name) => name.as_str() == names[place(at)],
+            Part::Glob(glob) => fits(glob, names[place(at)]),
+        });
+        if !fitting {
+            return None;
+        }
+        let name = names[place(learn.at)];
+        let id = name.strip_prefix(learn.before.as_str())?;
+        let id = id.strip_suffix(learn.after.as_str())?;
+        session_shaped(id).then(|| id.to_owned())
     }
 
     /// The identities of every file this record path matches now, which a reader started
@@ -288,11 +359,8 @@ fn refused<T>(code: &'static str, problem: &str) -> Result<T, Refused> {
 /// `SESSION_BYTES_MAX` letters, digits, `-` or `_`, the first a letter or digit, so it can
 /// never read as an option. Input: the id. Output: true when it is.
 pub fn session_shaped(session: &str) -> bool {
-    session_fits(session)
-}
-
-fn session_fits(session: &str) -> bool {
     (1..=SESSION_BYTES_MAX).contains(&session.len())
+        && session.as_bytes()[0].is_ascii_alphanumeric()
         && session
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')

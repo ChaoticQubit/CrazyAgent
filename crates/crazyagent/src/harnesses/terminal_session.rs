@@ -1,5 +1,5 @@
 use super::codex_folder::{self, Screen};
-use super::interactive::settings::{Step, TerminalSettings};
+use super::interactive::settings::{STEPS_MAX, Step, TerminalSettings};
 use super::interactive::{self, Run, Support, Transcript};
 use super::launch::{
     Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route,
@@ -26,6 +26,8 @@ pub use adopt::{KEEPERS_MAX, KeeperPin, PaneRecord, RecordSource};
 
 pub const PROMPT_BYTES_MAX: usize = 1024 * 1024;
 pub(crate) const READY_WAIT: Duration = Duration::from_secs(30);
+/// The failure of a launch whose first screen, as its manifest names it, never showed.
+pub(crate) const FIRST_SCREEN_MISSING: &str = "launch_first_screen_missing";
 const READY_QUIET: Duration = Duration::from_millis(700);
 const PASTE_SETTLE: Duration = Duration::from_millis(200);
 const POLL: Duration = Duration::from_millis(100);
@@ -61,14 +63,19 @@ fn keys(settings: Option<&TerminalSettings>) -> (&'static [u8], &'static [u8]) {
 /// it: a first screen its manifest names never showed, or Codex's folder access screen or
 /// its input box never came. Input: the failure. Output: whether it does.
 pub(crate) fn ended_the_launch(problem: &LaunchError) -> bool {
-    codex_folder::ended_the_launch(problem)
+    [
+        FIRST_SCREEN_MISSING,
+        codex_folder::SCREEN_MISSING,
+        codex_folder::BOX_MISSING,
+    ]
+    .contains(&problem.0.as_str())
 }
 
 /// The plain sentence an owner reads for a launch whose first screen never showed. Inputs:
 /// the harness's name and the text the missing step waits for. Output: the sentence.
 pub(crate) fn first_screen_missing(harness: &str, seen: &str) -> String {
-    let _ = (harness, seen);
-    String::new()
+    let wait = READY_WAIT.as_secs();
+    format!("{harness} did not show its first screen (\"{seen}\") within {wait} seconds.")
 }
 
 /// A harness running its own interactive app in a terminal pane of the engine's host.
@@ -87,6 +94,7 @@ pub struct TerminalSession {
     first: Option<FirstScreen>,
     folder: Option<FolderStep>,
     steps: VecDeque<Step>,
+    harness_name: Option<String>,
     submit_key: &'static [u8],
     interrupt_key: &'static [u8],
     turn: bool,
@@ -360,6 +368,11 @@ impl TerminalSession {
             .as_ref()
             .map(|settings| settings.first_screen().iter().cloned().collect())
             .unwrap_or_default();
+        let harness_name = settings.as_ref().map(|settings| settings.name().to_owned());
+        let named = claude
+            || settings
+                .as_ref()
+                .is_some_and(|settings| resume.is_some() || settings.takes_session());
         let folder = codex_folder::behind_a_screen(&command.argv).then_some(FolderStep::Waiting);
         if let Some(team) = installed.as_ref().and_then(Installed::native) {
             interactive::write_teammate_command(&home, &command, &request, team)?;
@@ -420,7 +433,7 @@ impl TerminalSession {
         assert_eq!(pane.agent, agent);
         let unkept = host.unkept(&agent);
         let ready = LaunchEvent::Ready {
-            native_session: (claude || settings.is_some()).then_some(session_id),
+            native_session: named.then_some(session_id),
         };
         let session = Self {
             host,
@@ -435,6 +448,7 @@ impl TerminalSession {
             first: None,
             folder,
             steps,
+            harness_name,
             submit_key,
             interrupt_key,
             turn: false,
@@ -520,7 +534,9 @@ impl TerminalSession {
     /// [`first_screen_missing`] for the needed step it still waits on. Output: the
     /// sentence, none when no needed step is left.
     pub fn first_screen_reason(&self) -> Option<String> {
-        None
+        let step = self.steps.iter().find(|step| !step.optional)?;
+        let name = self.harness_name.as_deref()?;
+        Some(first_screen_missing(name, &step.seen))
     }
 
     /// Returns the pane's first process, which leads the process group of the harness.
@@ -808,12 +824,14 @@ impl TerminalSession {
     /// prompt waits for: it has drawn its screen, nothing changed on it for `READY_QUIET`
     /// and it turned bracketed paste on (see [`Host::input_live`]), or `READY_WAIT` passed
     /// since the first look. A harness run from its settings answers its first-screen steps
-    /// first, each within `READY_WAIT` or `launch_first_screen_missing`, and only then waits
-    /// on bracketed paste. A Codex launch behind its folder access screen is ready only
-    /// once that screen took its one Enter and the input box is up, and fails instead of
-    /// typing when that does not happen in time. A failed look keeps the wait, so the next
-    /// look tries again within the same bound. Output: the answer, the failed look's
-    /// problem, a folder access failure, or `launch_closed` once the pane ended.
+    /// first, each as soon as its text shows, however busy the screen, a needed one within
+    /// `READY_WAIT` or `launch_first_screen_missing`, an optional one never waited for, and
+    /// only then waits on a quiet screen and bracketed paste. A Codex launch behind its
+    /// folder access screen is ready only once that screen took its one Enter and the input
+    /// box is up, and fails instead of typing when that does not happen in time. A failed
+    /// look keeps the wait, so the next look tries again within the same bound. Output: the
+    /// answer, the failed look's problem, a folder access failure, or `launch_closed` once
+    /// the pane ended.
     pub fn poll_ready(&mut self) -> Result<bool, LaunchError> {
         if self.ready {
             return Ok(true);
@@ -832,9 +850,10 @@ impl TerminalSession {
                 }));
             }
         } else if first.started.elapsed() >= READY_WAIT {
-            if !self.steps.is_empty() {
-                return Err(failure("launch_first_screen_missing"));
+            if self.steps.iter().any(|step| !step.optional) {
+                return Err(failure(FIRST_SCREEN_MISSING));
             }
+            self.steps.clear();
             self.ready = true;
             self.first = None;
             return Ok(true);
@@ -874,9 +893,14 @@ impl TerminalSession {
             first.drawn = true;
             first.quiet = Instant::now();
         }
-        let ready = first.drawn
-            && first.quiet.elapsed() >= READY_QUIET
-            && self.past_first_screen()?
+        let drawn = first.drawn;
+        let answered = drawn && self.past_first_screen()?;
+        let quiet = self
+            .first
+            .as_ref()
+            .is_some_and(|first| first.quiet.elapsed() >= READY_QUIET);
+        let ready = answered
+            && quiet
             && self.host.input_live(&self.agent).map_err(host_failure)?
             && self.past_folder_screen()?;
         if ready {
@@ -887,20 +911,33 @@ impl TerminalSession {
     }
 
     /// Answers the first screen of a harness run from its settings: each step's key once,
-    /// only once its text shows, in order, and each press starts the next step's wait. A
-    /// launch with no step left is past it. Output: whether every step was answered, or
-    /// the failed look's problem.
+    /// only once its text shows, in order. An optional step whose text is not shown is
+    /// passed over for a later step that is, and each press drops the steps up to it and
+    /// starts the next step's wait. A launch with no needed step left is past it. Output:
+    /// whether every needed step was answered, or the failed look's problem.
     fn past_first_screen(&mut self) -> Result<bool, LaunchError> {
-        let Some(step) = self.steps.front() else {
+        if self.steps.is_empty() {
             return Ok(true);
-        };
-        let screen = self.host.screen(&self.agent).map_err(host_failure)?;
-        if !String::from_utf8_lossy(&screen).contains(step.seen.as_str()) {
-            return Ok(false);
         }
-        let press = step.press;
+        let screen = self.host.screen(&self.agent).map_err(host_failure)?;
+        let shown = String::from_utf8_lossy(&screen);
+        let mut found = None;
+        for (at, step) in self.steps.iter().enumerate() {
+            if shown.contains(step.seen.as_str()) {
+                found = Some(at);
+                break;
+            }
+            if !step.optional {
+                break;
+            }
+        }
+        let Some(at) = found else {
+            return Ok(self.steps.iter().all(|step| step.optional));
+        };
+        let press = self.steps[at].press;
         self.type_bytes(press.bytes())?;
-        self.steps.pop_front();
+        self.steps.drain(..=at);
+        assert!(self.steps.len() < STEPS_MAX);
         if let Some(first) = self.first.as_mut() {
             first.started = Instant::now();
             first.quiet = Instant::now();

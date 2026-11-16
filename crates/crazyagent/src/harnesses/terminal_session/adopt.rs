@@ -110,7 +110,9 @@ pub struct KeeperPin {
 impl PaneRecord {
     /// Describes a pane the engine just started. Takes the harness's session record,
     /// its canonical working folder, the start time, the pane's first process and the
-    /// key file written for it. Returns none for a harness with no session record.
+    /// key file written for it. Returns none for a harness with no session record, and for
+    /// a manifest harness that picks its own session id, whose record a later engine could
+    /// not tell from another run's.
     pub fn new(
         transcript: &Transcript,
         cwd: &Path,
@@ -128,7 +130,7 @@ impl PaneRecord {
             Transcript::Records(records) => RecordSource::Manifest {
                 harness: records.harness.clone(),
                 home: records.pattern.home().to_path_buf(),
-                session: records.session.clone(),
+                session: records.session.clone()?,
             },
             Transcript::Unavailable => return None,
         };
@@ -517,6 +519,7 @@ impl TerminalSession {
             first: None,
             folder: on_menu.then_some(FolderStep::Waiting),
             steps: VecDeque::new(),
+            harness_name: settings.as_ref().map(|settings| settings.name().to_owned()),
             submit_key,
             interrupt_key,
             turn: false,

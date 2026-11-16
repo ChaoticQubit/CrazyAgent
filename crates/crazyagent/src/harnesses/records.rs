@@ -20,14 +20,26 @@ pub enum Reader {
 /// The record of one run of a manifest harness as a launch follows it: the harness, its
 /// record kind (jsonl-append or json-rewrite), the record path below the run's private
 /// home, the rules that turn the record's objects into facts, and the session id the path
-/// was filled with.
+/// was filled with, none for a harness that picks its own id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Records {
     pub harness: String,
     pub kind: RecordKind,
     pub pattern: json_files::Pattern,
     pub rules: Vec<Rule>,
-    pub session: String,
+    pub session: Option<String>,
+}
+
+impl Records {
+    /// Names the conversation a found record holds: the id the record path was filled
+    /// with, else the id the harness picked, read back from the record's place (see
+    /// [`json_files::Pattern::session_of`]). Input: the record's full path. Output: the id,
+    /// or none while the harness's own id cannot be told.
+    pub fn session_of(&self, record: &std::path::Path) -> Option<String> {
+        self.session
+            .clone()
+            .or_else(|| self.pattern.session_of(record))
+    }
 }
 
 /// The one dispatch point of live terminal records: the reader the engine runs for a record
