@@ -70,7 +70,7 @@ pub fn check(token: &AuditToken, policy: &Policy) -> Result<Holder, Refused> {
     if policy.runtime_required && signing.flags & RUNTIME_FLAG == 0 {
         return Err(Refused::NoRuntime);
     }
-    judge_entitlements(Entitlements::Names(signing.entitlements), policy)?;
+    judge_entitlements(signing.entitlements, policy)?;
     let holder = holder_of(token);
     assert!(holder.pid > 0);
     Ok(holder)
@@ -84,11 +84,12 @@ pub enum Entitlements {
     OtherForm,
 }
 
-/// Checks a caller's entitlements against `policy`'s allow list. Output: the first name, in
-/// sorted order, that the list does not hold.
+/// Checks a caller's entitlements against `policy`'s allow list. Entitlements in another form
+/// cannot be checked by name, so they are refused as unreadable signing information. Output:
+/// that refusal, or the first name, in sorted order, that the list does not hold.
 pub fn judge_entitlements(entitlements: Entitlements, policy: &Policy) -> Result<(), Refused> {
     let Entitlements::Names(mut names) = entitlements else {
-        return Ok(());
+        return Err(Refused::SigningInformation);
     };
     assert!(names.len() <= ENTITLEMENTS_MAX);
     names.sort();

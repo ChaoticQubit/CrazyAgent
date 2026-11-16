@@ -2,6 +2,7 @@
 //! signing information, launchd's socket, the thermal pressure key, the lid, the monotonic
 //! clock, signals, `poll` and syslog. The one file of this crate allowed `unsafe`.
 
+use crate::caller::Entitlements;
 use core_foundation::base::{CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
@@ -31,6 +32,7 @@ unsafe extern "C" {
     ) -> i32;
     static kSecCodeInfoFlags: CFStringRef;
     static kSecCodeInfoEntitlementsDict: CFStringRef;
+    static kSecCodeInfoEntitlements: CFStringRef;
 }
 
 #[allow(non_snake_case)]
@@ -80,15 +82,17 @@ pub fn peer_token(socket: BorrowedFd<'_>) -> io::Result<[u32; 8]> {
     Ok(token)
 }
 
-/// A caller's signing flags (`kSecCodeInfoFlags`) and entitlement names.
+/// A caller's signing flags (`kSecCodeInfoFlags`) and entitlements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signing {
     pub flags: u32,
-    pub entitlements: Vec<String>,
+    pub entitlements: Entitlements,
 }
 
-/// Reads `code`'s signing information: its flags and its entitlement names, none when it has
-/// no entitlements. Inputs: the code and the most names accepted. Output: `None` when the
+/// Reads `code`'s signing information: its flags and its entitlements, the names of
+/// `kSecCodeInfoEntitlementsDict`, or `OtherForm` when only the `kSecCodeInfoEntitlements` blob
+/// is there (SecCode.h: the dictionary is absent for entitlements in another format), none when
+/// it has neither. Inputs: the code and the most names accepted. Output: `None` when the
 /// information cannot be read or holds more names than that.
 pub fn signing_information(code: &SecCode, names_max: usize) -> Option<Signing> {
     let mut information: CFDictionaryRef = std::ptr::null();
@@ -107,11 +111,15 @@ pub fn signing_information(code: &SecCode, names_max: usize) -> Option<Signing> 
         .to_i64()?;
     let flags = u32::try_from(flags).ok()?;
     let names_key = unsafe { CFString::wrap_under_get_rule(kSecCodeInfoEntitlementsDict) };
+    let blob_key = unsafe { CFString::wrap_under_get_rule(kSecCodeInfoEntitlements) };
     let entitlements = match information.find(&names_key) {
-        Some(value) => entitlement_names(&value, names_max)?,
-        None => Vec::new(),
+        Some(value) => Entitlements::Names(entitlement_names(&value, names_max)?),
+        None if information.find(&blob_key).is_some() => Entitlements::OtherForm,
+        None => Entitlements::Names(Vec::new()),
     };
-    assert!(entitlements.len() <= names_max);
+    if let Entitlements::Names(names) = &entitlements {
+        assert!(names.len() <= names_max);
+    }
     Some(Signing {
         flags,
         entitlements,
