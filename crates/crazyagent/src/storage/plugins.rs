@@ -1464,8 +1464,9 @@ pub(crate) fn effective(
 }
 
 /// Reads the launch set of one project inside a caller's transaction, for launchers that
-/// hold their own engine database connection. Inputs: the transaction, the engine root and
-/// the project. Output: the effective set with secret values read, or `plugin_project_unknown`.
+/// hold their own engine database connection, with the owner's Native connectors setting
+/// (Off when it cannot be read). Inputs: the transaction, the engine root and the project.
+/// Output: the effective set with secret values read, or `plugin_project_unknown`.
 pub(crate) fn launch_set(
     tx: &Transaction<'_>,
     root: &Path,
@@ -1474,7 +1475,12 @@ pub(crate) fn launch_set(
     if !project_exists(tx, project)? {
         return Err(error("plugin_project_unknown"));
     }
-    launch(root, effective(tx, root, project)?)
+    let mut plugins = launch(root, effective(tx, root, project)?)?;
+    plugins.native_connectors = Some(crate::connectors::settings::load(tx).map_or(
+        crate::connectors::settings::NativeConnectors::Off,
+        |(settings, _)| settings.native,
+    ));
+    Ok(plugins)
 }
 
 /// The spec an agent launch runs where the engine has no shared context-mode install: the

@@ -944,13 +944,15 @@ pub(super) fn codex_configuration(
 /// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]),
 /// and without `disableAllHooks` when the launch's generated plugin holds the hooks the
 /// owner turned on, merged over the owner's Claude Code settings of the installed context,
-/// whose locked values it must hold. Setting sources stay off, so no other hook loads.
+/// whose locked values it must hold, and with `disableClaudeAiConnectors` when the owner's
+/// Native connectors setting is Off. Setting sources stay off, so no other hook loads.
 /// Inputs: the key file of a keyed account and the installed context. Output: the settings
 /// JSON.
 pub(crate) fn claude_settings(key_file: Option<&str>, installed: Option<&Installed>) -> String {
     let hooks = installed.is_some_and(Installed::runs_hooks);
     let owner = installed.map(Installed::harness_settings);
-    if key_file.is_none() && !hooks && owner.is_none() {
+    let native_off = installed.is_some_and(Installed::native_connectors_off);
+    if key_file.is_none() && !hooks && owner.is_none() && !native_off {
         return CLAUDE_SETTINGS.to_owned();
     }
     let mut settings: serde_json::Value =
@@ -971,6 +973,9 @@ pub(crate) fn claude_settings(key_file: Option<&str>, installed: Option<&Install
             crate::harness_settings::Apply::ClaudeSettings,
             &CLAUDE_ENGINE_KEYS,
         );
+    }
+    if native_off {
+        settings["disableClaudeAiConnectors"] = true.into();
     }
     settings.to_string()
 }

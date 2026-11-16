@@ -937,8 +937,16 @@ impl AgentContext {
     /// gateway through its launch folder and holds no secret. Input: the entry
     /// [`crate::connectors::launch::entry`] made. Output: the context, or
     /// `launch_context_connectors_taken` when an approved server already uses its name.
-    pub fn with_connectors(self, server: LaunchServer) -> Result<Self, LaunchError> {
-        let _ = server;
+    pub fn with_connectors(mut self, server: LaunchServer) -> Result<Self, LaunchError> {
+        if self
+            .plugins
+            .servers
+            .iter()
+            .any(|known| known.name == server.name)
+        {
+            return Err(failure("launch_context_connectors_taken"));
+        }
+        self.plugins.servers.push(server);
         Ok(self)
     }
 
@@ -1170,6 +1178,10 @@ impl AgentContext {
             .map(|spec| spec.id)
             .filter(|id| matches!(*id, "codex" | "claude-code"))
             .ok_or_else(|| failure("launch_harness_unsupported"))?;
+        let native_switch = self.plugins.native_connectors.map_or_else(
+            crate::connectors::launch::NativeSwitch::default,
+            |setting| crate::connectors::launch::native_switch(id, setting),
+        );
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
         let state = home.join(STATE);
@@ -1191,7 +1203,7 @@ impl AgentContext {
             freeze_record: self.freeze_record.clone(),
             terminal_display: self.terminal_display,
             settings: self.settings.clone(),
-            native_connectors_off: false,
+            native_connectors_off: native_switch.claude_ai_off,
             _lock: lock,
         };
         remove(&state);
@@ -1298,6 +1310,7 @@ impl AgentContext {
                     &config_hooks,
                     &source.to_string_lossy(),
                     sub_agents.as_ref(),
+                    native_switch.codex_apps_off,
                 )?,
             )?;
         } else {
@@ -2034,8 +2047,8 @@ fn denied_tools(servers: &[LaunchServer], off_tools: &[(String, Vec<String>)]) -
 /// Writes a Codex agent's `config.toml`: instructions, no project docs, MCP servers less
 /// switched-off tools, the engine's hooks pinned under their `source` key (PA-12); a native
 /// lead (PA-7) gets multi-agent v2 with `max_threads`, its sub-agents' instructions and no
-/// model or effort offered on spawn. Inputs: those parts. Output: the text, or
-/// `launch_context_server_name_taken`.
+/// model or effort offered on spawn; with `apps_off` Codex's own apps are off. Inputs:
+/// those parts. Output: the text, or `launch_context_server_name_taken`.
 fn codex_config(
     instructions: &str,
     servers: &[LaunchServer],
@@ -2043,6 +2056,7 @@ fn codex_config(
     hooks: &[CodexHook],
     source: &str,
     sub_agents: Option<&(u8, String)>,
+    apps_off: bool,
 ) -> Result<String, LaunchError> {
     let mut document = toml_edit::DocumentMut::new();
     document["developer_instructions"] = toml_edit::value(instructions);
@@ -2063,6 +2077,9 @@ fn codex_config(
         let mut agents = toml_edit::Table::new();
         agents["max_threads"] = toml_edit::value(i64::from(*cap));
         document["agents"] = toml_edit::Item::Table(agents);
+    }
+    if apps_off {
+        document.entry("features").or_insert(toml_edit::table())["apps"] = toml_edit::value(false);
     }
     if !servers.is_empty() {
         let mut table = toml_edit::Table::new();

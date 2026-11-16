@@ -1,5 +1,6 @@
 use crate::connectors::gateway::GatewayLaunch;
 use crate::connectors::settings::NativeConnectors;
+use crate::connectors::shim;
 use crate::engine::EngineError;
 use crate::plugins::{LaunchServer, ServerSpec};
 use std::path::Path;
@@ -21,12 +22,21 @@ pub struct NativeSwitch {
 /// absolute engine executable and the launch. Output: the entry, or
 /// `connector_request_invalid` for a path that is not absolute plain text.
 pub fn entry(executable: &Path, launch: &GatewayLaunch) -> Result<LaunchServer, EngineError> {
-    let _ = (executable, launch);
+    let plain = |path: &Path| {
+        path.is_absolute()
+            .then(|| path.to_str())
+            .flatten()
+            .filter(|text| !text.chars().any(char::is_control))
+            .map(str::to_owned)
+    };
+    let (Some(command), Some(folder)) = (plain(executable), plain(&launch.folder)) else {
+        return Err(EngineError("connector_request_invalid".into()));
+    };
     Ok(LaunchServer {
         name: SERVER_NAME.into(),
         spec: ServerSpec::Stdio {
-            command: String::new(),
-            args: Vec::new(),
+            command,
+            args: vec![shim::SERVER_COMMAND.into(), folder],
         },
         secrets: Vec::new(),
     })
@@ -36,8 +46,13 @@ pub fn entry(executable: &Path, launch: &GatewayLaunch) -> Result<LaunchServer, 
 /// claude.ai connectors or Codex's apps off; On, and any other harness, leave them as the
 /// harness has them. Inputs: the harness id and the setting. Output: the switch.
 pub fn native_switch(harness: &str, native: NativeConnectors) -> NativeSwitch {
-    let _ = (harness, native);
-    NativeSwitch::default()
+    if native != NativeConnectors::Off {
+        return NativeSwitch::default();
+    }
+    NativeSwitch {
+        claude_ai_off: harness == "claude-code",
+        codex_apps_off: harness == "codex",
+    }
 }
 
 #[cfg(all(test, unix))]
