@@ -832,18 +832,20 @@ fn file_tool(program: &str, args: &[&str], path: &Path) -> bool {
 }
 
 /// RV-DS241-77: a runner registration that fails gives its slot back, so failures never
-/// use up `RUNNERS_MAX`: after a refusal the same attempt registers in slot 0.
+/// use up `RUNNERS_MAX`: after a refusal the same attempt registers in slot 0. The refusal
+/// comes from an immutable file at the slot folder's name, which only the engine could
+/// place in its own root and which the registration leaves, unlike a runner's own entries.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_failed_runner_registration_gives_its_slot_back() {
     run_case(|context| async move {
         let (attempt, _client) = context.reserve().await;
         let stale = context.root.join("r00");
-        std::fs::create_dir(&stale).unwrap();
-        std::fs::write(stale.join("held"), "").unwrap();
-        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::fs::write(&stale, "").unwrap();
+        assert!(file_tool("/usr/bin/chflags", &["uchg"], &stale));
 
         let refused = context.service.lock().await.prepare_runner(&attempt).await;
-        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(file_tool("/usr/bin/chflags", &["nouchg"], &stale));
         let prepared = context.service.lock().await.prepare_runner(&attempt).await;
 
         assert!(refused.is_err(), "{refused:?}");
