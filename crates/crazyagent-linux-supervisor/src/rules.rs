@@ -373,8 +373,10 @@ impl Stamps {
     pub fn read(self, bytes: &[u8]) -> Option<[(i64, i64); 2]> {
         assert_eq!(bytes.len(), self.size());
         let words: Vec<i64> = bytes
-            .chunks_exact(8)
-            .map(|word| i64::from_ne_bytes(word.try_into().expect("eight bytes")))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|word| i64::from_ne_bytes(*word))
             .collect();
         let micros = |sec: i64, usec: i64| {
             if !(0..1_000_000).contains(&usec) {
