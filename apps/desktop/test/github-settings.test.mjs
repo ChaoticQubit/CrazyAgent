@@ -7,7 +7,7 @@ import "./load-source.mjs";
 
 const rules = await import("../src/screens/project/github-rules.ts");
 const { RULE_LABELS } = await import("../src/screens/project/publish-job.ts");
-const { GitHubRulesView } = await import("../src/screens/project/github-section.tsx");
+const { GitHubRulesView, sendRule } = await import("../src/screens/project/github-section.tsx");
 const { GitHubDefaultsView } = await import("../src/screens/settings/github.tsx");
 const settings = await import("../src/screens/project/settings.tsx");
 const api = await import("../src/api-intake.ts");
@@ -220,4 +220,36 @@ test("Project Settings has a GitHub section that reads on open and writes only f
   assert.ok(!github.includes("only to list and clone"), "the sign-in now also publishes and sets rules");
   assert.ok(!github.includes("you push"), "a publish pushes for the owner");
   assert.match(github, /<GitHubDefaultsSection \/>/);
+});
+
+test("a failed switch keeps its problem and reads the page again, since the change may have landed on GitHub", async () => {
+  const lost = { kind: "error", code: "github_outcome_unknown", message: api.intakeCopy("github_outcome_unknown") };
+  const fresh = { kind: "ok", value: page({ wiki_off: [true, applied] }) };
+  const calls = [];
+  const after = await sendRule("project-1", "wiki_off", true,
+    async (...args) => { calls.push(["set", ...args]); return lost; },
+    async (...args) => { calls.push(["read", ...args]); return fresh; });
+  assert.deepEqual(after, { page: fresh, problem: lost.message });
+  assert.deepEqual(calls, [["set", "project-1", "wiki_off", true], ["read", "project-1"]]);
+  const answered = { kind: "ok", value: page() };
+  assert.deepEqual(await sendRule("project-1", "wiki_off", false, async () => answered, act), { page: answered, problem: "" });
+  const down = { kind: "error", code: "github_unreachable", message: api.intakeCopy("github_unreachable") };
+  assert.deepEqual(await sendRule("project-1", "wiki_off", false, async () => down, async () => down), { page: down, problem: down.message });
+  assert.deepEqual(await sendRule("project-1", "wiki_off", false, async () => ({ kind: "not_ready" }), async () => answered),
+    { page: answered, problem: "Changing GitHub rules isn't in this build." });
+  const section = read("src/screens/project/github-section.tsx");
+  const change = section.slice(section.indexOf("  async function change("));
+  assert.match(change.slice(0, change.indexOf("\n  }\n")), /await sendRule\(id, rule, on\)/);
+});
+
+test("a defaults save that fails says so in its own words and shows the saved set read again", () => {
+  assert.equal(api.DEFAULTS_UNSAVED, "Couldn't save the defaults for new repositories. Try again.");
+  assert.deepEqual(api.savedDefaults({ kind: "error", code: "github_state_unavailable", message: api.intakeCopy("github_state_unavailable") }),
+    { kind: "error", code: "github_state_unavailable", message: api.DEFAULTS_UNSAVED });
+  assert.deepEqual(api.savedDefaults({ kind: "error", code: "github_state_invalid", message: "x" }), { kind: "error", code: "github_state_invalid", message: api.DEFAULTS_UNREADABLE });
+  assert.deepEqual(api.savedDefaults({ kind: "ok", value: ["squash_only"] }), { kind: "ok", value: ["squash_only"] });
+  const github = read("src/screens/settings/github.tsx");
+  const start = github.indexOf("  const save = async");
+  const save = github.slice(start, github.indexOf("  };\n", start));
+  assert.match(save, /setSaved\(null\);\s*reload\(\);/, "a failed save shows the saved set read again");
 });

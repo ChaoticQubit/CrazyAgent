@@ -412,6 +412,14 @@ export function defaultsRead(read: Result<string[]>): Result<string[]> {
   return read.kind === "error" && DEFAULTS_UNREADABLE_CODES.includes(read.code) ? { ...read, message: DEFAULTS_UNREADABLE } : read;
 }
 
+export const DEFAULTS_UNSAVED = "";
+
+/** Gives a failed defaults save its own sentence. Input: the save's answer. Output: the
+ * answer, with the defaults sentences on a failure they name. */
+export function savedDefaults(read: Result<string[]>): Result<string[]> {
+  return read;
+}
+
 /** Reads the rules a new repository starts with, DEC-182's while none are saved. Output:
  * the rules on. */
 export async function loadGitHubRuleDefaults(): Promise<Result<string[]>> {

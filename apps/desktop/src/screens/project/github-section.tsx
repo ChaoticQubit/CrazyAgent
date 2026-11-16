@@ -11,6 +11,18 @@ import type { ProjectData } from "./shared";
 const SENDING_SWITCH = "Sending to GitHub...";
 const RULES_NOT_READY = "Changing GitHub rules isn't in this build.";
 
+/** Sends one switch and answers the page to show next. Inputs: the project id, the rule,
+ * whether it is on, and the change and read calls. Output: the page and the change's problem. */
+export async function sendRule(
+  _project: string,
+  _rule: string,
+  _on: boolean,
+  _send: typeof setGitHubRule = setGitHubRule,
+  _read: typeof loadGitHubRules = loadGitHubRules,
+): Promise<{ page: Result<GitHubRepoRules>; problem: string }> {
+  return { page: { kind: "not_ready" }, problem: "" };
+}
+
 /** Project > Settings > GitHub as a view of its read: the repository, then one switch per
  * rule with its live state, GitHub's refusal on its own rule, and the rule being sent.
  * Inputs: the read, the rule being sent, the last change's problem, the switch handler and
