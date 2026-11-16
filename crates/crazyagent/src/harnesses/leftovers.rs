@@ -2921,7 +2921,7 @@ pub(crate) mod tests {
             end_pid(pid);
             let _ = leftover.wait();
             let cleared = within(LEFTOVER_GRACE, || held_in(project).is_empty());
-            let after = runs_seeing(project, &saved);
+            let freed = within(LEFTOVER_GRACE, || runs_seeing(project, &saved).is_empty());
 
             assert_eq!(view.len(), 1, "{mode:?}: {view:?}");
             assert!(kept, "{mode:?}: the owner's Keep was refused");
@@ -2933,10 +2933,89 @@ pub(crate) mod tests {
             );
             assert!(cleared, "{mode:?}: a hold whose processes ended stayed");
             assert!(
-                after.is_empty(),
+                freed,
                 "{mode:?}: a kept run stayed on the hidden folders list after its processes ended"
             );
         }
+    }
+
+    /// SA-VID14-KEEP-SLOTS: signing out the account an asked hold keeps lets the account and
+    /// its lease go, but the run stays on the hidden folders list while its processes run, as
+    /// the owner's Keep leaves it, and frees its place once they end.
+    #[test]
+    fn signing_out_keeps_a_listed_hold_named_until_its_processes_end() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let project = "keep-slots-signed-out";
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        let mut leftover = session_sleeper(false);
+        let pid = i32::try_from(leftover.id()).unwrap();
+        let account = CredentialRef::new("keep-slots-signed-out").unwrap();
+        let (lease, released) = std::sync::mpsc::channel::<()>();
+        let listed = starting(RunKind::Research, project).expect("the list has room");
+        listed.hid(&[]);
+        let lineage = Lineage::of_sandboxed(leftover.id(), None).unwrap();
+        Leftovers(Box::new(lineage)).hold_listed(
+            Some(account.clone()),
+            lease,
+            listed,
+            by_in(project),
+            LeftoverMode::Ask,
+        );
+        let ended = release(&account);
+        let let_go = released.recv_timeout(Duration::from_millis(500));
+        let reports = held_by(&account);
+        let while_running = runs_seeing(project, &saved);
+        let _ = leftover.try_wait();
+        let still_runs = runs(pid);
+        end_pid(pid);
+        let _ = leftover.wait();
+        let freed = within(LEFTOVER_GRACE, || runs_seeing(project, &saved).is_empty());
+
+        assert_eq!(ended, 1, "the sign-out did not count the hold");
+        assert_eq!(
+            let_go,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "the sign-out kept the lease"
+        );
+        assert!(reports.is_empty(), "{reports:?}");
+        assert!(still_runs, "the sign-out ended the process");
+        assert_eq!(
+            while_running,
+            vec![RunKind::Research],
+            "a signed-out run whose processes still run was not named"
+        );
+        assert!(
+            freed,
+            "a signed-out run stayed on the hidden folders list after its processes ended"
+        );
+    }
+
+    /// A run on the hidden folders list belongs to a project: a listed hold with none refuses
+    /// before anything is held, and the run leaves the list as its listing drops.
+    #[test]
+    fn a_listed_hold_without_a_project_refuses() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let project = "keep-slots-no-project";
+        let mut leftover = session_sleeper(false);
+        let listed = starting(RunKind::Research, project).expect("the list has room");
+        let lineage = Lineage::of_sandboxed(leftover.id(), None).unwrap();
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Leftovers(Box::new(lineage)).hold_listed(None, (), listed, by(), LeftoverMode::Keep);
+        }));
+        let after = runs_seeing(
+            project,
+            &[std::path::PathBuf::from("/tmp/keep-slots/vault")],
+        );
+        end_pid(i32::try_from(leftover.id()).unwrap());
+        let _ = leftover.wait();
+
+        let payload = refused.expect_err("a listed hold with no project was taken");
+        let text = payload
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned());
+        assert_eq!(text.as_deref(), Some("a listed run belongs to a project"));
+        assert!(after.is_empty(), "a refused listed hold kept its listing");
     }
 
     /// Commands a sandboxed run left count against its agent's next start while the owner
