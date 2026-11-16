@@ -108,13 +108,16 @@ impl RcliCustody {
         let host = self.host.as_mut().expect("retained RCLI host");
         let shut = host.shutdown();
         if let Some(left) = host.left_code() {
-            let profile = self
-                .profile
-                .take()
-                .expect("retained RCLI execution custody");
-            let account = profile.account().clone();
-            host.hold_leftovers(Some(account), profile);
-            assert!(host.left_code().is_none());
+            #[cfg(unix)]
+            {
+                let profile = self
+                    .profile
+                    .take()
+                    .expect("retained RCLI execution custody");
+                let account = profile.account().clone();
+                host.hold_leftovers(Some(account), profile);
+                assert!(host.left_code().is_none());
+            }
             return Err(failure(left));
         }
         shut.map_err(|error| {
