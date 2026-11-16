@@ -26,9 +26,13 @@ mod master_process {
     pub(super) enum HostProcess {}
 
     impl HostProcess {
-        /// Refuses to start the rcli master host. Takes the command, unused.
-        /// Returns `rcli_master_unavailable`.
-        pub(super) fn spawn(_command: Command) -> Result<Self, ProtocolError> {
+        /// Refuses to start the rcli master host. Takes the command, the lineage check and
+        /// who to hold leftovers under, all unused. Returns `rcli_master_unavailable`.
+        pub(super) fn spawn(
+            _command: Command,
+            _check: crate::sandbox::LineageCheck,
+            _by: crate::harnesses::leftovers::HoldBy,
+        ) -> Result<Self, ProtocolError> {
             Err(error("rcli_master_unavailable"))
         }
 
@@ -45,6 +49,18 @@ mod master_process {
         }
 
         pub(super) fn cleanup(&mut self) -> Result<(), ProtocolError> {
+            match *self {}
+        }
+
+        pub(super) fn left_code(&self) -> Option<&'static str> {
+            match *self {}
+        }
+
+        pub(super) fn hold_left<T: Send + 'static>(
+            &mut self,
+            _account: Option<crate::protocol::CredentialRef>,
+            _kept: T,
+        ) {
             match *self {}
         }
     }

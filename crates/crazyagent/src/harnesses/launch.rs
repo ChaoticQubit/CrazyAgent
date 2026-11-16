@@ -1577,9 +1577,12 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
         }
-        let follower = request
-            .unconfined
-            .then(|| Follower::start(child.id(), Some(token)));
+        let check = if request.unconfined {
+            crate::sandbox::LineageCheck::FullAccess
+        } else {
+            crate::sandbox::LineageCheck::Unneeded
+        };
+        let follower = Follower::start(child.id(), Some(token), check);
         let mut session = Self {
             child,
             warden,
