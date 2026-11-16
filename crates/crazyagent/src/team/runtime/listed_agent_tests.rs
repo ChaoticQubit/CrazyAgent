@@ -212,42 +212,49 @@ fn chunk(text: &str) -> String {
     .to_string()
 }
 
-/// The stand-in ACP script as Row B's runtime runs it: once it has made its state folder in
-/// the private home, the master's copy (agent 1) writes a first turn that calls the engine's
-/// `delegate` tool for a stand-in sub-agent and then replies `MASTER_REPLY`, and every other
-/// agent's copy replies `SUB_REPORT`. Output: the script text.
-fn delegating_standin() -> String {
+/// The stand-in ACP script with a shell block it runs once it has made its state folder in
+/// the private home, which writes that agent's turn fixtures there. Input: the block.
+/// Output: the script text.
+fn standin_with(turns: &str) -> String {
     const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin.sh");
     const MADE: &str = "mkdir -p \"$state\" || refuse \"the folder $state cannot be made.\"\n";
+    assert_eq!(STANDIN.matches(MADE).count(), 1);
+    STANDIN.replace(MADE, &format!("{MADE}{turns}"))
+}
+
+/// The stand-in ACP script whose every turn replies with one text. Input: the text.
+/// Output: the script text.
+fn replying_standin(text: &str) -> String {
+    let reply = chunk(text);
+    assert!(!reply.contains('\''), "{reply}");
+    standin_with(&format!("printf '%s\\n' '{reply}' >\"$state/turn.out\"\n"))
+}
+
+/// The stand-in ACP script as Row B's runtime runs it: the master's copy (agent 1) writes a
+/// first turn that calls the engine's `delegate` tool for a stand-in sub-agent and then
+/// replies `MASTER_REPLY`, and every other agent's copy replies `SUB_REPORT`. Output: the
+/// script text.
+fn delegating_standin() -> String {
     let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"standin","version":"1"}}}"#;
     let delegate = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delegate","arguments":{"harness":"standin-acp","task":"Write page.md"}}}"#;
     let (master, sub) = (chunk(MASTER_REPLY), chunk(SUB_REPORT));
     for line in [initialize, delegate, master.as_str(), sub.as_str()] {
         assert!(!line.contains('\''), "{line}");
     }
-    let turns = format!(
+    standin_with(&format!(
         "case $home in\n*/agents/agent-1/home/*)\n\tprintf '%s\\n' '{initialize}' '{delegate}' >\"$state/turn-1.mcp\"\n\tprintf '%s\\n' '{master}' >\"$state/turn.out\"\n\t;;\n*) printf '%s\\n' '{sub}' >\"$state/turn.out\" ;;\nesac\n"
-    );
-    assert_eq!(STANDIN.matches(MADE).count(), 1);
-    STANDIN.replace(MADE, &format!("{MADE}{turns}"))
+    ))
 }
 
-/// T19b Row B (QUESTION-2013 A, item 3), the runtime e2e: a tools-on master of the stand-in
-/// ACP harness on the keyless endpoint calls `delegate` through the engine's team server, the
-/// runtime takes the call at its reply's end and starts a stand-in sub-agent on the task, and
-/// the master's next turn, kept between messages, carries the sub-agent's report as a
-/// message from the engine. Written not run (DEC-170): expected to pass at d9414065d.
-#[test]
-fn a_listed_master_delegates_to_a_listed_sub_agent_and_its_next_turn_carries_the_report() {
-    use crate::protocol::Outcome;
-    use crate::team::TeamAction;
-    let mut fixture = Fixture::new(1);
+/// Saves a plan whose master and sub-agent harness is the stand-in ACP harness, with the
+/// tools switch given for both. Inputs: the fixture and the switch.
+fn plan_listed(fixture: &mut Fixture, tools: bool) {
     fixture.setup.team.master = "standin-acp".into();
-    fixture.setup.team.master_tools = true;
+    fixture.setup.team.master_tools = tools;
     fixture.setup.team.sub_harnesses = vec![HarnessSlot {
         harness: "standin-acp".into(),
         agents: 1,
-        tools: true,
+        tools,
     }];
     fixture
         .connection
@@ -256,78 +263,150 @@ fn a_listed_master_delegates_to_a_listed_sub_agent_and_its_next_turn_carries_the
             params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
         )
         .unwrap();
+}
+
+/// Opens a team runtime whose stand-in ACP harness runs one script, with the built engine as
+/// its delegation tool when one is given. Inputs: the fixture, the script and the engine.
+/// Output: the runtime.
+fn scripted_runtime(fixture: &Fixture, script: &str, engine: Option<&Path>) -> TeamRuntime {
     let bin = fixture.base.join("listed-bin");
     std::fs::create_dir_all(&bin).unwrap();
     let standin = bin.join("standin-acp");
-    std::fs::write(&standin, delegating_standin()).unwrap();
+    std::fs::write(&standin, script).unwrap();
     std::fs::set_permissions(&standin, std::fs::Permissions::from_mode(0o700)).unwrap();
     let access = fixture.access.clone();
-    let engine = crate::team::runtime::live_stop_hook_tests::engine_executable();
-    let mut team = TeamRuntime::open(
+    let runtime = TeamRuntime::open(
         &fixture.base.join("engine.db"),
         &fixture.base.join("team"),
         BTreeMap::from([("standin-acp", standin)]),
         Box::new(move || Some(access.clone())),
         TeamLimits::default(),
     )
-    .unwrap()
-    .with_delegation_tool(&engine)
     .unwrap();
+    match engine {
+        Some(engine) => runtime.with_delegation_tool(engine).unwrap(),
+        None => runtime,
+    }
+}
+
+/// Sends the owner's team message, as the owner socket does. Inputs: the fixture and the
+/// text.
+fn say(fixture: &mut Fixture, text: &str) {
     let tx = fixture.connection.transaction().unwrap();
     assert_eq!(
         crate::team::execute(
             &tx,
             &fixture.access,
-            &TeamAction::Message {
+            &crate::team::TeamAction::Message {
                 project_id: fixture.setup.project_id.clone(),
-                text: "Plan the page".into(),
+                text: text.into(),
             },
         )
         .unwrap(),
-        Outcome::Applied
+        crate::protocol::Outcome::Applied
     );
     tx.commit().unwrap();
-    let log = agent_home(&fixture.base.join("team"), 1)
+}
+
+/// Tells whether the master stored a reply that holds a text. Inputs: the fixture and the
+/// text. Output: the answer.
+fn master_said(fixture: &Fixture, text: &str) -> bool {
+    fixture
+        .status()
+        .messages
+        .iter()
+        .any(|message| message.author == MessageAuthor::Master && message.text.contains(text))
+}
+
+/// The `session/prompt` lines every run of one agent's stand-in logged in its private home,
+/// in run order. Inputs: the fixture and the agent. Output: the lines.
+fn prompts_of(fixture: &Fixture, agent: i64) -> Vec<String> {
+    let state = agent_home(&fixture.base.join("team"), agent)
         .join("standin-acp")
         .join(ENDPOINT)
-        .join("standin")
-        .join("stdin-1");
-    let prompts = || -> Vec<String> {
-        std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| line.contains("\"session/prompt\""))
-            .map(str::to_owned)
-            .collect()
+        .join("standin");
+    (1..=8)
+        .flat_map(|run| {
+            std::fs::read_to_string(state.join(format!("stdin-{run}")))
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("\"session/prompt\""))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// rv-code4 T19b F5: a listed team agent starts through its plan's request, which checks the
+/// hooks state `prepare` recorded, now hookless for every listed harness, and runs: a
+/// tools-off stand-in ACP master on the keyless endpoint answers the owner's message.
+#[test]
+fn a_listed_team_master_starts_and_answers_the_owners_message() {
+    let mut fixture = Fixture::new(1);
+    plan_listed(&mut fixture, false);
+    let mut team = scripted_runtime(&fixture, &replying_standin(MASTER_REPLY), None);
+
+    say(&mut fixture, "Plan the page");
+
+    fixture.until(&mut team, "the listed master answers the owner", |f| {
+        master_said(f, MASTER_REPLY)
+    });
+    let master = masters(&fixture.connection);
+    assert_eq!(master.len(), 1);
+    assert!(hookless_saved(&fixture, master[0]));
+    assert!(
+        prompts_of(&fixture, master[0])
+            .iter()
+            .any(|prompt| prompt.contains("Plan the page"))
+    );
+    team.shutdown().unwrap();
+}
+
+/// T19b Row B (QUESTION-2013 A, item 3), the runtime e2e: a tools-on master of the stand-in
+/// ACP harness on the keyless endpoint calls `delegate` through the engine's team server, the
+/// runtime takes the call at its reply's end and starts a stand-in sub-agent on the task, and
+/// the master's next turn, kept between messages, carries the sub-agent's report as a
+/// message from the engine. It needs the built engine, as the stop hook rows do. Written not
+/// run (DEC-170).
+#[test]
+fn a_listed_master_delegates_to_a_listed_sub_agent_and_its_next_turn_carries_the_report() {
+    let mut fixture = Fixture::new(1);
+    plan_listed(&mut fixture, true);
+    let engine = crate::team::runtime::live_stop_hook_tests::engine_executable();
+    let mut team = scripted_runtime(&fixture, &delegating_standin(), Some(&engine));
+    let tasks = |fixture: &Fixture| -> Vec<(String, String)> {
+        fixture
+            .connection
+            .prepare("SELECT harness,prompt FROM team_tasks WHERE project=?1 ORDER BY id")
+            .unwrap()
+            .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
     };
 
-    fixture.until(&mut team, "the master hears the sub-agent's report", |_| {
-        prompts().len() >= 2
-    });
+    say(&mut fixture, "Plan the page");
 
-    assert_eq!(masters(&fixture.connection), [1]);
-    let tasks: Vec<(String, String)> = fixture
-        .connection
-        .prepare("SELECT harness,prompt FROM team_tasks WHERE project=?1 ORDER BY id")
-        .unwrap()
-        .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
+    fixture.until(&mut team, "the master's delegate call makes a task", |f| {
+        !tasks(f).is_empty()
+    });
     assert_eq!(
-        tasks,
+        tasks(&fixture),
         [("standin-acp".to_owned(), "Write page.md".to_owned())]
     );
-    let prompts = prompts();
-    assert!(prompts[0].contains("Plan the page"), "{prompts:#?}");
-    assert!(
-        prompts[1].contains("Message from the engine:"),
-        "{prompts:#?}"
-    );
-    assert!(prompts[1].contains(SUB_REPORT), "{prompts:#?}");
-    let master = fixture.status().messages.iter().any(|message| {
-        message.author == MessageAuthor::Master && message.text.contains(MASTER_REPLY)
+    assert!(master_said(&fixture, MASTER_REPLY));
+    assert_eq!(masters(&fixture.connection), [1]);
+    fixture.until(&mut team, "the master hears the sub-agent's report", |f| {
+        prompts_of(f, 1)
+            .iter()
+            .any(|prompt| prompt.contains(SUB_REPORT))
     });
-    assert!(master, "{:#?}", fixture.status().messages);
+    let prompts = prompts_of(&fixture, 1);
+    assert!(prompts[0].contains("Plan the page"), "{prompts:#?}");
+    let heard = prompts
+        .iter()
+        .find(|prompt| prompt.contains(SUB_REPORT))
+        .unwrap();
+    assert!(heard.contains("Message from the engine:"), "{heard}");
     team.shutdown().unwrap();
 }
