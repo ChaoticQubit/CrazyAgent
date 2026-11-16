@@ -45,7 +45,7 @@ const ROLES: [Role; 3] = [
 
 pub(super) struct Case {
     _tmp: tempfile::TempDir,
-    base: PathBuf,
+    pub(super) base: PathBuf,
     pub(super) root: PathBuf,
     pub(super) db: Connection,
 }
