@@ -401,6 +401,20 @@ async function main() {
     const recorded = receipt?.operation_id ? recordedCode(db, receipt.operation_id) : null;
     throw new Refused(recorded && recorded !== code ? `${code} (engine: ${recorded})` : code, cmd);
   };
+  const setUp = async (spec, setup, via = bridge) => {
+    const started = await value("desktop_setup_project_job", { spec, setup }, via);
+    if (started?.kind !== "setup" || !started.project_id) throw new Refused("setup_job_not_started", JSON.stringify(started));
+    const deadline = Date.now() + JOB_MS;
+    let job = started;
+    while (job?.id === started.id && job.state.state === "building") {
+      if (Date.now() > deadline) throw new Refused("setup_job_never_ended", JSON.stringify(job));
+      await pause(250);
+      job = await value("desktop_intake_status", {}, via);
+    }
+    if (job?.id !== started.id || job.state.state !== "done") throw new Refused(job?.state?.code ?? "setup_job_lost", JSON.stringify(job));
+    await value("desktop_intake_dismiss", { id: started.id }, via);
+    return { project_id: started.project_id };
+  };
   const step = async (id, title, needs, run) => {
     let row;
     const began = Date.now();
@@ -520,7 +534,7 @@ async function main() {
       state.pool = pool;
       const project = await onboard(repo, pool);
       await assignPool(project, pool);
-      await saveSetup(project, { about: ABOUT, research: [], pool, team: { master: "claude-code", master_tools: true, sub_harnesses: [], min_agents: 0, max_agents: 1 } });
+      await saveSetup(project, { about: ABOUT, research: [], pool, team: { master: "claude-code", master_tools: true, sub_harnesses: [], min_agents: 1, max_agents: 1 } });
       state.project = project;
       const team = await value("desktop_team_status", { id: project });
       applied("team_live_master", await value("desktop_team_live_master", { id: project, on: true, version: team.settings_version, generation: generation() }));
@@ -899,7 +913,7 @@ async function main() {
 
     await step("10b", "a new project with the toggle on queues the roadmap planning job", ["RM-1"], async () => {
       writeFileSync(join(bin, SILENT), "", { mode: 0o600 });
-      const receipt = applied("setup_project", await value("desktop_setup_project", { spec: { name: "qf-roadmap-on", repositories: [] }, setup: { about: ABOUT, tech_stack: [], platforms: ["website"], research: ["roadmap_planning"], pool: needs(state.pool, "0"), team: null, documents: [] }, generation: generation() }));
+      const receipt = await setUp({ name: "qf-roadmap-on", repositories: [] }, { about: ABOUT, tech_stack: [], platforms: ["website"], research: ["roadmap_planning"], pool: needs(state.pool, "0"), team: null, documents: [] });
       await assignPool(receipt.project_id, state.pool);
       const job = await until("new_planning_job", JOB_MS, async () => (await value("desktop_research_jobs", { id: receipt.project_id })).jobs.find((item) => item.kind === "roadmap_planning") ?? null);
       return `project ${receipt.project_id}; planning job ${job.id} ${job.status}`;
@@ -907,7 +921,7 @@ async function main() {
 
     await step("10c", "a new project with the toggle off gets no plan until Plan roadmap now, and a second press is planning_busy", ["RM-1", "RM-2"], async () => {
       writeFileSync(join(bin, SILENT), "", { mode: 0o600 });
-      const receipt = applied("setup_project", await value("desktop_setup_project", { spec: { name: "qf-roadmap-off", repositories: [] }, setup: { about: ABOUT, tech_stack: [], platforms: ["website"], research: [], pool: needs(state.pool, "0"), team: null, documents: [] }, generation: generation() }));
+      const receipt = await setUp({ name: "qf-roadmap-off", repositories: [] }, { about: ABOUT, tech_stack: [], platforms: ["website"], research: [], pool: needs(state.pool, "0"), team: null, documents: [] });
       const project = receipt.project_id;
       await assignPool(project, state.pool);
       await pause(JOB_MS / 3);
@@ -963,7 +977,7 @@ async function main() {
     await step("10d", "a new project with the toggle on gets context/roadmap.md, context/release-process.md and its open points as questions (real profile)", ["RM-1", "QL-1", "QL-2"], async () => {
       const via = await realBridge();
       const next = () => (via.generation += 1);
-      const receipt = applied("setup_project", await value("desktop_setup_project", { spec: { name: `qf-roadmap-${Date.now()}`, repositories: [] }, setup: { about: ABOUT, tech_stack: [], platforms: ["website"], research: ["roadmap_planning"], pool: real.pool, team: null, documents: [] }, generation: next() }, via), real.database);
+      const receipt = await setUp({ name: `qf-roadmap-${Date.now()}`, repositories: [] }, { about: ABOUT, tech_stack: [], platforms: ["website"], research: ["roadmap_planning"], pool: real.pool, team: null, documents: [] }, via);
       return planDocuments(via, receipt.project_id, next);
     });
 

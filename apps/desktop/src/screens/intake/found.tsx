@@ -28,12 +28,12 @@ const JOB_BADGES: Record<IntakeJobState["state"], { word: string; tone: Tone }> 
   downloading: { word: "Downloading", tone: "info" }, stopping: { word: "Waiting", tone: "info" }, copying: { word: "Adding", tone: "info" },
   clearing: { word: "Finishing", tone: "info" }, trashing: { word: "Deleting", tone: "info" }, done: { word: "Added", tone: "ok" },
   failed: { word: "Failed", tone: "danger" }, cancelled: { word: "Stopped", tone: "neutral" }, needs_answer: { word: "Needs answer", tone: "warn" },
-  cut_short: { word: "Cut short", tone: "warn" },
+  cut_short: { word: "Cut short", tone: "warn" }, building: { word: "Setting up", tone: "info" },
 };
 
-/** The badge words a project move or a delete shows in place of an add's. */
+/** The badge words a project move, a delete or a New Project shows in place of an add's. */
 const KIND_BADGES: Record<IntakeJob["kind"], Partial<Record<IntakeJobState["state"], string>>> = {
-  add: {}, move_project: { copying: "Moving", done: "Moved" }, delete: { copying: "Deleting", done: "Deleted" },
+  add: {}, move_project: { copying: "Moving", done: "Moved" }, delete: { copying: "Deleting", done: "Deleted" }, setup: { done: "Set up" },
 };
 
 const JOB_LABELS: Record<ReturnType<typeof jobActions>[number], string> = { stop: "Stop", retry: "Try again", answer: "Answer", dismiss: "Dismiss" };

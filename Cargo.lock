@@ -777,6 +777,8 @@ name = "crazyagent"
 version = "2.3.0"
 dependencies = [
  "base64 0.22.1",
+ "crazyagent-linux-supervisor",
+ "crazyagent-macos-fs",
  "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",
@@ -827,6 +829,21 @@ dependencies = [
  "tauri-plugin-wdio-webdriver",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "crazyagent-linux-supervisor"
+version = "2.3.0"
+dependencies = [
+ "libc",
+ "rustix 1.1.5",
+]
+
+[[package]]
+name = "crazyagent-macos-fs"
+version = "2.3.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

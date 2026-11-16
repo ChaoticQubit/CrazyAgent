@@ -13,6 +13,9 @@ mod message_timeline;
 /// One test per refusal and outcome of removing a project, Remove from dashboard or
 /// Delete everything, through a real engine and its owner connection (DEC-118).
 mod delete;
+/// One test per state and refusal of a New Project run as the engine's job, through a real
+/// engine and its owner connection (DEC-177 addendum 2).
+mod setup_job;
 
 /// How long these engine tests let the engine and its owner client wait for
 /// one answer. Every test engine in the lib test binary shares one
@@ -1859,7 +1862,9 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             INSERT INTO team_agent_messages(project,agent,author,kind,text,created_ms)
             VALUES ('setup-pooled',1,'master','message','Start with the header',0);
             INSERT INTO team_message_settings(project,keep_master,kept,progress,results,owner_items,page_size)
-            VALUES ('setup-pooled',0,500,1,'full',1,25);",
+            VALUES ('setup-pooled',0,500,1,'full',1,25);
+            INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,created_ms)
+            VALUES ('setup-pooled','agent:1','wiki_off',1,'Docs live in the repository.','octo-cat/tool','approved',0);",
         )
         .unwrap();
     let questions = crate::questions::open(engine.root.path()).unwrap();
@@ -1910,6 +1915,11 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM questions_log WHERE project='setup-pooled'"),
         0,
         "its questions to the owner go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM github_rule_requests WHERE project='setup-pooled'"),
+        0,
+        "its agents' GitHub rule proposals go with it, so none is applied or told after it"
     );
     assert_eq!(
         engine.rows("SELECT count(*) FROM team_owner_turns WHERE project='setup-pooled'"),
@@ -2940,6 +2950,7 @@ async fn on_linux_the_owner_sees_why_wider_levels_cannot_run_and_saving_one_is_r
                     toolchains: Vec::new(),
                     ide_git_hooks: false,
                     tool_cache: Default::default(),
+                    home_caches: Default::default(),
                     ide_agent_files: Default::default(),
                     shared_folders: Default::default(),
                     ..Default::default()
@@ -2989,6 +3000,7 @@ async fn owner_saves_sandboxed_toolchains_and_stale_or_invalid_policies_are_refu
         toolchains,
         ide_git_hooks,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()
@@ -3110,6 +3122,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         }],
         ide_git_hooks: true,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()
@@ -3132,6 +3145,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
@@ -3178,6 +3192,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         ],
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()
@@ -3204,6 +3219,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         toolchains: Vec::new(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()
@@ -3284,6 +3300,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
@@ -3312,6 +3329,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
@@ -4194,5 +4212,33 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
         );
     }
     drop(owner);
+    engine.stop().await;
+}
+
+/// DEC-182 S7: an engine start ends every GitHub rule proposal an earlier engine left
+/// approved or being applied as refused and tells each agent once, sending nothing, so the
+/// owner's sign-in never applies a change the owner may have set otherwise since.
+#[tokio::test]
+async fn an_engine_start_ends_a_github_rule_proposal_left_approved_or_applying() {
+    let mut engine = Engine::start().await;
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,created_ms)
+            VALUES ('alpha','agent:1','wiki_off',1,'Docs live in the repository.','octo-cat/tool','approved',0),
+                   ('alpha','agent:2','no_force_push',1,'History stays.','octo-cat/tool','applying',0);",
+        )
+        .unwrap();
+    engine.restart().await;
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM github_rule_requests WHERE status='refused' AND told=1"),
+        2
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT count(*) FROM team_messages WHERE project='alpha' AND author='engine' AND text LIKE '%: refused.'"
+        ),
+        2
+    );
     engine.stop().await;
 }

@@ -654,7 +654,7 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
         "--setting-sources",
         "",
         "--settings",
-        "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
+        "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"autoMemoryEnabled\":false,\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
         "--session-id",
         SESSION,
         "--system-prompt-snapshot",
@@ -698,6 +698,7 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
                 "1".to_owned()
             ),
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_owned(), "1".to_owned()),
             (
                 "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
                 "1".to_owned()
@@ -2170,4 +2171,38 @@ fn a_manifest_command_refuses_a_session_id_that_is_no_plain_word() {
         ..run(None)
     };
     assert!(command_with(&request, None, &plain, Some(&settings)).is_ok());
+}
+
+/// RV-DS241-205: a Claude Code terminal launch, a native lead and the teammates its script
+/// starts included, runs with auto-memory off in its settings and its environment, so a
+/// memory file one run left under the home's `projects` folder is never loaded by a later
+/// run or a teammate as standing instructions.
+#[test]
+fn a_claude_terminal_launch_and_its_teammates_run_with_auto_memory_off() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+
+    let lead = command(&request, Some(&installed), &run(None)).unwrap();
+    write_teammate_command(&case.home(), &lead, &request, installed.native().unwrap()).unwrap();
+    let written =
+        std::fs::read_to_string(crate::launch_context::teammate_command(&case.home())).unwrap();
+
+    let memory: Vec<&str> = lead
+        .env
+        .iter()
+        .filter(|(name, _)| name == "CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert_eq!(memory, ["1"], "{:?}", lead.env);
+    assert_eq!(claude_settings(&lead)["autoMemoryEnabled"], false);
+    assert!(
+        written.contains(" 'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1' "),
+        "{written}"
+    );
+    drop(installed);
 }

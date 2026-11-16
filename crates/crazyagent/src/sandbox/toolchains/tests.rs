@@ -740,3 +740,51 @@ fn a_cargo_home_holds_only_links_to_the_owners_caches_and_never_changes_them() {
     assert!(fs::symlink_metadata(without.join(".cargo/registry")).is_err());
     assert!(without.join(".cargo/git/db").is_dir());
 }
+
+/// RV-DS241-199: launches that prepare one home at once, as two IDE terminals of one project
+/// opening together do, all get its cargo home: one that finds the link another launch just
+/// made at a name it saw free takes it, and every name links to the owner's cache.
+#[cfg(unix)]
+#[test]
+fn launches_that_prepare_one_cargo_home_at_once_all_get_it() {
+    const LAUNCHES: usize = 8;
+    const HOMES: usize = 64;
+    let scratch = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(scratch.path()).unwrap();
+    let owner = root.join("owner");
+    for name in CARGO_SHARED {
+        fs::create_dir_all(owner.join(".cargo").join(name)).unwrap();
+    }
+    let homes = ToolHomes::at(&owner);
+    let mut refused = Vec::new();
+    for round in 0..HOMES {
+        let home = root.join(format!("home-{round}"));
+        fs::create_dir(&home).unwrap();
+        let start = std::sync::Barrier::new(LAUNCHES);
+        let (start, home, homes) = (&start, &home, &homes);
+        let results: Vec<io::Result<PathBuf>> = std::thread::scope(|scope| {
+            let launches: Vec<_> = (0..LAUNCHES)
+                .map(|_| {
+                    scope.spawn(move || {
+                        start.wait();
+                        prepare_cargo_home(home, homes)
+                    })
+                })
+                .collect();
+            launches
+                .into_iter()
+                .map(|launch| launch.join().unwrap())
+                .collect()
+        });
+        for error in results.iter().filter_map(|result| result.as_ref().err()) {
+            refused.push(format!("home {round}: {error}"));
+        }
+        for name in CARGO_SHARED {
+            assert_eq!(
+                fs::read_link(home.join(".cargo").join(name)).unwrap(),
+                owner.join(".cargo").join(name)
+            );
+        }
+    }
+    assert!(refused.is_empty(), "{refused:?}");
+}

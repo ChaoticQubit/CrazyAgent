@@ -267,7 +267,13 @@ fn settle(child: &mut Child, deadline: Instant) -> bool {
 /// request bound.
 fn claude_turn(executable: &Path, managed: &Path, lock: &HeldLock) -> Result<bool, EngineError> {
     let mut command = managed_command(executable, managed)?;
-    command.args(RENEWAL_TURN).env("CLAUDE_CONFIG_DIR", managed);
+    command
+        .args(RENEWAL_TURN)
+        .env("CLAUDE_CONFIG_DIR", managed)
+        .env(
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.0,
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.1,
+        );
     let mut child = spawn_locked(&mut command, lock)?;
     Ok(settle(&mut child, Instant::now() + CLAUDE_RUN_TIME))
 }

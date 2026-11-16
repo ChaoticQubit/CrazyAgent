@@ -280,6 +280,32 @@ async fn handle(
         .map_err(|_| failure("questions_unavailable"))?
 }
 
+/// Starts applying the GitHub rule proposals the owner approved (DEC-182 S7) on a thread
+/// of its own once an answer is recorded, so the reply never waits on GitHub and an engine
+/// stop never waits on it either. Input: the engine root.
+fn apply_later(root: &Path) {
+    let root = root.to_path_buf();
+    let started = std::thread::Builder::new()
+        .name("crazyagent-github-rules".into())
+        .spawn(move || apply_proposals(&root));
+    if started.is_err() {
+        eprintln!("github_rule_proposals_not_started");
+    }
+}
+
+/// Applies the GitHub rule proposals the owner approved with the owner's sign-in and tells
+/// each agent how it ended. A failure is logged by its code alone. Input: the engine root.
+fn apply_proposals(root: &Path) {
+    let applied = questions::open(root).and_then(|db| {
+        crate::github::proposals::apply_approved(&db, &mut |folder, repo, rule, on| {
+            crate::github::GitHub::open(root)?.set_repo_rule(folder, repo, rule, on)
+        })
+    });
+    if let Err(problem) = applied {
+        eprintln!("github_rule_proposals_not_applied code={}", problem.0);
+    }
+}
+
 /// Reads one Questions request from an owner frame body, at most REQUEST_BYTES_MAX bytes.
 /// Input: the body. Output: the action, or `questions_request_bounds` or
 /// `questions_request_invalid`.
@@ -294,7 +320,8 @@ fn parse(bytes: &[u8]) -> Result<Action, EngineError> {
 
 /// Runs one authenticated Questions action against the engine database in the engine root.
 /// An answer names option positions, a comment or both, never neither; the log checks them
-/// against the question. Inputs: the engine root and the action. Output: the reply, or the
+/// against the question, and a settled answer starts applying any approved GitHub rule
+/// proposal off the reply. Inputs: the engine root and the action. Output: the reply, or the
 /// log's refusal.
 fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
     let db = questions::open(root)?;
@@ -313,7 +340,11 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
                 return Err(failure("questions_answer_invalid"));
             }
             let answer = Answer { picks, comment };
-            settlement(questions::answer(&db, id, version, &answer)?)
+            let settled = questions::answer(&db, id, version, &answer)?;
+            if settled == Settlement::Settled {
+                apply_later(root);
+            }
+            settlement(settled)
         }
         Action::Dismiss { id, version } => settlement(questions::dismiss(&db, id, version)?),
         Action::DismissMany { items } => Ok(Reply::Dismissed {

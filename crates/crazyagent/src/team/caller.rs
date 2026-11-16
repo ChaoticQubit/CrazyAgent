@@ -1,5 +1,5 @@
 use crate::coord::relay::{ANSWERED, REFUSED, REPLY_BYTES_MAX};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -724,6 +724,62 @@ pub(crate) fn process_parents() -> Option<HashMap<u32, u32>> {
             fields.next().is_none().then_some((pid, parent))
         })
         .collect()
+}
+
+/// Says whether a process or any process under it is stopped, as a stop signal or a tracer
+/// leaves it, from one `ps` table the engine reads outside every sandbox, since a stopped
+/// app draws nothing whatever its screen shows (RV-DS241-190 sec F1). Takes the root's
+/// process id. Returns the answer; a table that cannot be read, is out of bounds or does not
+/// list the root says stopped.
+pub(crate) fn stopped_under(root: u32) -> bool {
+    let table = crate::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-A", "-o", "pid=,ppid=,stat="])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .ok()
+    .filter(|output| output.status.success() && output.stdout.len() <= PROCESSES_BYTES_MAX)
+    .and_then(|output| String::from_utf8(output.stdout).ok())
+    .and_then(|listing| {
+        listing
+            .lines()
+            .map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid: u32 = fields.next()?.parse().ok()?;
+                let parent: u32 = fields.next()?.parse().ok()?;
+                let stopped = fields.next()?.starts_with(['T', 't']);
+                fields.next().is_none().then_some((pid, parent, stopped))
+            })
+            .collect::<Option<Vec<_>>>()
+    });
+    let Some(table) = table.filter(|table| root > 1 && table.iter().any(|row| row.0 == root))
+    else {
+        return true;
+    };
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut stopped = HashSet::new();
+    for &(pid, parent, halted) in &table {
+        children.entry(parent).or_default().push(pid);
+        if halted {
+            stopped.insert(pid);
+        }
+    }
+    let mut seen = HashSet::from([root]);
+    let mut under = vec![root];
+    while let Some(pid) = under.pop() {
+        if stopped.contains(&pid) {
+            return true;
+        }
+        for &child in children.get(&pid).into_iter().flatten() {
+            if seen.insert(child) {
+                under.push(child);
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

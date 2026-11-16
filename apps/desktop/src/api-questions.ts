@@ -141,7 +141,8 @@ export function notReady<T>(result: Result<T>): boolean {
 }
 
 /** Who asked, in plain words, from the engine's asker name such as `master:<session>`,
- * `agent:<team id>`, `engine:research:<kind>` or `terminal:<agent id>`, and a sub-agent by
+ * `agent:<team id>`, `engine:research:<kind>`, `engine:github-rule:<request>` or
+ * `terminal:<agent id>`, and a sub-agent by
  * the name the engine sent with it, else by its number (S4-R1). Inputs: the asker and the
  * name, if any. Output: the label. */
 export function askerLabel(asker: string, name: string | null = null): string {
@@ -156,6 +157,7 @@ export function askerLabel(asker: string, name: string | null = null): string {
     if (tail === "planning") return "Roadmap planning";
     if (tail.startsWith("research:")) return `Research: ${displayText(tail.slice("research:".length).replaceAll("_", " "))}`;
     if (tail.startsWith("landing:")) return "Landing changes";
+    if (tail.startsWith("github-rule:")) return `GitHub rule proposal ${displayText(tail.slice("github-rule:".length))}`;
   }
   return displayText(asker);
 }

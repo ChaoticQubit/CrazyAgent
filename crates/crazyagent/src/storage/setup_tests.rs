@@ -1046,10 +1046,36 @@ fn seed(
     )
 }
 
+/// The launch set a project's agents get, as the effective set gives it with no secret read,
+/// for rows that ask about a project with no stored row, which the engine's own launch set
+/// refuses. Inputs: the transaction, the engine root and the project. Output: the set.
+fn launch_of(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: &crate::protocol::ProjectId,
+) -> crate::plugins::LaunchPlugins {
+    let effective = plugins::effective(tx, root, project).unwrap();
+    let servers = effective
+        .servers
+        .into_iter()
+        .map(|server| crate::plugins::LaunchServer {
+            name: server.name,
+            spec: server.spec,
+            secrets: Vec::new(),
+        })
+        .collect();
+    crate::plugins::LaunchPlugins {
+        skills: effective.skills,
+        servers,
+        ..crate::plugins::LaunchPlugins::default()
+    }
+}
+
 fn effective_events(connection: &mut Connection, root: &Path, project: &str) -> Vec<String> {
     let project = crate::protocol::ProjectId::new(project).unwrap();
     let tx = connection.transaction().unwrap();
-    let hooks = plugins::effective_hooks(&tx, root, &project, &[]).unwrap();
+    let launch = launch_of(&tx, root, &project);
+    let hooks = plugins::effective_hooks(&tx, root, &project, &launch).unwrap();
     for hook in &hooks {
         assert!(hook.folder.join("hooks/start.sh").is_file(), "{hook:?}");
     }
@@ -1166,7 +1192,8 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
     let folders: Vec<PathBuf> = {
         let tx = connection.transaction().unwrap();
         let project = crate::protocol::ProjectId::new("project-2").unwrap();
-        plugins::effective_hooks(&tx, root, &project, &[])
+        let launch = launch_of(&tx, root, &project);
+        plugins::effective_hooks(&tx, root, &project, &launch)
             .unwrap()
             .into_iter()
             .map(|hook| hook.folder)
@@ -2153,4 +2180,139 @@ fn an_added_hook_that_both_moved_and_replaced_takes_every_off() {
     ];
     let added = [added_hook("caveman", "SessionStart", 1, "sh d.sh")];
     assert_eq!(kept_for(&kept, &added, &added[0]), [&kept[1], &kept[0]]);
+}
+
+/// RV-DS241-195: the per-project switches kept for a pack entry's hooks never outlive their
+/// project. Removing a project forgets its kept switches, so a new project that takes the
+/// same id starts with the hook on; a kept switch whose project is gone, as a removal before
+/// this fix left it, adds no switch row at the next seed. The second removal call stands for
+/// project creation, which runs it after the new row is written (storage.rs).
+#[test]
+fn kept_hook_switches_never_outlive_their_project() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    for project in ["project-1", "project-2"] {
+        connection
+            .execute("INSERT INTO projects(id, body) VALUES(?1, '{}')", [project])
+            .unwrap();
+    }
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/superpowers@1",
+        vec![skill(work.path(), "alpha"), skill(work.path(), "beta")],
+        None,
+    )
+    .unwrap();
+    let plugin = hook_plugin(work.path(), "superpowers");
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+    let prompt = hook_views(&mut connection, root, None)
+        .into_iter()
+        .find(|view| view.event == "UserPromptSubmit")
+        .unwrap()
+        .id;
+    for project in ["project-1", "project-2"] {
+        let version = plugins::plugin_version(&connection, &prompt).unwrap();
+        plugins::execute(
+            &mut connection,
+            root,
+            plugins::Command::Switch {
+                project: crate::protocol::ProjectId::new(project).unwrap(),
+                id: prompt.clone(),
+                on: false,
+                version,
+            },
+        )
+        .unwrap();
+    }
+    let alpha = skills(&mut connection, root)
+        .into_iter()
+        .find(|view| view.name == "alpha")
+        .unwrap()
+        .id;
+    let version = plugins::plugin_version(&connection, &alpha).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::RemoveSkill { id: alpha, version },
+    )
+    .unwrap();
+    {
+        let reused = crate::protocol::ProjectId::new("project-1").unwrap();
+        let tx = connection.transaction().unwrap();
+        tx.execute("DELETE FROM projects WHERE id='project-2'", [])
+            .unwrap();
+        tx.execute("DELETE FROM projects WHERE id='project-1'", [])
+            .unwrap();
+        plugins::remove_project(&tx, &reused).unwrap();
+        tx.execute("INSERT INTO projects(id, body) VALUES('project-1', '{}')", [])
+            .unwrap();
+        plugins::remove_project(&tx, &reused).unwrap();
+        tx.commit().unwrap();
+    }
+
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+
+    assert_eq!(
+        effective_events(&mut connection, root, "project-1"),
+        ["SessionStart", "UserPromptSubmit"],
+        "a new project with a removed project's id starts with the hook on"
+    );
+    let left: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM plugin_switches WHERE project IN ('project-1', 'project-2')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0, "no switch row names a project that is gone or new");
+}
+
+/// rv-code2 B3B-1: removing a project drops only its id from the kept hooks, so a hook kept
+/// on everywhere still matches the hook a new pin adds that runs the same thing, and that
+/// hook takes no switched-off sibling's off.
+#[test]
+fn removing_a_project_keeps_the_hooks_a_new_pin_matches_by_what_they_run() {
+    let (_dir, mut connection) = database();
+    let kept = |place: &str, enabled: bool, projects: &[&str], command: &str| KeptHook {
+        name: format!("caveman/SessionStart/{place}"),
+        enabled,
+        projects: projects.iter().copied().map(String::from).collect(),
+        event: "SessionStart".into(),
+        matcher: None,
+        command: command.into(),
+    };
+    let record = PackRecord {
+        id: "caveman".into(),
+        source: "https://example.invalid/caveman@1".into(),
+        skills: vec!["skill-1".into()],
+        server: None,
+        enabled: true,
+        hooks: vec![
+            kept("1", true, &[], "sh x.sh"),
+            kept("2", false, &[], "sh y.sh"),
+            kept("3", true, &["project-1"], "sh z.sh"),
+        ],
+    };
+    let project = crate::protocol::ProjectId::new("project-1").unwrap();
+    let tx = connection.transaction().unwrap();
+    save_pack(&tx, &record).unwrap();
+
+    forget_project(&tx, &project).unwrap();
+
+    let left = load_pack(&tx, "caveman").unwrap().unwrap().hooks;
+    let added = [added_hook("caveman", "SessionStart", 1, "sh x.sh")];
+    let taken: Vec<&str> = kept_for(&left, &added, &added[0])
+        .into_iter()
+        .map(|hook| hook.command.as_str())
+        .collect();
+    assert_eq!(
+        taken,
+        ["sh x.sh"],
+        "the added hook took a switched-off sibling's off"
+    );
+    assert_eq!(left.len(), 3);
+    assert!(left.iter().all(|hook| hook.projects.is_empty()));
 }

@@ -1977,3 +1977,57 @@ fn a_write_to_a_harness_that_is_gone_fails_once_and_its_exit_is_still_reported()
         exited = matches!(next.unwrap(), Some(LaunchEvent::Exited { .. }));
     }
 }
+
+/// RV-DS241-205: a piped Claude Code agent runs with auto-memory off, in its settings and in
+/// its environment, with tools on or off, so a memory file one run left in its home is never
+/// loaded by a later run as standing instructions.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_piped_claude_agent_runs_with_auto_memory_off() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::Builder::new()
+        .prefix("ca-memory-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let [home, work] = ["home", "work"].map(|name| base.join(name));
+    for folder in [&home, &work] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let profile = base.join("project.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+
+    for tools in [true, false] {
+        let request = LaunchRequest {
+            harness: "claude-code".into(),
+            executable: PathBuf::from("/usr/bin/true"),
+            working_dir: work.clone(),
+            account: AccountBinding::Subscription { home: home.clone() },
+            model: None,
+            tools,
+            sandbox_profile: Some(profile.clone()),
+            unconfined: false,
+            git_identity: None,
+            limits: LaunchLimits::default(),
+        };
+        let command = super::command(&request).unwrap();
+        let arguments: Vec<String> = command
+            .get_args()
+            .map(|argument| argument.to_str().unwrap().to_owned())
+            .collect();
+        let at = arguments
+            .iter()
+            .position(|argument| argument == "--settings")
+            .unwrap();
+        let settings: Value = serde_json::from_str(&arguments[at + 1]).unwrap();
+        let memory: Vec<Option<&std::ffi::OsStr>> = command
+            .get_envs()
+            .filter(|(name, _)| *name == "CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+            .map(|(_, value)| value)
+            .collect();
+
+        assert_eq!(settings["autoMemoryEnabled"], json!(false), "tools {tools}");
+        assert_eq!(memory, [Some(std::ffi::OsStr::new("1"))], "tools {tools}");
+    }
+}

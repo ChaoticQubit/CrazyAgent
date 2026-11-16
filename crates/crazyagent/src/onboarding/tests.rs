@@ -2691,3 +2691,64 @@ fn evidence_leaves_out_engine_folders_in_any_spelling_the_volume_opens() {
     }
     assert!(evidence.entries.contains(&"src/".to_owned()));
 }
+
+/// B17 (-44): while a project move is pending, its destination and every folder inside it
+/// are refused before anything is registered, also through a link that resolves there,
+/// since the move's record would replace an onboarding row there with the moved project's;
+/// a folder elsewhere, and the destination once the move is forgotten, go on to the usual
+/// checks (here the missing pool).
+#[test]
+fn a_folder_a_pending_project_move_lands_in_is_not_registered() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let target = root.join("home").join("alpha");
+    let inner = target.join("web");
+    let elsewhere = root.join("other");
+    let link = root.join("link");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    symlink(&target, &link).unwrap();
+    let mut connection = Connection::open_in_memory().unwrap();
+    crate::projects_home::initialize(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO projects_home_project_move VALUES (1,'request-1',1,'alpha',?1,?2,'move')",
+            params![
+                root.join("repos").join("alpha").to_str().unwrap(),
+                target.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    let database = root.join("engine.db");
+    let mut start = |folder: &Path| {
+        let tx = connection.transaction().unwrap();
+        let action = OnboardingAction::Start {
+            path: folder.to_str().unwrap().to_owned(),
+            pool: pool(),
+        };
+        let outcome = execute(&tx, &config, &database, &action).unwrap();
+        tx.rollback().unwrap();
+        outcome
+    };
+    let moving = Outcome::Rejected {
+        code: "move_project_in_progress".into(),
+    };
+    let usual = Outcome::Rejected {
+        code: "pool_missing".into(),
+    };
+    for folder in [&target, &inner, &link] {
+        assert_eq!(start(folder.as_path()), moving, "{}", folder.display());
+    }
+    assert_eq!(start(elsewhere.as_path()), usual);
+    assert_eq!(start(root.join("home").as_path()), usual);
+    connection
+        .execute("DELETE FROM projects_home_project_move", [])
+        .unwrap();
+    let tx = connection.transaction().unwrap();
+    let action = OnboardingAction::Start {
+        path: target.to_str().unwrap().to_owned(),
+        pool: pool(),
+    };
+    assert_eq!(execute(&tx, &config, &database, &action).unwrap(), usual);
+}

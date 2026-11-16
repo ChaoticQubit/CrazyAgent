@@ -364,25 +364,25 @@ fn adding(db: &Connection) -> Result<bool, EngineError> {
 const ADDS_MAX: usize = 64;
 
 /// How an add a record never reached is settled. With a request (after its exchange
-/// replied): its running row is forgotten, its disk work already settled in the exchange.
-/// With none (engine start, before any add plans, so no staging is live): each running row
-/// gets its staging folders removed and the end its disk shows, nothing else deleted, and
-/// only the newest ended row is kept for the owner to read. Inputs: the connection and the
-/// request. Output: how many running rows were settled.
+/// replied, its disk work already settled there) and whether that add placed its folder: a
+/// running row whose add placed its folder in the home, as when the grant was found stale
+/// after the disk changed, gets the end its disk shows, so the owner reads where the folder
+/// went as after an engine stop (RV-DS241-198); one that placed nothing, also when another
+/// folder took its destination after the plan (rv-sec2 b9 F1), or whose folder is gone, is
+/// forgotten. With none (engine start, before any add plans, so no staging is live): each
+/// running row gets its staging folders removed and the end its disk shows. Nothing else is
+/// deleted either way, and only the newest ended row is kept for the owner to read. Inputs:
+/// the connection, and the request with whether its add placed its folder. Output: how many
+/// running rows were settled.
 pub(super) fn add_settle(
     db: &mut Connection,
-    request: Option<&RequestId>,
+    request: Option<(&RequestId, bool)>,
 ) -> Result<usize, EngineError> {
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
     let settled = match request {
-        Some(request) => tx
-            .execute(
-                "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NULL",
-                [request.as_str()],
-            )
-            .map_err(error)?,
+        Some((request, placed)) => settle_add(&tx, request, placed)?,
         None => restart_adds(&tx)?,
     };
     assert!(request.is_some() || !adding(&tx)?);
@@ -419,14 +419,66 @@ fn restart_adds(tx: &Transaction<'_>) -> Result<usize, EngineError> {
         )
         .map_err(error)?;
     }
+    keep_newest_end(tx)?;
+    assert!(rows.len() <= ADDS_MAX);
+    Ok(rows.len())
+}
+
+/// Settles one add after its exchange replied, as [`add_settle`] says. A record already
+/// removed the running row of an add it reached. Inputs: the transaction, the request and
+/// whether its add placed its folder. Output: 1 when a running row was ended or forgotten,
+/// else 0.
+fn settle_add(
+    tx: &Transaction<'_>,
+    request: &RequestId,
+    placed: bool,
+) -> Result<usize, EngineError> {
+    let row: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT source, destination, mode FROM projects_home_add
+             WHERE request=?1 AND ended IS NULL",
+            [request.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((source, destination, mode)) = row else {
+        return Ok(0);
+    };
+    let ended = placed
+        .then(|| home::add_left(Path::new(&source), Path::new(&destination), mode == "move"))
+        .filter(|ended| *ended != "home_add_interrupted");
+    let changed = match ended {
+        Some(ended) => {
+            eprintln!("home_add_unrecorded ended={ended}");
+            tx.execute(
+                "UPDATE projects_home_add SET ended=?1 WHERE request=?2 AND ended IS NULL",
+                params![ended, request.as_str()],
+            )
+            .map_err(error)?
+        }
+        None => tx
+            .execute(
+                "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NULL",
+                [request.as_str()],
+            )
+            .map_err(error)?,
+    };
+    assert_eq!(changed, 1, "the running row read above is settled once");
+    keep_newest_end(tx)?;
+    Ok(changed)
+}
+
+/// Keeps only the newest ended add for the owner to read. Input: the transaction.
+/// Output: Ok.
+fn keep_newest_end(tx: &Transaction<'_>) -> Result<(), EngineError> {
     tx.execute(
         "DELETE FROM projects_home_add WHERE ended IS NOT NULL AND rowid <>
          (SELECT max(rowid) FROM projects_home_add WHERE ended IS NOT NULL)",
         [],
     )
     .map_err(error)?;
-    assert!(rows.len() <= ADDS_MAX);
-    Ok(rows.len())
+    Ok(())
 }
 
 /// An add an engine stop cut short, as the engine start found it: its request, source, mode
@@ -467,9 +519,10 @@ pub(super) fn add_ended(db: &Connection) -> Result<Option<AddEnded>, EngineError
 }
 
 /// Forgets an ended job the owner dismissed or a new job replaced: an ended add or a project
-/// move an engine stop cut short. A delete cut short stays on its project's banner until the
-/// owner keeps the project ([`delete_keep`]) or deletes it again. Inputs: the connection and
-/// its request. Output: Ok.
+/// move an engine stop cut short, with the old-folder mark of that move, so a dismissed
+/// warning is not shown again at the next start. A delete cut short stays on its project's
+/// banner until the owner keeps the project ([`delete_keep`]) or deletes it again. Inputs:
+/// the connection and its request. Output: Ok.
 pub(super) fn job_forget(db: &Connection, request: &RequestId) -> Result<(), EngineError> {
     db.execute(
         "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NOT NULL",
@@ -481,7 +534,7 @@ pub(super) fn job_forget(db: &Connection, request: &RequestId) -> Result<(), Eng
         [request.as_str()],
     )
     .map_err(error)?;
-    Ok(())
+    move_left_clear(db, request)
 }
 
 /// Checks a Delete everything job before it starts, writing nothing: the owner's admission,
@@ -552,6 +605,74 @@ pub(super) fn delete_keep(db: &Connection, request: &RequestId) -> Result<bool, 
     Ok(kept)
 }
 
+/// Checks a New Project job before it starts, writing nothing: the owner's admission and what
+/// its plan refuses before it builds anything, `project_exists` included. Inputs: the
+/// connection, the configuration, the admission and the Create action. Output: the folder it
+/// would land in as text, or the refusal code.
+pub(super) fn setup_job_check(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    a: &Admission,
+    action: &crate::project_setup::SetupAction,
+) -> Result<String, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    let folder =
+        crate::project_setup::check_job(&tx, config, action)?.map_err(|code| error(&code))?;
+    tx.rollback().map_err(error)?;
+    let folder = folder
+        .to_str()
+        .filter(|_| folder.is_absolute())
+        .ok_or_else(|| error("projects_home_path_invalid"))?
+        .to_owned();
+    assert!(!folder.is_empty());
+    Ok(folder)
+}
+
+/// Marks a New Project job in the action ledger before it plans anything, so an engine stop
+/// that cuts it short is shown on the next start (DEC-177 addendum 2, Q3 A). Inputs: the
+/// connection, the project, the job's request and the project's name. Output: Ok, or the
+/// ledger's failure.
+pub(super) fn setup_mark_begin(
+    db: &Connection,
+    project: &ProjectId,
+    request: &RequestId,
+    name: &str,
+) -> Result<(), EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    home::setup_mark::begin(&tx, project, request, name)?;
+    tx.commit().map_err(error)
+}
+
+/// Ends a New Project job's mark once its work ended, whatever the outcome: done when the
+/// project's records are there, else failed. Inputs: the connection and the project. Output:
+/// whether a mark ended.
+pub(super) fn setup_mark_end(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    let recorded: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let ended = home::setup_mark::end(&tx, project, recorded)?;
+    tx.commit().map_err(error)?;
+    Ok(ended)
+}
+
+/// The New Project an engine stop cut short, for the engine start to show as the engine's
+/// job: ends every mark an earlier engine process left ([`setup_mark::start`]) and returns
+/// the newest that failed. Input: the connection. Output: the New Project, or None.
+pub(super) fn setup_cut_short(
+    db: &Connection,
+) -> Result<Option<home::setup_mark::Interrupted>, EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    let found = home::setup_mark::start(&tx)?;
+    tx.commit().map_err(error)?;
+    Ok(found)
+}
+
 /// A project move an engine stop cut short, as the engine start found it: its request, the
 /// project, the folder it was in, its mode and its end code, `done` when the folder had
 /// landed and the move was recorded from disk.
@@ -598,6 +719,33 @@ pub(super) fn move_ended(db: &Connection) -> Result<Option<MoveEnded>, EngineErr
         })
     })
     .transpose()
+}
+
+/// Whether the project move recorded under `request` left its old folder behind: its record
+/// marked the folder as still to clear, since the move went by copy, and the folder is still
+/// there. A replay of that move answers the old-folder code its first reply carried (B17 -66).
+/// Inputs: the connection and the request. Output: the answer.
+pub(super) fn move_left(db: &Connection, request: &RequestId) -> Result<bool, EngineError> {
+    let origin: Option<String> = db
+        .query_row(
+            "SELECT origin FROM projects_home_project_move_left WHERE singleton=1 AND request=?1",
+            [request.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(origin.is_some_and(|origin| std::fs::symlink_metadata(origin).is_ok()))
+}
+
+/// Forgets the old-folder mark of the project move recorded under `request`, once its old
+/// folder was cleared. Inputs: the connection and the request. Output: Ok.
+pub(super) fn move_left_clear(db: &Connection, request: &RequestId) -> Result<(), EngineError> {
+    db.execute(
+        "DELETE FROM projects_home_project_move_left WHERE request=?1",
+        [request.as_str()],
+    )
+    .map_err(error)?;
+    Ok(())
 }
 
 /// A checked Delete everything: the plan with the project's research jobs, or the refusal code.
@@ -1183,6 +1331,7 @@ pub(super) fn project_move_settle(
             if let (Some(cut), Some(finished)) = (cut, finished) {
                 keep_move_ended(&tx, &cut, finished)?;
             }
+            keep_move_left(&tx)?;
             finished
         }
         Some(exchange) => {
@@ -1198,6 +1347,46 @@ pub(super) fn project_move_settle(
     tx.commit().map_err(error)?;
     if let Some(home::Finished::Moved { repointed }) = finished {
         eprintln!("project_move_settled copies_repointed={repointed}");
+    }
+    Ok(())
+}
+
+/// Keeps a project move whose record marked its old folder as still to clear, and whose old
+/// folder is still there, as the ended job the next status shows,
+/// `move_project_old_folder_left`, so an owner whose reply was lost to an engine stop during
+/// the clear is told (B17 -66). An ended job already kept, such as a move this start found
+/// cut short, stays, and the mark waits for the next start; a mark whose old folder is gone
+/// is forgotten. Input: the transaction. Output: Ok, or any SQLite failure.
+fn keep_move_left(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let mark: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT request, project, origin FROM projects_home_project_move_left WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((request, project, origin)) = mark else {
+        return Ok(());
+    };
+    if std::fs::symlink_metadata(&origin).is_err() {
+        tx.execute("DELETE FROM projects_home_project_move_left", [])
+            .map_err(error)?;
+        return Ok(());
+    }
+    let ended: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects_home_project_move_ended)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !ended {
+        tx.execute(
+            "INSERT INTO projects_home_project_move_ended VALUES (1,?1,?2,?3,'move',?4)",
+            rusqlite::params![request, project, origin, "move_project_old_folder_left"],
+        )
+        .map_err(error)?;
     }
     Ok(())
 }
@@ -1512,7 +1701,8 @@ fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcom
 /// Points every set-up project whose folder sat anywhere inside a folder of the
 /// old home that `arrived` accepts at the same place in the new home, keeping an
 /// onboarded project's recorded `.crazyagent/` folder and its onboarding folder,
-/// then every project's repository inside such a folder, where its master works.
+/// carrying its GitHub publish job along, then every project's repository inside such a
+/// folder, where its master works.
 fn rewrite_folders(
     tx: &Transaction<'_>,
     from: &Path,
@@ -1556,6 +1746,7 @@ fn rewrite_folders(
             params![text(&moved)?, project],
         )
         .map_err(error)?;
+        crate::github::carry_publish(tx, &folder, &moved);
     }
     move_repositories(tx, from, to, &arrived)
 }

@@ -81,7 +81,7 @@ fn configuration_missing(error: EngineError) -> EngineError {
     }
 }
 
-fn validate_connection(connection: &ModelConnection) -> Result<(), EngineError> {
+pub(super) fn validate_connection(connection: &ModelConnection) -> Result<(), EngineError> {
     if connection.harness.as_str() != "rcli"
         || !matches!(
             connection.auth,
@@ -319,11 +319,29 @@ fn same_home(pinned: &ConfiguredHomeIdentity, live: &ConfiguredHomeIdentity) -> 
         && pinned.config.changed == live.config.changed
 }
 
-/// The profile root, its manifest and its identity while a registration holds the lock.
+/// The profile root, its manifest and its identity while a registration holds the lock,
+/// and the exclusive locks the caller already holds on a slot manifest or a configured home
+/// for the whole registration, which the registration then does not take again.
 pub(super) struct LockedRoot<'a> {
     pub(super) root: &'a Directory,
     pub(super) manifest: &'a Manifest,
     pub(super) identity: &'a RootIdentity,
+    pub(super) held: &'a [HeldLock],
+}
+
+impl LockedRoot<'_> {
+    /// Takes the exclusive lock one registration step needs on a profile file, unless a
+    /// lock the caller holds is on that same file (RV-DS241-51). Input: the open file.
+    /// Output: the new lock, None when a held one covers the file, or the lock failure.
+    fn lock(&self, file: &File) -> Result<Option<HeldLock>, EngineError> {
+        let identity = Identity::of(&file.metadata().map_err(unsafe_custody)?);
+        for held in self.held {
+            if Identity::of(&held.0.metadata().map_err(unsafe_custody)?) == identity {
+                return Ok(None);
+            }
+        }
+        lock(file).map(Some)
+    }
 }
 
 impl NativeProfileCustody {
@@ -442,12 +460,61 @@ impl NativeProfileCustody {
         self.verify()?;
         self.validate_configured_home_path(configured_home)?;
         let captured = ConfiguredRcliUse::capture(configured_home, connection)?;
+        self.register_captured(host, connection, target_profile_ref, captured)
+    }
+
+    /// Registers a configured RCLI home again for a master turn whose slot no longer loads,
+    /// re-pinning a change in the config's times only when an account save this engine run
+    /// undid put that very config back: same file, same change time (rv-sec3 G4 r2 F1). A
+    /// config written and restored any other way, as a confined master can, stays refused,
+    /// with rcli_profile_changed_in_conversation when only the times moved under the same
+    /// connection, which a new conversation's register clears (rv-code4 B22 F3), else as
+    /// the owner's register names it: rcli_profile_config_changed for other bytes, else
+    /// rcli_profile_identity_changed (R2-F1). Inputs: host, connection, profile reference
+    /// and the home the slot pins. Output: the slot metadata, or that refusal.
+    pub(crate) fn register_undone_configured_rcli_profile(
+        &mut self,
+        host: &HostStamp,
+        connection: &ModelConnection,
+        target_profile_ref: &CredentialRef,
+        configured_home: &Path,
+    ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
+        self.verify()?;
+        self.validate_configured_home_path(configured_home)?;
+        let captured = ConfiguredRcliUse::capture(configured_home, connection)?;
+        let live = &captured.1.identity;
+        if self.undone.get(configured_home) != Some(&(live.config.identity, live.config.changed)) {
+            let pinned = self.configured_slot(host, target_profile_ref)?;
+            return Err(failure(
+                if pinned.connection == *connection && times_only(&pinned.configured, live) {
+                    "rcli_profile_changed_in_conversation"
+                } else if pinned.configured.config_sha256 != live.config_sha256 {
+                    "rcli_profile_config_changed"
+                } else {
+                    "rcli_profile_identity_changed"
+                },
+            ));
+        }
+        self.register_captured(host, connection, target_profile_ref, captured)
+    }
+
+    /// Registers a captured configured home under the profile root's lock. Inputs: host,
+    /// connection, profile reference and the captured home. Output: the slot metadata, or
+    /// the refusal `register_locked` gives.
+    fn register_captured(
+        &mut self,
+        host: &HostStamp,
+        connection: &ModelConnection,
+        target_profile_ref: &CredentialRef,
+        captured: (Directory, ConfiguredRcliUse),
+    ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
         let (root, root_manifest, root_identity) = self.root(host)?;
         let _root_lock = lock(&root_manifest.file)?;
         let locked = LockedRoot {
             root: &root,
             manifest: &root_manifest,
             identity: &root_identity,
+            held: &[],
         };
         self.register_locked(host, connection, target_profile_ref, captured, &locked)
     }
@@ -493,15 +560,15 @@ impl NativeProfileCustody {
                     },
                 ));
             }
-            let held = lock(&manifest.file)?;
-            (Some(profile), Some(manifest), Some(actual), Some(held))
+            let held = locked.lock(&manifest.file)?;
+            (Some(profile), Some(manifest), Some(actual), held)
         } else {
             if slots.len() >= MAX_PROFILES {
                 return Err(failure("native_profile_capacity"));
             }
             (None, None, None, None)
         };
-        let _home_lock = lock(&home.file)?;
+        let _home_lock = locked.lock(&home.file)?;
         configured.verify(&home, connection)?;
         let generation = match &previous {
             Some(actual) => actual
@@ -565,6 +632,36 @@ impl NativeProfileCustody {
         };
         remember_profile(&mut self.profiles, key, metadata.custody_id.clone());
         Ok(metadata)
+    }
+
+    /// The configured home a slot pins, read from its manifest under the retained root
+    /// without loading the home. Inputs: the host and the slot's profile ref. Output: the
+    /// pinned path, or the slot's read failure.
+    pub(crate) fn configured_rcli_home(
+        &self,
+        host: &HostStamp,
+        target_profile_ref: &CredentialRef,
+    ) -> Result<PathBuf, EngineError> {
+        let actual = self.configured_slot(host, target_profile_ref)?;
+        self.validate_configured_home_path(&actual.configured.path)?;
+        Ok(actual.configured.path)
+    }
+
+    /// Reads what one configured slot pins from its manifest under the retained root,
+    /// without loading the home. Inputs: the host and the slot's profile ref. Output: the
+    /// slot's connection and pinned home, or the slot's read failure.
+    fn configured_slot(
+        &self,
+        host: &HostStamp,
+        target_profile_ref: &CredentialRef,
+    ) -> Result<ConfiguredProfileIdentity, EngineError> {
+        self.verify()?;
+        let (root, _, root_identity) = self.retained_root(host).map_err(configuration_missing)?;
+        let slots = scan_slots(&root.file)?;
+        let key = digest(target_profile_ref.as_str().as_bytes());
+        let (_, _, actual) =
+            self.read_configured_slot(&root, &root_identity, &slots, &key, target_profile_ref)?;
+        Ok(actual)
     }
 
     pub(crate) fn configured_rcli_profile(

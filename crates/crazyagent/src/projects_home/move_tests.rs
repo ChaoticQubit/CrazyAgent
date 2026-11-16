@@ -443,6 +443,22 @@ impl Case {
             .unwrap()
     }
 
+    /// The mark the record of a move by copy leaves on its old folder until it is cleared:
+    /// its request, project and old folder, or None.
+    fn left(&self) -> Option<(String, String, String)> {
+        let mut statement = self
+            .db
+            .prepare("SELECT request, project, origin FROM projects_home_project_move_left")
+            .unwrap();
+        let rows: Vec<(String, String, String)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(rows.len() <= 1);
+        rows.into_iter().next()
+    }
+
     /// Every text cell of the database that still names `folder`, as `table.column`.
     fn leftovers(&self, folder: &Path) -> Vec<String> {
         let tables: Vec<String> = self
@@ -730,6 +746,56 @@ fn a_copy_leaves_the_old_folder_and_points_the_project_at_the_copy() {
     assert_eq!(git(&old_clone, &["rev-parse", "HEAD"]), head);
 }
 
+fn publish_job(folder: &Path) -> crate::github::GitHubPublishJob {
+    crate::github::GitHubPublishJob {
+        project: folder.to_path_buf(),
+        plan: crate::github::GitHubPublishPlan {
+            owner: "me".into(),
+            name: PROJECT.into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+        lines: vec![".env*".into()],
+        written: Vec::new(),
+        step: crate::github::GitHubPublishStep::Drafting,
+        stopped: None,
+        made: None,
+        rules: crate::github::GitHubRule::defaults(),
+    }
+}
+
+/// rv-sec3 S5b F2: a project's GitHub publish job is named by its folder, so a Move or a
+/// Copy carries it to the project's new folder, where the publish and the Overview's
+/// "not on GitHub" check still find it, and nothing is left under the old folder.
+#[test]
+fn a_moved_or_copied_project_keeps_its_github_publish_at_its_new_folder() {
+    for mode in [AddMode::Move, AddMode::Copy] {
+        let case = Case::new();
+        let origin = case.repo.clone();
+        let target = case.target();
+        let job = publish_job(&origin);
+        crate::github::keep_job(&case.engine, &job);
+        assert!(
+            matches!(case.move_project(mode, &[]), Ok(Finished::Moved { .. })),
+            "{mode:?}"
+        );
+        assert_eq!(
+            crate::github::kept_job(&case.engine, &origin),
+            None,
+            "{mode:?}"
+        );
+        assert_eq!(
+            crate::github::kept_job(&case.engine, &target),
+            Some(crate::github::GitHubPublishJob {
+                project: target.clone(),
+                ..job
+            }),
+            "{mode:?}"
+        );
+    }
+}
+
 /// An agent's linked git worktree inside the folder follows a Move: both of its git
 /// pointer files name the new places, so git works in it and the repository lists it.
 #[test]
@@ -1012,7 +1078,44 @@ fn a_move_by_copy_records_the_project_at_the_copy_before_the_old_folder_is_clear
         git(&moved, &["log", "-1", "--format=%s", "HEAD~1"]),
         "first"
     );
-    assert_eq!(case.leftovers(&origin), Vec::<String>::new());
+    assert_eq!(
+        case.leftovers(&origin),
+        ["projects_home_project_move_left.origin"],
+        "only the mark of the old folder the clear left names it (B17 -66)"
+    );
+}
+
+/// B17 (-66): the record of a Move that went by copy marks its old folder as still to clear,
+/// under the move's request and project, in the record's own write and before the folder is
+/// cleared; a Move by rename and a Copy, which keeps its old folder on purpose, leave no mark.
+#[test]
+fn the_record_of_a_move_by_copy_marks_its_old_folder_as_still_to_clear() {
+    let case = Case::new();
+    let origin = case.repo.clone();
+    let old = case.copied();
+    assert_eq!(case.left(), None);
+    assert_eq!(case.finish(true), Some(Finished::Moved { repointed: 0 }));
+    assert_eq!(
+        case.left(),
+        Some((
+            "request-7".to_owned(),
+            PROJECT.to_owned(),
+            text(&origin).to_owned()
+        ))
+    );
+    drop(old);
+    let renamed = Case::new();
+    assert!(matches!(
+        renamed.move_project(AddMode::Move, &[]),
+        Ok(Finished::Moved { .. })
+    ));
+    assert_eq!(renamed.left(), None);
+    let copied = Case::new();
+    assert!(matches!(
+        copied.move_project(AddMode::Copy, &[]),
+        Ok(Finished::Moved { .. })
+    ));
+    assert_eq!(copied.left(), None);
 }
 
 /// A crash never leaves the project on a folder with files missing: before the record

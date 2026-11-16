@@ -620,41 +620,50 @@ fn a_delete_that_moved_any_folder_or_lost_its_disk_work_counts_as_reaching_the_t
     assert!(!reached_trash(None, false), "no disk work ran");
 }
 
-/// RV-CODE combo-five r1 move F1 r1 (rv-code3 F1): the first grant check of an answer counts
-/// the disk as changed once a Delete reached the Trash or a move's disk work ran, for the
-/// projects home and for one project, so a grant found stale there is an outcome to
-/// reconcile, not Rejected, while the same request records the move. One case per path.
+/// RV-CODE combo-five r1 move F1 r1 (rv-code3 F1), RV-DS241-198: the first grant check of an
+/// answer counts the disk as changed once a Delete reached the Trash or a move's or an add's
+/// disk work ran, for the projects home, for one project and for a folder add, so a grant
+/// found stale there is an outcome to reconcile, not Rejected, while the same request records
+/// the move or the add. One case per path.
 #[test]
 fn the_first_grant_check_after_any_disk_work_counts_the_disk_as_changed() {
     use projects_home::disk_changed;
-    let (trashed, moved, moved_project, ran) = (true, true, true, true);
+    let (trashed, moved, moved_project, added, ran) = (true, true, true, true, true);
     assert!(
-        disk_changed(trashed, false, false, ran),
+        disk_changed(trashed, false, false, false, ran),
         "Delete in the Trash"
     );
     assert!(
-        !disk_changed(!trashed, false, false, ran),
+        !disk_changed(!trashed, false, false, false, ran),
         "Delete left out of the Trash"
     );
     assert!(
-        disk_changed(false, moved, false, ran),
+        disk_changed(false, moved, false, false, ran),
         "projects home moved"
     );
     assert!(
-        !disk_changed(false, moved, false, !ran),
+        !disk_changed(false, moved, false, false, !ran),
         "projects home move not run"
     );
     assert!(
-        disk_changed(false, false, moved_project, ran),
+        disk_changed(false, false, moved_project, false, ran),
         "project moved"
     );
     assert!(
-        !disk_changed(false, false, moved_project, !ran),
+        !disk_changed(false, false, moved_project, false, !ran),
         "project move not run"
     );
     assert!(
-        !disk_changed(false, false, false, ran),
-        "no Delete and no move"
+        disk_changed(false, false, false, added, ran),
+        "folder added"
+    );
+    assert!(
+        !disk_changed(false, false, false, added, !ran),
+        "folder add not run"
+    );
+    assert!(
+        !disk_changed(false, false, false, false, ran),
+        "no Delete, no move and no add"
     );
     let id = RequestId::new("move-1").unwrap();
     let admission = |owner_epoch| crate::engine::owner::Admission {
@@ -663,7 +672,7 @@ fn the_first_grant_check_after_any_disk_work_counts_the_disk_as_changed() {
         owner_id: "owner".into(),
         owner_epoch,
     };
-    let changed = disk_changed(false, false, moved_project, ran);
+    let changed = disk_changed(false, false, false, added, ran);
     let refused = projects_home::regranted(Ok(admission(2)), &admission(1), changed).unwrap_err();
     let frame = owner_reply_frame(Err(refused), id.clone(), true).unwrap();
     assert_eq!(

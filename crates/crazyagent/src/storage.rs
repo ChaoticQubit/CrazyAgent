@@ -177,9 +177,11 @@ pub(crate) enum Job {
         Vec<crate::projects_home::AddOverride>,
         oneshot::Sender<Result<(), EngineError>>,
     ),
-    HomeAddSettle(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeAddSettle(RequestId, bool, oneshot::Sender<Result<(), EngineError>>),
     HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
     HomeProjectMoveEnded(oneshot::Sender<Result<Option<projects_home::MoveEnded>, EngineError>>),
+    HomeProjectMoveLeft(RequestId, oneshot::Sender<Result<bool, EngineError>>),
+    HomeProjectMoveCleared(RequestId, oneshot::Sender<Result<(), EngineError>>),
     HomeJobForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
     HomeDeleteCheck(
         Admission,
@@ -193,6 +195,21 @@ pub(crate) enum Job {
         >,
     ),
     HomeDeleteKeep(RequestId, oneshot::Sender<Result<bool, EngineError>>),
+    HomeSetupCheck(
+        Admission,
+        Box<crate::project_setup::SetupAction>,
+        oneshot::Sender<Result<String, EngineError>>,
+    ),
+    HomeSetupCutShort(
+        oneshot::Sender<Result<Option<crate::projects_home::setup_mark::Interrupted>, EngineError>>,
+    ),
+    HomeSetupMark(
+        ProjectId,
+        RequestId,
+        String,
+        oneshot::Sender<Result<(), EngineError>>,
+    ),
+    HomeSetupMarkEnd(ProjectId, oneshot::Sender<Result<bool, EngineError>>),
     HomeProjectMoveCheck(
         Admission,
         ProjectId,
@@ -393,6 +410,11 @@ impl Storage {
                     }
                     if let Err(e) = projects_home::delete_settle(&connection, None, false) {
                         eprintln!("project_delete_not_settled cause={}", e.0);
+                    }
+                    match crate::github::proposals::start_store(&connection) {
+                        Ok(0) => {}
+                        Ok(ended) => eprintln!("github_rule_proposals_cut_short count={ended}"),
+                        Err(e) => eprintln!("github_rule_proposals_not_settled cause={}", e.0),
                     }
                     if let Err(e) = projects_home::sweep_home(&connection) {
                         eprintln!("home_staging_not_swept cause={}", e.0);
@@ -670,11 +692,12 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::HomeAddSettle(request, reply) => {
+                        Job::HomeAddSettle(request, placed, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_settle(&mut connection, Some(&request)).map(drop)
+                                projects_home::add_settle(&mut connection, Some((&request, placed)))
+                                    .map(drop)
                             };
                             let _ = reply.send(result);
                         }
@@ -683,6 +706,17 @@ impl Storage {
                         }
                         Job::HomeProjectMoveEnded(reply) => {
                             let _ = reply.send(projects_home::move_ended(&connection));
+                        }
+                        Job::HomeProjectMoveLeft(request, reply) => {
+                            let _ = reply.send(projects_home::move_left(&connection, &request));
+                        }
+                        Job::HomeProjectMoveCleared(request, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::move_left_clear(&connection, &request)
+                            };
+                            let _ = reply.send(result);
                         }
                         Job::HomeJobForget(request, reply) => {
                             let result = if readonly {
@@ -713,6 +747,38 @@ impl Storage {
                                 Err(error("projects_home_readonly"))
                             } else {
                                 projects_home::delete_keep(&connection, &request)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupCheck(admission, action, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_job_check(&mut connection, &config, &admission, &action)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupCutShort(reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_cut_short(&connection)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupMark(project, request, name, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_mark_begin(&connection, &project, &request, &name)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupMarkEnd(project, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_mark_end(&connection, &project)
                             };
                             let _ = reply.send(result);
                         }
@@ -812,6 +878,14 @@ impl Storage {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::Delete(&outcome)))
                             });
+                            if result.is_ok()
+                                && let OwnerOperation::Apply {
+                                    mutation: OwnerMutation::DeleteProject { project_id, .. },
+                                } = &request.operation
+                                && let Err(e) = accounts::forget_pool_project(&mut connection, &mut config, sources.as_ref(), &admission, project_id)
+                            {
+                                eprintln!("project_pool_not_forgotten cause={}", e.0);
+                            }
                             let _ = reply.send(result);
                         }
                         Job::SetupPlan(admission, request, reply) => {
@@ -2770,6 +2844,29 @@ fn owner_control_reconcile(
     .transpose()
 }
 
+/// Whether a project may hold another git repository, for its Agent access lines: a short
+/// transaction checks the admission and reads the project's folder and the supervisor
+/// setting, and the bounded read of that folder runs after it, so the owner read's own
+/// transaction never waits on a folder (DEC-179 T4d). Inputs: the database, the admission
+/// and the project. Output: the answer, true for a project with no setup.
+fn project_other_git(
+    db: &mut Connection,
+    a: &Admission,
+    project_id: &ProjectId,
+) -> Result<bool, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    let setup = crate::project_setup::load_setup(&tx, project_id)?;
+    let calls = crate::sandbox_settings::load(&tx)
+        .ok()
+        .map(|settings| settings.linux_supervisor);
+    drop(tx);
+    let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
+    let other_git = crate::sandbox::policy::LevelView::other_git;
+    let folder = setup.map(|setup| setup.project_folder());
+    Ok(folder.is_none_or(|folder| other_git(host, &folder)))
+}
+
 fn owner_read(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -2777,6 +2874,16 @@ fn owner_read(
     a: &Admission,
     query: &OwnerRead,
 ) -> Result<OwnerReadReply, EngineError> {
+    if matches!(
+        query,
+        OwnerRead::ProjectCatalog { .. } | OwnerRead::ProjectAgentPolicy { .. }
+    ) {
+        crate::sandbox::policy::LevelView::refresh();
+    }
+    let other_git = match query {
+        OwnerRead::ProjectAgentPolicy { project_id } => project_other_git(db, a, project_id)?,
+        _ => true,
+    };
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
     let revision = owner_revision(&tx)?;
@@ -2815,6 +2922,9 @@ fn owner_read(
                     pool.as_ref(),
                     research,
                     &crate::project_setup::signed_in_connections(&tx, config, pool.as_ref())?,
+                    crate::sandbox_settings::load(&tx)
+                        .ok()
+                        .map(|settings| settings.linux_supervisor),
                 )
                 .map_err(error)?,
             ),
@@ -2853,6 +2963,8 @@ fn owner_read(
                     &setup.project_folder(),
                     &homes,
                     versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
+                    crate::sandbox_settings::load(&tx).ok(),
+                    other_git,
                 );
             policy.grant_log =
                 crate::sandbox::grants::history(&tx, project_id.as_str()).map_err(error)?;

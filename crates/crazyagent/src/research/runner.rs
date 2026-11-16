@@ -142,8 +142,9 @@ const CLAUDE_USER_LINE: &[u8] = b"{\"type\":\"user\"";
 const CLAUDE_PARENT_KEY: &[u8] = b"\"parent_tool_use_id\":";
 /// The model name Claude Code gives the messages it writes itself, such as its API errors.
 const CLAUDE_OWN_MODEL: &str = "<synthetic>";
-/// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
-const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
+/// The `--settings` every research Claude Code gets, hooks and auto-memory off
+/// (RV-DS241-205); a keyed run adds its `apiKeyHelper`.
+const CLAUDE_SETTINGS: &str = "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}";
 
 /// The most bytes of one research report: the runner takes no longer report from an agent,
 /// and a reader of a stored report reads up to this many.
@@ -1086,7 +1087,9 @@ impl ResearchRunner {
         let display = jobs
             .terminal_display(&project)
             .map_err(|_| RunError::Invalid("project coordination settings unreadable".into()))?;
-        let context = context.with_terminal_display(display);
+        let context = context
+            .with_terminal_display(display)
+            .at_access(policy.access);
         let context = match &proxy {
             Some(proxy) => context.with_model_proxy(proxy.port()),
             None => context,
@@ -2521,7 +2524,11 @@ fn claude_arguments(
         .env("CLAUDE_CODE_TMPDIR", tmp)
         .env("TERM", "dumb")
         .env("DISABLE_TELEMETRY", "1")
-        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        .env(
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.0,
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.1,
+        );
     if tools {
         command
             .args([
@@ -3210,7 +3217,6 @@ fn setup_debug_stderr() -> Stdio {
 /// hooks and never with its branches or remotes. The `-c` adds one key of the engine's own,
 /// which git reads last: a listing that ends with it ([`FILTER_KEYS_END`]) is whole, and
 /// git always has a key to print, so no exit status stands for "no filter".
-#[cfg(unix)]
 pub(crate) const FILTER_KEYS: [&str; 7] = [
     "-c",
     "filter.crazyagent-listing-end.required=false",
@@ -3222,7 +3228,6 @@ pub(crate) const FILTER_KEYS: [&str; 7] = [
 ];
 
 /// The most bytes of a hook key an owner line shows.
-#[cfg(unix)]
 const HOOK_KEY_SHOWN_MAX: usize = 128;
 
 /// The first config hook key a [`FILTER_KEYS`] listing names: `hook.<name>.<key>`, which
@@ -3231,7 +3236,6 @@ const HOOK_KEY_SHOWN_MAX: usize = 128;
 /// [`listed_filter_keys`] gives. Returns the key as an owner line shows it, at most
 /// [`HOOK_KEY_SHOWN_MAX`] bytes with every byte outside letters, digits, `.`, `-` and `_`
 /// shown as `?`, or None when the listing names no hook.
-#[cfg(unix)]
 pub(crate) fn listed_hook(keys: &[u8]) -> Option<String> {
     let key = keys
         .split(|byte| *byte == 0)
@@ -3267,14 +3271,12 @@ fn hook_refusal(keys: &[u8]) -> Result<(), RunError> {
 
 /// The key the `-c` of [`FILTER_KEYS`] sets with its NUL, as git prints it at the end of a
 /// whole listing.
-#[cfg(unix)]
 const FILTER_KEYS_END: &[u8] = b"filter.crazyagent-listing-end.required\0";
 
 /// The repository's own filter keys in what a [`FILTER_KEYS`] listing printed. Takes git's
 /// whole output. Returns the NUL-separated keys before the engine's closing key, or none
 /// for a listing that does not end with that key on its own, which is cut short or not a
 /// listing at all.
-#[cfg(unix)]
 pub(crate) fn listed_filter_keys(listing: &[u8]) -> Option<&[u8]> {
     let keys = listing.strip_suffix(FILTER_KEYS_END)?;
     (keys.is_empty() || keys.ends_with(&[0])).then_some(keys)

@@ -590,11 +590,12 @@ fn a_locked_tool_install_leaves_its_python_and_environment_writable_only_by_this
          case \"$1\" in\n\
          --version) echo 'uv 0.13.5' ;;\n\
          venv)\n\
+           for env in \"$@\"; do :; done\n\
            py=\"$UV_PYTHON_INSTALL_DIR/cpython-9.9.9-dummy\"\n\
-           /bin/mkdir -p \"$py/bin\" \"$6/bin\"\n\
+           /bin/mkdir -p \"$py/bin\" \"$env/bin\"\n\
            printf '#!/bin/sh\\nexit 0\\n' > \"$py/bin/python3\"\n\
-           /bin/chmod 775 \"$py\" \"$py/bin\" \"$py/bin/python3\" \"$6\" \"$6/bin\"\n\
-           /bin/ln -s \"$py/bin/python3\" \"$6/bin/python\" ;;\n\
+           /bin/chmod 775 \"$py\" \"$py/bin\" \"$py/bin/python3\" \"$env\" \"$env/bin\"\n\
+           /bin/ln -s \"$py/bin/python3\" \"$env/bin/python\" ;;\n\
          pip)\n\
            bin=\"${5%/python}\"\n\
            printf '#!/bin/sh\\necho demo-tool 1.0\\n' > \"$bin/demo-tool\"\n\

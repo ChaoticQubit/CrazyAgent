@@ -11,7 +11,7 @@ use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::{
     HOURS_DEFAULT, HOURS_MAX, HOURS_MIN, LeftRunning, OnQuit, QuitSettings,
 };
-use crate::sandbox::LinuxSockets;
+use crate::sandbox::{LinuxSockets, LinuxSupervisor};
 use crate::sandbox_settings::SandboxSettings;
 use crate::setup::pack::entry_title;
 use crate::setup::{
@@ -61,6 +61,10 @@ const SOCKETS_CHOICES: [LinuxSockets; 3] = [
     LinuxSockets::Refuse,
     LinuxSockets::TcpPorts,
 ];
+const SOCKETS_UNKNOWN: &str = "The Linux sockets setting is not known yet.";
+const SUPERVISOR_TEXT: &str = "Linux call supervisor: whether CrazyAgent checks the calls Landlock can't limit by itself when agents make them, when CrazyAgent runs on Linux.";
+const SUPERVISOR_CHOICES: [LinuxSupervisor; 2] = [LinuxSupervisor::On, LinuxSupervisor::Off];
+const SUPERVISOR_UNKNOWN: &str = "The Linux call supervisor setting is not known yet.";
 
 const CLEANUP_TEXT: &str =
     "Finished agents: when CrazyAgent removes a finished agent's worktree on its own.";
@@ -260,6 +264,55 @@ pub(in crate::tui) fn sockets_words(sockets: LinuxSockets) -> (&'static str, &'s
     }
 }
 
+/// The plain title and explanation of one Linux call supervisor option, as Settings shows
+/// it and the desktop says it. Input: the option. Output: the title and the sentence naming
+/// what it keeps and what it leaves open.
+fn supervisor_words(calls: LinuxSupervisor) -> (&'static str, &'static str) {
+    match calls {
+        LinuxSupervisor::On => (
+            "On (recommended)",
+            "CrazyAgent checks some calls agents make and makes them for them, so ports on this computer, git repositories and signals stay within what you allow. Run as root, it starts none.",
+        ),
+        LinuxSupervisor::Off => (
+            "Off",
+            "Agents start as before: a port they may reach on this computer is open to them on every host, and they can make a git repository or, on older Linux, signal your programs.",
+        ),
+    }
+}
+
+/// What one Linux sandbox setting reads as: an option's title and sentence from the stored
+/// settings.
+type SandboxWords = fn(&SandboxSettings) -> (&'static str, &'static str);
+
+/// The rows of a Linux sandbox setting's ask: its explanation, then each option's title,
+/// marked when chosen, with its sentence under it. Inputs: the explanation, each option's
+/// title and sentence, the chosen index, the width and the context. Output: the rows.
+fn option_rows(
+    text: &str,
+    options: &[(&'static str, &'static str)],
+    choice: usize,
+    limit: usize,
+    ctx: &Ctx,
+) -> Vec<Line<'static>> {
+    assert!(choice < options.len());
+    let theme = &ctx.theme;
+    let mut lines: Vec<Line<'static>> = wrap(text, limit)
+        .into_iter()
+        .map(|part| styled(part, Role::Muted, theme))
+        .collect();
+    for (index, (title, detail)) in options.iter().enumerate() {
+        let mark = if index == choice { "> " } else { "  " };
+        lines.push(join([Line::raw(mark), styled(*title, Role::Heading, theme)]));
+        lines.extend(
+            wrap(detail, limit.saturating_sub(4).max(1))
+                .into_iter()
+                .map(|part| styled(format!("    {part}"), Role::Muted, theme)),
+        );
+    }
+    assert!(lines.len() > options.len());
+    lines
+}
+
 /// A plain sentence for a setup page problem code.
 /// Input: the code. Output: "Not ready yet." until the engine serves the
 /// request, otherwise the setup, projects home or GitHub sentence for the code,
@@ -419,6 +472,9 @@ enum Ask {
     Sockets {
         choice: usize,
     },
+    Supervisor {
+        choice: usize,
+    },
     Cleanup {
         choice: usize,
     },
@@ -466,8 +522,8 @@ enum Sent {
 /// skills and plugins pack, with ticks. First run shows it after the projects
 /// home folder: Enter installs and continues to the Harnesses step, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
-/// remove, the projects home folder, the GitHub account, the Linux sockets
-/// setting, when finished agents' worktrees go, what quitting does to team agents, the
+/// remove, the projects home folder, the GitHub account, the Linux sockets and call
+/// supervisor settings, when finished agents' worktrees go, what quitting does to team agents, the
 /// master step, time and frame size limits and what harnesses do when a model provider
 /// can't be reached.
 pub struct AppSetup {
@@ -971,10 +1027,7 @@ impl AppSetup {
 
     fn ask_sockets(&mut self, ctx: &mut Ctx) {
         let Load::Ready(settings) = &self.sandbox else {
-            ctx.say(Message::warning(
-                "The Linux sockets setting is not known yet.",
-                "",
-            ));
+            ctx.say(Message::warning(SOCKETS_UNKNOWN, ""));
             return;
         };
         let choice = SOCKETS_CHOICES
@@ -987,17 +1040,85 @@ impl AppSetup {
     fn set_sockets(&mut self, choice: usize, ctx: &mut Ctx) {
         assert!(choice < SOCKETS_CHOICES.len());
         let linux_sockets = SOCKETS_CHOICES[choice];
-        if matches!(&self.sandbox, Load::Ready(settings) if settings.linux_sockets == linux_sockets)
-        {
+        let Load::Ready(stored) = &self.sandbox else {
+            ctx.say(Message::warning(SOCKETS_UNKNOWN, ""));
+            return;
+        };
+        if stored.linux_sockets == linux_sockets {
             ctx.say(Message::warning("That is already the setting.", ""));
             return;
         }
+        let settings = SandboxSettings {
+            linux_sockets,
+            ..*stored
+        };
+        assert_eq!(settings.linux_supervisor, stored.linux_supervisor);
         let done = format!("Linux sockets: {}.", sockets_words(linux_sockets).0);
         let job = AppSetupJob::SetSandbox {
-            settings: SandboxSettings { linux_sockets },
+            settings,
             generation: ctx.next_generation(),
         };
         self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn ask_supervisor(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.sandbox else {
+            ctx.say(Message::warning(SUPERVISOR_UNKNOWN, ""));
+            return;
+        };
+        let choice = SUPERVISOR_CHOICES
+            .iter()
+            .position(|calls| *calls == settings.linux_supervisor)
+            .expect("every option is listed");
+        self.ask = Some(Ask::Supervisor { choice });
+    }
+
+    fn set_supervisor(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < SUPERVISOR_CHOICES.len());
+        let linux_supervisor = SUPERVISOR_CHOICES[choice];
+        let Load::Ready(stored) = &self.sandbox else {
+            ctx.say(Message::warning(SUPERVISOR_UNKNOWN, ""));
+            return;
+        };
+        if stored.linux_supervisor == linux_supervisor {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let settings = SandboxSettings {
+            linux_supervisor,
+            ..*stored
+        };
+        assert_eq!(settings.linux_sockets, stored.linux_sockets);
+        let (title, _) = supervisor_words(linux_supervisor);
+        let done = format!("Linux supervisor: {title}.");
+        let job = AppSetupJob::SetSandbox {
+            settings,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn sandbox_value(
+        &self,
+        words: SandboxWords,
+        ctx: &Ctx,
+    ) -> (Line<'static>, Option<&'static str>) {
+        match &self.sandbox {
+            Load::Ready(settings) => {
+                let (title, detail) = words(settings);
+                (Line::raw(title), Some(detail))
+            }
+            Load::NotReady => (styled("Not ready yet", Role::Muted, &ctx.theme), None),
+            Load::Failed(code) => (
+                status(
+                    &format!("Failed to read it. {}", setup_plain(code)),
+                    &ctx.theme,
+                    ctx.glyphs,
+                ),
+                None,
+            ),
+            Load::Idle | Load::Loading => (ctx.loading("Loading"), None),
+        }
     }
 
     fn ask_cleanup(&mut self, ctx: &mut Ctx) {
@@ -1690,6 +1811,21 @@ impl AppSetup {
                 Key::Esc => {}
                 _ => self.ask = Some(Ask::Sockets { choice }),
             },
+            Ask::Supervisor { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Supervisor {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Supervisor {
+                        choice: (choice + 1).min(SUPERVISOR_CHOICES.len() - 1),
+                    })
+                }
+                Key::Enter => self.set_supervisor(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Supervisor { choice }),
+            },
             Ask::Cleanup { choice } => match key {
                 Key::Up => {
                     self.ask = Some(Ask::Cleanup {
@@ -2119,25 +2255,16 @@ impl AppSetup {
         }
         let note =
             |text: &str| -> Vec<Line<'static>> { if notes { under(text) } else { Vec::new() } };
-        let (sockets, detail) = match &self.sandbox {
-            Load::Ready(settings) => {
-                let (title, detail) = sockets_words(settings.linux_sockets);
-                (Line::raw(title), Some(detail))
+        let sandbox: [(&str, SandboxWords); 2] = [
+            ("Linux sockets", |settings| sockets_words(settings.linux_sockets)),
+            ("Linux supervisor", |settings| supervisor_words(settings.linux_supervisor)),
+        ];
+        for (name, words) in sandbox {
+            let (value, detail) = self.sandbox_value(words, ctx);
+            lines.push(label(name, value));
+            if let Some(detail) = detail {
+                lines.extend(note(detail));
             }
-            Load::NotReady => (styled("Not ready yet", Role::Muted, theme), None),
-            Load::Failed(code) => (
-                status(
-                    &format!("Failed to read it. {}", setup_plain(code)),
-                    theme,
-                    glyphs,
-                ),
-                None,
-            ),
-            Load::Idle | Load::Loading => (ctx.loading("Loading"), None),
-        };
-        lines.push(label("Linux sockets", sockets));
-        if let Some(detail) = detail {
-            lines.extend(note(detail));
         }
         lines.push(label("Finished agents", self.cleanup_value(ctx)));
         if matches!(self.cleanup, Load::Ready(_)) {
@@ -2219,24 +2346,12 @@ impl AppSetup {
                 ));
             }
             Some(Ask::Sockets { choice }) => {
-                lines.extend(
-                    wrap(SOCKETS_TEXT, limit)
-                        .into_iter()
-                        .map(|part| styled(part, Role::Muted, theme)),
-                );
-                for (index, sockets) in SOCKETS_CHOICES.iter().enumerate() {
-                    let (title, detail) = sockets_words(*sockets);
-                    let mark = if index == *choice { "> " } else { "  " };
-                    lines.push(join([
-                        Line::raw(mark),
-                        styled(title, Role::Heading, theme),
-                    ]));
-                    lines.extend(
-                        wrap(detail, limit.saturating_sub(4).max(1))
-                            .into_iter()
-                            .map(|part| styled(format!("    {part}"), Role::Muted, theme)),
-                    );
-                }
+                let options = SOCKETS_CHOICES.map(sockets_words);
+                lines.extend(option_rows(SOCKETS_TEXT, &options, *choice, limit, ctx));
+            }
+            Some(Ask::Supervisor { choice }) => {
+                let options = SUPERVISOR_CHOICES.map(supervisor_words);
+                lines.extend(option_rows(SUPERVISOR_TEXT, &options, *choice, limit, ctx));
             }
             Some(Ask::Cleanup { choice }) => lines.extend(self.cleanup_rows(*choice, limit, ctx)),
             Some(Ask::Steps { choice }) => lines.extend(self.steps_rows(*choice, limit, ctx)),
@@ -2453,6 +2568,7 @@ impl Screen for AppSetup {
             }
             Some(
                 ask @ (Ask::Sockets { .. }
+                | Ask::Supervisor { .. }
                 | Ask::Cleanup { .. }
                 | Ask::QuitChoice { .. }
                 | Ask::QuitLimit { .. }
@@ -2509,27 +2625,40 @@ impl Screen for AppSetup {
             }
             _ => {}
         }
-        if self.fixable().is_some() && self.refused_tool() == Some(RefusedTool::FixButton) {
+        let fix = self.fixable().is_some() && self.refused_tool() == Some(RefusedTool::FixButton);
+        if fix && self.first_run {
             hints.push(hint("p", "Fix"));
         }
         if !self.first_run {
-            hints.push(hint("h", "Change home"));
+            hints.push(hint("h", "Home"));
             if matches!(&self.github, Load::Ready(github) if github.signed_in) {
                 hints.push(hint("g", "Sign out of GitHub"));
             }
-            hints.push(hint("l", "Linux sockets"));
-            hints.push(hint("f", "Finished agents"));
+            hints.push(hint("l", "Sockets"));
+            hints.push(hint("v", "Supervisor"));
+            hints.push(hint("f", "Finished"));
             hints.push(hint("q", "Quitting"));
             hints.push(hint("e", "Retry"));
             hints.push(hint("m", "Master steps"));
             hints.push(hint("t", "Master time"));
             hints.push(hint("z", "Master frame"));
             hints.push(hint("u", "Unused"));
+            if fix {
+                hints.push(hint("p", "Fix"));
+            }
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
         }
         hints
+    }
+
+    fn keys(&self, ctx: &Ctx) -> Vec<Hint> {
+        let mut keys = self.hints(ctx);
+        if let Some(at) = keys.iter().position(|item| item.key == "g") {
+            keys.insert(at + 1, hint("G", "GitHub rules"));
+        }
+        keys
     }
 
     fn typing(&self) -> bool {
@@ -2578,8 +2707,18 @@ impl Screen for AppSetup {
                 self.ask_sign_out(ctx);
                 Flow::Handled
             }
+            Key::Char('G')
+                if !self.first_run
+                    && matches!(&self.github, Load::Ready(github) if github.signed_in) =>
+            {
+                Flow::Open(Place::GitHubDefaults)
+            }
             Key::Char('l') if !self.first_run => {
                 self.ask_sockets(ctx);
+                Flow::Handled
+            }
+            Key::Char('v') if !self.first_run => {
+                self.ask_supervisor(ctx);
                 Flow::Handled
             }
             Key::Char('f') if !self.first_run => {
