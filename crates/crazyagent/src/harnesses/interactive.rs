@@ -10,7 +10,7 @@ use super::records::{self, Reader};
 use crate::coord::settings::{HarnessKind, TerminalDisplay};
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -334,8 +334,9 @@ pub fn command(
 /// Builds what the terminal host runs for one interactive agent as [`command`] does, from
 /// given terminal settings instead of the catalog's, such as a stand-in's. A harness run
 /// from settings gets their arguments and follows their record; an account with a key,
-/// tools off, Full access and a project context are refused until their tasks land.
-/// Inputs: as for `command`, and the settings. Output: the command, or a refusal code.
+/// tools off and Full access are refused until their tasks land, and a project context
+/// unless [`takes_context`] holds. Inputs: as for `command`, and the settings. Output: the
+/// command, or a refusal code.
 pub fn command_with(
     request: &LaunchRequest,
     installed: Option<&Installed>,
@@ -405,7 +406,7 @@ pub fn command_with(
             if request.unconfined {
                 return Err(failure("launch_harness_unsupported"));
             }
-            if installed.is_some() {
+            if installed.is_some_and(|installed| !takes_context(settings, installed)) {
                 return Err(failure("launch_context_unsupported"));
             }
             if !records::json_files::session_shaped(run.session_id) {
@@ -518,7 +519,8 @@ pub fn command_with(
                 .map(|(name, value)| (name.to_owned(), value)),
         );
     }
-    let env = agent_env(&env)?;
+    let listed = installed.map(Installed::environment).unwrap_or_default();
+    let env = agent_env(&env, listed)?;
     let built = InteractiveCommand {
         argv,
         cwd,
@@ -530,6 +532,16 @@ pub fn command_with(
     }
     assert_eq!(built.argv[0] == SANDBOX_EXEC, !request.unconfined);
     Ok(built)
+}
+
+/// Tells whether a pane run from a manifest's terminal settings may take an installed
+/// project context: one a listed launch wrote for a manifest that renders MCP servers, so
+/// the team tools reach the harness through its MCP file and no other way. Inputs: the
+/// settings and the installed context. Output: the answer.
+fn takes_context(settings: &TerminalSettings, installed: &Installed) -> bool {
+    let listed = installed.files().is_some_and(|files| files.listed);
+    let renders = super::render::read(settings.manifest());
+    listed && renders.is_ok_and(|renders| renders.mcp.is_some())
 }
 
 /// Reads the terminal settings of a catalog harness whose manifest names a manifest
@@ -546,15 +558,22 @@ pub(crate) fn catalog_settings(harness: &str) -> Result<TerminalSettings, Launch
 }
 
 /// Passes a pane's variables through the one agent environment builder, so a pane gets
-/// the same refusals and git settings as every other agent process.
-/// Input: the variables in order. Output: them with [`crate::sandbox::AGENT_GIT_ENV`]
-/// appended, or `launch_environment_refused`.
-fn agent_env(env: &[(String, String)]) -> Result<Vec<(String, String)>, LaunchError> {
+/// the same refusals and git settings as every other agent process, with a listed
+/// harness's home block variables as the harness's own, as its piped launch has them.
+/// Inputs: the variables in order and the home block's. Output: them with
+/// [`crate::sandbox::AGENT_GIT_ENV`] appended, or `launch_environment_refused`.
+fn agent_env(
+    env: &[(String, String)],
+    listed: &[(OsString, OsString)],
+) -> Result<Vec<(String, String)>, LaunchError> {
     let base: Vec<(&str, &OsStr)> = env
         .iter()
         .map(|(name, value)| (name.as_str(), OsStr::new(value)))
         .collect();
-    crate::sandbox::agent_env(&base, std::iter::empty())
+    let harness = listed
+        .iter()
+        .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str())));
+    crate::sandbox::agent_env(&base, harness)
         .map_err(|_| failure("launch_environment_refused"))?
         .into_iter()
         .map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
