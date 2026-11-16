@@ -816,3 +816,44 @@ async fn a_served_process_that_ended_beside_one_still_listening_fails_nothing() 
     assert!(served.await.unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(!flagged(&refused), "the launch is kept");
 }
+
+/// rv-sa241 LEAD-2: a process the open did not see ready that holds the server's own
+/// listening socket, as one that inherited it after ready, can accept the owner's
+/// connection, so the proxy sends nothing, the owner gets 502, and the launch is flagged.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_process_the_open_did_not_see_holding_the_listening_socket_gets_nothing() {
+    use rustix::io::{FdFlags, fcntl_setfd};
+    let (upstream, server_port) = bind(None).await.unwrap();
+    fcntl_setfd(&upstream, FdFlags::empty()).unwrap();
+    let spawned = crate::spawn_gate::spawn(
+        std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    );
+    fcntl_setfd(&upstream, FdFlags::CLOEXEC).unwrap();
+    let mut holder = spawned.unwrap();
+    let holder_pid = i32::try_from(holder.id()).unwrap();
+    let held = crate::ide::server::listeners(server_port).unwrap();
+    let shared = held.iter().any(|(pid, _)| *pid == holder_pid);
+    let ours = vec![i32::try_from(std::process::id()).unwrap()];
+    let (proxy, refused) = proxy_to(server_port, Some(ours)).await;
+    let taken = tokio::spawn(fetched(proxy));
+    let (mut reached, _) = crate::spawn_gate::accept_tcp(&upstream).await.unwrap();
+    let mut got = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), reached.read_to_end(&mut got)).await;
+    drop(reached);
+    let reply = taken.await.unwrap();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(shared, "the holder shares the listening socket: {held:?}");
+    assert!(
+        got.is_empty(),
+        "the shared socket got: {}",
+        String::from_utf8_lossy(&got)
+    );
+    assert!(reply.starts_with("HTTP/1.1 502 "), "{reply}");
+    assert!(flagged(&refused), "the launch is flagged to stop");
+}
