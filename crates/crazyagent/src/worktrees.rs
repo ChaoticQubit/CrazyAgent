@@ -349,7 +349,7 @@ fn collect_git_output(
             child.kill().map_err(error)?;
             child.wait().map_err(error)?;
             let _ = reader.join();
-            return Err(error("git_deadline"));
+            return Err(error(GIT_DEADLINE));
         }
         std::thread::sleep(Duration::from_millis(2));
     };
@@ -1540,6 +1540,9 @@ fn save(connection: &Connection, record: &LeaseRecord) -> Result<(), EngineError
 
 /// How long a lease check that failed on a read waits before its one more try.
 const VERIFY_RETRY_WAIT: Duration = Duration::from_millis(50);
+/// The code of an engine Git command killed at its deadline. It says the machine was
+/// slow, not that the repository broke a rule.
+const GIT_DEADLINE: &str = "git_deadline";
 /// The codes of a Git command that failed at once, which is no rule of the engine's about
 /// the repository. `git_deadline` is not among them: a Git command that ran out of time
 /// has already held its caller for its whole deadline.
@@ -1657,6 +1660,24 @@ impl LeaseLog {
     }
 }
 
+/// Writes a failed lease check to the engine log through [`LeaseLog`], at most once for
+/// each different failure of a lease. Inputs: the lease record, the failure and whether a
+/// second try ran. Output: nothing.
+fn log_failed_check(record: &LeaseRecord, problem: &EngineError, retried: bool) {
+    let line = LEASE_LOGGED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .line(
+            record.lease.task_id.as_str(),
+            &record.lease.repository,
+            &logged_failure(problem),
+            retried,
+        );
+    if let Some(line) = line {
+        eprintln!("{line}");
+    }
+}
+
 /// Reads a task's leases. A Ready or RecoveryRequired lease is checked against the file
 /// system and Git through [`checked`] and reads as Uncertain when the check fails. The
 /// failure it ends with is written to the engine log once for that lease, through
@@ -1678,18 +1699,7 @@ pub(crate) fn leases(connection: &Connection, task: &TaskId) -> Result<Outcome, 
                 LeaseState::Ready | LeaseState::RecoveryRequired
             ) && let Err((problem, retried)) = checked(|| verify_record(&record))
             {
-                let line = LEASE_LOGGED
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .line(
-                        record.lease.task_id.as_str(),
-                        &record.lease.repository,
-                        &logged_failure(&problem),
-                        retried,
-                    );
-                if let Some(line) = line {
-                    eprintln!("{line}");
-                }
+                log_failed_check(&record, &problem, retried);
                 record.lease.state = LeaseState::Uncertain;
             }
             Ok(record.lease)
@@ -2676,8 +2686,25 @@ fn renumbered(record: &LeaseRecord) -> bool {
             .is_ok_and(|live| live.device != record.admission.root.device)
 }
 
+/// Settles every stored lease when the engine starts, checking each through
+/// [`verify_record`]. Input: the connection, outside any transaction. Output: success, or
+/// `lease_capacity` or the storage failure.
 #[cfg(unix)]
 pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
+    reconcile_with(connection, verify_record)
+}
+
+/// Settles every stored lease at an engine start. A Ready or RecoveryRequired lease that
+/// still verifies, or whose check ran out of time on a slow start, becomes
+/// RecoveryRequired, to be checked again before any use; a Reserved lease, and one whose
+/// check failed otherwise, becomes Uncertain. Each failed check is logged. Inputs: the
+/// connection, outside any transaction, and the lease check. Output: success, or
+/// `lease_capacity` or the storage failure.
+#[cfg(unix)]
+fn reconcile_with(
+    connection: &Connection,
+    mut verify: impl FnMut(&LeaseRecord) -> Result<(), EngineError>,
+) -> Result<(), EngineError> {
     let mut statement = connection
         .prepare("SELECT body FROM worktree_leases LIMIT 129")
         .map_err(error)?;
@@ -2690,15 +2717,22 @@ pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
         return Err(error("lease_capacity"));
     }
     for mut record in records {
-        let checked = match record.lease.state {
-            LeaseState::Ready | LeaseState::RecoveryRequired => true,
-            LeaseState::Uncertain => renumbered(&record),
-            LeaseState::Reserved => false,
-        };
-        record.lease.state = if checked && verify_record(&record).is_ok() {
-            LeaseState::RecoveryRequired
-        } else {
-            LeaseState::Uncertain
+        let held = matches!(
+            record.lease.state,
+            LeaseState::Ready | LeaseState::RecoveryRequired
+        );
+        let due = held || (record.lease.state == LeaseState::Uncertain && renumbered(&record));
+        record.lease.state = match due.then(|| checked(|| verify(&record))) {
+            Some(Ok(())) => LeaseState::RecoveryRequired,
+            Some(Err((problem, retried))) => {
+                log_failed_check(&record, &problem, retried);
+                if held && problem.0 == GIT_DEADLINE {
+                    LeaseState::RecoveryRequired
+                } else {
+                    LeaseState::Uncertain
+                }
+            }
+            None => LeaseState::Uncertain,
         };
         save(connection, &record)?;
     }
@@ -3754,6 +3788,108 @@ mod tests {
             )
             .unwrap();
             assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
+        }
+    }
+
+    /// Stores one lease at `state` with both worktree identities pinned in a fresh lease
+    /// table, then runs one engine start's reconcile with a lease check that gives `answers`
+    /// in turn, the last one again once they run out. Inputs: the state and the answers.
+    /// Output: the state stored after the start and how many checks ran.
+    fn restarted(state: LeaseState, answers: &[Result<(), &str>]) -> (LeaseState, usize) {
+        assert!(!answers.is_empty());
+        let connection = Connection::open_in_memory().unwrap();
+        initialize(&connection).unwrap();
+        let mut record = reserved_record();
+        record.lease.state = state;
+        record.directory = Some(Identity {
+            device: 1,
+            inode: 4,
+        });
+        record.metadata = Some(Identity {
+            device: 1,
+            inode: 5,
+        });
+        let inserted = connection
+            .execute(
+                "INSERT INTO worktree_leases VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    record.lease.task_id.as_str(),
+                    record.lease.repository,
+                    record.lease.path,
+                    serde_json::to_string(&record).unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(inserted, 1);
+        let mut calls = 0;
+        reconcile_with(&connection, |checked| {
+            assert_eq!(checked.lease, record.lease);
+            let answer = answers[calls.min(answers.len() - 1)];
+            calls += 1;
+            answer.map_err(error)
+        })
+        .unwrap();
+        let stored = load(&connection, &record.lease.task_id, &record.lease.repository)
+            .unwrap()
+            .unwrap();
+        (stored.lease.state, calls)
+    }
+
+    /// ENGINE-START-LEASE-DEMOTE: a lease check that ran out of time while a slow engine
+    /// started keeps a Ready or RecoveryRequired lease waiting for recovery, checked again
+    /// later, instead of leaving it Uncertain for good.
+    #[test]
+    fn a_lease_check_that_ran_out_of_time_at_start_keeps_the_lease_for_recovery() {
+        for state in [LeaseState::Ready, LeaseState::RecoveryRequired] {
+            assert_eq!(
+                restarted(state.clone(), &[Err("git_deadline")]),
+                (LeaseState::RecoveryRequired, 1),
+                "{state:?}"
+            );
+        }
+    }
+
+    /// ENGINE-START-LEASE-DEMOTE: a lease check at start that failed on a read is tried once
+    /// more, as a lease read's check is; a second failed read leaves the lease Uncertain.
+    #[test]
+    fn a_lease_check_that_failed_on_a_read_at_start_is_tried_once_more() {
+        let missing = "No such file or directory (os error 2)";
+        assert_eq!(
+            restarted(LeaseState::RecoveryRequired, &[Err(missing), Ok(())]),
+            (LeaseState::RecoveryRequired, 2)
+        );
+        assert_eq!(
+            restarted(LeaseState::RecoveryRequired, &[Err(missing)]),
+            (LeaseState::Uncertain, 2)
+        );
+    }
+
+    /// ENGINE-START-LEASE-DEMOTE guard: a lease that verifies at start waits for recovery; one
+    /// that broke a rule is Uncertain after one check; a Reserved lease and an Uncertain one
+    /// on an unrenumbered volume are Uncertain without a check.
+    #[test]
+    fn a_lease_at_start_is_uncertain_on_a_rule_and_waits_for_recovery_when_it_verifies() {
+        assert_eq!(
+            restarted(LeaseState::Ready, &[Ok(())]),
+            (LeaseState::RecoveryRequired, 1)
+        );
+        for rule in [
+            "worktree_branch_mismatch",
+            "worktree_identity_changed",
+            "untrusted_git_entry:index.lock",
+        ] {
+            assert_eq!(
+                restarted(LeaseState::RecoveryRequired, &[Err(rule)]),
+                (LeaseState::Uncertain, 1),
+                "{rule}"
+            );
+        }
+        for state in [LeaseState::Reserved, LeaseState::Uncertain] {
+            assert_eq!(
+                restarted(state.clone(), &[Err("git_deadline")]),
+                (LeaseState::Uncertain, 0),
+                "{state:?}"
+            );
         }
     }
 }
