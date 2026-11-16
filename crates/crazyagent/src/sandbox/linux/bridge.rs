@@ -5,12 +5,12 @@ use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use nix::sys::signal::SigSet;
 use nix::sys::socket::{
     AddressFamily, ControlMessage, ControlMessageOwned, MsgFlags, Shutdown, SockFlag, SockType,
-    accept, recv, recvmsg, send, sendmsg, setsockopt, shutdown, socketpair, sockopt,
+    accept4, recv, recvmsg, send, sendmsg, setsockopt, shutdown, socketpair, sockopt,
 };
 use nix::sys::time::{TimeVal, TimeValLike};
 use std::ffi::{OsStr, OsString};
 use std::io::{IoSlice, IoSliceMut, Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -122,10 +122,10 @@ impl Bridge {
         let fd = self.fd.ok_or("the bridge has no descriptor")?;
         let mut listeners = Vec::new();
         for port in &self.ports {
-            let v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, *port))
+            let v4 = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, *port))
                 .map_err(|error| format!("bridge port {port}: {error}"))?;
             listeners.push((V4, *port, v4));
-            if let Ok(v6) = TcpListener::bind((Ipv6Addr::LOCALHOST, *port)) {
+            if let Ok(v6) = crate::spawn_gate::bind_tcp_std((Ipv6Addr::LOCALHOST, *port)) {
                 listeners.push((V6, *port, v6));
             }
         }
@@ -205,11 +205,12 @@ pub(super) fn broker_request(args: Vec<OsString>) -> Result<HelperRequest, Strin
     Ok(HelperRequest::Broker { parent, ports })
 }
 
-/// Opens the bridge from outside the nest: a socket pair, the broker started on this
-/// computer's network with one end as its input, and the other end left open for the
-/// helper inside, named in the flags written for it ([`inner`]). Inputs: the ports and the
-/// nest's arguments. Output: the open end, kept until bubblewrap starts, and the arguments
-/// with the flags; or the reason.
+/// Opens the bridge from outside the nest: a socket pair, close-on-exec from the call that
+/// makes it, so the spawn gate has nothing to hold; the broker on this computer's network
+/// with one end as its input; and the other end left open for the helper inside, named in
+/// its flags ([`inner`]). Inputs: the ports and the nest's arguments. Output: the open end,
+/// kept until bubblewrap starts, and the arguments with the flags; or the reason.
+#[allow(clippy::disallowed_methods)]
 pub(super) fn open(ports: &[u16], args: &[OsString]) -> Result<(OwnedFd, Vec<OsString>), String> {
     assert!(!ports.is_empty() && ports.len() <= PORTS_MAX);
     let (inside, outside) = socketpair(
@@ -308,7 +309,7 @@ fn listed(text: &[u8], fds: &[RawFd], ports: &[u16]) -> Result<Vec<Listener>, St
         return Err("the handover does not name each listener once".into());
     }
     let mut listeners: Vec<Listener> = Vec::with_capacity(fds.len());
-    for (entry, fd) in text.chunks_exact(ENTRY_BYTES).zip(fds) {
+    for (entry, fd) in text.as_chunks::<ENTRY_BYTES>().0.iter().zip(fds) {
         let (family, port) = (entry[0], u16::from_be_bytes([entry[1], entry[2]]));
         let known = [V4, V6].contains(&family) && ports.contains(&port);
         let twice = listeners
@@ -453,7 +454,7 @@ fn carry(listeners: &[Listener]) -> String {
 fn accept_on(family: u8, port: u16, listener: RawFd, live: &Arc<Live>) {
     loop {
         live.take();
-        let agent = match accept(listener) {
+        let agent = match accept4(listener, SockFlag::SOCK_CLOEXEC) {
             Ok(agent) => agent,
             Err(Errno::EBADF | Errno::EINVAL | Errno::ENOTSOCK) => return live.free(),
             Err(_) => {
@@ -490,8 +491,11 @@ fn relay(family: u8, port: u16, agent: RawFd) {
 }
 
 /// Connects to this computer's loopback on a bridged port, the family the agent used first
-/// and the other one after it, as a program on the shared network would fall back. Inputs:
-/// the family and the port. Output: the connection, or none when nothing listens there.
+/// and the other one after it, as a program on the shared network would fall back. The
+/// broker starts no process and std makes the socket close-on-exec as it creates it, so the
+/// spawn gate, held across a whole connect, would only queue its relays. Inputs: the family
+/// and the port. Output: the connection, or none when nothing listens there.
+#[allow(clippy::disallowed_methods)]
 fn reach(family: u8, port: u16) -> Option<TcpStream> {
     assert!(port >= BRIDGE_PORT_MIN);
     let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
@@ -547,9 +551,8 @@ fn shut(fd: RawFd) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nix::sys::socket::accept;
     use std::io::{Read, Write};
-    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::net::Ipv4Addr;
     use std::os::fd::AsRawFd;
     use std::time::{Duration, Instant};
 
@@ -728,16 +731,16 @@ mod tests {
 
     #[test]
     fn the_broker_carries_a_connection_both_ways_to_the_same_port_on_this_computer() {
-        let program = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let program = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = program.local_addr().unwrap().port();
         program.set_nonblocking(true).unwrap();
-        let nest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let mut agent = TcpStream::connect(nest.local_addr().unwrap()).unwrap();
-        let accepted = accept(nest.as_raw_fd()).unwrap();
+        let nest = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut agent = crate::spawn_gate::connect_tcp_std(nest.local_addr().unwrap()).unwrap();
+        let accepted = accept4(nest.as_raw_fd(), SockFlag::SOCK_CLOEXEC).unwrap();
         let carried = std::thread::spawn(move || relay(V4, port, accepted));
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut served = loop {
-            match program.accept() {
+            match crate::spawn_gate::accept_tcp_std(&program) {
                 Ok((served, _)) => break served,
                 Err(_) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
@@ -761,12 +764,12 @@ mod tests {
 
     #[test]
     fn a_bridged_port_with_nothing_behind_it_closes_the_connection() {
-        let free = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let free = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = free.local_addr().unwrap().port();
         drop(free);
-        let nest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let mut agent = TcpStream::connect(nest.local_addr().unwrap()).unwrap();
-        let accepted = accept(nest.as_raw_fd()).unwrap();
+        let nest = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut agent = crate::spawn_gate::connect_tcp_std(nest.local_addr().unwrap()).unwrap();
+        let accepted = accept4(nest.as_raw_fd(), SockFlag::SOCK_CLOEXEC).unwrap();
         relay(V4, port, accepted);
         let mut answer = Vec::new();
         assert_eq!(agent.read_to_end(&mut answer).ok(), Some(0));

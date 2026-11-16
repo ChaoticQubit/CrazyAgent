@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
 use std::io::Read;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::ops::RangeInclusive;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -420,7 +420,7 @@ pub enum HelperRequest {
         keep_free: bool,
     },
     Run {
-        policy: LandlockPolicy,
+        policy: Box<LandlockPolicy>,
         program: PathBuf,
         args: Vec<OsString>,
     },
@@ -561,7 +561,7 @@ fn run_request(
         return Err("too many path grants".into());
     }
     Ok(HelperRequest::Run {
-        policy,
+        policy: Box::new(policy),
         program,
         args: rest.collect(),
     })
@@ -1090,7 +1090,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             policy,
             program,
             args,
-        } => (policy, Some((program, args))),
+        } => (*policy, Some((program, args))),
     };
     hold(&policy, launch, bridge.as_ref(), started)
 }
@@ -1233,7 +1233,7 @@ fn probe_supervisor(folder: &Path) -> ExitCode {
     if nix::sys::prctl::set_no_new_privs().is_err() || !private_empty(folder) {
         return ExitCode::from(1);
     }
-    let checked = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).and_then(|listener| {
+    let checked = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).and_then(|listener| {
         let port = listener.local_addr()?.port();
         let mut check = Command::new("/proc/self/exe");
         check
@@ -1276,8 +1276,8 @@ fn probe_supervised(port: u16, folder: &Path) -> ExitCode {
     let refused = |error: std::io::Error| error.kind() == std::io::ErrorKind::PermissionDenied;
     let elsewhere = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port));
     let made = folder.join("made");
-    let here = TcpStream::connect((Ipv4Addr::LOCALHOST, port));
-    let there = TcpStream::connect_timeout(&elsewhere, Duration::from_secs(2));
+    let here = crate::spawn_gate::connect_tcp_std((Ipv4Addr::LOCALHOST, port));
+    let there = crate::spawn_gate::connect_tcp_std_timeout(&elsewhere, Duration::from_secs(2));
     let written = fs::write(&made, b"made").and_then(|()| fs::read(&made));
     let git = fs::create_dir(folder.join(".git"));
     let supervisor = rustix::process::getppid();
@@ -3113,7 +3113,7 @@ mod tests {
         let mut run = args;
         run.extend([OsString::from("--"), OsString::from("/bin/true")]);
         let parsed = match HelperRequest::parse(run) {
-            Ok(HelperRequest::Run { policy, .. }) => Some(policy),
+            Ok(HelperRequest::Run { policy, .. }) => Some(*policy),
             _ => None,
         };
         assert_eq!(parsed, Some(policy));
@@ -3218,7 +3218,7 @@ mod tests {
                     .collect()
             ),
             Ok(HelperRequest::Run {
-                policy,
+                policy: Box::new(policy),
                 program: PathBuf::from("/bin/true"),
                 args: Vec::new(),
             })
@@ -3328,7 +3328,7 @@ mod tests {
                     .collect()
             ),
             Ok(HelperRequest::Run {
-                policy,
+                policy: Box::new(policy),
                 program: PathBuf::from("/bin/true"),
                 args: Vec::new(),
             })
@@ -3365,11 +3365,11 @@ mod tests {
         assert_eq!(
             parse(&[LIMIT_NETWORK, KEEP_FREE, "1455", "--", "/bin/true"]),
             Ok(HelperRequest::Run {
-                policy: LandlockPolicy {
+                policy: Box::new(LandlockPolicy {
                     limit_network: true,
                     keep_free: vec![1455],
                     ..LandlockPolicy::default()
-                },
+                }),
                 program: PathBuf::from("/bin/true"),
                 args: Vec::new(),
             })
@@ -4424,7 +4424,7 @@ mod tests {
         assert_eq!(
             HelperRequest::parse(words),
             Ok(HelperRequest::Run {
-                policy,
+                policy: Box::new(policy),
                 program: PathBuf::from("/bin/true"),
                 args: Vec::new(),
             })
@@ -4489,7 +4489,7 @@ mod tests {
         assert_eq!(
             HelperRequest::parse(words),
             Ok(HelperRequest::Run {
-                policy,
+                policy: Box::new(policy),
                 program: PathBuf::from("/bin/true"),
                 args: Vec::new(),
             })
@@ -4560,7 +4560,9 @@ mod tests {
             assert!(parse(refused).is_err(), "{refused:?}");
         }
         let limited = [LIMIT_NETWORK, CONNECT, "8080", GUARD_LOOPBACK];
-        let ported = |more: &[&str]| [&limited[..], more, &["--", "/bin/true"][..]].concat();
+        let ported = |more: &[&'static str]| -> Vec<&'static str> {
+            [&limited[..], more, &["--", "/bin/true"][..]].concat()
+        };
         for refused in [&["0"][..], &["8081"], &["8080", OPEN_SOCKETS]] {
             assert!(parse(&ported(refused)).is_err(), "{refused:?}");
         }
@@ -4787,6 +4789,7 @@ mod tests {
     /// wider lines; nothing kept stays nothing (rv-secreview linux-t4c F2).
     #[test]
     fn a_launch_whose_probe_fails_marks_the_kept_host_unsupervised() {
+        use super::super::LinuxHost;
         let host = LinuxHost {
             nested: true,
             scoped: true,
