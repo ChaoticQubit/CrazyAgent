@@ -394,7 +394,7 @@ pub(super) fn rule_set(manifest: &Manifest, piped: &Yaml) -> Result<Vec<Rule>, R
 
 /// Reads one argument list setting. Inputs: the piped block and the key. Output: the list,
 /// none when the key is absent, or a refusal that names the setting.
-pub(crate) fn arguments(piped: &Yaml, key: &str) -> Result<Option<Vec<String>>, Refused> {
+pub(super) fn arguments(piped: &Yaml, key: &str) -> Result<Option<Vec<String>>, Refused> {
     let place = format!("piped.{key}");
     let items = match piped.get(key) {
         None | Some(Yaml::Null) => return Ok(None),

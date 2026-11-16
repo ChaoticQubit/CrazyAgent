@@ -1695,19 +1695,20 @@ impl Session {
         let (request, relay) = route(request)?;
         let key = write_key_file(&request)?;
         let command = command(&request)?;
-        Self::spawn(request, command, None, None, (relay, key))
+        Self::spawn(request, command, None, None, (relay, key), &[])
     }
 
-    /// Spawns one listed master turn's harness from the command [`listed_command`] built,
-    /// holding the relay of a keyed account for as long as the session lives (DEC-180 Task
-    /// 20). Inputs: the checked request, the command and the relay, if any. Output: a running
-    /// session, or a plain refusal code.
+    /// Spawns one listed master turn's harness from the command [`listed_command`] built, its
+    /// ACP session opened with the given engine servers, holding the relay of a keyed account
+    /// while the session lives (DEC-180 Task 20). Inputs: the checked request, the command,
+    /// the relay, if any, and the servers. Output: a running session, or a plain refusal code.
     pub fn start_listed(
         request: LaunchRequest,
         command: Command,
         relay: Option<Relay>,
+        servers: &[EngineServer],
     ) -> Result<Self, LaunchError> {
-        Self::spawn(request, command, None, None, (relay, None))
+        Self::spawn(request, command, None, None, (relay, None), servers)
     }
 
     /// Spawns the harness for an agent of one project with the project's approved skills,
@@ -1722,7 +1723,7 @@ impl Session {
         let (command, installed) = command_with_context(&request, &context)?;
         drop(context);
         let key = write_key_file(&request)?;
-        Self::spawn(request, command, Some(installed), None, (relay, key))
+        Self::spawn(request, command, Some(installed), None, (relay, key), &[])
     }
 
     /// Spawns a harness that outlives the engine: its input is a FIFO it holds open for
@@ -1750,7 +1751,7 @@ impl Session {
         drop(context);
         let io = DurableIo::create(state)?;
         let key = write_key_file(&request)?;
-        Self::spawn(request, command, installed, Some(io), (relay, key))
+        Self::spawn(request, command, installed, Some(io), (relay, key), &[])
     }
 
     fn spawn(
@@ -1759,12 +1760,13 @@ impl Session {
         context: Option<Installed>,
         durable: Option<DurableIo>,
         (relay, key): (Option<Relay>, Option<KeyFile>),
+        listed: &[EngineServer],
     ) -> Result<Self, LaunchError> {
+        assert!(context.is_none() || listed.is_empty());
         let native_threads = context.as_ref().is_some_and(Installed::native_threads);
         let servers = context
             .as_ref()
-            .map(Installed::engine_servers)
-            .unwrap_or_default();
+            .map_or(listed, Installed::engine_servers);
         let (driver, startup) = Driver::new(&request, native_threads, servers)?;
         let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
         command.env(LINEAGE_VARIABLE, token.as_str());

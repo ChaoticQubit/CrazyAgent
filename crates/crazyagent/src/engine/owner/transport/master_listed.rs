@@ -8,11 +8,10 @@ use crate::credentials::SecretString;
 use crate::engine::claude_host::MasterTools;
 use crate::harnesses::accounts::Handover;
 use crate::harnesses::launch::{LaunchError, LaunchEvent, LaunchRequest, listed_command};
-use crate::harnesses::manifest::{DriverKind, Manifest};
 use crate::harnesses::registry::Harness;
 use crate::launch_context::EngineServer;
 use crate::model_gateway::relay::Relay;
-use crate::plugins::{LaunchServer, ServerSpec};
+use crate::plugins::LaunchServer;
 use crate::usage::capture::Tokens;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -24,8 +23,7 @@ pub(super) const TURN_FAILED: &str = "listed_master_turn_failed";
 pub(super) const PROCESS_EXITED: &str = "listed_master_process_exited";
 /// The code of a listed master turn its harness ended as interrupted.
 pub(super) const CANCELLED: &str = "listed_master_cancelled";
-/// The code of a listed master launch its manifest cannot give: no ACP driver, a placeholder
-/// it does not fill or a path that is not text.
+/// The code of a listed master launch whose manifest's render or home block does not read.
 const UNSUPPORTED: &str = "master_runtime_backend_unsupported";
 /// The most reply text one turn gathers; the rest is counted, and the stored reply is cut
 /// to [`crate::master_session::REPLY_BYTES_MAX`] with its cut note.
@@ -92,10 +90,11 @@ pub(super) struct ListedLaunch {
     pub(super) written: Vec<PathBuf>,
 }
 
-/// Builds one listed master turn's launch: the manifest's piped arguments with its tools-off
-/// switch when tools are off, the hand-over variables through the agent sandbox's guard, and
-/// the MCP config, holding only the team server when tools are on, and instruction file.
-/// Input: the turn's launch. Output: the launch, or the refusal.
+/// Builds one listed master turn's launch: the manifest's ACP arguments with its tools-off
+/// switch when tools are off, the hand-over variables through the agent sandbox's guard, the
+/// team server for its session when tools are on, and an MCP config naming no server of the
+/// engine's or the owner's, beside the instruction file. Input: the turn's launch. Output:
+/// the launch, or the refusal.
 pub(super) fn listed_launch(spec: &ListedSpec<'_>) -> Result<ListedLaunch, EngineError> {
     let request = spec.request;
     if spec.tools.is_some() != request.tools {
@@ -106,11 +105,23 @@ pub(super) fn listed_launch(spec: &ListedSpec<'_>) -> Result<ListedLaunch, Engin
     }
     let manifest = spec.harness.manifest();
     let home = request.account.home();
-    let arguments = piped_arguments(manifest, request)?;
+    let arguments: Vec<OsString> = crate::harnesses::drivers::acp::arguments(
+        manifest,
+        home,
+        &request.working_dir,
+        request.model.as_deref(),
+        request.tools,
+    )
+    .map_err(engine_error)?
+    .into_iter()
+    .map(OsString::from)
+    .collect();
     let renders = crate::harnesses::render::read(manifest).map_err(|_| failure(UNSUPPORTED))?;
-    let server = spec.tools.map(team_server).transpose()?;
-    let written = crate::harnesses::render::write(&renders, home, &server, spec.instructions)
+    let none = std::iter::empty::<&LaunchServer>();
+    let written = crate::harnesses::render::write(&renders, home, none, spec.instructions)
         .map_err(engine_error)?;
+    let server = spec.tools.map(team_server).transpose()?;
+    let servers: Vec<EngineServer> = server.into_iter().collect();
     let shaped = crate::harnesses::home::read(manifest).map_err(|_| failure(UNSUPPORTED))?;
     let handover = spec.handover;
     let mut environment = shaped.environment(home);
@@ -131,57 +142,18 @@ pub(super) fn listed_launch(spec: &ListedSpec<'_>) -> Result<ListedLaunch, Engin
     let command = listed_command(request, &arguments, &environment, handed)
         .map_err(engine_error)?;
     assert!(written.iter().all(|path| path.starts_with(home)));
+    assert_eq!(servers.len(), usize::from(request.tools));
     Ok(ListedLaunch {
         command,
-        servers: Vec::new(),
+        servers,
         written,
     })
 }
 
-/// One listed master turn's arguments: the manifest's `piped.argv` with `piped.tools_off`
-/// placed as the per-turn drivers place it when tools are off, filling only `{home}`,
-/// `{cwd}` and `{model}`, so no token, key file or prompt can reach an argument. Inputs:
-/// the manifest and the request. Output: the arguments, or the refusal.
-fn piped_arguments(
-    manifest: &Manifest,
-    request: &LaunchRequest,
-) -> Result<Vec<OsString>, EngineError> {
-    let refused = || failure(UNSUPPORTED);
-    let piped = manifest
-        .block("piped")
-        .filter(|_| manifest.piped == Some(DriverKind::Acp))
-        .ok_or_else(refused)?;
-    let listed = |key| crate::harnesses::drivers::jsonl_turn::arguments(piped, key);
-    let argv = listed("argv").map_err(|_| refused())?.unwrap_or_default();
-    let off = if request.tools {
-        Vec::new()
-    } else {
-        listed("tools_off")
-            .map_err(|_| refused())?
-            .unwrap_or_default()
-    };
-    let at = crate::harnesses::drivers::positional(&argv, &[], &off).map_err(|_| refused())?;
-    let home = request.account.home().to_str().ok_or_else(refused)?;
-    let cwd = request.working_dir.to_str().ok_or_else(refused)?;
-    let model = request.model.as_deref();
-    let value = |name: &str| match (name, model) {
-        ("home", _) => Ok(home),
-        ("cwd", _) => Ok(cwd),
-        ("model", Some(model)) => Ok(model),
-        _ => Err(LaunchError(UNSUPPORTED.into(), None)),
-    };
-    let arguments: Vec<OsString> = crate::harnesses::drivers::ordered(&argv, at, &[], &off)
-        .map(|argument| crate::harnesses::drivers::fill(argument, value).map(OsString::from))
-        .collect::<Result<_, _>>()
-        .map_err(engine_error)?;
-    assert_eq!(arguments.len(), argv.len() + off.len());
-    Ok(arguments)
-}
-
-/// The engine's team server as a listed master's MCP config names it, the same command and
+/// The engine's team server as a listed master's ACP session opens it, the same command and
 /// arguments a native master's server gets from [`MasterTools::server_args`]. Input: the
 /// tools-on parts. Output: the server, or `master_runtime_binding` for an unsafe path.
-fn team_server(tools: MasterTools<'_>) -> Result<LaunchServer, EngineError> {
+fn team_server(tools: MasterTools<'_>) -> Result<EngineServer, EngineError> {
     let engine = tools
         .engine
         .to_str()
@@ -190,13 +162,10 @@ fn team_server(tools: MasterTools<'_>) -> Result<LaunchServer, EngineError> {
     let args = tools
         .server_args()
         .map_err(|_| failure("master_runtime_binding"))?;
-    Ok(LaunchServer {
+    Ok(EngineServer {
         name: crate::team::tool::SERVER_NAME.into(),
-        spec: ServerSpec::Stdio {
-            command: engine.into(),
-            args,
-        },
-        secrets: Vec::new(),
+        command: engine.into(),
+        args,
     })
 }
 
