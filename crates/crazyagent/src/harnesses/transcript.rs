@@ -9,7 +9,6 @@ use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
-use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
 pub const READ_BYTES_MAX: usize = 1024 * 1024;
@@ -1297,25 +1296,16 @@ fn appended_entry(rules: &[Rule], value: &Value) -> Option<(&'static str, String
     Some((speaker_name(speaker), found.text?))
 }
 
-/// The record rules of each catalog harness that keeps a jsonl-append record, read from
-/// its manifest's terminal settings once, as the registry never changes, so a record read
-/// line by line reads no manifest per line. Input: the catalog id. Output: the rules, or
-/// none for a harness with no jsonl-append record or settings that do not read.
+/// The record rules of the harness a jsonl-append record is stored under, found as
+/// [`records::stored`] finds its reader, by catalog id only, in the registry the run uses,
+/// and kept on that harness after the first read ([`super::registry::Harness::appended_rules`]).
+/// Input: the stored harness id. Output: the rules, or none for any other harness.
 fn appended_rules(harness: &str) -> Option<&'static [Rule]> {
-    static READ: LazyLock<Vec<(&'static str, Vec<Rule>)>> = LazyLock::new(|| {
-        super::registry::registry()
-            .all()
-            .iter()
-            .map(|found| found.manifest().id.as_str())
-            .filter(|id| records::stored(id) == Some(Reader::JsonlAppend))
-            .filter_map(|id| {
-                let settings = super::interactive::catalog_settings(id).ok()?;
-                Some((id, settings.rules().to_vec()))
-            })
-            .collect()
-    });
-    let found = READ.iter().find(|(id, _)| *id == harness)?;
-    Some(found.1.as_slice())
+    let found = super::registry::registry().get(harness)?;
+    if found.manifest().id != harness {
+        return None;
+    }
+    found.appended_rules()
 }
 
 /// Reads one jsonl-append record object as typed words: the text its manifest's
