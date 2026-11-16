@@ -2341,3 +2341,59 @@ fn a_layout_names_the_panes_of_every_leaf_cell() {
     assert!(ids("").is_empty());
     assert!(ids("not a layout").is_empty());
 }
+
+/// GB-7 row 4 (2.4.1 gate): a lead's own socket that its ended server left behind, where a
+/// connect is refused, counts as no own server, so a call on that lead routes on and finds
+/// it gone instead of failing on the dead server; a socket a server still listens at stays
+/// the lead's own. Neither case starts a server.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_socket_left_by_an_ended_server_routes_as_no_server_and_a_listening_one_stays() {
+    use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
+    let root = tempfile::tempdir().unwrap();
+    let program = PathBuf::from("/usr/bin/false");
+    let engine = root.path().join(crate::terminal::FOLDER);
+    let host = Servers::new(
+        Tmux::open(Some(program.clone()), &engine),
+        root.path(),
+        Some(program),
+    );
+    let lead = AgentId::team(7).unwrap();
+    let socket = harness_socket(root.path(), &lead).unwrap();
+    let folder = socket.parent().unwrap().to_path_buf();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&folder)
+        .unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let unknown = || failure("terminal_agent_unknown");
+    assert_eq!(
+        host.pane_pid(&lead),
+        Err(failure(OWN_SERVER_UNAVAILABLE)),
+        "a listening own socket is still the lead's own server"
+    );
+    drop(listener);
+    assert!(
+        std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket(),
+        "the ended server's socket file stays"
+    );
+    assert_eq!(
+        host.pane_pid(&lead),
+        Err(unknown()),
+        "the dead own server was asked for the lead's pane"
+    );
+    assert_eq!(
+        host.kill(&lead),
+        Err(unknown()),
+        "the dead own server was asked to end the lead"
+    );
+    assert!(
+        !engine.join(SOCKET).exists(),
+        "a call started the engine's server"
+    );
+    std::fs::remove_dir_all(&folder).unwrap();
+}
