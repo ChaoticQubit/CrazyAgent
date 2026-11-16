@@ -455,7 +455,7 @@ impl OwnerRuntimeHandle {
 
     /// Tells whether the policy the owner saved now still covers what a running RCLI master
     /// turn's sandbox granted at launch, its access and the toolchains fixed then, as native
-    /// turns check (RCLI-NARROWING). Stub: reads the toolchains from the folder again.
+    /// turns check (RCLI-NARROWING), never reading the toolchains from the folder again.
     /// Inputs: the prepared turn, its id and its granted toolchains. Output: Ok while
     /// covered, else the narrowing's code or the storage refusal.
     pub(super) async fn rcli_policy_covers(
@@ -464,11 +464,9 @@ impl OwnerRuntimeHandle {
         turn_id: &RequestId,
         granted: &[crate::sandbox::toolchains::Toolchain],
     ) -> Result<(), EngineError> {
-        let _ = granted;
-        let policy = &prepared.agent_policy;
-        let granted = policy.allowed(&prepared.repository);
+        let access = prepared.agent_policy.access;
         match self
-            .master_turn_narrowed(prepared, turn_id, policy.access, &granted)
+            .master_turn_narrowed(prepared, turn_id, access, granted)
             .await?
         {
             Some(narrowed) => Err(failure(narrowed.code())),
