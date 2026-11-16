@@ -1066,6 +1066,7 @@ fn group_alive(group: u32) -> bool {
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_groups() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()
@@ -1103,6 +1104,7 @@ fn live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_group
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_interrupt_stops_a_running_turn_through_the_harness_protocol() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()
@@ -1150,6 +1152,7 @@ fn live_interrupt_stops_a_running_turn_through_the_harness_protocol() {
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()
@@ -1203,6 +1206,7 @@ fn project_profile(work: &Path, home: &Path) -> PathBuf {
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_tools_on_turn_completes_inside_the_project_sandbox() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()

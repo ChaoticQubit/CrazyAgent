@@ -178,6 +178,7 @@ fn assert_no_agent_worktree(case: &Case) {
 }
 
 #[test]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:7b and Codex installed"]
 fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_report() {
     let _model = local_model();
     let marker = format!("BRIEF-MARKER-{}", std::process::id());
@@ -514,6 +515,7 @@ fn process_group_alive(group: u32) -> bool {
 }
 
 #[test]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:7b and Codex installed"]
 fn research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports() {
     let _model = local_model();
     let case = case("A mobile app that stores family recipes.");
@@ -616,6 +618,7 @@ fn codex_research_offers_its_model_tools_only_with_tools_on() {
 }
 
 #[test]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:7b and Codex and Claude Code installed"]
 fn queued_research_runs_claude_code_in_the_project_sandbox_on_an_anthropic_endpoint() {
     let _model = local_model();
     let marker = format!("CLAUDE-BRIEF-{}", std::process::id());
