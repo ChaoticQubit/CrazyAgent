@@ -3116,8 +3116,9 @@ pub(crate) fn check_job(
 /// Takes the transaction, configuration, database path, the Create action and whether the
 /// request is Create demo. Returns the plan with a fresh staging folder name, or the
 /// refusal code the owner sees; nothing on disk changes. This is the one place before the
-/// record that probes for leftover rows of the id, before any folder or job row exists;
-/// recording the project probes again.
+/// record that probes for leftover rows of the id, before its folder is built or any row is
+/// written; the New Project job has started in memory by then, and fails with the refusal.
+/// Recording the project probes again.
 pub(crate) fn plan_new(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
