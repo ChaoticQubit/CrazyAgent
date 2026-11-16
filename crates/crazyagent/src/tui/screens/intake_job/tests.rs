@@ -486,3 +486,49 @@ fn a_delete_job_says_it_moves_folders_to_the_trash_and_offers_finish_delete_once
         "It is moving its folders to the Trash, so it cannot stop now. Wait for it to finish on Home."
     );
 }
+
+/// rv-sec2 bgjobs 3b N3: a count the engine sends past its total is a wire value, not an
+/// invariant, so a job read with one shows its plain line with no count, on its card and in
+/// the header, and never stops the TUI.
+#[test]
+fn a_job_read_with_a_count_past_its_total_shows_its_plain_line_with_no_count() {
+    let setup = |state| JobView {
+        kind: JobKind::Setup,
+        source: "plans".into(),
+        ..deleting(state)
+    };
+    let cases = [
+        (
+            job(JobState::Downloading {
+                progress: Progress { total: 3, done: 7 },
+            }),
+            "Downloading shop from iCloud...",
+            "Downloading shop...",
+        ),
+        (
+            setup(JobState::Building { done: 5, total: 3 }),
+            "Setting up plans...",
+            "Setting up plans...",
+        ),
+        (
+            deleting(JobState::Trashing { done: 4, total: 2 }),
+            "Moving Notes/2026 plans to the Trash...",
+            "Deleting Notes/2026 plans...",
+        ),
+    ];
+    for (read, said, header) in cases {
+        let shown = std::panic::catch_unwind(|| line(&read)).ok();
+        assert_eq!(shown.as_deref(), Some(said), "{:?}", read.state);
+        let briefed = std::panic::catch_unwind(|| brief(&read, "...")).ok();
+        assert_eq!(briefed.as_deref(), Some(header), "{:?}", read.state);
+    }
+    let cut = deleting(JobState::CutShort {
+        trashed: 9,
+        total: 1,
+    });
+    let shown = std::panic::catch_unwind(|| line(&cut)).ok();
+    assert_eq!(
+        shown.as_deref(),
+        Some("Deleting Notes/2026 plans was cut short. Finish delete or keep the project.")
+    );
+}
