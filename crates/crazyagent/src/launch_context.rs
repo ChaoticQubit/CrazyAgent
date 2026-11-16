@@ -1165,8 +1165,8 @@ impl AgentContext {
 
     /// Writes this context into one agent's private home for one launch of `harness`.
     /// Input: the harness id ("codex" or "claude-code"), the agent's 0700 home (its
-    /// CODEX_HOME or CLAUDE_CONFIG_DIR) and the tools switch; with tools off no skill or
-    /// MCP server is given. On macOS the files hold the agent's own `getconf`
+    /// CODEX_HOME or CLAUDE_CONFIG_DIR) and the tools switch; with tools off no skill, MCP
+    /// server or account connector is given. On macOS the files hold the agent's own `getconf`
     /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
     /// and the harness arguments, or `launch_home_busy` while another launch uses the home.
     pub fn install(
@@ -1181,7 +1181,20 @@ impl AgentContext {
             .ok_or_else(|| failure("launch_harness_unsupported"))?;
         let native_switch = self.plugins.native_connectors.map_or_else(
             crate::connectors::launch::NativeSwitch::default,
-            |setting| crate::connectors::launch::native_switch(id, setting),
+            |setting| {
+                let setting = if tools {
+                    setting
+                } else {
+                    crate::connectors::settings::NativeConnectors::Off
+                };
+                crate::connectors::launch::native_switch(id, setting)
+            },
+        );
+        assert!(
+            tools
+                || self.plugins.native_connectors.is_none()
+                || native_switch.claude_ai_off
+                || native_switch.codex_apps_off
         );
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
