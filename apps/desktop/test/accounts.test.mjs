@@ -124,6 +124,23 @@ test("default names take the lowest free number; form checks match the engine's 
   for (const bad of ["", "   ", "a".repeat(61), "two\nlines"]) assert.ok(nameError(bad), JSON.stringify(bad));
 });
 
+test("a server on another machine takes no port a cloud metadata service answers on, as the engine refuses it", () => {
+  const refused =
+    "Use the server's https port, such as 443. Ports 80 and 32526 on another machine are refused, since cloud metadata services answer there.";
+  for (const bad of ["https://models.example.test:80/v1", "https://models.example.test:32526/v1", "https://10.0.0.5:80/v1"]) {
+    assert.equal(urlError(bad), refused, bad);
+  }
+  for (const kept of [
+    "https://models.example.test:443/v1",
+    "https://models.example.test:8443/v1",
+    "https://localhost:80/v1",
+    "http://127.0.0.1:32526/v1",
+    "http://localhost:80",
+  ]) {
+    assert.equal(urlError(kept), undefined, kept);
+  }
+});
+
 test("Account added lines follow the method and the real check result", () => {
   const key = catalog[2].methods[0];
   const url = catalog[3].methods[0];
