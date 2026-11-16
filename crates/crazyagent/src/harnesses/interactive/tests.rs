@@ -916,6 +916,49 @@ fn a_key_written_under_a_narrow_umask_is_still_a_private_file() {
     );
 }
 
+const NO_FILE_SPACE_HOME: &str = "CRAZYAGENT_TEST_NO_FILE_SPACE_HOME";
+
+/// Runs only in the process the row below starts, under a file size limit of zero with
+/// SIGXFSZ ignored, so the key write fails after the file was made. Input: the home named
+/// by `NO_FILE_SPACE_HOME`; without it the row does nothing.
+#[test]
+#[ignore]
+fn a_key_write_cut_short_in_its_own_process() {
+    let Some(home) = std::env::var_os(NO_FILE_SPACE_HOME) else {
+        return;
+    };
+    let key = Secret::new(KEY.into()).unwrap();
+    assert_eq!(
+        write_key(Path::new(&home), &key).unwrap_err().0,
+        "launch_key_file_unavailable"
+    );
+}
+
+/// WRITE-KEY-ASSERT: a key write that fails part way leaves no key file in the home, where
+/// it used to leave the partial file behind.
+#[test]
+fn a_key_write_cut_short_leaves_no_key_file() {
+    let case = Case::new();
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "trap '' XFSZ; ulimit -f 0; exec \"$0\" --exact harnesses::interactive::tests::a_key_write_cut_short_in_its_own_process --ignored --test-threads 1",
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .env(NO_FILE_SPACE_HOME, case.home())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(
+        status.success(),
+        "the key write under a zero file size limit ended in {status}"
+    );
+    assert!(std::fs::symlink_metadata(case.home().join(KEY_FILE)).is_err());
+}
+
 #[test]
 fn session_ids_are_fresh_version_four_uuids() {
     let first = session_id().unwrap();
