@@ -484,15 +484,17 @@ struct Server {
 }
 
 /// Whether the issuer a resource names and the one its server's metadata names are the
-/// same. Inputs: the two names. Output: true when they are equal.
+/// same: equal once at most one trailing `/` is taken off each, with no other folding of
+/// case, path or port. Inputs: the two names. Output: true when they are the same.
 pub(super) fn same_issuer(asked: &str, named: &str) -> bool {
-    asked == named
+    asked.strip_suffix('/').unwrap_or(asked) == named.strip_suffix('/').unwrap_or(named)
 }
 
 /// Reads the authorization server's metadata (RFC 8414, then OpenID) on a declared OAuth
-/// host. Its `issuer` must be the one it was read for, both endpoints must be on declared
-/// OAuth hosts and it must offer PKCE S256. Inputs: the issuer, the OAuth block and the
-/// lookup. Output: the server, or why it cannot be used.
+/// host. Its `issuer` must be the one it was read for, up to one trailing `/`, and the
+/// sign-in then uses the name the metadata gives. Both endpoints must be on declared OAuth
+/// hosts and it must offer PKCE S256. Inputs: the issuer, the OAuth block and the lookup.
+/// Output: the server, or why it cannot be used.
 fn server(issuer: &str, oauth: &OAuthSpec, reach: &ProviderReach) -> Result<Server, OAuthError> {
     let base = url::Url::parse(issuer).map_err(|_| metadata_invalid())?;
     guard::checked(&base, &oauth.hosts).map_err(from_mcp)?;
@@ -521,13 +523,12 @@ fn server(issuer: &str, oauth: &OAuthSpec, reach: &ProviderReach) -> Result<Serv
         }
     }
     let metadata = found.ok_or_else(metadata_invalid)?;
-    if !metadata
+    let named = metadata
         .get("issuer")
         .and_then(Value::as_str)
-        .is_some_and(|named| same_issuer(issuer, named))
-    {
-        return Err(metadata_invalid());
-    }
+        .filter(|named| same_issuer(issuer, named))
+        .ok_or_else(metadata_invalid)?
+        .to_owned();
     let endpoint = |key: &str| -> Result<url::Url, OAuthError> {
         let text = metadata
             .get(key)
@@ -560,7 +561,7 @@ fn server(issuer: &str, oauth: &OAuthSpec, reach: &ProviderReach) -> Result<Serv
         .unwrap_or_default();
     let yes = |key: &str| metadata.get(key) == Some(&Value::Bool(true));
     Ok(Server {
-        issuer: issuer.to_owned(),
+        issuer: named,
         iss_promised: yes("authorization_response_iss_parameter_supported"),
         authorize,
         token,
