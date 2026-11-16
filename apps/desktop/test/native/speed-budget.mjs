@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { lstatSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync } from "node:fs";
+import { userInfo } from "node:os";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
 /** Exit code of a speed run the Mac was too busy to judge: EX_TEMPFAIL, so a gate reads it as
  * not run, never as a pass or a failure. */
@@ -19,6 +20,17 @@ export const QUIET_LIMITS = { load1_max: 2, memory_level_min: 50 };
 /** Processes whose presence means a build is running and timings are noise. */
 export const COMPILERS = ["rustc", "cargo", "clang", "ld", "ld64", "swift-frontend", "xcodebuild"];
 const COUNT_SLACK = 1;
+/** A speed run's kept engine state folder, as speed-run.mjs makes it: new, private and short
+ * enough for the engine's socket address. */
+export const SPEED_STATE = /^\/private\/tmp\/cas-(noise|compare)-(base|candidate)-[0-9a-f]{8}-[A-Za-z0-9]{6}$/;
+/** Most runs in a row the Mac may get busy through before a speed run is refused. */
+const TAINTED_MAX = 3;
+/** Most characters of a failed run's error its record keeps: the tail, where run.mjs puts the
+ * child's stderr. */
+export const FAILURE_TEXT_MAX = 4000;
+/** The macOS keychain tool, and the longest one call of it may take. */
+const SECURITY = "/usr/bin/security";
+const SECURITY_MS_MAX = 30_000;
 
 const round = (value) => Number(value.toFixed(2));
 
@@ -248,6 +260,115 @@ export function schedule(kept) {
   return order;
 }
 
+/** Runs every scheduled launch (`schedule`), each only once the Mac is quiet and kept only when
+ * the Mac stayed quiet through it; a run it got busy through, failed or not, runs again, and
+ * `TAINTED_MAX` in a row refuse. A launch that fails on a quiet Mac is recorded with its error,
+ * counted for its side and not run again, and the schedule goes on, so the medians come from the
+ * good runs; once a side can no longer reach `KEPT_MIN` good runs the schedule ends, as no
+ * verdict could come. Every record keeps the Mac reading after its run. Inputs: kept
+ * runs per side, `{ quietBefore, launch, quietAfter }` (null or the busy reasons; `{ run,
+ * sample }` for a side and whether it is a warm-up; `{ quiet, reasons }`) and the progress it
+ * fills: `{ samples, failed, runs }`. Output: null, or the refusal's reasons. */
+export async function runSchedule(kept, { quietBefore, launch, quietAfter }, progress) {
+  assert.ok(Number.isInteger(kept) && kept >= KEPT_MIN, `at least ${KEPT_MIN} kept runs per side`);
+  const { samples, failed, runs } = progress;
+  const order = schedule(kept);
+  for (const [at, { side, warm }] of order.entries()) {
+    for (let tainted = 0; ; tainted += 1) {
+      if (tainted >= TAINTED_MAX) return [`${TAINTED_MAX} runs in a row saw the Mac get busy`];
+      const busy = await quietBefore();
+      if (busy) return busy;
+      let done;
+      try {
+        done = await launch(side, warm);
+      } catch (error) {
+        const after = quietAfter();
+        runs.push({ side, warm, failed: failureText(error), quiet_after: after.quiet, reasons: after.reasons });
+        if (!after.quiet) continue;
+        failed[side] += 1;
+        break;
+      }
+      const after = quietAfter();
+      runs.push({ side, warm, ...done.run, quiet_after: after.quiet, reasons: after.reasons });
+      if (!after.quiet) continue;
+      if (!warm) samples[side].push(done.sample);
+      break;
+    }
+    const left = order.slice(at + 1).filter((slot) => slot.side === side && !slot.warm).length;
+    if (samples[side].length + left < KEPT_MIN) return null;
+  }
+  for (const side of ["base", "candidate"]) {
+    assert.ok(samples[side].length <= kept && samples[side].length + failed[side] <= kept + 1, `${side}: one result a slot`);
+  }
+  return null;
+}
+
+/** The text a failed run's record keeps: the error's message, its last `FAILURE_TEXT_MAX`
+ * characters. Input: what the launch threw. Output: the text. */
+function failureText(error) {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.slice(-FAILURE_TEXT_MAX);
+}
+
+/** Runs the keychain tool for a speed state home with only that HOME and the system PATH, as the
+ * gate's kc-state.sh did, so it reads and writes that home's keychain settings. Inputs: the home
+ * and the tool's arguments. Output: what the tool printed. */
+export function securityIn(home, args) {
+  return execFileSync(SECURITY, args, {
+    cwd: home, env: { HOME: home, PATH: "/usr/bin:/bin" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: SECURITY_MS_MAX,
+  });
+}
+
+/** The paths a keychain tool listing names, one a line, without its indent and quotes. Input:
+ * the listing. Output: the paths. */
+function listedPaths(text) {
+  return text.split("\n").map((line) => line.trim()).filter((line) => line !== "").map((line) => line.replace(/^"(.*)"$/, "$1"));
+}
+
+/** Checks the owner has no keychain settings file, as the gate's kc-state.sh did before and
+ * after each step: a keychain tool that wrote the owner's settings instead of the home's would
+ * leave one. Input: the owner's home. Output: none. */
+function ownerSettingsAbsent(realHome) {
+  const settings = join(realHome, "Library", "Preferences", "com.apple.security.plist");
+  assert.ok(!existsSync(settings), `the owner's keychain settings file stays absent: ${settings}`);
+}
+
+/** The owner's own keychain view: the search list and the default keychain the tool prints for
+ * the owner's home. Inputs: the owner's home and the keychain tool. Output: `{ list, chosen }`. */
+function ownerKeychains(realHome, security) {
+  return {
+    list: listedPaths(security(realHome, ["list-keychains", "-d", "user"])),
+    chosen: listedPaths(security(realHome, ["default-keychain", "-d", "user"])),
+  };
+}
+
+/** Gives a new speed state home its own empty login keychain as its default and its only
+ * search-list entry, as the gate's kc-state.sh prep did by hand (DEC-146), so an app and a TUI
+ * run on that home never reach the owner's keychain. Refuses a folder that is not a new speed
+ * state home, stops while the owner has a keychain settings file, and reads the owner's search
+ * list and default keychain before and after, stopping when either changed. Inputs: the home,
+ * the owner's home and the keychain tool. Output: the keychain's path. */
+export function prepareKeychain(home, realHome = userInfo().homedir, security = securityIn) {
+  assert.ok(basename(home) === "home" && SPEED_STATE.test(dirname(home)), `a speed state home: ${home}`);
+  privateFolder(home);
+  ownerSettingsAbsent(realHome);
+  assert.ok(!existsSync(join(home, "Library")), `a new speed state home holds no Library yet: ${home}`);
+  const owner = ownerKeychains(realHome, security);
+  for (const folder of ["Library", "Library/Keychains", "Library/Preferences"]) mkdirSync(join(home, folder), { mode: 0o700 });
+  const keychain = join(home, "Library", "Keychains", "login.keychain-db");
+  security(home, ["create-keychain", "-p", "", keychain]);
+  security(home, ["set-keychain-settings", keychain]);
+  security(home, ["list-keychains", "-d", "user", "-s", keychain]);
+  security(home, ["default-keychain", "-d", "user", "-s", keychain]);
+  assert.deepEqual(listedPaths(security(home, ["list-keychains", "-d", "user"])), [keychain], "the home's search list holds only its own keychain");
+  assert.deepEqual(listedPaths(security(home, ["default-keychain", "-d", "user"])), [keychain], "the home's default keychain is its own");
+  ownerSettingsAbsent(realHome);
+  const after = ownerKeychains(realHome, security);
+  assert.deepEqual(after.list, owner.list, "the owner's search list is unchanged");
+  assert.deepEqual(after.chosen, owner.chosen, "the owner's default keychain is unchanged");
+  return keychain;
+}
+
 /** The values one metric has across a side's samples. Inputs: the samples and the metric.
  * Output: the values, in run order. */
 function valuesOf(samples, metric) {
@@ -319,6 +440,15 @@ export function joinSample(sample, tui) {
   const joined = { ...sample, ...tui };
   assert.equal(Object.keys(joined).length, Object.keys(sample).length + Object.keys(tui).length);
   return joined;
+}
+
+/** The exit of a compare run: 1 when a metric failed or could not be judged, or when the
+ * candidate failed more runs than the base, since a failure only the candidate has is a finding
+ * and one both sides met is the Mac's; else 0. Inputs: judge's rows, `incomplete`'s metrics and
+ * the failed runs per side. Output: the exit code. */
+export function compareExit(rows, gaps, failed) {
+  assert.ok(Number.isInteger(failed.base) && Number.isInteger(failed.candidate), "failed runs are counted per side");
+  return rows.some((row) => row.status === "fail") || gaps.length > 0 || failed.candidate > failed.base ? 1 : 0;
 }
 
 /** The floor a metric's gap must pass to fail. Input: the metric. Output: the floor. */
