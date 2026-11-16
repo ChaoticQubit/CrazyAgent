@@ -517,12 +517,16 @@ async fn handle(
                     &crate::projects_home::owner_home()?,
                 )?,
             },
-            Action::PublishPrompt { project } => {
-                let _ = project;
-                Reply::Prompt { ask: false }
-            }
+            Action::PublishPrompt { project } => Reply::Prompt {
+                ask: account.publish_prompt(
+                    &project,
+                    &project_folder(&root, &project)?,
+                    crate::team::now_ms(),
+                )?,
+            },
             Action::PublishPromptSet { project, answer } => {
-                let _ = (project, answer);
+                project_folder(&root, &project)?;
+                account.publish_prompt_set(&project, answer, crate::team::now_ms())?;
                 Reply::PromptKept
             }
             Action::PublishStatus { project } => Reply::PublishStatus {
