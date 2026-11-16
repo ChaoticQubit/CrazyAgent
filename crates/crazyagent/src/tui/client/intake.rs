@@ -19,6 +19,7 @@ mod tests;
 /// Built by the first run, Home, Add project and onboarding screens, and by Settings for the home folder.
 /// Runs on the owner worker; the reply arrives as `OwnerEvent::Intake` with this query.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub(in crate::tui) enum IntakeQuery {
     Home,
     SetHome {
@@ -119,6 +120,7 @@ pub(in crate::tui) fn start_id() -> Result<RequestId, String> {
 /// One intake job for the owner worker: a plain query or a pasted GitHub token.
 /// The token travels only here, never in a query, so no reply, log or Debug output can echo it.
 /// The token job answers as a `GitHubStatus` query.
+#[allow(clippy::large_enum_variant)]
 pub(in crate::tui) enum IntakeJob {
     Query(IntakeQuery),
     GitHubToken(AccountSecret),

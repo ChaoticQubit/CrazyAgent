@@ -245,7 +245,10 @@ fn a_proposal_raises_one_owner_question_naming_the_rule_and_its_repository_with_
     );
     assert!(off.is_ok(), "{off:?}");
     let asked = case.questions();
-    let off = asked.iter().find(|item| item.id == off.unwrap()).unwrap();
+    let off = asked
+        .iter()
+        .find(|item| item.id == *off.as_ref().unwrap())
+        .unwrap();
     assert_eq!(off.recommended.as_deref(), Some(DECLINE));
     assert!(off.question.contains("no_force_push") && off.question.contains(" off "));
     let context = off.context.clone().unwrap();

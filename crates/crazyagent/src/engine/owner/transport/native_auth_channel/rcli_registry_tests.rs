@@ -1183,7 +1183,10 @@ async fn a_found_rcli_is_pinned_only_once_the_file_it_resolved_passes_the_start_
         host.registered_rcli_master_executable(),
         host.registered_rcli_private_key_executable(),
     ]
-    .map(|role| role.ok().and_then(|found| found.verified_path().ok()));
+    .map(|role| {
+        role.ok()
+            .and_then(|found| found.verified_path().ok().map(|path| path.to_path_buf()))
+    });
     fixture.service.shutdown().await.unwrap();
     assert_eq!(
         refused.as_deref(),
@@ -1219,8 +1222,10 @@ async fn a_found_rcli_pins_the_master_and_the_key_writer_from_one_capture() {
     let master = host.registered_rcli_master_executable();
     let writer = host.registered_rcli_private_key_executable();
     let one = matches!((&master, &writer), (Ok(master), Ok(writer)) if Arc::ptr_eq(master, writer));
-    let pinned =
-        [master, writer].map(|role| role.ok().and_then(|found| found.verified_path().ok()));
+    let pinned = [master, writer].map(|role| {
+        role.ok()
+            .and_then(|found| found.verified_path().ok().map(|path| path.to_path_buf()))
+    });
     let steps_left = {
         let mut steps = super::BETWEEN_CHECK_AND_CAPTURE.lock().unwrap();
         let left = steps.iter().filter(|(path, _)| *path == entry).count();

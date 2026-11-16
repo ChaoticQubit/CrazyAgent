@@ -585,7 +585,8 @@ pub(crate) fn start(
         }
         Err(_) => return Ok((rejected("onboarding_instructions_unwritable"), None)),
     };
-    if let Some(data) = database.parent().filter(|root| root.is_absolute()) {
+    let data = database.parent().filter(|root| root.is_absolute());
+    if let Some(data) = data {
         let _ = crate::agent_home::mark_written(data, &repo, &labelled);
     }
     let mut drafted = engine_draft(tx, repo_text, &layout)?

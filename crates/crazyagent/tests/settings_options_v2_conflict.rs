@@ -40,7 +40,8 @@ async fn conflict(owner: &Owner) -> ProcessText {
         opened,
         ProcessText {
             text: String::new(),
-            version: 0
+            version: 0,
+            outside: false
         }
     );
     let other = owner
@@ -66,7 +67,8 @@ async fn conflict(owner: &Owner) -> ProcessText {
                 current,
                 ProcessText {
                     text: THEIRS.into(),
-                    version: 1
+                    version: 1,
+                    outside: false
                 }
             );
             current
@@ -111,7 +113,8 @@ async fn conflict_keep_mine_writes_the_owner_text_agents_receive_and_records_it(
         owner.controller.process_text(None).await.unwrap(),
         ProcessText {
             text: MINE.into(),
-            version: 2
+            version: 2,
+            outside: false
         }
     );
     assert_eq!(given(&engine), MINE);
@@ -129,7 +132,8 @@ async fn conflict_reload_keeps_the_newer_text_and_records_no_keep_mine() {
         reloaded,
         ProcessText {
             text: THEIRS.into(),
-            version: 1
+            version: 1,
+            outside: false
         },
         "Reload shows the text that landed"
     );

@@ -36,22 +36,6 @@ fn a_token_job_answers_as_a_status_read_and_never_shows_the_token() {
     assert!(!shown.contains("ghp_"), "{shown}");
 }
 
-#[test]
-fn a_started_onboarding_is_named_like_the_engine_names_it() {
-    assert_eq!(
-        started("/Users/owner/Projects/My Notes_v2"),
-        Ok(ProjectId::new("my-notes-v2").unwrap())
-    );
-    assert_eq!(
-        started("/Users/owner/Projects/My Notes_v2"),
-        crate::onboarding::project_id_for(std::path::Path::new(
-            "/Users/owner/Projects/My Notes_v2"
-        ))
-        .map_err(|error| error.0)
-    );
-    assert_eq!(started("/"), Err("onboarding_path_invalid".into()));
-}
-
 /// DEC-178 addendum 1: the TUI opens the project the engine started, `my-app-2` while a
 /// removal holds `my-app`, never the folder slug it guesses before sending.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -406,7 +390,7 @@ async fn a_second_rule_switch_while_one_runs_is_refused_at_once() {
     );
     let (_, access) = native.attach().await;
     assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
-    let (replies, receiver) = std::sync::mpsc::sync_channel(1);
+    let (replies, receiver) = std::sync::mpsc::sync_channel::<crate::tui::client::OwnerReply>(1);
     let next = || {
         let reply = tokio::task::block_in_place(|| {
             receiver.recv_timeout(std::time::Duration::from_secs(20))

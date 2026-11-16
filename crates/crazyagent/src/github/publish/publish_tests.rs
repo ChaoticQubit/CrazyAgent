@@ -369,8 +369,8 @@ fn prepare_initializes_main_hides_crazyagent_and_appends_the_ignore_lines_once()
         );
     }
     assert_eq!(fixture.read(".gitignore"), ignore);
-    let linked = fixture();
-    let outside = fixture();
+    let linked = self::fixture();
+    let outside = self::fixture();
     outside.write("kept", "keep\n");
     std::os::unix::fs::symlink(
         outside.path().join("kept"),
@@ -710,7 +710,7 @@ fn commit_on_owner_history_takes_only_the_files_publish_wrote() {
     }
     assert_eq!(
         owned.lines(&["rev-parse", "HEAD"]),
-        [committed.commit.clone()]
+        std::slice::from_ref(&committed.commit)
     );
     git(&["checkout", "-q", "--detach"], &project);
     assert_eq!(owned.commit(&[]).unwrap_err().0, "github_publish_detached");
