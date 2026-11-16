@@ -1,12 +1,12 @@
 use super::{
-    FAILURE_BYTES_MAX, Offered, Research, Tab, clipped, evidence, named_tabs, offer, parse_reply,
-    prompt, read, unavailable,
+    FAILURE_BYTES_MAX, Offered, Research, Tab, clipped, evidence, named_tabs, offer_held,
+    parse_reply, prompt, read, unavailable, writing,
 };
 use crate::engine::EngineError;
 use crate::onboarding::draft::names;
 use crate::protocol::ProjectId;
 use crate::roadmap_status::{Claim, Runs};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -329,7 +329,7 @@ fn offered(
             missed.push((tab, why));
             continue;
         };
-        let outcome: Result<Offered, EngineError> = offer(db, project, folder, tab, text);
+        let outcome: Result<Offered, EngineError> = offer_held(db, project, folder, tab, text);
         match outcome {
             Ok(_) => taken += 1,
             Err(error) => {
@@ -352,15 +352,36 @@ fn offered(
     Ok(missed_note(&missed))
 }
 
-/// Ends the run a claim names, and only that run. The run is closed first, by its claim:
-/// a run that was closed for its time on the steady clock, or whose project is gone, ends
-/// nothing and writes no tab. A reply's tabs are offered only after that, then the time
-/// is stored, with a line naming each asked tab that was not written; a failure stores one
-/// plain line and is not retried until the next landing or Refresh; a skip only closes
-/// the run. A reply whose offers do not finish leaves the run closed as unfinished.
+/// Ends the run a claim names, and only that run, under the one-writer lock and in one
+/// immediate transaction, so a read sees the run still running or wholly ended, never closed
+/// with its tabs unwritten (gate race 2). The run is closed first, by its claim: a run that
+/// was closed for its time on the steady clock, or whose project is gone, ends nothing and
+/// writes no tab. A reply's tabs are offered only after that, then the time is stored, with
+/// a line naming each asked tab that was not written; a failure stores one plain line and
+/// is not retried until the next landing or Refresh; a skip only closes the run. A finish
+/// that does not commit leaves the run open, for the close at its time or at engine start.
 /// Inputs: the connection, the project, its folder, the claim, how the run ended and now.
 /// Output: whether this run was the one in flight, or `overview_unavailable`.
 pub fn finish(
+    db: &Connection,
+    project: &ProjectId,
+    folder: &Path,
+    claim: Claim,
+    ended: Ended<'_>,
+    now_ms: i64,
+) -> Result<bool, EngineError> {
+    assert!(claim.ms() >= 0 && now_ms >= 0);
+    let _writing = writing();
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(unavailable)?;
+    let ran = finish_held(&tx, project, folder, claim, ended, now_ms)?;
+    tx.commit().map_err(unavailable)?;
+    Ok(ran)
+}
+
+/// The steps of [`finish`], run inside its transaction while it holds the one-writer lock.
+/// Inputs: the transaction's connection, the project, its folder, the claim, how the run
+/// ended and now. Output: whether this run was the one in flight, or `overview_unavailable`.
+fn finish_held(
     db: &Connection,
     project: &ProjectId,
     folder: &Path,
