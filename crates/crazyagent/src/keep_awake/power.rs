@@ -224,9 +224,10 @@ pub(super) struct Sensing {
 
 impl Sensing {
     /// Starts the sensor thread around a reader and, where there is one, the lid line,
-    /// whose lid support stands in for the reader's in every reading. Inputs: the reader
-    /// and the lid line, which the thread owns from here on. Output: the line to the
-    /// thread, or the error of starting it.
+    /// whose lid support stands in for the reader's in every reading; the rows' short form
+    /// of `start_lines`. Inputs: the reader and the lid line, which the thread owns from
+    /// here on. Output: the line to the thread, or the error of starting it.
+    #[cfg(test)]
     pub(super) fn start(reader: Reader, lid: Option<LidReader>) -> std::io::Result<Self> {
         Self::start_lines(reader, lid, None)
     }
