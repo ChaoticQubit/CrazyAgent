@@ -291,7 +291,7 @@ fn one_row_per_name_so_built_in_linear_hides_the_owner_s_refused_file_of_its_nam
         shows(&mut shell, "Refused  On"),
         "a refused file of its own name keeps its switch, so it can be turned off"
     );
-    keys(&mut shell, &[Key::End, Key::Up, Key::Char(' ')]);
+    keys(&mut shell, &[Key::End, Key::Char(' ')]);
     assert!(granted(&one(&mut shell), "broken", false, Who::Both));
 }
 
@@ -313,4 +313,39 @@ fn an_oauth_only_connector_is_named_under_not_ready_yet_and_an_on_one_keeps_its_
     assert!(shows(&mut shell, "Unavailable  On"), "an On one can still be turned off");
     keys(&mut shell, &[Key::Down, Key::Char(' ')]);
     assert!(granted(&one(&mut shell), "github", false, Who::Both));
+}
+
+/// rv-ds241 T5 F3: an On connector that is not Ready has no "Who can use it" line, as the
+/// desktop shows it only while On and Ready, and Left or Right there sends nothing.
+#[test]
+fn an_on_connector_that_is_not_ready_has_no_who_can_use_it_line() {
+    let mut shell = page(view(vec![grant("board", true, Who::Both)]));
+    assert!(shows(&mut shell, "Needs review  On"));
+    let rows = render(&mut shell, 80, 24);
+    let who = rows.iter().filter(|row| row.contains("Who can use it")).count();
+    assert_eq!(who, 0, "board is On but needs review: {rows:#?}");
+    keys(&mut shell, &[Key::End]);
+    keys(&mut shell, &[Key::Right, Key::Left]);
+    assert!(requests(&mut shell).is_empty(), "no who row, so nothing to change");
+    keys(&mut shell, &[Key::Char(' ')]);
+    assert!(granted(&one(&mut shell), "board", false, Who::Both), "it can still be turned off");
+    let mut shell = page(view(vec![grant("linear", true, Who::Master)]));
+    assert!(shows(&mut shell, "Who can use it"), "a Ready one that is On keeps its who row");
+}
+
+/// rv-ds241 T5 nit 3: a failed read wraps its sentence to the page, as Settings does, so
+/// the end of a long one is not cut at the edge.
+#[test]
+fn a_failed_read_wraps_a_long_sentence() {
+    let place = Place::ProjectConnectors {
+        id: ProjectId::new(PROJECT).unwrap(),
+        name: "Plant shop".into(),
+    };
+    let mut shell = shell_at(ready(80, 24), place);
+    assert!(reads_project(&one(&mut shell)));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Page(Err("app_plugin_folder_unsafe".into())),
+    );
+    assert!(shows(&mut shell, "Make it yours alone and try again."));
 }

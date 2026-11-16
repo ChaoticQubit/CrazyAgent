@@ -568,10 +568,6 @@ fn refusals_read_as_the_desktop_s_words() {
             "The manifest changed after you checked it. Check it again before you trust it.",
         ),
         (
-            "app_plugin_connector_oauth_not_yet",
-            "This connector signs in with OAuth, which this build does not have.",
-        ),
-        (
             "app_plugin_needs_key",
             "This connector needs a key first. Set one on its page in Settings, Connectors.",
         ),
@@ -751,4 +747,139 @@ fn an_oauth_only_connector_reads_unavailable_with_the_oauth_line_once_and_review
     assert!(shows(&mut shell, "Settings  /  Connectors  /  Board"));
     assert!(shows(&mut shell, "Review this connector before a project can use it."));
     assert!(!shows(&mut shell, oauth), "a connector under review shows the review line only");
+}
+
+fn checked(shell: &mut Shell, trust: TrustView) {
+    keys(shell, &[Key::Char('a')]);
+    typed(shell, "name: board");
+    keys(shell, &[Key::Enter]);
+    assert!(matches!(one(shell), ConnectorsJob::Preview { .. }));
+    arrive(
+        shell,
+        ConnectorsEvent::Preview {
+            read: None,
+            result: Ok(Preview::Ready { trust }),
+        },
+    );
+}
+
+/// rv-ds241 T5 F1: a trust screen taller than the terminal scrolls inside its box above the
+/// help bar, says how much is below, and y confirms only once its end was on screen.
+#[test]
+fn a_long_trust_screen_scrolls_to_its_end_before_y_confirms() {
+    let mut long = trust(false);
+    long.replaces = true;
+    if let Some(block) = long.connector.as_mut() {
+        block.read_tools = (1..=60).map(|at| format!("read_tool_{at:02}")).collect();
+    }
+    let mut shell = page(view());
+    checked(&mut shell, long);
+    assert!(shows(&mut shell, "Trust Board?"));
+    assert!(shows(&mut shell, "more lines below"));
+    assert!(!shows(&mut shell, "read_tool_60"));
+    assert!(!shows(&mut shell, "Replaces your connector named board."));
+    assert!(shows(&mut shell, "Esc Cancel"), "the box leaves the help bar");
+    assert!(!shows(&mut shell, "y Confirm"), "no confirm before the end was shown");
+    keys(&mut shell, &[Key::Char('y')]);
+    assert!(requests(&mut shell).is_empty(), "y waits for the end");
+    keys(&mut shell, &[Key::Down]);
+    assert!(!shows(&mut shell, "Version 0.2.0"), "Down moves the body one line");
+    keys(&mut shell, &[Key::Up]);
+    assert!(shows(&mut shell, "Version 0.2.0"));
+    for _ in 0..40 {
+        if shows(&mut shell, "Replaces your connector named board.") {
+            break;
+        }
+        keys(&mut shell, &[Key::PageDown]);
+    }
+    for words in [
+        "read_tool_60",
+        "Secrets it needs: api_key",
+        "SHA-256 c0ffee",
+        "Replaces your connector named board.",
+        "y Confirm",
+    ] {
+        assert!(shows(&mut shell, words), "{words}");
+    }
+    assert!(!shows(&mut shell, "more lines below"));
+    keys(&mut shell, &[Key::Home]);
+    assert!(shows(&mut shell, "Version 0.2.0"));
+    assert!(shows(&mut shell, "y Confirm"), "the end was shown once");
+    keys(&mut shell, &[Key::Char('y')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::Add { ref sha256, replace: true, .. } if sha256 == SHA
+    ));
+}
+
+/// rv-ds241 T5 F2: Esc does nothing while a request is on its way, as the desktop's busy
+/// dialog, so a late answer never opens a screen the owner closed.
+#[test]
+fn esc_while_a_request_is_on_its_way_keeps_the_form_and_the_dialog() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::Char('a')]);
+    typed(&mut shell, "name: board");
+    keys(&mut shell, &[Key::Enter]);
+    assert!(matches!(one(&mut shell), ConnectorsJob::Preview { .. }));
+    assert!(!shows(&mut shell, "Esc Cancel"), "no Esc is offered while it is checked");
+    keys(&mut shell, &[Key::Esc]);
+    assert!(shows(&mut shell, "Add a connector"), "the form stays while it is checked");
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Preview {
+            read: None,
+            result: Ok(Preview::Ready { trust: trust(false) }),
+        },
+    );
+    assert!(shows(&mut shell, "Trust Board?"));
+    keys(&mut shell, &[Key::Char('y')]);
+    assert!(matches!(one(&mut shell), ConnectorsJob::Add { .. }));
+    keys(&mut shell, &[Key::Esc]);
+    assert!(shows(&mut shell, "Trust Board?"), "the trust screen stays while it saves");
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(view())));
+    assert!(said(&shell).contains("Board was added."));
+
+    keys(&mut shell, &[Key::Down, Key::Down, Key::Enter, Key::Char('x')]);
+    assert!(shows(&mut shell, "Remove Board?"));
+    keys(&mut shell, &[Key::Char('y')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::Remove { ref name } if name == "board"
+    ));
+    keys(&mut shell, &[Key::Esc]);
+    assert!(shows(&mut shell, "Remove Board?"), "the dialog stays while it removes");
+    let mut gone = view();
+    gone.connectors.truncate(2);
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(gone)));
+    assert!(said(&shell).contains("Board was removed."));
+    assert!(shows(&mut shell, "Catalog"), "the removed connector's page closes");
+    assert!(!shows(&mut shell, "No connector named"));
+}
+
+/// rv-ds241 T5 F4: a picked .yaml path the TUI cannot read says so in the words the App
+/// plugins page uses, never that the engine could not do it.
+#[test]
+fn a_path_that_cannot_be_read_says_the_file_could_not_be_read() {
+    let unreadable = "CrazyAgent couldn't read that file. Pick a manifest file you can open.";
+    let not_text = "That file isn't text. A manifest is a UTF-8 .yaml file.";
+    assert_eq!(refusal("app_plugin_file_unreadable"), unreadable);
+    assert_eq!(refusal("app_plugin_file_not_text"), not_text);
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::Char('a'), Key::Tab]);
+    typed(&mut shell, "/no/such/board.yaml");
+    keys(&mut shell, &[Key::Enter]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::ReadFile { ref path } if path.ends_with("board.yaml")
+    ));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Preview {
+            read: None,
+            result: Err("app_plugin_file_unreadable".into()),
+        },
+    );
+    assert!(shows(&mut shell, "Add a connector"));
+    assert!(shows(&mut shell, "CrazyAgent couldn't read that file."));
+    assert!(!shows(&mut shell, "The engine could not do this."));
 }
