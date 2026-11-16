@@ -1,5 +1,6 @@
 use super::{
-    OAuthError, OWN_ID_BYTES_MAX, Pending, key_store, not_offered, own_ref, own_secret_ref, visible,
+    OAuthError, OWN_ID_BYTES_MAX, Pending, key_store, not_offered, now_ms, own_issuer_ref, own_ref,
+    own_secret_ref, visible,
 };
 use crate::app_plugins::connector::{ConnectorSpec, OAuthSpec, Registration};
 use crate::app_plugins::http::{self, Config, Ended};
@@ -11,6 +12,7 @@ use crate::provider_reach::ProviderReach;
 use crate::storage::accounts::{self, PLUGIN_KEYS};
 use base64::Engine;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
@@ -35,6 +37,11 @@ const TOKEN_BYTES_MAX: usize = 8192;
 /// The request that asks an MCP server which authorization server it trusts: any request
 /// without a token is answered 401 with the resource metadata address.
 const PROBE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+/// How long before its end an access token is renewed, so a call never starts on one that
+/// ends on the way.
+const RENEW_EARLY_MS: i64 = 60_000;
+/// The longest access token lifetime taken from a server, ten years.
+const LIFETIME_MAX_S: i64 = 10 * 365 * 24 * 60 * 60;
 
 fn failed() -> OAuthError {
     OAuthError("connector_call_failed")
@@ -50,6 +57,10 @@ fn metadata_invalid() -> OAuthError {
 
 fn token_invalid() -> OAuthError {
     OAuthError("connector_oauth_token_invalid")
+}
+
+fn sign_in_needed() -> OAuthError {
+    OAuthError("connector_sign_in_needed")
 }
 
 fn from_mcp(error: McpError) -> OAuthError {
@@ -80,15 +91,33 @@ struct Flow {
     started: Instant,
 }
 
-/// The client a sign-in uses: its id, where its secret is saved when it has one, and
-/// whether the token endpoint takes that secret in the body rather than a Basic header.
+/// The client a sign-in uses: its id, where its secret is saved when it has one, whether
+/// the token endpoint takes that secret in the body rather than a Basic header, and
+/// whether it is the owner's own app.
 struct Client {
     id: String,
     secret: Option<CredentialRef>,
     post: bool,
+    own: bool,
+}
+
+/// What a renewal needs of a connector's last sign-in, saved after its tokens in the plugin
+/// key store: the issuer, its token endpoint, the client and how it signs in, the resource
+/// the tokens are for, and when the access token ends (Unix ms; `i64::MAX` for no end).
+#[derive(Serialize, Deserialize)]
+struct Record {
+    issuer: String,
+    token: String,
+    client: String,
+    secret: Option<String>,
+    post: bool,
+    resource: String,
+    expires_ms: i64,
 }
 
 static FLOWS: Mutex<Vec<Flow>> = Mutex::new(Vec::new());
+/// Held while an access token is renewed, so two calls never spend one refresh token twice.
+static RENEWING: Mutex<()> = Mutex::new(());
 
 fn flows() -> MutexGuard<'static, Vec<Flow>> {
     FLOWS.lock().unwrap_or_else(PoisonError::into_inner)
@@ -512,12 +541,18 @@ fn client(
     if allows(Registration::Own)
         && let Some(id) = saved(root, &own_ref(name)?)?
     {
+        let bound = accounts::read_bearer_in(root, PLUGIN_KEYS, &own_issuer_ref(name)?)
+            .map_err(|_| key_store())?;
+        if bound.is_some_and(|issuer| issuer.expose() != server.issuer) {
+            return Err(OAuthError("connector_oauth_issuer_mismatch"));
+        }
         let secret = own_secret_ref(name)?;
         let has_secret = saved(root, &secret)?.is_some();
         return Ok(Client {
             id: id.expose().to_owned(),
             secret: has_secret.then_some(secret),
             post: server.post_only,
+            own: true,
         });
     }
     if allows(Registration::Cimd)
@@ -528,6 +563,7 @@ fn client(
             id: document.as_str().to_owned(),
             secret: None,
             post: false,
+            own: false,
         });
     }
     if allows(Registration::Dcr)
@@ -559,6 +595,7 @@ fn registered(
             id: id.expose().to_owned(),
             secret: has_secret.then_some(secret_ref),
             post: server.post_only,
+            own: false,
         });
     }
     let body = json!({
@@ -601,6 +638,7 @@ fn registered(
         id: id.to_owned(),
         secret: secret.is_some().then_some(secret_ref),
         post: server.post_only,
+        own: false,
     })
 }
 
@@ -731,10 +769,140 @@ fn token_of<'a>(tokens: &'a Map<String, Value>, key: &str) -> Result<Option<&'a 
     }
 }
 
+/// Adds a client's sign-in to a token request: its id in the body unless its secret goes in
+/// a Basic header, and that secret in the body where the server takes only that. Inputs:
+/// the form, the client and its secret. Output: the Basic id and secret, if any.
+fn signed<'a>(
+    form: &mut url::form_urlencoded::Serializer<'_, String>,
+    client: &'a Client,
+    secret: Option<&'a SecretString>,
+) -> Option<(&'a str, &'a str)> {
+    let basic = secret.filter(|_| !client.post);
+    if basic.is_none() {
+        form.append_pair("client_id", &client.id);
+    }
+    if client.post
+        && let Some(secret) = secret
+    {
+        form.append_pair("client_secret", secret.expose());
+    }
+    basic.map(|secret| (client.id.as_str(), secret.expose()))
+}
+
+/// A client's secret read from where it is saved. Output: none for a public client, or
+/// `connector_oauth_client_invalid` when a saved secret is gone.
+fn secret_of(root: &Path, client: &Client) -> Result<Option<SecretString>, OAuthError> {
+    match &client.secret {
+        Some(reference) => {
+            Some(saved(root, reference)?.ok_or(OAuthError("connector_oauth_client_invalid")))
+                .transpose()
+        }
+        None => Ok(None),
+    }
+}
+
+/// A token endpoint's answer (RFC 6749 5.1) as the engine keeps it: the Bearer access token,
+/// the refresh token when one came, and when the access token ends.
+struct Grant<'a> {
+    access: &'a str,
+    refresh: Option<&'a str>,
+    ends_ms: i64,
+}
+
+/// Reads a token answer. Inputs: its object and the clock. Output: the grant, or
+/// `connector_oauth_token_invalid` for a token of the wrong shape or kind or a lifetime
+/// that is not one second to ten years.
+fn grant(tokens: &Map<String, Value>, now_ms: i64) -> Result<Grant<'_>, OAuthError> {
+    let access = token_of(tokens, "access_token")?.ok_or_else(token_invalid)?;
+    let bearer = tokens
+        .get("token_type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("bearer"));
+    if !bearer {
+        return Err(token_invalid());
+    }
+    let ends_ms = match tokens.get("expires_in") {
+        None | Some(Value::Null) => i64::MAX,
+        Some(value) => {
+            let seconds = value
+                .as_i64()
+                .filter(|seconds| (1..=LIFETIME_MAX_S).contains(seconds))
+                .ok_or_else(token_invalid)?;
+            now_ms.saturating_add(seconds * 1000)
+        }
+    };
+    Ok(Grant {
+        access,
+        refresh: token_of(tokens, "refresh_token")?,
+        ends_ms,
+    })
+}
+
+/// Saves a grant under the connector and issuer. A grant with no refresh token removes the
+/// old one after a code, and keeps it after a renewal (RFC 6749 6). Inputs: root,
+/// connector, issuer, grant and whether it renews. Output: Ok, or the key store's refusal.
+fn keep(
+    root: &Path,
+    name: &str,
+    issuer: &str,
+    grant: &Grant<'_>,
+    renewing: bool,
+) -> Result<(), OAuthError> {
+    let save = |kind: &str, token: &str| -> Result<(), OAuthError> {
+        accounts::replace_key_in(
+            root,
+            PLUGIN_KEYS,
+            &token_ref(kind, name, issuer)?,
+            token.as_bytes().to_vec(),
+        )
+        .map_err(|_| key_store())
+    };
+    save("token", grant.access)?;
+    match (grant.refresh, renewing) {
+        (Some(refresh), _) => save("refresh", refresh),
+        (None, true) => Ok(()),
+        (None, false) => accounts::remove_key_in(
+            root,
+            PLUGIN_KEYS,
+            token_ref("refresh", name, issuer)?.as_str(),
+        )
+        .map_err(|_| key_store()),
+    }
+}
+
+fn record_ref(name: &str) -> Result<CredentialRef, OAuthError> {
+    CredentialRef::new(format!("connector-signin-{name}")).map_err(|_| key_store())
+}
+
+/// A connector's last sign-in. Output: the record, none when there is none or it cannot be
+/// read as one, or the key store's refusal.
+fn record_of(root: &Path, name: &str) -> Result<Option<Record>, OAuthError> {
+    let text =
+        accounts::read_bearer_in(root, PLUGIN_KEYS, &record_ref(name)?).map_err(|_| key_store())?;
+    Ok(text.and_then(|text| serde_json::from_str(text.expose()).ok()))
+}
+
+/// A record as the key store keeps it: visible ASCII with no space, the shape every saved
+/// key must have. Output: the text, or `connector_oauth_metadata_invalid`.
+fn record_text(record: &Record) -> Result<String, OAuthError> {
+    let text = serde_json::to_string(record).map_err(|_| metadata_invalid())?;
+    if !visible(&text, TOKEN_BYTES_MAX) {
+        return Err(metadata_invalid());
+    }
+    Ok(text)
+}
+
+fn save_record(root: &Path, name: &str, text: String) -> Result<(), OAuthError> {
+    accounts::replace_key_in(root, PLUGIN_KEYS, &record_ref(name)?, text.into_bytes())
+        .map_err(|_| key_store())
+}
+
 /// Redeems an answer's code (RFC 6749 4.1.3 with PKCE and the resource): the issuer is
 /// checked first, so a code from another server is never sent anywhere. The request body
-/// lives in a buffer that never grows and is zeroed. Inputs: engine root, the sign-in, the
-/// code, the answer's issuer and the lookup. Output: Ok once the tokens are saved.
+/// lives in a buffer that never grows and is zeroed. The tokens are saved, the tokens of
+/// another issuer the connector was signed in at before are removed, the owner's own app
+/// is bound to this issuer, and the sign-in record is saved last. Inputs: engine root, the
+/// sign-in, the code, the answer's issuer and the lookup. Output: Ok once all is saved.
 fn redeem(
     root: &Path,
     flow: Flow,
@@ -751,29 +919,15 @@ fn redeem(
     if !visible(code, CODE_BYTES_MAX) {
         return Err(OAuthError("connector_oauth_code_invalid"));
     }
-    let secret = match &flow.client.secret {
-        Some(reference) => {
-            Some(saved(root, reference)?.ok_or(OAuthError("connector_oauth_client_invalid"))?)
-        }
-        None => None,
-    };
-    let basic = secret.as_ref().filter(|_| !flow.client.post);
+    let secret = secret_of(root, &flow.client)?;
     let mut form = url::form_urlencoded::Serializer::new(String::with_capacity(FORM_BYTES));
     form.append_pair("grant_type", "authorization_code")
         .append_pair("code", code)
         .append_pair("redirect_uri", &flow.redirect)
         .append_pair("code_verifier", flow.verifier.expose());
-    if basic.is_none() {
-        form.append_pair("client_id", &flow.client.id);
-    }
-    if flow.client.post
-        && let Some(secret) = &secret
-    {
-        form.append_pair("client_secret", secret.expose());
-    }
+    let basic = signed(&mut form, &flow.client, secret.as_ref());
     let body = form.append_pair("resource", &flow.resource).finish();
     let sent = if body.len() <= FORM_BYTES {
-        let basic = basic.map(|secret| (flow.client.id.as_str(), secret.expose()));
         request(&flow.token, &flow.hosts, Verb::Form(&body), basic, reach)
     } else {
         Err(OAuthError("connector_oauth_code_invalid"))
@@ -785,40 +939,107 @@ fn redeem(
         return Err(OAuthError("connector_oauth_refused"));
     }
     let tokens = reply.object().ok_or_else(token_invalid)?;
-    let access = token_of(&tokens, "access_token")?.ok_or_else(token_invalid)?;
-    let bearer = tokens
-        .get("token_type")
-        .and_then(Value::as_str)
-        .is_some_and(|kind| kind.eq_ignore_ascii_case("bearer"));
-    if !bearer {
-        return Err(token_invalid());
+    let granted = grant(&tokens, now_ms())?;
+    let text = record_text(&Record {
+        issuer: flow.issuer.clone(),
+        token: flow.token.as_str().to_owned(),
+        client: flow.client.id.clone(),
+        secret: flow
+            .client
+            .secret
+            .as_ref()
+            .map(|reference| reference.as_str().to_owned()),
+        post: flow.client.post,
+        resource: flow.resource.clone(),
+        expires_ms: granted.ends_ms,
+    })?;
+    if let Some(before) = record_of(root, &flow.connector)?
+        && before.issuer != flow.issuer
+    {
+        for kind in ["token", "refresh"] {
+            let old = token_ref(kind, &flow.connector, &before.issuer)?;
+            accounts::remove_key_in(root, PLUGIN_KEYS, old.as_str()).map_err(|_| key_store())?;
+        }
     }
-    let refresh = token_of(&tokens, "refresh_token")?;
-    let save = |kind: &str, token: &str| -> Result<(), OAuthError> {
+    keep(root, &flow.connector, &flow.issuer, &granted, false)?;
+    if flow.client.own {
         accounts::replace_key_in(
             root,
             PLUGIN_KEYS,
-            &token_ref(kind, &flow.connector, &flow.issuer)?,
-            token.as_bytes().to_vec(),
+            &own_issuer_ref(&flow.connector)?,
+            flow.issuer.as_bytes().to_vec(),
         )
-        .map_err(|_| key_store())
-    };
-    save("token", access)?;
-    match refresh {
-        Some(refresh) => save("refresh", refresh),
-        None => accounts::remove_key_in(
-            root,
-            PLUGIN_KEYS,
-            token_ref("refresh", &flow.connector, &flow.issuer)?.as_str(),
-        )
-        .map_err(|_| key_store()),
+        .map_err(|_| key_store())?;
     }
+    save_record(root, &flow.connector, text)
+}
+
+/// Renews a connector's access token at the token endpoint of its sign-in (RFC 6749 6),
+/// never one found again, so a refresh token only goes back where it came from, and only
+/// while that endpoint is on a host the file declares. The body is sized for its values
+/// so it never grows, and is zeroed. Inputs: root, connector, OAuth block, the record,
+/// clock and lookup. Output: when the new token ends, or `connector_sign_in_needed`.
+fn renew(
+    root: &Path,
+    name: &str,
+    oauth: &OAuthSpec,
+    record: &Record,
+    now_ms: i64,
+    reach: &ProviderReach,
+) -> Result<i64, OAuthError> {
+    let refresh = accounts::read_bearer_in(
+        root,
+        PLUGIN_KEYS,
+        &token_ref("refresh", name, &record.issuer)?,
+    )
+    .map_err(|_| key_store())?
+    .ok_or_else(sign_in_needed)?;
+    let token = url::Url::parse(&record.token).map_err(|_| sign_in_needed())?;
+    let client = Client {
+        id: record.client.clone(),
+        secret: record
+            .secret
+            .as_deref()
+            .map(CredentialRef::new)
+            .transpose()
+            .map_err(|_| key_store())?,
+        post: record.post,
+        own: false,
+    };
+    let secret = secret_of(root, &client)?;
+    let values = [
+        refresh.expose(),
+        client.id.as_str(),
+        secret.as_ref().map_or("", SecretString::expose),
+        record.resource.as_str(),
+    ];
+    let room = values.iter().map(|value| 3 * value.len()).sum::<usize>() + 128;
+    let mut form = url::form_urlencoded::Serializer::new(String::with_capacity(room));
+    form.append_pair("grant_type", "refresh_token")
+        .append_pair("refresh_token", refresh.expose());
+    let basic = signed(&mut form, &client, secret.as_ref());
+    let body = form.append_pair("resource", &record.resource).finish();
+    assert!(body.len() <= room, "the renewal body never grows");
+    let sent = request(&token, &oauth.hosts, Verb::Form(&body), basic, reach);
+    let mut body = body.into_bytes();
+    body.fill(0);
+    let reply = sent?;
+    match reply.status {
+        200 => {}
+        400 | 401 => return Err(sign_in_needed()),
+        _ => return Err(OAuthError("connector_oauth_refused")),
+    }
+    let tokens = reply.object().ok_or_else(token_invalid)?;
+    let granted = grant(&tokens, now_ms)?;
+    keep(root, name, &record.issuer, &granted, true)?;
+    Ok(granted.ends_ms)
 }
 
 /// The credential a call sends now for one connector as declared, its access token
-/// renewed first at the token endpoint of its sign-in when it ends within a minute.
-/// Blocking when it renews. Inputs: root, connector, its declaration, the clock (Unix ms)
-/// and the lookup. Output: the credential, or `connector_sign_in_needed`.
+/// renewed first at the token endpoint of its sign-in when it ends within a minute. A
+/// sign-in for another resource than the one declared is not used. Blocking when it
+/// renews. Inputs: root, connector, its declaration, the clock (Unix ms) and the lookup.
+/// Output: the credential, or `connector_sign_in_needed` and a renewal's refusals.
 pub(crate) fn fresh_with(
     root: &Path,
     name: &str,
@@ -826,6 +1047,28 @@ pub(crate) fn fresh_with(
     now_ms: i64,
     reach: &ProviderReach,
 ) -> Result<Credential, OAuthError> {
-    let _ = (root, name, spec, now_ms, reach);
-    Err(OAuthError("connector_sign_in_needed"))
+    let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
+    let usable = |record: Option<Record>| {
+        record
+            .filter(|record| covers(&record.resource, &spec.mcp.url))
+            .ok_or_else(sign_in_needed)
+    };
+    let ends_soon = |record: &Record| now_ms.saturating_add(RENEW_EARLY_MS) >= record.expires_ms;
+    let mut record = usable(record_of(root, name)?)?;
+    if ends_soon(&record) {
+        let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+        record = usable(record_of(root, name)?)?;
+        if ends_soon(&record) {
+            record.expires_ms = renew(root, name, oauth, &record, now_ms, reach)?;
+            save_record(root, name, record_text(&record)?)?;
+        }
+    }
+    let refresh = token_ref("refresh", name, &record.issuer)?;
+    let renewable = accounts::key_saved_in(root, PLUGIN_KEYS, &refresh).map_err(|_| key_store())?;
+    Ok(Credential::OAuth {
+        access: token_ref("token", name, &record.issuer)?,
+        refresh: renewable.then_some(refresh),
+        issuer: record.issuer,
+        expires_ms: record.expires_ms,
+    })
 }

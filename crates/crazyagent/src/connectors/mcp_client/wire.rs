@@ -4,6 +4,7 @@ use crate::app_plugins::http::{self, Config, Ended, Scratch};
 use crate::app_plugins::store;
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
+use crate::storage::accounts::{self, PLUGIN_KEYS};
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -87,8 +88,14 @@ pub(in crate::connectors) fn command(scheme: &str) -> Command {
 }
 
 fn keys(root: &Path, auth: &Credential) -> Result<Vec<SecretString>, McpError> {
-    let Credential::Key(key) = auth else {
-        return Err(failed());
+    let key = match auth {
+        Credential::Key(key) => key,
+        Credential::OAuth { access, .. } => {
+            let token = accounts::read_bearer_in(root, PLUGIN_KEYS, access)
+                .map_err(|_| failed())?
+                .ok_or(McpError::Refused("connector_sign_in_needed"))?;
+            return Ok(vec![token]);
+        }
     };
     let mut secrets = Vec::with_capacity(key.bindings.len());
     for bound in &key.bindings {
@@ -123,9 +130,6 @@ fn config(
     secrets: &[SecretString],
     body: Option<&Path>,
 ) -> Result<Config, McpError> {
-    let Credential::Key(key) = request.auth else {
-        return Err(failed());
-    };
     let mut config = Config::with_capacity(CONFIG_BYTES);
     http::push_line(&mut config, "url", request.url.as_str()).map_err(engine_failed)?;
     config.push(match request.verb {
@@ -143,17 +147,29 @@ fn config(
         http::push_line(&mut config, "resolve", pins).map_err(engine_failed)?;
     }
     config.push("header = \"");
-    http::push_quoted(&mut config, &key.header).map_err(engine_failed)?;
-    match (key.scheme, secrets) {
-        (Scheme::Bearer, [secret]) => {
-            config.push(": Bearer ");
-            http::push_quoted(&mut config, secret.expose()).map_err(engine_failed)?;
+    match request.auth {
+        Credential::Key(key) => {
+            http::push_quoted(&mut config, &key.header).map_err(engine_failed)?;
+            match (key.scheme, secrets) {
+                (Scheme::Bearer, [secret]) => {
+                    config.push(": Bearer ");
+                    http::push_quoted(&mut config, secret.expose()).map_err(engine_failed)?;
+                }
+                (Scheme::Basic, [secret, user]) => {
+                    config.push(": Basic ");
+                    http::push_basic(&mut config, user.expose(), secret.expose())
+                        .map_err(engine_failed)?;
+                }
+                _ => return Err(failed()),
+            }
         }
-        (Scheme::Basic, [secret, user]) => {
-            config.push(": Basic ");
-            http::push_basic(&mut config, user.expose(), secret.expose()).map_err(engine_failed)?;
+        Credential::OAuth { .. } => {
+            let [token] = secrets else {
+                return Err(failed());
+            };
+            config.push("Authorization: Bearer ");
+            http::push_quoted(&mut config, token.expose()).map_err(engine_failed)?;
         }
-        _ => return Err(failed()),
     }
     config.push("\"\n");
     for (name, value) in request.headers {
