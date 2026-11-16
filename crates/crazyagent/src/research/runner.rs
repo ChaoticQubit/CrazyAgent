@@ -140,8 +140,10 @@ const CLAUDE_USER_LINE: &[u8] = b"{\"type\":\"user\"";
 const CLAUDE_PARENT_KEY: &[u8] = b"\"parent_tool_use_id\":";
 /// The model name Claude Code gives the messages it writes itself, such as its API errors.
 const CLAUDE_OWN_MODEL: &str = "<synthetic>";
-/// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
-const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
+/// The `--settings` every research Claude Code gets: hooks off and the account's claude.ai
+/// connectors off, as no Native switch reaches a research run; a keyed run adds its
+/// `apiKeyHelper`.
+const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true,\"disableClaudeAiConnectors\":true}";
 
 /// The most bytes of one research report: the runner takes no longer report from an agent,
 /// and a reader of a stored report reads up to this many.
@@ -2539,8 +2541,9 @@ fn codex_arguments(
 }
 
 /// Adds Claude Code's print-mode arguments and environment for one research
-/// run: no MCP servers, settings sources, hooks or saved sessions, tools on, or
-/// off with the no-tools system prompt and one model turn; the account as
+/// run: no MCP servers, claude.ai connectors, settings sources, hooks or saved
+/// sessions, tools on, or off with the no-tools system prompt and one model
+/// turn; the account as
 /// either a managed config directory or a keyless Anthropic endpoint in bare
 /// mode that never reads the keychain.
 /// Takes the command, the agent home and temp dir, the tools switch, the most
@@ -7691,6 +7694,60 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// Every Claude Code research run, on a signed-in account, a local endpoint or a keyed
+    /// relay, with tools off or on, starts with its account's claude.ai connectors off and
+    /// hooks off, as no Native switch reaches a research run.
+    #[test]
+    fn every_claude_research_run_starts_with_the_accounts_claude_ai_connectors_off() {
+        let accounts = [
+            ResearchAccount::ManagedClaude {
+                connection: codex_connection(),
+                model: None,
+            },
+            ResearchAccount::AnthropicEndpoint {
+                base_url: "http://127.0.0.1:11434".into(),
+                model: "local-model".into(),
+                key: None,
+            },
+            ResearchAccount::AnthropicEndpoint {
+                base_url: "http://127.0.0.1:41234".into(),
+                model: "claude-test".into(),
+                key: Some(CredentialRef::new("openai-key-0123456789abcdef0123").unwrap()),
+            },
+        ];
+        for account in &accounts {
+            for tools in [false, true] {
+                let mut command = Command::new("/usr/bin/true");
+                claude_arguments(
+                    &mut command,
+                    Path::new("/agent/home"),
+                    Path::new("/agent/tmp"),
+                    tools,
+                    None,
+                    account,
+                    crate::provider_retry::ProviderRetry::HarnessDefault,
+                )
+                .unwrap();
+                let arguments: Vec<String> = command
+                    .get_args()
+                    .map(|argument| argument.to_str().unwrap().to_owned())
+                    .collect();
+                let settings: Vec<serde_json::Value> = arguments
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--settings")
+                    .map(|pair| serde_json::from_str(&pair[1]).unwrap())
+                    .collect();
+                assert_eq!(settings.len(), 1, "{arguments:?}");
+                assert_eq!(
+                    settings[0]["disableClaudeAiConnectors"], true,
+                    "{account:?} tools {tools}: {}",
+                    settings[0]
+                );
+                assert_eq!(settings[0]["disableAllHooks"], true, "{}", settings[0]);
+            }
+        }
     }
 
     /// The answer of a streamed Claude Code run is the text of its last result line, and only

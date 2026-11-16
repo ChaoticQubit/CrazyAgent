@@ -229,9 +229,9 @@ pub(in crate::engine) fn tools_launch_command(
     )
 }
 
-/// Claude Code's `--settings` for a master turn: hooks off and no commit attribution, as
-/// for agents, merged over the owner's Claude Code settings. Input: the settings. Output:
-/// the JSON text.
+/// Claude Code's `--settings` for a master turn: hooks off, no commit attribution and the
+/// account's claude.ai connectors off, as no Native switch reaches a master, merged over
+/// the owner's Claude Code settings. Input: the settings. Output: the JSON text.
 #[cfg(unix)]
 fn master_settings(settings: &Applied) -> String {
     crate::harness_settings::apply::json_settings(
@@ -248,6 +248,7 @@ fn master_engine_settings() -> serde_json::Value {
     serde_json::json!({
         "attribution": {"commit": "", "pr": ""},
         "disableAllHooks": true,
+        "disableClaudeAiConnectors": true,
         "includeCoAuthoredBy": false,
     })
 }

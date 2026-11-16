@@ -69,7 +69,8 @@ pub(crate) const REFRESH_WINDOW: std::time::Duration = std::time::Duration::from
 /// The arguments of the one print turn that renews a managed Claude Code account. Claude
 /// Code refreshes a token inside its refresh window, and waits for the refresh, before the
 /// turn's API call; `auth status` only starts it and exits about two seconds later. The
-/// turn asks Haiku for one word with no tools, MCP servers, settings, hooks or saved session.
+/// turn asks Haiku for one word with no tools, MCP servers, claude.ai connectors, settings,
+/// hooks or saved session.
 #[cfg(unix)]
 pub(crate) const RENEWAL_TURN: [&str; 18] = [
     "--print",
@@ -79,7 +80,7 @@ pub(crate) const RENEWAL_TURN: [&str; 18] = [
     "--setting-sources",
     "",
     "--settings",
-    "{\"disableAllHooks\":true}",
+    "{\"disableAllHooks\":true,\"disableClaudeAiConnectors\":true}",
     "--no-session-persistence",
     "--tools",
     "",
@@ -1003,6 +1004,24 @@ mod tests {
         let mut p = protocol();
         p.buffer = vec![0; LINE_BYTES_MAX + 1];
         p.state();
+    }
+
+    /// The one print turn that renews a managed account names one `--settings`, with hooks
+    /// off and the account's claude.ai connectors off, so a renewal neither fetches nor
+    /// connects them whatever the owner's Native setting is.
+    #[cfg(unix)]
+    #[test]
+    fn the_renewal_turn_starts_with_the_accounts_claude_ai_connectors_off() {
+        let named: Vec<usize> = RENEWAL_TURN
+            .iter()
+            .enumerate()
+            .filter(|(_, word)| **word == "--settings")
+            .map(|(at, _)| at + 1)
+            .collect();
+        assert_eq!(named.len(), 1, "{RENEWAL_TURN:?}");
+        let settings: Value = serde_json::from_str(RENEWAL_TURN[named[0]]).unwrap();
+        assert_eq!(settings["disableClaudeAiConnectors"], true, "{settings}");
+        assert_eq!(settings["disableAllHooks"], true, "{settings}");
     }
 }
 
