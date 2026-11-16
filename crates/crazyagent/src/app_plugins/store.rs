@@ -1,7 +1,7 @@
 use super::manifest::{self, Manifest, Runs};
 use super::{
     Binding, LOCAL_PLUGIN, Listing, Origin, PluginKind, PluginStatus, PluginView, Preview, Problem,
-    SecretView, USER_PLUGINS_MAX, connector, yaml,
+    SecretView, USER_PLUGINS_MAX, yaml,
 };
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
@@ -108,9 +108,10 @@ fn sqlite(_: rusqlite::Error) -> EngineError {
     error("app_plugins_unavailable")
 }
 
-fn forget_grants(db: &Connection, name: &str) -> Result<(), EngineError> {
+fn forget_grants(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
     crate::connectors::grants::forget_connector(db, name)
         .and_then(|()| crate::connectors::gateway::pins::forget_connector(db, name))
+        .and_then(|()| crate::connectors::oauth::forget(db, root, name))
         .map_err(|_| error("app_plugins_unavailable"))
 }
 
@@ -140,7 +141,7 @@ fn prepare(db: &Connection, root: &Path) -> Result<(), EngineError> {
         }
         db.execute("DELETE FROM app_plugin_state WHERE name=?1", [name])
             .map_err(sqlite)?;
-        forget_grants(db, name)?;
+        forget_grants(db, root, name)?;
         crate::semantic::settings::forget(db, name)?;
         db.execute("DELETE FROM app_plugin_trust WHERE name=?1", [name])
             .map_err(sqlite)?;
@@ -609,7 +610,7 @@ fn settle(
         .map_err(sqlite)?;
     let moved = trusted_hosts.as_deref() != Some(hosts.as_str());
     if moved {
-        forget_grants(db, &manifest.name)?;
+        forget_grants(db, root, &manifest.name)?;
     }
     for (secret, source, reference) in binding_rows(db, &manifest.name)? {
         if moved || !manifest.secrets().contains(&secret) {
@@ -739,7 +740,7 @@ pub fn remove(db: &Connection, root: &Path, name: &str) -> Result<(), EngineErro
         return Err(error("app_plugin_not_found"));
     }
     crate::semantic::settings::forget(db, name)?;
-    forget_grants(db, name)?;
+    forget_grants(db, root, name)?;
     let removed = folder::remove(root, name)?;
     let known: bool = db
         .query_row(
@@ -899,9 +900,6 @@ fn load(db: &Connection, root: &Path, name: &str, launch: bool) -> Result<Loaded
     if !launch && !enabled_flag(db, &manifest.name, found.origin)? {
         return Err(error("app_plugin_off"));
     }
-    if let Some(code) = manifest.connector().and_then(connector::sign_in_refusal) {
-        return Err(error(code));
-    }
     let mut bindings = Vec::with_capacity(manifest.secrets().len());
     for secret in manifest.secrets() {
         let (_, bound) = resolve(db, root, &manifest.name, secret)?;
@@ -917,10 +915,9 @@ fn load(db: &Connection, root: &Path, name: &str, launch: bool) -> Result<Loaded
 }
 
 /// Loads a plugin to run: valid, trusted as it is now, turned on, and every declared secret
-/// bound to a saved key. A connector whose only way in is an OAuth sign-in never loads
-/// until sign-in exists. Inputs: database, engine root and name. Output: the plugin, or
-/// `app_plugin_not_found`, `_refused`, `_needs_review`, `_off`, `_needs_key`,
-/// `_connector_oauth_not_yet`.
+/// bound to a saved key. A connector whose only way in is an OAuth sign-in loads with no
+/// binding; its call asks for the sign-in. Inputs: database, engine root and name. Output:
+/// the plugin, or `app_plugin_not_found`, `_refused`, `_needs_review`, `_off`, `_needs_key`.
 pub fn ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineError> {
     load(db, root, name, false)
 }
@@ -929,10 +926,30 @@ pub fn ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineE
 /// now, and every declared secret bound to a key the owner entered for it. The app-wide
 /// plugin switch is not read; a connector's switch is the project's. Inputs: database,
 /// engine root and name. Output: the connector, or `app_plugin_not_found` (also for a
-/// plugin of another kind), `_refused`, `_needs_review`, `_needs_key`,
-/// `_connector_oauth_not_yet`.
+/// plugin of another kind), `_refused`, `_needs_review`, `_needs_key`.
 pub fn connector_ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineError> {
     load(db, root, name, true)
+}
+
+/// Loads a connector's file as trusted now, whatever its keys and sign-in, for the OAuth
+/// sign-in that runs before any token exists. Inputs: database, engine root and name.
+/// Output: the manifest, or `app_plugin_not_found` (also for a plugin of another kind),
+/// `_refused`, `_needs_review`.
+pub fn trusted_connector(
+    db: &Connection,
+    root: &Path,
+    name: &str,
+) -> Result<Manifest, EngineError> {
+    prepare(db, root)?;
+    let found = found(root, name)?;
+    let manifest = found.parsed.map_err(|_| error("app_plugin_refused"))?;
+    if manifest.kind != PluginKind::Connector {
+        return Err(error("app_plugin_not_found"));
+    }
+    if !reviewed(db, found.origin, &manifest)? {
+        return Err(error("app_plugin_needs_review"));
+    }
+    Ok(manifest)
 }
 
 /// Reads one bound secret's key into engine memory for a single request. Inputs: the

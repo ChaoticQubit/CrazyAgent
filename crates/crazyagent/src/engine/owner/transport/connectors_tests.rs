@@ -471,7 +471,6 @@ fn a_connectors_request_is_bounded_and_every_code_has_a_plain_sentence() {
         "app_plugin_refused",
         "app_plugin_needs_key",
         "app_plugin_needs_review",
-        "app_plugin_connector_oauth_not_yet",
         "app_plugin_key_invalid",
         "app_plugin_key_store_unavailable",
         "app_plugin_secret_not_declared",

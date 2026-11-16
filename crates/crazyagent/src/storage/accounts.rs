@@ -140,6 +140,40 @@ pub(crate) fn read_key_in(
     folder: &str,
     credential: &CredentialRef,
 ) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+    read_within(
+        root,
+        folder,
+        credential,
+        crate::credentials::SecretString::new,
+    )
+}
+
+/// [`read_key_in`] for a bearer token the engine saved, such as a connector's OAuth access
+/// token, which may be longer than a key the owner types: up to the 8 KiB a key file holds.
+/// Inputs and outputs as there.
+#[cfg(unix)]
+pub(crate) fn read_bearer_in(
+    root: &Path,
+    folder: &str,
+    credential: &CredentialRef,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+    read_within(
+        root,
+        folder,
+        credential,
+        crate::credentials::SecretString::bearer,
+    )
+}
+
+/// Reads one owner-only key file and holds it with `make`, which bounds its length.
+/// Inputs: the engine root, folder, reference and the holder. Output as [`read_key_in`].
+#[cfg(unix)]
+fn read_within(
+    root: &Path,
+    folder: &str,
+    credential: &CredentialRef,
+    make: fn(Vec<u8>) -> Result<crate::credentials::SecretString, crate::credentials::StoreError>,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
     use rustix::fs::{Mode, OFlags};
     use std::io::Read;
     use std::os::unix::fs::MetadataExt;
@@ -171,7 +205,7 @@ pub(crate) fn read_key_in(
         bytes.fill(0);
         return Err(error("account_key_store_unavailable"));
     }
-    crate::credentials::SecretString::new(bytes)
+    make(bytes)
         .map(Some)
         .map_err(|_| error("account_key_store_unsafe"))
 }
@@ -266,6 +300,17 @@ pub(crate) const PLUGIN_KEYS: &str = "plugin-keys";
 /// `account_key_store_unavailable`.
 #[cfg(not(unix))]
 pub(crate) fn read_key_in(
+    _root: &Path,
+    _folder: &str,
+    _credential: &CredentialRef,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+    Err(error("account_key_store_unavailable"))
+}
+
+/// Refuses to read a bearer token where the Unix owner-only key folder does not exist.
+/// Output: `account_key_store_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn read_bearer_in(
     _root: &Path,
     _folder: &str,
     _credential: &CredentialRef,

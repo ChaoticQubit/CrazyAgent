@@ -445,7 +445,6 @@ fn every_connector_refusal_has_a_plain_sentence() {
         "app_plugin_connector_scope_invalid",
         "app_plugin_connector_tools_limit",
         "app_plugin_connector_tool_invalid",
-        "app_plugin_connector_oauth_not_yet",
         "app_plugin_connector_elsewhere",
     ] {
         assert!(plain_problem(code).is_some(), "{code}");
@@ -685,18 +684,16 @@ mod stored {
     }
 
     #[test]
-    fn oauth_sign_in_is_refused_until_slice_3_with_a_plain_reason() {
+    fn an_oauth_only_connector_loads_with_no_key_and_signs_in_at_its_vendor() {
         let case = case();
         put(&case, &oauth_only(), false, 1);
+        let loaded = store::ready(&case.db, &case.root, "acme-issues");
+        assert!(loaded.is_ok(), "{:?}", loaded.err());
+        assert!(loaded.unwrap().bindings.is_empty());
         assert_eq!(
-            code(store::ready(&case.db, &case.root, "acme-issues")),
-            "app_plugin_connector_oauth_not_yet"
-        );
-        let plain = crate::app_plugins::plain_problem("app_plugin_connector_oauth_not_yet")
-            .expect("a plain sentence");
-        assert!(
-            plain.contains("sign") && !plain.contains('\u{2014}'),
-            "{plain}"
+            crate::app_plugins::plain_problem("app_plugin_connector_oauth_not_yet"),
+            None,
+            "the slice 1 refusal is gone"
         );
         put(&case, &full(), true, 2);
         assert_eq!(

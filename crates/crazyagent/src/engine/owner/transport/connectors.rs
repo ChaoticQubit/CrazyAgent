@@ -18,7 +18,6 @@ pub(super) const CONNECTORS_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CONNECTORS_CODES: &[&str] = &[
     "app_plugin_bundled",
     "app_plugin_changed",
-    "app_plugin_connector_oauth_not_yet",
     "app_plugin_folder_unavailable",
     "app_plugin_folder_unsafe",
     "app_plugin_key_invalid",

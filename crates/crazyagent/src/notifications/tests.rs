@@ -1198,6 +1198,7 @@ fn every_kind_has_one_wire_name_and_its_class() {
         "change_set_review",
         "connector_tools_changed",
         "connector_write",
+        "connector_sign_in",
     ];
     for name in actions {
         assert!(NoticeKind::parse(name).is_some(), "{name}");

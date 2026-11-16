@@ -1,9 +1,10 @@
 //! The engine state behind each Action kind (DEC-136a decision 1): open questions, accounts
 //! that need a sign-in, research waiting for a pool, memories to review, change sets to
-//! review, connectors whose tools changed and connector writes waiting for the owner. Each
-//! source reads only its own tables and reports at most `SOURCE_ROWS_MAX` conditions; one
-//! whose tables are missing reports none and resolves nothing, and one a cap stopped before
-//! the end of its state resolves nothing either.
+//! review, connectors whose tools changed, connector writes waiting for the owner and
+//! connectors whose sign-in ended. Each source reads only its own tables and reports at
+//! most `SOURCE_ROWS_MAX` conditions; one whose tables are missing reports none and
+//! resolves nothing, and one a cap stopped before the end of its state resolves nothing
+//! either.
 
 use super::reconcile::{Condition, SOURCE_ROWS_MAX};
 use super::{NoticeKind, NoticeTarget, error};
@@ -60,7 +61,7 @@ pub(super) struct Live {
 /// Reads every Action source. Inputs: the engine database and the model access. Output:
 /// what holds now.
 pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
-    let sources: [(NoticeKind, Source); 7] = [
+    let sources: [(NoticeKind, Source); 8] = [
         (NoticeKind::Question, questions),
         (NoticeKind::AccountSignIn, accounts),
         (NoticeKind::ResearchPool, pools),
@@ -68,6 +69,7 @@ pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
         (NoticeKind::ChangeSetReview, change_sets),
         (NoticeKind::ConnectorToolsChanged, connector_tools),
         (NoticeKind::ConnectorWrite, writes),
+        (NoticeKind::ConnectorSignIn, connector_sign_ins),
     ];
     let mut live = Live::default();
     for (kind, read) in sources {
@@ -155,6 +157,32 @@ fn writes(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, Eng
                 project_id,
                 id: waiting.id,
             },
+        };
+        push(&mut found, &mut keys, condition);
+    }
+    Ok(Some(Found::read(found, capped, Vec::new())))
+}
+
+/// Connectors whose sign-in ended because their vendor refused a renewal: one app-wide
+/// item per connector until it is signed in again or removed. Inputs: the database and
+/// the model access (unused). Output: the conditions, or none before any was marked.
+fn connector_sign_ins(
+    connection: &Connection,
+    _: &ModelAccess,
+) -> Result<Option<Found>, EngineError> {
+    let Some(rows) = crate::connectors::oauth::wanting(connection, SOURCE_ROWS_MAX)? else {
+        return Ok(None);
+    };
+    let capped = rows.len() >= SOURCE_ROWS_MAX;
+    let mut found = Vec::new();
+    let mut keys = BTreeSet::new();
+    for (connector, title) in rows {
+        let condition = Condition {
+            kind: NoticeKind::ConnectorSignIn,
+            project_id: None,
+            subject: format!("connector:{connector}"),
+            text: format!("{title} needs you to sign in again."),
+            target: NoticeTarget::Connectors,
         };
         push(&mut found, &mut keys, condition);
     }

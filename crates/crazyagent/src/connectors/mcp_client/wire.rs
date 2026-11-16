@@ -4,6 +4,7 @@ use crate::app_plugins::http::{self, Config, Ended, Scratch};
 use crate::app_plugins::store;
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
+use crate::storage::accounts::{self, PLUGIN_KEYS};
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -14,7 +15,7 @@ const CONFIG_BYTES: usize = 48 * 1024;
 const HEAD_BYTES_MAX: usize = 64 * 1024;
 const CHALLENGES_MAX: usize = 8;
 const SCOPE_BYTES_MAX: usize = 1024;
-const CURL_TIMED_OUT: i32 = 28;
+pub(in crate::connectors) const CURL_TIMED_OUT: i32 = 28;
 
 fn failed() -> McpError {
     McpError::Refused("connector_call_failed")
@@ -66,7 +67,7 @@ pub(super) struct Reply {
 /// no proxy, unbuffered output with the reply's headers first, bounded time and a cleared
 /// environment. Its arguments and environment hold no URL, header or key. Input: the one
 /// scheme it may speak, as curl's `--proto` value. Output: the command.
-pub(super) fn command(scheme: &str) -> Command {
+pub(in crate::connectors) fn command(scheme: &str) -> Command {
     let mut command = Command::new(http::CURL);
     command
         .arg("-q")
@@ -87,7 +88,15 @@ pub(super) fn command(scheme: &str) -> Command {
 }
 
 fn keys(root: &Path, auth: &Credential) -> Result<Vec<SecretString>, McpError> {
-    let Credential::Key(key) = auth;
+    let key = match auth {
+        Credential::Key(key) => key,
+        Credential::OAuth { access, .. } => {
+            let token = accounts::read_bearer_in(root, PLUGIN_KEYS, access)
+                .map_err(|_| failed())?
+                .ok_or(McpError::Refused("connector_sign_in_needed"))?;
+            return Ok(vec![token]);
+        }
+    };
     let mut secrets = Vec::with_capacity(key.bindings.len());
     for bound in &key.bindings {
         let secret = store::secret_value(root, bound).map_err(|error| {
@@ -121,7 +130,6 @@ fn config(
     secrets: &[SecretString],
     body: Option<&Path>,
 ) -> Result<Config, McpError> {
-    let Credential::Key(key) = request.auth;
     let mut config = Config::with_capacity(CONFIG_BYTES);
     http::push_line(&mut config, "url", request.url.as_str()).map_err(engine_failed)?;
     config.push(match request.verb {
@@ -139,17 +147,29 @@ fn config(
         http::push_line(&mut config, "resolve", pins).map_err(engine_failed)?;
     }
     config.push("header = \"");
-    http::push_quoted(&mut config, &key.header).map_err(engine_failed)?;
-    match (key.scheme, secrets) {
-        (Scheme::Bearer, [secret]) => {
-            config.push(": Bearer ");
-            http::push_quoted(&mut config, secret.expose()).map_err(engine_failed)?;
+    match request.auth {
+        Credential::Key(key) => {
+            http::push_quoted(&mut config, &key.header).map_err(engine_failed)?;
+            match (key.scheme, secrets) {
+                (Scheme::Bearer, [secret]) => {
+                    config.push(": Bearer ");
+                    http::push_quoted(&mut config, secret.expose()).map_err(engine_failed)?;
+                }
+                (Scheme::Basic, [secret, user]) => {
+                    config.push(": Basic ");
+                    http::push_basic(&mut config, user.expose(), secret.expose())
+                        .map_err(engine_failed)?;
+                }
+                _ => return Err(failed()),
+            }
         }
-        (Scheme::Basic, [secret, user]) => {
-            config.push(": Basic ");
-            http::push_basic(&mut config, user.expose(), secret.expose()).map_err(engine_failed)?;
+        Credential::OAuth { .. } => {
+            let [token] = secrets else {
+                return Err(failed());
+            };
+            config.push("Authorization: Bearer ");
+            http::push_quoted(&mut config, token.expose()).map_err(engine_failed)?;
         }
-        _ => return Err(failed()),
     }
     config.push("\"\n");
     for (name, value) in request.headers {
@@ -221,7 +241,7 @@ struct Reader {
     found: Option<Value>,
 }
 
-fn head_end(bytes: &[u8]) -> Option<(usize, usize)> {
+pub(in crate::connectors) fn head_end(bytes: &[u8]) -> Option<(usize, usize)> {
     (0..bytes.len()).find_map(|at| {
         if bytes[at..].starts_with(b"\r\n\r\n") {
             Some((at, 4))
@@ -233,7 +253,7 @@ fn head_end(bytes: &[u8]) -> Option<(usize, usize)> {
     })
 }
 
-fn status_of(line: &[u8]) -> Option<u16> {
+pub(in crate::connectors) fn status_of(line: &[u8]) -> Option<u16> {
     let text = std::str::from_utf8(line).ok()?;
     let mut parts = text.split(' ');
     if !parts.next()?.starts_with("HTTP/") {
@@ -428,8 +448,13 @@ impl Reader {
         if (300..400).contains(&self.status) {
             return Err(McpError::Refused("connector_redirect_refused"));
         }
-        if self.status == 401 || (self.status == 403 && insufficient(&self.challenges)) {
+        if self.status == 401 {
             return Err(McpError::Unauthorized {
+                scope: scope(&self.challenges),
+            });
+        }
+        if self.status == 403 && insufficient(&self.challenges) {
+            return Err(McpError::InsufficientScope {
                 scope: scope(&self.challenges),
             });
         }
@@ -502,7 +527,7 @@ fn unquoted(value: &str) -> String {
 /// Reads the Bearer parameters out of one `WWW-Authenticate` value, which may hold more
 /// than one challenge. Input: the header value. Output: each Bearer parameter, its name
 /// in lowercase and its value unquoted.
-fn bearer(value: &str) -> Vec<(String, String)> {
+pub(in crate::connectors) fn bearer(value: &str) -> Vec<(String, String)> {
     let mut scheme = String::new();
     let mut found = Vec::new();
     for part in parts(value) {

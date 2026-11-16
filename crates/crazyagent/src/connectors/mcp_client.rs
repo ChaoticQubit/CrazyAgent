@@ -6,6 +6,7 @@
 use crate::app_plugins::connector::{KeyAuth, McpEndpoint, Scheme};
 use crate::app_plugins::store::Bound;
 use crate::connectors::settings::SizeCap;
+use crate::protocol::CredentialRef;
 use crate::provider_reach::ProviderReach;
 use serde_json::Value;
 use std::path::Path;
@@ -13,11 +14,11 @@ use std::path::Path;
 #[cfg(unix)]
 mod clean;
 #[cfg(unix)]
-mod guard;
+pub(in crate::connectors) mod guard;
 #[cfg(unix)]
 mod live;
 #[cfg(unix)]
-mod wire;
+pub(in crate::connectors) mod wire;
 
 /// The most tools one connector may list; a longer list is refused, never cut.
 pub const TOOLS_MAX: usize = 512;
@@ -56,11 +57,18 @@ pub const MCP_CODES: [&str; 19] = [
     "connector_vendor_error",
 ];
 
-/// How the engine signs in to a vendor: today a key the owner entered, named by where it is
-/// saved and never held here by value.
+/// How the engine signs in to a vendor: a key the owner entered, or the tokens of an OAuth
+/// sign-in with the issuer they came from and when the access token ends (Unix ms), each
+/// named by where it is saved and never held here by value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Credential {
     Key(KeyRef),
+    OAuth {
+        access: CredentialRef,
+        refresh: Option<CredentialRef>,
+        issuer: String,
+        expires_ms: i64,
+    },
 }
 
 /// Where a connector's key is saved and how it is sent: the header, the scheme, and the
@@ -120,12 +128,14 @@ pub struct ToolResult {
     pub cut: bool,
 }
 
-/// Why a vendor call gave nothing: the key or its scope was refused, the reply was too
-/// large to read, the vendor took too long, the engine refused (a code from `MCP_CODES`),
-/// or the vendor answered with an error of its own, hidden characters taken out.
+/// Why a vendor call gave nothing: the key was refused (401), its scope was short (403
+/// insufficient_scope), the reply was too large to read, the vendor took too long, the
+/// engine refused (a code from `MCP_CODES`), or the vendor answered with an error of its
+/// own, hidden characters taken out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpError {
     Unauthorized { scope: Option<String> },
+    InsufficientScope { scope: Option<String> },
     TooLarge,
     Timeout,
     Refused(&'static str),
@@ -136,7 +146,9 @@ impl McpError {
     /// The code a page shows for this error, one of `MCP_CODES`.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Unauthorized { .. } => "connector_sign_in_needed",
+            Self::Unauthorized { .. } | Self::InsufficientScope { .. } => {
+                "connector_sign_in_needed"
+            }
             Self::TooLarge => "connector_reply_too_large",
             Self::Timeout => "connector_timeout",
             Self::Refused(code) => code,

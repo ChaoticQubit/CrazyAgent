@@ -49,6 +49,7 @@ pub(in crate::connectors) struct Seen {
     pub(in crate::connectors) path: String,
     pub(in crate::connectors) headers: Vec<(String, String)>,
     pub(in crate::connectors) body: Value,
+    pub(in crate::connectors) raw: String,
 }
 
 impl Seen {
@@ -161,6 +162,7 @@ fn read_request(stream: &TcpStream) -> Seen {
         path,
         headers,
         body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+        raw: String::from_utf8_lossy(&body).into_owned(),
     }
 }
 
@@ -832,7 +834,7 @@ fn a_result_is_handed_on_as_text_only_with_hidden_characters_taken_out() {
 #[test]
 fn a_401_with_a_scope_is_reported_as_unauthorized_with_that_scope() {
     let desk = desk();
-    let cases: [(&str, &str, Option<&str>); 6] = [
+    let cases: [(&str, &str, Option<&str>); 5] = [
         (
             "401 Unauthorized",
             "Bearer resource_metadata=\"https://mcp.board.example/.well-known/oauth-protected-resource\", scope=\"read:issues write:issues\"",
@@ -843,11 +845,6 @@ fn a_401_with_a_scope_is_reported_as_unauthorized_with_that_scope() {
             "401 Unauthorized",
             "Bearer scope=\"read\u{202e}issues\"",
             None,
-        ),
-        (
-            "403 Forbidden",
-            "Bearer error=\"insufficient_scope\", scope=\"issues:write\", error_description=\"More access needed\"",
-            Some("issues:write"),
         ),
         (
             "401 Unauthorized",
@@ -878,6 +875,26 @@ fn a_401_with_a_scope_is_reported_as_unauthorized_with_that_scope() {
         open(&desk, &vendor.endpoint(), Access::Full).unwrap_err(),
         McpError::Unauthorized { scope: None }
     );
+    let vendor = Vendor::start(|_, _, stream| {
+        send(
+            stream,
+            &empty(
+                "403 Forbidden",
+                &[(
+                    "WWW-Authenticate",
+                    "Bearer error=\"insufficient_scope\", scope=\"issues:write\", error_description=\"More access needed\"",
+                )],
+            ),
+        );
+    });
+    assert_eq!(
+        open(&desk, &vendor.endpoint(), Access::Full).unwrap_err(),
+        McpError::InsufficientScope {
+            scope: Some("issues:write".into())
+        },
+        "a scope challenge is not a refused key"
+    );
+    assert_eq!(vendor.calls(), ["server/discover"]);
     let vendor = Vendor::start(|seen, _, stream| {
         let reply = modern(seen).unwrap_or_else(|| match seen.rpc() {
             "tools/list" => result(
@@ -899,7 +916,7 @@ fn a_401_with_a_scope_is_reported_as_unauthorized_with_that_scope() {
     session.list_tools().unwrap();
     assert_eq!(
         session.call("create_issue", &json!({"title": "x"})),
-        Err(McpError::Unauthorized {
+        Err(McpError::InsufficientScope {
             scope: Some("issues:write".into())
         })
     );
@@ -1835,6 +1852,7 @@ fn every_mcp_client_code_has_a_plain_sentence() {
     }
     for error in [
         McpError::Unauthorized { scope: None },
+        McpError::InsufficientScope { scope: None },
         McpError::TooLarge,
         McpError::Timeout,
         McpError::Refused("connector_call_failed"),
