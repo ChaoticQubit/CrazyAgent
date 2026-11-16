@@ -2,6 +2,7 @@ use super::super::launch::{LaunchError, LaunchEvent, failure, rate_limited};
 use super::super::manifest::{self, DriverKind, Manifest, Refused};
 use crate::adapters::{LINE_BYTES_MAX, clip_text};
 use crate::app_plugins::yaml::Value as Yaml;
+use crate::launch_context::EngineServer;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -37,13 +38,15 @@ enum Pending {
 
 /// One ACP agent conversation over JSON-RPC lines, without any IO: it writes the frames the
 /// caller sends to the agent and turns the agent's lines into launch events. The client
-/// offers the agent no file or terminal service, answers a permission request from the
-/// launch's tools switch, and keeps at most one request of its own open at a time.
+/// offers the agent no file or terminal service and no MCP server but the engine's own,
+/// answers a permission request from the launch's tools switch, and keeps at most one
+/// request of its own open at a time.
 #[derive(Debug)]
 pub struct Acp {
     phase: Phase,
     cwd: String,
     tools: bool,
+    servers: Vec<Value>,
     resume: Option<String>,
     session: Option<String>,
     next_id: u64,
@@ -76,6 +79,7 @@ impl Acp {
             phase: Phase::Initializing,
             cwd: folder.to_owned(),
             tools,
+            servers: Vec::new(),
             resume: resume.map(str::to_owned),
             session: None,
             next_id: 0,
@@ -98,6 +102,27 @@ impl Acp {
         );
         acp.assert_consistent();
         Ok((acp, start))
+    }
+
+    /// Gives the session the engine's own MCP servers, which `session/new`, `session/load`
+    /// and `session/resume` carry in the ACP stdio form, and none with tools off. Input: the
+    /// servers, before the first line is read. Output: the protocol.
+    pub fn with_servers(mut self, servers: &[EngineServer]) -> Self {
+        if self.tools {
+            self.servers = servers
+                .iter()
+                .map(|server| {
+                    json!({
+                        "name": server.name,
+                        "command": server.command,
+                        "args": server.args,
+                        "env": []
+                    })
+                })
+                .collect();
+        }
+        self.assert_consistent();
+        self
     }
 
     /// Where the conversation stands. Output: the phase.
@@ -315,7 +340,7 @@ impl Acp {
                     }
                     Some(_) => return Err(failure("launch_resume_unsupported")),
                 };
-                let mut params = json!({"cwd": self.cwd, "mcpServers": []});
+                let mut params = json!({"cwd": self.cwd, "mcpServers": self.servers});
                 if let Some(id) = open.2 {
                     params["sessionId"] = Value::String(id);
                 }
@@ -417,6 +442,7 @@ impl Acp {
 
     fn assert_consistent(&self) {
         assert!(Path::new(&self.cwd).is_absolute());
+        assert!(self.tools || self.servers.is_empty());
         assert!(self.resume.as_deref().is_none_or(plain_id));
         assert!(self.session.as_deref().is_none_or(plain_id));
         assert!(self.pending.is_none_or(|(id, _)| id < self.next_id));
@@ -474,6 +500,50 @@ pub fn check(manifest: &Manifest) -> Result<(), Refused> {
             message: "piped.tools_off: an acp harness switches tools off only by a setting of its own; name it here, or say tools_limited.".into(),
         }),
     }
+}
+
+/// The command line of an ACP agent process: `piped.argv`, with `piped.tools_off` before its
+/// first `--` entry while tools are off, each `{home}`, `{cwd}` and `{model}` filled once.
+/// Inputs: the manifest, the agent home, the working folder, the model, if any, and the
+/// tools switch. Output: the arguments, `launch_model_unsupported` for `{model}` with no
+/// model, `launch_account_home_unavailable` or `launch_working_dir_unavailable` for a folder
+/// that is not UTF-8, or `launch_harness_unsupported` for a manifest that does not read as
+/// an ACP harness or names any other placeholder.
+pub fn arguments(
+    manifest: &Manifest,
+    home: &Path,
+    cwd: &Path,
+    model: Option<&str>,
+    tools: bool,
+) -> Result<Vec<String>, LaunchError> {
+    let unsupported = |_: Refused| failure("launch_harness_unsupported");
+    let piped = manifest
+        .block("piped")
+        .filter(|_| manifest.piped == Some(DriverKind::Acp))
+        .ok_or_else(|| failure("launch_harness_unsupported"))?;
+    let argv = super::jsonl_turn::arguments(piped, "argv")
+        .map_err(unsupported)?
+        .unwrap_or_default();
+    let off = if tools {
+        Vec::new()
+    } else {
+        super::jsonl_turn::arguments(piped, "tools_off")
+            .map_err(unsupported)?
+            .unwrap_or_default()
+    };
+    let at = super::positional(&argv, &[], &off).map_err(unsupported)?;
+    let (home, cwd) = (home.to_str(), cwd.to_str());
+    let value = |name: &str| match name {
+        "home" => home.ok_or_else(|| failure("launch_account_home_unavailable")),
+        "cwd" => cwd.ok_or_else(|| failure("launch_working_dir_unavailable")),
+        "model" => model.ok_or_else(|| failure("launch_model_unsupported")),
+        _ => Err(failure("launch_harness_unsupported")),
+    };
+    let filled = super::ordered(&argv, at, &[], &off)
+        .map(|argument| super::fill(argument, &value))
+        .collect::<Result<Vec<String>, LaunchError>>()?;
+    assert_eq!(filled.len(), argv.len() + off.len());
+    Ok(filled)
 }
 
 /// Picks the permission option the launch's tools switch allows: with tools on the
