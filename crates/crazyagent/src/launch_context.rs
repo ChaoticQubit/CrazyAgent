@@ -1386,8 +1386,12 @@ impl AgentContext {
     /// file holds no server, a server with any tool the
     /// owner switched off is left out whole, as the file cannot switch off one tool, and an
     /// ACP harness's file leaves out the engine's own servers, which its session opens with.
+    /// With a tool home ([`Self::with_tool_home`]) it also writes the agent's own `getconf`
+    /// into that home's launch folder, as a native install does into its home, naming the
+    /// short temp folder there (rv-code4 T19b F7).
     /// Output: the guard that deletes those files, `launch_context_unsafe` for a tool home
-    /// ([`Self::with_tool_home`]) the private home is not inside, `launch_manifest_invalid`
+    /// the private home is not inside or a launch folder there that is not a plain folder,
+    /// `launch_context_unwritable` when the `getconf` cannot be written, `launch_manifest_invalid`
     /// for blocks that do not read, `launch_listed_hooks_unsupported` for a tools-on team
     /// agent whose project turned hooks on, or `launch_home_busy`.
     pub fn install_listed(
@@ -1455,6 +1459,12 @@ impl AgentContext {
         });
         let written = crate::harnesses::render::write(&renders, home, servers, &instructions)?;
         assert_eq!(written.len(), count);
+        #[cfg(target_os = "macos")]
+        if let Some(tools) = &self.tool_home {
+            directory(&tools.join(STATE), false)?;
+            crate::sandbox::toolchains::write_getconf(tools, false)
+                .map_err(|_| failure("launch_context_unwritable"))?;
+        }
         Ok(installed)
     }
 

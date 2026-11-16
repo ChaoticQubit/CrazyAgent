@@ -252,14 +252,19 @@ fn a_tools_on_listed_team_agent_launches_with_the_agent_homes_temp_folder_and_ca
     );
     assert_eq!(env("CARGO_HOME"), Some(own.join(".cargo")));
     assert!(own.join(".cargo").is_dir());
+    let path = env("PATH").unwrap_or_default();
+    let path = path.as_os_str().to_string_lossy();
+    let getconf = own.join(crate::launch_context::STATE).join("bin");
+    assert!(getconf.join("getconf").is_file(), "{getconf:?}");
+    assert!(
+        path.starts_with(&format!("{}:", getconf.display())),
+        "{path}"
+    );
     let git = scratch.join("bin");
     if git.join("git").is_file() {
-        let path = env("PATH").unwrap_or_default();
         assert!(
-            path.as_os_str()
-                .to_string_lossy()
-                .starts_with(&format!("{}:", git.display())),
-            "{path:?}"
+            path.starts_with(&format!("{}:{}:", getconf.display(), git.display())),
+            "{path}"
         );
     }
 }
