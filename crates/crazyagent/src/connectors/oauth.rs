@@ -29,6 +29,8 @@ use sign::forget_keys;
 #[cfg(unix)]
 pub(crate) use sign::fresh_with;
 #[cfg(unix)]
+use sign::own_replaced;
+#[cfg(unix)]
 pub(crate) use sign::refused_with;
 #[cfg(unix)]
 pub(crate) use sign::renew_with;
@@ -119,7 +121,8 @@ fn own_issuer_ref(name: &str) -> Result<CredentialRef, OAuthError> {
 
 /// Saves the owner's own OAuth app for a trusted connector that lets the owner bring one:
 /// its client id and, for a confidential app, its secret, replacing what was saved before
-/// and freeing it from the issuer the old one was bound to.
+/// and freeing it from the issuer the old one was bound to. A sign-in made with the old
+/// one ends and asks the owner again, and sign-ins begun with it are dropped.
 /// Inputs: database, engine root, connector, client id and secret. Output: Ok, or
 /// `connector_oauth_not_offered`, `_client_invalid`, `_key_store_unavailable`.
 pub fn set_own_client(
@@ -142,18 +145,34 @@ pub fn set_own_client(
     if !visible(id, OWN_ID_BYTES_MAX) || !secret_fits {
         return Err(OAuthError("connector_oauth_client_invalid"));
     }
-    accounts::remove_key_in(root, PLUGIN_KEYS, own_issuer_ref(name)?.as_str())
-        .map_err(|_| key_store())?;
-    accounts::replace_key_in(root, PLUGIN_KEYS, &own_ref(name)?, id.as_bytes().to_vec())
-        .map_err(|_| key_store())?;
-    let secret_ref = own_secret_ref(name)?;
-    match secret {
-        Some(secret) => {
-            accounts::replace_key_in(root, PLUGIN_KEYS, &secret_ref, secret.as_bytes().to_vec())
+    own_replaced(db, root, name, &manifest.title, now_ms(), || {
+        accounts::remove_key_in(root, PLUGIN_KEYS, own_issuer_ref(name)?.as_str())
+            .map_err(|_| key_store())?;
+        accounts::replace_key_in(root, PLUGIN_KEYS, &own_ref(name)?, id.as_bytes().to_vec())
+            .map_err(|_| key_store())?;
+        let secret_ref = own_secret_ref(name)?;
+        match secret {
+            Some(secret) => {
+                accounts::replace_key_in(root, PLUGIN_KEYS, &secret_ref, secret.as_bytes().to_vec())
+            }
+            None => accounts::remove_key_in(root, PLUGIN_KEYS, secret_ref.as_str()),
         }
-        None => accounts::remove_key_in(root, PLUGIN_KEYS, secret_ref.as_str()),
-    }
-    .map_err(|_| key_store())
+        .map_err(|_| key_store())
+    })
+}
+
+/// Saves the owner's own app where no sign-in can be made, so none is ended. Output: the
+/// save's answer.
+#[cfg(not(unix))]
+fn own_replaced(
+    _db: &Connection,
+    _root: &Path,
+    _name: &str,
+    _title: &str,
+    _now_ms: i64,
+    save: impl FnOnce() -> Result<(), OAuthError>,
+) -> Result<(), OAuthError> {
+    save()
 }
 
 /// Starts a sign-in to a trusted connector: finds its authorization server, picks the

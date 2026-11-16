@@ -114,8 +114,8 @@ struct Client {
 /// What a renewal needs of a connector's last sign-in, saved after its tokens in the plugin
 /// key store: the issuer, its token endpoint, the client and how it signs in, the resource
 /// the tokens are for, the scopes it asked, how many step-ups in a row led to it, when the
-/// access token ends (Unix ms; `i64::MAX` for no end) and the sha256 of the connector file
-/// the owner signed in under.
+/// access token ends (Unix ms; `i64::MAX` for no end), the sha256 of the connector file
+/// the owner signed in under, and whether the client is the owner's own app.
 #[derive(Serialize, Deserialize)]
 struct Record {
     sha256: String,
@@ -124,6 +124,7 @@ struct Record {
     client: String,
     secret: Option<String>,
     post: bool,
+    own: bool,
     resource: String,
     scopes: Vec<String>,
     tries: u8,
@@ -999,6 +1000,29 @@ pub(super) fn forget_keys(root: &Path, name: &str) -> Result<(), OAuthError> {
     Ok(())
 }
 
+/// Runs `save`, which replaces the owner's own app for a connector, under its renewal
+/// lock, after ending a sign-in made with the app saved before and dropping the sign-ins
+/// begun with it, so the issuer it was used at never gets the new app's id or secret; the
+/// owner is asked to sign in again. Inputs: database, root, connector, its title, the
+/// clock (Unix ms) and the save. Output: the save's answer, or the key store's or
+/// database's refusal.
+pub(super) fn own_replaced(
+    db: &Connection,
+    root: &Path,
+    name: &str,
+    title: &str,
+    now_ms: i64,
+    save: impl FnOnce() -> Result<(), OAuthError>,
+) -> Result<(), OAuthError> {
+    let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    flows().retain(|flow| !(flow.root == root && flow.connector == name && flow.client.own));
+    if let Some(record) = record_of(root, name)?.filter(|record| record.own) {
+        ended(root, name, &record.issuer)?;
+        mark_sign_in(db, name, title, now_ms)?;
+    }
+    save()
+}
+
 fn record_ref(name: &str) -> Result<CredentialRef, OAuthError> {
     CredentialRef::new(format!("connector-signin-{name}")).map_err(|_| key_store())
 }
@@ -1029,7 +1053,8 @@ fn save_record(root: &Path, name: &str, text: String) -> Result<(), OAuthError> 
 /// Redeems an answer's code (RFC 6749 4.1.3 with PKCE and the resource): the issuer is
 /// checked first, so a code from another server is never sent anywhere. The request body
 /// lives in a buffer that never grows and is zeroed. Under the renewal lock, the owner's
-/// own app must still be bound to this issuer or to none; then the tokens are saved, the
+/// own app must still be the one the sign-in began with, and bound to this issuer or to
+/// none; then the tokens are saved, the
 /// tokens of another issuer the connector was signed in at before are removed, the owner's
 /// own app is bound to this issuer, and the sign-in record is saved last. Inputs: engine root, the
 /// sign-in, the code, the answer's issuer and the lookup. Output: Ok once all is saved.
@@ -1051,6 +1076,10 @@ fn redeem(
     }
     let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
     if flow.client.own {
+        let now = saved(root, &own_ref(&flow.connector)?)?;
+        if now.is_none_or(|id| id.expose() != flow.client.id) {
+            return Err(OAuthError("connector_oauth_state_unknown"));
+        }
         let bound = accounts::read_bearer_in(root, PLUGIN_KEYS, &own_issuer_ref(&flow.connector)?)
             .map_err(|_| key_store())?;
         if bound.is_some_and(|issuer| issuer.expose() != flow.issuer) {
@@ -1089,6 +1118,7 @@ fn redeem(
             .as_ref()
             .map(|reference| reference.as_str().to_owned()),
         post: flow.client.post,
+        own: flow.client.own,
         resource: flow.resource.clone(),
         scopes: flow.scopes.clone(),
         tries: flow.tries,
