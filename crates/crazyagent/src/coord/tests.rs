@@ -3598,6 +3598,37 @@ fn a_listed_harness_kind_is_stored_as_its_id_and_answers_every_question_asked_of
     }
 }
 
+/// rv-sec3 T19b F2: a listed harness's launch writes no hooks, so its agent gets none of
+/// the owner's hooks, no edit guard and no receipts; every listed kind says why on every
+/// account kind, and its team agents are counted hookless.
+#[test]
+fn a_listed_harness_kind_lacks_hooks_the_edit_guard_and_receipts_and_says_why() {
+    use super::settings::{LISTED_NO_HOOKS, LISTED_NO_RECEIPTS, Protection};
+    for id in LISTED {
+        let kind = HarnessKind::Listed(id);
+        for endpoint in [false, true] {
+            assert_eq!(
+                kind.lacks(endpoint, Protection::Receipts),
+                Some(LISTED_NO_RECEIPTS),
+                "{id}"
+            );
+            for protection in [Protection::OwnerHooks, Protection::EditGuard] {
+                assert_eq!(
+                    kind.lacks(endpoint, protection),
+                    Some(LISTED_NO_HOOKS),
+                    "{id}"
+                );
+            }
+        }
+    }
+    for words in [LISTED_NO_HOOKS, LISTED_NO_RECEIPTS] {
+        assert!(
+            words.ends_with('.') && !words.contains('\u{2014}'),
+            "{words}"
+        );
+    }
+}
+
 /// DEC-180 Phase 1: the kind of a harness follows its manifest. A harness that is not one
 /// of the three native ones becomes a listed kind, under its own id, the moment its
 /// manifest names the agent or the master role, and has no kind while it names neither.

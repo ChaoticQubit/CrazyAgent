@@ -150,6 +150,10 @@ pub const BARE_NO_HOOKS: &str = "Claude Code on an API key or URL account starts
 /// Why an rcli master runs no hooks: rcli has none.
 pub const RCLI_NO_HOOKS: &str =
     "RCLI has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.";
+/// Why an agent of a listed harness runs no hooks: a listed launch writes none.
+pub const LISTED_NO_HOOKS: &str = "This harness runs no hooks in this version, so it runs none of yours and Block and Wait cannot hold its edits.";
+/// Why receipts are missing for an agent of a listed harness: they ride on hooks.
+pub const LISTED_NO_RECEIPTS: &str = "Receipts are unavailable for this harness.";
 /// Which owner hooks a Codex agent runs: those on an event Codex has (PA-12).
 pub const CODEX_HOOK_EVENTS_ONLY: &str = "Codex agents run your hooks on the events Codex has.";
 /// What a Codex agent's Messages timeline shows when its app-server lists a hook the launch

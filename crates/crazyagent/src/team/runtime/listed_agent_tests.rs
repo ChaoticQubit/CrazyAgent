@@ -151,3 +151,42 @@ fn a_team_agent_of_a_listed_harness_whose_account_left_the_pool_is_refused() {
     let refused = prepared.err().unwrap_or_default();
     assert!(refused.contains("team_account_left_pool"), "{refused}");
 }
+
+/// rv-sec3 T19b F2: a listed harness's launch writes no hooks, so its team agent is saved
+/// hookless, and one with tools is refused under Overlaps Block, as a hookless Claude Code
+/// agent is, since the edit guard is a hook.
+#[test]
+fn a_tools_on_team_agent_of_a_listed_harness_is_hookless_and_refused_under_block() {
+    use crate::coord::settings::{CoordSettings, Overlaps, write};
+    let fixture = Fixture::new(1);
+    let runtime = listed_runtime(&fixture);
+    write(
+        &fixture.connection,
+        &ProjectId::new(PROJECT).unwrap(),
+        &CoordSettings {
+            overlaps: Overlaps::Block,
+            ..CoordSettings::default()
+        },
+    )
+    .unwrap();
+    let with_tools = fixture.agent(AgentRole::Sub, "standin-acp", AgentStatus::Starting);
+
+    let prepared = runtime.prepare(
+        &fixture.setup,
+        with_tools,
+        AgentRole::Sub,
+        "standin-acp",
+        true,
+        &keyless_endpoint(),
+        false,
+        crate::agent_git::Layout::Linked,
+        false,
+    );
+
+    let refused = prepared.err().unwrap_or_default();
+    assert!(
+        refused.contains(crate::protocol::plain_code("overlap_block_needs_hooks")),
+        "{refused}"
+    );
+    assert!(hookless_saved(&fixture, with_tools));
+}

@@ -742,6 +742,32 @@ fn an_acp_manifest_names_its_own_tools_off_switch_or_says_tools_are_limited() {
     );
 }
 
+/// rv-sec3 T19b F1: a harness whose manifest says `tools_limited` cannot switch its tools
+/// off, so an ACP launch with tools off on it is refused before it runs, whatever switch
+/// the manifest names, the rule a listed master's launch keeps; tools on still builds.
+#[test]
+fn an_acp_launch_with_tools_off_is_refused_on_a_harness_whose_tools_are_limited() {
+    const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-acp.yaml");
+    let parse = |text: &str| crate::harnesses::manifest::parse(text.as_bytes()).unwrap();
+    let (home, cwd) = (Path::new("/agent/home"), Path::new(CWD));
+    let limited = STANDIN.replace(
+        "sub_agents: \"app\"\n",
+        "sub_agents: \"app\"\ntools_limited: \"Tools cannot be switched off.\"\n",
+    );
+    assert_ne!(limited, STANDIN);
+    let bare = limited.replace("  tools_off:\n    - \"--no-tools\"\n", "");
+    assert_ne!(bare, limited);
+    for text in [&limited, &bare] {
+        let manifest = parse(text);
+        assert_eq!(
+            arguments(&manifest, home, cwd, None, false).err(),
+            Some(failure("launch_tools_off_unsupported"))
+        );
+        assert!(arguments(&manifest, home, cwd, None, true).is_ok());
+    }
+    assert!(arguments(&parse(STANDIN), home, cwd, None, false).is_ok());
+}
+
 fn team_server() -> EngineServer {
     EngineServer {
         name: "crazyagent-team".into(),
