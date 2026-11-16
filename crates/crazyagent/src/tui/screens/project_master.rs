@@ -368,8 +368,8 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
     {
         return Some(format!("{harness} stopped: {detail} ({code}){retry}"));
     }
-    if turn.cause.as_deref() == Some(LOCAL_CONFIG_CHANGED_CAUSE) {
-        return Some(format!("{LOCAL_CONFIG_CHANGED} ({code})"));
+    if let Some(line) = turn.cause.as_deref().and_then(local_config_line) {
+        return Some(format!("{line} ({code})"));
     }
     let why = match turn.reason {
         Some(MasterReason::ReadinessUnknown | MasterReason::ReadinessStale) => {
@@ -453,12 +453,21 @@ fn stop_code(turn: &MasterTurnView) -> String {
     code
 }
 
-/// The code the engine gives when the local model's config file changed outside an account
-/// save, which a later try never clears (rv-sec3 G4 r2 F1).
-const LOCAL_CONFIG_CHANGED_CAUSE: &str = "rcli_profile_identity_changed";
-
-/// What the app says for [`LOCAL_CONFIG_CHANGED_CAUSE`]: a new conversation is the way on.
-const LOCAL_CONFIG_CHANGED: &str = "The local model's config file changed since this conversation started, so the master cannot use it. Press e to end it, then send again.";
+/// The plain line for a refusal because the local model's config changed: within the
+/// conversation, outside an account save, which a new conversation clears (rv-sec3 G4 r2
+/// F1), or on disk in another way, which it does not (rv-code4 B22 F3). A later try clears
+/// neither. Input: the code. Output: the line, or None for any other code.
+fn local_config_line(code: &str) -> Option<&'static str> {
+    match code {
+        "rcli_profile_changed_in_conversation" => Some(
+            "The local model's config file changed since this conversation started, so the master cannot use it. Press e to end it, then send again.",
+        ),
+        "rcli_profile_identity_changed" => Some(
+            "The local model's config file or folder changed on disk, so the master cannot use it.",
+        ),
+        _ => None,
+    }
+}
 
 /// Turns the engine's refusal of a master request into a plain line that keeps its code.
 /// Takes the rejection code.
@@ -478,8 +487,7 @@ pub(in crate::tui) fn master_problem(code: &str) -> String {
             "Its transcript could not be removed from the master's home, so nothing was deleted."
         }
         "stale_revision" => "Something changed meanwhile. Try again.",
-        LOCAL_CONFIG_CHANGED_CAUSE => LOCAL_CONFIG_CHANGED,
-        _ => "The engine refused it.",
+        _ => local_config_line(code).unwrap_or("The engine refused it."),
     };
     format!("{plain} ({code})")
 }

@@ -1842,7 +1842,7 @@ fn validate_registration(
     if proof.engine_epoch != session.engine_epoch()
         || (&proof.config_id, proof.source_hash.as_str()) != session.binding()
     {
-        return Err(error("master_configured_receipt_stale"));
+        return Err(stale_or_changed(record, &host));
     }
     check_owner_host(tx, &host)?;
     check_owner_admission(
@@ -1900,6 +1900,28 @@ fn validate_registration(
         return Err(error("master_configured_receipt_stale"));
     }
     Ok(())
+}
+
+/// The refusal of a configured registration made under an older engine run or settings
+/// binding: custody's rcli_profile_identity_changed when the home it pinned changed since,
+/// so turn preparation re-registers it only on that pinned home, as for a current one, and
+/// a write-and-restore stays refused across a rebinding (rv-code4 B22 F2); else
+/// master_configured_receipt_stale. Inputs: the registration and its host. Output: the
+/// refusal.
+fn stale_or_changed(record: &ConfiguredRegistration, host: &HostStamp) -> EngineError {
+    let proof = &record.proof;
+    let loaded = std::fs::symlink_metadata(&record.database_path)
+        .map_err(error)
+        .and_then(|metadata| NativeProfileCustody::capture(&record.database_path, &metadata))
+        .and_then(|mut custody| {
+            custody
+                .configured_rcli_profile(host, &proof.connection, &proof.profile_ref)
+                .map(|_| ())
+        });
+    match loaded {
+        Err(failure) if failure.0 == "rcli_profile_identity_changed" => failure,
+        Ok(()) | Err(_) => error("master_configured_receipt_stale"),
+    }
 }
 
 /// Proves one RCLI member's configured registration can authorize a turn now.
@@ -3959,12 +3981,13 @@ fn register_rcli_profile(
 /// Registers the configured RCLI members of a session about to prepare a turn (PA-6):
 /// each member without a registration whose engine-generated SDK home exists, each member
 /// whose registration was made under an older binding, from custody's unchanged profile,
-/// and each member whose pinned home custody no longer loads, on the home its slot pins,
-/// which registration re-pins only for the config an undone account save put back with a
-/// new change time this engine run (rv-sec3 G4 r2 F1). Inputs: the actor
-/// database, settings, custody, host and the session. Output: Ok; a member that cannot
-/// register is left for its turn check to name, except the owner's chosen member with an
-/// unchanged home, whose failure stops the preparation as before.
+/// and each member whose pinned home custody no longer loads, under any binding, on the
+/// home its slot pins, which registration re-pins only for the config an undone account
+/// save put back with a new change time this engine run (rv-sec3 G4 r2 F1, rv-code4 B22
+/// F2). Inputs: the actor database, settings, custody, host and the session. Output: Ok; a
+/// member that cannot register is left for its turn check to name, except the owner's
+/// chosen member, whose failure stops the preparation: any failure with an unchanged home,
+/// and rcli_profile_changed_in_conversation on its pinned home (rv-code4 B22 F3).
 fn register_generated_rcli_profile(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -4017,7 +4040,6 @@ fn register_generated_rcli_profile(
             },
         };
         let account = super::account_profile::configured_profile_ref(member)?;
-        let chosen = chosen && pinned.is_none();
         pending.push((member.clone(), account, stale, chosen, pinned));
     }
     drop(tx);
@@ -4054,6 +4076,7 @@ fn register_generated_rcli_profile(
         };
         if let Err(failure) = registered
             && chosen
+            && (!undone || failure.0 == "rcli_profile_changed_in_conversation")
         {
             return Err(failure);
         }
