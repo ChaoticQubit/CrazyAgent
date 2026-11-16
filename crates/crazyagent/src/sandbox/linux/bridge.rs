@@ -491,14 +491,17 @@ fn relay(family: u8, port: u16, agent: RawFd) {
 }
 
 /// Connects to this computer's loopback on a bridged port, the family the agent used first
-/// and the other one after it, as a program on the shared network would fall back. Inputs:
-/// the family and the port. Output: the connection, or none when nothing listens there.
+/// and the other one after it, as a program on the shared network would fall back. The
+/// broker starts no process and std makes the socket close-on-exec as it creates it, so the
+/// spawn gate, held across a whole connect, would only queue its relays. Inputs: the family
+/// and the port. Output: the connection, or none when nothing listens there.
+#[allow(clippy::disallowed_methods)]
 fn reach(family: u8, port: u16) -> Option<TcpStream> {
     assert!(port >= BRIDGE_PORT_MIN);
     let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, port));
     let order = if family == V6 { [v6, v4] } else { [v4, v6] };
-    crate::spawn_gate::connect_tcp_std(&order[..]).ok()
+    TcpStream::connect(&order[..]).ok()
 }
 
 /// Copies what the agent sends to the program on this computer until the agent's side ends
