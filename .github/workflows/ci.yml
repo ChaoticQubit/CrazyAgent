@@ -479,5 +479,5 @@ jobs:
           set -euo pipefail
           cargo test -p crazyagent-win-sandbox --locked --offline
           cargo test -p crazyagent --locked --offline --test windows_terminal
-          cargo test -p crazyagent --locked --offline --lib -- storage::setup::switch_tests onboarding::step_tests platform::beneath_tests
+          cargo test -p crazyagent --locked --offline --lib -- storage::setup::switch_tests onboarding::step_tests platform::beneath_tests setup::launch::tests plugins::windows_tests::a_windows_server_command_is_a_plain_drive_path setup::windows::tests::a_pack_program_is_found_as_cmd_or_exe_in_kept_places_and_uv_as_setup_runs_it
           cargo test -p crazyagent-desktop --locked --offline --test picker_windows

@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(unix)]
-use crate::plugins::{Scope, ServerSpec};
+use crate::plugins::Scope;
+use crate::plugins::ServerSpec;
 use crate::setup::pack::{GRAPH_ENTRY, PackKind, PackManifest, PackManifestEntry};
 use crate::setup::{RefusedTool, SetupAction, SetupStatus, progress};
 use crate::storage::versioned;
@@ -25,7 +26,6 @@ const PRESENT: &str = "present";
 const SKILLS: [&str; 2] = ["skills", "global"];
 
 pub(crate) enum Command {
-    #[cfg(unix)]
     Install {
         id: String,
         source: String,
@@ -1077,8 +1077,10 @@ pub(crate) fn execute(
     root: &Path,
     command: Command,
 ) -> Result<(), EngineError> {
-    let Command::Sweep = command;
-    sweep(connection, root)
+    match command {
+        Command::Sweep => sweep(connection, root),
+        Command::Install { .. } => Err(error(crate::setup::PLATFORM_UNSUPPORTED)),
+    }
 }
 
 #[cfg(test)]

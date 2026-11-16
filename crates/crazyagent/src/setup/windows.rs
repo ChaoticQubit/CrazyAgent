@@ -548,4 +548,60 @@ mod tests {
             );
         }
     }
+
+    /// WIN-PACK-SEED: a pack server's program is found as `<name>.cmd`, then `<name>.exe`,
+    /// only in a folder the installer's places keep, never by a bare file, a path, a drive
+    /// or stream name, and uv as the uv setup runs it, from the owner's WinGet Links.
+    #[test]
+    fn a_pack_program_is_found_as_cmd_or_exe_in_kept_places_and_uv_as_setup_runs_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = crate::sandbox::canonical(temp.path()).unwrap();
+        let bin = base.join("bin");
+        let links = base
+            .join("local")
+            .join("Microsoft")
+            .join("WinGet")
+            .join("Links");
+        let elsewhere = base.join("elsewhere");
+        for file in [
+            bin.join("npx.cmd"),
+            bin.join("npx.exe"),
+            bin.join("node.exe"),
+            bin.join("tool"),
+            links.join("uv.exe"),
+            elsewhere.join("other.cmd"),
+        ] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"program").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let places = crate::tools::Places::new(vec![bin.clone()], None);
+        let installer =
+            WindowsInstaller::new(&base.join("app"), Some(&base.join("local")), places).unwrap();
+        assert_eq!(installer.program("npx"), Some(bin.join("npx.cmd")));
+        assert_eq!(installer.program("node"), Some(bin.join("node.exe")));
+        assert_eq!(installer.program("uv"), Some(links.join("uv.exe")));
+        for name in [
+            "tool",
+            "other",
+            "",
+            ".npx",
+            "../npx",
+            r"..\npx",
+            "bin/npx",
+            r"bin\npx",
+            "C:npx",
+            "npx.cmd:x",
+        ] {
+            assert_eq!(installer.program(name), None, "{name}");
+        }
+        assert_eq!(
+            installer.lookup_program("tool"),
+            Err(crate::setup::program_not_found("tool"))
+        );
+    }
 }

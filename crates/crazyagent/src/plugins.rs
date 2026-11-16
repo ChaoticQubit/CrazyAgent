@@ -1077,3 +1077,34 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// WIN-PACK-SEED: on Windows a server command is a plain drive path, such as the `npx.cmd`
+    /// setup finds, never a `/` path, a bare name, or a UNC, verbatim, device, drive-relative,
+    /// forward-slash or stream path ([`crate::sandbox::windows_clean_text`]).
+    #[test]
+    fn a_windows_server_command_is_a_plain_drive_path() {
+        let stdio = |command: &str| ServerSpec::Stdio {
+            command: command.into(),
+            args: vec!["-y".into()],
+        };
+        assert!(stdio(r"C:\Program Files\nodejs\npx.cmd").validate().is_ok());
+        for command in [
+            "/usr/local/bin/npx",
+            "npx.cmd",
+            r"\nodejs\npx.cmd",
+            r"\\server\share\npx.cmd",
+            r"\\?\C:\nodejs\npx.cmd",
+            r"\\.\pipe\npx",
+            r"C:nodejs\npx.cmd",
+            "C:/nodejs/npx.cmd",
+            r"C:\nodejs\npx.cmd:stream",
+        ] {
+            let refused = stdio(command).validate().unwrap_err();
+            assert_eq!(refused.0, "server_command_invalid", "{command}");
+        }
+    }
+}

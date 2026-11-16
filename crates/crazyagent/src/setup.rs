@@ -2,6 +2,7 @@
 pub mod bundled;
 #[cfg(unix)]
 pub mod fetch;
+pub mod launch;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod linux;
 #[cfg(target_os = "macos")]
