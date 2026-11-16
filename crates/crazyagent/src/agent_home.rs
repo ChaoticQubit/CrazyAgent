@@ -1339,9 +1339,13 @@ pub(crate) fn remove_shell_startup(home: &Path, engine_root: &Path) -> Result<()
 /// shell startup files ([`remove_shell_startup`]) and what its cargo home holds that cargo
 /// runs code from, since the master's `CARGO_HOME` is that home's `.cargo`
 /// (AGENT-HOME-CONFIG). Only a home the engine made, strictly below its data root, loses
-/// them. Inputs: the home and the engine's data root, both canonical. Output: unit, or
-/// `agent_home_unwritable` when one stays, refusing the turn.
-pub(crate) fn remove_home_code(home: &Path, engine_root: &Path) -> Result<(), AgentHomeError> {
+/// them. Inputs: the home and the engine's data root, both canonical, and the owner's tool
+/// homes. Output: unit, or `agent_home_unwritable` when one stays, refusing the turn.
+pub(crate) fn remove_home_code(
+    home: &Path,
+    engine_root: &Path,
+    _homes: &crate::sandbox::toolchains::ToolHomes,
+) -> Result<(), AgentHomeError> {
     remove_shell_startup(home, engine_root)?;
     if home == engine_root || !home.starts_with(engine_root) {
         return Ok(());
