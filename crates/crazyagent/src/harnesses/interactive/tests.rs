@@ -2146,13 +2146,13 @@ fn a_claude_terminal_launch_and_its_teammates_run_with_auto_memory_off() {
 /// falls below that version and a signed-in Claude always knows the flag at start.
 #[test]
 fn the_claude_sign_in_floor_never_falls_below_the_first_claude_with_the_snapshot_flag() {
-    use crate::harnesses::update::below;
+    use crate::harnesses::update::{below, plain_version};
     const SNAPSHOT_FLAG_MIN: &str = "2.1.267";
     let floor = crate::adapters::claude::SIGN_IN_MIN;
     assert_eq!(CLAUDE_PROMPT_FRESH, ["--system-prompt-snapshot", "off"]);
     assert!(below("2.1.266", SNAPSHOT_FLAG_MIN));
     assert!(
-        below("0", floor),
+        plain_version(floor),
         "the sign-in floor {floor:?} is a plain version"
     );
     assert!(
