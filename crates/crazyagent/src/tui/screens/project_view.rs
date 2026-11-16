@@ -663,7 +663,8 @@ fn remove_ask(screen: &ProjectScreen, inner: usize, room: usize, look: &Look) ->
             body.push(pick(everything, "Delete everything"));
             if everything {
                 let rows = room.saturating_sub(body.len() + 2);
-                body.extend(delete_details(removal, &screen.remove_typed, rows, look));
+                let typed = &screen.remove_typed;
+                body.extend(delete_details(removal, typed, inner, rows, look));
             } else {
                 body.extend(words(DELETE_WORDS));
             }
@@ -707,17 +708,22 @@ fn remove_ask(screen: &ProjectScreen, inner: usize, room: usize, look: &Look) ->
 }
 
 /// Lists what Delete everything does in at most `rows` rows: the folders it moves to the Trash,
-/// what would be lost and the name typed so far, one line each, the two lists sharing the rows
-/// and each counting what it does not show. Inputs: the preview, the typed name, the rows and
-/// the look. Output: the rows, two at least.
+/// what would be lost and the name typed so far, wrapped when every line fits, else one line
+/// each, the two lists sharing the rows and each counting what it does not show. Inputs: the
+/// preview, the typed name, the box's inner width, the rows and the look. Output: the rows.
 fn delete_details(
     removal: &crate::team::cleanup::RemovalPreview,
     typed: &str,
+    inner: usize,
     rows: usize,
     look: &Look,
 ) -> Vec<Row> {
     let indented = |line: &str, style: Style| Row::of(format!("    {line}"), style);
     let losses = crate::team::cleanup::loss_lines(removal);
+    let wrapped = wrapped_details(removal, &losses, typed, inner, look);
+    if wrapped.len() <= rows {
+        return wrapped;
+    }
     let lists = rows.saturating_sub(2);
     let loss_need = losses.len().clamp(1, REMOVE_LOSSES_SHOWN + 1);
     let folder_need = removal.folders.len().min(REMOVE_FOLDERS_SHOWN + 1);
@@ -748,6 +754,47 @@ fn delete_details(
     }
     body.push(indented(&format!("Type the project name: {typed}"), look.fg));
     assert!(body.len() <= rows.max(2));
+    body
+}
+
+/// Lists what Delete everything does with every folder and loss wrapped to the box: up to
+/// three folders and six losses, each list counting the rest, then the name typed so far.
+/// Inputs: the preview, its loss lines, the typed name, the box's inner width and the look.
+/// Output: the rows, however many they take.
+fn wrapped_details(
+    removal: &crate::team::cleanup::RemovalPreview,
+    losses: &[String],
+    typed: &str,
+    inner: usize,
+    look: &Look,
+) -> Vec<Row> {
+    let indented = |line: &str, style: Style| Row::of(format!("    {line}"), style);
+    let mut body = vec![indented("Moves to the Trash:", look.muted)];
+    for folder in removal.folders.iter().take(REMOVE_FOLDERS_SHOWN) {
+        for line in wrap_words(folder, inner - 6) {
+            body.push(indented(&format!("  {line}"), look.fg));
+        }
+    }
+    if removal.folders.len() > REMOVE_FOLDERS_SHOWN {
+        let more = removal.folders.len() - REMOVE_FOLDERS_SHOWN;
+        body.push(indented(&format!("  and {more} more"), look.muted));
+    }
+    if losses.is_empty() {
+        body.push(indented(
+            "No agent is running and no work is unlanded.",
+            look.muted,
+        ));
+    }
+    for loss in losses.iter().take(REMOVE_LOSSES_SHOWN) {
+        for line in wrap_words(loss, inner - 4) {
+            body.push(indented(&line, look.warning));
+        }
+    }
+    if losses.len() > REMOVE_LOSSES_SHOWN {
+        let more = losses.len() - REMOVE_LOSSES_SHOWN;
+        body.push(indented(&format!("and {more} more"), look.warning));
+    }
+    body.push(indented(&format!("Type the project name: {typed}"), look.fg));
     body
 }
 
