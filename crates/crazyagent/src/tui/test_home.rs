@@ -94,6 +94,25 @@ pub(in crate::tui) fn refusing_settings(settings: &str) -> (tokio::net::TcpSocke
     (socket, settings)
 }
 
+/// rv-sec2 L388 F1: the port a TUI test engine seeds turns a connect away at once on macOS
+/// and Linux, so each account probe takes the refused path in well under its 400 ms budget,
+/// never a dropped SYN that waits the probe out.
+#[test]
+fn the_seeded_port_refuses_a_connect_within_a_tenth_of_a_second() {
+    let (_held, address) = refusing_port();
+    let started = std::time::Instant::now();
+    let refused =
+        crate::spawn_gate::connect_tcp_std_timeout(&address, std::time::Duration::from_secs(1))
+            .unwrap_err();
+    let took = started.elapsed();
+    assert_eq!(
+        refused.kind(),
+        std::io::ErrorKind::ConnectionRefused,
+        "{refused} after {took:?}"
+    );
+    assert!(took < std::time::Duration::from_millis(100), "{took:?}");
+}
+
 /// Asserts that every http model endpoint in a test engine's settings names a loopback port
 /// that is none of the owner's tool ports and refuses connections, so the engine never
 /// reaches a model server the host runs, such as Ollama on 11434 (backlog L388).
