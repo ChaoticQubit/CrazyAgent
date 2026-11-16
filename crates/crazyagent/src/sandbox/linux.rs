@@ -354,7 +354,7 @@ pub(crate) fn git_step_policy(read: &[PathBuf], write: &[PathBuf]) -> LandlockPo
         die_with: Some(std::process::id()).filter(|engine| *engine > 1),
         ..LandlockPolicy::default()
     };
-    assert!(policy.read.len() + policy.write.len() <= HELPER_PATHS_MAX);
+    assert!(policy.read.len() + policy.write.len() + policy.git_write.len() <= HELPER_PATHS_MAX);
     assert!(!policy.limit_network && policy.keep_free.is_empty());
     policy
 }
@@ -789,10 +789,11 @@ fn bindable(keep_free: &[u16]) -> Vec<u16> {
     ports
 }
 
-/// The rights a confined agent has in a git folder it writes ([`LandlockPolicy::git_write`]):
-/// read, write, truncate, make and remove files and folders, and nothing else, so no
-/// symlink, no move from or to another folder, no device, fifo or socket and no execute
-/// (DEC-185 S1). No input. Output: the rights.
+/// The rights a git folder grant ([`LandlockPolicy::git_write`]) adds: read, write,
+/// truncate, make and remove files and folders, and no symlink, no move from or to another
+/// folder, no device, fifo or socket and no execute. Landlock unions a folder's rights with
+/// its ancestors', so a read grant above the folder still gives execute (DEC-185 S1).
+/// No input. Output: the rights.
 pub fn git_folder_rights() -> BitFlags<AccessFs> {
     make_bitflags!(AccessFs::{
         ReadFile | ReadDir | WriteFile | Truncate | MakeReg | MakeDir | RemoveFile | RemoveDir
