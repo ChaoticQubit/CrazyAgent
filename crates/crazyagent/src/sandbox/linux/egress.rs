@@ -765,8 +765,8 @@ mod tests {
         ":FORWARD DROP [0:0]\n",
         ":OUTPUT DROP [0:0]\n",
         "-A OUTPUT -o lo -j ACCEPT\n",
-        "-A OUTPUT -d 10.0.2.2/32 -j DROP\n",
         "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
+        "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
         "COMMIT\n",
     );
@@ -787,8 +787,8 @@ mod tests {
         ":FORWARD DROP [0:0]\n",
         ":OUTPUT DROP [12:720]\n",
         "-A OUTPUT -o lo -j ACCEPT\n",
-        "-A OUTPUT -d 10.0.2.2/32 -j DROP\n",
         "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
+        "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
         "COMMIT\n",
         "# Completed on Sun Nov 15 23:10:00 2026\n",
@@ -830,6 +830,33 @@ mod tests {
     }
 
     #[test]
+    fn no_route_port_rule_reaches_the_slirp_network_and_only_dns_reaches_its_resolver() {
+        let dns = "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT";
+        let fence = "-A OUTPUT -d 10.0.2.0/24 -j DROP";
+        for ports in [&[443][..], &[53, 443], &[1, 8443, 65535]] {
+            let rules = egress_rules(ports);
+            let lines: Vec<&str> = rules.lines().collect();
+            let fenced = lines.iter().position(|line| *line == fence);
+            let Some(fenced) = fenced else {
+                panic!("no drop of the slirp network: {rules}");
+            };
+            let before: Vec<&str> = lines[..fenced]
+                .iter()
+                .copied()
+                .filter(|line| line.starts_with("-A "))
+                .collect();
+            assert_eq!(before, ["-A OUTPUT -o lo -j ACCEPT", dns], "{rules}");
+            for port in ports {
+                let line = format!("-A OUTPUT -o tap0 -p tcp -m tcp --dport {port} -j ACCEPT");
+                let at = lines.iter().position(|kept| *kept == line);
+                assert!(at.is_some_and(|at| at > fenced), "{port}: {rules}");
+            }
+            assert!(!rules.contains("10.0.2.2"), "the fence covers the gateway: {rules}");
+            assert_eq!(rules.matches("10.0.2.3").count(), 1, "{rules}");
+        }
+    }
+
+    #[test]
     fn the_read_back_drops_comments_and_counters_and_keeps_every_policy_and_rule() {
         let canonical = concat!(
             "*filter\n",
@@ -837,8 +864,8 @@ mod tests {
             ":FORWARD DROP\n",
             ":OUTPUT DROP\n",
             "-A OUTPUT -o lo -j ACCEPT\n",
-            "-A OUTPUT -d 10.0.2.2/32 -j DROP\n",
             "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
+            "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
             "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
             "COMMIT\n",
         );
@@ -846,7 +873,7 @@ mod tests {
         assert_eq!(canonical_rules(SAVED), canonical);
         let widened = SAVED.replace(":OUTPUT DROP [12:720]", ":OUTPUT ACCEPT [12:720]");
         let added = SAVED.replace("COMMIT\n", "-A OUTPUT -o tap0 -p udp -j ACCEPT\nCOMMIT\n");
-        let dropped = SAVED.replace("-A OUTPUT -d 10.0.2.2/32 -j DROP\n", "");
+        let dropped = SAVED.replace("-A OUTPUT -d 10.0.2.0/24 -j DROP\n", "");
         for changed in [widened, added, dropped] {
             assert_ne!(canonical_rules(&changed), canonical, "{changed}");
         }
