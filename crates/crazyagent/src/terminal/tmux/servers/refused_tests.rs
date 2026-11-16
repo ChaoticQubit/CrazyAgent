@@ -409,3 +409,52 @@ fn a_lead_server_start_waiting_for_its_socket_holds_no_keeper_map() {
     }
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
+
+/// v242 (rv-sec2 LOW): a lead server start keeps every other lead's keeper, also one that
+/// exited cleanly, so that lead's own server is still read through its keeper: a refused own
+/// socket whose keeper ended cleanly stays no own server rather than falling back to the
+/// socket file and becoming the lead's own again. The start here fails, since its server
+/// program runs no server.
+#[test]
+fn a_lead_server_start_keeps_another_leads_cleanly_exited_keeper() {
+    let (_root, host, _) = fresh_host();
+    let (starting, starting_socket) = own_lead(&host, 7);
+    let (ended, ended_socket) = own_lead(&host, 8);
+    let found = || host.own(&ended).map(|server| server.is_some());
+    drop(crate::spawn_gate::bind_unix_std(&ended_socket).unwrap());
+    assert!(
+        socket_file(&ended_socket),
+        "the ended server's socket file stays"
+    );
+    let mut keeper = crate::spawn_gate::spawn(
+        std::process::Command::new("/usr/bin/true")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(keeper.wait().unwrap().success());
+    host.keepers.lock().unwrap().insert(ended.clone(), keeper);
+    assert_eq!(
+        found(),
+        Ok(false),
+        "a refused own socket whose keeper ended cleanly was the lead's own server"
+    );
+    assert_eq!(
+        host.keep_server(&starting, &starting_socket, false, false),
+        Err(failure("terminal_unavailable")),
+        "a start whose server program runs no server did not fail"
+    );
+    assert!(
+        host.keepers.lock().unwrap().contains_key(&ended),
+        "a start dropped another lead's cleanly exited keeper"
+    );
+    assert_eq!(
+        found(),
+        Ok(false),
+        "another lead's start made a lead's ended own server its own again"
+    );
+    for socket in [&starting_socket, &ended_socket] {
+        std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+    }
+}
