@@ -1160,3 +1160,50 @@ test("the secret guard reads every form of the secrets context, an index, a whol
   ].join("\n");
   assert.deepEqual(exposedJobs(inherited), ["lint", "test"]);
 });
+
+test("the secret guard reads the secrets context in any case, as the runner does, and refuses a YAML alias, a backslash escape or a quoted scalar left open outside a block scalar, each of which hands a job secrets its lines never spell (B17 F1)", () => {
+  for (const line of ["${{ SECRETS.KEY }}", "${{ Secrets['KEY'] }}", "${{ toJSON(SECRETS) }}"]) {
+    assert.match(line, SECRET, line);
+  }
+  const shouted = [
+    "jobs:",
+    "  lint:",
+    "    runs-on: ubuntu-22.04",
+    "    steps:",
+    "      - run: echo ${{ SECRETS.KEY }}",
+    "  plain:",
+    "    runs-on: ubuntu-22.04",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(shouted), ["lint"]);
+  const head = ["jobs:", "  build:", "    runs-on: ubuntu-22.04", "    env: &signing", "      KEY: ${{ secrets.KEY }}", "  publish:", "    runs-on: ubuntu-22.04"];
+  for (const tail of [
+    ["    env: *signing"],
+    ["    env: *signing # shared"],
+    ["    env:", "      <<: *signing"],
+    ["    env: { <<: *signing }"],
+    ["    steps:", "      - *step"],
+    ["    env:", '      KEY: "${{ \\x73ecrets.KEY }}"'],
+    ["    env:", '      KEY: "${{ \\u0073ecrets.KEY }}"'],
+    ["    env:", '      KEY: "${{ secr\\', '        ets.KEY }}"'],
+    ["    steps:", '      - run: "echo ${{ \\u0053ECRETS.KEY }}"'],
+    ["    steps:", "      - run: |", "          echo hi", "        env:", '          KEY: "${{ \\u0073ecrets.KEY }}"'],
+    ["    env:", '      KEY: "${{ toJSON(', "        x: |", '          \\u0073ecrets) }}"'],
+  ]) {
+    const text = [...head, ...tail, ""].join("\n");
+    assert.throws(() => exposedJobs(text), /alias, a backslash/, text);
+  }
+  const scripted = [
+    "jobs:",
+    "  build:",
+    "    runs-on: ubuntu-22.04",
+    "    steps:",
+    "      - run: |",
+    "          printf '%s\\n' \"$NAME\" | tee *.txt",
+    "          echo \"it's",
+    "        env:",
+    "          NAME: plain",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(scripted), []);
+});
