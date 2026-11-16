@@ -873,29 +873,40 @@ pub fn claude_project_folder(cwd: &Path) -> Option<String> {
     (name.chars().count() <= CLAUDE_PROJECT_NAME_MAX).then_some(name)
 }
 
-/// Writes a keyed account's key into `<home>/.crazyagent-key`, readable only by this user,
-/// replacing an earlier one, so the key reaches the harness without argv or environment.
-/// Sets the mode itself, so no inherited umask narrows it, and removes the file when the write
-/// fails or the written file is not this user's private copy of the key. Inputs: the account
-/// home, already checked by the launch, and the key. Output: the path.
+/// Writes a keyed account's key into `<home>/.crazyagent-key`, private to this user and
+/// replacing an earlier one, so the key reaches the harness without argv or environment. Every
+/// step goes through the home folder opened once without following a link, so a home swapped
+/// after its check cannot redirect them; a failed or unsafe write is removed. Inputs: the
+/// account home and the key. Output: the path.
 #[cfg(unix)]
 pub fn write_key(home: &Path, key: &Secret) -> Result<PathBuf, LaunchError> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     super::launch::validate_home(home)?;
     let path = home.join(KEY_FILE);
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            std::fs::remove_file(&path).map_err(|_| failure("launch_key_file_unavailable"))?;
+    let unavailable = |_| failure("launch_key_file_unavailable");
+    let folder = rustix::fs::open(
+        home,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(unavailable)?;
+    match rustix::fs::statat(&folder, KEY_FILE, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => {
+            rustix::fs::unlinkat(&folder, KEY_FILE, AtFlags::empty()).map_err(unavailable)?;
         }
         Ok(_) => return Err(failure("launch_key_file_unsafe")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(rustix::io::Errno::NOENT) => {}
         Err(_) => return Err(failure("launch_key_file_unavailable")),
     }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|_| failure("launch_key_file_unavailable"))?;
+    let mut file = std::fs::File::from(
+        rustix::fs::openat(
+            &folder,
+            KEY_FILE,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(unavailable)?,
+    );
     let written = file
         .set_permissions(std::fs::Permissions::from_mode(0o600))
         .and_then(|()| file.write_all(key.reveal().as_bytes()))
@@ -911,7 +922,7 @@ pub fn write_key(home: &Path, key: &Secret) -> Result<PathBuf, LaunchError> {
         Err(_) => "launch_key_file_unavailable",
     };
     drop(file);
-    let _ = std::fs::remove_file(&path);
+    let _ = rustix::fs::unlinkat(&folder, KEY_FILE, AtFlags::empty());
     Err(failure(refusal))
 }
 
