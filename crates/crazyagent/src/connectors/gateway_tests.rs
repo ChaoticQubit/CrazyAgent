@@ -2039,6 +2039,13 @@ fn shelf_vendor(taken: Arc<Mutex<String>>) -> Vendor {
                     other => panic!("{other}"),
                 })
             }
+            ("POST", "/mcp") if wanted == "Bearer scope-short" => empty(
+                "403 Forbidden",
+                &[(
+                    "WWW-Authenticate",
+                    "Bearer error=\"insufficient_scope\", scope=\"write\"",
+                )],
+            ),
             ("POST", "/mcp") => {
                 let challenge = format!(
                     "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\""
@@ -2145,6 +2152,23 @@ fn an_oauth_connector_is_called_with_its_token_and_renews_once_when_refused() {
     assert!(!error, "{text}");
     assert_eq!(renewals(&vendor), 1, "a held session needs no renewal");
 
+    *taken.lock().unwrap() = "scope-short".to_owned();
+    for _ in 0..2 {
+        let (text, error) = called(&bench, &launch, "shelf__list_items", json!({}));
+        assert!(
+            error && text.starts_with("connector_sign_in_needed"),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        renewals(&vendor),
+        1,
+        "a scope challenge, held or at open, is never answered with a renewal"
+    );
+    *taken.lock().unwrap() = "at-shelf-2".to_owned();
+    let (text, error) = called(&bench, &launch, "shelf__list_items", json!({}));
+    assert!(!error, "the sign-in outlives a scope challenge: {text}");
+
     *taken.lock().unwrap() = "at-shelf-never".to_owned();
     let (text, error) = called(&bench, &launch, "shelf__list_items", json!({}));
     assert!(
@@ -2162,11 +2186,25 @@ fn an_oauth_connector_is_called_with_its_token_and_renews_once_when_refused() {
         "a new session renews once, never twice in a row"
     );
     assert_eq!(
+        crate::connectors::oauth::wanting(&bench.case.db, 8)
+            .map(|wanted| wanted
+                .map(|rows| rows.into_iter().map(|(name, _)| name).collect::<Vec<_>>())),
+        Ok(Some(vec!["shelf".to_owned()])),
+        "a renewed token refused at open ends the sign-in and asks for a new one"
+    );
+    let (text, error) = called(&bench, &launch, "shelf__list_items", json!({}));
+    assert!(
+        error && text.starts_with("connector_sign_in_needed"),
+        "{text}"
+    );
+    assert_eq!(renewals(&vendor), 2, "an ended sign-in is never renewed");
+    assert_eq!(
         bearers(&vendor),
         [
             "Bearer at-shelf-1",
             "Bearer at-shelf-2",
             "Bearer at-shelf-3"
-        ]
+        ],
+        "an ended sign-in sends no token"
     );
 }

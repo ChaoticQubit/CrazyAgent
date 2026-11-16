@@ -128,12 +128,14 @@ pub struct ToolResult {
     pub cut: bool,
 }
 
-/// Why a vendor call gave nothing: the key or its scope was refused, the reply was too
-/// large to read, the vendor took too long, the engine refused (a code from `MCP_CODES`),
-/// or the vendor answered with an error of its own, hidden characters taken out.
+/// Why a vendor call gave nothing: the key was refused (401), its scope was short (403
+/// insufficient_scope), the reply was too large to read, the vendor took too long, the
+/// engine refused (a code from `MCP_CODES`), or the vendor answered with an error of its
+/// own, hidden characters taken out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpError {
     Unauthorized { scope: Option<String> },
+    InsufficientScope { scope: Option<String> },
     TooLarge,
     Timeout,
     Refused(&'static str),
@@ -144,7 +146,9 @@ impl McpError {
     /// The code a page shows for this error, one of `MCP_CODES`.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Unauthorized { .. } => "connector_sign_in_needed",
+            Self::Unauthorized { .. } | Self::InsufficientScope { .. } => {
+                "connector_sign_in_needed"
+            }
             Self::TooLarge => "connector_reply_too_large",
             Self::Timeout => "connector_timeout",
             Self::Refused(code) => code,

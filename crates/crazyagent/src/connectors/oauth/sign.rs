@@ -72,7 +72,9 @@ fn from_mcp(error: McpError) -> OAuthError {
         McpError::Refused(code) => OAuthError(code),
         McpError::Timeout => OAuthError("connector_timeout"),
         McpError::TooLarge => OAuthError("connector_reply_too_large"),
-        McpError::Unauthorized { .. } | McpError::Vendor(_) => failed(),
+        McpError::Unauthorized { .. }
+        | McpError::InsufficientScope { .. }
+        | McpError::Vendor(_) => failed(),
     }
 }
 
