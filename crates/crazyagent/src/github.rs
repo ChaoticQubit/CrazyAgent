@@ -13,6 +13,7 @@ mod clone;
 mod draft;
 pub(crate) mod http;
 mod job;
+pub mod proposals;
 mod publish;
 mod rules;
 mod settings;

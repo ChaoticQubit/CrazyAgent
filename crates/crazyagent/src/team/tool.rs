@@ -483,6 +483,13 @@ pub fn serve_live(
     rpc(input, output, |request| answer_live(request, mailbox, off))
 }
 
+/// The tools a console master's team server leaves out: the owner's switched-off tools
+/// and the ones whose outcome reaches only a team conversation (DEC-182 S7). Stub until
+/// the fix. Takes the switched-off tools. Returns the tools left out.
+pub fn console_off(off: Vec<String>) -> Vec<String> {
+    off
+}
+
 /// Says whether every name is one of the team tools or the configured master's `wake`, as
 /// the engine subcommands check the tools they are told to leave out. Takes the names.
 /// Returns the answer.
