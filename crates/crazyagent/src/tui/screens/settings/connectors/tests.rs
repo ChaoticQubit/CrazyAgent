@@ -1,0 +1,629 @@
+use super::words::{refusal, trust_lines};
+use super::*;
+use crate::app_plugins::{
+    Binding, ConnectorTrust, KeyTrust, OAuthTrust, Origin, PluginKind, PluginStatus, Preview,
+    Problem, ReadOnlyTrust, RunsView, SecretView, TrustView,
+};
+use crate::connectors::{
+    ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, SignIn, SizeCap,
+};
+use crate::engine::owner::ConnectorsSaved;
+use crate::tui::client::OwnerEvent;
+use crate::tui::client::connectors::{ConnectorsEvent, ConnectorsJob};
+use crate::tui::client::settings::{SettingsEvent, SettingsJob};
+use crate::tui::render_tests::{check, ready, render, shell_at};
+use crate::tui::screens::open;
+use crate::tui::seam::{Arrival, Request};
+use crate::tui::shell::{Shell, targets};
+
+const SHA: &str = "c0ffee";
+const TYPED_KEY: &str = "lin-secret-typed";
+
+fn secret(name: &str, binding: Binding) -> SecretView {
+    SecretView {
+        name: name.into(),
+        binding,
+    }
+}
+
+fn connector(
+    name: &str,
+    title: &str,
+    origin: Origin,
+    status: PluginStatus,
+    host: &str,
+    secret: SecretView,
+) -> ConnectorView {
+    ConnectorView {
+        name: name.into(),
+        title: title.into(),
+        version: if origin == Origin::User {
+            "0.2.0"
+        } else {
+            "1.0.0"
+        }
+        .into(),
+        description: format!("Issues and projects in {title}."),
+        origin,
+        status,
+        sign_in: SignIn::Key,
+        runs: RunsView::Connector {
+            url: format!("https://{host}/mcp"),
+            hosts: vec![host.into()],
+            oauth_hosts: Vec::new(),
+            vendor_read_only: false,
+        },
+        secrets: vec![secret],
+        sha256: SHA.into(),
+    }
+}
+
+fn view() -> ConnectorsView {
+    ConnectorsView {
+        connectors: vec![
+            connector(
+                "linear",
+                "Linear",
+                Origin::Bundled,
+                PluginStatus::NeedsKey,
+                "mcp.linear.app",
+                secret("api_key", Binding::None),
+            ),
+            connector(
+                "github",
+                "GitHub",
+                Origin::Bundled,
+                PluginStatus::Ready,
+                "api.githubcopilot.com",
+                secret("token", Binding::Key),
+            ),
+            connector(
+                "board",
+                "Board",
+                Origin::User,
+                PluginStatus::NeedsReview,
+                "board.example.com",
+                secret("api_key", Binding::None),
+            ),
+        ],
+        more: false,
+        settings: ConnectorSettings::DEFAULT,
+        version: 7,
+        project: None,
+        grants: Vec::new(),
+    }
+}
+
+fn trust(oauth: bool) -> TrustView {
+    TrustView {
+        name: "board".into(),
+        title: "Board".into(),
+        version: "0.2.0".into(),
+        description: "Cards on the team board.".into(),
+        kind: PluginKind::Connector,
+        runs: RunsView::Connector {
+            url: "https://board.example.com/mcp".into(),
+            hosts: vec!["board.example.com".into(), "files.example.com".into()],
+            oauth_hosts: Vec::new(),
+            vendor_read_only: true,
+        },
+        secrets: vec!["api_key".into()],
+        sha256: SHA.into(),
+        replaces: false,
+        connector: Some(Box::new(ConnectorTrust {
+            read_only: ReadOnlyTrust::Header {
+                name: "X-Read-Only".into(),
+                value: "true".into(),
+            },
+            key: Some(KeyTrust {
+                header: "Authorization".into(),
+                scheme: "Bearer".into(),
+                secrets: vec!["api_key".into()],
+            }),
+            oauth: oauth.then(|| OAuthTrust {
+                hosts: vec!["auth.example.com".into()],
+                registration: vec!["cimd".into(), "dcr".into()],
+                scopes_read: vec!["read".into()],
+                scopes_write: Vec::new(),
+            }),
+            read_tools: vec!["list_cards".into()],
+        })),
+    }
+}
+
+fn requests(shell: &mut Shell) -> Vec<ConnectorsJob> {
+    std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::Settings(job) => match *job {
+                SettingsJob::Connectors(job) => Some(*job),
+                _ => panic!("the page sent another Settings request"),
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn one(shell: &mut Shell) -> ConnectorsJob {
+    let mut sent = requests(shell);
+    assert_eq!(sent.len(), 1, "one request at a time");
+    sent.remove(0)
+}
+
+fn arrive(shell: &mut Shell, event: ConnectorsEvent) {
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::Connectors(Box::new(event)),
+    )))));
+}
+
+fn read_all(job: &ConnectorsJob) -> bool {
+    matches!(job, ConnectorsJob::View { project: None })
+}
+
+fn page(read: ConnectorsView) -> Shell {
+    let mut shell = shell_at(ready(80, 24), Place::Connectors);
+    assert!(read_all(&one(&mut shell)), "the page reads every connector");
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
+    shell
+}
+
+fn shows(shell: &mut Shell, text: &str) -> bool {
+    render(shell, 80, 24).iter().any(|row| row.contains(text))
+}
+
+fn said(shell: &Shell) -> String {
+    shell
+        .ctx
+        .message()
+        .map(|message| format!("{} {}", message.lead, message.rest))
+        .unwrap_or_default()
+}
+
+fn keys(shell: &mut Shell, keys: &[Key]) {
+    for key in keys {
+        shell.key(key.clone());
+    }
+}
+
+fn typed(shell: &mut Shell, text: &str) {
+    for character in text.chars() {
+        shell.key(Key::Char(character));
+    }
+}
+
+fn with_secret(binding: Binding, at: usize) -> ConnectorsView {
+    let mut read = view();
+    read.connectors[at].secrets[0].binding = binding;
+    read
+}
+
+#[test]
+fn the_catalog_lists_every_connector_then_the_harnesses_and_the_two_settings() {
+    let mut shell = page(view());
+    check("connectors-80", &render(&mut shell, 80, 24), &[]);
+    keys(&mut shell, &[Key::End]);
+    check("connectors-settings-80", &render(&mut shell, 80, 24), &[]);
+    let mut more = view();
+    more.more = true;
+    let mut shell = page(more);
+    keys(&mut shell, &[Key::End]);
+    assert!(shows(&mut shell, "Showing the first 3 connectors."));
+}
+
+#[test]
+fn enter_opens_a_connector_s_page_and_esc_goes_back_to_all_connectors() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::Enter]);
+    assert!(requests(&mut shell).is_empty(), "the page is already read");
+    check("connector-detail-80", &render(&mut shell, 80, 24), &[]);
+    keys(&mut shell, &[Key::Esc]);
+    assert!(shows(&mut shell, "Catalog"));
+    assert!(!shows(&mut shell, "/  Linear"), "Esc closes the connector's page");
+    let mut gone = view();
+    keys(&mut shell, &[Key::End, Key::Home, Key::Enter]);
+    gone.connectors.remove(0);
+    keys(&mut shell, &[Key::Char('r')]);
+    assert!(read_all(&one(&mut shell)));
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(gone)));
+    assert!(shows(&mut shell, "No connector named linear."));
+}
+
+#[test]
+fn the_native_setting_and_the_size_cap_wait_for_enter_and_save_with_the_version_read() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::End, Key::Up, Key::Right]);
+    assert!(requests(&mut shell).is_empty(), "a pick waits for Enter");
+    assert!(shows(&mut shell, "[On]"));
+    assert!(shows(&mut shell, "Enter Save changes"));
+    keys(&mut shell, &[Key::Enter]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::SaveSettings { settings, version: 7 } if settings == ConnectorSettings {
+            native: NativeConnectors::On,
+            ..ConnectorSettings::DEFAULT
+        }
+    ));
+    let mut stored = view();
+    stored.settings.native = NativeConnectors::On;
+    stored.version = 8;
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Saved(Ok(ConnectorsSaved::Saved(Box::new(stored)))),
+    );
+    assert!(said(&shell).contains("Connector settings saved."));
+    assert!(requests(&mut shell).is_empty(), "the save answered with the page");
+    keys(&mut shell, &[Key::Down, Key::Left, Key::Enter]);
+    assert!(matches!(one(&mut shell), ConnectorsJob::SaveSettings { version: 8, .. }));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Saved(Ok(ConnectorsSaved::Stale(9))),
+    );
+    assert!(said(&shell).contains("The connector settings changed elsewhere."));
+    assert!(read_all(&one(&mut shell)), "a stale save reads the page again");
+    assert!(shows(&mut shell, "[256 KiB]"), "a stale save drops the pick");
+}
+
+#[test]
+fn each_size_cap_is_one_left_or_right_away_and_the_choices_wrap() {
+    for (seed, key, cap) in [
+        (SizeCap::Kib256, Key::Left, SizeCap::Kib64),
+        (SizeCap::Kib256, Key::Right, SizeCap::Mib1),
+        (SizeCap::Kib64, Key::Right, SizeCap::Kib256),
+        (SizeCap::Mib1, Key::Right, SizeCap::Kib64),
+    ] {
+        let mut read = view();
+        read.settings.size_cap = seed;
+        let mut shell = page(read);
+        keys(&mut shell, &[Key::End, key, Key::Enter]);
+        let saved = ConnectorSettings {
+            size_cap: cap,
+            ..ConnectorSettings::DEFAULT
+        };
+        assert!(
+            matches!(
+                one(&mut shell),
+                ConnectorsJob::SaveSettings { settings, version: 7 } if settings == saved
+            ),
+            "{seed:?} to {cap:?}"
+        );
+    }
+}
+
+#[test]
+fn esc_drops_an_unsaved_pick_and_a_failed_save_says_why() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::End, Key::Right]);
+    assert!(shows(&mut shell, "[1 MiB]"));
+    assert!(shows(&mut shell, "Esc Discard changes"));
+    keys(&mut shell, &[Key::Esc]);
+    assert!(shows(&mut shell, "[256 KiB]"));
+    assert!(shows(&mut shell, "Settings  /  Connectors "), "Esc stayed on the page");
+    assert!(requests(&mut shell).is_empty());
+    keys(&mut shell, &[Key::Right, Key::Enter]);
+    assert!(matches!(one(&mut shell), ConnectorsJob::SaveSettings { .. }));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Saved(Err("connectors_unavailable".into())),
+    );
+    assert!(said(&shell).contains("The connector settings were not saved."));
+    assert!(said(&shell).contains("The engine could not be reached."));
+}
+
+#[test]
+fn a_typed_key_is_masked_and_leaves_only_inside_the_set_key_job() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::Enter, Key::Char('k')]);
+    assert!(shows(&mut shell, "Key for api_key"));
+    assert!(shows(
+        &mut shell,
+        "Linear sends this key to mcp.linear.app. Only the engine keeps it."
+    ));
+    assert!(shows(&mut shell, "Sent to the engine once and never shown again."));
+    keys(&mut shell, &[Key::Enter]);
+    assert!(requests(&mut shell).is_empty(), "an empty key is not sent");
+    assert!(shows(&mut shell, "Enter a key."));
+    typed(&mut shell, TYPED_KEY);
+    for size in [(80, 24), (120, 40)] {
+        assert!(
+            !render(&mut shell, size.0, size.1)
+                .iter()
+                .any(|row| row.contains("lin-secret") || row.contains("typed")),
+            "{size:?}"
+        );
+    }
+    keys(&mut shell, &[Key::Enter]);
+    let job = one(&mut shell);
+    assert_eq!(format!("{job:?}"), "ConnectorSetKey");
+    assert!(matches!(
+        job,
+        ConnectorsJob::SetKey { ref name, ref secret, .. }
+            if name == "linear" && secret == "api_key"
+    ));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Page(Ok(with_secret(Binding::Key, 0))),
+    );
+    assert!(said(&shell).contains("The key for api_key was saved."));
+    assert!(shows(&mut shell, "api_key: Key you entered"));
+    assert!(!render(&mut shell, 80, 24).iter().any(|row| row.contains("lin-secret")));
+}
+
+#[test]
+fn u_clears_a_saved_key_and_a_gone_connector_reads_the_page_again() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::Down, Key::Enter]);
+    assert!(shows(&mut shell, "token: Key you entered"));
+    assert!(shows(&mut shell, "u Clear key"));
+    keys(&mut shell, &[Key::Char('u')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::ClearKey { ref name, ref secret } if name == "github" && secret == "token"
+    ));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Page(Ok(with_secret(Binding::None, 1))),
+    );
+    assert!(said(&shell).contains("token no longer has a key."));
+    assert!(shows(&mut shell, "token: Not set"));
+    keys(&mut shell, &[Key::Char('r')]);
+    assert!(read_all(&one(&mut shell)));
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(with_secret(Binding::Key, 1))));
+    keys(&mut shell, &[Key::Char('u')]);
+    assert!(matches!(one(&mut shell), ConnectorsJob::ClearKey { .. }));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Page(Err("app_plugin_not_found".into())),
+    );
+    assert!(said(&shell).contains("That connector is gone. The page now shows the current ones."));
+    assert!(read_all(&one(&mut shell)), "a gone connector reads the page again");
+}
+
+#[test]
+fn adding_shows_the_trust_screen_and_confirm_sends_the_text_and_its_sha() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::Char('a')]);
+    assert!(shows(&mut shell, "Add a connector"));
+    assert!(shows(&mut shell, "Connector manifest (YAML)"));
+    assert!(shows(&mut shell, "Nothing is used until you confirm its trust screen."));
+    typed(&mut shell, "name: board");
+    keys(&mut shell, &[Key::Enter]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::Preview { ref yaml } if yaml == "name: board"
+    ));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Preview {
+            read: None,
+            result: Ok(Preview::Ready { trust: trust(false) }),
+        },
+    );
+    for words in [
+        "Trust Board?",
+        "Version 0.2.0",
+        "Address: https://board.example.com/mcp",
+        "Reaches board.example.com, files.example.com",
+        "Read-only header: X-Read-Only: true",
+        "Key: the Authorization header with Bearer, from api_key",
+        "Tools it says only read: list_cards",
+        "SHA-256 c0ffee",
+    ] {
+        assert!(shows(&mut shell, words), "{words}");
+    }
+    keys(&mut shell, &[Key::Char('y')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::Add { ref yaml, ref sha256, replace: false }
+            if yaml == "name: board" && sha256 == SHA
+    ));
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(view())));
+    assert!(said(&shell).contains("Board was added."));
+    assert!(shows(&mut shell, "Catalog"));
+}
+
+#[test]
+fn a_manifest_that_is_not_a_connector_is_refused_and_e_edits_it_again() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::Char('a')]);
+    typed(&mut shell, "kind: embedding");
+    keys(&mut shell, &[Key::Enter]);
+    assert!(matches!(one(&mut shell), ConnectorsJob::Preview { .. }));
+    let mut embedding = trust(false);
+    embedding.kind = PluginKind::Embedding;
+    embedding.connector = None;
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Preview {
+            read: None,
+            result: Ok(Preview::Ready { trust: embedding }),
+        },
+    );
+    assert!(shows(&mut shell, "This manifest can't be added"));
+    assert!(shows(&mut shell, "app_plugin_not_connector, kind"));
+    assert!(shows(&mut shell, "e Edit manifest"));
+    keys(&mut shell, &[Key::Char('y')]);
+    assert!(requests(&mut shell).is_empty(), "a refused manifest has no confirm");
+    keys(&mut shell, &[Key::Char('e')]);
+    assert!(shows(&mut shell, "Add a connector"));
+    assert!(shows(&mut shell, "kind: embedding"));
+    keys(&mut shell, &[Key::Enter]);
+    assert!(matches!(one(&mut shell), ConnectorsJob::Preview { .. }));
+    let problem = Problem {
+        code: "app_plugin_manifest_invalid".into(),
+        line: Some(2),
+        field: Some("mcp.url".into()),
+        message: "The address must start with https://.".into(),
+    };
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Preview {
+            read: None,
+            result: Ok(Preview::Refused { problem }),
+        },
+    );
+    assert!(shows(&mut shell, "(app_plugin_manifest_invalid, line 2, mcp.url)"));
+}
+
+#[test]
+fn a_connector_that_needs_review_is_trusted_from_its_page_and_the_owner_s_own_is_removed() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::Enter, Key::Char('x')]);
+    assert!(said(&shell).contains("Built-in connectors can't be removed or replaced."));
+    assert!(requests(&mut shell).is_empty());
+    keys(&mut shell, &[Key::Esc, Key::Down, Key::Down, Key::Enter]);
+    assert!(shows(&mut shell, "Enter Review"));
+    assert!(shows(&mut shell, "x Remove"));
+    keys(&mut shell, &[Key::Enter]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::Review { ref name } if name == "board"
+    ));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Preview {
+            read: None,
+            result: Ok(Preview::Ready { trust: trust(false) }),
+        },
+    );
+    assert!(shows(&mut shell, "Review Board"));
+    keys(&mut shell, &[Key::Char('y')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::Trust { ref name, ref sha256 } if name == "board" && sha256 == SHA
+    ));
+    let mut trusted = view();
+    trusted.connectors[2].status = PluginStatus::NeedsKey;
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(trusted.clone())));
+    assert!(said(&shell).contains("Board is trusted."));
+    keys(&mut shell, &[Key::Char('x')]);
+    assert!(shows(&mut shell, "Remove Board?"));
+    assert!(shows(&mut shell, "keys and its switch in every project."));
+    keys(&mut shell, &[Key::Char('y')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::Remove { ref name } if name == "board"
+    ));
+    trusted.connectors.truncate(2);
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(trusted)));
+    assert!(said(&shell).contains("Board was removed."));
+    assert!(shows(&mut shell, "Catalog"), "a removed connector's page closes");
+}
+
+#[test]
+fn a_failed_first_read_offers_a_retry() {
+    let mut shell = shell_at(ready(80, 24), Place::Connectors);
+    assert!(read_all(&one(&mut shell)));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Page(Err("app_plugins_unavailable".into())),
+    );
+    assert!(shows(&mut shell, "Couldn't load the connectors."));
+    assert!(shows(&mut shell, "Connectors aren't available in this engine yet."));
+    assert!(shows(&mut shell, "r Try again"));
+    keys(&mut shell, &[Key::Char('r')]);
+    assert!(read_all(&one(&mut shell)));
+}
+
+#[test]
+fn refusals_read_as_the_desktop_s_words() {
+    for (code, words) in [
+        (
+            "app_plugin_bundled",
+            "Built-in connectors can't be removed or replaced.",
+        ),
+        (
+            "app_plugin_changed",
+            "The manifest changed after you checked it. Check it again before you trust it.",
+        ),
+        (
+            "app_plugin_connector_oauth_not_yet",
+            "This connector signs in with OAuth, which this build does not have.",
+        ),
+        (
+            "app_plugin_needs_key",
+            "This connector needs a key first. Set one on its page in Settings, Connectors.",
+        ),
+        (
+            "app_plugin_needs_review",
+            "This connector's file changed or is new. Review it in Settings, Connectors first.",
+        ),
+        (
+            "app_plugin_secret_not_declared",
+            "This connector doesn't declare that secret.",
+        ),
+        (
+            "connector_project_unknown",
+            "That project is not set up here any more.",
+        ),
+        ("connectors_unavailable", "The engine could not be reached."),
+        ("connector_request_bounds", "The request is too large."),
+    ] {
+        assert_eq!(refusal(code), words, "{code}");
+    }
+}
+
+#[test]
+fn a_trust_screen_lists_every_field_in_the_desktop_s_order() {
+    assert_eq!(
+        trust_lines(&trust(true)),
+        [
+            "Version 0.2.0",
+            "Address: https://board.example.com/mcp",
+            "Reaches board.example.com, files.example.com",
+            "Read-only header: X-Read-Only: true",
+            "Key: the Authorization header with Bearer, from api_key",
+            "Signs in on auth.example.com",
+            "Registers by cimd, then dcr",
+            "Scopes while reading: read",
+            "Scopes when writing: none",
+            "Tools it says only read: list_cards",
+            "Secrets it needs: api_key",
+            "SHA-256 c0ffee",
+        ]
+    );
+    let mut plain = trust(false);
+    plain.replaces = true;
+    plain.secrets.clear();
+    if let Some(block) = plain.connector.as_mut() {
+        block.read_only = ReadOnlyTrust::Url {
+            url: "https://board.example.com/mcp/readonly".into(),
+        };
+        block.read_tools.clear();
+        if let Some(key) = block.key.as_mut() {
+            key.scheme.clear();
+        }
+    }
+    let lines = trust_lines(&plain);
+    assert_eq!(lines[3], "Read-only address: https://board.example.com/mcp/readonly");
+    assert_eq!(lines[4], "Key: the Authorization header, from api_key");
+    assert_eq!(lines[5], "Tools it says only read: none");
+    assert_eq!(lines[6], "Secrets it needs: none");
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("Replaces your connector named board.")
+    );
+    if let Some(block) = plain.connector.as_mut() {
+        block.read_only = ReadOnlyTrust::None;
+        block.key = None;
+    }
+    let lines = trust_lines(&plain);
+    assert_eq!(lines[3], "Read-only mode at the vendor: none");
+    assert_eq!(lines[4], "Key: none");
+}
+
+#[test]
+fn go_to_lists_connectors_under_settings_and_opens_it() {
+    let mut context = ready(80, 24);
+    let listed = targets(&context);
+    let at = listed.iter().position(|target| {
+        target.label == "Settings / Connectors"
+            && target.kind == "Settings"
+            && target.place == Place::Connectors
+    });
+    let activity = listed
+        .iter()
+        .position(|target| target.place == Place::ConnectorActivity);
+    assert!(at.is_some() && at < activity, "{at:?} {activity:?}");
+    let screen = open(&Place::Connectors, &mut context);
+    assert_eq!(screen.place(), Some(Place::Connectors));
+    assert_eq!(screen.crumbs(), ["Settings", "Connectors"]);
+}

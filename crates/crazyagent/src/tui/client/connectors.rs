@@ -1,12 +1,13 @@
 use super::settings::problem;
 use super::*;
-use crate::connectors::ConnectorSettings;
+use crate::app_plugins::Preview;
 use crate::connectors::audit::ActivityView;
-use crate::engine::owner::ConnectorsSaved;
+use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
+use crate::engine::owner::{AccountSecret, ConnectorsSaved};
+use std::path::PathBuf;
 
-/// One Connectors request a Settings page sends: read the activity log with its filters,
-/// or save the connector settings with the version the page read.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One Connectors request a Settings page or a project's Connectors page sends. A typed key
+/// travels only inside `SetKey`, as the engine's secret type, and is never printed.
 pub(in crate::tui) enum ConnectorsJob {
     Activity {
         connector: Option<String>,
@@ -16,14 +17,65 @@ pub(in crate::tui) enum ConnectorsJob {
         settings: ConnectorSettings,
         version: u64,
     },
+    View {
+        project: Option<String>,
+    },
+    Preview {
+        yaml: String,
+    },
+    ReadFile {
+        path: PathBuf,
+    },
+    Review {
+        name: String,
+    },
+    Add {
+        yaml: String,
+        sha256: String,
+        replace: bool,
+    },
+    Trust {
+        name: String,
+        sha256: String,
+    },
+    Remove {
+        name: String,
+    },
+    SetKey {
+        name: String,
+        secret: String,
+        key: AccountSecret,
+    },
+    ClearKey {
+        name: String,
+        secret: String,
+    },
+    Grant {
+        project: String,
+        connector: String,
+        enabled: bool,
+        who: Who,
+    },
 }
 
-/// The engine's answer to one Connectors request: the activity view, or how a settings
-/// save ended.
+impl std::fmt::Debug for ConnectorsJob {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(job_name(self))
+    }
+}
+
+/// The engine's answer to one Connectors request: the activity view, how a settings save
+/// ended, the Connectors page every page change answers with, or a trust screen (`read`
+/// carries the text a typed path held).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ConnectorsEvent {
     Activity(Result<ActivityView, String>),
     Saved(Result<ConnectorsSaved, String>),
+    Page(Result<ConnectorsView, String>),
+    Preview {
+        read: Option<String>,
+        result: Result<Preview, String>,
+    },
 }
 
 impl ConnectorsEvent {
@@ -40,14 +92,38 @@ fn failed(job: &ConnectorsJob, code: String) -> ConnectorsEvent {
     match job {
         ConnectorsJob::Activity { .. } => ConnectorsEvent::Activity(Err(code)),
         ConnectorsJob::SaveSettings { .. } => ConnectorsEvent::Saved(Err(code)),
+        ConnectorsJob::Preview { .. }
+        | ConnectorsJob::ReadFile { .. }
+        | ConnectorsJob::Review { .. } => ConnectorsEvent::Preview {
+            read: None,
+            result: Err(code),
+        },
+        ConnectorsJob::View { .. }
+        | ConnectorsJob::Add { .. }
+        | ConnectorsJob::Trust { .. }
+        | ConnectorsJob::Remove { .. }
+        | ConnectorsJob::SetKey { .. }
+        | ConnectorsJob::ClearKey { .. }
+        | ConnectorsJob::Grant { .. } => ConnectorsEvent::Page(Err(code)),
     }
 }
 
-/// The name a job is logged and refused under. Input: the job. Output: the name.
+/// The name a job is logged and refused under, never its text or key. Input: the job.
+/// Output: the name.
 pub(in crate::tui) fn job_name(job: &ConnectorsJob) -> &'static str {
     match job {
         ConnectorsJob::Activity { .. } => "ConnectorActivity",
         ConnectorsJob::SaveSettings { .. } => "SetConnectorSettings",
+        ConnectorsJob::View { .. } => "Connectors",
+        ConnectorsJob::Preview { .. } => "ConnectorPreview",
+        ConnectorsJob::ReadFile { .. } => "ConnectorReadFile",
+        ConnectorsJob::Review { .. } => "ConnectorReview",
+        ConnectorsJob::Add { .. } => "ConnectorAdd",
+        ConnectorsJob::Trust { .. } => "ConnectorTrust",
+        ConnectorsJob::Remove { .. } => "ConnectorRemove",
+        ConnectorsJob::SetKey { .. } => "ConnectorSetKey",
+        ConnectorsJob::ClearKey { .. } => "ConnectorClearKey",
+        ConnectorsJob::Grant { .. } => "ConnectorGrant",
     }
 }
 
@@ -77,6 +153,36 @@ impl NativeOwner {
                     .await
                     .map_err(|error| problem(&error, lost)),
             ),
+            other => ConnectorsEvent::unavailable(&other),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_connector_job_prints_its_name_never_its_key() {
+        let job = ConnectorsJob::SetKey {
+            name: "linear".into(),
+            secret: "api_key".into(),
+            key: AccountSecret::new(b"lin-test-never-printed".to_vec()).unwrap(),
+        };
+        assert_eq!(format!("{job:?}"), "ConnectorSetKey");
+        assert!(!format!("{job:?}").contains("lin-test"));
+        assert_eq!(
+            ConnectorsEvent::unavailable(&job),
+            ConnectorsEvent::Page(Err("trusted_connection_unavailable".into()))
+        );
+        assert_eq!(
+            ConnectorsEvent::unavailable(&ConnectorsJob::ReadFile {
+                path: PathBuf::from("/Users/owner/linear.yaml"),
+            }),
+            ConnectorsEvent::Preview {
+                read: None,
+                result: Err("trusted_connection_unavailable".into()),
+            }
+        );
     }
 }

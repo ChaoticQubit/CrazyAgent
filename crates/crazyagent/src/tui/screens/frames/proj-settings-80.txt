@@ -11,7 +11,7 @@
   Team      Codex leads. Any harness, up to 63 agents. Tools on.   h Harness se…
   Folders   Loading...   f Edit read-only folders
   Hidden    Loading...   k Edit hidden folders
-  Access    Loading...   c Agent access
+  Access    Loading...   c Agent access   b Connectors
   Trust     Loading...   w Repository trust
   Process   Instructions for this project's agents   i Edit
   Roadmap   Not planned   p Plan roadmap now

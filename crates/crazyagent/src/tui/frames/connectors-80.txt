@@ -1,0 +1,24 @@
+ [◆▪◆▪] CrazyAgent  /  Settings  /  Connectors                                  
+────────────────────────────────────────────────────────────────────────────────
+  Connectors                                                                    
+  Vendor MCP servers your projects can use through the engine, which keeps      
+  each key. A connector reaches no project until you turn it on in that         
+  project's Settings, Connectors.                                               
+                                                                                
+  Catalog                                                                       
+  Built-in connectors ship with CrazyAgent. Yours live in your plugins folder   
+  and are used only while their file matches what you trusted.                  
+  > Linear                                                         Needs a key  
+      linear, version 1.0.0. Built in.                                          
+      Set a key for each secret it needs.                                       
+      Reaches mcp.linear.app                                                    
+    GitHub                                                               Ready  
+      github, version 1.0.0. Built in.                                          
+      Reaches api.githubcopilot.com                                             
+    Board                                                         Needs review  
+      board, version 0.2.0. Added by you.                                       
+      Review this connector before a project can use it.                        
+      Reaches board.example.com                                                 
+                                                                                
+                                                                                
+ ↑↓ Move  Enter Open  a Add connector  r Read again  Esc Back            ? Help 

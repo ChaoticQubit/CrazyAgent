@@ -667,6 +667,7 @@ pub(in crate::tui) enum ProjectReply {
     Master,
     Process,
     Harnesses,
+    Connectors,
     Memory,
     Usage,
     Session(SessionsAction),
