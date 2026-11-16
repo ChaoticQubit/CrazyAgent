@@ -2187,11 +2187,20 @@ fn a_harness_the_resolver_refuses_as_changeable_is_never_asked_its_version() {
 /// A folder for a row's owner entry outside every temp folder and every folder agents can
 /// write: in `~/Library/Caches`, since this user's `getconf` cache folder lies in
 /// `/private/var/folders`, a temp folder, and the checkout and its build sit below a project
-/// folder. Input: the folder name's prefix. Output: the folder, removed when dropped.
+/// folder. A HOME without `Library/Caches`, as the gate's own HOME is, gets it private, as
+/// macOS makes it for every user. Input: the folder name's prefix. Output: the folder,
+/// removed when dropped.
 #[cfg(target_os = "macos")]
 fn outside_temp(prefix: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::DirBuilderExt;
     let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
-    let caches = home.join("Library").join("Caches").canonicalize().unwrap();
+    let caches = home.join("Library").join("Caches");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&caches)
+        .unwrap();
+    let caches = caches.canonicalize().unwrap();
     let folder = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir_in(caches)
