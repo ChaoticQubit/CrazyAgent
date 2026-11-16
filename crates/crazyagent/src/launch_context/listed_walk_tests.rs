@@ -127,3 +127,27 @@ fn a_listed_launch_runs_only_in_its_own_harness_folder_of_an_agent_home() {
     }
     untouched(&flat);
 }
+
+/// T18 LEAD-1 code r1 (rv-code2): a launch of a listed harness with no project context
+/// holds its private home through the same no-follow walk from the agent home, so once its
+/// harness folder is swapped for a link the next hold is refused and the folder the link
+/// names is never locked.
+#[test]
+fn a_context_less_listed_launch_never_locks_through_a_link_planted_at_the_harness_folder() {
+    let (_folder, home) = harness_home("standin-acp");
+    let base = agent_home(&home);
+    let held = lock_only(&home, "standin-acp");
+    assert!(held.is_ok(), "{:?}", held.as_ref().err());
+    drop(held);
+    let (_victim, target) = victim();
+    fs::rename(base.join("standin-acp"), base.join("moved")).unwrap();
+    std::os::unix::fs::symlink(&target, base.join("standin-acp")).unwrap();
+
+    let refused = lock_only(&home, "standin-acp");
+
+    assert_eq!(
+        refused.err().map(|problem| problem.0).as_deref(),
+        Some("launch_account_home_unsafe")
+    );
+    untouched(&target);
+}
