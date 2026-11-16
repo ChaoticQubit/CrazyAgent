@@ -886,6 +886,30 @@ fn the_owner_saves_and_removes_an_own_oauth_app_through_the_protocol() {
     assert_eq!(parse(&bytes).unwrap_err().0, "connector_request_invalid");
 }
 
+/// DEC-168 addendum 30, 23:36 Q2 A: the owner signs a connector out through the protocol;
+/// a waiting sign-in is cancelled and the page comes back. Names are bounded, and a ghost is
+/// refused.
+#[test]
+fn the_owner_signs_a_connector_out_through_the_protocol() {
+    let (_tmp, root) = engine();
+    let sha256 = sha(BOARD_OAUTH);
+    ask(
+        &root,
+        json!({"kind": "add", "yaml": BOARD_OAUTH, "sha256": sha256, "replace": false}),
+    );
+    waiting_sign_in(&root);
+    let out = ask(&root, json!({"kind": "sign_out", "name": "board"}));
+    named(&out, "board");
+    assert_eq!(sign_in::state_of(&root, "board"), SignInState::Cancelled);
+    let ghost = json!({"kind": "sign_out", "name": "ghost"});
+    assert_eq!(refused(&root, ghost), "app_plugin_not_found");
+    for name in [String::new(), "n".repeat(NAME_BYTES_MAX + 1)] {
+        let action = json!({"kind": "sign_out", "name": name});
+        let bytes = serde_json::to_vec(&request(action)).unwrap();
+        assert_eq!(parse(&bytes).unwrap_err().0, "connector_request_invalid");
+    }
+}
+
 /// fix10 on T12: the owner's read of a write whose wait ran out answers expired, with no
 /// arguments and the wait's end as its answer time, though no gateway tick marked it yet,
 /// so the desktop, the terminal and the notice's page never offer Allow on it; an answer

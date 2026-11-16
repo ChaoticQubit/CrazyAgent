@@ -172,6 +172,9 @@ enum Action {
     ClearOwnApp {
         name: String,
     },
+    SignOut {
+        name: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -412,6 +415,12 @@ impl OwnerClient {
             .await
     }
 
+    /// Signs a connector out at the owner's ask: its sign-in ends and a waiting one is
+    /// cancelled, with no "Sign in again" after. Input: the connector. Output: the page.
+    pub async fn connector_sign_out(&self, name: String) -> Result<ConnectorsView, EngineError> {
+        self.connectors_view(Action::SignOut { name }, None).await
+    }
+
     /// Reads where a connector's sign-in stands. Input: the connector. Output: its state.
     pub async fn connector_sign_in_state(&self, name: String) -> Result<SignInState, EngineError> {
         self.sign_in_reply(Action::SignInState { name }).await
@@ -607,7 +616,8 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         | Action::SignInState { name }
         | Action::CancelSignIn { name }
         | Action::SetOwnApp { name, .. }
-        | Action::ClearOwnApp { name } => &[name.as_str()],
+        | Action::ClearOwnApp { name }
+        | Action::SignOut { name } => &[name.as_str()],
         Action::SetKey { name, secret } | Action::ClearKey { name, secret } => {
             &[name.as_str(), secret.as_str()]
         }
@@ -647,7 +657,8 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         | Action::SignInState { .. }
         | Action::CancelSignIn { .. }
         | Action::SetOwnApp { .. }
-        | Action::ClearOwnApp { .. } => None,
+        | Action::ClearOwnApp { .. }
+        | Action::SignOut { .. } => None,
     };
     let id_invalid = matches!(
         connectors,
@@ -834,6 +845,11 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
         Action::ClearOwnApp { name } => {
             connector(root, &name)?;
             sign_in::clear_own_app(&db, root, &name)?;
+            page(&db, None)
+        }
+        Action::SignOut { name } => {
+            connector(root, &name)?;
+            sign_in::sign_out(&db, root, &name)?;
             page(&db, None)
         }
     }

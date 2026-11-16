@@ -286,6 +286,13 @@ pub fn clear_own_app(db: &Connection, root: &Path, name: &str) -> Result<(), Eng
     oauth::clear_own_client(db, root, name).map_err(refusal)
 }
 
+/// Signs a connector out at the owner's ask: a waiting sign-in is cancelled first, then
+/// the sign-in ends with no "Sign in again" after. Inputs: the engine database and root and
+/// the connector. Output: Ok, or the refusal.
+pub fn sign_out(_db: &Connection, _root: &Path, _name: &str) -> Result<(), EngineError> {
+    Err(EngineError("sign_out_not_built".into()))
+}
+
 #[cfg(test)]
 #[path = "sign_in_tests.rs"]
 mod tests;

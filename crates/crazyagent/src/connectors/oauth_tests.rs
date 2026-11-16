@@ -1409,6 +1409,50 @@ fn saving_an_own_app_ends_a_sign_in_made_by_registration() {
     );
 }
 
+/// Signing out at the owner's ask ends the sign-in: its tokens are not used, a sign-in
+/// begun before it is never redeemed, the vendor is asked nothing, and no Action item asks
+/// the owner to sign in again, since the owner chose it (DEC-168 addendum 30, 23:36 Q2 A).
+#[test]
+fn signing_out_ends_the_sign_in_and_asks_nothing_after() {
+    let mut sign = prepared(
+        Shape {
+            register: Some("{base}/register"),
+            ..shape()
+        },
+        &["127.0.0.1"],
+        &[Registration::Dcr],
+        None,
+    );
+    let pending = begun(&sign, false);
+    let waiting = begun(&sign, false);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    assert!(fresh_at(&sign, clock()).is_ok());
+    let sent = sign.vendor.seen().len();
+    assert_eq!(sign_out(&sign.case.db, &sign.case.root, "board"), Ok(()));
+    assert_eq!(
+        fresh_at(&sign, clock()),
+        Err(OAuthError("connector_sign_in_needed")),
+        "a signed-out connector's tokens are not used"
+    );
+    assert_eq!(
+        finished(&sign, &waiting.state, Some(&sign.issuer())),
+        Err(OAuthError("connector_oauth_state_unknown")),
+        "a sign-in begun before the sign-out is never redeemed"
+    );
+    assert_eq!(sign.vendor.seen().len(), sent);
+    for prefix in [
+        "connector-token-board-",
+        "connector-refresh-board-",
+        "connector-signin-board",
+    ] {
+        assert!(saved(&sign.case, prefix).is_empty(), "{prefix}");
+    }
+    assert!(notices(&mut sign.case).is_empty());
+}
+
 /// The Action items waiting on the owner after one reconcile, as kind, class, text and
 /// the page a click opens.
 fn notices(case: &mut Case) -> Vec<(NoticeKind, NoticeClass, String, serde_json::Value)> {

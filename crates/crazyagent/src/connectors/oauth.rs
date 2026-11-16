@@ -181,6 +181,14 @@ pub fn clear_own_client(db: &Connection, root: &Path, name: &str) -> Result<(), 
     })
 }
 
+/// Signs a connector out at the owner's ask: ends its sign-in and drops the sign-ins begun
+/// for it, and clears its "Sign in again", since the owner chose this. The vendor is not
+/// told, so its tokens stay valid there until they end. Inputs: database, engine root and
+/// connector. Output: Ok, or `connector_oauth_key_store_unavailable`, `connectors_unavailable`.
+pub fn sign_out(_db: &Connection, _root: &Path, _name: &str) -> Result<(), OAuthError> {
+    Err(OAuthError("sign_out_not_built"))
+}
+
 /// Saves the owner's own app where no sign-in can be made, so none is ended. Output: the
 /// save's answer.
 #[cfg(not(unix))]
