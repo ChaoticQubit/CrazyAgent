@@ -11,16 +11,21 @@ import type { ProjectData } from "./shared";
 const SENDING_SWITCH = "Sending to GitHub...";
 const RULES_NOT_READY = "Changing GitHub rules isn't in this build.";
 
-/** Sends one switch and answers the page to show next. Inputs: the project id, the rule,
- * whether it is on, and the change and read calls. Output: the page and the change's problem. */
+/** Sends one switch and answers the page to show next: the page the change answers, or,
+ * when the change fails, its problem and the page read again, since the change may have
+ * landed on GitHub before the failure. Inputs: the project id, the rule, whether it is on,
+ * and the change and read calls. Output: the page and the change's problem. */
 export async function sendRule(
-  _project: string,
-  _rule: string,
-  _on: boolean,
-  _send: typeof setGitHubRule = setGitHubRule,
-  _read: typeof loadGitHubRules = loadGitHubRules,
+  project: string,
+  rule: string,
+  on: boolean,
+  send: typeof setGitHubRule = setGitHubRule,
+  read: typeof loadGitHubRules = loadGitHubRules,
 ): Promise<{ page: Result<GitHubRepoRules>; problem: string }> {
-  return { page: { kind: "not_ready" }, problem: "" };
+  const changed = await send(project, rule, on);
+  if (changed.kind === "ok") return { page: changed, problem: "" };
+  const problem = changed.kind === "not_ready" ? RULES_NOT_READY : changed.message;
+  return { page: await read(project), problem };
 }
 
 /** Project > Settings > GitHub as a view of its read: the repository, then one switch per
@@ -94,12 +99,12 @@ export function GitHubRulesSection({ data }: { data: Pick<ProjectData, "id"> }) 
     sending.current = true;
     setBusy(rule);
     setProblem("");
-    const result = await setGitHubRule(id, rule, on);
+    const answer = await sendRule(id, rule, on);
     if (current.current !== id) return;
     sending.current = false;
     setBusy(null);
-    if (result.kind === "ok") setRead(result);
-    else setProblem(result.kind === "not_ready" ? RULES_NOT_READY : result.message);
+    setRead(answer.page);
+    setProblem(answer.problem);
   }
 
   return <GitHubRulesView read={read} busy={busy} problem={problem} onRule={(rule, on) => void change(rule, on)} onRetry={() => void retry()} />;

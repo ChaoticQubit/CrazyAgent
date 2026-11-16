@@ -59,7 +59,8 @@ export function GitHubDefaultsView({ read, problem, onRule, onStandard, onRetry 
 
 /** Settings, GitHub, New repositories: reads the saved defaults and saves the whole set on
  * each switch or on Use the standard setup, then shows what the engine read back, which is
- * another client's set when it saved in between. Output: the section. */
+ * another client's set when it saved in between; a failed save reads the saved set again.
+ * Output: the section. */
 function GitHubDefaultsSection() {
   const [read, reload] = useLoad(loadGitHubRuleDefaults);
   const [saved, setSaved] = useState<string[] | null>(null);
@@ -75,6 +76,8 @@ function GitHubDefaultsSection() {
     saving.current = false;
     if (result.kind === "ok") { setSaved(result.value); return; }
     setProblem(result.kind === "not_ready" ? "Saving defaults for new repositories isn't in this build." : result.message);
+    setSaved(null);
+    reload();
   };
 
   return <GitHubDefaultsView read={shown} problem={problem}

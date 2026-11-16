@@ -412,12 +412,13 @@ export function defaultsRead(read: Result<string[]>): Result<string[]> {
   return read.kind === "error" && DEFAULTS_UNREADABLE_CODES.includes(read.code) ? { ...read, message: DEFAULTS_UNREADABLE } : read;
 }
 
-export const DEFAULTS_UNSAVED = "";
+export const DEFAULTS_UNSAVED = "Couldn't save the defaults for new repositories. Try again.";
 
-/** Gives a failed defaults save its own sentence. Input: the save's answer. Output: the
- * answer, with the defaults sentences on a failure they name. */
+/** Gives a failed defaults save its own sentence: the file could not be written, or what was
+ * saved could not be read back safely. Input: the save's answer. Output: the answer, with the
+ * defaults sentences on a failure they name. */
 export function savedDefaults(read: Result<string[]>): Result<string[]> {
-  return read;
+  return read.kind === "error" && read.code === "github_state_unavailable" ? { ...read, message: DEFAULTS_UNSAVED } : defaultsRead(read);
 }
 
 /** Reads the rules a new repository starts with, DEC-182's while none are saved. Output:
@@ -429,7 +430,7 @@ export async function loadGitHubRuleDefaults(): Promise<Result<string[]>> {
 /** Saves the rules a new repository starts with; a publish already started keeps its copy.
  * Input: the rules on. Output: the rules the engine read back. */
 export async function saveGitHubRuleDefaults(rules: string[]): Promise<Result<string[]>> {
-  return defaultsRead(await wrap(() => githubRuleDefaultsSet(rules)));
+  return savedDefaults(await wrap(() => githubRuleDefaultsSet(rules)));
 }
 
 /** Reads the live rules of the repository a project was published to; GitHub gets only

@@ -214,8 +214,9 @@ test("Project Settings has a GitHub section that reads on open and writes only f
   const opened = section.slice(section.indexOf("export function GitHubRulesSection("));
   const effect = opened.slice(opened.indexOf("useEffect("), opened.indexOf("}, [data.id]);"));
   assert.ok(effect.includes("loadGitHubRules(data.id)"), "opening the section reads the live rules");
-  assert.ok(!effect.includes("setGitHubRule("), "opening the section sends no change");
-  assert.equal(counted(section, /setGitHubRule\(/g), 1, "one change call, from the switch handler");
+  assert.ok(!effect.includes("setGitHubRule(") && !effect.includes("sendRule("), "opening the section sends no change");
+  assert.equal(counted(section, /await sendRule\(/g), 1, "one change call, from the switch handler");
+  assert.equal(counted(section, /\bsend\(project, rule, on\)/g), 1, "sendRule sends the change once");
   const github = read("src/screens/settings/github.tsx");
   assert.ok(!github.includes("only to list and clone"), "the sign-in now also publishes and sets rules");
   assert.ok(!github.includes("you push"), "a publish pushes for the owner");
