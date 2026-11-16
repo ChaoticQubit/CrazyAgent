@@ -1,4 +1,5 @@
 use crate::protocol::CredentialRef;
+use crate::sandbox::LineageCheck;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1106,28 +1107,39 @@ enum Following {
     Taken,
 }
 
-/// A Full access headless run's or pane's processes, followed from its start on a thread of
-/// its own, since neither may be polled while it waits (SETSID-L2, BL-PANE-FOLLOW-GAP): the
+/// A Full access or sandboxed headless run's or pane's processes, followed from its start on
+/// a thread of its own, since neither may be polled while it waits (SETSID-L2,
+/// BL-PANE-FOLLOW-GAP, LINUX-KILL-GROUP): the
 /// thread takes the first read, or a pane's own, then the engine's shared table every
 /// [`FOLLOWER_PACE`], so a process a table showed in the run stays known once it leaves the
 /// run's session and loses its parent. One that does both between two tables it took, up to the pace plus the table's age
 /// plus the reads, is never seen, and only its token can still find it at the stop: the
 /// SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
 /// apply a table, so a stop never waits for a read in flight. Holds the leader, the launch's
-/// token, the lineage and the sender whose drop ends the thread.
+/// token, whether the run is sandboxed, the lineage and the sender whose drop ends the thread.
 pub(crate) struct Follower {
     leader: u32,
     token: Option<LineageToken>,
+    sandboxed: bool,
     lineage: Arc<Mutex<Following>>,
     _wake: std::sync::mpsc::Sender<()>,
 }
 
 impl Follower {
-    /// Starts following a Full access run from its first read on a thread of its own. When no
+    /// Starts following a headless run whose stop checks its lineage, a Full access run's or
+    /// a sandboxed one's as `check` says, from its first read on a thread of its own. When no
     /// thread starts, or no table is read here, the stop reads the lineage itself. Inputs: the
-    /// run's leader, whose id is also its session's, and the launch's token. Output: the
-    /// follower.
-    pub(crate) fn start(leader: u32, token: Option<LineageToken>) -> Self {
+    /// run's leader, whose id is also its session's, the launch's token and the check. Output:
+    /// the follower, or none where the run's boundary ends every process it started.
+    pub(crate) fn start(
+        leader: u32,
+        token: Option<LineageToken>,
+        check: LineageCheck,
+    ) -> Option<Self> {
+        if check == LineageCheck::Unneeded {
+            return None;
+        }
+        let sandboxed = check == LineageCheck::Sandboxed;
         let lineage = Arc::new(Mutex::new(Following::Reading));
         let (wake, woken) = std::sync::mpsc::channel();
         #[cfg(unix)]
@@ -1135,17 +1147,18 @@ impl Follower {
             let followed = Arc::clone(&lineage);
             let first = token.clone();
             let _ = std::thread::Builder::new()
-                .name("full-access-follow".into())
-                .spawn(move || follow_run(leader, first, &followed, &woken));
+                .name("run-follow".into())
+                .spawn(move || follow_run(leader, first, sandboxed, &followed, &woken));
         }
         #[cfg(not(unix))]
         drop(woken);
-        Self {
+        Some(Self {
             leader,
             token,
+            sandboxed,
             lineage,
             _wake: wake,
-        }
+        })
     }
 
     /// Follows, on a thread of its own, a lineage its owner already read, such as a pane's
@@ -1158,6 +1171,7 @@ impl Follower {
         token: Option<LineageToken>,
         first: Result<Lineage, Unstopped>,
     ) -> Self {
+        let sandboxed = first.as_ref().is_ok_and(|lineage| lineage.sandboxed);
         let lineage = Arc::new(Mutex::new(Following::Read(first)));
         let (wake, woken) = std::sync::mpsc::channel();
         #[cfg(unix)]
@@ -1172,6 +1186,7 @@ impl Follower {
         Self {
             leader,
             token,
+            sandboxed,
             lineage,
             _wake: wake,
         }
@@ -1185,7 +1200,9 @@ impl Follower {
         let taken = std::mem::replace(&mut *following(&self.lineage), Following::Taken);
         let mut lineage = match taken {
             Following::Read(read) => read?,
-            Following::Reading | Following::Taken => Lineage::of(self.leader, self.token)?,
+            Following::Reading | Following::Taken => {
+                first_read(self.leader, self.token, self.sandboxed)?
+            }
         };
         lineage.before_stop();
         Ok(lineage)
@@ -1198,18 +1215,35 @@ fn following(lineage: &Mutex<Following>) -> MutexGuard<'_, Following> {
     lineage.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Reads a followed run's lineage from the start: a sandboxed run's
+/// ([`Lineage::of_sandboxed`]) or a Full access one's ([`Lineage::of`]). Inputs: the leader,
+/// the token and whether the run is sandboxed. Output: the lineage, or why it cannot be read.
+fn first_read(
+    leader: u32,
+    token: Option<LineageToken>,
+    sandboxed: bool,
+) -> Result<Lineage, Unstopped> {
+    if sandboxed {
+        Lineage::of_sandboxed(leader, token)
+    } else {
+        Lineage::of(leader, token)
+    }
+}
+
 /// Takes a follower's first read, then the shared table every [`FOLLOWER_PACE`] until its
 /// stop. Each read runs with no lock held, and the lock is taken only to apply it. Ends at
-/// the stop, or once the first read found no lineage. Inputs: the leader, the token, the
-/// lineage's lock and the receiver the stop disconnects. Output: none.
+/// the stop, or once the first read found no lineage. Inputs: the leader, the token, whether
+/// the run is sandboxed, the lineage's lock and the receiver the stop disconnects. Output:
+/// none.
 #[cfg(unix)]
 fn follow_run(
     leader: u32,
     token: Option<LineageToken>,
+    sandboxed: bool,
     lineage: &Mutex<Following>,
     woken: &std::sync::mpsc::Receiver<()>,
 ) {
-    let first = Lineage::of(leader, token);
+    let first = first_read(leader, token, sandboxed);
     {
         let mut slot = following(lineage);
         if !matches!(*slot, Following::Reading) {
@@ -2599,6 +2633,63 @@ pub(crate) mod tests {
         if let Some(pid) = rustix::process::Pid::from_raw(pid) {
             let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
         }
+    }
+
+    /// LINUX-KILL-GROUP: a headless run whose boundary leaves a process in a session of its
+    /// own running, as the plain Linux Landlock helper's does, follows a sandboxed lineage, so
+    /// the process its harness left outside the group is found once the harness is gone and
+    /// is named as a sandboxed run's leftover, never as a Full access one's. Its leader leads
+    /// a session of its own, as the Linux helper's `own_session` makes a wrapped harness.
+    #[test]
+    fn a_sandboxed_follower_names_what_its_run_left_outside_its_group_as_sandboxed() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut leader = crate::spawn_gate::spawn(
+            std::process::Command::new("/usr/bin/perl")
+                .args(["-mPOSIX", "-e", "POSIX::setsid() > 0 or exit 1; exec '/bin/sh', '-c', $ARGV[0] or exit 1"])
+                .arg(
+                    "/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30",
+                )
+                .current_dir(folder.path())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        let follower = Follower::start(leader.id(), None, LineageCheck::Sandboxed).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let child = loop {
+            if let Some(child) = std::fs::read_to_string(folder.path().join("child.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break child;
+            }
+            assert!(Instant::now() < deadline, "the stand-in never started");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        let lineage = follower.stop();
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+        let settled = lineage.and_then(Lineage::settle);
+        end_pid(child);
+
+        match settled {
+            Err(Unstopped::Left(left)) => {
+                assert_eq!(left.code(), SANDBOX_LEFT);
+                assert!(left.0.known.iter().any(|process| process.pid == child));
+            }
+            other => panic!("the leftover was not found: {other:?}"),
+        }
+    }
+
+    /// LINUX-KILL-GROUP guard: a run whose boundary ends every process it started, as the
+    /// warden, a process namespace or the job does, gets no follower.
+    #[test]
+    fn a_run_whose_boundary_ends_every_process_it_started_has_no_follower() {
+        let follower = Follower::start(std::process::id(), None, LineageCheck::Unneeded);
+
+        assert!(follower.is_none());
     }
 
     /// Leaves a hold as a sandboxed run's stop does, for another module's row: a process in

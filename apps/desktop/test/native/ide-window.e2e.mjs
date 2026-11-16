@@ -159,11 +159,14 @@ function ideRefusal() {
 
 /** The app's window number while the window server lists the window on screen, found by the
  * app's process. Output: the number as text, or an empty string while the window is off that
- * list; throws when the app has no process. */
+ * list; throws at once, with the window id tool's status and error, when the app has no
+ * process or the tool did not run or did not exit 0, so a broken tool is never waited on. */
 function listedWindow() {
   const found = spawnSync("/usr/bin/pgrep", ["-f", `^${app}`], { encoding: "utf8" }).stdout.trim().split("\n")[0];
   assert.ok(found, "the test app has a process");
   const listed = spawnSync(windowIdTool, [found], { encoding: "utf8" });
+  const why = listed.error ? listed.error.message : (listed.stderr ?? "").trim();
+  assert.ok(!listed.error && listed.status === 0, `the window id tool ${windowIdTool} failed, status ${listed.status}: ${why}`);
   return listed.stdout.trim().split("\n")[0];
 }
 
@@ -469,6 +472,17 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     assert.equal(said, !back, `an unsaved edit was ${back ? "returned" : "lost"} after the restart, and the Save ${said ? "says" : "does not say"} it is lost`);
     await pause(Math.max(0, saving + LEAVE_S * 1000 + POLL_MS * 5 - Date.now()));
     await until(() => browser.execute(() => location.hash === "#/"), 60000, "the page never left the project");
+  });
+
+  it("a project removed with its terminal wall open: the wall's own read in WKWebView finds it gone and the wall closes itself (UI-5-F1)", async () => {
+    const name = "Wall own close";
+    const walls = () => Number(onApp(`count (every window whose title contains "${name}")`));
+    const project = await newProject("wall-own-close");
+    await invoke("desktop_open_terminal_windows", { id: project, name, count: 1, focus: false });
+    await until(() => walls() === 1, OWN_WINDOW_MS, "the project's terminal wall never opened");
+    const removal = await invoke("desktop_remove_project", { id: project, generation: ++generation });
+    assert.equal(removal.outcome, "applied", JSON.stringify(removal));
+    await until(() => walls() === 0, OWN_WINDOW_MS, "the wall stayed open after its project was removed");
   });
 
   it("moves to its own window with no reload, comes back, and closes with its project and the main window", async () => {
