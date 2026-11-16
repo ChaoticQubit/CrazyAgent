@@ -8,6 +8,16 @@ import { setTimeout as pause } from "node:timers/promises";
 const SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP"];
 const KILL_WAIT_MS = 5000;
 const REMOVE = { recursive: true, force: true, maxRetries: 20, retryDelay: 100 };
+const META = 4;
+
+/** Why a DevTools call never goes out on this system, or null when it may. A key event with Cmd
+ * (Meta) held is refused on macOS, whatever the page does with it: Chrome there hands a key the
+ * page left uncancelled to the Mac menu bar, and test keys opened About This Mac on the owner's
+ * screen (ABOUT-THIS-MAC). Inputs: the method, its params and the platform. Output: the reason. */
+export function refusedCall(method, params, platform = process.platform) {
+  if (platform !== "darwin" || method !== "Input.dispatchKeyEvent" || ((params?.modifiers ?? 0) & META) === 0) return null;
+  return "a DevTools key event with Cmd held never goes out on macOS (ABOUT-THIS-MAC): dispatch a KeyboardEvent in the page, or run the row on Linux";
+}
 
 /** The Chrome for Testing executable the desktop tests run, named by CRAZYAGENT_CHROME. There is
  * no default, so an unset variable never falls back to the owner's Google Chrome and its keychain.

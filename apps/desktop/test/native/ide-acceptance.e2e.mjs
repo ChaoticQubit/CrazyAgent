@@ -28,6 +28,7 @@ const BACKUP_MS = 3000;
 const STOP_MS = 20000;
 const RESTORE_MS = 20000;
 const PRIMARY = process.platform === "darwin" ? 4 : 2;
+const MAC_SKIP = process.platform === "darwin" && "the workbench's Cmd keybindings need a trusted Cmd key, and DevTools never sends one on macOS (ABOUT-THIS-MAC); this row runs on Linux, where the key is Ctrl";
 const CTRL = 2;
 const CHAT_KEYS = process.platform === "darwin" ? CTRL | PRIMARY : CTRL | 1;
 const SHIFT = 8;
@@ -105,7 +106,7 @@ function agentHosts(runtime) {
   return listed.stdout.split("\n").filter((line) => line.includes(runtime) && line.includes("--type=agentHost"));
 }
 
-test("the owner edits, reviews an agent change in Source Control, accepts, commits and pushes in the real IDE, with no AI UI", { timeout: 2400000 }, async (t) => {
+test("the owner edits, reviews an agent change in Source Control, accepts, commits and pushes in the real IDE, with no AI UI", { timeout: 2400000, skip: MAC_SKIP }, async (t) => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
