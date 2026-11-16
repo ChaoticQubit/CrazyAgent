@@ -146,8 +146,9 @@ impl Open {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        self.server.join().unwrap();
-        self.replies()
+        let Self { server, output, .. } = self;
+        server.join().unwrap();
+        parsed(&output.0.lock().unwrap())
     }
 }
 
