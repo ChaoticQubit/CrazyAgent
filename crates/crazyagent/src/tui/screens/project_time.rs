@@ -23,6 +23,15 @@ pub(in crate::tui) fn local_offset(at_ms: i64) -> i64 {
         .unwrap_or(0)
 }
 
+/// The UTC offset a compiled zone held at one moment, so a stamp of a date on the other
+/// side of a daylight-saving change reads that date's clock. Takes the TZif bytes, or none
+/// for the offset `date` gives now, and the moment in milliseconds since 1970.
+/// Returns the offset in seconds.
+pub(in crate::tui) fn zone_offset(zone: Option<&[u8]>, at_ms: i64) -> i64 {
+    let _ = (zone, at_ms);
+    0
+}
+
 /// Formats a moment as local 24-hour time.
 /// Takes the moment in milliseconds and the UTC offset in seconds.
 /// Returns text such as "10:38".
@@ -175,6 +184,33 @@ mod tests {
         assert_eq!(tzif_offset(&cut, 0), None);
         let bad_index = tzif(b'2', &[(0, 9)], &[0]);
         assert_eq!(tzif_offset(&bad_index, 10), None);
+    }
+
+    #[test]
+    fn a_stamp_reads_the_offset_its_own_date_held_as_the_desktop_does() {
+        use crate::tui::clock::{local_offset, stamp};
+        const EDT_FROM: i64 = 1_772_953_200;
+        const EST_FROM: i64 = 1_793_512_800;
+        const OCT_30_2104_UTC: i64 = 1_793_394_240_000;
+        const NOV_15_2204_UTC: i64 = 1_794_780_240_000;
+        let new_york = tzif(b'2', &[(EDT_FROM, 1), (EST_FROM, 0)], &[-18_000, -14_400]);
+        let zone = Some(new_york.as_slice());
+        assert_eq!(zone_offset(zone, OCT_30_2104_UTC), -14_400);
+        assert_eq!(zone_offset(zone, NOV_15_2204_UTC), -18_000);
+        assert_eq!(
+            stamp(OCT_30_2104_UTC, zone_offset(zone, OCT_30_2104_UTC)),
+            "Oct 30 17:04",
+            "a call before the change reads the clock of its own date"
+        );
+        assert_eq!(
+            stamp(NOV_15_2204_UTC, zone_offset(zone, NOV_15_2204_UTC)),
+            "Nov 15 17:04"
+        );
+        assert_eq!(zone_offset(None, NOV_15_2204_UTC), local_offset());
+        assert_eq!(
+            zone_offset(Some(b"nope".as_slice()), NOV_15_2204_UTC),
+            local_offset()
+        );
     }
 
     #[test]

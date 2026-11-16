@@ -44,20 +44,6 @@ pub fn local_offset() -> i64 {
     })
 }
 
-/// The zone the system clock reads in, its daylight-saving rules included.
-/// Input: none. Output: the zone, or None when the system names none that can be read.
-pub fn local_zone() -> Option<jiff::tz::TimeZone> {
-    None
-}
-
-/// The UTC offset a zone held at a time, so a stamp of a date on the other side of a
-/// daylight-saving change reads that date's clock. Inputs: the zone, or None for the
-/// offset `date` gives now, and epoch milliseconds. Output: seconds east of UTC.
-pub fn offset_in(zone: Option<&jiff::tz::TimeZone>, ms: i64) -> i64 {
-    let _ = (zone, ms);
-    0
-}
-
 /// Milliseconds since the Unix epoch now.
 /// Input: none. Output: the time.
 pub fn now_ms() -> i64 {
@@ -149,26 +135,6 @@ mod tests {
         assert_eq!(stamp(NOV_15_1204_UTC, 13 * 3600), "Nov 16 01:04");
         assert_eq!(stamp(NOV_15_1204_UTC, -19_800), "Nov 15 06:34");
         assert_eq!(stamp(OCT_23_1042_UTC - 22 * 86_400_000, 0), "Oct 1 10:42");
-    }
-
-    #[test]
-    fn a_stamp_reads_the_offset_its_own_date_held_as_the_desktop_does() {
-        const OCT_30_2104_UTC: i64 = 1_793_394_240_000;
-        const NOV_15_2204_UTC: i64 = 1_794_780_240_000;
-        let new_york = jiff::tz::TimeZone::posix("EST5EDT,M3.2.0,M11.1.0").unwrap();
-        let zone = Some(&new_york);
-        assert_eq!(offset_in(zone, OCT_30_2104_UTC), -4 * 3600);
-        assert_eq!(offset_in(zone, NOV_15_2204_UTC), -5 * 3600);
-        assert_eq!(
-            stamp(OCT_30_2104_UTC, offset_in(zone, OCT_30_2104_UTC)),
-            "Oct 30 17:04",
-            "a call before the change reads the clock of its own date"
-        );
-        assert_eq!(
-            stamp(NOV_15_2204_UTC, offset_in(zone, NOV_15_2204_UTC)),
-            "Nov 15 17:04"
-        );
-        assert_eq!(offset_in(None, NOV_15_2204_UTC), local_offset());
     }
 
     #[test]

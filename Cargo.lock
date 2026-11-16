@@ -782,7 +782,6 @@ dependencies = [
  "getrandom 0.4.3",
  "icu_normalizer",
  "icu_properties",
- "jiff",
  "keyring-core",
  "landlock",
  "libc",
