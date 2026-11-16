@@ -415,6 +415,7 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
     }
     let kept = kept_records(connection, project).unwrap_or_default();
     let (trees, listed) = record_trees(connection, project, agents);
+    assert!(listed <= VISITS_MAX);
     let (mut visits_left, mut records_left) = (VISITS_MAX - listed, RECORDS_MAX);
     let mut records = Vec::new();
     for (at, tree) in trees.iter().rev().enumerate() {
