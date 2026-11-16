@@ -44,6 +44,10 @@ marker="$CLAUDE_CONFIG_DIR/.recovery-flow-signed-in"
 keychain="$CLAUDE_CONFIG_DIR/Library/Keychains/login.keychain-db"
 service="Claude Code-credentials-$(printf %s "$CLAUDE_CONFIG_DIR" | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-8)"
 if [ "$1" != "auth" ]; then
+  case " $* " in
+    *" --input-format "*) ;;
+    *" --print "*) echo "${STAND_IN_SIGN}: this claude holds no one-shot print run open" >&2; exit 64 ;;
+  esac
   kind=other
   id=-
   for arg in "$@"; do
@@ -565,7 +569,7 @@ async function main() {
       for (const deadline = Date.now() + SETUP_MS; ; await pause(POLL_MS * 4)) {
         const view = await value("desktop_onboarding", { id: state.project });
         if (!["waiting", "running"].includes(view.graph.kind) && !["waiting", "running"].includes(view.mapping.kind)) break;
-        if (Date.now() > deadline) throw new Refused("onboarding_still_running");
+        if (Date.now() > deadline) throw new Refused("onboarding_still_running", `graph ${view.graph.kind}, mapping ${view.mapping.kind}`);
       }
       await assignPool(state.project, pool);
       const team = { master: "claude-code", master_tools: false, sub_harnesses: [{ harness: "claude-code", agents: 3, tools: true }], min_agents: 1, max_agents: 4 };
