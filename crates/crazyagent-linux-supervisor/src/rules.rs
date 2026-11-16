@@ -182,8 +182,7 @@ fn folded_parts(path: &Path) -> Option<Vec<String>> {
 /// hold, and git makes only ASCII names. Inputs: the name, the folder's held names and
 /// whether a name is there. Output: true when the name may be made.
 pub fn plainly_named(name: &OsStr, held: &[&OsStr], there: impl Fn(&OsStr) -> bool) -> bool {
-    let _ = (name, held, there);
-    true
+    name.is_ascii() || there(name) || held.iter().all(|&held| there(held))
 }
 
 /// The git folders an agent may make entries in: the top-level `.git` of each working

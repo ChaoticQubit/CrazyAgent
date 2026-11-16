@@ -220,13 +220,17 @@ fn node_type(mode: u32) -> FileType {
     }
 }
 
-/// Logs an entry the supervisor made and could not take back after a filesystem read its
-/// name as `.git` or as a held name. Input: the result of taking it back.
+/// Checks that an entry the supervisor made was taken back after a filesystem read its name
+/// as `.git` or as a held name. When it was not, the hold no longer holds, so the supervisor
+/// stops as a failed listener does and the harness ends by its parent-death signal
+/// (rv-sec3 F1). Input: the result of taking it back.
 fn undone(taken_back: Result<(), Errno>) {
     if let Err(error) = taken_back {
         eprintln!(
-            "crazyagent-landlock: an entry read as .git or a held name was not removed: {error}"
+            "crazyagent-landlock: an entry read as .git or a held name was not removed, so \
+             the call supervisor stops: {error}"
         );
+        std::process::exit(STOPPED_EXIT);
     }
 }
 
@@ -676,12 +680,34 @@ impl Job<'_> {
         })
     }
 
-    /// Refuses a new entry whose path holds a `.git` that is not one of the agent's own;
-    /// with no git guard every entry passes here.
+    /// Refuses a new entry whose path holds a `.git` that is not one of the agent's own, with
+    /// no git guard none, or whose name a case-folding folder could read as a held name not
+    /// made yet ([`Job::named`]). Input: the place. Output: Ok, or `EACCES`.
     fn judged(&self, place: &Place) -> Result<(), Errno> {
         let git = self.server.config.git.as_ref();
         let allowed = place.proc || git.is_none_or(|git| git.allows(&place.entry()));
-        allowed.then_some(()).ok_or(Errno::ACCESS)
+        allowed.then_some(()).ok_or(Errno::ACCESS)?;
+        self.named(place)
+    }
+
+    /// Refuses, before anything is made, a name with a byte outside ASCII in a folder where
+    /// one of its held names is not there ([`rules::plainly_named`], rv-sec3 F1); a read
+    /// that fails counts as not there. Input: the place. Output: Ok, or `EACCES`; with no
+    /// held guard, on procfs and for an ASCII name, Ok without a read.
+    fn named(&self, place: &Place) -> Result<(), Errno> {
+        let Some(nodes) = &self.server.nodes else {
+            return Ok(());
+        };
+        if place.proc || place.name().is_ascii() {
+            return Ok(());
+        }
+        let folder = node_of(&rustix::fs::fstat(&place.folder)?);
+        let there = |name: &OsStr| {
+            rustix::fs::statat(&place.folder, name, AtFlags::SYMLINK_NOFOLLOW).is_ok()
+        };
+        rules::plainly_named(place.name(), &nodes.names_in(folder), there)
+            .then_some(())
+            .ok_or(Errno::ACCESS)
     }
 
     /// Refuses to move away a folder that holds one of the agent's own git folders; with
