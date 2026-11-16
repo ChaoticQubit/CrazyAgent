@@ -315,10 +315,10 @@ async function deliveries(bridge) {
   return settings.kinds.map((item) => [item.kind, item.delivery]);
 }
 
-test("Notifications: a mixed pick for all 24 kinds saves as one, and every kind reads back after a reload and an engine restart", { timeout: 900000 }, (t) => onEngine(t, "ca-notice-all-kinds-", async ({ bridge, me, page, open, reload, restart }) => {
+test("Notifications: a mixed pick for all 25 kinds saves as one, and every kind reads back after a reload and an engine restart", { timeout: 900000 }, (t) => onEngine(t, "ca-notice-all-kinds-", async ({ bridge, me, page, open, reload, restart }) => {
   await settingsPage(me, open);
   const offered = await page.evaluate(`[...document.querySelectorAll('${FORM} fieldset[data-kind]')].map((field) => [field.dataset.kind, [...field.querySelectorAll("input[type=radio]")].map((input) => input.value)])`);
-  assert.equal(offered.length, 24, "the form lists every kind");
+  assert.equal(offered.length, 25, "the form lists every kind");
   assert.deepEqual(offered.map(([kind]) => kind), (await deliveries(bridge)).map(([kind]) => kind), "the form lists the engine's kinds in its order");
   assert.equal(offered.filter(([, choices]) => choices.length === 2).length, 7, "the seven Action kinds offer On and Bell only");
   const picked = offered.map(([kind, choices], at) => [kind, choices[(at + 1) % choices.length]]);
