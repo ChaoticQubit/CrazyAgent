@@ -26,6 +26,7 @@ pub(in crate::tui) mod project_activity;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
+pub(in crate::tui) mod project_publish;
 pub(in crate::tui) mod project_plugins;
 pub(in crate::tui) mod project_team;
 pub(in crate::tui) mod project_time;
@@ -62,6 +63,8 @@ mod project_access_tests;
 mod project_frames;
 #[cfg(all(test, unix))]
 mod project_page_tests;
+#[cfg(all(test, unix))]
+mod project_publish_tests;
 #[cfg(all(test, unix))]
 mod project_tests;
 #[cfg(all(test, unix))]
