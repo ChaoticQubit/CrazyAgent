@@ -64,6 +64,16 @@ fn listening(socket: &Path) -> bool {
         .is_ok_and(|metadata| metadata.file_type().is_socket() && metadata.uid() == user())
 }
 
+/// Whether a connect to a socket is refused, as at the file an ended server leaves behind.
+/// Any other failure, such as no descriptor left, counts as not refused. Takes the socket
+/// path. Returns the answer.
+fn refused(socket: &Path) -> bool {
+    matches!(
+        crate::spawn_gate::connect_unix_std(socket),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+    )
+}
+
 /// The installed Seatbelt profile of a team agent, which its own server and every engine
 /// client on it run inside. Takes the engine root and the agent. Returns the profile path,
 /// or `terminal_own_server_unavailable` when it is not this user's plain file.
@@ -478,21 +488,44 @@ impl Servers {
         Ok(pin)
     }
 
-    /// A native lead's teammates' server when one accepts connections at the socket its
-    /// latest start named, else none; a raw connect, never a tmux client, looks, since an
-    /// ended server's socket stays. Takes the agent. Returns the server host or the failure
-    /// to open one.
+    /// A native lead's teammates' server while one may run at the socket its latest start
+    /// named, else none, as [`Self::mates_gone`] reads it; a raw connect, never a tmux
+    /// client, looks, since an ended server's socket stays. Takes the agent. Returns the
+    /// server host or the failure to open one.
     fn mates(&self, lead: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
         let Ok(socket) = teammates_socket(&self.root, lead) else {
             return Ok(None);
         };
-        if !listening(&socket) || crate::spawn_gate::connect_unix_std(&socket).is_err() {
+        if !listening(&socket) || self.mates_gone(lead, &socket) {
             if let Ok(mut mates) = self.mates.lock() {
                 mates.remove(lead);
             }
             return Ok(None);
         }
         self.mates_host(lead, &socket).map(Some)
+    }
+
+    /// Whether a lead's teammates' socket file names no server. While this engine holds the
+    /// keeper it started that server under, only a refused connect once that keeper exited
+    /// cleanly counts: a keeper outlives its server, while on macOS a live server whose
+    /// accept queue is full refuses a connect too, and a teammate can stop the server it
+    /// runs under. With none held, as for a server an earlier engine started, whose keeper
+    /// still ends it at its deadline, any failed connect counts. A poisoned keepers lock
+    /// counts as a held keeper still running. Takes the lead and the socket. Returns the
+    /// answer.
+    fn mates_gone(&self, lead: &AgentId, socket: &Path) -> bool {
+        let Ok(mut keepers) = self.mates_keepers.lock() else {
+            return false;
+        };
+        let ended_cleanly = keepers
+            .get_mut(lead)
+            .map(|keeper| matches!(keeper.try_wait(), Ok(Some(status)) if status.success()));
+        drop(keepers);
+        match ended_cleanly {
+            None => crate::spawn_gate::connect_unix_std(socket).is_err(),
+            Some(true) => refused(socket),
+            Some(false) => false,
+        }
     }
 
     /// The teammates' server a native lead's team panes are on (PLC d): the one its latest
