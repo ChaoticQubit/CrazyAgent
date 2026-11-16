@@ -191,7 +191,7 @@ test("every code the rule calls can return has its own sentence and passes the d
   const codes = new Set([...`${engine}\n${folder}`.matchAll(/"(github_[a-z_]+)"/g)].map((match) => match[1]));
   for (const match of transport.matchAll(/failure\("(github_store_unavailable)"\)/g)) codes.add(match[1]);
   codes.delete("github_owned_allowed");
-  for (const code of ["github_rules_not_published", "github_rule_invalid", "github_repo_unreadable", "github_publish_project_unknown", "github_publish_unavailable", "github_store_unavailable"]) {
+  for (const code of ["github_rules_not_published", "github_rule_invalid", "github_rules_repo_mismatch", "github_repo_unreadable", "github_publish_project_unknown", "github_publish_unavailable", "github_store_unavailable"]) {
     assert.ok(codes.has(code), `${code} is read from the engine`);
   }
   const intake = read("src/api-intake.ts");

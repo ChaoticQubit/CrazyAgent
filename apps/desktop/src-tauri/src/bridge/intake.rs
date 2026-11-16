@@ -129,7 +129,7 @@ pub const INTAKE_CODES: [&str; 99] = [
     "delete_outside_home",
 ];
 
-const GITHUB_CODES: [&str; 67] = [
+const GITHUB_CODES: [&str; 68] = [
     "github_not_signed_in",
     "github_token_invalid",
     "github_token_refused",
@@ -193,6 +193,7 @@ const GITHUB_CODES: [&str; 67] = [
     "not_connected",
     "github_rules_not_published",
     "github_rule_invalid",
+    "github_rules_repo_mismatch",
     "github_repo_unreadable",
     "github_publish_project_unknown",
     "github_publish_unavailable",

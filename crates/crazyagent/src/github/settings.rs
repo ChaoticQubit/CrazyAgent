@@ -60,7 +60,9 @@ impl GitHub {
             return Err(failure("github_rule_invalid"));
         }
         let full_name = self.published(project)?;
-        let _ = repo;
+        if full_name != repo {
+            return Err(failure("github_rules_repo_mismatch"));
+        }
         let token = self.store.get(&self.saved()?.credential)?;
         let made = self.record(&full_name)?;
         let (live, facts) = rules::read(&self.endpoints, &token, &full_name, &made)?;

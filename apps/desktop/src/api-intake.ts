@@ -157,6 +157,7 @@ const COPY: Record<string, string> = {
   github_failed: "Something went wrong talking to GitHub. Try again.",
   github_rules_not_published: "GitHub rules show here for a project CrazyAgent published on GitHub, once its publish is done.",
   github_rule_invalid: "This rule is a file in the project, so it can't be switched on GitHub.",
+  github_rules_repo_mismatch: "This project is now published to another GitHub repository, so nothing was changed. Check its rules again.",
   github_repo_unreadable: "GitHub didn't show this repository. Check that it still exists and that your GitHub sign-in can see it.",
   github_publish_project_unknown: "CrazyAgent can't find this project. Reload and try again.",
   github_publish_unavailable: "CrazyAgent couldn't read its projects just now. Try again.",
