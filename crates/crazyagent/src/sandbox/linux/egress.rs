@@ -137,6 +137,9 @@ pub(super) fn fits(
     request: &HelperRequest,
 ) -> Result<(), String> {
     assert!(routes.len() <= REMOTES_MAX);
+    if started.is_some() && !routes.is_empty() {
+        return Err(format!("{ROUTE_FD} takes no {ROUTE}; stage 1 writes it inside the nest"));
+    }
     if started.is_some() {
         return match request {
             HelperRequest::Probe { .. } => Ok(()),
