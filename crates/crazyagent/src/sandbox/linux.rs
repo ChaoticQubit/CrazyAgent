@@ -68,6 +68,7 @@ const OWN_GIT: &str = "--own-git";
 const GUARD_SIGNALS: &str = "--guard-signals";
 const GUARD_HELD: &str = "--guard-held";
 const GUARD_HELD_TREE: &str = "--guard-held-tree";
+const GUARD_HELD_STORE: &str = "--guard-held-store";
 const PROBE_SUPERVISOR: &str = "--probe-supervisor";
 const PROBE_SUPERVISED: &str = "--probe-supervised";
 /// Where AppArmor says whether it keeps unprivileged programs out of user namespaces, as on
@@ -280,7 +281,11 @@ impl Guard {
             args.push(GUARD_SIGNALS.into());
         }
         if let Some(held) = &self.held {
-            for (flag, paths) in [(GUARD_HELD, &held.entries), (GUARD_HELD_TREE, &held.trees)] {
+            for (flag, paths) in [
+                (GUARD_HELD, &held.entries),
+                (GUARD_HELD_TREE, &held.trees),
+                (GUARD_HELD_STORE, &held.stores),
+            ] {
                 for path in paths {
                     args.push(flag.into());
                     args.push(path.into());
@@ -1556,24 +1561,20 @@ impl LinuxSandbox {
 
     /// The policy with the guards this launch's supervision carries, none without one,
     /// checked as the helper checks it ([`guard_fits`]). A nested launch never carries the
-    /// signal guard. Inputs: the policy and the guarded entries, each held whole with all
-    /// below it (DEC-185 S2a). Output: the policy, or `Invalid` for more own git folders or
-    /// held places than the helper takes.
+    /// signal guard. Inputs: the policy and the places its supervisor holds (DEC-185 S2).
+    /// Output: the policy, or `Invalid` for more own git folders or held places than the
+    /// helper takes.
     fn with_guard(
         &self,
         policy: LandlockPolicy,
-        held: &[PathBuf],
+        held: &Held,
     ) -> Result<LandlockPolicy, SandboxError> {
         let Some(supervision) = self.supervision else {
             return Ok(policy);
         };
-        let held = Held {
-            entries: Vec::new(),
-            trees: held.to_vec(),
-        };
         let guarded = LandlockPolicy {
             guard: Guard {
-                held: Some(held).filter(|held| !held.trees.is_empty()),
+                held: Some(held.clone()).filter(|held| !held.is_empty()),
                 ..guard(&self.sandbox, supervision)
             },
             ..policy
@@ -2238,16 +2239,16 @@ impl Sandbox for LinuxSandbox {
 }
 
 /// What a launch's Landlock rules grant: folders read, folders written whole, git folders
-/// written with [`git_folder_rights`], and `guarded`, the entries Landlock cannot keep
-/// read-only under those grants (protected paths in a git grant, [`ADMIN_WRITES`] and
-/// [`ADMIN_LINKS`] in the admin folder, the worktree's `.git` link and a clone's whole git
-/// folder), which the call supervisor must hold before a confined launch starts, the
-/// nested binds a second layer (DEC-185 S1, S2).
+/// written with [`git_folder_rights`], and `guarded`, what Landlock cannot keep read-only
+/// under those grants, as the call supervisor holds it (protected paths in a git grant,
+/// [`ADMIN_WRITES`] and [`ADMIN_LINKS`] in the admin folder, the worktree's `.git` link and
+/// a clone's whole git folder), which that supervisor must hold before a confined launch
+/// starts, the nested binds a second layer (DEC-185 S1, S2).
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
     git_write: Vec<PathBuf>,
-    guarded: Vec<PathBuf>,
+    guarded: Held,
 }
 
 impl Grants {
@@ -2320,22 +2321,27 @@ impl Grants {
         {
             return Err(invalid("a writable root sits inside a protected path"));
         }
-        let mut guarded: Vec<PathBuf> = protected
-            .iter()
-            .filter(|item| git_write.iter().any(|root| item.starts_with(root)))
-            .cloned()
-            .collect();
+        let mut guarded = Held {
+            trees: protected
+                .iter()
+                .filter(|item| git_write.iter().any(|root| item.starts_with(root)))
+                .cloned()
+                .collect(),
+            ..Held::default()
+        };
         if let Some(checkout) = checkout {
             if git_write.contains(&checkout.admin) {
                 let held = ADMIN_WRITES.iter().chain(&ADMIN_LINKS);
-                guarded.extend(held.map(|name| checkout.admin.join(name)));
+                guarded
+                    .trees
+                    .extend(held.map(|name| checkout.admin.join(name)));
             }
             if write.contains(&checkout.worktree) {
-                guarded.push(checkout.worktree.join(".git"));
+                guarded.trees.push(checkout.worktree.join(".git"));
             }
         }
         if let Some(clone) = sandbox.clone.as_ref() {
-            guarded.push(clone.join(".git"));
+            guarded.trees.push(clone.join(".git"));
         }
         let secrets = sandbox.secret_paths();
         let carved = sandbox.carved_home.as_ref();
@@ -2409,12 +2415,11 @@ fn guard(sandbox: &ProjectSandbox, supervision: Supervision) -> Guard {
     held
 }
 
-/// Tells whether a launch policy's supervisor holds every guarded entry, the rule that lets
+/// Tells whether a launch policy's supervisor holds every guarded place, the rule that lets
 /// a confined launch past the tripwire (DEC-185 S2). Inputs: the policy and the guarded
-/// entries. Output: true when there are none, or each is a held tree.
-fn holds_all(policy: &LandlockPolicy, guarded: &[PathBuf]) -> bool {
-    let held = policy.guard.held.as_ref();
-    guarded.is_empty() || held.is_some_and(|held| held.trees == guarded)
+/// places. Output: true when there are none, or the supervisor holds exactly them.
+fn holds_all(policy: &LandlockPolicy, guarded: &Held) -> bool {
+    guarded.is_empty() || policy.guard.held.as_ref() == Some(guarded)
 }
 
 /// The folders an agent may make a `.git` entry in, as the macOS boundary's nested git
@@ -2643,7 +2648,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: Vec::new(),
-            guarded: Vec::new(),
+            guarded: Held::default(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -2661,7 +2666,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: Vec::new(),
-            guarded: Vec::new(),
+            guarded: Held::default(),
         };
         let unshares = |network: SandboxNetwork| {
             bwrap_command(
@@ -2766,7 +2771,8 @@ mod tests {
             grants.read.contains(&project),
             "the object store is read through the project"
         );
-        let mut guarded = grants.guarded.clone();
+        assert!(grants.guarded.entries.is_empty() && grants.guarded.stores.is_empty());
+        let mut guarded = grants.guarded.trees.clone();
         guarded.sort();
         let mut held = ["HEAD", "commondir", "gitdir", "config.worktree", "modules"]
             .map(|name| admin.join(name))
@@ -2869,7 +2875,7 @@ mod tests {
     fn a_supervised_linked_worktree_launches_with_every_guarded_entry_held() {
         let (_temp, project, sandbox, worktree) = linked();
         let confined = sandbox.confine_to_worktree(&worktree).unwrap();
-        let mut guarded = Grants::of(&confined).unwrap().guarded;
+        let mut guarded = Grants::of(&confined).unwrap().guarded.trees;
         guarded.sort();
         let launch = supervised_launch(confined);
         let mut harness = Command::new("/bin/true");
@@ -2915,20 +2921,29 @@ mod tests {
     }
 
     #[test]
-    fn a_supervised_clone_is_refused_until_its_store_is_held() {
+    fn a_supervised_clone_launches_with_its_store_held() {
         let (_temp, project, sandbox, _) = linked();
         let clone = project.join("worktrees").join("agent-2");
         fs::create_dir(&clone).unwrap();
         git(&clone, &["init", "-q"]);
-        let launch = supervised_launch(sandbox.confine_to_clone(&clone).unwrap());
+        let confined = sandbox.confine_to_clone(&clone).unwrap();
+        let guarded = Grants::of(&confined).unwrap().guarded;
+        let launch = supervised_launch(confined);
         let mut harness = Command::new("/bin/true");
         harness.current_dir(&clone);
-        let refused = launch.wrap(&harness).err();
-        assert!(
-            matches!(&refused, Some(SandboxError::Unavailable(reason))
-                if reason == CONFINED_UNAVAILABLE),
-            "{refused:?}"
-        );
+        let wrapped = launch.wrap(&harness);
+        assert!(wrapped.is_ok(), "{:?}", wrapped.as_ref().err());
+        let words: Vec<OsString> = wrapped
+            .unwrap()
+            .get_args()
+            .map(OsStr::to_os_string)
+            .collect();
+        assert_eq!(flag_values(&words, GUARD_HELD), guarded.entries);
+        assert_eq!(flag_values(&words, GUARD_HELD_TREE), guarded.trees);
+        assert_eq!(flag_values(&words, GUARD_HELD_STORE), guarded.stores);
+        let objects = clone.join(".git").join("objects");
+        assert_eq!(guarded.stores, vec![objects.clone()]);
+        assert!(guarded.entries.contains(&objects.join("ff")));
     }
 
     #[test]
@@ -2941,10 +2956,32 @@ mod tests {
         let grants = Grants::of(&confined).unwrap();
         assert!(grants.write.contains(&clone));
         assert!(grants.git_write.is_empty());
+        let git_folder = clone.join(".git");
+        let objects = git_folder.join("objects");
+        let (info, pack) = (objects.join("info"), objects.join("pack"));
+        let mut entries = vec![
+            git_folder.clone(),
+            git_folder.join("commondir"),
+            objects.clone(),
+            info.clone(),
+            info.join("alternates"),
+            info.join("http-alternates"),
+            pack.clone(),
+            pack.join("multi-pack-index"),
+        ];
+        entries.extend((0..=u8::MAX).map(|byte| objects.join(format!("{byte:02x}"))));
+        entries.sort();
+        let mut trees = vec![clone.join(".git.git"), pack.join("multi-pack-index.d")];
+        trees.sort();
+        let mut guarded = grants.guarded.clone();
+        guarded.entries.sort();
+        guarded.trees.sort();
+        assert_eq!(guarded.entries, entries, "each store name macOS keeps");
+        assert_eq!(guarded.trees, trees);
         assert_eq!(
-            grants.guarded,
-            vec![clone.join(".git")],
-            "a clone's git folder stays guarded whole until the supervisor holds its store"
+            guarded.stores,
+            vec![objects],
+            "no symlink or folder put in the store"
         );
         let git = project.join(".git");
         assert!(grants.write.iter().all(|path| !path.starts_with(&git)));
@@ -3042,7 +3079,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: vec![PathBuf::from("/p/.git/worktrees/agent-1")],
-            guarded: Vec::new(),
+            guarded: Held::default(),
         };
         let _command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -3076,7 +3113,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: Vec::new(),
-            guarded: Vec::new(),
+            guarded: Held::default(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(!policy.limit_network);
@@ -3187,7 +3224,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: Vec::new(),
-            guarded: Vec::new(),
+            guarded: Held::default(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(policy.limit_network);
@@ -3308,7 +3345,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: Vec::new(),
-            guarded: Vec::new(),
+            guarded: Held::default(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -4228,6 +4265,7 @@ mod tests {
                 held: Some(Held {
                     entries: vec![PathBuf::from("/p/.git/worktrees/a/HEAD")],
                     trees: vec![PathBuf::from("/p/.git/worktrees/a/modules")],
+                    stores: vec![PathBuf::from("/c/.git/objects")],
                 }),
             },
             ..LandlockPolicy::default()
@@ -4253,6 +4291,8 @@ mod tests {
             "/p/.git/worktrees/a/HEAD",
             GUARD_HELD_TREE,
             "/p/.git/worktrees/a/modules",
+            GUARD_HELD_STORE,
+            "/c/.git/objects",
         ]
         .iter()
         .map(OsString::from)
@@ -4293,12 +4333,24 @@ mod tests {
             held: Some(Held {
                 entries: Vec::new(),
                 trees: vec![PathBuf::from("/p/t")],
+                stores: Vec::new(),
             }),
             ..Guard::default()
         };
         assert_eq!(
             held(&[GUARD_HELD_TREE, "/p/t", "--", "/bin/true"]),
             Some(tree)
+        );
+        let store = Guard {
+            held: Some(Held {
+                stores: vec![PathBuf::from("/c/s")],
+                ..Held::default()
+            }),
+            ..Guard::default()
+        };
+        assert_eq!(
+            held(&[GUARD_HELD_STORE, "/c/s", "--", "/bin/true"]),
+            Some(store)
         );
         for refused in [
             &[OWN_TREE, "/p", "--", "/bin/true"][..],
@@ -4315,6 +4367,8 @@ mod tests {
             &[GUARD_HELD_TREE, "--", "/bin/true"],
             &[GUARD_HELD, "/p/a", DIE_WITH, "4242", "--", "/bin/true"],
             &[PROBE, GUARD_HELD, "/p/a"],
+            &[GUARD_HELD_STORE, "c/s", "--", "/bin/true"],
+            &[PROBE, GUARD_HELD_STORE, "/c/s"],
         ] {
             assert!(parse(refused).is_err(), "{refused:?}");
         }

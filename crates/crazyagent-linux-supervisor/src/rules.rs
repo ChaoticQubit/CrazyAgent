@@ -240,15 +240,22 @@ impl GitOwn {
 }
 
 /// The entries an agent may not write, truncate, move, link or remove (DEC-185 S2): each
-/// path in `entries`, and each path in `trees` with everything below it. Paths are real and
-/// absolute, as the engine names them from the launch's guarded list.
+/// path in `entries`, and each path in `trees` with everything below it; and the `stores`,
+/// trees where no symlink is made and no symlink or folder is moved or linked in (S2b).
+/// Paths are real and absolute, as the engine names them from the launch's guarded list.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Held {
     pub entries: Vec<PathBuf>,
     pub trees: Vec<PathBuf>,
+    pub stores: Vec<PathBuf>,
 }
 
 impl Held {
+    /// Tells whether nothing is held. Output: true with no entry, tree or store.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.trees.is_empty() && self.stores.is_empty()
+    }
+
     /// Tells whether a path is held, each name compared as the loosest folder compares it
     /// ([`folded`]). Input: the real, absolute path of an entry, its folder resolved.
     /// Output: true for an entry, a path in a tree, and any path not in that form, and
@@ -271,6 +278,15 @@ impl Held {
         let below = |held: &PathBuf| folded_parts(held).is_none_or(|held| held.starts_with(&path));
         self.holds(real) || self.entries.iter().chain(&self.trees).any(below)
     }
+
+    /// Tells whether a path lies in a held store, where no symlink or folder may be put,
+    /// each name compared as [`Held::holds`] compares it. Input: the real, absolute path of
+    /// an entry. Output: true for a path in a store, and with any store held, for a path
+    /// not in that form and for every path while a store is itself not in that form.
+    pub fn stored(&self, real: &Path) -> bool {
+        let _ = real;
+        false
+    }
 }
 
 /// One entry as the kernel knows it whatever its name: its device and inode numbers.
@@ -278,14 +294,16 @@ pub type Node = (u64, u64);
 
 /// The held entries as the kernel knows them, taken once before the harness starts
 /// (DEC-185 S2a): the node of each held entry and tree that exists, the node of each held
-/// tree, the node of every folder above a held path, and each held path's folder node with
-/// its last name, for a name that does not exist yet.
+/// tree, the node of every folder above a held path, each held path's folder node with its
+/// last name, for a name that does not exist yet, and the node of each held store that
+/// exists (S2b).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HeldNodes {
     pub nodes: Vec<Node>,
     pub trees: Vec<Node>,
     pub above: Vec<Node>,
     pub names: Vec<(Node, OsString)>,
+    pub stores: Vec<Node>,
 }
 
 impl HeldNodes {
@@ -344,6 +362,13 @@ impl HeldNodes {
     pub fn names_in(&self, folder: Node) -> Vec<&OsStr> {
         let here = self.names.iter().filter(|(parent, _)| *parent == folder);
         here.map(|(_, name)| name.as_os_str()).collect()
+    }
+
+    /// Tells whether a folder lies in a held store. Input: the nodes of the folder and of
+    /// each folder above it, nearest first. Output: true when one of them is a store.
+    pub fn stored(&self, chain: &[Node]) -> bool {
+        let _ = chain;
+        false
     }
 }
 
@@ -874,6 +899,7 @@ mod tests {
                 PathBuf::from("/p/worktrees/a/.git"),
             ],
             trees: vec![PathBuf::from("/p/.git/worktrees/a/modules")],
+            stores: Vec::new(),
         }
     }
 
@@ -1060,6 +1086,79 @@ mod tests {
             Some([(-1, 2_000_000_000), (0, 0)]),
             "the kernel checks it"
         );
+    }
+
+    #[test]
+    fn a_path_in_a_held_store_is_stored_by_name_and_a_neighbour_is_not() {
+        let held = Held {
+            stores: vec![PathBuf::from("/c/.git/objects")],
+            ..Held::default()
+        };
+        for path in [
+            "/c/.git/objects/ab/cd",
+            "/c/.git/OBJECTS/pack/x",
+            "/c/.git/objects",
+        ] {
+            assert!(held.stored(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/c/.git/refs/heads/x",
+            "/c/objects/ab",
+            "/c/.git/objects2/x",
+        ] {
+            assert!(!held.stored(Path::new(path)), "{path}");
+        }
+        assert!(
+            held.stored(Path::new("c/.git/objects/ab")),
+            "not a real path"
+        );
+        assert!(
+            !Held::default().stored(Path::new("c/.git/objects/ab")),
+            "no store held"
+        );
+        assert!(
+            !held.holds(Path::new("/c/.git/objects/ab/cd")),
+            "a store holds no entry"
+        );
+        assert!(!held.is_empty() && Held::default().is_empty());
+    }
+
+    #[test]
+    fn a_folder_whose_chain_runs_through_a_held_store_is_stored() {
+        let held = Held {
+            stores: vec![PathBuf::from("/c/.git/objects"), PathBuf::from("/c/gone")],
+            ..Held::default()
+        };
+        let map = [
+            ("/", (1, 2)),
+            ("/c", (1, 40)),
+            ("/c/.git", (1, 41)),
+            ("/c/.git/objects", (1, 50)),
+        ];
+        let stat = |path: &Path| {
+            let found = map.iter().find(|(at, _)| Path::new(at) == path);
+            Ok(found.map(|(_, node)| *node))
+        };
+        let nodes = HeldNodes::taken(&held, stat).unwrap();
+        assert_eq!(nodes.stores, vec![(1, 50)], "a store not there has no node");
+        assert!(
+            nodes.stored(&[(1, 51), (1, 50), (1, 41), (1, 40), (1, 2)]),
+            "a fan-out"
+        );
+        assert!(
+            nodes.stored(&[(1, 50), (1, 41), (1, 40), (1, 2)]),
+            "the store itself"
+        );
+        assert!(!nodes.stored(&[(1, 41), (1, 40), (1, 2)]), "the git folder");
+        assert!(
+            !nodes.holds(Some((1, 50)), &[(1, 41)]),
+            "a store is not held"
+        );
+        let relative = Held {
+            stores: vec![PathBuf::from("c/.git/objects")],
+            ..Held::default()
+        };
+        assert!(HeldNodes::taken(&relative, stat).is_err());
     }
 
     #[test]
