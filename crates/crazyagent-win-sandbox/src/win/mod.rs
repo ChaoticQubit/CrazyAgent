@@ -2,6 +2,7 @@ mod acl;
 mod container;
 mod job;
 mod launch;
+pub mod lid;
 mod name;
 pub mod power;
 mod record;

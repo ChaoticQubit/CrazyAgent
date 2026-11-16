@@ -638,6 +638,40 @@ mod journal {
         assert!(Journal::open(root.path()).unwrap().entries().is_empty());
     }
 
+    /// DEC-167 addendum 26: settle undoes the entries of one kind, newest first, keeps the
+    /// ones whose undo failed and every entry of another kind, and keeps the file in step.
+    #[test]
+    fn settle_undoes_one_kind_newest_first_and_keeps_every_other_kind() {
+        let root = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(root.path()).unwrap();
+        let lid = |restore: &str| Entry {
+            kind: "lid".into(),
+            restore: restore.into(),
+        };
+        for recorded in [lid("first"), entry(), lid("second"), lid("third")] {
+            journal.record(recorded).unwrap();
+        }
+        let mut seen = Vec::new();
+        let failed = journal.settle("lid", |undone| {
+            assert_eq!(undone.kind, "lid");
+            seen.push(undone.restore.clone());
+            match undone.restore.as_str() {
+                "second" => Err(EngineError("stand_in_undo_failed".into())),
+                _ => Ok(()),
+            }
+        });
+        assert_eq!(failed, Err(EngineError("stand_in_undo_failed".into())));
+        assert_eq!(seen, ["third", "second", "first"]);
+        assert_eq!(journal.entries(), [entry(), lid("second")]);
+        assert_eq!(Journal::open(root.path()).unwrap().entries(), [entry(), lid("second")]);
+
+        let none = journal.settle("other", |_| panic!("no entry of this kind"));
+        assert_eq!(none, Ok(()));
+        journal.settle("lid", |_| Ok(())).unwrap();
+        assert_eq!(journal.entries(), [entry()]);
+        assert_eq!(Journal::open(root.path()).unwrap().entries(), [entry()]);
+    }
+
     #[test]
     fn an_unreadable_journal_is_an_error_and_stays_in_place() {
         let root = tempfile::tempdir().unwrap();

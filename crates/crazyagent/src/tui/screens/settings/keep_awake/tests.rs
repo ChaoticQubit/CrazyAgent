@@ -500,3 +500,56 @@ fn a_refused_lid_command_in_settings_says_why_and_keeps_the_picks() {
     assert!(text.contains("Lid-closed hold is set up only on macOS."), "{text}");
     assert!(text.contains("Save changes"), "the pick is still there: {text}");
 }
+
+const CRASH_GAP: &str = "the lid stays at Do nothing until the engine starts";
+
+/// The settings page's view on Windows where the lid line says `lid`. Input: the lid
+/// support. Output: the view.
+fn on_windows(lid: LidSupport) -> KeepAwakeView {
+    let mut view = on_mac(lid);
+    view.platform = Platform::Windows;
+    view
+}
+
+/// DEC-167 addendum 26, QUESTION 22:58 Q9: on Windows the page says what a crash during a
+/// hold leaves and p sends Put the lid setting back now; a refused one says why.
+#[test]
+fn on_windows_the_settings_page_offers_put_the_lid_setting_back_now() {
+    let mut shell = page(on_windows(LidSupport::SleepNotRestored));
+    let text = shown(&mut shell);
+    assert!(text.contains("Lid setting"), "{text}");
+    assert!(text.contains(CRASH_GAP), "{text}");
+    assert!(text.contains("Put the lid setting back now"), "the hint for p: {text}");
+    assert!(!text.contains("Lid helper"), "{text}");
+    let put_back = crate::keep_awake::KeepAwakeAction::PutLidBack;
+    assert_eq!(lid_key(&mut shell, 'p'), put_back);
+    for key in ['t', 'd'] {
+        shell.key(Key::Char(key));
+        assert_eq!(saves(&mut shell), Vec::new(), "{key}");
+    }
+    shell.key(Key::Char('p'));
+    let sent = saves(&mut shell);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    answer(&mut shell, sent[0].clone(), Err("keep_awake_lid_held".into()));
+    let text = shown(&mut shell);
+    assert!(text.contains("The lid setting was not put back."), "{text}");
+    assert!(
+        text.contains("The lid setting goes back when this hold ends."),
+        "{text}"
+    );
+}
+
+#[test]
+fn off_windows_the_settings_page_has_no_put_the_lid_setting_back_now() {
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut view = on_windows(LidSupport::NotTurnedOn);
+        view.platform = platform;
+        let mut shell = page(view);
+        let text = shown(&mut shell);
+        assert!(!text.contains("Lid setting"), "{platform:?}: {text}");
+        assert!(!text.contains(CRASH_GAP), "{platform:?}: {text}");
+        assert!(!text.contains("Put the lid setting back now"), "{platform:?}: {text}");
+        shell.key(Key::Char('p'));
+        assert_eq!(saves(&mut shell), Vec::new(), "{platform:?}");
+    }
+}

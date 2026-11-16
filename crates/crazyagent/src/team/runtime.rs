@@ -15127,6 +15127,7 @@ pub fn start_for_engine(
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;
     let leftover = crate::keep_awake::reconcile(&runtime);
+    let lid = crate::keep_awake::power::platform_lid(&runtime);
     let settings = (global.to_path_buf(), project.to_path_buf());
     let (global, project) = settings.clone();
     let access: AccessSource = Box::new(move || {
@@ -15172,10 +15173,7 @@ pub fn start_for_engine(
     let mut runtime = runtime.with_events(super::events::HANDLERS);
     runtime.keep_awake =
         crate::keep_awake::Keeper::with_hold(crate::keep_awake::platform_hold(std::process::id()))
-            .with_sensors(
-                crate::keep_awake::power::platform_reader(),
-                crate::keep_awake::power::platform_lid(),
-            )
+            .with_sensors(crate::keep_awake::power::platform_reader(), lid)
             .with_leftover(leftover);
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }

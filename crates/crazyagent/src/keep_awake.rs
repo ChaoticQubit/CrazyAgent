@@ -8,6 +8,8 @@ mod hold_macos;
 #[cfg(windows)]
 mod hold_windows;
 pub mod journal;
+#[cfg(any(windows, test))]
+mod lid_windows;
 pub mod power;
 pub mod power_linux;
 pub mod power_macos;
@@ -71,6 +73,7 @@ pub enum KeepAwakeAction {
     Set { settings: KeepAwakeSettings },
     TurnOnLidHold,
     RemoveLidHelper,
+    PutLidBack,
 }
 
 impl KeepAwakeAction {
@@ -79,9 +82,11 @@ impl KeepAwakeAction {
     pub fn validate(&self) -> Result<(), EngineError> {
         let minutes = match self {
             Self::Start { minutes } | Self::Extend { minutes } => *minutes,
-            Self::End | Self::Set { .. } | Self::TurnOnLidHold | Self::RemoveLidHelper => {
-                return Ok(());
-            }
+            Self::End
+            | Self::Set { .. }
+            | Self::TurnOnLidHold
+            | Self::RemoveLidHelper
+            | Self::PutLidBack => return Ok(()),
         };
         if !(1..=MINUTES_MAX).contains(&minutes) {
             return Err(error("keep_awake_minutes_invalid"));
@@ -335,6 +340,7 @@ fn change(
             stored.lid_order = Some(power::LidOrder { command, number });
             assert!(number > 0);
         }
+        KeepAwakeAction::PutLidBack => {}
     }
     None
 }
@@ -514,6 +520,21 @@ pub(crate) fn reconcile(root: &Path) -> Leftover {
         .collect();
     assert!(kinds.len() <= journal::ENTRIES_MAX);
     Leftover::Kinds(kinds)
+}
+
+/// What `crazyagent keep-awake restore` says when a recorded change could not be put back.
+pub const RESTORE_LEFT: &str = "Keep awake could not put back every setting it changed. It \
+    tries again when the engine starts.";
+/// What `crazyagent keep-awake restore` says when its list of changes could not be read.
+pub const RESTORE_UNREADABLE: &str = "Keep awake could not read its list of settings to put \
+    back. It tries again when the engine starts.";
+
+/// `crazyagent keep-awake restore` (plan Task 14, for an uninstaller): runs the engine
+/// start's undo now, while no engine runs. Input: the engine root. Output: Ok when nothing
+/// is left to put back, else the owner's sentence for what is left.
+pub fn restore(root: &Path) -> Result<(), &'static str> {
+    assert!(!root.as_os_str().is_empty());
+    Err("not built yet")
 }
 
 /// Cuts a logged failure to at most 300 characters. Input: the text. Output: its start.

@@ -442,6 +442,14 @@ fn every_refusal_of_an_owner_change_has_plain_words() {
             "keep_awake_no_lid_helper",
             "Lid-closed hold is set up only on macOS.",
         ),
+        (
+            "keep_awake_no_lid_setting",
+            "Put the lid setting back is only on Windows.",
+        ),
+        (
+            "keep_awake_lid_held",
+            "The lid setting goes back when this hold ends.",
+        ),
     ];
     for (code, sentence) in words {
         assert_eq!(refusal_words(code), Some(sentence), "{code}");
@@ -470,6 +478,56 @@ fn the_lid_helper_commands_are_owner_changes_with_plain_names() {
             assert_eq!(outcome, rejected("keep_awake_no_lid_helper"), "{action:?}");
         }
     }
+}
+
+/// DEC-167 addendum 26, QUESTION 22:58 Q3: Put the lid setting back now is an owner change
+/// on Windows only, and waits while a hold covers the closed lid, which puts it back as it
+/// ends.
+#[test]
+fn put_the_lid_setting_back_now_is_an_owner_change_on_windows_only() {
+    let action = KeepAwakeAction::PutLidBack;
+    assert_eq!(serde_json::to_string(&action).unwrap(), "\"put_lid_back\"");
+    let parsed = serde_json::from_str::<KeepAwakeAction>("\"put_lid_back\"").unwrap();
+    assert_eq!(parsed, action);
+    assert!(action.validate().is_ok());
+    let (_folder, connection) = engine();
+    let ac = sensors(PowerSource::Ac, Some(80));
+    let resting = evaluate(&connection, NOW_MS, Some(&ac)).unwrap();
+    assert_eq!(resting.state.want, Want::Nothing);
+    let outcome = act(&connection, action, NOW_MS);
+    if !cfg!(windows) {
+        assert_eq!(outcome, rejected("keep_awake_no_lid_setting"));
+        return;
+    }
+    assert_eq!(outcome, Outcome::Applied, "nothing holds the lid");
+    agent(&connection, "working");
+    let held = evaluate(&connection, NOW_MS + SECOND_MS, Some(&ac)).unwrap();
+    assert_eq!(held.state.want, IDLE_AND_LID);
+    let waiting = act(&connection, action, NOW_MS + 2 * SECOND_MS);
+    assert_eq!(waiting, rejected("keep_awake_lid_held"));
+}
+
+/// Plan Task 14: `crazyagent keep-awake restore` runs the engine start's undo now and says
+/// what is left in the owner's words, never by a change's kind.
+#[test]
+fn keep_awake_restore_runs_the_engine_start_undo_and_says_what_is_left() {
+    let folder = tempfile::tempdir().unwrap();
+    assert_eq!(restore(folder.path()), Ok(()), "nothing recorded, nothing left");
+    let mut found = journal::Journal::open(folder.path()).unwrap();
+    let unknown = journal::Entry {
+        kind: "stand_in".into(),
+        restore: "before".into(),
+    };
+    found.record(unknown.clone()).unwrap();
+    drop(found);
+    assert_eq!(restore(folder.path()), Err(RESTORE_LEFT));
+    let kept = journal::Journal::open(folder.path()).unwrap();
+    assert_eq!(kept.entries(), [unknown], "a change not put back stays recorded");
+    assert!(!RESTORE_LEFT.contains("stand_in"));
+    let file = folder.path().join("keep-awake").join("journal.json");
+    std::fs::write(&file, "not a journal").unwrap();
+    assert_eq!(restore(folder.path()), Err(RESTORE_UNREADABLE));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "not a journal");
 }
 
 #[test]
@@ -919,6 +977,7 @@ fn a_failed_step_drops_the_platform_hold_and_the_next_good_step_takes_it_again()
 
 #[cfg(target_os = "macos")]
 mod lid_macos;
+mod lid_windows;
 mod notices;
 mod sensing;
 

@@ -1,6 +1,8 @@
-use super::keep_awake::{
-    APPROVAL_TEXT, LID_JOURNAL_TEXT, ended_text, hot_text, left_over, lid_journal,
-};
+#[cfg(not(windows))]
+use super::keep_awake::LID_JOURNAL_TEXT;
+#[cfg(windows)]
+use super::keep_awake::LID_SETTING_TEXT;
+use super::keep_awake::{APPROVAL_TEXT, ended_text, hot_text, left_over, lid_journal};
 use super::*;
 use crate::config::ModelAccess;
 use crate::keep_awake::{EndReason, HeatEnd, Leftover, LidSupport, Sensors};
@@ -239,6 +241,7 @@ fn approvals(connection: &Connection, filter: NoticeFilter) -> Vec<Notice> {
     page(connection, &query).unwrap().items
 }
 
+#[cfg(not(windows))]
 #[test]
 fn the_lid_helper_journal_item_shows_the_fix_and_outlives_the_engine_start_undo() {
     let (_folder, mut connection) = store();
@@ -271,6 +274,35 @@ fn the_lid_helper_journal_item_shows_the_fix_and_outlives_the_engine_start_undo(
     lid_journal(&connection, false).unwrap();
     reconciled(&mut connection, NOW_MS + 2);
     assert!(restores(&connection, NoticeFilter::Pending).is_empty());
+}
+
+/// DEC-167 addendum 26: on Windows the lid row names the Windows fix, and the lid line
+/// clearing it also clears the engine start's row for a lid setting not put back, so one
+/// put back that works resolves both.
+#[cfg(windows)]
+#[test]
+fn on_windows_the_lid_item_names_put_back_now_and_clears_with_the_engine_start_one() {
+    let (_folder, mut connection) = store();
+    let left = kinds(&["windows_lid_action", "sleep_disabled"]);
+    left_over(&connection, &left).unwrap();
+    lid_journal(&connection, true).unwrap();
+    reconciled(&mut connection, NOW_MS);
+    let pending = restores(&connection, NoticeFilter::Pending);
+    assert_eq!(pending.len(), 3, "two kinds left and the lid line's row");
+    let lid = pending
+        .iter()
+        .find(|item| item.text == LID_SETTING_TEXT)
+        .expect("the lid setting item");
+    assert!(lid.text.contains("Put the lid setting back now"));
+    assert!(lid.text.contains("Power Options"));
+    assert!(!lid.text.contains("pmset"));
+    assert!(LID_SETTING_TEXT.len() <= TEXT_BYTES_MAX);
+
+    lid_journal(&connection, false).unwrap();
+    reconciled(&mut connection, NOW_MS + 1);
+    let pending = restores(&connection, NoticeFilter::Pending);
+    assert_eq!(pending.len(), 1, "only the other kind's item stays");
+    assert_eq!(pending[0].text, NOT_PUT_BACK);
 }
 
 #[test]

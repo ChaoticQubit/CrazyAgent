@@ -1,6 +1,7 @@
 use super::state::{Heat, LidSupport, PowerSource, Sensors};
 use crate::paths::Platform;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::time::{Duration, Instant};
 
@@ -64,13 +65,15 @@ pub struct LidAsk {
     pub sleep_display: bool,
 }
 
-/// An owner command for the lid helper (QUESTION 36a): Turn on lid-closed hold, or Remove
-/// lid helper. The lid line runs it on the sensor thread, never in the owner's change.
+/// An owner command for the lid line: Turn on lid-closed hold or Remove lid helper on
+/// macOS (QUESTION 36a), Put the lid setting back now on Windows (DEC-167 addendum 26).
+/// The lid line runs it on the sensor thread, never in the owner's change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LidCommand {
     TurnOn,
     Remove,
+    PutBack,
 }
 
 /// A lid command waiting in the run state, with its number in this engine run, which only
@@ -88,9 +91,11 @@ pub struct LidOrder {
 /// stands in for the reader's.
 pub type LidReader = Box<dyn FnMut(LidAsk, Option<LidCommand>, i64) -> LidSupport + Send>;
 
-/// Builds this platform's lid line: the macOS lid helper, and none elsewhere, where the
-/// reader's own lid support stands. Output: the lid line, if this platform has one.
-pub fn platform_lid() -> Option<LidReader> {
+/// Builds this platform's lid line: the macOS lid helper, the Windows lid close action
+/// with its journal under the engine root, and none on Linux, where the reader's own lid
+/// support stands. Input: the engine root. Output: the lid line, if this platform has one.
+pub fn platform_lid(root: &Path) -> Option<LidReader> {
+    assert!(!root.as_os_str().is_empty());
     #[cfg(target_os = "macos")]
     let lid = Some(super::hold_macos::lid_reader());
     #[cfg(not(target_os = "macos"))]

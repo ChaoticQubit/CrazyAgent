@@ -37,6 +37,10 @@ pub(crate) const LID_JOURNAL_TEXT: &str = "The lid helper cannot read its journa
     may stay off. Run sudo pmset -a disablesleep 0, then remove its journal.json in \
     /Library/Application Support/dev.crazyagent.power with sudo, then Remove lid helper and \
     add it again.";
+/// The restore line on Windows of a lid close action Keep awake could not put back (DEC-167
+/// addendum 26), under the same subject, with the owner's two ways to fix it.
+pub(crate) const LID_SETTING_TEXT: &str = "Keep awake could not put the lid setting back. Use \
+    Put the lid setting back now in Settings, Keep awake, or set it in Power Options.";
 /// The approval subject and line (QUESTION 35j).
 pub(crate) const APPROVAL_SUBJECT: &str = "keep_awake_approval";
 pub(crate) const APPROVAL_TEXT: &str =
@@ -53,6 +57,7 @@ const _: () = assert!(NOT_READ.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(HOT_UNTIL_CRITICAL.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(HOT_NEVER_ENDS.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(LID_JOURNAL_TEXT.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(LID_SETTING_TEXT.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(APPROVAL_TEXT.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(LID_SUBJECT.len() <= 128);
 const _: () = assert!(APPROVAL_SUBJECT.len() <= 128);

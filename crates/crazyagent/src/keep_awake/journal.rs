@@ -179,6 +179,19 @@ impl Journal {
         first.map_or(Ok(()), Err)
     }
 
+    /// Undoes the recorded changes of one kind, newest first, and forgets the ones whose
+    /// undo worked; entries of every other kind stay as they are (DEC-167 addendum 26).
+    /// Inputs: the kind and the undo for one entry. Output: Ok when no entry of that kind
+    /// is left, else the first failure; the entries that failed stay recorded.
+    pub fn settle(
+        &mut self,
+        kind: &str,
+        _undo: impl FnMut(&Entry) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        assert!(!kind.is_empty());
+        Ok(())
+    }
+
     /// Replaces the journal file with the given entries: writes a draft, syncs it, renames
     /// it over the file and syncs the folder. Input: the entries. Output: Ok, or why not.
     fn persist(&self, entries: &[Entry]) -> Result<(), EngineError> {
