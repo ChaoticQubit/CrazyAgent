@@ -544,6 +544,14 @@ fn a_five_hour_line_read_over_five_hours_ago_says_how_old_the_read_is() {
     );
 }
 
+/// The age words are only for a read past the 5 h line: a younger read reaching them is a
+/// caller that skipped the check, and stops the TUI rather than show a wrong line.
+#[test]
+#[should_panic(expected = "only a read past STALE_READ_MS has an age line")]
+fn a_read_under_five_hours_old_has_no_stale_age() {
+    stale_age(NOW - 4 * HOUR, NOW);
+}
+
 /// R4 N-D16 follow-up: an account whose read failed before any window was read shows its
 /// cause first and each window as not read, pointing at that cause, never as a window the
 /// provider left out.

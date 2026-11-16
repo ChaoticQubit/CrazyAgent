@@ -343,6 +343,19 @@ fn shown<'a>(names: &'a HashMap<String, String>, key: &'a str) -> &'a str {
 /// (N-D16, leader 11-16 03:00).
 const STALE_READ_MS: i64 = 5 * 60 * 60 * 1000;
 
+/// How old a read past [`STALE_READ_MS`] is, in the desktop card's words: whole hours under
+/// a day, then whole days. Inputs: the read time and now, in epoch milliseconds. Output:
+/// "14 h ago" or "3 d ago".
+fn stale_age(at_ms: i64, now_ms: i64) -> String {
+    let hours = now_ms.saturating_sub(at_ms) / 3_600_000;
+    assert!(hours >= 5, "only a read past STALE_READ_MS has an age line");
+    if hours < 24 {
+        format!("{hours} h ago")
+    } else {
+        format!("{} d ago", hours / 24)
+    }
+}
+
 fn window_line(
     label: &str,
     window: Option<LimitWindow>,
@@ -414,7 +427,7 @@ fn limits_lines(
     let stale = limits
         .observed_ms
         .filter(|at| now_ms.saturating_sub(*at) > STALE_READ_MS)
-        .map(|at| ago(at, now_ms, offset));
+        .map(|at| stale_age(at, now_ms));
     lines.push(Line::raw(format!(
         "  {}",
         window_line(

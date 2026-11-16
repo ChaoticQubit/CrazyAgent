@@ -21,13 +21,11 @@ function readAge(line) {
   return { age: `${found[1]} ${found[2]} ago`, hours: found[2] === "d" ? count * 24 : count };
 }
 
-/** Says whether Metrics shows every account's 5-hour and weekly use with a meter and
- * the time each window resets (OP-17); an API-key account's card saying it has no windows is
- * a valid reading, and a card read over 5 h ago is not exercised and named with its age, as
- * its 5-hour reset has passed since (N-D16), though not when every account is one of these.
- * Input: the limit cards in screen order, each { notice, read, windows: [{ label, used, meter,
- * reset }] } as the page shows them. Output: the detail; throws the first account and window
- * that shows less, by its place so no name is logged. */
+/** Says whether Metrics shows every account's 5-hour and weekly use, meter and reset time
+ * (OP-17). An API-key card, and a card read over 5 h ago named with its age (N-D16), are not
+ * exercised, though not when every card is. Input: the cards in screen order, each { notice,
+ * read, windows: [{ label, used, meter, reset }] }. Output: the detail; throws the first
+ * account and window that shows less, by its place so no name is logged. */
 export function limitsVerdict(cards) {
   assert(Array.isArray(cards), "the limit cards are a list");
   if (cards.length === 0) throw new Error("Metrics shows no account limits");
