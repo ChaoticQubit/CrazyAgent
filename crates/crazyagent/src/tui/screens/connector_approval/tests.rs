@@ -448,3 +448,43 @@ fn control_and_escape_characters_show_as_escapes_and_nothing_is_taken_out() {
         "a control in the arguments shows as an escape"
     );
 }
+
+/// Advisor on rv-sec2 T13d F2: with the arguments open, End jumps past the end of what the
+/// write sends and its time left; only rows drawn in one run down from the top count as
+/// read, so a after End and Home answers nothing until the page is paged down to them.
+#[test]
+fn end_past_the_unread_rows_never_counts_them_as_read() {
+    let fill = |bytes: usize| "abc ".repeat(bytes / 4);
+    let mut long = waiting();
+    long.hidden = true;
+    long.title = fill(64);
+    long.tool = fill(108);
+    long.agent = fill(128);
+    long.preview = fill(480);
+    long.arguments = format!("{{\"body\":\"{}tail-mark\"}}", fill(2400));
+    let mut shell = page(long);
+    keys(&mut shell, &[Key::Enter]);
+    assert!(!shows(&mut shell, "Time left"));
+    keys(&mut shell, &[Key::End]);
+    assert!(
+        shows(&mut shell, "tail-mark"),
+        "End reaches the last argument row"
+    );
+    assert!(
+        !shows(&mut shell, "Time left"),
+        "End jumped past the time left"
+    );
+    keys(&mut shell, &[Key::Home, Key::Char('a')]);
+    assert!(
+        requests(&mut shell).is_empty(),
+        "rows End jumped past are unread"
+    );
+    assert!(said(&shell).contains(READ_FIRST));
+    keys(&mut shell, &[Key::PageDown]);
+    assert!(shows(&mut shell, "Time left"));
+    keys(&mut shell, &[Key::Char('a')]);
+    assert!(
+        answers(&one(&mut shell), true),
+        "paged down to its time left, a answers"
+    );
+}

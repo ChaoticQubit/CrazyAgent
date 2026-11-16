@@ -133,6 +133,8 @@ pub(in crate::tui) struct ConnectorApprovalPage {
     top: usize,
     last_top: usize,
     room: usize,
+    seen: usize,
+    seen_width: usize,
     read_end: bool,
 }
 
@@ -150,6 +152,8 @@ impl ConnectorApprovalPage {
             top: 0,
             last_top: 0,
             room: 1,
+            seen: 0,
+            seen_width: 0,
             read_end: false,
         }
     }
@@ -420,8 +424,15 @@ impl Screen for ConnectorApprovalPage {
         self.room = room;
         self.last_top = lines.len().saturating_sub(room);
         self.top = self.top.min(self.last_top);
+        if width != self.seen_width {
+            self.seen = 0;
+            self.seen_width = width;
+        }
+        if self.top <= self.seen {
+            self.seen = self.seen.max(self.top + room);
+        }
         if let Some(summary) = summary {
-            self.read_end |= self.top + room >= summary;
+            self.read_end |= self.seen >= summary;
         }
         let shown: Vec<_> = lines.into_iter().skip(self.top).take(room).collect();
         draw_lines(frame.buffer_mut(), inner, &shown);
