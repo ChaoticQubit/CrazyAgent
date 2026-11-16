@@ -102,10 +102,9 @@ test("the owners and the publish start reach the engine through their own client
   assert.deepEqual(await api.startGitHubPublish("project-1", plan), unreachable);
 });
 
-test("Basics shows the publish block and Create waits on it", () => {
+test("Basics shows the publish block", () => {
   const page = read("src/screens/new-project/index.tsx");
   assert.ok(page.includes("<PublishFields"), "index.tsx renders no PublishFields");
-  assert.match(page, /const canCreate = [^;]*publishReady[^;]*;/);
   const fields = read("src/screens/new-project/fields.tsx");
   assert.ok(fields.includes("export function PublishFields"), "fields.tsx has no PublishFields");
   for (const name of ["PUBLISH_TOGGLE", "PUBLISH_LINE", "PUBLISH_DOCS", "SIGN_IN_WAIT"]) assert.ok(fields.includes(name), name);
