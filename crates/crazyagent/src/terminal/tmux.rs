@@ -124,6 +124,10 @@ const REPLY_TIME: Duration = Duration::from_secs(10);
 /// with the text so far as a success; only a line ending with this mark was expanded whole.
 const FORMAT_END: &str = " end";
 const REPLY_CUT: &str = "terminal_reply_cut";
+/// The most lines the reader drops after a cut attach capture while it looks for that
+/// attach's marker line: every history and screen row a capture can hold, then the
+/// capture's closing guard, the marker block's opening guard and the marker itself.
+const DRAIN_LINES_MAX: usize = HISTORY_ROWS_MAX + u16::MAX as usize + 3;
 /// The most live views one tmux server feeds at once over all its panes: every view the
 /// engine serves, so one agent per tile never meets it first; `VIEWERS_MAX` bounds one pane.
 const SERVER_VIEWERS_MAX: usize = super::CONNECTIONS_MAX;
@@ -200,6 +204,7 @@ enum Pending {
         history: usize,
         view: bool,
         reply: SyncSender<Result<TerminalStream, HostError>>,
+        marker: Vec<u8>,
     },
 }
 
@@ -1691,6 +1696,7 @@ fn finish(state: &mut State, answer: Answer) {
             history,
             view,
             reply,
+            marker,
         } => match answer {
             Ok(lines) => state.pending.push_front(Pending::Attach {
                 agent,
@@ -1698,6 +1704,7 @@ fn finish(state: &mut State, answer: Answer) {
                 history,
                 view,
                 reply,
+                marker,
             }),
             Err(error) => {
                 let _ = reply.send(Err(error));
@@ -1709,6 +1716,7 @@ fn finish(state: &mut State, answer: Answer) {
             history,
             view,
             reply,
+            ..
         } => {
             let opened =
                 answer.and_then(|screen| viewer(state, agent, &lines, &screen, history, view));
@@ -1983,6 +1991,7 @@ impl Tmux {
                     history,
                     view,
                     reply,
+                    marker: Vec::new(),
                 },
             )?;
             match control.wait(&answer) {
