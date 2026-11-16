@@ -421,7 +421,7 @@ pub(in crate::team) fn request_reply(
 /// words that never name the repository or anything from the owner's sign-in. Inputs: the
 /// engine connection, the project, who asked, the rule, whether it is to be on and the
 /// reason. Output: the sentence the caller reads and whether it is an error.
-pub(in crate::team) fn propose_reply(
+pub(crate) fn propose_reply(
     db: &Connection,
     project: &ProjectId,
     asker: &Asker,

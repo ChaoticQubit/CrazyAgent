@@ -4211,3 +4211,31 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
     drop(owner);
     engine.stop().await;
 }
+
+/// DEC-182 S7: an engine start ends every GitHub rule proposal an earlier engine left
+/// approved or being applied as refused and tells each agent once, sending nothing, so the
+/// owner's sign-in never applies a change the owner may have set otherwise since.
+#[tokio::test]
+async fn an_engine_start_ends_a_github_rule_proposal_left_approved_or_applying() {
+    let mut engine = Engine::start().await;
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,created_ms)
+            VALUES ('alpha','agent:1','wiki_off',1,'Docs live in the repository.','octo-cat/tool','approved',0),
+                   ('alpha','agent:2','no_force_push',1,'History stays.','octo-cat/tool','applying',0);",
+        )
+        .unwrap();
+    engine.restart().await;
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM github_rule_requests WHERE status='refused' AND told=1"),
+        2
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT count(*) FROM team_messages WHERE project='alpha' AND author='engine' AND text LIKE '%: refused.'"
+        ),
+        2
+    );
+    engine.stop().await;
+}

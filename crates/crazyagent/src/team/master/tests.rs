@@ -6885,3 +6885,38 @@ fn a_live_master_relays_a_terminal_answer_withdraws_and_asks_a_text_question_aga
         (QuestionStatus::Dismissed, Some(ClosedBy::Replaced), None)
     );
 }
+
+/// DEC-182 S7: a live master's `propose_github_rule` call reaches the proposal check at
+/// once, here refused plainly since the project was never published, with no question.
+#[test]
+fn a_live_master_s_github_rule_proposal_is_checked_at_once() {
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let folder = PathBuf::from(&fixture.setup.folder);
+    std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    crate::ide::workspace::tests::add_project(&fixture.connection, PROJECT, &folder);
+    fixture.live(Some(MASTER));
+    let project = fixture.setup.project_id.clone();
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![tool_call(
+            1,
+            tool::PROPOSE_RULE_TOOL,
+            json!({"rule": "wiki_off", "on": true, "why": "Docs live in the repository."}),
+        )],
+    );
+    assert_eq!(
+        text(&answers[0]),
+        (
+            "Not proposed: this project has not been published to GitHub, so it has no repository rules to change.",
+            true
+        )
+    );
+    assert!(
+        crate::questions::pending(&fixture.connection, &project)
+            .unwrap()
+            .is_empty()
+    );
+}

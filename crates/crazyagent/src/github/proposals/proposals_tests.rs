@@ -605,3 +605,68 @@ fn an_outcome_a_full_conversation_cannot_take_is_told_at_the_next_pass() {
     assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 0);
     assert_eq!(case.told().len(), 1, "an outcome is told once");
 }
+
+/// DEC-182 S7: a reason with a hidden character, such as a direction override or a
+/// zero-width space, is refused before any question, so the owner reads only what shows.
+#[test]
+fn a_reason_with_hidden_characters_is_refused_before_any_question() {
+    let case = Case::new();
+    case.done(REPO);
+    for why in [
+        "Docs\u{202E}txt",
+        "Docs\u{200B} live here",
+        "Docs\u{2066}here",
+    ] {
+        let refused = request(
+            &case.db,
+            &case.project,
+            &Asker::Agent(4),
+            GitHubRule::WikiOff,
+            true,
+            why,
+        );
+        assert_eq!(
+            refused,
+            Err("github_rule_why_invalid".to_owned()),
+            "{why:?}"
+        );
+    }
+    assert!(case.questions().is_empty());
+}
+
+/// DEC-182 S7: the proposer hears who gets the outcome: a master gets the one message
+/// itself, while a sub-agent hears that the message goes to its master, since the outcome
+/// is told in the project's team conversation.
+#[test]
+fn the_proposer_hears_who_gets_the_outcome() {
+    let case = Case::new();
+    case.done(REPO);
+    let (said, refused) = crate::team::tool::questions::propose_reply(
+        &case.db,
+        &case.project,
+        &Asker::Master(7),
+        GitHubRule::WikiOff,
+        true,
+        WHY,
+    );
+    assert!(!refused, "{said}");
+    assert!(
+        said.contains("You get one message saying only whether"),
+        "{said}"
+    );
+    let (said, refused) = crate::team::tool::questions::propose_reply(
+        &case.db,
+        &case.project,
+        &Asker::Agent(4),
+        GitHubRule::NoForcePush,
+        true,
+        WHY,
+    );
+    assert!(!refused, "{said}");
+    assert!(
+        said.contains("Your master gets one message saying only whether"),
+        "{said}"
+    );
+    assert!(!said.contains("You get one message"), "{said}");
+    assert!(!said.contains(REPO), "{said}");
+}

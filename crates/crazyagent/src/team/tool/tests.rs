@@ -1834,6 +1834,8 @@ fn a_propose_github_rule_call_reads_one_switchable_rule_on_and_a_short_plain_why
         json!({"rule": "wiki_off", "on": "yes", "why": "x"}),
         json!({"rule": "wiki_off", "on": true, "why": "  "}),
         json!({"rule": "wiki_off", "on": true, "why": "x".repeat(301)}),
+        json!({"rule": "wiki_off", "on": true, "why": "Docs\u{202E}txt"}),
+        json!({"rule": "wiki_off", "on": true, "why": "Docs\u{200B} live here"}),
         json!({"rule": "wiki_off", "on": true, "why": "x", "repo": "octo-cat/tool"}),
     ] {
         assert!(matches!(read(refused.clone()), Some(Err(_))), "{refused}");
@@ -1867,6 +1869,11 @@ fn propose_github_rule_is_listed_for_team_masters_and_sub_agents_but_not_console
     assert!(!rules.contains(&"security_policy") && !rules.contains(&"dependabot_version_updates"));
     assert_eq!(rules.len(), 23);
     assert_eq!(listed["inputSchema"]["properties"]["why"]["maxLength"], 300);
+    let description = listed["description"].as_str().unwrap();
+    assert!(
+        description.contains("your master gets it when you are a sub-agent"),
+        "{description}"
+    );
     let sub_agent = MASTER_QUESTION_TOOLS.map(str::to_owned);
     assert!(entry(&sub_agent).is_some());
     let console = console_off(Vec::new());
