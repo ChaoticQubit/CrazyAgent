@@ -82,8 +82,8 @@ fn from_mcp(error: McpError) -> OAuthError {
 }
 
 /// One sign-in waiting for the browser, held in engine memory only: where it ends, what
-/// the answer must match, and the PKCE verifier, which never leaves the engine before the
-/// token request.
+/// the answer must match, the PKCE verifier, which never leaves the engine before the
+/// token request, and whether its file takes the owner's own app.
 struct Flow {
     root: PathBuf,
     state: String,
@@ -94,6 +94,7 @@ struct Flow {
     token: url::Url,
     hosts: Vec<String>,
     client: Client,
+    own_allowed: bool,
     redirect: String,
     resource: String,
     scopes: Vec<String>,
@@ -778,6 +779,7 @@ fn begin_scoped(
         token: server.token,
         hosts: oauth.hosts.clone(),
         client,
+        own_allowed: oauth.registration.contains(&Registration::Own),
         redirect: redirect.as_str().to_owned(),
         resource,
         scopes,
@@ -823,6 +825,22 @@ pub(crate) fn finish_with(
     reach: &ProviderReach,
 ) -> Result<(), OAuthError> {
     redeem(root, take(root, state)?, code, iss, reach)
+}
+
+/// [`finish_with`] with `between` run once the sign-in is taken and before its code is
+/// redeemed, where a save the owner makes in that moment lands.
+#[cfg(test)]
+pub(crate) fn finish_with_between(
+    root: &Path,
+    state: &str,
+    code: &str,
+    iss: Option<&str>,
+    reach: &ProviderReach,
+    between: impl FnOnce(),
+) -> Result<(), OAuthError> {
+    let flow = take(root, state)?;
+    between();
+    redeem(root, flow, code, iss, reach)
 }
 
 /// Where one token of a connector signed in at one issuer is saved: the kind, the
@@ -1084,7 +1102,8 @@ fn save_record(root: &Path, name: &str, text: String) -> Result<(), OAuthError> 
 /// checked first, so a code from another server is never sent anywhere. The request body
 /// lives in a buffer that never grows and is zeroed. Under the renewal lock, the owner's
 /// own app must still be the one the sign-in began with, and bound to this issuer or to
-/// none; then the tokens are saved, the tokens of another issuer the connector was signed
+/// none, and a sign-in by another client is refused once an own app its file takes is
+/// saved; then the tokens are saved, the tokens of another issuer the connector was signed
 /// in at before are removed, the owner's own app is bound to this issuer, and the sign-in
 /// record is saved last. Inputs: engine root, the sign-in, the code, the answer's issuer
 /// and the lookup. Output: Ok once all is saved.
@@ -1106,8 +1125,11 @@ fn redeem(
     }
     let lock = renewal_lock(root, &flow.connector);
     let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    let saved_id = saved(root, &own_ref(&flow.connector)?)?;
+    if !flow.client.own && flow.own_allowed && saved_id.is_some() {
+        return Err(OAuthError("connector_oauth_state_unknown"));
+    }
     if flow.client.own {
-        let saved_id = saved(root, &own_ref(&flow.connector)?)?;
         if saved_id.is_none_or(|id| id.expose() != flow.client.id) {
             return Err(OAuthError("connector_oauth_state_unknown"));
         }

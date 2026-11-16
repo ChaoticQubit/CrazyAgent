@@ -1453,6 +1453,71 @@ fn signing_out_ends_the_sign_in_and_asks_nothing_after() {
     assert!(notices(&mut sign.case).is_empty());
 }
 
+/// An own app saved while a sign-in by registration is being answered wins: the answer
+/// taken before the save is never redeemed, so no registered client's tokens are saved
+/// once an own app is. A file that takes no own app still signs in by registration with
+/// one saved.
+#[test]
+fn a_registered_sign_in_answered_while_an_own_app_is_saved_is_never_redeemed() {
+    let registering = Shape {
+        register: Some("{base}/register"),
+        ..shape()
+    };
+    let sign = prepared(
+        registering.clone(),
+        &["127.0.0.1"],
+        &[Registration::Own, Registration::Dcr],
+        None,
+    );
+    let pending = begun(&sign, false);
+    assert_eq!(query(&pending.authorize_url)["client_id"], DCR_CLIENT);
+    let issuer = sign.issuer();
+    let answered = finish_with_between(
+        &sign.case.root,
+        &pending.state,
+        CODE,
+        Some(&issuer),
+        &no_lookup(),
+        || {
+            assert_eq!(
+                set_own_client(
+                    &sign.case.db,
+                    &sign.case.root,
+                    "board",
+                    CLIENT,
+                    Some(SECRET)
+                ),
+                Ok(())
+            );
+        },
+    );
+    assert_eq!(answered, Err(OAuthError("connector_oauth_state_unknown")));
+    assert!(
+        sign.token_requests().is_empty(),
+        "the registered client's code is never sent"
+    );
+    assert!(saved(&sign.case, "connector-signin-board").is_empty());
+    assert!(saved(&sign.case, "connector-token-board-").is_empty());
+
+    let keyless = prepared(
+        registering,
+        &["127.0.0.1"],
+        &[Registration::Dcr],
+        Some((CLIENT, Some(SECRET))),
+    );
+    let pending = begun(&keyless, false);
+    assert_eq!(
+        query(&pending.authorize_url)["client_id"],
+        DCR_CLIENT,
+        "a file that takes no own app registers"
+    );
+    assert_eq!(
+        finished(&keyless, &pending.state, Some(&keyless.issuer())),
+        Ok(()),
+        "and is redeemed though an own app is saved"
+    );
+}
+
 /// The Action items waiting on the owner after one reconcile, as kind, class, text and
 /// the page a click opens.
 fn notices(case: &mut Case) -> Vec<(NoticeKind, NoticeClass, String, serde_json::Value)> {
