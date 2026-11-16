@@ -27,10 +27,12 @@ async function accountNames() {
   throw new Error(`there are more than ${PAGES_MAX * 200} accounts to name`);
 }
 
-/** The limit cards Metrics shows, in screen order. Output: [{ notice, windows }]. */
+/** The limit cards Metrics shows, in screen order, each with its read line, such as "Read
+ * from the provider 14 h ago". Output: [{ notice, read, windows }]. */
 function limitCards() {
   return browser.execute(() => [...document.querySelectorAll("section.usage-limits")].map((card) => ({
     notice: card.querySelector(".notice")?.innerText.trim() ?? "",
+    read: card.querySelector(":scope > span.muted")?.innerText.trim() ?? "",
     windows: [...card.querySelectorAll(".usage-window")].map((window) => ({
       label: window.querySelector(".usage-window-head strong")?.innerText.trim() ?? "",
       used: window.querySelector(".usage-window-head span")?.innerText.trim() ?? "",
