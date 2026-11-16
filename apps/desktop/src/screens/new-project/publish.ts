@@ -8,6 +8,10 @@ export const PUBLISH_DOCS = "Also publish the docs folder (plans, research)";
 export const SIGN_IN_WAIT = "Sign in to GitHub, or turn publishing off.";
 export const DETAILS_WAIT = "Fix the GitHub details in Basics first.";
 export const CHECKING_WAIT = "Checking your GitHub sign-in. Create waits for it, or turn publishing off.";
+export const SIGN_IN_CHECKING = "Checking your GitHub sign-in...";
+export const OVERVIEW_SIGNED_OUT = "Sign in to GitHub to publish this project.";
+export const SIGN_IN_UNREAD = "CrazyAgent couldn't read your GitHub sign-in.";
+export const OVERVIEW_DETAILS_WAIT = "Fix the GitHub details above first.";
 export const PUBLISH_STARTED = "Publishing on GitHub has started.";
 export const PUBLISH_NOT_STARTED = "Publishing on GitHub didn't start.";
 const ENGINE_STARTING = "CrazyAgent's engine is still starting.";
@@ -151,10 +155,12 @@ export function createWait(publish: PublishDraft, projectName: string, about: st
   return Object.keys(errors).length > 0 ? DETAILS_WAIT : null;
 }
 
-/** Says why the Overview's Publish waits, in the Overview's words. Input: the New Project
- * wait. Output: the sentence, or null when the fields already say why. */
+/** Says why the Overview's Publish waits, in the Overview's words: nothing more while the
+ * sign-in is being read or missing, since the fields above already say so, and the details
+ * to fix otherwise. Input: the New Project wait. Output: the sentence, or null. */
 export function overviewWait(wait: string | null): string | null {
-  return wait;
+  assert(wait === null || wait === CHECKING_WAIT || wait === SIGN_IN_WAIT || wait === DETAILS_WAIT, "overviewWait got a wait createWait does not give");
+  return wait === DETAILS_WAIT ? OVERVIEW_DETAILS_WAIT : null;
 }
 
 /** Starts publishing a made project on GitHub with the block's plan. Inputs: the project

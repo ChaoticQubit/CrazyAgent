@@ -191,6 +191,7 @@ test("the Overview form says the TUI's sign-in words, offers Try again after a f
   assert.equal(publish.overviewWait(publish.SIGN_IN_WAIT), null, "the fields already say to sign in");
   assert.equal(publish.overviewWait(publish.DETAILS_WAIT), publish.OVERVIEW_DETAILS_WAIT);
   assert.equal(publish.overviewWait(null), null);
+  assert.throws(() => publish.overviewWait("A wait createWait never gives."), /overviewWait got a wait/);
   const fields = read("src/screens/new-project/fields.tsx");
   assert.match(fields, /place === "overview" \? OVERVIEW_SIGNED_OUT : SIGN_IN_WAIT/);
   assert.match(fields, /\{SIGN_IN_CHECKING\}/);

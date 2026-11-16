@@ -5,7 +5,7 @@ import type { GitHubPublishJob } from "../../engine-client";
 import { ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
 import { PublishFields, useGitHubPublish } from "../new-project/fields";
-import { createWait, emptyPublish, publishOutcome, startPublish } from "../new-project/publish";
+import { createWait, emptyPublish, overviewWait, publishOutcome, startPublish } from "../new-project/publish";
 import { emptyDraft } from "../new-project/wizard";
 import type { ProjectDraft } from "../new-project/wizard";
 import { DRAFT_POLL_MS, ENGINE_STARTING, PROMPT_LINE, PROMPT_NEVER, PROMPT_NOT_NOW, PROMPT_PUBLISH, discardable, leftLine, noticeShown, publishView, readKept } from "./publish-job";
@@ -20,6 +20,7 @@ function PublishForm({ projectId, name, about, onStarted, onCancel }: { projectI
   const [busy, setBusy] = useState(false);
   const publish = draft.publish ?? emptyPublish();
   const wait = createWait(publish, name, about, github.offered, github.signedIn, github.checking);
+  const why = overviewWait(wait);
 
   async function start() {
     const started = startPublish(projectId, publish, name, about, github.offered);
@@ -31,10 +32,10 @@ function PublishForm({ projectId, name, about, onStarted, onCancel }: { projectI
   }
 
   return <div className="pj-stack-s">
-    <PublishFields prefix="pj-github" draft={draft} onChange={setDraft} github={github} />
-    {wait && <p className="pj-muted" id="pj-github-why">{wait}</p>}
+    <PublishFields prefix="pj-github" draft={draft} onChange={setDraft} github={github} place="overview" />
+    {why && <p className="pj-muted" id="pj-github-why">{why}</p>}
     <div className="pj-need">
-      <button type="button" className="btn primary" disabled={busy || !publish.on || wait !== null} aria-describedby={wait ? "pj-github-why" : undefined} onClick={() => void start()}>Publish on GitHub</button>
+      <button type="button" className="btn primary" disabled={busy || !publish.on || wait !== null} aria-describedby={why ? "pj-github-why" : undefined} onClick={() => void start()}>Publish on GitHub</button>
       <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
     </div>
   </div>;
