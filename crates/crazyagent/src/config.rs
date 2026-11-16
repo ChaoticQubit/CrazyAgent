@@ -1807,6 +1807,32 @@ pools = [{ id = "pool", members = ["codex-connection", "local-connection"], proj
         edit_model_access(&bytes, "", &ModelAccessEdit::ReplacePool { pool }, &[]).unwrap();
     }
 
+    /// DEC-180 Task 20 Q8: an HTTP account stored for a harness that runs listed masters and
+    /// fits it is its own master target once its pool is assigned, as a signed-in account is;
+    /// one stored for a harness without the master role gets none.
+    #[test]
+    fn a_listed_master_account_is_its_own_master_target() {
+        let connection = |harness: &str| -> ModelConnection {
+            serde_json::from_value(serde_json::json!({
+                "id": "listed-connection",
+                "provider": "google",
+                "harness": harness,
+                "protocol": "openai-chat",
+                "account_ref": "listed-account",
+                "endpoint": {"kind": "http", "url": "http://127.0.0.1:9/v1"},
+                "model": {"id": "m-1", "author": "google"},
+                "auth": {"method": "none"},
+            }))
+            .unwrap()
+        };
+        let listed = connection("standin-acp");
+        assert!(crate::master_session::listed_master("standin-acp").is_ok());
+        assert_eq!(connection_destination(&listed), Some(listed.id.clone()));
+        let other = connection("gemini-cli");
+        assert!(crate::master_session::listed_master("gemini-cli").is_err());
+        assert_eq!(connection_destination(&other), None);
+    }
+
     #[test]
     fn unassigned_pools_approve_nothing() {
         let (_, config) =
