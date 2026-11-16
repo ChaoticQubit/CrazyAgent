@@ -11,7 +11,7 @@ import {
   Button, Checkbox, ConfirmDialog, Dialog, EmptyState, LoadError, NotReady, Notice, Panel, SecretField, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, Switch, TextArea,
   TextField,
 } from "../../ui";
-import { isWindows } from "../../ui/keys";
+import { isMac, isWindows } from "../../ui/keys";
 import { navigate } from "../../ui/router";
 import { SkillTag } from "../skill-tag";
 import { displayText } from "../conversation";
@@ -643,7 +643,7 @@ export function SecretRows({ rows, onRows }: { rows: SecretRow[]; onRows: (rows:
   </>;
 }
 
-/** The Add MCP server dialog: name, a command on this Mac or a URL, and secrets by name.
+/** The Add MCP server dialog: name, a command on this computer or a URL, and secrets by name.
  * Secret values stay in masked fields until submit, are sent once and then cleared.
  * Inputs: open, where the server applies, close and added handlers. */
 export function AddServerDialog({ open, scope, onClose, onAdded }: {
@@ -653,6 +653,7 @@ export function AddServerDialog({ open, scope, onClose, onAdded }: {
   onAdded: (server: McpServerView) => void;
 }) {
   const session = useAppSession();
+  const here = isMac() ? "this Mac" : "this computer";
   const [name, setName] = useState("");
   const [form, setForm] = useState<ServerForm>({ kind: "stdio", command: "", args: "", url: "" });
   const [rows, setRows] = useState<SecretRow[]>([]);
@@ -686,14 +687,14 @@ export function AddServerDialog({ open, scope, onClose, onAdded }: {
       <TextField id="server-name" label="Name" value={name} onValue={setName} error={errors.name} maxLength={64} spellCheck={false} autoComplete="off"
         helper="Lowercase letters, digits, - or _, such as github." />
       <Segmented label="Type" value={form.kind} onValue={(kind) => setForm({ ...form, kind })}
-        options={[{ value: "stdio", label: "Command on this Mac", icon: "terminal" }, { value: "http", label: "URL", icon: "link" }]} />
+        options={[{ value: "stdio", label: `Command on ${here}`, icon: "terminal" }, { value: "http", label: "URL", icon: "link" }]} />
       {form.kind === "stdio" ? <>
         <TextField id="server-command" label="Command" value={form.command} onValue={(command) => setForm({ ...form, command })} error={errors.command}
           spellCheck={false} autoComplete="off" helper={isWindows() ? "The full path, such as C:\\Program Files\\nodejs\\npx.cmd." : "The full path, such as /opt/homebrew/bin/npx."} />
         <TextArea id="server-args" label="Arguments" value={form.args} onValue={(args) => setForm({ ...form, args })} error={errors.args} rows={3}
           helper="One per line." />
       </> : <TextField id="server-url" label="URL" type="url" value={form.url} onValue={(url) => setForm({ ...form, url })} error={errors.url}
-        spellCheck={false} autoComplete="off" helper="An https address, or http://127.0.0.1 for a server on this Mac." />}
+        spellCheck={false} autoComplete="off" helper={`An https address, or http://127.0.0.1 for a server on ${here}.`} />}
       <div className="stack-small">
         <span className="title">Secrets</span>
         <p className="secondary">{form.kind === "stdio" ? "Each secret is given to the command as an environment value." : "Each secret is sent to the URL as a header."} CrazyAgent's engine keeps them privately; you won't see them again.</p>
