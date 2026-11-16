@@ -270,7 +270,7 @@ else
   build_ncurses "$tree"
   build_libevent "$tree"
   build_utf8proc "$tree"
-  build_tmux "$tree" --enable-static
+  build_tmux "$tree" --enable-static LIBNCURSESW_CFLAGS="-I$prefix/include" LIBNCURSESW_LIBS="-L$prefix/lib -lncursesw"
   check_linux "$tree/tmux/tmux"
 fi
 
