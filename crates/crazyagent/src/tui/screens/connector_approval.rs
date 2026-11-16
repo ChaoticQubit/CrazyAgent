@@ -254,8 +254,11 @@ impl ConnectorApprovalPage {
             lines.extend(paint(HIDDEN, Role::Warning));
         }
         let offset = local_offset();
+        let hang = width.saturating_sub(2).max(1);
         for line in approval_lines(view, offset) {
-            lines.extend(wrap(&line, width).into_iter().map(Line::raw));
+            for (at, part) in wrap(&line, hang).into_iter().enumerate() {
+                lines.push(Line::raw(if at == 0 { part } else { format!("  {part}") }));
+            }
         }
         lines.push(Line::default());
         let now = now_ms();

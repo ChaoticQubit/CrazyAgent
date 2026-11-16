@@ -390,8 +390,11 @@ impl ProjectConnectorsPage {
         match result {
             Ok(view) if view.project.as_deref() == Some(self.project.as_str()) => {
                 self.stored = Load::Ready(view.clone());
+                if !self.asks_once() {
+                    self.writes = Load::Idle;
+                }
                 self.moved(self.selected);
-                if pending == Pending::Read {
+                if pending == Pending::Read || self.writes.ready().is_none() {
                     self.read_writes(ctx);
                 }
             }
