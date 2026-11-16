@@ -3053,6 +3053,23 @@ fn job_asks(shell: &mut Shell) -> Vec<IntakeQuery> {
         .collect()
 }
 
+/// The job actions among the intake asks queued so far: a start, a stop or a dismiss, never
+/// a read such as the ones Home sends each time it is shown. Takes the shell. Returns those
+/// actions.
+fn job_actions(shell: &mut Shell) -> Vec<IntakeQuery> {
+    job_asks(shell)
+        .into_iter()
+        .filter(|query| {
+            matches!(
+                query,
+                IntakeQuery::JobStart { .. }
+                    | IntakeQuery::JobStop { .. }
+                    | IntakeQuery::JobDismiss { .. }
+            )
+        })
+        .collect()
+}
+
 fn job_read(shell: &mut Shell, job: Option<JobView>) {
     shell.arrive(intake(IntakeQuery::JobStatus, Ok(IntakeView::Job(job))));
     job_asks(shell);
@@ -3315,15 +3332,14 @@ fn answering_a_project_move_s_soft_refusal_moves_that_project_or_keeps_it_where_
     );
     shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::Home));
-    assert!(
-        job_asks(&mut shell).is_empty(),
-        "Keep it here sends nothing"
-    );
+    let acted = job_actions(&mut shell);
+    assert!(acted.is_empty(), "Keep it here sends nothing: {acted:?}");
 
     let mut shell = answer();
     shell.key(Key::Esc);
     assert_eq!(shell.place(), Some(Place::Home));
-    assert!(job_asks(&mut shell).is_empty(), "Esc sends nothing");
+    let acted = job_actions(&mut shell);
+    assert!(acted.is_empty(), "Esc sends nothing: {acted:?}");
 
     let mut shell = answer();
     shell.key(Key::Right);
@@ -3441,9 +3457,10 @@ fn finish_delete_on_home_opens_the_project_s_remove_ask_and_d_keeps_the_project(
     );
 }
 
-/// Opens the notes project's Settings, opens its remove ask, answers the page's read of what
-/// removing would do with a delete it allows, then picks Delete everything and types the exact
-/// name and Enter. Takes nothing. Returns the shell and every request the Enter queued.
+/// Opens the notes project's Settings, opens its remove ask, answers the page's setup read,
+/// which it sends first and one read at a time, then its read of what removing would do with
+/// a delete it allows, then picks Delete everything and types the exact name and Enter.
+/// Takes nothing. Returns the shell and every request the Enter queued.
 fn delete_everything_on_notes() -> (Shell, Vec<Request>) {
     let mut ctx = ctx(120, 30);
     ctx.store.projects = Load::Ready(Vec::new());
@@ -3456,15 +3473,35 @@ fn delete_everything_on_notes() -> (Shell, Vec<Request>) {
     let screen = open(&place, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     shell.key(Key::Char('x'));
+    let setup_reads = |shell: &mut Shell| -> Vec<SetupQuery> {
+        std::iter::from_fn(|| shell.ctx.next_request())
+            .filter_map(|request| match request {
+                Request::Setup(query) => Some(query),
+                _ => None,
+            })
+            .collect()
+    };
+    let setup = SetupQuery::Setup {
+        project: notes.clone(),
+    };
+    let opened = setup_reads(&mut shell);
+    assert_eq!(
+        opened,
+        std::slice::from_ref(&setup),
+        "the page reads its setup first"
+    );
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: setup,
+            result: Ok(crate::project_setup::SetupView::Setup(Some(Box::new(
+                stored_setup(&notes, "Notes/2026 plans"),
+            )))),
+        },
+    )))));
     let removal = SetupQuery::Removal {
         project: notes.clone(),
     };
-    let reads: Vec<_> = std::iter::from_fn(|| shell.ctx.next_request())
-        .filter_map(|request| match request {
-            Request::Setup(query) => Some(query),
-            _ => None,
-        })
-        .collect();
+    let reads = setup_reads(&mut shell);
     assert!(reads.contains(&removal), "{reads:?}");
     shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
         SetupEvent {
@@ -3633,14 +3670,12 @@ fn home_keeps_the_picked_project_when_the_job_card_comes_and_goes() {
     );
 }
 
-/// Confirms a review page as the owner left it: the stored setup at revision 7 arrives,
-/// then Tab moves from the name to Confirm and Enter sends the change. Input: the page.
-/// Output: the setup the confirm sends.
-fn confirmed_setup(shell: &mut Shell, project: &ProjectId, typed_in_about: &str) -> ProjectSetup {
-    while shell.ctx.next_request().is_some() {}
-    let stored = crate::project_setup::StoredSetup {
+/// A project's stored setup at revision 7 with one codex master and no pool, as the engine
+/// answers a setup read. Takes the project and its name. Returns the setup.
+fn stored_setup(project: &ProjectId, name: &str) -> crate::project_setup::StoredSetup {
+    crate::project_setup::StoredSetup {
         project_id: project.clone(),
-        name: "notes".into(),
+        name: name.into(),
         about: String::new(),
         tech_stack: vec![],
         platforms: vec![],
@@ -3657,7 +3692,15 @@ fn confirmed_setup(shell: &mut Shell, project: &ProjectId, typed_in_about: &str)
         folder: "/Users/owner/Projects/notes".into(),
         created_ms: 0,
         revision: 7,
-    };
+    }
+}
+
+/// Confirms a review page as the owner left it: the stored setup at revision 7 arrives,
+/// then Tab moves from the name to Confirm and Enter sends the change. Input: the page.
+/// Output: the setup the confirm sends.
+fn confirmed_setup(shell: &mut Shell, project: &ProjectId, typed_in_about: &str) -> ProjectSetup {
+    while shell.ctx.next_request().is_some() {}
+    let stored = stored_setup(project, "notes");
     shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
         SetupEvent {
             query: SetupQuery::Setup {
