@@ -16,6 +16,7 @@ use crate::usage::capture::Tokens;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 /// The code of a listed master turn its harness ended as failed, without a rate limit.
 pub(super) const TURN_FAILED: &str = "listed_master_turn_failed";
@@ -28,6 +29,9 @@ const UNSUPPORTED: &str = "master_runtime_backend_unsupported";
 /// The most reply text one turn gathers; the rest is counted, and the stored reply is cut
 /// to [`crate::master_session::REPLY_BYTES_MAX`] with its cut note.
 const GATHERED_BYTES_MAX: usize = 4 * crate::master_session::REPLY_BYTES_MAX;
+/// How long one wait for a listed master's next event lasts before the turn reads its stop
+/// check again.
+const EVENT_WAIT: Duration = Duration::from_millis(100);
 
 /// Carries a launch refusal over as the engine's error with the same code. Input: the
 /// refusal. Output: the error.
@@ -231,14 +235,30 @@ pub(super) fn collect(collected: &mut Collected, event: LaunchEvent) {
 }
 
 /// Drives one listed master turn on its running harness: sends the prompt, then folds every
-/// event until the turn ends, asking the harness once to stop the turn when `stop` says so.
-/// Inputs: the session, the prompt and the stop check. Output: what the turn gathered, with
-/// its end set, or the session's refusal code.
+/// event until the turn ends, asking the harness once to stop the turn when `stop` says so;
+/// a turn the harness has already ended needs no stop. Inputs: the session, the prompt and
+/// the stop check. Output: what the turn gathered, with its end set, or the refusal code.
 pub(super) fn drive(
     session: &mut Session,
     prompt: &str,
     stop: &dyn Fn() -> bool,
 ) -> Result<Collected, EngineError> {
-    let _ = (session, prompt, stop);
-    Ok(Collected::default())
+    let mut collected = Collected::default();
+    let mut asked = false;
+    session.send(prompt).map_err(engine_error)?;
+    while collected.ended.is_none() {
+        if !asked && stop() {
+            asked = true;
+            match session.interrupt() {
+                Ok(()) => {}
+                Err(error) if error.0 == "launch_not_running" => {}
+                Err(error) => return Err(engine_error(error)),
+            }
+        }
+        if let Some(event) = session.next_event(EVENT_WAIT).map_err(engine_error)? {
+            collect(&mut collected, event);
+        }
+    }
+    assert!(collected.ended.is_some());
+    Ok(collected)
 }
