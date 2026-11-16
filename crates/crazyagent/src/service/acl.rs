@@ -41,8 +41,8 @@ type Stamp = (u64, u64, i64, i64);
 /// where change times keep whole seconds (HFS-CTIME). Inputs: the entry's stamp and the
 /// whole second the listing started. Output: the answer.
 #[cfg(target_os = "macos")]
-pub(super) fn settled(_stamp: &Stamp, _listed_secs: i64) -> bool {
-    true
+pub(super) fn settled(stamp: &Stamp, listed_secs: i64) -> bool {
+    stamp.2 < listed_secs
 }
 
 /// The access-list answers read so far, by entry, each with the stamp it was read at.
