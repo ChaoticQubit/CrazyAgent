@@ -5,7 +5,6 @@ use crate::tui::clock::{local_offset, now_ms, stamp};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
-use crate::tui::screens::new_project_view::printable;
 use crate::tui::screens::settings::connectors::words::refusal;
 use crate::tui::screens::settings_accounts::{send, settings_event};
 use crate::tui::screens::{Flow, Place, Screen};
@@ -43,11 +42,21 @@ pub(in crate::tui) const READ_FIRST: &str =
 const READ_TO_ANSWER: &str = "Read to the end to answer";
 const CLOSED: &str = "connector_approval_closed";
 
+/// Text as the page shows it on one row with nothing taken out (rv-sec2 T13d F3): every
+/// control, escape and its sequence included, and every hidden character becomes a visible
+/// escape, as the desktop's displayText shows them, and line breaks and tabs become spaces.
+/// Input: the text. Output: the text to show.
+fn shown_text(text: &str) -> String {
+    let shown = crate::memory::visible_text(text).replace(['\n', '\t'], " ");
+    assert!(!shown.chars().any(char::is_control));
+    shown
+}
+
 /// One agent- or vendor-supplied text as the page shows it (approvalText): each typed
-/// backslash doubled, then hidden characters escaped and line breaks flattened, never cut.
-/// Input: the text the engine answered. Output: the text to show.
+/// backslash doubled, then [`shown_text`], never cut. Input: the text the engine answered.
+/// Output: the text to show.
 fn approval_text(text: &str) -> String {
-    printable(text.replace('\\', "\\\\"))
+    shown_text(&text.replace('\\', "\\\\"))
 }
 
 /// The time a waiting write has left (timeLeft), in whole seconds rounded up and never
@@ -77,7 +86,7 @@ pub(in crate::tui) fn approval_lines(view: &ApprovalView, offset: i64) -> Vec<St
     vec![
         format!("Connector: {}", approval_text(&view.title)),
         format!("Tool: {}", approval_text(&view.tool)),
-        format!("Project: {}", printable(view.project_name.clone())),
+        format!("Project: {}", shown_text(&view.project_name)),
         format!("Agent: {}", approval_text(&view.agent)),
         format!("Asked: {}", stamp(view.created_ms, offset)),
         format!("What it sends: {}", approval_text(&view.preview)),
@@ -293,7 +302,7 @@ impl ConnectorApprovalPage {
         lines.push(styled(format!("{mark} {FOLD}"), Role::Accent, theme));
         if self.open {
             let room = width.saturating_sub(2).max(1);
-            let arguments = printable(view.arguments.clone());
+            let arguments = shown_text(&view.arguments);
             lines.extend(
                 wrap(&arguments, room)
                     .into_iter()

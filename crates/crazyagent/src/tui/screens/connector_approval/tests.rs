@@ -422,3 +422,29 @@ fn a_and_d_answer_only_once_the_write_has_been_read_down_to_its_time_left() {
         "once read down to its time left, a answers"
     );
 }
+
+/// rv-sec2 T13d F3: an escape sequence or another control character in any shown field,
+/// one in the arguments included, shows as an escape with all the text around it, and is
+/// never taken out (paste-box rule), as the desktop's displayText shows it.
+#[test]
+fn control_and_escape_characters_show_as_escapes_and_nothing_is_taken_out() {
+    let mut odd = waiting();
+    odd.title = "Lin\u{1b}]8;;https://x\u{7}ear".into();
+    odd.tool = "make\u{1b}[2J".into();
+    odd.project_name = "Plant\u{9b}31mshop".into();
+    odd.agent = "a\u{0}b\rc\td".into();
+    odd.preview = "p\u{1b}Pq\u{1b}\\".into();
+    odd.arguments = "{\"t\":\"\u{1b}[31mred\"}".into();
+    let lines = approval_lines(&odd, 0);
+    assert_eq!(lines[0], "Connector: Lin\\u001b]8;;https://x\\u0007ear");
+    assert_eq!(lines[1], "Tool: make\\u001b[2J");
+    assert_eq!(lines[2], "Project: Plant\\u009b31mshop");
+    assert_eq!(lines[3], "Agent: a\\u0000b\\u000dc d");
+    assert_eq!(lines[5], "What it sends: p\\u001bPq\\u001b\\\\");
+    let mut shell = page(odd);
+    keys(&mut shell, &[Key::End, Key::Enter, Key::End]);
+    assert!(
+        shows(&mut shell, "\\u001b[31mred"),
+        "a control in the arguments shows as an escape"
+    );
+}
