@@ -393,6 +393,7 @@ fn a_steered_text_joined_the_busy_turn_only_with_no_turn_event_before_it() {
 /// reached by typing). `codex::deliver` then starts a turn while the app is idle and steers
 /// the running turn while it works. Needs Codex 0.164 and a local Ollama model.
 #[test]
+#[ignore = "live qualification: needs Codex, tmux and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn a_real_codex_app_takes_coord_messages_through_its_app_server_idle_and_busy() {
     let root = tempfile::Builder::new()
         .prefix("ca-bridge-")
@@ -432,6 +433,7 @@ fn a_real_codex_app_takes_coord_messages_through_its_app_server_idle_and_busy() 
 /// adoption nudge alike, so neither waits for the agent's next task. Needs Codex 0.164 and
 /// a local Ollama model.
 #[test]
+#[ignore = "live qualification: needs Codex, tmux and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_delivery_tick() {
     let root = tempfile::Builder::new()
         .prefix("ca-bridge-")
@@ -534,6 +536,7 @@ fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_deliver
 /// agent's receipts read that turn's abort in its rollout and put the message back to sent,
 /// and the next tick delivers it once, in a new turn. Needs Codex 0.164 and local Ollama.
 #[test]
+#[ignore = "live qualification: needs Codex, tmux and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn a_steer_a_codex_turn_aborted_by_esc_dropped_goes_back_to_sent_and_comes_once_more() {
     let root = tempfile::Builder::new()
         .prefix("ca-bridge-")

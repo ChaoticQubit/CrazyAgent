@@ -11,7 +11,7 @@ use crazyagent::master_session::{MasterBackend, MasterOwnerAction};
 use crazyagent::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
 use crazyagent::project_setup::{ProjectSetup, TeamPlan};
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
-use crazyagent::sandbox::{LinuxSockets, LinuxSupervisor};
+use crazyagent::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use crazyagent::sandbox_settings::SandboxSettings;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -244,10 +244,9 @@ async fn the_owner_profile_is_absent_on_first_run_then_saved_updated_and_durable
 async fn each_linux_sockets_option_is_saved_in_the_engine_and_survives_a_restart() {
     let mut case = Case::new().await;
     let mut controller = case.controller().await;
-    assert_eq!(
-        controller.sandbox_settings().await.unwrap().linux_sockets,
-        LinuxSockets::TcpOnly
-    );
+    let fresh = controller.sandbox_settings().await.unwrap();
+    assert_eq!(fresh.settings.linux_sockets, LinuxSockets::TcpOnly);
+    let mut version = fresh.version;
     for (generation, linux_sockets) in [
         (1, LinuxSockets::Refuse),
         (2, LinuxSockets::TcpPorts),
@@ -261,19 +260,26 @@ async fn each_linux_sockets_option_is_saved_in_the_engine_and_survives_a_restart
         assert_eq!(
             applied(
                 controller
-                    .set_sandbox_settings(settings, generation)
+                    .set_sandbox_settings(settings, version, generation)
                     .await
                     .unwrap()
             ),
             OwnerResult::Applied
         );
-        assert_eq!(controller.sandbox_settings().await.unwrap(), settings);
+        let read = controller.sandbox_settings().await.unwrap();
+        assert_eq!(read.settings, settings);
+        version = read.version;
     }
     drop(controller);
     case.restart().await;
     let mut controller = case.controller().await;
     assert_eq!(
-        controller.sandbox_settings().await.unwrap().linux_sockets,
+        controller
+            .sandbox_settings()
+            .await
+            .unwrap()
+            .settings
+            .linux_sockets,
         LinuxSockets::TcpPorts
     );
     drop(controller);
@@ -284,33 +290,105 @@ async fn each_linux_sockets_option_is_saved_in_the_engine_and_survives_a_restart
 async fn each_linux_call_supervisor_option_is_saved_in_the_engine_and_survives_a_restart() {
     let mut case = Case::new().await;
     let mut controller = case.controller().await;
-    assert_eq!(
-        controller
-            .sandbox_settings()
-            .await
-            .unwrap()
-            .linux_supervisor,
-        LinuxSupervisor::On
-    );
+    let fresh = controller.sandbox_settings().await.unwrap();
+    assert_eq!(fresh.settings.linux_supervisor, LinuxSupervisor::On);
+    let mut version = fresh.version;
     for (generation, linux_supervisor) in [(1, LinuxSupervisor::Off), (2, LinuxSupervisor::On)] {
         let settings = SandboxSettings {
             linux_sockets: LinuxSockets::Refuse,
             linux_supervisor,
+            linux_strict: LinuxStrict::Off,
         };
-        let set = controller.set_sandbox_settings(settings, generation).await;
+        let set = controller
+            .set_sandbox_settings(settings, version, generation)
+            .await;
         assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
-        assert_eq!(controller.sandbox_settings().await.unwrap(), settings);
+        let read = controller.sandbox_settings().await.unwrap();
+        assert_eq!(read.settings, settings);
+        version = read.version;
     }
     let off = SandboxSettings {
         linux_sockets: LinuxSockets::TcpOnly,
         linux_supervisor: LinuxSupervisor::Off,
+        linux_strict: LinuxStrict::Off,
     };
-    let set = controller.set_sandbox_settings(off, 3).await;
+    let set = controller.set_sandbox_settings(off, version, 3).await;
     assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
     drop(controller);
     case.restart().await;
     let mut controller = case.controller().await;
-    assert_eq!(controller.sandbox_settings().await.unwrap(), off);
+    assert_eq!(controller.sandbox_settings().await.unwrap().settings, off);
+    drop(controller);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn each_strict_linux_option_is_saved_in_the_engine_and_survives_a_restart() {
+    let mut case = Case::new().await;
+    let mut controller = case.controller().await;
+    let fresh = controller.sandbox_settings().await.unwrap();
+    assert_eq!(fresh.settings.linux_strict, LinuxStrict::Off);
+    let mut version = fresh.version;
+    for (generation, linux_strict) in [(1, LinuxStrict::On), (2, LinuxStrict::Off)] {
+        let settings = SandboxSettings {
+            linux_sockets: LinuxSockets::TcpPorts,
+            linux_supervisor: LinuxSupervisor::Off,
+            linux_strict,
+        };
+        let set = controller
+            .set_sandbox_settings(settings, version, generation)
+            .await;
+        assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
+        let read = controller.sandbox_settings().await.unwrap();
+        assert_eq!(read.settings, settings);
+        version = read.version;
+    }
+    let on = SandboxSettings {
+        linux_strict: LinuxStrict::On,
+        ..SandboxSettings::default()
+    };
+    let set = controller.set_sandbox_settings(on, version, 3).await;
+    assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
+    drop(controller);
+    case.restart().await;
+    let mut controller = case.controller().await;
+    assert_eq!(controller.sandbox_settings().await.unwrap().settings, on);
+    drop(controller);
+    case.close().await;
+}
+
+/// A second window that read the sandbox settings before the first one turned strict On
+/// cannot turn it back Off: its save names the older read and is refused `stale_revision`,
+/// and the stored choice stays On (rv-sec2 F1).
+#[tokio::test]
+async fn a_sandbox_save_from_a_stale_read_is_refused_and_strict_stays_on() {
+    let mut case = Case::new().await;
+    let mut controller = case.controller().await;
+    let shown = controller.sandbox_settings().await.unwrap();
+    let on = SandboxSettings {
+        linux_strict: LinuxStrict::On,
+        ..shown.settings
+    };
+    let set = controller.set_sandbox_settings(on, shown.version, 1).await;
+    assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
+    let moved = controller.sandbox_settings().await.unwrap();
+    assert_eq!(moved.version, shown.version + 1);
+    let off = SandboxSettings {
+        linux_strict: LinuxStrict::Off,
+        ..shown.settings
+    };
+    let stale = controller.set_sandbox_settings(off, shown.version, 2).await;
+    assert_eq!(
+        applied(stale.unwrap()),
+        OwnerResult::Rejected {
+            code: "stale_revision".into()
+        },
+        "a save built on the read before the last save is refused"
+    );
+    drop(controller);
+    case.restart().await;
+    let mut controller = case.controller().await;
+    assert_eq!(controller.sandbox_settings().await.unwrap(), moved);
     drop(controller);
     case.close().await;
 }

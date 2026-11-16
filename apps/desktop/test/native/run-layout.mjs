@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, chownSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
@@ -247,4 +248,28 @@ function deadTakeoverMessage(takeover, taker) {
 function heldMessage(home, lock, holder, waitMs) {
   const who = holder ? `pid ${holder.pid} (${holder.label}), started ${holder.started}` : "a lock that cannot be read";
   return `The native test home ${home} is in use by ${who}. Waited ${Math.round(waitMs / 1000)} s; native suites never run side by side on one home. Run this suite once that one ends, or remove ${lock} if no native run holds it.`;
+}
+
+/** This user's own temp folder on macOS (`DARWIN_USER_TEMP_DIR`), private to the user and
+ * outside /tmp; elsewhere /tmp, as before FIXTURE-HARNESS-SEARCH. Output: its real path. */
+function userTemp() {
+  if (process.platform !== "darwin") return realpathSync("/tmp");
+  const folder = execFileSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8" }).trim();
+  assert.ok(isAbsolute(folder), `getconf named no absolute temp folder: ${folder}`);
+  return realpathSync(folder);
+}
+
+/** Makes the fixture engine's root: new, empty and 0700, in this user's own temp folder
+ * rather than /tmp, so the engine keeps the engine prefix of its harness search as
+ * production does, with its socket path within macOS's 104 bytes (FIXTURE-HARNESS-SEARCH).
+ * Input: the parent folder, the user's temp folder by default. Output: the root's real path. */
+export function fixtureEngineRoot(parent = userTemp()) {
+  assert.ok(isAbsolute(parent), parent);
+  const real = realpathSync(parent);
+  if (process.platform === "darwin") {
+    assert.ok(!/^\/(private\/)?tmp(\/|$)/.test(real), `the engine root's parent ${real} lies in /tmp`);
+  }
+  const root = realpathSync(mkdtempSync(join(real, "cad-")));
+  assert.ok(Buffer.byteLength(join(root, "e.sock")) < 104, `the engine socket under ${root} is past 104 bytes`);
+  return root;
 }

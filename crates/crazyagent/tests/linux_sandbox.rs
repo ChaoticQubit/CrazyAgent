@@ -5,8 +5,8 @@ use crazyagent::sandbox::linux::{
 };
 
 use crazyagent::sandbox::{
-    InstalledSandbox, LinuxSockets, LinuxSupervisor, ProjectSandbox, Sandbox, SandboxError,
-    SandboxNetwork, SandboxRemote,
+    InstalledSandbox, LinuxSockets, LinuxStrict, LinuxSupervisor, ProjectSandbox, Sandbox,
+    SandboxError, SandboxNetwork, SandboxRemote,
 };
 
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
@@ -906,6 +906,7 @@ fn an_installed_sandbox_on_linux_launches_through_the_linux_boundary() {
         policy(&case, SandboxNetwork::Open),
         &profiles.join("agent.sb"),
         LinuxSupervisor::On,
+        LinuxStrict::Off,
     )
     .unwrap();
     let launcher = installed.launcher().to_path_buf();
@@ -917,6 +918,29 @@ fn an_installed_sandbox_on_linux_launches_through_the_linux_boundary() {
     );
     let output = run(&installed, &case, &boundary_script(&case));
     assert_boundary(&case, &output);
+}
+
+#[test]
+fn the_strict_setting_refuses_a_launch_without_the_call_supervisor_and_off_starts_it() {
+    let case = case();
+    let profiles = case.outside.join("profiles");
+    fs::create_dir_all(&profiles).unwrap();
+    let install = |strict| {
+        InstalledSandbox::install(
+            policy(&case, SandboxNetwork::Open),
+            &profiles.join("agent.sb"),
+            LinuxSupervisor::Off,
+            strict,
+        )
+    };
+    let refused = install(LinuxStrict::On).err();
+    assert!(
+        matches!(&refused, Some(SandboxError::Unavailable(reason))
+            if reason == crazyagent::sandbox::LINUX_NOT_FULL_LINE),
+        "strict On must refuse an unsupervised launch: {refused:?}"
+    );
+    let started = install(LinuxStrict::Off).unwrap();
+    assert!(!started.launcher().as_os_str().is_empty());
 }
 
 #[test]

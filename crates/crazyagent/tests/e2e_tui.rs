@@ -52,20 +52,16 @@ const LIVE_PROJECT: &str = "CRAZYAGENT_E2E_LIVE_PROJECT";
 struct Pty {
     tmux: PathBuf,
     socket: PathBuf,
-    home: Option<PathBuf>,
+    home: PathBuf,
     _folder: tempfile::TempDir,
 }
 
 impl Pty {
-    fn launch(tmux: PathBuf, engine_socket: &Path) -> Self {
-        Self::start(tmux, engine_socket, None)
-    }
-
     /// Starts the TUI under its own tmux server whose HOME, and so the TUI's, is `home`, a
     /// private folder, never the runner's (rv-sec3 S4 F1); checks tmux holds that HOME.
     /// Inputs: tmux, the engine's socket and the HOME. Output: the running TUI.
     fn launch_at(tmux: PathBuf, engine_socket: &Path, home: &Path) -> Self {
-        let pty = Self::start(tmux, engine_socket, Some(home));
+        let pty = Self::start(tmux, engine_socket, home);
         let shown = pty.run(&["show-environment", "-g", "HOME"]);
         assert_eq!(
             String::from_utf8_lossy(&shown.stdout).trim(),
@@ -75,14 +71,14 @@ impl Pty {
         pty
     }
 
-    fn start(tmux: PathBuf, engine_socket: &Path, home: Option<&Path>) -> Self {
+    fn start(tmux: PathBuf, engine_socket: &Path, home: &Path) -> Self {
         let engine_socket = engine_socket.to_str().unwrap();
         assert!(!ENGINE.contains('\'') && !engine_socket.contains('\''));
         let folder = scratch("ca-e2e-pty-");
         let pty = Self {
             tmux,
             socket: folder.path().join("pty.sock"),
-            home: home.map(Path::to_path_buf),
+            home: home.to_path_buf(),
             _folder: folder,
         };
         let command = format!("'{ENGINE}' tui '{engine_socket}'");
@@ -112,9 +108,10 @@ impl Pty {
             .stdin(Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        if let Some(home) = &self.home {
-            command.env("HOME", home).env_remove("XDG_CONFIG_HOME");
-        }
+        command
+            .env("HOME", &self.home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME");
         let output = crazyagent::spawn_gate::output(&mut command).expect(TMUX);
         assert!(
             output.status.success(),
@@ -295,7 +292,7 @@ fn reach_home(pty: &Pty, home: impl Fn(&str) -> bool) {
         let screen = pty.until("the TUI shows Home or a first-run step", |screen| {
             home(screen)
                 || screen.contains("Welcome to CrazyAgent")
-                || screen.contains("c Continue without")
+                || screen.contains("c Skip for now")
         });
         if home(&screen) {
             return;
@@ -363,7 +360,8 @@ fn team_from_home(pty: &Pty, project: &str) {
 
 #[test]
 fn the_tui_walks_from_home_into_the_project_team_tree() {
-    let mut engine = Engine::start("ca-e2e-tui-");
+    let user = private_home("ca-e2e-tui-home-");
+    let mut engine = start_at("ca-e2e-tui-", user.path());
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-home-");
     let home = disk.path().join("Projects");
@@ -383,7 +381,7 @@ fn the_tui_walks_from_home_into_the_project_team_tree() {
             owner.controller.detach();
         });
 
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     open_team(&pty, PROJECT);
     let screen = pty.screen();
     assert!(screen.contains("Master"), "{screen}");
@@ -399,7 +397,8 @@ const NEWER_PROJECT: &str = "Tidepool e2e readd";
 /// ca-trial-4-readd-202611051754 for ca-trial-4).
 #[test]
 fn the_tui_opens_the_project_named_exactly_when_a_newer_card_starts_with_its_name() {
-    let mut engine = Engine::start("ca-e2e-tui-");
+    let user = private_home("ca-e2e-tui-home-");
+    let mut engine = start_at("ca-e2e-tui-", user.path());
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-home-");
     let home = disk.path().join("Projects");
@@ -424,7 +423,7 @@ fn the_tui_opens_the_project_named_exactly_when_a_newer_card_starts_with_its_nam
             owner.controller.detach();
         });
 
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     reach_home(&pty, |screen| at_home(screen, NEWER_PROJECT));
     open_team(&pty, PROJECT);
     let screen = pty.screen();
@@ -479,7 +478,8 @@ fn stopped_team(root: &Path, project: &str) -> (i64, [i64; 2]) {
 
 #[test]
 fn after_every_agent_stops_its_tasks_keep_its_name_and_f_lists_it_in_the_tui() {
-    let mut engine = Engine::start("ca-e2e-stopped-");
+    let user = private_home("ca-e2e-stopped-home-");
+    let mut engine = start_at("ca-e2e-stopped-", user.path());
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-home-");
     let home = disk.path().join("Projects");
@@ -524,7 +524,7 @@ fn after_every_agent_stops_its_tasks_keep_its_name_and_f_lists_it_in_the_tui() {
     let lead_name = name(lead);
     let worker_names = workers.map(name);
 
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     open_team(&pty, STOPPED_PROJECT);
     let screen = pty.until("the Tasks rows show every task", |screen| {
         screen.contains(LEAD_TASK) && WORKER_TASKS.iter().all(|task| screen.contains(task))
@@ -689,9 +689,15 @@ fn settled(turn: &MasterTurnView) -> bool {
 /// the tab is entered opens the master's live terminal (DEC-117 Q4) and races the row's Enter.
 #[test]
 fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui() {
-    let mut engine = Engine::new("ca-e2e-flow-");
+    let user = private_home("ca-e2e-flow-home-");
+    let mut engine = engine_at("ca-e2e-flow-", user.path());
     let _provider = unreachable_provider(&engine);
     engine.launch();
+    assert_eq!(
+        engine.home.as_deref(),
+        Some(user.path()),
+        "the engine runs with the private HOME"
+    );
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-disk-");
     let home = disk.path().join("Projects");
@@ -710,7 +716,7 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
         owner.controller.detach();
     });
 
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     reach_home(&pty, |screen| screen.contains("No projects yet."));
     nothing_left_setting_up(&pty.screen());
 
@@ -1006,7 +1012,8 @@ fn the_tui_types_into_a_live_agent_terminal_from_the_team_tree() {
     assert!(socket.exists(), "{LIVE_SOCKET} names no socket");
     let probe = scratch("ca-e2e-probe-");
     let tmux = installed(probe.path()).expect(TMUX);
-    let pty = Pty::launch(tmux, &socket);
+    let user = private_home("ca-e2e-live-home-");
+    let pty = Pty::launch_at(tmux, &socket, user.path());
     reach_home(&pty, |screen| at_home(screen, &project));
     team_from_home(&pty, &project);
     pty.keys(&["Enter"]);
@@ -1070,6 +1077,7 @@ impl ScriptPty {
             .env("HOME", home)
             .env("TERM", "xterm-256color")
             .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
             .env_remove("TMUX")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1196,8 +1204,8 @@ fn welcome_bio(pty: &ScriptPty) {
 /// back to legacy keys.
 #[test]
 fn shift_enter_auto_turns_the_keyboard_protocol_on_and_the_exit_turns_it_off() {
-    let mut engine = Engine::start("ca-e2e-keys-");
     let home = scratch("ca-e2e-keys-home-");
+    let mut engine = start_at("ca-e2e-keys-", home.path());
     let mut pty = ScriptPty::launch(&engine.socket(), home.path());
     pty.until_written(
         "Auto asks the terminal for the keyboard protocol",
@@ -1238,8 +1246,8 @@ fn shift_enter_auto_turns_the_keyboard_protocol_on_and_the_exit_turns_it_off() {
 /// off; Ctrl-J still makes a new line in the bio.
 #[test]
 fn shift_enter_auto_leaves_a_terminal_without_the_protocol_as_it_is() {
-    let mut engine = Engine::start("ca-e2e-keys-");
     let home = scratch("ca-e2e-keys-home-");
+    let mut engine = start_at("ca-e2e-keys-", home.path());
     let mut pty = ScriptPty::launch(&engine.socket(), home.path());
     pty.until_written(
         "Auto asks the terminal for the keyboard protocol",
@@ -1271,8 +1279,8 @@ fn shift_enter_auto_leaves_a_terminal_without_the_protocol_as_it_is() {
 /// makes a new line in the bio.
 #[test]
 fn shift_enter_off_never_asks_the_terminal_and_ctrl_j_makes_a_new_line() {
-    let mut engine = Engine::start("ca-e2e-keys-");
     let home = scratch("ca-e2e-keys-home-");
+    let mut engine = start_at("ca-e2e-keys-", home.path());
     let prefs = if cfg!(target_os = "macos") {
         home.path().join("Library/Application Support/CrazyAgent")
     } else {
@@ -1310,7 +1318,7 @@ fn script_home(pty: &mut ScriptPty) {
             pty.screen()
         );
         pty.until("the TUI shows Home or a first-run step", |screen| {
-            at_home(screen, PROJECT) || screen.contains("c Continue without")
+            at_home(screen, PROJECT) || screen.contains("c Skip for now")
         });
         let screen = pty.screen();
         if at_home(&screen, PROJECT) {
@@ -1326,7 +1334,8 @@ fn script_home(pty: &mut ScriptPty) {
 /// back on, and the exit turns it off once more before it leaves the alternate screen.
 #[test]
 fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
-    let mut engine = Engine::start("ca-e2e-keys-");
+    let home = scratch("ca-e2e-keys-home-");
+    let mut engine = start_at("ca-e2e-keys-", home.path());
     let disk = scratch("ca-e2e-keys-projects-");
     let projects = disk.path().join("Projects");
     std::fs::create_dir(&projects).unwrap();
@@ -1344,7 +1353,6 @@ fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
             );
             owner.controller.detach();
         });
-    let home = scratch("ca-e2e-keys-home-");
     let mut pty = ScriptPty::launch(&engine.socket(), home.path());
     pty.until_written("Auto asks the terminal at start", |written| {
         found(written, KEYBOARD_QUERY).len() == 1
@@ -1411,10 +1419,11 @@ fn applied(screen: &str, choice: &str) -> bool {
 }
 
 /// Starts an engine with one fresh project and opens that project's Team settings in the
-/// TUI. Input: a scratch prefix. Output: the engine, the TUI, the project id and the
-/// projects home, which lives as long as the test needs it.
-fn switch_settings(prefix: &str) -> (Engine, Pty, ProjectId, tempfile::TempDir) {
-    let engine = Engine::start(prefix);
+/// TUI, both on a private HOME. Input: a scratch prefix. Output: the engine, the TUI, the
+/// project id, and the projects home with that HOME, which live as long as the test needs them.
+fn switch_settings(prefix: &str) -> (Engine, Pty, ProjectId, [tempfile::TempDir; 2]) {
+    let user = private_home(&format!("{prefix}home-"));
+    let engine = start_at(prefix, user.path());
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-home-");
     let home = disk.path().join("Projects");
@@ -1433,13 +1442,14 @@ fn switch_settings(prefix: &str) -> (Engine, Pty, ProjectId, tempfile::TempDir) 
             );
             owner.controller.detach();
         });
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     open_team(&pty, SWITCH_PROJECT);
     pty.keys(&["s"]);
     pty.until("s on the team tree opens the Team settings", |screen| {
         screen.contains("Team settings") && screen.contains("On harness switch  ")
     });
-    (engine, pty, ProjectId::new(SWITCH_ID).unwrap(), disk)
+    let project = ProjectId::new(SWITCH_ID).unwrap();
+    (engine, pty, project, [disk, user])
 }
 
 /// Reads what the engine keeps for the master harness switch.
@@ -1659,7 +1669,7 @@ fn reach_accounts_step(engine: &Engine, home: &Path) -> ScriptPty {
     });
     pty.type_bytes(b"\r");
     pty.until("Setup offers to continue without installing", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty.type_bytes(b"c");
     pass_harness_step(&mut pty);
@@ -1689,8 +1699,8 @@ fn pass_harness_step(pty: &mut ScriptPty) {
 /// starting an install.
 #[test]
 fn first_run_shows_the_harness_step_with_only_rcli_picked() {
-    let mut engine = Engine::start("ca-e2e-harness-step-");
     let home = scratch("ca-e2e-harness-step-home-");
+    let mut engine = start_at("ca-e2e-harness-step-", home.path());
     std::fs::create_dir(home.path().join("Projects")).unwrap();
     let prefs = if cfg!(target_os = "macos") {
         home.path().join("Library/Application Support/CrazyAgent")
@@ -1707,7 +1717,7 @@ fn first_run_shows_the_harness_step_with_only_rcli_picked() {
     });
     pty.type_bytes(b"\r");
     pty.until("Setup offers to continue without installing", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty.type_bytes(b"c");
     pty.until(
@@ -1755,8 +1765,7 @@ fn first_run_installs_node_for_a_codex_that_cannot_run_and_its_row_leaves_cant_r
     std::fs::write(&codex, "#!/usr/bin/env node\n").unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
     let gate = scratch("ca-e2e-node-gate-");
-    let mut engine = Engine::new("ca-e2e-node-");
-    engine.home = Some(home.path().to_path_buf());
+    let mut engine = engine_at("ca-e2e-node-", home.path());
     engine.env.push(("PATH", SYSTEM_PATH.into()));
     engine
         .env
@@ -1770,7 +1779,7 @@ fn first_run_installs_node_for_a_codex_that_cannot_run_and_its_row_leaves_cant_r
     });
     pty.type_bytes(b"\r");
     pty.until("Setup offers to continue without installing", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty.type_bytes(b"c");
     pty.until_within(
@@ -1813,8 +1822,8 @@ fn first_run_installs_node_for_a_codex_that_cannot_run_and_its_row_leaves_cant_r
 /// on Home with the guide, and the engine holds nothing as skipped.
 #[test]
 fn first_run_with_the_guide_ticked_skips_accounts_and_keeps_the_guide_on_home() {
-    let mut engine = Engine::start("ca-e2e-learn-");
     let home = scratch("ca-e2e-learn-home-");
+    let mut engine = start_at("ca-e2e-learn-", home.path());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1891,8 +1900,8 @@ fn open_profile_replay(pty: &mut ScriptPty) {
 /// guide again clears the skip in the engine and Home shows the guide again.
 #[test]
 fn show_the_learning_guide_again_on_profile_clears_the_skip_and_home_shows_the_guide() {
-    let mut engine = Engine::start("ca-e2e-learn-");
     let home = scratch("ca-e2e-learn-home-");
+    let mut engine = start_at("ca-e2e-learn-", home.path());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1918,8 +1927,8 @@ fn show_the_learning_guide_again_on_profile_clears_the_skip_and_home_shows_the_g
 /// Skip for now with the guide ticked ends on Home with the guide.
 #[test]
 fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_the_guide() {
-    let mut engine = Engine::start("ca-e2e-learn-");
     let home = scratch("ca-e2e-learn-home-");
+    let mut engine = start_at("ca-e2e-learn-", home.path());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1940,7 +1949,7 @@ fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_th
     });
     pty.type_bytes(b"\r");
     pty.until("Setup offers to continue without installing", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty.type_bytes(b"c");
     pass_harness_step(&mut pty);
@@ -1969,8 +1978,8 @@ fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_th
 /// Home, the engine holds the guide as skipped, and Home shows no guide.
 #[test]
 fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
-    let mut engine = Engine::start("ca-e2e-learn-");
     let home = scratch("ca-e2e-learn-home-");
+    let mut engine = start_at("ca-e2e-learn-", home.path());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -2020,9 +2029,11 @@ fn flat(screen: &str) -> String {
 
 /// Opens Settings, Pools in the TUI on a fresh engine with a saved profile, home and one
 /// project, once the Pools spend part shows its Claude free resets line.
-/// Input: the scratch prefix. Output: the engine, the TUI and the scratch home.
-fn pools_settings(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
-    let engine = Engine::start(prefix);
+/// Input: the scratch prefix. Output: the engine, the TUI, and the scratch projects home
+/// with the private HOME the engine and the TUI run on.
+fn pools_settings(prefix: &str) -> (Engine, Pty, [tempfile::TempDir; 2]) {
+    let user = private_home(&format!("{prefix}home-"));
+    let engine = start_at(prefix, user.path());
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-home-");
     let home = disk.path().join("Projects");
@@ -2041,7 +2052,7 @@ fn pools_settings(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
             );
             owner.controller.detach();
         });
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     reach_home(&pty, |screen| at_home(screen, RESETS_PROJECT));
     setup_checked(&pty);
     pty.keys(&["s"]);
@@ -2053,7 +2064,7 @@ fn pools_settings(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
         "] steps to Pools with its Claude free resets line",
         |screen| flat(screen).contains("Claude free resets (f):"),
     );
-    (engine, pty, disk)
+    (engine, pty, [disk, user])
 }
 
 /// Reads where the engine keeps reading Claude free resets from, as any client reads it.
@@ -2365,8 +2376,7 @@ fn first_run_home(prefix: &str) -> tempfile::TempDir {
 /// graphify it can find is the one in the home. Inputs: a scratch prefix, the home and the
 /// gate root. Output: the running engine.
 fn clean_engine(prefix: &str, home: &Path, gate: &Path) -> Engine {
-    let mut engine = Engine::new(prefix);
-    engine.home = Some(home.to_path_buf());
+    let mut engine = engine_at(prefix, home);
     engine.env.push(("PATH", SYSTEM_PATH.into()));
     engine
         .env
@@ -2386,7 +2396,7 @@ fn first_run_setup_page(engine: &Engine, home: &Path) -> ScriptPty {
     });
     pty.type_bytes(b"\r");
     pty.until("the Setup page opens", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty
 }
@@ -2629,8 +2639,7 @@ fn old_harnesses(home: &Path, claude: (Option<&str>, &str), codex: (Option<&str>
 /// and the system folders, so no harness installed on this Mac is ever found or run. Inputs:
 /// the prefix, the HOME and the PATH. Output: the running engine.
 fn stand_in_engine(prefix: &str, home: &Path, path: String) -> Engine {
-    let mut engine = Engine::new(prefix);
-    engine.home = Some(home.to_path_buf());
+    let mut engine = engine_at(prefix, home);
     engine.env.push(("PATH", path.into()));
     engine.launch();
     engine
@@ -2837,6 +2846,40 @@ fn private_home(prefix: &str) -> tempfile::TempDir {
     home
 }
 
+/// The real engine, not yet started, with `home` as its HOME and its XDG config and data
+/// folders inside that HOME, a private folder that is never the runner's
+/// (E2E-TUI-SCRATCH-HOME), so no row reads or writes the owner's live profile.
+/// Inputs: a scratch prefix and the HOME. Output: the engine.
+fn engine_at(prefix: &str, home: &Path) -> Engine {
+    assert_ne!(
+        std::env::var_os("HOME").as_deref(),
+        Some(home.as_os_str()),
+        "the engine HOME is a private folder"
+    );
+    let mut engine = Engine::new(prefix);
+    engine.home = Some(home.to_path_buf());
+    engine
+        .env
+        .push(("XDG_CONFIG_HOME", home.join(".config").into_os_string()));
+    engine
+        .env
+        .push(("XDG_DATA_HOME", home.join(".local/share").into_os_string()));
+    engine
+}
+
+/// Starts [`engine_at`] and checks it runs with that private HOME.
+/// Inputs: a scratch prefix and the HOME. Output: the running engine.
+fn start_at(prefix: &str, home: &Path) -> Engine {
+    let mut engine = engine_at(prefix, home);
+    engine.launch();
+    assert_eq!(
+        engine.home.as_deref(),
+        Some(home),
+        "the engine runs with the private HOME"
+    );
+    engine
+}
+
 /// Makes the project `gone-app` the way New project does, saves the owner's note on it, then
 /// removes it from the dashboard, or with its files when `everything`, as both apps do.
 /// Inputs: the engine, the projects home and the choice. Output: the project's folder.
@@ -2942,8 +2985,7 @@ fn set_up_here(pty: &Pty, folder: &Path) -> String {
 #[test]
 fn a_removed_project_comes_back_only_from_its_own_folder_in_the_tui() {
     let user = private_home("ca-e2e-return-home-");
-    let mut engine = Engine::new("ca-e2e-return-");
-    engine.home = Some(user.path().to_path_buf());
+    let mut engine = engine_at("ca-e2e-return-", user.path());
     let _provider = unreachable_provider(&engine);
     engine.launch();
     assert_eq!(
@@ -3056,8 +3098,7 @@ impl Drop for Volume {
 #[test]
 fn after_delete_everything_the_same_folder_is_a_new_project_in_the_tui() {
     let user = private_home("ca-e2e-deleted-home-");
-    let mut engine = Engine::new("ca-e2e-deleted-");
-    engine.home = Some(user.path().to_path_buf());
+    let mut engine = engine_at("ca-e2e-deleted-", user.path());
     let _provider = unreachable_provider(&engine);
     engine.launch();
     assert_eq!(

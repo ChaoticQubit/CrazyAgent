@@ -342,7 +342,9 @@ fn a_copy_never_reads_through_a_source_entry_swapped_for_a_link() {
         let files = regular_files(&copy);
         if files.iter().any(|bytes| bytes == b"secret\n") {
             reached.push(attempt);
-        } else if copied.is_ok() {
+        } else if let Err(refusal) = &copied {
+            assert_eq!(refusal.0, "home_copy_entry_swapped", "attempt {attempt}");
+        } else {
             finished += 1;
             assert_eq!(
                 fs::read(copy.join("kept")).unwrap(),
@@ -403,4 +405,77 @@ fn an_add_cut_short_reads_from_disk_whether_it_landed_and_what_it_left() {
     assert_eq!(add_left(&source, &landed, false), "done");
     fs::remove_dir(&source).unwrap();
     assert_eq!(add_left(&source, &landed, true), "done");
+}
+
+/// The permission bits of an entry, its links not followed. Input: the path. Output: the bits.
+fn bits(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+/// DS-INTAKE: a folder swapped for a link to an owner folder after the walk that makes a
+/// tree writable listed it, and before it touched it, is never walked through: the folder
+/// the link names and the folders in it keep their modes.
+#[test]
+fn making_a_tree_writable_never_walks_through_a_folder_swapped_for_a_link() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(root.path()).unwrap();
+    let (tree, outside) = (base.join("tree"), base.join("outside"));
+    fs::create_dir_all(tree.join("a")).unwrap();
+    fs::create_dir_all(outside.join("kept")).unwrap();
+    fs::set_permissions(outside.join("kept"), fs::Permissions::from_mode(0o500)).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o555)).unwrap();
+    fs::set_permissions(&tree, fs::Permissions::from_mode(0o555)).unwrap();
+    let (swapped, target) = (tree.join("a"), outside.clone());
+    BEFORE_WRITABLE_FOLDER.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            fs::remove_dir(&swapped).unwrap();
+            std::os::unix::fs::symlink(&target, &swapped).unwrap();
+        }));
+    });
+    let made = make_writable(&tree);
+    let (kept, named) = (bits(&outside.join("kept")), bits(&outside));
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(outside.join("kept"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(kept, 0o500, "a folder behind the link was opened up");
+    assert_eq!(named, 0o555, "the folder the link names was opened up");
+    assert!(made.is_ok(), "{made:?}");
+    assert_eq!(bits(&tree), 0o755, "the tree's root was opened up");
+}
+
+/// DS-INTAKE: a refill that puts a moved folder back never writes through a folder of its
+/// target swapped for a link after the refill found it there: nothing lands behind the
+/// link, the folder the link names keeps its mode, and the refill answers
+/// `home_copy_entry_swapped`.
+#[test]
+fn a_refill_never_writes_through_a_target_folder_swapped_for_a_link() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(root.path()).unwrap();
+    let (copy, target, outside) = (base.join("copy"), base.join("source"), base.join("outside"));
+    fs::create_dir_all(copy.join("sub")).unwrap();
+    fs::write(copy.join("sub/new.txt"), "copied\n").unwrap();
+    fs::set_permissions(copy.join("sub"), fs::Permissions::from_mode(0o750)).unwrap();
+    fs::create_dir_all(target.join("sub")).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
+    let (swapped, named) = (target.join("sub"), outside.clone());
+    BEFORE_REFILL_FOLDER.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            fs::remove_dir(&swapped).unwrap();
+            std::os::unix::fs::symlink(&named, &swapped).unwrap();
+        }));
+    });
+    let filled = fill_tree(&copy, &target);
+    assert!(
+        fs::symlink_metadata(outside.join("new.txt")).is_err(),
+        "a file landed behind the link"
+    );
+    assert_eq!(
+        bits(&outside),
+        0o755,
+        "the folder the link names took a mode"
+    );
+    assert_eq!(filled.unwrap_err().0, "home_copy_entry_swapped");
 }

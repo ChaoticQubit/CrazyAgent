@@ -235,6 +235,8 @@ fn a_task_queued_by_a_lead_the_owner_stopped_waits_for_the_lead() {
 /// RV-DS241-122 r2 (rv-code4 F1): more queued tasks than dispatch reads at once are held for
 /// a lead the owner stopped, and a task queued after them with no lead still starts: held
 /// tasks stay out of dispatch's window, and every one of them says it waits for the lead.
+/// The later task is stored as the owner's hand-off stores one, since the hand-off itself
+/// refuses a project already past `TASKS_ACTIVE_MAX` (GB-3).
 #[test]
 fn tasks_held_for_an_owner_stopped_lead_never_fill_the_dispatch_window() {
     let fixture = Fixture::new(2);
@@ -279,7 +281,16 @@ fn tasks_held_for_an_owner_stopped_lead_never_fill_the_dispatch_window() {
         f.agent_status(lead).0 == AgentStatus::Stopped
     });
     let later = "Write the index page.";
-    owner(&fixture, &[hand_off(&fixture, later)]);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,turn,harness,tools,prompt,status,created_ms)
+             SELECT project,'owner',NULL,'codex',tools,?2,'queued',created_ms
+             FROM team_tasks WHERE prompt=?1",
+            params![prompt, later],
+        )
+        .unwrap();
+    assert_eq!(task_of(&fixture, later).0, "queued");
     fixture.until(&mut team, "a task queued after the held ones starts", |f| {
         task_of(f, later).0 != "queued"
     });
@@ -320,7 +331,8 @@ fn an_owner_stop_during_an_instruction_restart_keeps_the_agent_stopped() {
     worker.restarting = true;
     worker.stop_for("engine_stop:instructions");
     let _ = worker.orders.send(Order::Stop);
-    team.instruction_restarts.insert(agent, project.clone());
+    team.restarts
+        .insert(agent, (project.clone(), Restart::Instructions));
     owner(
         &fixture,
         &[crate::team::TeamAction::StopAgent {

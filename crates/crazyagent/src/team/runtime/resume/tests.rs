@@ -861,7 +861,9 @@ done
         let mut team = fixture.runtime(&host);
         let reason = "it was stopped, so it waits for you to start it again";
         fixture.until(&mut team, "the stopped agent's run is not resumed", |f| {
-            f.runs()[0].state == RunState::Failed
+            f.runs()
+                .first()
+                .is_some_and(|run| run.state == RunState::Failed)
         });
         assert_eq!(fixture.runs()[0].reason.as_deref(), Some(reason));
         assert!(fixture.noted(&format!(
@@ -1288,6 +1290,7 @@ mod live {
             relay: plan.relay.clone(),
             terminal_display: plan.terminal_display,
             task_start: plan.task_start.clone(),
+            hidden: plan.hidden.clone(),
         }
     }
 

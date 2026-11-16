@@ -882,6 +882,63 @@ pub enum LinuxSupervisor {
     Off,
 }
 
+/// Whether a Linux launch that does not hold the full Linux sandbox is refused, the owner's
+/// setting "Refuse agents without the full Linux sandbox" (DEC-185). `Off` (the default)
+/// starts it with what this Linux holds and the lines that say what it cannot; `On` refuses
+/// it unless [`linux_holds_fully`] does. Team agents need the full sandbox whatever it says.
+/// Other systems ignore it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinuxStrict {
+    #[default]
+    Off,
+    On,
+}
+
+/// The engine refusal code of a Linux launch the strict setting refuses ([`LinuxStrict`]).
+pub const LINUX_NOT_FULL: &str = "linux_sandbox_not_full";
+
+/// Why [`InstalledSandbox::install`] refuses a Linux launch under [`LinuxStrict::On`]: it
+/// does not hold the full Linux sandbox ([`linux_holds_fully`]).
+pub const LINUX_NOT_FULL_LINE: &str = "this Linux does not hold the full sandbox for this launch, and the setting 'Refuse agents without the full Linux sandbox' is on";
+
+/// Tells whether a launch holds the full Linux sandbox (DEC-185): a process space of its own
+/// (the nested backend), the call supervisor running, and its network limits held, so none
+/// of the gap lines would show for it. An open network has no limit to hold; a limited one
+/// needs TCP-only sockets and, for a port on any host, a network of its own (DEC-179 SBX-2).
+/// Inputs: what the launch got and its sandbox. Output: true when it holds all of it.
+pub fn linux_holds_fully(
+    nested: bool,
+    supervised: bool,
+    routed: bool,
+    sandbox: &ProjectSandbox,
+) -> bool {
+    assert!(
+        !routed || nested,
+        "only a nested launch has a network of its own"
+    );
+    if !nested || !supervised {
+        return false;
+    }
+    let SandboxNetwork::Only(remotes) = &sandbox.network else {
+        return true;
+    };
+    if sandbox.linux_sockets != LinuxSockets::TcpOnly {
+        return false;
+    }
+    remotes.iter().all(|remote| match remote {
+        SandboxRemote::Loopback(port) => *port >= BRIDGE_PORT_MIN,
+        SandboxRemote::AnyHost(_) => routed,
+    })
+}
+
+/// Tells whether a launch refusal is the strict setting's ([`LINUX_NOT_FULL_LINE`]), so a
+/// caller can give it its own code ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the
+/// answer.
+pub fn linux_not_full(error: &SandboxError) -> bool {
+    matches!(error, SandboxError::Unavailable(reason) if reason == LINUX_NOT_FULL_LINE)
+}
+
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
 pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
 
@@ -3740,15 +3797,18 @@ impl InstalledSandbox {
     /// Linux, picks the Landlock helper next to the engine's executable or bubblewrap; on
     /// Windows, checks the helper next to the engine's executable first, then writes its
     /// boundary profile with the engine's grants folder (see
-    /// [`windows::WindowsSandbox::install`]). `calls` is the owner's "Linux call supervisor"
-    /// choice, which every launch must pass and only Linux acts on. Output: the sandbox
-    /// bound to that profile, the install refusal, or `Unavailable` where this system has no
-    /// boundary.
+    /// [`windows::WindowsSandbox::install`]). `calls` and `strict` are the owner's "Linux call
+    /// supervisor" and [`LinuxStrict`] choices, which every launch must pass and only Linux
+    /// acts on. Output: the sandbox bound to that profile, the install refusal, or
+    /// `Unavailable` where this system has no boundary.
     pub fn install(
         sandbox: ProjectSandbox,
         profile: &Path,
         calls: LinuxSupervisor,
+        strict: LinuxStrict,
     ) -> Result<Self, SandboxError> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = strict;
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
         {
@@ -3794,6 +3854,10 @@ impl InstalledSandbox {
                 let data = crate::tools::engine_root();
                 linux::LinuxSandbox::detect(sandbox.clone(), &helper)?.supervise(calls, data)
             };
+            #[cfg(target_os = "linux")]
+            if strict == LinuxStrict::On && !linux.holds_fully() {
+                return Err(SandboxError::Unavailable(LINUX_NOT_FULL_LINE.into()));
+            }
             Ok(Self {
                 sandbox,
                 profile: profile.to_path_buf(),
@@ -5234,6 +5298,124 @@ mod linux_sockets_tests {
         }
         let open = sandbox(&case, SandboxNetwork::Open, LinuxSockets::Refuse);
         assert_eq!(open.linux_refusal(&case.root.join("glibc")), None);
+    }
+
+    #[test]
+    fn only_a_nested_supervised_launch_with_its_network_held_is_full() {
+        let case = case();
+        let tcp = |network| sandbox(&case, network, LinuxSockets::TcpOnly);
+        for held in [
+            SandboxNetwork::Open,
+            SandboxNetwork::Only(Vec::new()),
+            local(),
+        ] {
+            let held = tcp(held);
+            assert!(linux_holds_fully(true, true, false, &held));
+            assert!(
+                !linux_holds_fully(false, true, false, &held),
+                "no process space"
+            );
+            assert!(
+                !linux_holds_fully(true, false, false, &held),
+                "no supervisor"
+            );
+        }
+        let hosted = tcp(model());
+        assert!(linux_holds_fully(true, true, true, &hosted), "routed");
+        assert!(
+            !linux_holds_fully(true, true, false, &hosted),
+            "a port on any host from this computer's network"
+        );
+        let low = tcp(SandboxNetwork::Only(vec![
+            SandboxRemote::AnyHost(443),
+            SandboxRemote::Loopback(80),
+        ]));
+        assert!(low.routed().is_none());
+        assert!(
+            !linux_holds_fully(true, true, true, &low),
+            "a loopback port below the bridge keeps it on this computer's network"
+        );
+        for sockets in [LinuxSockets::TcpPorts, LinuxSockets::Refuse] {
+            let other = sandbox(&case, local(), sockets);
+            assert!(!linux_holds_fully(true, true, true, &other), "{sockets:?}");
+        }
+        let open = sandbox(&case, SandboxNetwork::Open, LinuxSockets::TcpPorts);
+        assert!(
+            linux_holds_fully(true, true, false, &open),
+            "an open network has no limit to hold"
+        );
+        let below = tcp(SandboxNetwork::Only(vec![SandboxRemote::Loopback(80)]));
+        assert!(
+            !linux_holds_fully(true, true, false, &below),
+            "a loopback port below the bridge is not bridged"
+        );
+    }
+
+    #[test]
+    fn a_full_launch_is_one_no_network_line_names_on_a_host_that_holds_everything() {
+        let case = case();
+        let host = LinuxHost {
+            nested: true,
+            scoped: true,
+            supervised: true,
+            root: false,
+            armored: false,
+            routed: true,
+        };
+        let networks = [
+            SandboxNetwork::Open,
+            SandboxNetwork::Only(Vec::new()),
+            local(),
+            model(),
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(80)]),
+            SandboxNetwork::Only(vec![
+                SandboxRemote::AnyHost(443),
+                SandboxRemote::Loopback(80),
+            ]),
+            SandboxNetwork::Only(vec![
+                SandboxRemote::AnyHost(443),
+                SandboxRemote::Loopback(8080),
+            ]),
+        ];
+        for network in networks {
+            let launched = sandbox(&case, network, LinuxSockets::TcpOnly);
+            let routed = launched.routed().is_some();
+            let full = linux_holds_fully(true, true, routed, &launched);
+            for choice in [
+                policy::AgentNetwork::None,
+                policy::AgentNetwork::Https,
+                policy::AgentNetwork::Open,
+            ] {
+                let line = linux_unbridged_notice_on(Some(host), choice, &launched);
+                assert_eq!(
+                    full,
+                    line.is_none(),
+                    "{:?} under {choice:?}: {line:?}",
+                    launched.network
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_strict_refusal_has_its_own_code_and_reads_plainly() {
+        assert!(linux_not_full(&SandboxError::Unavailable(
+            LINUX_NOT_FULL_LINE.into()
+        )));
+        assert!(!linux_not_full(&SandboxError::Unavailable("other".into())));
+        assert!(!linux_not_full(&SandboxError::Invalid(
+            LINUX_NOT_FULL_LINE.into()
+        )));
+        let line = crate::config::plain_problem(LINUX_NOT_FULL);
+        assert!(line.is_some(), "the strict refusal has a plain sentence");
+        let line = line.unwrap();
+        for part in [
+            "Refuse agents without the full Linux sandbox",
+            "Agent access",
+            "Settings",
+        ] {
+            assert!(line.contains(part), "{line}");
+        }
     }
 
     #[test]

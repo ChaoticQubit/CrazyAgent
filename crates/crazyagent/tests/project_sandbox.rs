@@ -3,8 +3,8 @@
 use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
 use crazyagent::sandbox::tool_cache::CacheShape;
 use crazyagent::sandbox::{
-    InstalledSandbox, LinuxSupervisor, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
-    SandboxRemote, agent_env, tool_cache,
+    InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, Sandbox, SandboxError,
+    SandboxNetwork, SandboxRemote, agent_env, tool_cache,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -1642,7 +1642,9 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
         assert!(text.contains(&rule), "{rule}\n{text}");
     }
     let profile = case.profiles.join("seam.sb");
-    let installed = InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On).unwrap();
+    let installed =
+        InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off)
+            .unwrap();
     let seam: &dyn Sandbox = &installed;
     let mut harness = std::process::Command::new("/bin/sh");
     harness

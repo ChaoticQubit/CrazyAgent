@@ -13,7 +13,7 @@ use crazyagent::verification::{BaselineDraft, BaselineOrigin, CheckKind, CheckSp
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -71,11 +71,7 @@ impl Process {
     }
 
     fn diagnostics(&self) -> String {
-        format!(
-            "stdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&self.stdout.lock().unwrap().bytes),
-            String::from_utf8_lossy(&self.stderr.lock().unwrap().bytes),
-        )
+        captured_text(&self.stdout, &self.stderr)
     }
 
     fn ready(&mut self) {
@@ -154,6 +150,17 @@ impl Drop for Process {
             eprintln!("{}", self.diagnostics());
         }
     }
+}
+
+/// Reads both captured streams for a failure message. Process's Drop prints it while a
+/// failed assert unwinds, and that assert may have held a capture. Inputs: the two captures.
+/// Output: the text.
+fn captured_text(stdout: &Mutex<Capture>, stderr: &Mutex<Capture>) -> String {
+    let read = |capture: &Mutex<Capture>| {
+        let capture = capture.lock().unwrap_or_else(PoisonError::into_inner);
+        String::from_utf8_lossy(&capture.bytes).into_owned()
+    };
+    format!("stdout: {}\nstderr: {}", read(stdout), read(stderr))
 }
 
 fn owner_request(id: &str, revision: &Cursor, operation: OwnerOperation) -> OwnerRequest {
@@ -356,4 +363,24 @@ async fn real_tui_discovers_baseline_detail_in_evidence() {
     let status = driver.wait(Duration::from_secs(45));
     assert!(status.success(), "{}", driver.diagnostics());
     assert!(engine.child.try_wait().unwrap().is_none());
+}
+
+/// TEST-DROP-UNWRAP: a capture a failed assert poisoned while it held it still reads back,
+/// so Process's Drop, which prints both captures while that assert unwinds, never panics a
+/// second time and aborts the whole test binary.
+#[test]
+fn a_poisoned_capture_still_reads_back_for_the_failure_message() {
+    let stdout = Mutex::new(Capture::default());
+    stdout.lock().unwrap().bytes.extend_from_slice(b"ready\n");
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = stdout.lock().unwrap();
+        panic!("a failed assert while the capture is held");
+    }));
+    assert!(poisoned.is_err());
+    assert!(stdout.is_poisoned());
+    let stderr = Mutex::new(Capture::default());
+    let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        captured_text(&stdout, &stderr)
+    }));
+    assert_eq!(text.ok().as_deref(), Some("stdout: ready\nstderr: "));
 }

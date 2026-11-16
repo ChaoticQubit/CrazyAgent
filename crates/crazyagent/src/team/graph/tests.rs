@@ -33,6 +33,7 @@ fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAg
         hookless: false,
         instructions_changed: false,
         message_note: None,
+        sees_hidden: false,
     }
 }
 

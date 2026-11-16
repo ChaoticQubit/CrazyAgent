@@ -5,6 +5,7 @@ import "./load-source.mjs";
 
 const settings = await import("../src/screens/project/settings.tsx");
 const api = await import("../src/api.ts");
+const projects = await import("../src/api-projects.ts");
 
 test("the sandbox section opens from its route and adds only absolute, new folders up to the limit", () => {
   assert.equal(settings.settingsSection("sandbox"), "sandbox");
@@ -58,4 +59,26 @@ test("a hidden folders save sends the version it read, and a stale one reads the
   const api = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
   assert.match(api, /export function saveHiddenPaths\(id: string, paths: string\[\], version: number, generation: number\)/);
   assert.match(api, /call<IntentReceipt>\("desktop_set_project_hidden_paths", \{ id, version, paths, generation \}\)/);
+});
+
+test("the hidden folders section names the running agents that can still open a hidden folder and Restart them restarts them", () => {
+  const agent = (id, label, sees) => ({ id, label, ...(sees === undefined ? {} : { sees_hidden: sees }) });
+  const status = { agents: [agent(1, "Master", true), agent(2, "Ada", false), agent(3, "Cy", true), agent(4, "Bo")] };
+  assert.deepEqual(settings.hiddenSeers(null), [], "nothing before the team is read");
+  assert.deepEqual(settings.hiddenSeers(status).map((seer) => seer.id), [1, 3], "an engine without the flag lists none");
+  assert.equal(settings.seersLine([agent(3, "Cy", true)]), "Cy started before a folder was hidden and can still open it.");
+  assert.equal(settings.seersLine(settings.hiddenSeers(status)), "Master, Cy started before a folder was hidden and can still open it.");
+  const source = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  const start = source.indexOf("function HiddenSection(");
+  const hidden = source.slice(start, source.indexOf("\n}\n", start));
+  assert.match(hidden, /hiddenSeers\(data\.team\.result\?\.kind === "ok" \? data\.team\.result\.value : null\)/, "read from the team the page already polls");
+  assert.match(hidden, /restartHiddenSeers\(data\.id, nextGeneration\(\)\)/);
+  assert.match(hidden, />Restart them</);
+  assert.match(hidden, /!fullAccess && seers\.length > 0/, "Full access hides nothing, so it lists no one");
+  assert.match(hidden, /\{!fullAccess && <p className="pj-secondary">\{HIDDEN_SEERS_COVER\}<\/p>\}/, "an empty list never reads as nothing can open it");
+  assert.match(settings.HIDDEN_SEERS_COVER, /^Team agents that started before you hid a folder, including ones CrazyAgent took over/);
+  assert.match(settings.HIDDEN_SEERS_COVER, /A research, overview, roadmap or onboarding run that started before keeps its access until it ends\.$/);
+  const api = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
+  assert.match(api, /call<IntentReceipt>\("desktop_team_restart_hidden_seers", \{ id, generation \}\)/);
+  assert.equal(projects.failureCopy("team_no_hidden_seers"), "No running agent can still open a hidden folder.");
 });

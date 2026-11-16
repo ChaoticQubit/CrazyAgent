@@ -710,9 +710,9 @@ fn a_chosen_file_in_the_shared_temp_folder_is_refused_as_changeable() {
     let case = Case::new();
     let shared = tempfile::Builder::new()
         .prefix("harness-shared-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in("/tmp")
         .unwrap();
-    let file = shared.path().join("codex");
+    let file = std::fs::canonicalize(shared.path()).unwrap().join("codex");
     std::fs::write(&file, b"#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
     let space = finding::AgentSpace::open(&case.engine).unwrap();

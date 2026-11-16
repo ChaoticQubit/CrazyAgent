@@ -4,7 +4,7 @@ import test from "node:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { chooseHome, clearWebStore, createRunDirectories, nodeSuiteHome, refusedGraphifyPaths, refusedToolHome, runProjects } from "./run-layout.mjs";
+import { chooseHome, clearWebStore, createRunDirectories, fixtureEngineRoot, nodeSuiteHome, refusedGraphifyPaths, refusedToolHome, runProjects } from "./run-layout.mjs";
 import { createNavigationReader } from "./refresh-barrier.mjs";
 
 const source = (name) => readFileSync(new URL(name, import.meta.url), "utf8");
@@ -197,7 +197,7 @@ test("run.mjs never writes under the fixture engine's root, which owner_fixture 
   assert.ok(start > 0, "run.mjs builds the engine's environment in engineEnvironment");
   const environment = runner.slice(start, runner.indexOf("\n}\n", start));
   assert.doesNotMatch(environment, /engineRoot|mkdirSync|writeFileSync/, "owner_fixture serve refuses a root that is not empty");
-  assert.doesNotMatch(runner, /join\(engineRoot, "setup"|plantNodeCodex/, "the fixture's catalog never searches the engine prefix under /tmp");
+  assert.doesNotMatch(runner, /join\(engineRoot, "setup"|plantNodeCodex/, "run.mjs plants nothing under the fixture engine's prefix");
   assert.match(runner, /: suite === "first-run-harnesses-node" \? nodeSuiteHome\(\) :/);
 });
 
@@ -225,6 +225,29 @@ test("the Node suite's home lies outside the checkout, holds an owner's npm Code
     process.umask(mask);
     rmSync(parent, { recursive: true });
   }
+});
+
+test("the fixture engine's root is new, empty and private outside /tmp, its socket within 104 bytes, and owner_fixture holds the harness search production holds (FIXTURE-HARNESS-SEARCH)", { skip: process.platform !== "darwin" }, () => {
+  assert.throws(() => fixtureEngineRoot("/private/tmp"), /lies in \/tmp/);
+  const root = fixtureEngineRoot();
+  try {
+    assert.equal(root, realpathSync(root));
+    assert.doesNotMatch(`${root}/`, /^\/(private\/)?tmp\//);
+    assert.deepEqual(readdirSync(root), []);
+    assert.equal(statSync(root).mode & 0o777, 0o700);
+    assert.equal(statSync(root).uid, process.getuid());
+    assert.ok(Buffer.byteLength(join(root, "e.sock")) < 104, root);
+    let folder = dirname(root);
+    for (let hops = 0; folder !== "/" && hops < 64; hops += 1, folder = dirname(folder)) {
+      assert.equal(statSync(folder).mode & 0o022, 0, `${folder} is writable by its group or others`);
+    }
+    assert.equal(folder, "/");
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+  assert.match(source("./run.mjs"), /\nconst engineRoot = fixtureEngineRoot\(\);\n/);
+  const fixture = source("../../src-tauri/src/bin/owner_fixture.rs");
+  assert.match(fixture, /set_harness_search\(Search::from_environment\(\)\.with_engine\(root\)\)/);
 });
 
 test("owner_fixture prints why it failed, so a refused root names its reason in the engine log", () => {

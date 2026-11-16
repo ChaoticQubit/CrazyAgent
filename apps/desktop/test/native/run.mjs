@@ -10,7 +10,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
 import { endTerminals, freeLowPort } from "./e2e-harness.mjs";
-import { chooseHome, clearWebStore, createRunDirectories, lockHome, nodeSuiteHome, refusedToolHome, runProjects } from "./run-layout.mjs";
+import { chooseHome, clearWebStore, createRunDirectories, fixtureEngineRoot, lockHome, nodeSuiteHome, refusedToolHome, runProjects } from "./run-layout.mjs";
 import { prepareSpeedSide, speedSide } from "./speed-seed.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -18,7 +18,7 @@ const workRoot = resolve(appRoot, "../../.local-state/desktop-execution");
 const rawRoot = join(workRoot, "native-runs");
 mkdirSync(rawRoot, { recursive: true, mode: 0o700 });
 const evidence = mkdtempSync(join(rawRoot, "run-"));
-const engineRoot = mkdtempSync("/tmp/cad-");
+const engineRoot = fixtureEngineRoot();
 const owned = [];
 const started = new Date().toISOString();
 const began = performance.now();
