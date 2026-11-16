@@ -209,9 +209,9 @@ pub(in crate::tui) fn origin_line(connector: &ConnectorView) -> String {
 }
 
 /// A connector's one state word with its role and the line under it, checked in the
-/// desktop's order (WORDS r11): Refused (with its problem), Needs review, Unavailable (it
-/// signs in with OAuth, which the engine lists Ready with no key), Needs a key, then Ready.
-/// Input: the connector. Output: the word, its role and the line, if any.
+/// desktop's order (WORDS r11): Refused (with its problem), Needs review, Unavailable (a file
+/// whose only way in this build cannot use), Needs a key, Needs sign-in (the browser way
+/// with no sign-in yet), then Ready. Input: the connector. Output: the word, role and line.
 pub(in crate::tui) fn state(connector: &ConnectorView) -> (&'static str, Role, Option<String>) {
     match &connector.status {
         PluginStatus::Refused { problem } => ("Refused", Role::Error, Some(problem_text(problem))),
@@ -230,7 +230,12 @@ pub(in crate::tui) fn state(connector: &ConnectorView) -> (&'static str, Role, O
             Role::Warning,
             Some("Set a key for each secret it needs.".into()),
         ),
-        PluginStatus::NeedsSignIn | PluginStatus::Ready => (READY, Role::Success, None),
+        PluginStatus::NeedsSignIn => (
+            "Needs sign-in",
+            Role::Warning,
+            Some("Sign in on its page before a project can use it.".into()),
+        ),
+        PluginStatus::Ready => (READY, Role::Success, None),
     }
 }
 

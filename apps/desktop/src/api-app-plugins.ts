@@ -10,7 +10,7 @@ export type RunsView =
 export type Binding = { kind: "none" } | { kind: "account"; account: string; name: string } | { kind: "key" };
 export interface SecretView { name: string; binding: Binding }
 export interface Problem { code: string; line: number | null; field: string | null; message: string }
-export type PluginStatus = { kind: "ready" } | { kind: "needs_review" } | { kind: "needs_key" } | { kind: "refused"; problem: Problem };
+export type PluginStatus = { kind: "ready" } | { kind: "needs_review" } | { kind: "needs_key" } | { kind: "needs_sign_in" } | { kind: "refused"; problem: Problem };
 export interface PluginView {
   name: string;
   title: string;
@@ -95,13 +95,14 @@ export function problemText(problem: Problem): string {
 }
 
 /** The one label a plugin row shows, in a fixed order: Refused (with its problem), Needs
- * review, Needs a key, then Enabled or Off. The TUI uses the same words. Input: the plugin.
- * Output: the word, its tone and the line under it, if any. */
+ * review, Needs a key, Needs sign-in, then Enabled or Off. The TUI uses the same words.
+ * Input: the plugin. Output: the word, its tone and the line under it, if any. */
 export function pluginState(plugin: PluginView): { word: string; tone: Tone; detail: string | null } {
   const status = plugin.status;
   if (status.kind === "refused") return { word: "Refused", tone: "danger", detail: problemText(status.problem) };
   if (status.kind === "needs_review") return { word: "Needs review", tone: "warn", detail: "Review this plugin before it runs." };
   if (status.kind === "needs_key") return { word: "Needs a key", tone: "warn", detail: "Set a key for each secret it needs." };
+  if (status.kind === "needs_sign_in") return { word: "Needs sign-in", tone: "warn", detail: "Sign in on its page before it runs." };
   return plugin.enabled ? { word: "Enabled", tone: "ok", detail: null } : { word: "Off", tone: "neutral", detail: null };
 }
 

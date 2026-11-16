@@ -130,6 +130,14 @@ fn by_browser(db: &Connection, manifest: &Manifest) -> Result<bool, EngineError>
     Ok(way == crate::connectors::SignInWith::Browser)
 }
 
+/// Whether a connector's file signs in only through the browser: a sign-in and no key.
+/// Input: the manifest. Output: the answer.
+fn browser_only(manifest: &Manifest) -> bool {
+    manifest
+        .connector()
+        .is_some_and(|spec| spec.key.is_none() && spec.oauth.is_some())
+}
+
 /// Creates the store's tables and drops what an older plugin of the owner's left under a
 /// name a bundled plugin now has: its secret bindings with the keys entered for it, its
 /// switch, its switches in projects, a Search choice naming it and its trust record. A
@@ -487,10 +495,13 @@ fn view(db: &Connection, root: &Path, found: Found) -> Result<PluginView, Engine
     }
     let reviewed = reviewed(db, found.origin, &manifest)?;
     let browser = by_browser(db, &manifest)?;
+    let signs_in = browser || browser_only(&manifest);
     let status = if !reviewed {
         PluginStatus::NeedsReview
     } else if !browser && secrets.iter().any(|secret| secret.binding == Binding::None) {
         PluginStatus::NeedsKey
+    } else if signs_in && !crate::connectors::oauth::signed_in_now(root, &manifest.name) {
+        PluginStatus::NeedsSignIn
     } else {
         PluginStatus::Ready
     };
