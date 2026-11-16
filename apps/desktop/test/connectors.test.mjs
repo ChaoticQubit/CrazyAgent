@@ -353,6 +353,8 @@ test("Every refusal the Connectors protocol answers, past the owner codes, has a
     connector_request_invalid: "The request could not be read.",
     connector_request_bounds: "The request is too large.",
     connector_outcome_unknown: "The engine did not answer in time; check the list again.",
+    connector_approval_unknown: "That approval is gone.",
+    connector_approval_closed: "This write was already answered or its wait ran out. The page now shows where it stands.",
   };
   for (const [code, sentence] of Object.entries(words)) {
     assert.equal(api.connectorProblem({ code, cause: code, message: "Something went wrong. Try again." }), sentence, code);

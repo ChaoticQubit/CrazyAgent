@@ -80,8 +80,8 @@ test("each target opens its exact page, with the anchor of the item to highlight
   assert.deepEqual(opened({ page: "usage" }), ["#/metrics", null]);
   assert.deepEqual(opened({ page: "updates" }), ["#/settings/updates", null]);
   assert.deepEqual(opened({ page: "harnesses" }), ["#/settings/harnesses", null]);
-  assert.deepEqual(opened({ page: "connectors" }), ["#/settings/plugins", null]);
-  assert.deepEqual(opened({ page: "connector_approval", project_id: "p-1", id: 7 }), ["#/settings/plugins", "connector-approval-7"]);
+  assert.deepEqual(opened({ page: "connectors" }), ["#/settings/connectors", null]);
+  assert.deepEqual(opened({ page: "connector_approval", project_id: "p-1", id: 7 }), ["#/connectors/approval/7", null]);
   assert.deepEqual(opened({ page: "home" }), ["#/home", null]);
 });
 

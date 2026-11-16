@@ -32,6 +32,7 @@ export type Route =
   | { name: "demo" }
   | { name: "onboarding"; id: string }
   | { name: "metrics" }
+  | { name: "connector-approval"; id: number }
   | { name: "settings"; tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string; harness?: string; connector?: string };
 
 function pick<T extends string>(choices: readonly T[], value: string | null | undefined, fallback: T): T {
@@ -102,6 +103,7 @@ export function formatRoute(route: Route): string {
     case "demo": return "#/demo";
     case "onboarding": return `#/projects/${encodeURIComponent(route.id)}/setup`;
     case "metrics": return "#/metrics";
+    case "connector-approval": return "#/home";
     case "settings": {
       const account = route.action && route.account ? `&account=${encodeURIComponent(route.account)}` : "";
       if (!route.action && route.tab === "plugins" && route.skill) return `#/settings/plugins?skill=${encodeURIComponent(route.skill)}`;

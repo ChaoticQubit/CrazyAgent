@@ -422,3 +422,93 @@ export function clearConnectorKey(name: string, secret: string): Promise<Result<
 export function setConnectorGrant(project: string, connector: string, enabled: boolean, who: Who): Promise<Result<ConnectorsView>> {
   return connectorCall<ConnectorsView>("desktop_connector_grant", { project, connector, enabled, who });
 }
+
+/** Where one connector write stands: waiting for the owner, allowed, denied, or past its wait. */
+export type ApprovalState = "waiting" | "allowed" | "denied" | "expired";
+
+/** One connector write as the approval page shows it, the engine's ApprovalView: what asks,
+ * where, the preview, the full arguments with hidden characters already escaped and `hidden`
+ * marking that they hold some, where it stands and its times in epoch milliseconds. */
+export interface ApprovalView {
+  id: number;
+  project: string;
+  project_name: string;
+  agent: string;
+  connector: string;
+  title: string;
+  tool: string;
+  preview: string;
+  arguments: string;
+  hidden: boolean;
+  state: ApprovalState;
+  created_ms: number;
+  expires_ms: number;
+  answered_ms: number | null;
+}
+
+/** The connectors one project may write with without asking again, by name. */
+export interface AllowedWrites { project: string; connectors: string[] }
+
+/** The approval page's words, the same in the TUI (WORDS-t4.md r6, r8). */
+export const APPROVAL_PAGE = {
+  title: "Connector write",
+  purpose: "An agent wants a connector to change something. Nothing is sent until you allow it.",
+  hidden: "This write holds hidden or control characters; each one is shown as a \\u escape.",
+  fold: "All arguments",
+  allow: "Allow",
+  deny: "Deny",
+  allowed: "Write allowed.",
+  denied: "Write denied.",
+  expired: "Expired",
+} as const;
+
+/** The approval page's lines, in order: connector, tool, project, agent, when it asked and
+ * what it sends. Input: the approval. Output: the lines. */
+export function approvalLines(view: ApprovalView): string[] {
+  void view;
+  return [];
+}
+
+/** The time a waiting write has left, in whole seconds rounded up and never below 0:00.
+ * Inputs: now and the end of the wait, in epoch milliseconds. Output: such as "9:59". */
+export function timeLeft(nowMs: number, expiresMs: number): string {
+  void nowMs;
+  void expiresMs;
+  return "";
+}
+
+/** Where an answered write stands: "Allowed <stamp>", "Denied <stamp>" or "Expired".
+ * Input: the approval. Output: the line, empty while it waits. */
+export function answeredLine(view: ApprovalView): string {
+  void view;
+  return "";
+}
+
+/** Reads one connector write by the id its notice carries. Input: the id. Output: the approval. */
+export function loadApproval(id: number): Promise<Result<ApprovalView>> {
+  void id;
+  return Promise.resolve({ kind: "not_ready" });
+}
+
+/** Answers one waiting connector write once. Inputs: the id and whether the owner allows it.
+ * Output: the approval after the answer. */
+export function answerApproval(id: number, allow: boolean): Promise<Result<ApprovalView>> {
+  void id;
+  void allow;
+  return Promise.resolve({ kind: "not_ready" });
+}
+
+/** Reads the connectors a project may write with without asking again. Input: the project.
+ * Output: them by name. */
+export function loadAllowedWrites(project: string): Promise<Result<AllowedWrites>> {
+  void project;
+  return Promise.resolve({ kind: "not_ready" });
+}
+
+/** Takes back a project's standing allow for one connector. Inputs: the project and the
+ * connector. Output: the standing allows left. */
+export function revokeWrites(project: string, connector: string): Promise<Result<AllowedWrites>> {
+  void project;
+  void connector;
+  return Promise.resolve({ kind: "not_ready" });
+}
