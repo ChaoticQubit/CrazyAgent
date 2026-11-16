@@ -1107,12 +1107,23 @@ impl Drop for Busy {
 /// on their own thread, so a slow vendor holds up only its own calls. A round whose launch
 /// read fails is skipped and closes nothing. Inputs: the engine root and the stop flag.
 pub fn serve(root: &Path, stop: &AtomicBool) {
+    serve_with(root, stop, &crate::questions::open);
+}
+
+/// Wakes a gateway loop that waits with no launch. Takes nothing.
+fn wake() {}
+
+/// [`serve`] with the way it opens the engine database given. Inputs: the engine root, the
+/// stop flag and the open.
+fn serve_with(
+    root: &Path,
+    stop: &AtomicBool,
+    open: &dyn Fn(&Path) -> Result<Connection, EngineError>,
+) {
     let gateway = Arc::new(Gateway::new(root));
     let busy: Arc<Mutex<BTreeSet<String>>> = Arc::default();
     while !stop.load(Ordering::SeqCst) {
-        let found = crate::questions::open(root)
-            .ok()
-            .and_then(|db| launches(&db).ok());
+        let found = open(root).ok().and_then(|db| launches(&db).ok());
         let Some(found) = found else {
             std::thread::sleep(TICK);
             continue;
