@@ -426,18 +426,20 @@ impl ProjectPage {
     }
 
     /// Takes the engine's answer to this page's publish read or one of the pane's answers:
-    /// a read opens the pane on a publish the owner can act on or follow, an answer shows
-    /// where the publish now stands, a discard says what it left on GitHub, and a refused
-    /// answer says why with the pane kept. A failed read stays quiet. Takes the reply and the
-    /// context. Returns nothing.
+    /// a read opens the pane on a publish the owner can act on or follow and keeps an open
+    /// pane on where the publish stands, finished or not, an answer shows where the publish
+    /// now stands, a discard says what it left on GitHub, and a refused answer says why and
+    /// reads the publish again with the pane kept. A failed read stays quiet. Takes the reply
+    /// and the context. Returns nothing.
     fn publish_answered(&mut self, event: &IntakeEvent, ctx: &mut Ctx) {
         let read = matches!(event.query, IntakeQuery::GitHubPublishStatus { .. });
         self.publish_asked = None;
         match &event.result {
             Ok(IntakeView::PublishStatus(job)) => {
+                let shown = self.publish_shows();
                 self.publish_pane = job
                     .as_deref()
-                    .filter(|job| opens(job))
+                    .filter(|job| shown || opens(job))
                     .cloned()
                     .map(PublishPane::new);
             }
@@ -452,14 +454,20 @@ impl ProjectPage {
                 ));
             }
             Err(_) if read => {}
-            Err(code) => ctx.say(Message::warning(
-                ANSWER_NOT_TAKEN,
-                &super::intake::copy(code),
-            )),
-            Ok(_) => ctx.say(Message::warning(
-                ANSWER_NOT_TAKEN,
-                &super::intake::copy("github_outcome_unknown"),
-            )),
+            Err(code) => {
+                ctx.say(Message::warning(
+                    ANSWER_NOT_TAKEN,
+                    &super::intake::copy(code),
+                ));
+                self.ask_publish(ctx);
+            }
+            Ok(_) => {
+                ctx.say(Message::warning(
+                    ANSWER_NOT_TAKEN,
+                    &super::intake::copy("github_outcome_unknown"),
+                ));
+                self.ask_publish(ctx);
+            }
         }
     }
 
