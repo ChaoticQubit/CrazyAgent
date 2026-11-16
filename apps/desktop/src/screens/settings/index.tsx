@@ -5,6 +5,7 @@ import { Accounts } from "./accounts";
 import { AppPluginsSettings } from "./app-plugins";
 import { ChecksSettings } from "./checks";
 import { ConnectorActivity } from "./connector-activity";
+import { ConnectorsSettings } from "./connectors";
 import { FinishedAgentsSettings } from "./finished-agents";
 import { Harnesses } from "./harnesses";
 import { MasterSettings } from "./master";
@@ -32,7 +33,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     { id: "accounts", label: "Accounts" }, { id: "pools", label: "Pools" },
   ] },
   { title: "Agents", items: [
-    { id: "harnesses", label: "Harnesses" }, { id: "plugins", label: "Plugins and skills" },
+    { id: "harnesses", label: "Harnesses" }, { id: "plugins", label: "Plugins and skills" }, { id: "connectors", label: "Connectors" },
     { id: "process", label: "Process" }, { id: "tickets", label: "Tickets" }, { id: "pack", label: "Pack" },
     { id: "checks", label: "Checks" }, { id: "memory", label: "Memory" },
     { id: "finished", label: "Finished agents" }, { id: "quit", label: "Quitting" },
@@ -82,14 +83,17 @@ export function SettingsFrame({ tab, children }: { tab: ListedSettingsTab; child
 
 /** Settings: the frame around the selected section's panel.
  * Inputs: the tab, optional action ("add" opens Add account, "new" opens a new pool,
- * "sign_in" opens the sign-in of the given account), the skill whose detail is open and the
- * harness whose settings page is open. */
-export function Settings({ tab, action, account, skill, harness }: { tab: ListedSettingsTab; action?: SettingsAction; account?: string; skill?: string; harness?: string }) {
+ * "sign_in" opens the sign-in of the given account), the skill whose detail is open, the
+ * harness whose settings page is open and the connector whose page is open. */
+export function Settings({ tab, action, account, skill, harness, connector }: {
+  tab: ListedSettingsTab; action?: SettingsAction; account?: string; skill?: string; harness?: string; connector?: string;
+}) {
   return <SettingsFrame tab={tab}>
     {tab === "accounts" ? <Accounts adding={action === "add"} signingIn={action === "sign_in" ? account : undefined} />
       : tab === "pools" ? <Pools creating={action === "new"} />
       : tab === "harnesses" ? <Harnesses harness={harness} />
       : tab === "plugins" ? <PluginsAndSkills skill={skill} />
+      : tab === "connectors" ? <ConnectorsSettings connector={connector} />
       : tab === "process" ? <ProcessSettings />
       : tab === "tickets" ? <TicketSettings />
       : tab === "pack" ? <PackSettings />
