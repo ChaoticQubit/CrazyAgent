@@ -124,8 +124,9 @@ fn own_issuer_ref(name: &str) -> Result<CredentialRef, OAuthError> {
 
 /// Saves the owner's own OAuth app for a trusted connector that lets the owner bring one:
 /// its client id and, for a confidential app, its secret, replacing what was saved before
-/// and freeing it from the issuer the old one was bound to. A sign-in made with the old
-/// one ends and asks the owner again, and sign-ins begun with it are dropped.
+/// and freeing it from the issuer the old one was bound to. The connector's sign-in, by
+/// the old app or by registration, ends and asks the owner again, and sign-ins begun for
+/// it are dropped.
 /// Inputs: database, engine root, connector, client id and secret. Output: Ok, or
 /// `connector_oauth_not_offered`, `_client_invalid`, `_key_store_unavailable`.
 pub fn set_own_client(
