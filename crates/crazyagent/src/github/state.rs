@@ -1,3 +1,4 @@
+use super::job::GitHubPublishJob;
 use super::rules::RepoRecord;
 use super::{CLIENT_ID, GitHubMethod};
 use crate::engine::EngineError;
@@ -13,6 +14,8 @@ use std::path::{Path, PathBuf};
 const CONFIG: &str = "github.toml";
 const STATE: &str = "github.json";
 const RECORDS: &str = "github-repos";
+const JOBS: &str = "github-publish";
+const JOB_BYTES_MAX: u64 = 8 << 20;
 #[cfg(unix)]
 const FILE_BYTES_MAX: u64 = 4096;
 const CLIENT_ID_BYTES_MAX: usize = 64;
@@ -38,8 +41,26 @@ fn read_private(_path: &Path) -> Result<Option<Vec<u8>>, EngineError> {
     Err(failure("github_state_unavailable"))
 }
 
+/// Refuses a private file where its Unix owner and mode cannot be checked. Takes the path
+/// and bound, both unused. Returns `github_state_unavailable`.
+#[cfg(not(unix))]
+fn read_private_within(_path: &Path, _max: u64) -> Result<Option<Vec<u8>>, EngineError> {
+    Err(failure("github_state_unavailable"))
+}
+
+/// Reads a private file of at most `FILE_BYTES_MAX`, as [`read_private_within`] does.
+/// Input: the path. Output: the bytes, None when there is no file, or
+/// `github_config_unsafe`.
 #[cfg(unix)]
 fn read_private(path: &Path) -> Result<Option<Vec<u8>>, EngineError> {
+    read_private_within(path, FILE_BYTES_MAX)
+}
+
+/// Reads a private file: a plain file the engine's user owns, open to no one else, with
+/// one link and at most `max` bytes, opened without following a link. Inputs: the path
+/// and the bound. Output: the bytes, None when there is no file, or `github_config_unsafe`.
+#[cfg(unix)]
+fn read_private_within(path: &Path, max: u64) -> Result<Option<Vec<u8>>, EngineError> {
     let unsafe_file = || failure("github_config_unsafe");
     let file = match std::fs::OpenOptions::new()
         .read(true)
@@ -55,15 +76,15 @@ fn read_private(path: &Path) -> Result<Option<Vec<u8>>, EngineError> {
         || metadata.uid() != rustix::process::getuid().as_raw()
         || metadata.mode() & 0o077 != 0
         || metadata.nlink() != 1
-        || metadata.len() > FILE_BYTES_MAX
+        || metadata.len() > max
     {
         return Err(unsafe_file());
     }
     let mut bytes = Vec::new();
-    file.take(FILE_BYTES_MAX + 1)
+    file.take(max + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| unsafe_file())?;
-    if bytes.len() as u64 > FILE_BYTES_MAX {
+    if bytes.len() as u64 > max {
         return Err(unsafe_file());
     }
     Ok(Some(bytes))
@@ -125,13 +146,26 @@ pub(super) fn save(root: &Path, saved: &Saved) -> Result<(), EngineError> {
     write_private(root, STATE, &bytes)
 }
 
-/// Writes a private 0600 file in a private folder, replaced in one rename, so a reader
-/// sees the old file or the new one. Inputs: the folder, the file name and the bytes, at
-/// most `FILE_BYTES_MAX`. Output: Ok, or `github_state_unavailable`.
+/// Writes a private file of at most `FILE_BYTES_MAX`, as [`write_private_within`] does.
+/// Inputs: the folder, the file name and the bytes. Output: Ok, or
+/// `github_state_unavailable`.
 #[cfg(unix)]
 fn write_private(folder: &Path, name: &str, bytes: &[u8]) -> Result<(), EngineError> {
+    write_private_within(folder, name, bytes, FILE_BYTES_MAX)
+}
+
+/// Writes a private 0600 file in a private folder, replaced in one rename, so a reader
+/// sees the old file or the new one. Inputs: the folder, the file name, the bytes and
+/// their bound. Output: Ok, or `github_state_unavailable`.
+#[cfg(unix)]
+fn write_private_within(
+    folder: &Path,
+    name: &str,
+    bytes: &[u8],
+    max: u64,
+) -> Result<(), EngineError> {
     let unavailable = || failure("github_state_unavailable");
-    assert!(bytes.len() as u64 <= FILE_BYTES_MAX);
+    assert!(bytes.len() as u64 <= max);
     let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(|_| unavailable())?;
     let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -192,22 +226,99 @@ pub(super) fn save_record(
     record: &RepoRecord,
 ) -> Result<(), EngineError> {
     let (folder, name) = record_file(root, full_name)?;
-    match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
+    private_folder(&folder)?;
+    let bytes = serde_json::to_vec(record).map_err(|_| failure("github_state_unavailable"))?;
+    write_private(&folder, &name, &bytes)
+}
+
+/// Makes a private 0700 folder in the engine root when it is missing and checks the one
+/// there: a plain folder the engine's user owns, open to no one else. Input: the folder.
+/// Output: Ok, or `github_config_unsafe`, `github_state_unavailable`.
+#[cfg(unix)]
+fn private_folder(folder: &Path) -> Result<(), EngineError> {
+    match std::fs::DirBuilder::new().mode(0o700).create(folder) {
         Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
             return Err(failure("github_state_unavailable"));
         }
         _ => {}
     }
     let metadata =
-        std::fs::symlink_metadata(&folder).map_err(|_| failure("github_config_unsafe"))?;
+        std::fs::symlink_metadata(folder).map_err(|_| failure("github_config_unsafe"))?;
     if !metadata.is_dir()
         || metadata.uid() != rustix::process::getuid().as_raw()
         || metadata.mode() & 0o077 != 0
     {
         return Err(failure("github_config_unsafe"));
     }
-    let bytes = serde_json::to_vec(record).map_err(|_| failure("github_state_unavailable"))?;
-    write_private(&folder, &name, &bytes)
+    Ok(())
+}
+
+/// The folder and file that hold one project's publish job: the file is named by the
+/// SHA-256 of the project folder's path. Inputs: the engine root and the project folder.
+/// Output: the folder and the file name.
+fn job_file(root: &Path, project: &Path) -> (PathBuf, String) {
+    let digest = Sha256::digest(project.as_os_str().as_encoded_bytes());
+    let name: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    (root.join(JOBS), format!("{name}.json"))
+}
+
+/// Reads one project's publish job. Inputs: the engine root and the project folder.
+/// Output: the job, None when none is saved, or `github_state_invalid` for a file that
+/// is not this project's job, `github_config_unsafe`.
+pub(super) fn load_job(
+    root: &Path,
+    project: &Path,
+) -> Result<Option<GitHubPublishJob>, EngineError> {
+    let (folder, name) = job_file(root, project);
+    let Some(bytes) = read_private_within(&folder.join(name), JOB_BYTES_MAX)? else {
+        return Ok(None);
+    };
+    let job: GitHubPublishJob =
+        serde_json::from_slice(&bytes).map_err(|_| failure("github_state_invalid"))?;
+    if job.project != project {
+        return Err(failure("github_state_invalid"));
+    }
+    Ok(Some(job))
+}
+
+/// Saves one project's publish job as a private file in the engine root's private
+/// `github-publish` folder, replaced in one rename. Inputs: the engine root and the job.
+/// Output: Ok, or `github_config_unsafe`, `github_state_unavailable`.
+#[cfg(unix)]
+pub(super) fn save_job(root: &Path, job: &GitHubPublishJob) -> Result<(), EngineError> {
+    let (folder, name) = job_file(root, &job.project);
+    private_folder(&folder)?;
+    let bytes = serde_json::to_vec(job).map_err(|_| failure("github_state_unavailable"))?;
+    if bytes.len() as u64 > JOB_BYTES_MAX {
+        return Err(failure("github_state_unavailable"));
+    }
+    write_private_within(&folder, &name, &bytes, JOB_BYTES_MAX)
+}
+
+/// Refuses to save a publish job where no owner-only file can be made. Takes the engine
+/// root and the job, both unused. Returns `github_state_unavailable`.
+#[cfg(not(unix))]
+pub(super) fn save_job(_root: &Path, _job: &GitHubPublishJob) -> Result<(), EngineError> {
+    Err(failure("github_state_unavailable"))
+}
+
+/// Removes one project's publish job, as Discard does. Inputs: the engine root and the
+/// project folder. Output: Ok, also when no job is saved, or `github_state_unavailable`.
+#[cfg(unix)]
+pub(super) fn remove_job(root: &Path, project: &Path) -> Result<(), EngineError> {
+    let (folder, name) = job_file(root, project);
+    match std::fs::remove_file(folder.join(name)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(failure("github_state_unavailable")),
+    }
+}
+
+/// Refuses to remove a publish job where none can be saved. Takes the engine root and the
+/// project folder, both unused. Returns `github_state_unavailable`.
+#[cfg(not(unix))]
+pub(super) fn remove_job(_root: &Path, _project: &Path) -> Result<(), EngineError> {
+    Err(failure("github_state_unavailable"))
 }
 
 /// Refuses to save a repository record where no owner-only file can be made. Takes the

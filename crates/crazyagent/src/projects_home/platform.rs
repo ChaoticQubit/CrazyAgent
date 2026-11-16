@@ -384,14 +384,16 @@ pub(super) fn set_mode(path: &Path, wanted: fs::Permissions) -> std::io::Result<
 }
 
 /// Opens a file for appending, creating it, and refuses to follow a link
-/// placed at its path. Input: the file path. Output: the open file.
+/// placed at its path or to wait on a FIFO there. Input: the file path.
+/// Output: the open file.
 #[cfg(unix)]
 pub(super) fn open_append(path: &Path) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
     fs::OpenOptions::new()
         .append(true)
         .create(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags(flags.bits() as i32)
         .open(path)
 }
 

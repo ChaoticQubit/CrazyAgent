@@ -85,14 +85,17 @@ function rowButtons(page) {
   return page.evaluate(`[...document.querySelectorAll("div.in-row button")].map((button) => button.innerText.trim())`);
 }
 
-/** Fills New Project as the owner does, research and roadmap planning off so no agent starts,
- * the test pool kept, then presses Create project. Inputs: the page, its helpers, the name and
- * whether the brief is attached through Choose files. Output: none. */
+/** Fills New Project as the owner does, publishing on GitHub, research and roadmap planning
+ * off so no agent starts and nothing needs a GitHub sign-in, the test pool kept, then presses
+ * Create project. Inputs: the page, its helpers, the name and whether the brief is attached
+ * through Choose files. Output: none. */
 async function create(page, me, name, documents = false) {
   await open(page, "/projects/new");
   await me.waitFor("New Project's Basics", (text) => text.includes("Basics") && text.includes("Project name"));
   await me.type("#np-name", name);
   await me.type("#np-about", `${name} for the New Project job`);
+  await me.follow("#np-publish");
+  assert.equal(await page.evaluate(`document.querySelector("#np-publish")?.getAttribute("aria-checked") ?? null`), "false", "publishing on GitHub is off for this run");
   await me.click("Next", "button");
   await me.waitFor("the Documents step", (text) => text.includes("Choose files"));
   if (documents) {

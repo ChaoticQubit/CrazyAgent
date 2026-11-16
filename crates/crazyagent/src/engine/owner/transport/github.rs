@@ -2,32 +2,74 @@ use super::*;
 use crate::credentials::{SECRET_BYTES_MAX, SecretString};
 use crate::engine::owner::AccountSecret;
 use crate::github::{
-    CloneReceipt, GitHub, GitHubDeviceCode, GitHubOwners, GitHubRepoPage, GitHubStatus,
+    CloneReceipt, GitHub, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
+    GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
 };
-use crate::protocol::encode_frame;
+use crate::protocol::{ProjectId, encode_frame};
 use serde::{Deserialize, Serialize};
 
 const TOKEN_FRAME_TIME: Duration = Duration::from_secs(5);
 const ACTION_TIME: Duration = Duration::from_secs(75);
 const CLONE_TIME: Duration = Duration::from_secs(1900);
+const PUBLISH_TIME: Duration = Duration::from_secs(1900);
+const DRAFT_AGENT: &str = "gitignore-draft";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum Action {
+pub(super) enum Action {
     Status,
     SignIn,
     Token,
     UseCli,
     SignOut,
-    Repos { page: u32 },
-    Clone { full_name: String },
+    Repos {
+        page: u32,
+    },
+    Clone {
+        full_name: String,
+    },
     Owners,
+    PublishStart {
+        project: ProjectId,
+        plan: GitHubPublishPlan,
+    },
+    PublishApprove {
+        project: ProjectId,
+        lines: Vec<String>,
+    },
+    PublishExclude {
+        project: ProjectId,
+        path: String,
+    },
+    PublishRecheck {
+        project: ProjectId,
+    },
+    PublishContinue {
+        project: ProjectId,
+    },
+    PublishPrompt {
+        project: ProjectId,
+    },
+    PublishPromptSet {
+        project: ProjectId,
+        answer: crate::github::GitHubPromptAnswer,
+    },
+    PublishStatus {
+        project: ProjectId,
+    },
+    PublishDiscard {
+        project: ProjectId,
+    },
 }
 
 impl Action {
-    fn time(&self) -> Duration {
+    pub(super) fn time(&self) -> Duration {
         match self {
             Self::Clone { .. } => CLONE_TIME,
+            Self::PublishApprove { .. }
+            | Self::PublishExclude { .. }
+            | Self::PublishRecheck { .. }
+            | Self::PublishContinue { .. } => PUBLISH_TIME,
             _ => ACTION_TIME,
         }
     }
@@ -48,6 +90,11 @@ enum Reply {
     Repos { page: GitHubRepoPage },
     Cloned { receipt: CloneReceipt },
     Owners { owners: GitHubOwners },
+    Prompt { ask: bool },
+    PromptKept,
+    Publish { job: GitHubPublishJob },
+    PublishStatus { job: Option<GitHubPublishJob> },
+    Discarded { left: Option<GitHubPublishLeft> },
     Rejected { code: String },
 }
 
@@ -121,6 +168,127 @@ impl OwnerClient {
     pub async fn github_owners(&self) -> Result<GitHubOwners, EngineError> {
         match self.github_exchange(Action::Owners, None).await? {
             Reply::Owners { owners } => Ok(owners),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Starts publishing a project on GitHub: the engine checks the plan, the sign-in and
+    /// the project's git, answers with the job at Drafting and drafts the .gitignore lines
+    /// to show first after. Inputs: the project and the plan. Output: the job at Drafting.
+    pub async fn github_publish_start(
+        &self,
+        project: ProjectId,
+        plan: GitHubPublishPlan,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.github_publish(Action::PublishStart { project, plan })
+            .await
+    }
+
+    /// Approves a project's .gitignore lines and runs its publish as far as it goes.
+    /// Inputs: the project and the lines. Output: the job where it stands.
+    pub async fn github_publish_approve(
+        &self,
+        project: ProjectId,
+        lines: Vec<String>,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.github_publish(Action::PublishApprove { project, lines })
+            .await
+    }
+
+    /// Leaves a file that holds a secret out of a project's publish and runs on.
+    /// Inputs: the project and the file's path as the check named it. Output: the job.
+    pub async fn github_publish_exclude(
+        &self,
+        project: ProjectId,
+        path: String,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.github_publish(Action::PublishExclude { project, path })
+            .await
+    }
+
+    /// Checks a blocked publish for secrets again and runs on. Input: the project.
+    /// Output: the job where it stands.
+    pub async fn github_publish_recheck(
+        &self,
+        project: ProjectId,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.github_publish(Action::PublishRecheck { project })
+            .await
+    }
+
+    /// Runs a project's publish on from the last step it finished. Input: the project.
+    /// Output: the job where it stands.
+    pub async fn github_publish_continue(
+        &self,
+        project: ProjectId,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.github_publish(Action::PublishContinue { project })
+            .await
+    }
+
+    /// Tells whether a project's Overview asks to publish it on GitHub (DEC-182 S5b).
+    /// Input: the project. Output: true to ask, or `github_publish_project_unknown`.
+    pub async fn github_publish_prompt(&self, project: ProjectId) -> Result<bool, EngineError> {
+        match self
+            .github_exchange(Action::PublishPrompt { project }, None)
+            .await?
+        {
+            Reply::Prompt { ask } => Ok(ask),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Keeps the owner's answer to a project's publish prompt, Not now or Don't ask
+    /// again. Inputs: the project and the answer. Output: nothing, or
+    /// `github_publish_project_unknown`.
+    pub async fn github_publish_prompt_set(
+        &self,
+        project: ProjectId,
+        answer: crate::github::GitHubPromptAnswer,
+    ) -> Result<(), EngineError> {
+        match self
+            .github_exchange(Action::PublishPromptSet { project, answer }, None)
+            .await?
+        {
+            Reply::PromptKept => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads where a project's publish stands. Input: the project. Output: the job, or
+    /// None when the project has none.
+    pub async fn github_publish_status(
+        &self,
+        project: ProjectId,
+    ) -> Result<Option<GitHubPublishJob>, EngineError> {
+        match self
+            .github_exchange(Action::PublishStatus { project }, None)
+            .await?
+        {
+            Reply::PublishStatus { job } => Ok(job),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Forgets a project's publish before its push, so Start runs fresh. Input: the
+    /// project. Output: the empty repository the job made, or the one its create may have
+    /// made, if any; a job at Pushed or Done gives `github_publish_step_invalid`.
+    pub async fn github_publish_discard(
+        &self,
+        project: ProjectId,
+    ) -> Result<Option<GitHubPublishLeft>, EngineError> {
+        match self
+            .github_exchange(Action::PublishDiscard { project }, None)
+            .await?
+        {
+            Reply::Discarded { left } => Ok(left),
+            _ => Err(unknown()),
+        }
+    }
+
+    async fn github_publish(&self, action: Action) -> Result<GitHubPublishJob, EngineError> {
+        match self.github_exchange(action, None).await? {
+            Reply::Publish { job } => Ok(job),
             _ => Err(unknown()),
         }
     }
@@ -269,6 +437,10 @@ async fn handle(
         Action::Clone { .. } => Some(projects_home(engine, admission).await?),
         _ => None,
     };
+    let drafting = match &action {
+        Action::PublishStart { .. } => Some(draft_tools(engine, authority)),
+        _ => None,
+    };
     let root = engine_root(authority)?;
     tokio::task::spawn_blocking(move || -> Result<Reply, EngineError> {
         let account = GitHub::open(&root)?;
@@ -297,10 +469,111 @@ async fn handle(
             Action::Owners => Reply::Owners {
                 owners: account.owners()?,
             },
+            Action::PublishStart { project, plan } => {
+                let (settings, codex, claude) = drafting.ok_or_else(unknown)?;
+                let draft = account.publish_begin(&project_folder(&root, &project)?, &plan)?;
+                let draft_root = root.clone();
+                Reply::Publish {
+                    job: draft.spawn(move |prompt| {
+                        let (global, local) = settings
+                            .as_ref()
+                            .ok_or(crate::instruction_cleanup::UNAVAILABLE)?;
+                        crate::instruction_cleanup::run(&crate::instruction_cleanup::Request {
+                            root: &draft_root,
+                            settings: (global, local),
+                            codex: codex.as_deref(),
+                            claude: claude.as_deref(),
+                            project: Some(&project),
+                            pool: None,
+                            prompt,
+                            agent: DRAFT_AGENT,
+                        })
+                    }),
+                }
+            }
+            Action::PublishApprove { project, lines } => Reply::Publish {
+                job: account.publish_approve(
+                    &project_folder(&root, &project)?,
+                    &crate::projects_home::owner_home()?,
+                    &lines,
+                )?,
+            },
+            Action::PublishExclude { project, path } => Reply::Publish {
+                job: account.publish_exclude(
+                    &project_folder(&root, &project)?,
+                    &crate::projects_home::owner_home()?,
+                    &path,
+                )?,
+            },
+            Action::PublishRecheck { project } => Reply::Publish {
+                job: account.publish_recheck(
+                    &project_folder(&root, &project)?,
+                    &crate::projects_home::owner_home()?,
+                )?,
+            },
+            Action::PublishContinue { project } => Reply::Publish {
+                job: account.publish_continue(
+                    &project_folder(&root, &project)?,
+                    &crate::projects_home::owner_home()?,
+                )?,
+            },
+            Action::PublishPrompt { project } => Reply::Prompt {
+                ask: account.publish_prompt(
+                    &project,
+                    &project_folder(&root, &project)?,
+                    crate::team::now_ms(),
+                )?,
+            },
+            Action::PublishPromptSet { project, answer } => {
+                project_folder(&root, &project)?;
+                account.publish_prompt_set(&project, answer, crate::team::now_ms())?;
+                Reply::PromptKept
+            }
+            Action::PublishStatus { project } => Reply::PublishStatus {
+                job: account.publish_status(&project_folder(&root, &project)?)?,
+            },
+            Action::PublishDiscard { project } => Reply::Discarded {
+                left: account.publish_discard(&project_folder(&root, &project)?)?,
+            },
         })
     })
     .await
     .map_err(|_| unknown())?
+}
+
+/// What a publish's .gitignore draft runs with: the engine's settings files and the
+/// model harnesses it verified, as Edit with AI runs. Inputs: the engine and the
+/// authority. Output: the settings files and the Codex and Claude Code paths, each none
+/// when the engine has not got it, so the draft falls back to the baseline.
+fn draft_tools(
+    engine: &Engine,
+    authority: &Authority,
+) -> (Option<(PathBuf, PathBuf)>, Option<PathBuf>, Option<PathBuf>) {
+    let (codex, claude) = match authority.native_auth_host.lock() {
+        Ok(host) => host.model_harnesses(),
+        Err(_) => (None, None),
+    };
+    let path = |host: Option<Arc<crate::engine::native_auth_host::RegisteredNativeAuthHost>>| {
+        host.and_then(|host| host.verified_path().ok().map(Path::to_path_buf))
+    };
+    (engine.settings_files(), path(codex), path(claude))
+}
+
+/// Finds the folder a publish works on from the project's stored setup, so a client names
+/// a project by its id and never by a path. Inputs: the engine root and the project.
+/// Output: the absolute folder, or `github_publish_project_unknown`,
+/// `github_publish_unavailable`.
+fn project_folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> {
+    let unavailable = || failure("github_publish_unavailable");
+    let db = crate::landing::open(root).map_err(|_| unavailable())?;
+    let folder = crate::project_setup::load_setup(&db, project)
+        .map_err(|_| unavailable())?
+        .ok_or_else(|| failure("github_publish_project_unknown"))?
+        .project_folder();
+    if !folder.is_absolute() {
+        return Err(failure("github_publish_project_unknown"));
+    }
+    Ok(folder)
 }
 
 async fn projects_home(engine: &Engine, admission: &Admission) -> Result<PathBuf, EngineError> {
@@ -363,9 +636,11 @@ fn public_code(error: EngineError) -> String {
 /// Input: the request. Output: its name, None for a request that changes something.
 fn read_kind(action: &Action) -> Option<&'static str> {
     match action {
+        Action::PublishPrompt { .. } => Some("github.publish_prompt"),
         Action::Status => Some("github.status"),
         Action::Repos { .. } => Some("github.repos"),
         Action::Owners => Some("github.owners"),
+        Action::PublishStatus { .. } => Some("github.publish_status"),
         _ => None,
     }
 }

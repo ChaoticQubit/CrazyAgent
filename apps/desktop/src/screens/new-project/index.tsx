@@ -16,7 +16,8 @@ import { homePath } from "../settings/harnesses";
 import { NotReady } from "../project/shared";
 import { AccessLevels, accessLabel, policyOf } from "../project/access";
 import { PoolPicker } from "./pool-picker";
-import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "./fields";
+import { BasicsFields, PublishFields, ResearchSwitches, RoadmapSwitch, useGitHubPublish } from "./fields";
+import { createWait, emptyPublish, publishOutcome, startPublish } from "./publish";
 import { TeamEditor } from "./team-editor";
 import {
   STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, draftAccess, emptyDraft, levelUnavailable, poolName, preselectPool,
@@ -117,6 +118,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const mounted = useRef(true);
   const follow = following === null ? null : setupFollow(session?.intake ?? null, following);
   const creating = starting || finishing || following !== null;
+  const github = useGitHubPublish();
 
   const setDraft = (next: ProjectDraft) => {
     setDraftState(next);
@@ -212,7 +214,8 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const index = STEPS.findIndex((item) => item.id === step);
   const showBasicsErrors = visited.has("documents") || visited.has("work") || visited.has("pool") || visited.has("team") || draft.name !== "";
   const teamOk = draft.team !== null && teamValid(draft.team, harnessValue);
-  const canCreate = catalog?.kind === "ok" && Object.keys(basics).length === 0 && teamOk && !creating;
+  const publishWait = createWait(draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered, github.signedIn, github.checking);
+  const canCreate = catalog?.kind === "ok" && Object.keys(basics).length === 0 && !publishWait && teamOk && !creating;
 
   async function create() {
     if (!canCreate) return;
@@ -266,6 +269,9 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
       }
     }
     if (!mounted.current) return;
+    const publishing = startPublish(id, draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered);
+    const outcome = publishOutcome(publishing ? await publishing : null);
+    if (outcome) message = `${message} ${outcome}`;
     void dismissIntake(job);
     kept = null;
     await session?.refreshProjects();
@@ -320,6 +326,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         {step === "basics" && <div className="pj-stack">
           <h2 id="pj-step-title">Basics</h2>
           <BasicsFields prefix="np" draft={draft} onChange={setDraft} catalog={catalog} errors={basics} showErrors={showBasicsErrors} autoFocus />
+          <PublishFields prefix="np" draft={draft} onChange={setDraft} github={github} />
           <div className="pj-field">
             <span className="pj-label">Project folder</span>
             <p>CrazyAgent creates a new folder for this project when you create it.</p>
@@ -387,7 +394,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           {step === "team"
             ? <Button type="submit" variant="primary" icon="folder-plus" pending={creating} pendingLabel="Creating..." disabled={!canCreate} aria-describedby={!canCreate ? "np-create-why" : undefined}>Create project</Button>
             : <Button type="submit" variant="primary">Next</Button>}
-          {step === "team" && !canCreate && !creating && <span className="pj-small pj-muted" id="np-create-why">{catalog?.kind !== "ok" ? "Create project needs the engine's project setup." : Object.keys(basics).length ? "Finish Basics first." : "Fix the team above first."}</span>}
+          {step === "team" && !canCreate && !creating && <span className="pj-small pj-muted" id="np-create-why">{catalog?.kind !== "ok" ? "Create project needs the engine's project setup." : Object.keys(basics).length ? "Finish Basics first." : publishWait ?? "Fix the team above first."}</span>}
         </footer>
       </form>
     </div>

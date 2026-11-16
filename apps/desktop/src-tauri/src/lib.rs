@@ -32,7 +32,10 @@ use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountExtras, AccountPage, AccountSecret,
     ModelAccessCollection, NativeAuthMethod,
 };
-use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
+use crazyagent::github::{
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
+    GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
+};
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
@@ -2522,6 +2525,123 @@ async fn desktop_github_repos(
 ) -> Result<GitHubRepoPage, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.github_repos(page)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_owners(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<GitHubOwners, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_owners()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_status(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<Option<GitHubPublishJob>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_status(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_approve(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    lines: Vec<String>,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .github_publish_approve(&project, lines)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_exclude(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    path: String,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_exclude(&project, path)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_recheck(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_recheck(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_continue(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_continue(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_prompt(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_prompt(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_prompt_set(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    answer: crazyagent::github::GitHubPromptAnswer,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .github_publish_prompt_set(&project, answer)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_discard(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<Option<GitHubPublishLeft>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_discard(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_start(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    plan: GitHubPublishPlan,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_start(&project, plan)?;
     call.await
 }
 
@@ -5136,6 +5256,16 @@ native_commands! {
     desktop_github_use_cli,
     desktop_github_sign_out,
     desktop_github_repos,
+    desktop_github_owners,
+    desktop_github_publish_status,
+    desktop_github_publish_approve,
+    desktop_github_publish_exclude,
+    desktop_github_publish_recheck,
+    desktop_github_publish_continue,
+    desktop_github_publish_prompt,
+    desktop_github_publish_prompt_set,
+    desktop_github_publish_discard,
+    desktop_github_publish_start,
     desktop_clone_repo,
     desktop_icloud_download,
     desktop_icloud_progress,

@@ -67,7 +67,10 @@ fn bearer(seen: &Seen, token: &str) -> bool {
 
 fn user(seen: &Seen, token: &str) -> Answer {
     if bearer(seen, token) {
-        Answer::json(200, serde_json::json!({ "login": "octo-cat" }))
+        Answer::json(
+            200,
+            serde_json::json!({ "login": "octo-cat", "id": 583_231 }),
+        )
     } else {
         Answer::json(401, serde_json::json!({ "message": "Bad credentials" }))
     }
@@ -1521,4 +1524,1878 @@ fn a_repository_record_is_found_in_any_case_and_a_tampered_one_is_refused() {
         );
         assert_eq!(server.seen().len(), before, "{tampered}");
     }
+}
+
+fn git_out(args: &[&str], directory: &Path) -> String {
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .args(args)
+            .current_dir(directory)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", directory)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(output.status.success(), "git {args:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn http_backend(served: &Path, seen: &Seen) -> Answer {
+    let mut command = Command::new("/usr/bin/git");
+    command
+        .arg("http-backend")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_PROJECT_ROOT", served)
+        .env("GIT_HTTP_EXPORT_ALL", "1")
+        .env("REMOTE_USER", "x-access-token")
+        .env("REQUEST_METHOD", &seen.method)
+        .env("PATH_INFO", &seen.path)
+        .env("QUERY_STRING", &seen.query)
+        .env("CONTENT_TYPE", seen.header("content-type").unwrap_or(""))
+        .env("CONTENT_LENGTH", seen.body.len().to_string())
+        .env(
+            "HTTP_CONTENT_ENCODING",
+            seen.header("content-encoding").unwrap_or(""),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let body = seen.body.clone();
+    let writer = std::thread::spawn(move || {
+        let _ = std::io::Write::write_all(&mut stdin, &body);
+    });
+    let output = child.wait_with_output().unwrap();
+    writer.join().unwrap();
+    let end = output
+        .stdout
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    let mut answer = Answer {
+        status: 200,
+        headers: Vec::new(),
+        body: output.stdout[end + 4..].to_vec(),
+    };
+    for line in String::from_utf8_lossy(&output.stdout[..end]).split("\r\n") {
+        let (name, value) = line.split_once(':').unwrap();
+        if name.eq_ignore_ascii_case("status") {
+            answer.status = value.trim()[..3].parse().unwrap();
+        } else if !name.eq_ignore_ascii_case("content-length") {
+            answer
+                .headers
+                .push((name.to_owned(), value.trim().to_owned()));
+        }
+    }
+    answer
+}
+
+fn pushed_repository(
+    full_name: &str,
+    secret_text: &str,
+    refuse_push: bool,
+) -> (tempfile::TempDir, PathBuf, Server) {
+    let served = tempfile::tempdir().unwrap();
+    let root = served.path().canonicalize().unwrap();
+    let bare = root.join(format!("{full_name}.git"));
+    std::fs::create_dir_all(&bare).unwrap();
+    git(&["init", "--quiet", "--bare"], &bare);
+    let basic = format!(
+        "Basic {}",
+        base64(format!("x-access-token:{secret_text}").as_bytes())
+    );
+    let expected = secret_text.to_owned();
+    let server = Server::start(move |seen, _| {
+        if seen.path == "/user" {
+            return user(seen, &expected);
+        }
+        if seen.header("authorization") != Some(basic.as_str()) {
+            let mut answer = Answer::bytes(401, Vec::new());
+            answer
+                .headers
+                .push(("WWW-Authenticate".into(), "Basic realm=\"git\"".into()));
+            return answer;
+        }
+        if refuse_push && seen.method == "POST" {
+            return Answer::bytes(403, Vec::new());
+        }
+        http_backend(&root, seen)
+    });
+    (served, bare, server)
+}
+
+fn published_project() -> (tempfile::TempDir, PathBuf, GitHubCommitted) {
+    let folder = tempfile::tempdir().unwrap();
+    let project = folder.path().canonicalize().unwrap();
+    git(&["init", "--quiet", "--initial-branch=main"], &project);
+    std::fs::write(project.join("README.md"), "hello\n").unwrap();
+    git(&["add", "README.md"], &project);
+    git(&["commit", "--quiet", "-m", "first"], &project);
+    let commit = git_out(&["rev-parse", "HEAD"], &project).trim().to_owned();
+    let committed = GitHubCommitted {
+        branch: "main".into(),
+        commit,
+        left_out: 0,
+    };
+    (folder, project, committed)
+}
+
+fn publish_homes(root: &Path) -> Vec<String> {
+    std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".publish-home-"))
+        .collect()
+}
+
+#[test]
+fn publish_commit_uses_the_owners_identity_else_the_github_noreply_address() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let expected = secret_text.clone();
+    let server = Server::start(move |seen, _| user(seen, &expected));
+    let account = scratch.account(&server);
+    let folder = tempfile::tempdir().unwrap();
+    let project = folder.path().canonicalize().unwrap();
+    let owner_home = tempfile::tempdir().unwrap();
+    std::fs::write(project.join("a.txt"), "a\n").unwrap();
+    let local = account.publish_inspect(&project).unwrap();
+    let choices = GitHubPrepare {
+        private: true,
+        docs: false,
+        approved: Vec::new(),
+    };
+    let written = account.publish_prepare(&project, &local, &choices).unwrap();
+    assert_eq!(
+        account
+            .publish_commit(&project, owner_home.path(), &written)
+            .unwrap_err()
+            .0,
+        "github_not_signed_in"
+    );
+    account.use_token(secret(&secret_text)).unwrap();
+    let committed = account
+        .publish_commit(&project, owner_home.path(), &written)
+        .unwrap();
+    assert_eq!(committed.branch, "main");
+    assert_eq!(
+        git_out(&["log", "--format=%an|%ae|%s"], &project),
+        "octo-cat|583231+octo-cat@users.noreply.github.com|Publish with CrazyAgent\n"
+    );
+    std::fs::write(
+        owner_home.path().join(".gitconfig"),
+        "[user]\n\tname = Ada Lovelace\n\temail = ada@example.invalid\n",
+    )
+    .unwrap();
+    std::fs::write(project.join(".gitignore"), "/graphify-out/\nnew/\n").unwrap();
+    let again = account
+        .publish_commit(&project, owner_home.path(), &[String::from(".gitignore")])
+        .unwrap();
+    assert_ne!(again.commit, committed.commit);
+    assert_eq!(
+        git_out(&["log", "-1", "--format=%an|%ae"], &project),
+        "Ada Lovelace|ada@example.invalid\n"
+    );
+    assert!(publish_homes(scratch.root.path()).is_empty());
+}
+
+#[test]
+fn publish_push_sends_from_a_staging_repository_and_points_the_project_at_github() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, bare, server) = pushed_repository("octo-cat/tool", &secret_text, false);
+    let account = scratch.account(&server);
+    let (_folder, project, committed) = published_project();
+    let remote = format!("http://127.0.0.1:{}/octo-cat/tool.git", server.port);
+    git(
+        &[
+            "config",
+            "url.http://127.0.0.1:9/.insteadOf",
+            &format!("http://127.0.0.1:{}/", server.port),
+        ],
+        &project,
+    );
+    git(&["config", "http.extraHeader", "X-Planted: yes"], &project);
+    git(
+        &[
+            "config",
+            "credential.helper",
+            "!f() { echo password=planted; }; f",
+        ],
+        &project,
+    );
+    assert_eq!(
+        account
+            .publish_push(&project, "octo-cat/tool", &committed)
+            .unwrap_err()
+            .0,
+        "github_not_signed_in"
+    );
+    account.use_token(secret(&secret_text)).unwrap();
+    account
+        .publish_push(&project, "octo-cat/tool", &committed)
+        .unwrap();
+    assert_eq!(
+        git_out(&["rev-parse", "refs/heads/main"], &bare).trim(),
+        committed.commit
+    );
+    let seen = server.seen();
+    assert!(seen.iter().any(|request| {
+        request.method == "POST" && request.path == "/octo-cat/tool.git/git-receive-pack"
+    }));
+    assert!(
+        seen.iter()
+            .all(|request| request.header("x-planted").is_none())
+    );
+    let config = |key: &str| {
+        git_out(&["config", "--get", key], &project)
+            .trim()
+            .to_owned()
+    };
+    assert_eq!(config("remote.origin.url"), remote);
+    assert_eq!(
+        config("remote.origin.fetch"),
+        "+refs/heads/*:refs/remotes/origin/*"
+    );
+    assert_eq!(config("branch.main.remote"), "origin");
+    assert_eq!(config("branch.main.merge"), "refs/heads/main");
+    assert_eq!(
+        git_out(&["rev-parse", "refs/remotes/origin/main"], &project).trim(),
+        committed.commit
+    );
+    assert!(!tree_holds(&project, &secret_text));
+    assert!(publish_homes(scratch.root.path()).is_empty());
+    account
+        .publish_push(&project, "octo-cat/tool", &committed)
+        .unwrap();
+    assert_eq!(config("remote.origin.url"), remote);
+}
+
+#[test]
+fn publish_push_refuses_a_moved_head_and_a_refused_push_and_leaves_the_project_alone() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, bare, server) = pushed_repository("octo-cat/tool", &secret_text, true);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project, committed) = published_project();
+    let before = server.seen().len();
+    for moved in [
+        GitHubCommitted {
+            branch: "other".into(),
+            ..committed.clone()
+        },
+        GitHubCommitted {
+            commit: "0".repeat(40),
+            ..committed.clone()
+        },
+        GitHubCommitted {
+            commit: "zz".into(),
+            ..committed.clone()
+        },
+    ] {
+        assert_eq!(
+            account
+                .publish_push(&project, "octo-cat/tool", &moved)
+                .unwrap_err()
+                .0,
+            "github_publish_head_moved",
+            "{moved:?}"
+        );
+    }
+    assert_eq!(
+        account
+            .publish_push(&project, "../tool", &committed)
+            .unwrap_err()
+            .0,
+        "github_repo_name_invalid"
+    );
+    assert_eq!(server.seen().len(), before);
+    assert_eq!(
+        account
+            .publish_push(&project, "octo-cat/tool", &committed)
+            .unwrap_err()
+            .0,
+        "github_publish_push_failed"
+    );
+    assert!(server.seen().len() > before);
+    let config = std::fs::read_to_string(project.join(".git/config")).unwrap();
+    assert!(!config.contains("remote"), "{config}");
+    assert!(!config.contains("[branch"), "{config}");
+    assert!(git_out(&["for-each-ref", "refs/remotes"], &project).is_empty());
+    assert!(git_out(&["for-each-ref"], &bare).is_empty());
+    assert!(publish_homes(scratch.root.path()).is_empty());
+}
+
+#[test]
+fn publish_push_refuses_a_config_hook_in_the_project_before_anything_is_sent() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, bare, server) = pushed_repository("octo-cat/tool", &secret_text, false);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project, committed) = published_project();
+    let marks = tempfile::tempdir().unwrap();
+    let mark = marks.path().join("ran");
+    git(
+        &["config", "hook.mark.event", "reference-transaction"],
+        &project,
+    );
+    let command = format!("/usr/bin/touch '{}'", mark.display());
+    git(&["config", "hook.mark.command", &command], &project);
+    let before = server.seen().len();
+    let pushed = account.publish_push(&project, "octo-cat/tool", &committed);
+    assert!(!mark.exists());
+    assert_eq!(pushed.unwrap_err().0, "github_publish_hooks_set");
+    assert_eq!(server.seen().len(), before);
+    assert!(git_out(&["for-each-ref"], &bare).is_empty());
+    let config = std::fs::read_to_string(project.join(".git/config")).unwrap();
+    assert!(!config.contains("[remote"), "{config}");
+    assert!(publish_homes(scratch.root.path()).is_empty());
+}
+
+#[test]
+fn publish_push_never_runs_a_hook_an_include_keyed_on_the_remote_url_brings_in() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, bare, server) = pushed_repository("octo-cat/tool", &secret_text, false);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project, committed) = published_project();
+    let marks = tempfile::tempdir().unwrap();
+    let mark = marks.path().join("ran");
+    std::fs::write(
+        project.join(".git/gh.inc"),
+        format!(
+            "[hook \"mark\"]\n\tevent = reference-transaction\n\tcommand = /usr/bin/touch '{}'\n",
+            mark.display()
+        ),
+    )
+    .unwrap();
+    git(
+        &[
+            "config",
+            "includeIf.hasconfig:remote.*.url:**.path",
+            "gh.inc",
+        ],
+        &project,
+    );
+    account
+        .publish_push(&project, "octo-cat/tool", &committed)
+        .unwrap();
+    assert!(!mark.exists());
+    assert_eq!(
+        git_out(&["rev-parse", "refs/heads/main"], &bare).trim(),
+        committed.commit
+    );
+    assert_eq!(
+        git_out(&["rev-parse", "refs/remotes/origin/main"], &project).trim(),
+        committed.commit
+    );
+    assert!(publish_homes(scratch.root.path()).is_empty());
+}
+
+const LEAKED: &str = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+
+struct Stand {
+    create: u16,
+    private: bool,
+    branches: bool,
+    created_at: String,
+    scopes: Option<&'static str>,
+    recorded: Vec<bool>,
+}
+
+fn rfc3339(seconds: u64) -> String {
+    let days = i64::try_from(seconds / 86_400).unwrap();
+    let rest = seconds % 86_400;
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let of_era = shifted.rem_euclid(146_097);
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * of_year + 2) / 153;
+    let day = of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn publish_stand(
+    secret_text: &str,
+    scratch: &Scratch,
+    names: &[&str],
+) -> (tempfile::TempDir, PathBuf, Arc<Mutex<Stand>>, Server) {
+    let served = tempfile::tempdir().unwrap();
+    let root = served.path().canonicalize().unwrap();
+    for name in names {
+        let bare = root.join(format!("octo-cat/{name}.git"));
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&["init", "--quiet", "--bare"], &bare);
+    }
+    let stand = Arc::new(Mutex::new(Stand {
+        create: 201,
+        private: true,
+        branches: false,
+        created_at: rfc3339(now()),
+        scopes: None,
+        recorded: Vec::new(),
+    }));
+    let records = scratch
+        .root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("github-publish");
+    let basic = format!(
+        "Basic {}",
+        base64(format!("x-access-token:{secret_text}").as_bytes())
+    );
+    let expected = secret_text.to_owned();
+    let held = Arc::clone(&stand);
+    let backend = root.clone();
+    let server = Server::start(move |seen, _| {
+        let mut stand = held.lock().unwrap();
+        let path = seen.path.as_str();
+        if path == "/user" {
+            let mut answer = user(seen, &expected);
+            if let Some(scopes) = stand.scopes {
+                answer
+                    .headers
+                    .push(("X-OAuth-Scopes".into(), scopes.into()));
+            }
+            return answer;
+        }
+        if path.starts_with("/octo-cat/") {
+            if seen.header("authorization") != Some(basic.as_str()) {
+                let mut answer = Answer::bytes(401, Vec::new());
+                answer
+                    .headers
+                    .push(("WWW-Authenticate".into(), "Basic realm=\"git\"".into()));
+                return answer;
+            }
+            return http_backend(&backend, seen);
+        }
+        if !bearer(seen, &expected) {
+            return Answer::json(401, serde_json::json!({ "message": "Bad credentials" }));
+        }
+        if seen.method == "POST" && path == "/user/repos" {
+            let creating = std::fs::read_dir(&records)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|entry| {
+                    std::fs::read_to_string(entry.path())
+                        .is_ok_and(|text| text.contains("\"step\":\"creating\""))
+                });
+            stand.recorded.push(creating);
+            let body: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
+            let name = body["name"].as_str().unwrap().to_owned();
+            return match stand.create {
+                201 => Answer::json(
+                    201,
+                    serde_json::json!({
+                        "full_name": format!("octo-cat/{name}"),
+                        "node_id": "R_kgDOtool",
+                        "private": body["private"],
+                    }),
+                ),
+                422 => Answer::json(
+                    422,
+                    serde_json::json!({
+                        "message": "Repository creation failed.",
+                        "errors": [{
+                            "resource": "Repository",
+                            "code": "custom",
+                            "field": "name",
+                            "message": "name already exists on this account",
+                        }],
+                    }),
+                ),
+                status => Answer::json(status, serde_json::json!({})),
+            };
+        }
+        if seen.method == "GET"
+            && let Some(rest) = path.strip_prefix("/repos/octo-cat/")
+        {
+            match rest.split_once('/') {
+                None => {
+                    return Answer::json(
+                        200,
+                        serde_json::json!({
+                            "full_name": format!("octo-cat/{rest}"),
+                            "node_id": "R_kgDOtool",
+                            "private": stand.private,
+                            "created_at": stand.created_at,
+                            "pushed_at": null,
+                            "size": 0,
+                        }),
+                    );
+                }
+                Some((_, "branches")) => {
+                    let branches = if stand.branches {
+                        serde_json::json!([{ "name": "main" }])
+                    } else {
+                        serde_json::json!([])
+                    };
+                    return Answer::json(200, branches);
+                }
+                Some(_) => {}
+            }
+        }
+        Answer::json(404, serde_json::json!({ "message": "Not Found" }))
+    });
+    (served, root, stand, server)
+}
+
+fn plan(name: &str) -> GitHubPublishPlan {
+    GitHubPublishPlan {
+        owner: "octo-cat".into(),
+        name: name.into(),
+        description: "A small tool".into(),
+        private: true,
+        docs: false,
+    }
+}
+
+fn baseline() -> Vec<String> {
+    [".env*", "*.pem", "*.key", ".DS_Store"]
+        .map(String::from)
+        .to_vec()
+}
+
+fn no_draft(_prompt: &str) -> Result<String, &'static str> {
+    Err(crate::instruction_cleanup::UNAVAILABLE)
+}
+
+fn creates(server: &Server) -> Vec<Seen> {
+    server
+        .seen()
+        .into_iter()
+        .filter(|seen| seen.method == "POST" && seen.path == "/user/repos")
+        .collect()
+}
+
+fn new_project(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
+    let folder = tempfile::tempdir().unwrap();
+    let project = folder.path().canonicalize().unwrap();
+    std::fs::create_dir(project.join(".crazyagent")).unwrap();
+    for (path, text) in files {
+        let path = project.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    (folder, project)
+}
+
+fn done_on(job: &GitHubPublishJob) -> (String, Vec<GitHubRuleOutcome>) {
+    match &job.step {
+        GitHubPublishStep::Done {
+            full_name,
+            outcomes,
+        } => (full_name.clone(), outcomes.clone()),
+        other => panic!("not done: {other:?} {:?}", job.stopped),
+    }
+}
+
+#[test]
+fn publish_job_runs_from_the_ignore_lines_to_done_and_records_each_step() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    assert_eq!(account.publish_status(&project).unwrap(), None);
+    let started = account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    assert_eq!(
+        started,
+        GitHubPublishJob {
+            project: project.clone(),
+            plan: plan("tool"),
+            lines: Vec::new(),
+            written: Vec::new(),
+            step: GitHubPublishStep::Lines {
+                lines: baseline(),
+                draft: GitHubIgnoreDraft::Baseline {
+                    reason: crate::instruction_cleanup::UNAVAILABLE.into(),
+                },
+            },
+            stopped: None,
+            made: None,
+        }
+    );
+    assert!(!project.join(".git").exists());
+    assert!(creates(&server).is_empty());
+    assert_eq!(account.publish_status(&project).unwrap(), Some(started));
+    let lines: Vec<String> = [".env*", "*.pem", "target/"].map(String::from).to_vec();
+    let done = account
+        .publish_approve(&project, owner_home.path(), &lines)
+        .unwrap();
+    let (full_name, outcomes) = done_on(&done);
+    assert_eq!(full_name, "octo-cat/tool");
+    assert_eq!(outcomes.len(), GitHubRule::ALL.len() - 2);
+    assert_eq!(done.stopped, None);
+    assert_eq!(done.lines, lines);
+    assert_eq!(done.written, [".gitignore"]);
+    assert_eq!(
+        std::fs::read_to_string(project.join(".gitignore")).unwrap(),
+        "/.crazyagent/\n/graphify-out/\n.env*\n*.pem\ntarget/\n"
+    );
+    assert_eq!(
+        git_out(&["ls-tree", "-r", "--name-only", "HEAD"], &project),
+        ".gitignore\nmain.rs\n"
+    );
+    let bare = root.join("octo-cat/tool.git");
+    assert_eq!(
+        git_out(&["rev-parse", "refs/heads/main"], &bare),
+        git_out(&["rev-parse", "HEAD"], &project)
+    );
+    assert_eq!(
+        git_out(&["config", "--get", "remote.origin.url"], &project),
+        format!("http://127.0.0.1:{}/octo-cat/tool.git\n", server.port)
+    );
+    let made = creates(&server);
+    assert_eq!(made.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&made[0].body).unwrap();
+    assert_eq!(body["name"], "tool");
+    assert_eq!(body["private"], true);
+    assert_eq!(
+        account.publish_status(&project).unwrap(),
+        Some(done.clone())
+    );
+    let records = scratch
+        .root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("github-publish");
+    let files: Vec<PathBuf> = std::fs::read_dir(&records)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let name = files[0].file_name().unwrap().to_str().unwrap().to_owned();
+    assert!(
+        name.len() == 69
+            && name.ends_with(".json")
+            && name[..64].bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{name}"
+    );
+    let metadata = std::fs::symlink_metadata(&files[0]).unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert!(
+        !std::fs::read_to_string(&files[0])
+            .unwrap()
+            .contains(&secret_text)
+    );
+    assert_eq!(
+        account
+            .publish_continue(&project, owner_home.path())
+            .unwrap(),
+        done
+    );
+    assert_eq!(
+        account
+            .publish_start(&project, &plan("tool"), no_draft)
+            .unwrap_err()
+            .0,
+        "github_publish_on_github"
+    );
+}
+
+#[test]
+fn publish_job_proposes_the_agents_lines_after_the_baseline_and_never_shows_it_a_file() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[
+        ("src/main.rs", "fn main() { let word = \"PLAINWORD\"; }\n"),
+        (".idea/workspace.xml", "<x/>\n"),
+        (".gitignore", "target/\n.env*\n"),
+    ]);
+    let asked = std::cell::RefCell::new(String::new());
+    let reply = "node_modules/\n# deps\n!.env*\n*\n.idea/\ntarget/\nSorry, no more.\n*.log\n";
+    let started = account
+        .publish_start(&project, &plan("tool"), |prompt| {
+            *asked.borrow_mut() = prompt.to_owned();
+            Ok(reply.to_owned())
+        })
+        .unwrap();
+    assert_eq!(
+        started.step,
+        GitHubPublishStep::Lines {
+            lines: [
+                "*.pem",
+                "*.key",
+                ".DS_Store",
+                "node_modules/",
+                ".idea/",
+                "*.log"
+            ]
+            .map(String::from)
+            .to_vec(),
+            draft: GitHubIgnoreDraft::Agent,
+        }
+    );
+    let asked = asked.into_inner();
+    assert!(asked.contains("src/main.rs\n"), "{asked}");
+    assert!(asked.contains(".idea/\n"), "{asked}");
+    assert!(asked.contains("target/\n"), "{asked}");
+    assert!(!asked.contains("PLAINWORD"), "{asked}");
+    assert!(!project.join(".git").exists());
+    assert_eq!(
+        std::fs::read_to_string(project.join(".gitignore")).unwrap(),
+        "target/\n.env*\n"
+    );
+    assert_eq!(account.publish_status(&project).unwrap(), Some(started));
+    assert!(creates(&server).is_empty());
+}
+
+#[test]
+fn publish_job_falls_back_to_the_baseline_and_says_why_no_agent_drafted() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let started = account
+        .publish_start(&project, &plan("tool"), |_| {
+            Err("instructions_cleanup_no_account")
+        })
+        .unwrap();
+    assert_eq!(
+        started.step,
+        GitHubPublishStep::Lines {
+            lines: baseline(),
+            draft: GitHubIgnoreDraft::Baseline {
+                reason: "instructions_cleanup_no_account".into(),
+            },
+        }
+    );
+    assert!(creates(&server).is_empty());
+}
+
+fn unused_server() -> Server {
+    Server::start(|_, _| Answer::json(404, serde_json::json!({})))
+}
+
+fn project_id(id: &str) -> crate::protocol::ProjectId {
+    crate::protocol::ProjectId::new(id).unwrap()
+}
+
+#[test]
+fn the_publish_prompt_asks_a_project_without_a_remote_and_not_now_waits_exactly_seven_days() {
+    let scratch = Scratch::new();
+    let server = unused_server();
+    let account = scratch.account(&server);
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let (_other, other) = new_project(&[("main.rs", "fn main() {}\n")]);
+    git(&["init", "-q", "-b", "main"], &other);
+    let (alpha, beta) = (project_id("alpha"), project_id("beta"));
+    let now = 1_800_000_000_000_i64;
+    assert!(account.publish_prompt(&alpha, &project, now).unwrap());
+    assert!(account.publish_prompt(&beta, &other, now).unwrap());
+    account
+        .publish_prompt_set(&alpha, GitHubPromptAnswer::NotNow, now)
+        .unwrap();
+    assert!(!account.publish_prompt(&alpha, &project, now).unwrap());
+    assert!(
+        !account
+            .publish_prompt(&alpha, &project, now + SNOOZE_MS - 1)
+            .unwrap()
+    );
+    assert!(
+        account
+            .publish_prompt(&alpha, &project, now + SNOOZE_MS)
+            .unwrap()
+    );
+    assert!(
+        account.publish_prompt(&beta, &other, now).unwrap(),
+        "a Not now is kept for its own project only"
+    );
+    assert_eq!(SNOOZE_MS, 604_800_000);
+}
+
+#[test]
+fn dont_ask_again_never_asks_and_a_later_not_now_does_not_undo_it() {
+    let scratch = Scratch::new();
+    let server = unused_server();
+    let account = scratch.account(&server);
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let alpha = project_id("alpha");
+    let now = 1_800_000_000_000_i64;
+    assert!(account.publish_prompt(&alpha, &project, now).unwrap());
+    account
+        .publish_prompt_set(&alpha, GitHubPromptAnswer::Never, now)
+        .unwrap();
+    account
+        .publish_prompt_set(&alpha, GitHubPromptAnswer::NotNow, now)
+        .unwrap();
+    for later in [now, now + SNOOZE_MS, now + 100 * SNOOZE_MS] {
+        assert!(!account.publish_prompt(&alpha, &project, later).unwrap());
+    }
+    let reopened = scratch.account(&server);
+    assert!(
+        !reopened
+            .publish_prompt(&alpha, &project, now + SNOOZE_MS)
+            .unwrap(),
+        "the answer is kept in the engine database"
+    );
+}
+
+#[test]
+fn a_project_with_any_remote_or_a_git_that_is_not_a_plain_folder_is_never_asked() {
+    let scratch = Scratch::new();
+    let server = unused_server();
+    let account = scratch.account(&server);
+    let now = 1_800_000_000_000_i64;
+    let alpha = project_id("alpha");
+    for url in [
+        "https://github.com/octo-cat/tool.git",
+        "git@github.com:octo-cat/tool.git",
+        "https://gitlab.com/octo-cat/tool.git",
+    ] {
+        let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+        git(&["init", "-q", "-b", "main"], &project);
+        assert!(account.publish_prompt(&alpha, &project, now).unwrap());
+        git(&["remote", "add", "origin", url], &project);
+        assert!(
+            !account.publish_prompt(&alpha, &project, now).unwrap(),
+            "{url}"
+        );
+    }
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    assert!(account.publish_prompt(&alpha, &project, now).unwrap());
+    std::fs::write(project.join(".git"), "gitdir: /elsewhere/.git\n").unwrap();
+    assert!(!account.publish_prompt(&alpha, &project, now).unwrap());
+    let gone = project.join("gone");
+    assert!(!account.publish_prompt(&alpha, &gone, now).unwrap());
+}
+
+#[test]
+fn a_project_with_a_publish_recorded_is_not_asked() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let alpha = project_id("alpha");
+    let now = 1_800_000_000_000_i64;
+    assert!(account.publish_prompt(&alpha, &project, now).unwrap());
+    drop(account.publish_begin(&project, &plan("tool")).unwrap());
+    assert!(account.publish_status(&project).unwrap().is_some());
+    assert!(!account.publish_prompt(&alpha, &project, now).unwrap());
+}
+
+#[test]
+fn a_spawned_draft_answers_with_the_job_at_drafting_while_the_agent_still_drafts() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let (asked, answered) = std::sync::mpsc::channel::<bool>();
+    let started = account
+        .publish_begin(&project, &plan("tool"))
+        .unwrap()
+        .spawn(move |_| {
+            let released = held.recv_timeout(Duration::from_secs(5)).is_ok();
+            let _ = asked.send(released);
+            Ok("node_modules/\n".to_owned())
+        });
+    assert_eq!(started.step, GitHubPublishStep::Drafting, "{started:?}");
+    assert_eq!(
+        account
+            .publish_start(&project, &plan("tool"), no_draft)
+            .unwrap_err()
+            .0,
+        "github_publish_running"
+    );
+    let _ = release.send(());
+    assert_eq!(
+        answered.recv_timeout(Duration::from_secs(10)),
+        Ok(true),
+        "the Start answered while the agent still drafted"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let drafted = loop {
+        match account.publish_status(&project).unwrap() {
+            Some(job) if job.step != GitHubPublishStep::Drafting => break job,
+            _ => {
+                assert!(Instant::now() < deadline, "the draft was never saved");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    };
+    assert!(
+        matches!(
+            &drafted.step,
+            GitHubPublishStep::Lines {
+                draft: GitHubIgnoreDraft::Agent,
+                ..
+            }
+        ),
+        "{drafted:?}"
+    );
+}
+
+#[test]
+fn publish_start_records_the_job_at_drafting_and_holds_the_publish_while_the_agent_drafts() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let seen = std::cell::RefCell::new(None);
+    let started = account
+        .publish_start(&project, &plan("tool"), |_| {
+            *seen.borrow_mut() = Some((
+                account.publish_status(&project).map_err(|error| error.0),
+                account
+                    .publish_start(&project, &plan("tool"), no_draft)
+                    .map_err(|error| error.0),
+                account
+                    .publish_approve(&project, &project, &baseline())
+                    .map_err(|error| error.0),
+            ));
+            Ok("node_modules/\n".to_owned())
+        })
+        .unwrap();
+    let seen = seen.into_inner();
+    let Some((status, again, approve)) = seen else {
+        panic!("the agent was not asked");
+    };
+    assert!(
+        matches!(&status, Ok(Some(job)) if job.step == GitHubPublishStep::Drafting && job.lines.is_empty()),
+        "{status:?}"
+    );
+    assert_eq!(again.unwrap_err(), "github_publish_running");
+    assert_eq!(approve.unwrap_err(), "github_publish_running");
+    assert!(
+        matches!(
+            &started.step,
+            GitHubPublishStep::Lines {
+                draft: GitHubIgnoreDraft::Agent,
+                ..
+            }
+        ),
+        "{started:?}"
+    );
+    assert_eq!(account.publish_status(&project).unwrap(), Some(started));
+    assert!(creates(&server).is_empty());
+}
+
+#[test]
+fn a_draft_that_stopped_leaves_the_baseline_lines_at_the_next_status() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let mut stopped = account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    stopped.step = GitHubPublishStep::Drafting;
+    state::save_job(&account.root, &stopped).unwrap();
+    let closed = account.publish_status(&project).unwrap().unwrap();
+    assert_eq!(
+        closed.step,
+        GitHubPublishStep::Lines {
+            lines: baseline(),
+            draft: GitHubIgnoreDraft::Baseline {
+                reason: "github_publish_draft_stopped".into(),
+            },
+        }
+    );
+    assert_eq!(closed.plan, plan("tool"));
+    assert_eq!(
+        state::load_job(&account.root, &project).unwrap(),
+        Some(closed.clone())
+    );
+    assert_eq!(account.publish_status(&project).unwrap(), Some(closed));
+    assert!(creates(&server).is_empty());
+}
+
+#[test]
+fn a_publish_record_from_before_the_draft_still_loads() {
+    let step: Option<GitHubPublishStep> =
+        serde_json::from_str(r#"{"step":"lines","lines":[".env*"]}"#).ok();
+    assert_eq!(
+        step,
+        Some(GitHubPublishStep::Lines {
+            lines: vec![".env*".into()],
+            draft: GitHubIgnoreDraft::Baseline {
+                reason: "github_publish_draft_not_asked".into(),
+            },
+        })
+    );
+}
+
+#[test]
+fn publish_job_waits_on_a_secret_until_the_file_is_left_out() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let leaked = format!("deploy = 1\ntoken {LEAKED}\n");
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n"), ("keys.txt", &leaked)]);
+    let owner_home = tempfile::tempdir().unwrap();
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let blocked = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(
+        blocked.step,
+        GitHubPublishStep::Blocked {
+            scan: GitHubSecretScan {
+                findings: vec![GitHubSecretFinding {
+                    path: "keys.txt".into(),
+                    line: 2,
+                    kind: GitHubSecretKind::Token,
+                }],
+                truncated: false,
+            },
+        }
+    );
+    assert_eq!(blocked.stopped, None);
+    assert!(creates(&server).is_empty());
+    assert_eq!(
+        account
+            .publish_continue(&project, owner_home.path())
+            .unwrap_err()
+            .0,
+        "github_publish_step_invalid"
+    );
+    for bad in ["main.rs", "../keys.txt", "*.txt", "missing.txt"] {
+        assert_eq!(
+            account
+                .publish_exclude(&project, owner_home.path(), bad)
+                .unwrap_err()
+                .0,
+            "github_publish_exclude_invalid",
+            "{bad}"
+        );
+    }
+    assert_eq!(account.publish_status(&project).unwrap(), Some(blocked));
+    let done = account
+        .publish_exclude(&project, owner_home.path(), "keys.txt")
+        .unwrap();
+    let (full_name, _) = done_on(&done);
+    assert_eq!(full_name, "octo-cat/tool");
+    assert_eq!(done.lines.last().map(String::as_str), Some("/keys.txt"));
+    assert!(
+        std::fs::read_to_string(project.join(".gitignore"))
+            .unwrap()
+            .ends_with("\n/keys.txt\n")
+    );
+    assert_eq!(
+        git_out(&["ls-tree", "-r", "--name-only", "HEAD"], &project),
+        ".gitignore\nmain.rs\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("keys.txt")).unwrap(),
+        leaked
+    );
+    assert_eq!(creates(&server).len(), 1);
+}
+
+#[test]
+fn publish_job_checks_a_fixed_file_again_and_goes_on() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("keys.txt", &format!("token {LEAKED}\n"))]);
+    let owner_home = tempfile::tempdir().unwrap();
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let blocked = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert!(matches!(blocked.step, GitHubPublishStep::Blocked { .. }));
+    assert_eq!(
+        account
+            .publish_recheck(&project, owner_home.path())
+            .unwrap(),
+        blocked
+    );
+    std::fs::write(project.join("keys.txt"), "token removed\n").unwrap();
+    let done = account
+        .publish_recheck(&project, owner_home.path())
+        .unwrap();
+    done_on(&done);
+    assert_eq!(
+        git_out(&["ls-tree", "-r", "--name-only", "HEAD"], &project),
+        ".gitignore\nkeys.txt\n"
+    );
+    assert_eq!(creates(&server).len(), 1);
+}
+
+#[test]
+fn publish_job_continued_after_a_stop_before_its_commit_checks_the_project_again() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    git(&["init", "--quiet", "--initial-branch=main"], &project);
+    git(&["config", "hook.mark.event", "pre-commit"], &project);
+    git(&["config", "hook.mark.command", "/usr/bin/true"], &project);
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(stopped.step, GitHubPublishStep::Checked);
+    assert_eq!(stopped.stopped.as_deref(), Some("github_publish_hooks_set"));
+    git(&["config", "--remove-section", "hook.mark"], &project);
+    std::fs::write(project.join("keys.txt"), format!("token {LEAKED}\n")).unwrap();
+    let continued = account
+        .publish_continue(&project, owner_home.path())
+        .unwrap();
+    assert_eq!(
+        continued.step,
+        GitHubPublishStep::Blocked {
+            scan: GitHubSecretScan {
+                findings: vec![GitHubSecretFinding {
+                    path: "keys.txt".into(),
+                    line: 1,
+                    kind: GitHubSecretKind::Token,
+                }],
+                truncated: false,
+            },
+        }
+    );
+    assert_eq!(continued.stopped, None);
+    assert!(creates(&server).is_empty());
+    assert_eq!(account.publish_status(&project).unwrap(), Some(continued));
+}
+
+#[test]
+fn publish_job_started_again_keeps_the_paths_publish_wrote_for_its_commit() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    git(&["init", "--quiet", "--initial-branch=main"], &project);
+    git(&["add", "main.rs"], &project);
+    git(&["commit", "--quiet", "-m", "first"], &project);
+    git(&["config", "hook.mark.event", "pre-commit"], &project);
+    git(&["config", "hook.mark.command", "/usr/bin/true"], &project);
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(stopped.step, GitHubPublishStep::Checked);
+    assert_eq!(stopped.stopped.as_deref(), Some("github_publish_hooks_set"));
+    assert_eq!(stopped.written, [".gitignore"]);
+    git(&["config", "--remove-section", "hook.mark"], &project);
+    let restarted = account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    assert_eq!(restarted.written, [".gitignore"]);
+    let done = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    let (full_name, _) = done_on(&done);
+    assert_eq!(full_name, "octo-cat/tool");
+    assert_eq!(
+        git_out(&["ls-tree", "-r", "--name-only", "HEAD"], &project),
+        ".gitignore\nmain.rs\n"
+    );
+    assert_eq!(creates(&server).len(), 1);
+}
+
+#[test]
+fn publish_job_checks_the_files_publish_wrote_on_a_project_with_history() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    git(&["init", "--quiet", "--initial-branch=main"], &project);
+    git(&["add", "main.rs"], &project);
+    git(&["commit", "--quiet", "-m", "first"], &project);
+    git(&["config", "hook.mark.event", "pre-commit"], &project);
+    git(&["config", "hook.mark.command", "/usr/bin/true"], &project);
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(stopped.step, GitHubPublishStep::Checked);
+    assert_eq!(stopped.written, [".gitignore"]);
+    git(&["config", "--remove-section", "hook.mark"], &project);
+    let ignore = project.join(".gitignore");
+    let mut text = std::fs::read_to_string(&ignore).unwrap();
+    text.push_str(&format!("token {LEAKED}\n"));
+    std::fs::write(&ignore, text).unwrap();
+    let continued = account
+        .publish_continue(&project, owner_home.path())
+        .unwrap();
+    assert!(
+        matches!(
+            &continued.step,
+            GitHubPublishStep::Blocked { scan }
+                if scan.findings.len() == 1
+                    && scan.findings[0].path == ".gitignore"
+                    && scan.findings[0].kind == GitHubSecretKind::Token
+        ),
+        "{continued:?}"
+    );
+    assert!(creates(&server).is_empty());
+}
+
+fn hooked_owner_project(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
+    let (folder, project) = new_project(files);
+    git(&["init", "--quiet", "--initial-branch=main"], &project);
+    git(&["add", "-A"], &project);
+    git(&["commit", "--quiet", "-m", "first"], &project);
+    git(&["config", "hook.mark.event", "pre-commit"], &project);
+    git(&["config", "hook.mark.command", "/usr/bin/true"], &project);
+    (folder, project)
+}
+
+#[test]
+fn publish_job_stopped_at_created_pushes_the_moved_head_after_a_new_check() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, root, stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[(".github/workflows/ci.yml", "on: push\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    stand.lock().unwrap().scopes = Some("repo, read:org");
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert!(
+        matches!(stopped.step, GitHubPublishStep::Created { .. }),
+        "{stopped:?}"
+    );
+    std::fs::write(project.join("notes.md"), "later\n").unwrap();
+    git(&["add", "notes.md"], &project);
+    git(&["commit", "--quiet", "-m", "later"], &project);
+    stand.lock().unwrap().scopes = Some("repo, workflow");
+    let done = account
+        .publish_continue(&project, owner_home.path())
+        .unwrap();
+    assert!(
+        matches!(done.step, GitHubPublishStep::Done { .. }),
+        "{done:?}"
+    );
+    assert_eq!(done_on(&done).0, "octo-cat/tool");
+    assert_eq!(
+        git_out(
+            &["rev-parse", "refs/heads/main"],
+            &root.join("octo-cat/tool.git")
+        ),
+        git_out(&["rev-parse", "HEAD"], &project)
+    );
+    assert!(git_out(&["ls-tree", "-r", "--name-only", "HEAD"], &project).contains("notes.md\n"));
+    assert_eq!(creates(&server).len(), 1);
+}
+
+#[test]
+fn publish_job_discarded_short_of_done_starts_fresh_and_names_the_repository_left() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, root, stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[(".github/workflows/ci.yml", "on: push\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        account.publish_discard(&project).map_err(|error| error.0),
+        Err("github_publish_not_started".to_owned())
+    );
+    stand.lock().unwrap().scopes = Some("repo, read:org");
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert!(
+        matches!(stopped.step, GitHubPublishStep::Created { .. }),
+        "{stopped:?}"
+    );
+    let bare = root.join("octo-cat/tool.git");
+    std::fs::remove_dir_all(&bare).unwrap();
+    stand.lock().unwrap().scopes = Some("repo, workflow");
+    let failed = account
+        .publish_continue(&project, owner_home.path())
+        .unwrap();
+    assert!(
+        matches!(failed.step, GitHubPublishStep::Created { .. }),
+        "{failed:?}"
+    );
+    assert_eq!(
+        account.publish_discard(&project).map_err(|error| error.0),
+        Ok(Some(GitHubPublishLeft::Made {
+            full_name: "octo-cat/tool".into()
+        }))
+    );
+    assert_eq!(account.publish_status(&project).unwrap(), None);
+    std::fs::create_dir_all(&bare).unwrap();
+    git(&["init", "--quiet", "--bare"], &bare);
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let done = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert!(
+        matches!(done.step, GitHubPublishStep::Done { .. }),
+        "{done:?}"
+    );
+    assert_eq!(done_on(&done).0, "octo-cat/tool");
+    assert_eq!(
+        git_out(&["rev-parse", "refs/heads/main"], &bare),
+        git_out(&["rev-parse", "HEAD"], &project)
+    );
+    assert_eq!(creates(&server).len(), 2);
+    assert_eq!(
+        account.publish_discard(&project).map_err(|error| error.0),
+        Err("github_publish_step_invalid".to_owned())
+    );
+}
+
+#[test]
+fn publish_job_stopped_at_creating_names_the_repository_a_lost_answer_may_have_made() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    stand.lock().unwrap().create = 500;
+    let lost = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert!(
+        matches!(lost.step, GitHubPublishStep::Creating { .. }),
+        "{lost:?}"
+    );
+    assert_eq!(lost.stopped.as_deref(), Some("github_unreachable"));
+    assert_eq!(
+        account
+            .publish_start(&project, &plan("tool"), no_draft)
+            .map_err(|error| error.0)
+            .err(),
+        Some("github_publish_in_progress".to_owned())
+    );
+    assert_eq!(
+        account.publish_discard(&project).map_err(|error| error.0),
+        Ok(Some(GitHubPublishLeft::Maybe {
+            full_name: "octo-cat/tool".into()
+        }))
+    );
+    assert_eq!(account.publish_status(&project).unwrap(), None);
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    stand.lock().unwrap().create = 403;
+    let refused = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(
+        refused.stopped.as_deref(),
+        Some("github_repo_create_refused")
+    );
+    assert!(
+        matches!(
+            account
+                .publish_start(&project, &plan("tool"), no_draft)
+                .map(|job| job.step),
+            Ok(GitHubPublishStep::Lines { .. })
+        ),
+        "a refused create made nothing, so Start runs fresh"
+    );
+    assert_eq!(
+        account.publish_discard(&project).map_err(|error| error.0),
+        Ok(None)
+    );
+}
+
+#[test]
+fn publish_job_at_pushed_is_not_discarded_while_its_rules_are_still_to_apply() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let engine_root = scratch.root.path().canonicalize().unwrap();
+    let pushed = GitHubPublishJob {
+        project: project.clone(),
+        plan: plan("tool"),
+        lines: baseline(),
+        written: vec![".gitignore".into()],
+        step: GitHubPublishStep::Pushed {
+            full_name: "octo-cat/tool".into(),
+            private: true,
+            workflows: false,
+        },
+        stopped: Some("github_token_refused".into()),
+        made: Some("octo-cat/tool".into()),
+    };
+    state::save_job(&engine_root, &pushed).unwrap();
+    assert_eq!(
+        account.publish_discard(&project).map_err(|error| error.0),
+        Err("github_publish_step_invalid".to_owned())
+    );
+    assert_eq!(account.publish_status(&project).unwrap(), Some(pushed));
+}
+
+#[test]
+fn publish_job_refuses_a_written_path_that_became_a_folder() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = hooked_owner_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(stopped.step, GitHubPublishStep::Checked);
+    assert_eq!(stopped.written, [".gitignore"]);
+    git(&["config", "--remove-section", "hook.mark"], &project);
+    let head = git_out(&["rev-parse", "HEAD"], &project);
+    std::fs::remove_file(project.join(".gitignore")).unwrap();
+    std::fs::create_dir(project.join(".gitignore")).unwrap();
+    std::fs::write(
+        project.join(".gitignore/keys.txt"),
+        format!("token {LEAKED}\n"),
+    )
+    .unwrap();
+    let continued = account
+        .publish_continue(&project, owner_home.path())
+        .unwrap();
+    assert_eq!(continued.step, GitHubPublishStep::Checked);
+    assert_eq!(
+        continued.stopped.as_deref(),
+        Some("github_publish_file_invalid")
+    );
+    assert_eq!(git_out(&["rev-parse", "HEAD"], &project), head);
+    assert!(creates(&server).is_empty());
+}
+
+#[test]
+fn publish_job_goes_on_when_a_file_publish_wrote_was_deleted_since() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = hooked_owner_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    let public = GitHubPublishPlan {
+        private: false,
+        ..plan("tool")
+    };
+    account.publish_start(&project, &public, no_draft).unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(stopped.step, GitHubPublishStep::Checked);
+    assert_eq!(stopped.written, [".gitignore", "SECURITY.md"]);
+    git(&["config", "--remove-section", "hook.mark"], &project);
+    std::fs::remove_file(project.join("SECURITY.md")).unwrap();
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let done = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert!(
+        matches!(done.step, GitHubPublishStep::Done { .. }),
+        "{done:?}"
+    );
+    assert_eq!(done_on(&done).0, "octo-cat/tool");
+    assert_eq!(
+        git_out(&["ls-tree", "-r", "--name-only", "HEAD"], &project),
+        ".gitignore\nmain.rs\n"
+    );
+    assert_eq!(creates(&server).len(), 1);
+}
+
+#[test]
+fn publish_job_with_no_history_leaves_out_a_written_file_the_owner_excludes() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/main.rs", "fn main() {}\n"),
+    ]);
+    let owner_home = tempfile::tempdir().unwrap();
+    git(&["init", "--quiet", "--initial-branch=main"], &project);
+    git(&["config", "hook.mark.event", "pre-commit"], &project);
+    git(&["config", "hook.mark.command", "/usr/bin/true"], &project);
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(stopped.step, GitHubPublishStep::Checked);
+    assert_eq!(stopped.written, [".gitignore", ".github/dependabot.yml"]);
+    git(&["config", "--remove-section", "hook.mark"], &project);
+    let dependabot = project.join(".github/dependabot.yml");
+    let mut text = std::fs::read_to_string(&dependabot).unwrap();
+    text.push_str(&format!("token {LEAKED}\n"));
+    std::fs::write(&dependabot, text).unwrap();
+    let blocked = account
+        .publish_continue(&project, owner_home.path())
+        .unwrap();
+    assert!(
+        matches!(blocked.step, GitHubPublishStep::Blocked { .. }),
+        "{blocked:?}"
+    );
+    let done = account
+        .publish_exclude(&project, owner_home.path(), ".github/dependabot.yml")
+        .unwrap();
+    assert!(
+        matches!(done.step, GitHubPublishStep::Done { .. }),
+        "{done:?}"
+    );
+    assert_eq!(done_on(&done).0, "octo-cat/tool");
+    assert_eq!(
+        git_out(&["ls-tree", "-r", "--name-only", "HEAD"], &project),
+        ".gitignore\nCargo.toml\nsrc/main.rs\n"
+    );
+    assert_eq!(creates(&server).len(), 1);
+}
+
+#[test]
+fn publish_job_stopped_at_create_goes_on_and_knows_the_repository_it_made() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, root, stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    let before = now();
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    stand.lock().unwrap().create = 500;
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    let GitHubPublishStep::Creating { sent_at, committed } = &stopped.step else {
+        panic!("{stopped:?}");
+    };
+    assert!(*sent_at >= before && *sent_at <= now(), "{sent_at}");
+    assert_eq!(
+        committed.commit,
+        git_out(&["rev-parse", "HEAD"], &project).trim()
+    );
+    assert_eq!(stopped.stopped.as_deref(), Some("github_unreachable"));
+    assert_eq!(
+        account.publish_status(&project).unwrap(),
+        Some(stopped.clone())
+    );
+    let refused = [
+        (true, true, rfc3339(now())),
+        (false, false, rfc3339(now())),
+        (false, true, rfc3339(before - 3600)),
+    ];
+    for (branches, private, created_at) in refused {
+        {
+            let mut held = stand.lock().unwrap();
+            held.create = 422;
+            held.branches = branches;
+            held.private = private;
+            held.created_at = created_at.clone();
+        }
+        let taken = account
+            .publish_continue(&project, owner_home.path())
+            .unwrap();
+        assert_eq!(
+            taken.step, stopped.step,
+            "{branches} {private} {created_at}"
+        );
+        assert_eq!(taken.stopped.as_deref(), Some("github_repo_name_taken"));
+    }
+    {
+        let mut held = stand.lock().unwrap();
+        held.branches = false;
+        held.private = true;
+        held.created_at = rfc3339(now());
+    }
+    let done = account
+        .publish_continue(&project, owner_home.path())
+        .unwrap();
+    let (full_name, _) = done_on(&done);
+    assert_eq!(full_name, "octo-cat/tool");
+    assert_eq!(done.stopped, None);
+    assert_eq!(
+        git_out(
+            &["rev-parse", "refs/heads/main"],
+            &root.join("octo-cat/tool.git")
+        ),
+        git_out(&["rev-parse", "HEAD"], &project)
+    );
+    assert_eq!(creates(&server).len(), 5);
+    assert_eq!(stand.lock().unwrap().recorded, [true; 5]);
+}
+
+#[test]
+fn publish_job_needs_the_workflow_scope_for_a_project_with_workflows() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, root, stand, server) = publish_stand(&secret_text, &scratch, &["tool", "kit"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let workflow = [(".github/workflows/ci.yml", "on: push\n")];
+    let (_folder, project) = new_project(&workflow);
+    let owner_home = tempfile::tempdir().unwrap();
+    stand.lock().unwrap().scopes = Some("repo, read:org");
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    let GitHubPublishStep::Created {
+        full_name, private, ..
+    } = &stopped.step
+    else {
+        panic!("{stopped:?}");
+    };
+    assert_eq!(full_name, "octo-cat/tool");
+    assert!(*private);
+    assert_eq!(
+        stopped.stopped.as_deref(),
+        Some("github_publish_workflow_scope")
+    );
+    assert_eq!(stopped.written, [".gitignore", ".github/dependabot.yml"]);
+    assert!(git_out(&["for-each-ref"], &root.join("octo-cat/tool.git")).is_empty());
+    assert_eq!(
+        account
+            .publish_start(&project, &plan("tool"), no_draft)
+            .unwrap_err()
+            .0,
+        "github_publish_in_progress"
+    );
+    stand.lock().unwrap().scopes = Some("repo, workflow");
+    let done = account
+        .publish_continue(&project, owner_home.path())
+        .unwrap();
+    let (_, outcomes) = done_on(&done);
+    let checks = outcomes
+        .iter()
+        .find(|outcome| outcome.rule == GitHubRule::RequiredChecks)
+        .unwrap();
+    assert!(
+        matches!(checks.state, GitHubRuleState::Waiting { .. }),
+        "{checks:?}"
+    );
+    assert_eq!(creates(&server).len(), 1);
+    stand.lock().unwrap().scopes = None;
+    let (_other, unknown) = new_project(&workflow);
+    account
+        .publish_start(&unknown, &plan("kit"), no_draft)
+        .unwrap();
+    let done = account
+        .publish_approve(&unknown, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(done_on(&done).0, "octo-cat/kit");
+}
+
+#[test]
+fn publish_job_refuses_a_bad_plan_a_wrong_step_and_a_second_run() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        account
+            .publish_start(&project, &plan("tool"), no_draft)
+            .unwrap_err()
+            .0,
+        "github_not_signed_in"
+    );
+    account.use_token(secret(&secret_text)).unwrap();
+    let bad_plans = [
+        (plan("../x"), "github_repo_name_invalid"),
+        (
+            GitHubPublishPlan {
+                owner: "-x".into(),
+                ..plan("tool")
+            },
+            "github_repo_name_invalid",
+        ),
+        (
+            GitHubPublishPlan {
+                description: "a\u{7}b".into(),
+                ..plan("tool")
+            },
+            "github_repo_description_invalid",
+        ),
+    ];
+    for (bad, code) in bad_plans {
+        assert_eq!(
+            account
+                .publish_start(&project, &bad, no_draft)
+                .unwrap_err()
+                .0,
+            code,
+            "{bad:?}"
+        );
+    }
+    assert_eq!(account.publish_status(&project).unwrap(), None);
+    assert_eq!(
+        account
+            .publish_approve(&project, owner_home.path(), &baseline())
+            .unwrap_err()
+            .0,
+        "github_publish_not_started"
+    );
+    assert_eq!(
+        account
+            .publish_continue(&project, owner_home.path())
+            .unwrap_err()
+            .0,
+        "github_publish_not_started"
+    );
+    let started = account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let engine_root = scratch.root.path().canonicalize().unwrap();
+    let held = job::publishing(&engine_root, &project).unwrap();
+    assert_eq!(
+        job::publishing(&engine_root, &project).err().unwrap().0,
+        "github_publish_running"
+    );
+    assert_eq!(
+        account
+            .publish_start(&project, &plan("tool"), no_draft)
+            .unwrap_err()
+            .0,
+        "github_publish_running"
+    );
+    assert_eq!(
+        account
+            .publish_approve(&project, owner_home.path(), &baseline())
+            .unwrap_err()
+            .0,
+        "github_publish_running"
+    );
+    drop(held);
+    assert_eq!(
+        account
+            .publish_recheck(&project, owner_home.path())
+            .unwrap_err()
+            .0,
+        "github_publish_step_invalid"
+    );
+    assert_eq!(
+        account
+            .publish_exclude(&project, owner_home.path(), "main.rs")
+            .unwrap_err()
+            .0,
+        "github_publish_step_invalid"
+    );
+    assert_eq!(
+        account
+            .publish_continue(&project, owner_home.path())
+            .unwrap_err()
+            .0,
+        "github_publish_step_invalid"
+    );
+    assert_eq!(
+        account
+            .publish_approve(&project, owner_home.path(), &["a\nb".to_owned()])
+            .unwrap_err()
+            .0,
+        "github_publish_ignore_invalid"
+    );
+    assert_eq!(account.publish_status(&project).unwrap(), Some(started));
+    assert!(!project.join(".git").exists());
+    assert!(creates(&server).is_empty());
+    let done = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    done_on(&done);
+    assert_eq!(
+        account
+            .publish_approve(&project, owner_home.path(), &baseline())
+            .unwrap_err()
+            .0,
+        "github_publish_step_invalid"
+    );
 }

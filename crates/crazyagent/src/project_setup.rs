@@ -103,7 +103,7 @@ const KEY_BLOCK_END: &str = "-----end";
 const BASE64_RUN_MIN: usize = 20;
 const WRAPPED_TAIL_MIN: usize = 8;
 const PGPASS_FIELDS_MIN: usize = 5;
-const SECRET_PREFIXES: [&str; 14] = [
+pub(crate) const SECRET_PREFIXES: [&str; 14] = [
     "sk-",
     "sk_",
     "pk_",
@@ -2943,10 +2943,12 @@ fn finish_removed_agent_notices(
 }
 
 /// Records a Delete everything once the owner transport finished its disk work: the
-/// project's records go as in Remove from dashboard when every folder reached the Trash, the
-/// caller recording the exact names and folder identities of its engine files in the same
-/// write, and otherwise the refusal is kept with nothing removed. Inputs: the transaction,
-/// the action, the transport's outcome and the revision. Output: the outcome to record.
+/// project's records go as in Remove from dashboard when every folder reached the Trash,
+/// with its answer to the GitHub publish question and its GitHub publish job too, which
+/// Remove keeps (DEC-178 add.1), the caller recording the exact names and folder identities of its engine files in the
+/// same write, and otherwise the refusal is kept with nothing removed. Inputs: the
+/// transaction, the action, the transport's outcome and the revision. Output: the outcome
+/// to record.
 pub(crate) fn record_delete(
     tx: &Transaction<'_>,
     action: &SetupAction,
@@ -2959,7 +2961,21 @@ pub(crate) fn record_delete(
     if let Err(code) = outcome {
         return Ok(rejected(code));
     }
-    remove(tx, project_id, revision)
+    let folder = match load_setup(tx, project_id) {
+        Ok(stored) => stored.map(|stored| stored.project_folder()),
+        Err(error) => {
+            eprintln!("github_publish_forget_failed code={}", error.0);
+            None
+        }
+    };
+    let removed = remove(tx, project_id, revision)?;
+    if matches!(removed, Outcome::Applied) {
+        crate::github::forget_prompt(tx, project_id)?;
+        if let Some(folder) = &folder {
+            crate::github::forget_job(tx, folder);
+        }
+    }
+    Ok(removed)
 }
 
 /// The team a New Project gets and the folder it lands in, after the checks

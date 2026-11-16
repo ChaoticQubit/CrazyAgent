@@ -14,6 +14,7 @@ pub use intake::{
     AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, OldSource, Placed,
     Tally, add_left, copy_tree, folder_size, move_by_copy, sweep_staging, verify_tree,
 };
+pub(crate) use layout::append_lines;
 pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
 };

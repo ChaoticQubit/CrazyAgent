@@ -1516,6 +1516,74 @@ export interface CloneReceipt {
   path: string;
 }
 
+export interface GitHubOwner {
+  login: string;
+  personal: boolean;
+}
+
+export interface GitHubOwners {
+  owners: GitHubOwner[];
+  problem: string | null;
+}
+
+export interface GitHubPublishPlan {
+  owner: string;
+  name: string;
+  description: string;
+  private: boolean;
+  docs: boolean;
+}
+
+export type GitHubIgnoreDraft = { by: "agent" } | { by: "baseline"; reason: string };
+
+export interface GitHubCommitted {
+  branch: string;
+  commit: string;
+  left_out: number;
+}
+
+export interface GitHubSecretFinding {
+  path: string;
+  line: number;
+  kind: "token" | "private_key" | "named_value";
+}
+
+export type GitHubRuleState =
+  | { state: "applied" }
+  | { state: "refused"; status: number; message: string }
+  | { state: "not_applicable"; reason: string }
+  | { state: "waiting"; reason: string };
+
+export interface GitHubRuleOutcome {
+  rule: string;
+  on: boolean;
+  state: GitHubRuleState;
+}
+
+export type GitHubPublishStep =
+  | { step: "drafting" }
+  | { step: "lines"; lines: string[]; draft: GitHubIgnoreDraft }
+  | { step: "blocked"; scan: { findings: GitHubSecretFinding[]; truncated: boolean } }
+  | { step: "checked" }
+  | { step: "committed"; committed: GitHubCommitted }
+  | { step: "creating"; committed: GitHubCommitted; sent_at: number }
+  | { step: "created"; committed: GitHubCommitted; full_name: string; private: boolean }
+  | { step: "pushed"; full_name: string; private: boolean; workflows: boolean }
+  | { step: "done"; full_name: string; outcomes: GitHubRuleOutcome[] };
+
+/** A repository a discarded publish leaves on GitHub: one it made, or one it may have made. */
+export type GitHubPublishLeft = { left: "made" | "maybe"; full_name: string };
+
+export interface GitHubPublishJob {
+  project: string;
+  plan: GitHubPublishPlan;
+  lines: string[];
+  written: string[];
+  step: GitHubPublishStep;
+  stopped: string | null;
+  made: string | null;
+}
+
 /** Starts "Sign in with GitHub". Output: the code to type at the GitHub page and its
  * address; the engine waits for approval in the background, so poll githubStatus. */
 export function githubSignIn(): Promise<GitHubDeviceCode> {
@@ -1547,6 +1615,71 @@ export function githubRepos(page = 1): Promise<GitHubRepoPage> {
 /** Clones one repository, as "owner/name", into the projects home. Output: where it landed. */
 export function cloneRepo(fullName: string): Promise<CloneReceipt> {
   return invoke<CloneReceipt>("desktop_clone_repo", { fullName });
+}
+
+/** Lists the GitHub accounts a published project's repository can go under, the personal
+ * account first. Output: the accounts and a plain problem, such as organizations that
+ * could not be listed. */
+export function githubOwners(): Promise<GitHubOwners> {
+  return invoke<GitHubOwners>("desktop_github_owners");
+}
+
+/** Reads where a project's GitHub publish stands. Input: the project id. Output: the job,
+ * or null when the project has no publish. */
+export function githubPublishStatus(project: string): Promise<GitHubPublishJob | null> {
+  return invoke<GitHubPublishJob | null>("desktop_github_publish_status", { project });
+}
+
+/** Approves a project's .gitignore lines and runs its publish as far as it goes. Inputs:
+ * the project id and the lines. Output: the job where it stands. */
+export function githubPublishApprove(project: string, lines: string[]): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_approve", { project, lines });
+}
+
+/** Leaves a file that holds a secret out of a project's publish and runs on. Inputs: the
+ * project id and the file's path as the check named it. Output: the job where it stands. */
+export function githubPublishExclude(project: string, path: string): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_exclude", { project, path });
+}
+
+/** Checks a project's files for secrets again after the owner fixed them. Input: the
+ * project id. Output: the job where it stands. */
+export function githubPublishRecheck(project: string): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_recheck", { project });
+}
+
+/** Runs a stopped publish on from the step it reached. Input: the project id. Output:
+ * the job where it stands. */
+export function githubPublishContinue(project: string): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_continue", { project });
+}
+
+/** The owner's answer to the Overview's publish prompt: Not now asks again in 7 days. */
+export type GitHubPromptAnswer = "not_now" | "never";
+
+/** Tells whether a project's Overview asks to publish it on GitHub. Input: the project id.
+ * Output: true to ask. */
+export function githubPublishPrompt(project: string): Promise<boolean> {
+  return invoke<boolean>("desktop_github_publish_prompt", { project });
+}
+
+/** Keeps the owner's answer to a project's publish prompt. Inputs: the project id and the
+ * answer. Output: null once kept. */
+export function githubPublishPromptSet(project: string, answer: GitHubPromptAnswer): Promise<null> {
+  return invoke<null>("desktop_github_publish_prompt_set", { project, answer });
+}
+
+/** Discards a project's publish record; the files it wrote and a repository it made stay.
+ * Input: the project id. Output: the repository GitHub made or may have made, or null. */
+export function githubPublishDiscard(project: string): Promise<GitHubPublishLeft | null> {
+  return invoke<GitHubPublishLeft | null>("desktop_github_publish_discard", { project });
+}
+
+/** Starts publishing a project on GitHub: the engine checks the plan, the sign-in and the
+ * project's git, answers, and drafts the .gitignore lines to show first after. Inputs: the
+ * project id and the plan. Output: the job at Drafting. */
+export function githubPublishStart(project: string, plan: GitHubPublishPlan): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_start", { project, plan });
 }
 
 export type DependencyName = "tmux" | "uv" | "graphify" | "node";

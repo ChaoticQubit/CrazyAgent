@@ -1,7 +1,10 @@
 use super::settings::connection_lost;
 use super::*;
 use crate::engine::owner::{AccountSecret, OwnerResult};
-use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
+use crate::github::{
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
+    GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
+};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::job::{JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
@@ -38,6 +41,38 @@ pub(in crate::tui) enum IntakeQuery {
     GitHubSignOut,
     GitHubRepos {
         page: u32,
+    },
+    GitHubOwners,
+    GitHubPublishStart {
+        project: ProjectId,
+        plan: GitHubPublishPlan,
+    },
+    GitHubPublishStatus {
+        project: ProjectId,
+    },
+    GitHubPublishApprove {
+        project: ProjectId,
+        lines: Vec<String>,
+    },
+    GitHubPublishExclude {
+        project: ProjectId,
+        path: String,
+    },
+    GitHubPublishRecheck {
+        project: ProjectId,
+    },
+    GitHubPublishContinue {
+        project: ProjectId,
+    },
+    GitHubPublishPrompt {
+        project: ProjectId,
+    },
+    GitHubPublishPromptSet {
+        project: ProjectId,
+        answer: crate::github::GitHubPromptAnswer,
+    },
+    GitHubPublishDiscard {
+        project: ProjectId,
     },
     CloneRepo {
         full_name: String,
@@ -87,6 +122,12 @@ pub(in crate::tui) enum IntakeView {
     GitHub(GitHubStatus),
     DeviceCode(GitHubDeviceCode),
     Repos(GitHubRepoPage),
+    Owners(GitHubOwners),
+    Publish(Box<GitHubPublishJob>),
+    PublishStatus(Option<Box<GitHubPublishJob>>),
+    Prompt(bool),
+    PromptKept,
+    Discarded(Option<GitHubPublishLeft>),
     Cloned(CloneReceipt),
     Changed(OwnerResult),
     Job(Option<JobView>),
@@ -229,6 +270,65 @@ impl NativeOwner {
             IntakeQuery::GitHubRepos { page } => {
                 IntakeView::Repos(controller.github_repos(page).await.map_err(problem)?)
             }
+            IntakeQuery::GitHubOwners => {
+                IntakeView::Owners(controller.github_owners().await.map_err(problem)?)
+            }
+            IntakeQuery::GitHubPublishStart { project, plan } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_start(project, plan)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishStatus { project } => IntakeView::PublishStatus(
+                controller
+                    .github_publish_status(project)
+                    .await
+                    .map_err(problem)?
+                    .map(Box::new),
+            ),
+            IntakeQuery::GitHubPublishApprove { project, lines } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_approve(project, lines)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishExclude { project, path } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_exclude(project, path)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishRecheck { project } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_recheck(project)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishContinue { project } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_continue(project)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishPrompt { project } => IntakeView::Prompt(
+                controller
+                    .github_publish_prompt(project)
+                    .await
+                    .map_err(problem)?,
+            ),
+            IntakeQuery::GitHubPublishPromptSet { project, answer } => {
+                controller
+                    .github_publish_prompt_set(project, answer)
+                    .await
+                    .map_err(problem)?;
+                IntakeView::PromptKept
+            }
+            IntakeQuery::GitHubPublishDiscard { project } => IntakeView::Discarded(
+                controller
+                    .github_publish_discard(project)
+                    .await
+                    .map_err(problem)?,
+            ),
             IntakeQuery::CloneRepo { full_name } => {
                 IntakeView::Cloned(controller.clone_repo(full_name).await.map_err(problem)?)
             }
