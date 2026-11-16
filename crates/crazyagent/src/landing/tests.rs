@@ -10104,6 +10104,7 @@ fn a_master_commit_after_its_conflict_fix_leaves_the_set_waiting() {
 #[test]
 fn a_clean_merge_under_a_conflict_fix_leaves_the_master_set_waiting() {
     let case = Case::new();
+    master_project(&case);
     let other = numbered_agent(&case, 3);
     record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
     write(&other.worktree.join("NOTES"), "clean\n");
