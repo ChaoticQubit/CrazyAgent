@@ -116,10 +116,10 @@ pub const CREATING: [Call; 12] = [
 /// allows (DEC-185 S2).
 pub const REMOVING: [Call; 4] = [Call::Unlink, Call::Unlinkat, Call::Rmdir, Call::Truncate];
 
-/// The calls that change a file's mode or owner, which the supervisor makes itself on a
-/// file it judged (DEC-185 S2a). `fchmodat2` is refused instead, so the C library falls
-/// back to these.
-pub const CHANGING: [Call; 7] = [
+/// The calls that change a file's mode, owner or times, which the supervisor makes itself
+/// on a file it judged (DEC-185 S2a, S2b). `fchmodat2` is refused instead, so the C
+/// library falls back to these.
+pub const CHANGING: [Call; 11] = [
     Call::Chmod,
     Call::Fchmod,
     Call::Fchmodat,
@@ -127,6 +127,10 @@ pub const CHANGING: [Call; 7] = [
     Call::Fchown,
     Call::Lchown,
     Call::Fchownat,
+    Call::Utime,
+    Call::Utimes,
+    Call::Futimesat,
+    Call::Utimensat,
 ];
 
 /// The calls that set or remove an extended attribute, refused whole under the held guard

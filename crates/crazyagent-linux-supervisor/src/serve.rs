@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
 use crate::filter::{self, Call, Calls, Guards};
-use crate::rules::{self, Dest, GitOwn, Held, HeldNodes, Node, Reach, Target};
+use crate::rules::{self, Dest, GitOwn, Held, HeldNodes, Node, Reach, Stamps, Target};
 use crate::sys::{self, Notice};
 use rustix::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, RenameFlags};
+use rustix::fs::{
+    AtFlags, CWD, FileType, Mode, OFlags, RenameFlags, Timespec, Timestamps, UTIME_NOW, UTIME_OMIT,
+};
 use rustix::io::Errno;
 use rustix::net::SocketAddrUnix;
 use rustix::process::{
@@ -285,10 +287,12 @@ enum Make {
     Link(Vec<u8>),
 }
 
-/// What a mode or owner call changes: the mode register, or the owner and group registers.
+/// What a mode, owner or time call changes: the mode register, the owner and group
+/// registers, or the access and modification times as seconds and nanoseconds.
 enum Change {
     Mode(u64),
     Owner(u64, u64),
+    Times([(i64, i64); 2]),
 }
 
 /// What a two-path creating call does, with its flags register: a hard link or a rename.
@@ -861,11 +865,11 @@ impl Job<'_> {
         Ok(Answer::Value(0))
     }
 
-    /// Changes a file's mode or owner for the caller once the held guard lets it: a path
-    /// form pins the file its call names ([`Job::pinned`]), a descriptor form takes a copy
-    /// of the caller's descriptor, the pin is judged ([`Job::kept_pin`]) and the change is
-    /// made on that pin. An owner or group of -1 stays as it is. Input: which call.
-    /// Output: zero, or the error.
+    /// Changes a file's mode, owner or times for the caller once the held guard lets it: a
+    /// path form pins the file its call names ([`Job::pinned`]), a descriptor form (a null
+    /// path on a time call) takes a copy of the caller's descriptor, the pin is judged
+    /// ([`Job::kept_pin`]) and the change is made on that pin. An owner or group of -1
+    /// stays as it is. Input: which call. Output: zero, or the error.
     fn change(&self, call: Call) -> Result<Answer, Errno> {
         let a = self.notice.args;
         let here = AT_FDCWD as u32 as u64;
@@ -884,6 +888,38 @@ impl Job<'_> {
                 Change::Owner(a[1], a[2]),
             ),
             Call::Fchownat => (self.owner_pin(a[0], a[1], a[4])?, Change::Owner(a[2], a[3])),
+            Call::Utime => {
+                let times = self.stamps(a[1], Stamps::Seconds)?;
+                (self.pinned(here, text(a[0])?, true)?, Change::Times(times))
+            }
+            Call::Utimes => {
+                let times = self.stamps(a[1], Stamps::Micros)?;
+                (self.pinned(here, text(a[0])?, true)?, Change::Times(times))
+            }
+            Call::Futimesat => {
+                let times = self.stamps(a[2], Stamps::Micros)?;
+                let pin = match a[1] {
+                    0 if !matches!(Base::of(a[0]), Base::Here) => self.taken(a[0])?,
+                    _ => self.pinned(a[0], text(a[1])?, true)?,
+                };
+                (pin, Change::Times(times))
+            }
+            Call::Utimensat => {
+                let times = self.stamps(a[2], Stamps::Nanos)?;
+                if times.iter().all(|(_, nsec)| *nsec == UTIME_OMIT) {
+                    return Ok(Answer::Value(0));
+                }
+                let pin = match a[1] {
+                    0 if !matches!(Base::of(a[0]), Base::Here) => {
+                        if a[3] as u32 != 0 {
+                            return Err(Errno::INVAL);
+                        }
+                        self.taken(a[0])?
+                    }
+                    _ => self.owner_pin(a[0], a[1], a[3])?,
+                };
+                (pin, Change::Times(times))
+            }
             _ => return Err(Errno::NOSYS),
         };
         self.kept_pin(pin.as_fd())?;
@@ -899,12 +935,32 @@ impl Job<'_> {
                 let group = id(group).map(Gid::from_raw);
                 rustix::fs::chownat(&pin, "", owner, group, AtFlags::EMPTY_PATH)?;
             }
+            Change::Times([access, modified]) => {
+                let at = |(tv_sec, tv_nsec): (i64, i64)| Timespec { tv_sec, tv_nsec };
+                let times = Timestamps {
+                    last_access: at(access),
+                    last_modification: at(modified),
+                };
+                rustix::fs::utimensat(&pin, "", &times, AtFlags::EMPTY_PATH)?;
+            }
         }
         Ok(Answer::Value(0))
     }
 
-    /// Pins the file `fchownat` names: its flags take `AT_SYMLINK_NOFOLLOW` and
-    /// `AT_EMPTY_PATH` and no other, and an empty path with `AT_EMPTY_PATH` names the
+    /// Reads the times a time-setting call names, before its path, as the kernel does.
+    /// Inputs: the times register and their layout. Output: the access and modification
+    /// times, now twice for a null register; `EFAULT` when they cannot be read, `EINVAL`
+    /// for a microsecond count out of range.
+    fn stamps(&self, at: u64, kind: Stamps) -> Result<[(i64, i64); 2], Errno> {
+        if at == 0 {
+            return Ok([(0, UTIME_NOW); 2]);
+        }
+        let bytes = self.caller.bytes(at, kind.size())?;
+        kind.read(&bytes).ok_or(Errno::INVAL)
+    }
+
+    /// Pins the file `fchownat` or `utimensat` names: its flags take `AT_SYMLINK_NOFOLLOW`
+    /// and `AT_EMPTY_PATH` and no other, and an empty path with `AT_EMPTY_PATH` names the
     /// folder descriptor itself, or the working folder. Inputs: the folder, path and flags
     /// registers. Output: the pin.
     fn owner_pin(&self, base: u64, at: u64, flags: u64) -> Result<OwnedFd, Errno> {

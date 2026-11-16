@@ -371,8 +371,22 @@ impl Stamps {
     /// Output: the access and modification times, or none for a microsecond count outside
     /// 0..1_000_000, which the kernel refuses with `EINVAL`.
     pub fn read(self, bytes: &[u8]) -> Option<[(i64, i64); 2]> {
-        let _ = bytes;
-        None
+        assert_eq!(bytes.len(), self.size());
+        let words: Vec<i64> = bytes
+            .chunks_exact(8)
+            .map(|word| i64::from_ne_bytes(word.try_into().expect("eight bytes")))
+            .collect();
+        let micros = |sec: i64, usec: i64| {
+            if !(0..1_000_000).contains(&usec) {
+                return None;
+            }
+            Some((sec, usec * 1000))
+        };
+        match self {
+            Self::Seconds => Some([(words[0], 0), (words[1], 0)]),
+            Self::Micros => Some([micros(words[0], words[1])?, micros(words[2], words[3])?]),
+            Self::Nanos => Some([(words[0], words[1]), (words[2], words[3])]),
+        }
     }
 }
 
