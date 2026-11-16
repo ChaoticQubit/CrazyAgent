@@ -779,3 +779,19 @@ test("A waiting sign-in keeps Waiting for the browser and Cancel on its page whi
   assert.ok(switched.includes("aria-label=\"Cancel the sign-in to Board\""), "Cancel stays");
   assert.ok(!switched.includes("aria-label=\"Sign in to Board\""));
 });
+
+test("While one connector's sign-in waits, every other connector's Sign in is disabled with the line saying to finish or cancel it first, in the TUI's words (rv-code CONN-T10-PAGES-A F1, leader 02:44)", () => {
+  const view = { kind: "ok", value: { ...CATALOG, connectors: [notion(false), both("browser")] } };
+  const other = page({ view, open: "board", signing: "notion" });
+  const button = other.match(/<button[^>]*aria-label="Sign in to Board"[^>]*>/u)?.[0] ?? "";
+  assert.ok(button.includes("disabled"), `Board's Sign in is disabled: ${button}`);
+  assert.ok(text(other).includes("Finish or cancel the Notion sign-in first."), text(other));
+  const own = page({ view, open: "notion", signing: "notion" });
+  assert.ok(own.includes("aria-label=\"Cancel the sign-in to Notion\""), "the waiting one keeps Cancel");
+  const free = page({ view, open: "board" });
+  assert.ok(!(free.match(/<button[^>]*aria-label="Sign in to Board"[^>]*>/u)?.[0] ?? "").includes("disabled"), "nothing waits, so Sign in is on");
+  assert.ok(!text(free).includes("sign-in first."));
+  assert.equal(api.signInFirstLine?.("Notion"), "Finish or cancel the Notion sign-in first.");
+  const tui = source("../../../crates/crazyagent/src/tui/screens/settings/connectors/words.rs");
+  assert.ok(tui.includes("\"Finish or cancel the {} sign-in first.\""), "the TUI says the same line");
+});

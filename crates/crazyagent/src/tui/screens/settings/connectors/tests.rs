@@ -1468,3 +1468,30 @@ fn a_sign_in_is_read_a_bounded_number_of_times() {
     assert!(read_all(&one(&mut shell)), "the page reads itself again");
     assert!(!shows(&mut shell, "Waiting for the browser"));
 }
+
+/// rv-code CONN-T10-PAGES-A F1, leader 02:44: while one connector's sign-in waits, every
+/// other connector's Sign in is withheld with "Finish or cancel the <name> sign-in first.",
+/// which `s` says too, so the page never drops the waiting one; once it ends, Sign in is back.
+#[test]
+fn while_one_sign_in_waits_another_connector_says_to_finish_it_first() {
+    let mut read = browser(false);
+    read.connectors[1].sign_in = SignIn::Both;
+    read.connectors[1].status = PluginStatus::NeedsSignIn;
+    read.connectors[1].oauth = browser(false).connectors[3].oauth.clone();
+    let mut shell = page(read.clone());
+    keys(&mut shell, &[Key::Down, Key::Down, Key::Down, Key::Enter]);
+    keys(&mut shell, &[Key::Char('s')]);
+    assert!(matches!(one(&mut shell), ConnectorsJob::SignIn { .. }));
+    arrive(&mut shell, started(true));
+    keys(&mut shell, &[Key::Esc, Key::Up, Key::Up, Key::Enter]);
+    let first = "Finish or cancel the Notion sign-in first.";
+    assert!(shows(&mut shell, first), "GitHub's page says why");
+    assert!(!shows(&mut shell, "s Sign in"));
+    keys(&mut shell, &[Key::Char('s')]);
+    assert!(requests(&mut shell).is_empty(), "the waiting one is kept");
+    assert!(said(&shell).contains(first), "s says why too");
+    arrive(&mut shell, stands(Ok(SignInState::Cancelled)));
+    assert!(read_all(&one(&mut shell)));
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
+    assert!(shows(&mut shell, "s Sign in") && !shows(&mut shell, first));
+}
