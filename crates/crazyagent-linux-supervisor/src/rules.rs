@@ -142,6 +142,14 @@ pub const IGNORED: [(u32, u32); 17] = [
 /// ignores anywhere in it. Input: one path component. Output: true for such a name; the
 /// agent's own git folders are spelled `.git` exactly ([`GitOwn`]).
 pub fn is_git(name: &OsStr) -> bool {
+    folded(name) == ".git"
+}
+
+/// Spells one name as the loosest filesystem compares it: without the code points a
+/// case-folding folder ignores, without dots and spaces at its end, in lower case. Input:
+/// one path component. Output: the spelling two names share when some folder reads them
+/// as one.
+fn folded(name: &OsStr) -> String {
     let text = String::from_utf8_lossy(name.as_encoded_bytes());
     let ignored = |point: &char| {
         let point = u32::from(*point);
@@ -150,8 +158,21 @@ pub fn is_git(name: &OsStr) -> bool {
             .any(|(first, last)| (*first..=*last).contains(&point))
     };
     let kept: String = text.chars().filter(|point| !ignored(point)).collect();
-    kept.trim_end_matches(['.', ' '])
-        .eq_ignore_ascii_case(".git")
+    kept.trim_end_matches(['.', ' ']).to_ascii_lowercase()
+}
+
+/// Spells a real, absolute path name by name with [`folded`]. Input: the path. Output: the
+/// names below the root, or none for a path that is relative or holds `.` or `..`.
+fn folded_parts(path: &Path) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    for (at, part) in path.components().enumerate() {
+        match part {
+            Component::RootDir if at == 0 => {}
+            Component::Normal(name) if at > 0 => parts.push(folded(name)),
+            _ => return None,
+        }
+    }
+    path.is_absolute().then_some(parts)
 }
 
 /// The git folders an agent may make entries in: the top-level `.git` of each working
@@ -227,18 +248,27 @@ pub struct Held {
 }
 
 impl Held {
-    /// Tells whether a path is held. Input: the real, absolute path of an entry, its folder
-    /// resolved. Output: true for an entry, a path in a tree, and any path not in that form.
+    /// Tells whether a path is held, each name compared as the loosest folder compares it
+    /// ([`folded`]). Input: the real, absolute path of an entry, its folder resolved.
+    /// Output: true for an entry, a path in a tree, and any path not in that form, and
+    /// for every path while a held path is itself not in that form.
     pub fn holds(&self, real: &Path) -> bool {
-        let _ = real;
-        false
+        let Some(path) = folded_parts(real) else {
+            return true;
+        };
+        let entry = |held: &PathBuf| folded_parts(held).is_none_or(|held| held == path);
+        let tree = |held: &PathBuf| folded_parts(held).is_none_or(|held| path.starts_with(&held));
+        self.entries.iter().any(entry) || self.trees.iter().any(tree)
     }
 
     /// Tells whether moving a path away would carry a held entry with it. Input: the real,
     /// absolute source path. Output: true when it is held or a folder above a held entry.
     pub fn pins(&self, real: &Path) -> bool {
-        let _ = real;
-        false
+        let Some(path) = folded_parts(real) else {
+            return true;
+        };
+        let below = |held: &PathBuf| folded_parts(held).is_none_or(|held| held.starts_with(&path));
+        self.holds(real) || self.entries.iter().chain(&self.trees).any(below)
     }
 }
 
