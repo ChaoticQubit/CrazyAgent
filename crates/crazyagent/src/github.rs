@@ -15,6 +15,7 @@ pub(crate) mod http;
 mod job;
 mod publish;
 mod rules;
+mod settings;
 mod state;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "github/test_server.rs"]
@@ -31,7 +32,9 @@ pub use publish::{
     GitHubCommitted, GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding,
     GitHubSecretKind, GitHubSecretScan,
 };
-pub use rules::{GitHubCi, GitHubRepoFacts, GitHubRule, GitHubRuleOutcome, GitHubRuleState};
+pub use rules::{
+    GitHubCi, GitHubRepoFacts, GitHubRepoRules, GitHubRule, GitHubRuleOutcome, GitHubRuleState,
+};
 
 pub const CLIENT_ID: &str = "Ov23liHICPRkMyS5sNMV";
 pub const SCOPES: &str = "repo read:user read:org workflow";

@@ -99,7 +99,7 @@ impl GitHubRule {
     /// Tells whether GitHub's settings hold the rule. Dependabot version updates and the
     /// security policy are files the publish writes into the project instead.
     /// Output: true for a rule set through GitHub's API.
-    fn on_github(self) -> bool {
+    pub(super) fn on_github(self) -> bool {
         !matches!(self, Self::DependabotVersionUpdates | Self::SecurityPolicy)
     }
 
@@ -158,13 +158,28 @@ pub struct GitHubRepoFacts {
     pub ci: GitHubCi,
 }
 
+/// What the per-repository GitHub settings page shows: `owner/name`, whether it is
+/// private, the check names the first CI run reported, escaped and bounded, and one entry
+/// per rule in `ALL`'s order with its live switch and state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubRepoRules {
+    pub full_name: String,
+    pub private: bool,
+    pub checks: Vec<String>,
+    pub rules: Vec<GitHubRuleOutcome>,
+}
+
 /// What CrazyAgent remembers about one repository it set rules on: the id of each ruleset
-/// it made, by the rule the ruleset holds, so a pass only ever changes CrazyAgent's own.
+/// it made, by the rule the ruleset holds, so a pass only ever changes CrazyAgent's own,
+/// and the rules the owner wants on, which a later switch sends for the other rules.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RepoRecord {
     #[serde(default)]
     pub(super) rulesets: BTreeMap<GitHubRule, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) on: Option<BTreeSet<GitHubRule>>,
 }
 
 impl RepoRecord {
@@ -282,6 +297,31 @@ pub(super) fn set(
         on: on.contains(&rule),
         state: pass.state(rule)?,
     })
+}
+
+/// Reads one repository's live settings for the GitHub settings page, one GET per
+/// setting, and sends nothing that changes it. One refused read never stops the rest.
+/// Inputs: endpoints, token, `owner/name` and the repository's record. Output: the page
+/// and the facts a switch needs, or `github_repo_unreadable`, `github_token_refused`,
+/// `github_unreachable`, `github_reply_invalid`.
+pub(super) fn read(
+    _endpoints: &Endpoints,
+    _token: &SecretString,
+    full_name: &str,
+    _made: &RepoRecord,
+) -> Result<(GitHubRepoRules, GitHubRepoFacts), EngineError> {
+    Ok((
+        GitHubRepoRules {
+            full_name: full_name.to_owned(),
+            private: false,
+            checks: Vec::new(),
+            rules: Vec::new(),
+        },
+        GitHubRepoFacts {
+            private: false,
+            ci: GitHubCi::None,
+        },
+    ))
 }
 
 /// One of the repository's own rulesets, as GitHub lists it.

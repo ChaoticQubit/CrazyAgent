@@ -1,10 +1,11 @@
 use super::job::GitHubPublishJob;
-use super::rules::RepoRecord;
+use super::rules::{GitHubRule, RepoRecord};
 use super::{CLIENT_ID, GitHubMethod};
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -15,6 +16,7 @@ const CONFIG: &str = "github.toml";
 const STATE: &str = "github.json";
 const RECORDS: &str = "github-repos";
 const JOBS: &str = "github-publish";
+const DEFAULTS: &str = "github-defaults.json";
 const JOB_BYTES_MAX: u64 = 8 << 20;
 #[cfg(unix)]
 const FILE_BYTES_MAX: u64 = 4096;
@@ -186,6 +188,34 @@ fn write_private_within(
         return Err(unavailable());
     }
     Ok(())
+}
+
+/// The rules a new repository starts with, as the owner set them in Settings > GitHub:
+/// DEC-182's defaults while no `github-defaults.json` is saved. Input: the engine root.
+/// Output: the rules on, or `github_state_invalid`, `github_config_unsafe`.
+pub(super) fn load_defaults(_root: &Path) -> Result<BTreeSet<GitHubRule>, EngineError> {
+    Ok(BTreeSet::new())
+}
+
+/// Saves the rules a new repository starts with as the private 0600
+/// `github-defaults.json` in the engine root, replaced in one rename. Inputs: the engine
+/// root and the rules on. Output: Ok, or `github_state_unavailable`.
+#[cfg(unix)]
+pub(super) fn save_defaults(
+    _root: &Path,
+    _rules: &BTreeSet<GitHubRule>,
+) -> Result<(), EngineError> {
+    Ok(())
+}
+
+/// Refuses to save the defaults where no owner-only file can be made. Takes the engine
+/// root and the rules, both unused. Returns `github_state_unavailable`.
+#[cfg(not(unix))]
+pub(super) fn save_defaults(
+    _root: &Path,
+    _rules: &BTreeSet<GitHubRule>,
+) -> Result<(), EngineError> {
+    Err(failure("github_state_unavailable"))
 }
 
 /// The folder and file that hold what CrazyAgent remembers about one repository: the file

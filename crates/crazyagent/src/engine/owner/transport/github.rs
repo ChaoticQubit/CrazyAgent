@@ -3,10 +3,11 @@ use crate::credentials::{SECRET_BYTES_MAX, SecretString};
 use crate::engine::owner::AccountSecret;
 use crate::github::{
     CloneReceipt, GitHub, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
-    GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
+    GitHubPublishPlan, GitHubRepoPage, GitHubRepoRules, GitHubRule, GitHubStatus,
 };
 use crate::protocol::{ProjectId, encode_frame};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 const TOKEN_FRAME_TIME: Duration = Duration::from_secs(5);
 const ACTION_TIME: Duration = Duration::from_secs(75);
@@ -53,6 +54,18 @@ pub(super) enum Action {
     PublishDiscard {
         project: ProjectId,
     },
+    RuleDefaults,
+    RuleDefaultsSet {
+        rules: BTreeSet<GitHubRule>,
+    },
+    Rules {
+        project: ProjectId,
+    },
+    RuleSet {
+        project: ProjectId,
+        rule: GitHubRule,
+        on: bool,
+    },
 }
 
 impl Action {
@@ -88,6 +101,8 @@ enum Reply {
     PublishStatus { job: Option<GitHubPublishJob> },
     Discarded { left: Option<GitHubPublishLeft> },
     Rejected { code: String },
+    RuleDefaults { rules: BTreeSet<GitHubRule> },
+    Rules { rules: GitHubRepoRules },
 }
 
 impl OwnerClient {
@@ -245,6 +260,60 @@ impl OwnerClient {
             .await?
         {
             Reply::Discarded { left } => Ok(left),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the rules a new repository starts with, as Settings > GitHub shows them.
+    /// Output: the rules on.
+    pub async fn github_rule_defaults(&self) -> Result<BTreeSet<GitHubRule>, EngineError> {
+        match self.github_exchange(Action::RuleDefaults, None).await? {
+            Reply::RuleDefaults { rules } => Ok(rules),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Saves the rules a new repository starts with. Input: the rules on.
+    /// Output: the rules as the engine saved them.
+    pub async fn github_rule_defaults_set(
+        &self,
+        rules: BTreeSet<GitHubRule>,
+    ) -> Result<BTreeSet<GitHubRule>, EngineError> {
+        match self
+            .github_exchange(Action::RuleDefaultsSet { rules }, None)
+            .await?
+        {
+            Reply::RuleDefaults { rules } => Ok(rules),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the live rules of the repository a project was published to. Input: the
+    /// project. Output: the page, or `github_rules_not_published` until its publish is done.
+    pub async fn github_rules(&self, project: ProjectId) -> Result<GitHubRepoRules, EngineError> {
+        match self
+            .github_exchange(Action::Rules { project }, None)
+            .await?
+        {
+            Reply::Rules { rules } => Ok(rules),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Turns one rule on or off on the repository a project was published to, with the
+    /// owner's GitHub sign-in. Inputs: the project, the rule and whether it is on.
+    /// Output: the page read again after the change.
+    pub async fn github_rule_set(
+        &self,
+        project: ProjectId,
+        rule: GitHubRule,
+        on: bool,
+    ) -> Result<GitHubRepoRules, EngineError> {
+        match self
+            .github_exchange(Action::RuleSet { project, rule, on }, None)
+            .await?
+        {
+            Reply::Rules { rules } => Ok(rules),
             _ => Err(unknown()),
         }
     }
@@ -484,6 +553,18 @@ async fn handle(
             Action::PublishDiscard { project } => Reply::Discarded {
                 left: account.publish_discard(&project_folder(&root, &project)?)?,
             },
+            Action::RuleDefaults => Reply::RuleDefaults {
+                rules: account.rule_defaults()?,
+            },
+            Action::RuleDefaultsSet { rules } => Reply::RuleDefaults {
+                rules: account.set_rule_defaults(&rules)?,
+            },
+            Action::Rules { project } => Reply::Rules {
+                rules: account.repo_rules(&project_folder(&root, &project)?)?,
+            },
+            Action::RuleSet { project, rule, on } => Reply::Rules {
+                rules: account.set_repo_rule(&project_folder(&root, &project)?, rule, on)?,
+            },
         })
     })
     .await
@@ -589,6 +670,8 @@ fn read_kind(action: &Action) -> Option<&'static str> {
         Action::Repos { .. } => Some("github.repos"),
         Action::Owners => Some("github.owners"),
         Action::PublishStatus { .. } => Some("github.publish_status"),
+        Action::RuleDefaults => Some("github.rule_defaults"),
+        Action::Rules { .. } => Some("github.rules"),
         _ => None,
     }
 }

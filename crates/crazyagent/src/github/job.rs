@@ -102,8 +102,9 @@ pub enum GitHubPublishStep {
 
 /// One project's publish as the engine records it: the plan, the lines the owner
 /// approved, the paths publish wrote, the step reached, the code of the failure that
-/// stopped it there, if one did, and the `owner/name` of the repository it made, kept
-/// once made so a check and commit again never create a second one.
+/// stopped it there, if one did, the `owner/name` of the repository it made, kept
+/// once made so a check and commit again never create a second one, and the rules it
+/// sets, copied from the global defaults at Start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubPublishJob {
@@ -115,6 +116,8 @@ pub struct GitHubPublishJob {
     pub stopped: Option<String>,
     #[serde(default)]
     pub made: Option<String>,
+    #[serde(default = "GitHubRule::defaults")]
+    pub rules: BTreeSet<GitHubRule>,
 }
 
 /// Holds one project's publish for the engine, so a second run of it is refused while
@@ -241,6 +244,7 @@ impl GitHub {
             },
             stopped: None,
             made: None,
+            rules: GitHubRule::defaults(),
         };
         state::save_job(&self.root, &job)?;
         Ok(job)
@@ -428,6 +432,7 @@ impl GitHub {
             private: job.plan.private,
             docs: job.plan.docs,
             approved: job.lines.clone(),
+            rules: job.rules.clone(),
         };
         for path in self.publish_prepare(&job.project, &local, &choices)? {
             if !job.written.contains(&path) {

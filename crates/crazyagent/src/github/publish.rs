@@ -1,8 +1,10 @@
+use super::GitHubRule;
 use super::clone;
 use crate::engine::EngineError;
 use crate::project_setup::SECRET_PREFIXES;
 use crate::research::runner::GIT_SAFE;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
@@ -131,13 +133,15 @@ pub struct GitHubLocal {
 }
 
 /// What the owner chose for the local side of a publish: the repository's visibility,
-/// whether the docs folder goes up, and the .gitignore lines the owner approved.
+/// whether the docs folder goes up, the .gitignore lines the owner approved, and the rules
+/// on, of which the security policy and Dependabot version updates are files written here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubPrepare {
     pub private: bool,
     pub docs: bool,
     pub approved: Vec<String>,
+    pub rules: BTreeSet<GitHubRule>,
 }
 
 /// The kind of secret found on a line: a known token, a private key block, or a
