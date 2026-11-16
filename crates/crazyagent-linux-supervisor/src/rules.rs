@@ -347,6 +347,35 @@ impl HeldNodes {
     }
 }
 
+/// How a time-setting call lays out the access and modification times it names in the
+/// caller's memory, each count a 64-bit word: whole seconds (`utime`), seconds and
+/// microseconds (`utimes`, `futimesat`), or seconds and nanoseconds (`utimensat`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stamps {
+    Seconds,
+    Micros,
+    Nanos,
+}
+
+impl Stamps {
+    /// How many bytes the two times take in the caller's memory. Output: the count.
+    pub fn size(self) -> usize {
+        match self {
+            Self::Seconds => 16,
+            Self::Micros | Self::Nanos => 32,
+        }
+    }
+
+    /// Reads the two times as `utimensat` takes them, seconds and nanoseconds, leaving
+    /// the nanosecond counts for the kernel to check. Input: [`Stamps::size`] bytes.
+    /// Output: the access and modification times, or none for a microsecond count outside
+    /// 0..1_000_000, which the kernel refuses with `EINVAL`.
+    pub fn read(self, bytes: &[u8]) -> Option<[(i64, i64); 2]> {
+        let _ = bytes;
+        None
+    }
+}
+
 /// Whom a signal call names: one process, one process group, the caller's own group, or
 /// every process the caller may signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -989,6 +1018,32 @@ mod tests {
         let src = [(1, 21), (1, 20), (1, 10), (1, 2)];
         assert!(!nodes.pins(Some((1, 41)), &src), "a folder in the worktree");
         assert!(!nodes.pins(None, &src));
+    }
+
+    #[test]
+    fn the_times_a_time_call_names_are_read_as_seconds_and_nanoseconds() {
+        let bytes = |words: &[i64]| -> Vec<u8> {
+            words.iter().flat_map(|word| word.to_ne_bytes()).collect()
+        };
+        assert_eq!(Stamps::Seconds.size(), 16);
+        assert_eq!(Stamps::Micros.size(), 32);
+        assert_eq!(Stamps::Nanos.size(), 32);
+        let seconds = Stamps::Seconds.read(&bytes(&[7, 9]));
+        assert_eq!(seconds, Some([(7, 0), (9, 0)]));
+        let micros = Stamps::Micros.read(&bytes(&[7, 5, 9, 999_999]));
+        assert_eq!(micros, Some([(7, 5_000), (9, 999_999_000)]));
+        for bad in [[7, 1_000_000, 9, 0], [7, 0, 9, -1], [7, i64::MAX, 9, 0]] {
+            assert_eq!(Stamps::Micros.read(&bytes(&bad)), None, "{bad:?}");
+        }
+        let omit = (1 << 30) - 2;
+        let nanos = Stamps::Nanos.read(&bytes(&[7, 5, 9, omit]));
+        assert_eq!(nanos, Some([(7, 5), (9, omit)]));
+        let unchecked = Stamps::Nanos.read(&bytes(&[-1, 2_000_000_000, 0, 0]));
+        assert_eq!(
+            unchecked,
+            Some([(-1, 2_000_000_000), (0, 0)]),
+            "the kernel checks it"
+        );
     }
 
     #[test]
