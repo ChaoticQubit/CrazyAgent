@@ -1235,6 +1235,8 @@ test("the secret guard reads the secrets context in any case, as the runner does
     ["    steps:", '      - run: "echo ${{ \\u0053ECRETS.KEY }}"'],
     ["    steps:", "      - run: |", "          echo hi", "        env:", '          KEY: "${{ \\u0073ecrets.KEY }}"'],
     ["    env:", '      KEY: "${{ toJSON(', "        x: |", '          \\u0073ecrets) }}"'],
+    ["    env:", '      KEY: &a "${{ toJSON(', "        x: |", '          \\u0073ecrets) }}"'],
+    ["    env:", '      KEY: !!str "${{ toJSON(', "        x: |", '          \\u0073ecrets) }}"'],
   ]) {
     const text = [...head, ...tail, ""].join("\n");
     assert.throws(() => exposedJobs(text), /alias, a backslash/, text);
