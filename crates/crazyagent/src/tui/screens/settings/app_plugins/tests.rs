@@ -905,3 +905,10 @@ fn every_refusal_sentence_matches_the_desktop_words() {
     assert!(checked >= 27, "the desktop map was read: {checked}");
     assert!(sentence("app_plugin_name_invalid").starts_with("A plugin name is"));
 }
+
+#[test]
+fn the_add_forms_manifest_box_draws_hidden_characters_as_escapes() {
+    let form = add_form();
+    assert!(form.yaml.multiline && form.yaml.escaped);
+    assert!(!form.path.escaped);
+}
