@@ -248,11 +248,11 @@ fn an_interrupt_writes_the_interrupt_frame_and_the_turn_ends_interrupted() {
     assert_eq!(rpc.phase(), Phase::Idle);
 }
 
-/// DEC-180 Task 12, the jsonl-rpc side of rv-sec3 F1 on ACP: with tools off, a tool the
-/// harness reports using is a breach. It gives one `ApprovalDenied` and writes the interrupt
-/// line once; until the turn ends nothing else is read, an interrupt is refused, and the
-/// end is unsuccessful with no `Interrupted`. After an interrupt already asked, a breach
-/// writes no second line. With tools on the same line is a plain tool use.
+/// DEC-180 Task 12 and rv-sa241 L1: with tools off, a tool the harness reports using is a
+/// breach: one `ApprovalDenied` and the interrupt line once, then nothing read and no
+/// interrupt until an unsuccessful end with no `Interrupted`, after which the process takes
+/// no further turn. After an asked interrupt a breach writes no second line. With tools on
+/// the same line is a plain tool use.
 #[test]
 fn a_tool_used_with_tools_off_is_a_breach_that_interrupts_the_turn() {
     let tool = json!({"type": "tool", "name": "Bash"});
@@ -275,7 +275,8 @@ fn a_tool_used_with_tools_off_is_a_breach_that_interrupts_the_turn() {
         [finished(false)]
     );
     assert!(!rpc.breached());
-    assert_eq!(rpc.phase(), Phase::Idle);
+    assert_eq!(rpc.phase(), Phase::Failed);
+    assert_eq!(code(rpc.prompt("again")), "launch_protocol_failed");
 
     let mut asked = running(false);
     asked.interrupt().unwrap();
@@ -286,6 +287,8 @@ fn a_tool_used_with_tools_off_is_a_breach_that_interrupts_the_turn() {
         events_of(&mut asked, json!({"type": "done", "ok": true})),
         [LaunchEvent::Interrupted, finished(false)]
     );
+    assert_eq!(asked.phase(), Phase::Failed);
+    assert_eq!(code(asked.prompt("again")), "launch_protocol_failed");
 
     let mut on = running(true);
     assert_eq!(
@@ -295,6 +298,39 @@ fn a_tool_used_with_tools_off_is_a_breach_that_interrupts_the_turn() {
         }]
     );
     assert!(!on.breached());
+}
+
+/// rv-sa241 L1 on Task 12: with tools off, a tool the harness reports between turns, before
+/// the first prompt or after a turn ended, is a breach too. It gives one `ApprovalDenied`,
+/// writes the interrupt line and fails the conversation for good, so the process takes no
+/// further turn. With tools on the same line between turns gives nothing.
+#[test]
+fn a_tool_used_with_tools_off_between_turns_is_a_breach_that_fails_the_conversation() {
+    let tool = json!({"type": "tool", "name": "Bash"});
+    let mut after = running(false);
+    assert_eq!(
+        events_of(&mut after, json!({"type": "done", "ok": true})),
+        [finished(true)]
+    );
+    assert_eq!(after.phase(), Phase::Idle);
+    for (state, mut rpc) in [("before", begin(false)), ("after", after)] {
+        let (events, writes) = rpc.receive(&line(tool.clone())).unwrap();
+        assert_eq!(events, [LaunchEvent::ApprovalDenied], "{state}");
+        assert_eq!(writes, [ABORT.to_vec()], "{state}");
+        assert_eq!(rpc.phase(), Phase::Failed, "{state}");
+        assert!(!rpc.breached(), "{state}");
+        assert_eq!(code(rpc.prompt("x")), "launch_protocol_failed", "{state}");
+        assert_eq!(code(rpc.interrupt()), "launch_not_running", "{state}");
+        assert_eq!(
+            code(rpc.receive(&line(json!({"type": "done", "ok": true})))),
+            "launch_protocol_failed",
+            "{state}"
+        );
+    }
+
+    let mut on = begin(true);
+    assert!(events_of(&mut on, tool).is_empty());
+    assert_eq!(on.phase(), Phase::Idle);
 }
 
 /// DEC-180 Task 12: every fact a rule reports during a turn gives its event, and the turn

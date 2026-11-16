@@ -182,10 +182,10 @@ fn a_jsonl_rpc_harness_that_dies_mid_turn_leaves_the_turn_unfinished() {
     assert!(!ended.killed);
 }
 
-/// DEC-180 Task 12, on the Task 9 stand-in: with tools off and a session to continue, the
-/// process starts with the resume and tools-off arguments; a tool it reports is a breach
-/// whose interrupt line the client writes back, and the turn the stand-in then stops ends
-/// unsuccessfully with no `Interrupted`.
+/// DEC-180 Task 12 and rv-sa241 L1, on the Task 9 stand-in: with tools off and a session to
+/// continue, the process starts with the resume and tools-off arguments; a tool it reports
+/// is a breach whose interrupt line the client writes back, the turn the stand-in then stops
+/// ends unsuccessfully with no `Interrupted`, and the process takes no further turn.
 #[test]
 fn a_jsonl_rpc_breach_of_tools_off_writes_the_interrupt_and_ends_the_turn() {
     let standin = Standin::new("jsonl-rpc");
@@ -205,6 +205,11 @@ fn a_jsonl_rpc_breach_of_tools_off_writes_the_interrupt_and_ends_the_turn() {
         ]
     );
     assert!(!client.rpc.breached());
+    assert_eq!(client.rpc.phase(), Phase::Failed);
+    assert_eq!(
+        client.rpc.prompt("again").unwrap_err().0,
+        "launch_protocol_failed"
+    );
     client.live.close();
     let ended = client.live.finish();
     assert_eq!(ended.status.code(), Some(0));
