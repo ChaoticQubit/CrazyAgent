@@ -1848,7 +1848,9 @@ fn execute(
             crate::conversation::apply(tx, mutation, revision)
         }
         Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
-        Command::OwnerSandbox { settings } => crate::sandbox_settings::save(tx, settings),
+        Command::OwnerSandbox { settings, version } => {
+            crate::sandbox_settings::save_from(tx, settings, *version)
+        }
         Command::OwnerAgentCleanup { settings } => crate::cleanup_settings::save(tx, settings),
         Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
         Command::OwnerProviderRetry { choice } => crate::provider_retry::save(tx, *choice),

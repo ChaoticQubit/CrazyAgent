@@ -12,7 +12,7 @@ use crate::quit_settings::{
     HOURS_DEFAULT, HOURS_MAX, HOURS_MIN, LeftRunning, OnQuit, QuitSettings,
 };
 use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
-use crate::sandbox_settings::SandboxSettings;
+use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crate::setup::pack::entry_title;
 use crate::setup::{
     Dependency, DependencyState, PackEntry, PackKind, PackState, RefusedTool, SetupStatus, ToolFix,
@@ -556,7 +556,7 @@ pub struct AppSetup {
     setup: Load<SetupStatus>,
     home: Load<ProjectsHome>,
     github: Load<GitHubStatus>,
-    sandbox: Load<SandboxSettings>,
+    sandbox: Load<StoredSandboxSettings>,
     cleanup: Load<CleanupSettings>,
     quit: Load<QuitSettings>,
     steps: Load<MasterStepSettings>,
@@ -1051,7 +1051,7 @@ impl AppSetup {
     }
 
     fn ask_sockets(&mut self, ctx: &mut Ctx) {
-        let Load::Ready(settings) = &self.sandbox else {
+        let Load::Ready(StoredSandboxSettings { settings, .. }) = &self.sandbox else {
             ctx.say(Message::warning(SOCKETS_UNKNOWN, ""));
             return;
         };
@@ -1065,7 +1065,10 @@ impl AppSetup {
     fn set_sockets(&mut self, choice: usize, ctx: &mut Ctx) {
         assert!(choice < SOCKETS_CHOICES.len());
         let linux_sockets = SOCKETS_CHOICES[choice];
-        let Load::Ready(stored) = &self.sandbox else {
+        let Load::Ready(StoredSandboxSettings {
+            settings: stored, ..
+        }) = &self.sandbox
+        else {
             ctx.say(Message::warning(SOCKETS_UNKNOWN, ""));
             return;
         };
@@ -1081,13 +1084,14 @@ impl AppSetup {
         let done = format!("Linux sockets: {}.", sockets_words(linux_sockets).0);
         let job = AppSetupJob::SetSandbox {
             settings,
+            version: 0,
             generation: ctx.next_generation(),
         };
         self.change(job, Sent::Done(done), ctx);
     }
 
     fn ask_supervisor(&mut self, ctx: &mut Ctx) {
-        let Load::Ready(settings) = &self.sandbox else {
+        let Load::Ready(StoredSandboxSettings { settings, .. }) = &self.sandbox else {
             ctx.say(Message::warning(SUPERVISOR_UNKNOWN, ""));
             return;
         };
@@ -1101,7 +1105,10 @@ impl AppSetup {
     fn set_supervisor(&mut self, choice: usize, ctx: &mut Ctx) {
         assert!(choice < SUPERVISOR_CHOICES.len());
         let linux_supervisor = SUPERVISOR_CHOICES[choice];
-        let Load::Ready(stored) = &self.sandbox else {
+        let Load::Ready(StoredSandboxSettings {
+            settings: stored, ..
+        }) = &self.sandbox
+        else {
             ctx.say(Message::warning(SUPERVISOR_UNKNOWN, ""));
             return;
         };
@@ -1118,13 +1125,14 @@ impl AppSetup {
         let done = format!("Linux supervisor: {title}.");
         let job = AppSetupJob::SetSandbox {
             settings,
+            version: 0,
             generation: ctx.next_generation(),
         };
         self.change(job, Sent::Done(done), ctx);
     }
 
     fn ask_strict(&mut self, ctx: &mut Ctx) {
-        let Load::Ready(settings) = &self.sandbox else {
+        let Load::Ready(StoredSandboxSettings { settings, .. }) = &self.sandbox else {
             ctx.say(Message::warning(STRICT_UNKNOWN, ""));
             return;
         };
@@ -1138,7 +1146,10 @@ impl AppSetup {
     fn set_strict(&mut self, choice: usize, ctx: &mut Ctx) {
         assert!(choice < STRICT_CHOICES.len());
         let linux_strict = STRICT_CHOICES[choice];
-        let Load::Ready(stored) = &self.sandbox else {
+        let Load::Ready(StoredSandboxSettings {
+            settings: stored, ..
+        }) = &self.sandbox
+        else {
             ctx.say(Message::warning(STRICT_UNKNOWN, ""));
             return;
         };
@@ -1156,6 +1167,7 @@ impl AppSetup {
         let done = format!("Linux strict: {title}.");
         let job = AppSetupJob::SetSandbox {
             settings,
+            version: 0,
             generation: ctx.next_generation(),
         };
         self.change(job, Sent::Done(done), ctx);
@@ -1167,7 +1179,7 @@ impl AppSetup {
         ctx: &Ctx,
     ) -> (Line<'static>, Option<&'static str>) {
         match &self.sandbox {
-            Load::Ready(settings) => {
+            Load::Ready(StoredSandboxSettings { settings, .. }) => {
                 let (title, detail) = words(settings);
                 (Line::raw(title), Some(detail))
             }

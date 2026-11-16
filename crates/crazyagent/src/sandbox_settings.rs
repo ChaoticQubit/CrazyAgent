@@ -2,7 +2,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
 use crate::protocol::Outcome;
 use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,17 @@ pub struct SandboxSettings {
     pub linux_supervisor: LinuxSupervisor,
     #[serde(default)]
     pub linux_strict: LinuxStrict,
+}
+
+/// The owner's sandbox settings with the version of the read that showed them. A save
+/// names that version, so a save from a window that read older settings is refused
+/// `stale_revision` instead of turning a newer choice back (rv-sec2 F1). Fields: the
+/// settings and the version, 0 before the first save.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredSandboxSettings {
+    pub settings: SandboxSettings,
+    pub version: u64,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -100,6 +111,19 @@ pub(crate) fn save(
     Ok(Outcome::Applied)
 }
 
+/// Saves the owner's sandbox settings from a read of `version`, so a save from a screen
+/// that read older settings never replaces newer ones, as team settings do (V2SYNC-2).
+/// Inputs: the owner transaction, the settings and the version the screen showed. Output:
+/// `Applied`, the `stale_revision` rejection with the stored row unchanged, or the error.
+pub(crate) fn save_from(
+    tx: &Transaction<'_>,
+    settings: &SandboxSettings,
+    version: u64,
+) -> Result<Outcome, EngineError> {
+    let _ = version;
+    save(tx, settings)
+}
+
 /// Loads the owner's sandbox settings. Input: the engine database, writable or read-only.
 /// Output: the stored settings, the defaults before the first save, or
 /// `sandbox_settings_invalid` for a stored value this engine does not know, so a launch
@@ -144,16 +168,51 @@ pub(crate) fn stored(engine: &std::path::Path) -> Result<SandboxSettings, Engine
 }
 
 /// The owner read of the sandbox settings. Input: the open transaction. Output: the
-/// settings as owner data.
+/// settings and the version a save from this read names, as owner data.
 pub(crate) fn read(connection: &Connection) -> Result<OwnerData, EngineError> {
     Ok(OwnerData::SandboxSettings {
         settings: load(connection)?,
+        version: 0,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shown(connection: &Connection) -> Option<(SandboxSettings, u64)> {
+        match read(connection) {
+            Ok(OwnerData::SandboxSettings { settings, version }) => Some((settings, version)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_save_from_a_stale_read_is_refused_and_the_stored_strict_choice_stays() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut connection = Connection::open(folder.path().join("engine.db")).unwrap();
+        initialize(&connection).unwrap();
+        assert_eq!(shown(&connection), Some((SandboxSettings::default(), 0)));
+        let on = SandboxSettings {
+            linux_strict: LinuxStrict::On,
+            ..SandboxSettings::default()
+        };
+        let tx = connection.transaction().unwrap();
+        assert_eq!(save_from(&tx, &on, 0).unwrap(), Outcome::Applied);
+        tx.commit().unwrap();
+        assert_eq!(shown(&connection), Some((on, 1)));
+        let tx = connection.transaction().unwrap();
+        let stale = save_from(&tx, &SandboxSettings::default(), 0).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            stale,
+            Outcome::Rejected {
+                code: "stale_revision".into()
+            }
+        );
+        assert_eq!(shown(&connection), Some((on, 1)));
+        assert_eq!(load(&connection).unwrap().linux_strict, LinuxStrict::On);
+    }
 
     #[test]
     fn each_option_is_saved_and_read_back_and_a_fresh_engine_has_the_default() {

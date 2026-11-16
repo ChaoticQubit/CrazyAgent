@@ -7,7 +7,7 @@ use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
-use crate::sandbox_settings::SandboxSettings;
+use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crate::setup::{Dependency, DependencyStatus, PackGroup, Version};
 use crate::tui::client::OwnerEvent;
 use crate::tui::glyphs::Status;
@@ -184,9 +184,12 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
     shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
     shell.arrive(event(AppSetupEvent::Home(Ok(home()))));
     shell.arrive(event(AppSetupEvent::GitHub(Ok(signed_in()))));
-    shell.arrive(event(AppSetupEvent::Sandbox(Ok(SandboxSettings {
-        linux_sockets,
-        ..SandboxSettings::default()
+    shell.arrive(event(AppSetupEvent::Sandbox(Ok(StoredSandboxSettings {
+        settings: SandboxSettings {
+            linux_sockets,
+            ..SandboxSettings::default()
+        },
+        version: 0,
     }))));
     shell.arrive(event(AppSetupEvent::Cleanup(
         Ok(CleanupSettings::default()),
@@ -240,7 +243,10 @@ fn sent(shell: &mut Shell) -> SandboxSettings {
 }
 
 fn stored(shell: &mut Shell, settings: SandboxSettings) {
-    shell.arrive(event(AppSetupEvent::Sandbox(Ok(settings))));
+    shell.arrive(event(AppSetupEvent::Sandbox(Ok(StoredSandboxSettings {
+        settings,
+        version: 0,
+    }))));
 }
 
 fn find<'a>(rows: &'a [String], needle: &str) -> &'a str {
@@ -1164,6 +1170,26 @@ fn changing_sockets_or_the_supervisor_keeps_strict_on() {
     };
     assert_eq!(sent(&mut shell), off);
     assert_eq!(off.linux_strict, LinuxStrict::On);
+}
+
+#[test]
+fn each_sandbox_change_names_the_version_of_the_read_it_changes() {
+    for (key, version) in [('l', 7), ('v', 8), ('x', 9)] {
+        let mut shell = settings(120, 60);
+        shell.arrive(event(AppSetupEvent::Sandbox(Ok(StoredSandboxSettings {
+            settings: SandboxSettings::default(),
+            version,
+        }))));
+        shell.key(Key::Char(key));
+        shell.key(Key::Down);
+        shell.key(Key::Enter);
+        let sent = jobs(&mut shell);
+        let named = match sent.as_slice() {
+            [AppSetupJob::SetSandbox { version, .. }] => Some(*version),
+            _ => None,
+        };
+        assert_eq!(named, Some(version), "key {key}");
+    }
 }
 
 #[test]
