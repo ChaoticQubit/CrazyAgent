@@ -409,3 +409,36 @@ fn a_step_up_for_an_undeclared_scope_falls_back_to_a_plain_sign_in() {
     let stepped_up = stepped(Ok(pending("step")), || Ok(pending("plain")));
     assert_eq!(stepped_up.map(|begun| begun.state), Ok("step".to_owned()));
 }
+
+/// rv-code2 T10R2-1, rv-sa241 r2 LOW-1: while a sign-in's answer is being redeemed, a
+/// sign-out and a save or removal of the own app are refused at once, so no token saved by
+/// that answer outlives a sign-out and the page never reads signed in after one; once the
+/// answer settles, the sign-out goes through and the page reads none.
+#[test]
+fn a_sign_out_or_own_app_change_is_refused_while_an_answer_is_being_redeemed() {
+    let (_tmp, root) = engine_root();
+    let db = crate::questions::open(&root).unwrap();
+    let (enter, entered) = mpsc::channel::<()>();
+    let (release, hold) = mpsc::channel::<()>();
+    let finish = move |_: &str, _: &str, _: Option<&str>| {
+        enter.send(()).unwrap();
+        hold.recv().unwrap();
+        Ok(())
+    };
+    let (_, redirect) = started(&root, "board", STATE, WAIT, finish);
+    let query = format!("state={STATE}&code=c6");
+    assert_eq!(answered(&redirect, &query).0, 200);
+    entered.recv_timeout(WAIT).unwrap();
+    let finishing = Some("connector_oauth_sign_in_finishing");
+    let out = sign_out(&db, &root, "board");
+    assert_eq!(out.err().map(|refusal| refusal.0).as_deref(), finishing);
+    let clear = clear_own_app(&db, &root, "board");
+    assert_eq!(clear.err().map(|refusal| refusal.0).as_deref(), finishing);
+    let save = save_own_app(&db, &root, "board", "app-0001", None);
+    assert_eq!(save.err().map(|refusal| refusal.0).as_deref(), finishing);
+    assert_eq!(state_of(&root, "board"), SignInState::Waiting);
+    release.send(()).unwrap();
+    until("signed in", || state_of(&root, "board") == SIGNED_IN);
+    sign_out(&db, &root, "board").unwrap();
+    assert_eq!(state_of(&root, "board"), SignInState::Idle);
+}

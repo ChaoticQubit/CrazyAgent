@@ -1519,6 +1519,38 @@ fn a_registered_sign_in_answered_while_an_own_app_is_saved_is_never_redeemed() {
     );
 }
 
+/// rv-sa241 r2 N1: signing out removes every access token and refresh token the
+/// connector's sign-ins saved, at every issuer, even with no record that names one, and a
+/// record that cannot be read; the owner's own app and a registered client stay.
+#[test]
+fn signing_out_removes_every_token_the_connector_saved_and_keeps_its_apps() {
+    let sign = signing(shape(), &["127.0.0.1"]);
+    for key in [
+        "connector-token-board-0123456789abcdef",
+        "connector-refresh-board-0123456789abcdef",
+        "connector-signin-board",
+        "connector-client-board-fedcba9876543210",
+    ] {
+        let reference = CredentialRef::new(key).unwrap();
+        crate::storage::accounts::replace_key_in(
+            &sign.case.root,
+            PLUGIN_KEYS,
+            &reference,
+            b"stale-0001".to_vec(),
+        )
+        .unwrap();
+    }
+    assert_eq!(sign_out(&sign.case.db, &sign.case.root, "board"), Ok(()));
+    for prefix in [
+        "connector-token-board-",
+        "connector-refresh-board-",
+        "connector-signin-board",
+    ] {
+        assert!(saved(&sign.case, prefix).is_empty(), "{prefix} is removed");
+    }
+    assert_eq!(saved(&sign.case, "connector-client-board-").len(), 2);
+}
+
 /// Sends the browser's answer to a sign-in's loopback address, as the owner's browser does
 /// once the vendor sends it back. Inputs: the address and the query. Output: the status.
 fn brought_back(redirect: &url::Url, query: &str) -> u16 {
