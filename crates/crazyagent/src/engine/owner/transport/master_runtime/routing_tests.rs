@@ -1617,6 +1617,59 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
     case.finish().await;
 }
 
+/// RCLI-NARROWING: a running RCLI master turn checks the saved policy as native turns do.
+/// One that launched under Full access stops as lowered access once the saved policy is
+/// sandboxed, one the saved policy still covers runs on, and the collect loop makes the
+/// check every POLICY_CHECK_EVERY on its inspect tick.
+#[tokio::test]
+async fn a_running_rcli_turn_stops_when_the_saved_policy_no_longer_covers_its_launch() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    case.register().await;
+    let result = case
+        .command(MasterRuntimeCommand::Prepare {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+        })
+        .await
+        .unwrap();
+    let MasterRuntimeResult::Prepared(prepared) = result else {
+        panic!("the master turn was prepared");
+    };
+    let mut prepared = *prepared;
+    assert_eq!(prepared.agent_policy.access, AgentAccess::Sandboxed);
+    case.runtime()
+        .rcli_policy_covers(&prepared, &case.turn.id)
+        .await
+        .expect("a turn the saved policy still covers runs on");
+    prepared.agent_policy.access = AgentAccess::Full;
+    let stopped = case
+        .runtime()
+        .rcli_policy_covers(&prepared, &case.turn.id)
+        .await
+        .expect_err("a turn launched under Full stops once the saved policy is sandboxed");
+    assert_eq!(stopped.0, "agent_access_lowered");
+    assert_eq!(reason_for_error(&stopped), MasterReason::ConnectionChanged);
+    let source = include_str!("../master_rcli.rs");
+    let start = source.find("async fn collect_rcli_master_turn(").unwrap();
+    let end = start
+        + source[start..]
+            .find("async fn rcli_policy_covers(")
+            .unwrap();
+    let collect = &source[start..end];
+    assert!(
+        collect.contains("POLICY_CHECK_EVERY"),
+        "the loop paces the check"
+    );
+    assert!(
+        collect.contains("self.rcli_policy_covers(prepared, turn_id).await?"),
+        "the loop stops the turn on a narrowing"
+    );
+    case.finish().await;
+}
+
 #[tokio::test]
 async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_guard() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;

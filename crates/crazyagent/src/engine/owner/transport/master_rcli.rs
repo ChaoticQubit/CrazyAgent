@@ -444,6 +444,19 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Tells whether the policy the owner saved now still covers what a running RCLI master
+    /// turn's sandbox granted at launch, its access and the toolchains its policy allowed,
+    /// as native turns check (RCLI-NARROWING). Stub: always covered. Inputs: the prepared
+    /// turn and its id. Output: Ok while covered, else the narrowing's code or the refusal.
+    pub(super) async fn rcli_policy_covers(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+    ) -> Result<(), EngineError> {
+        let _ = (prepared, turn_id);
+        Ok(())
+    }
+
     async fn inspect_rcli_scope(
         &self,
         prepared: &PreparedMasterTurn,
