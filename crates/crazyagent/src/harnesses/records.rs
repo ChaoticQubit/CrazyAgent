@@ -5,6 +5,9 @@ use super::registry::registry;
 pub mod json_files;
 pub mod json_rewrite;
 pub mod jsonl_append;
+pub mod markdown_history;
+pub mod screen;
+pub mod sqlite_poll;
 
 /// The record readers the engine runs today: the Codex rollouts, the Claude Code session
 /// transcript, and the JSON lines and rewritten JSON records a manifest's terminal settings
