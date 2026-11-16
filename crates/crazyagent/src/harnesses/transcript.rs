@@ -1,6 +1,5 @@
 use super::drivers::rules;
 use super::interactive::Transcript;
-use super::interactive::settings::TerminalSettings;
 use super::launch::{LaunchError, failure, rate_limited};
 use super::manifest::{Fact, RecordKind, Rule};
 use super::records::json_rewrite::JsonRewrite;
@@ -10,6 +9,7 @@ use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
 pub const READ_BYTES_MAX: usize = 1024 * 1024;
@@ -1278,8 +1278,52 @@ pub fn record_message(harness: &str, line: &[u8]) -> Option<(&'static str, Strin
     match reader {
         Reader::CodexRollouts => codex_entry(&value),
         Reader::ClaudeSession => claude_entry(&value),
-        Reader::JsonlAppend | Reader::JsonRewrite => None,
+        Reader::JsonlAppend => appended_entry(appended_rules(harness)?, &value),
+        Reader::JsonRewrite => None,
     }
+}
+
+/// Reads one jsonl-append record object for the session search through its manifest's
+/// rules: the text a `turn_started` rule reads is typed, a `text` rule's the agent's.
+/// Inputs: the record rules and the object. Output: who said it and the text, none for a
+/// fact with no text or any other fact.
+fn appended_entry(rules: &[Rule], value: &Value) -> Option<(&'static str, String)> {
+    let found = rules::matched(rules, value)?;
+    let speaker = match found.fact {
+        Fact::TurnStarted => Speaker::Input,
+        Fact::Text => Speaker::Agent,
+        _ => return None,
+    };
+    Some((speaker_name(speaker), found.text?))
+}
+
+/// The record rules of each catalog harness that keeps a jsonl-append record, read from
+/// its manifest's terminal settings once, as the registry never changes, so a record read
+/// line by line reads no manifest per line. Input: the catalog id. Output: the rules, or
+/// none for a harness with no jsonl-append record or settings that do not read.
+fn appended_rules(harness: &str) -> Option<&'static [Rule]> {
+    static READ: LazyLock<Vec<(&'static str, Vec<Rule>)>> = LazyLock::new(|| {
+        super::registry::registry()
+            .all()
+            .iter()
+            .map(|found| found.manifest().id.as_str())
+            .filter(|id| records::stored(id) == Some(Reader::JsonlAppend))
+            .filter_map(|id| {
+                let settings = super::interactive::catalog_settings(id).ok()?;
+                Some((id, settings.rules().to_vec()))
+            })
+            .collect()
+    });
+    let found = READ.iter().find(|(id, _)| *id == harness)?;
+    Some(found.1.as_slice())
+}
+
+/// Reads one jsonl-append record object as typed words: the text its manifest's
+/// `turn_started` rule reads (the T25 convention). Inputs: the record rules and the
+/// object. Output: the text, none for a start with no text or any other line.
+fn appended_typed(rules: &[Rule], value: &Value) -> Option<String> {
+    let found = rules::matched(rules, value)?;
+    found.text.filter(|_| found.fact == Fact::TurnStarted)
 }
 
 fn speaker_name(speaker: Speaker) -> &'static str {
@@ -1546,13 +1590,17 @@ fn said(speaker: Speaker, text: String) -> Option<(Speaker, String)> {
 pub mod pending;
 
 /// Reads what was typed into a harness conversation after byte `offset` of its record, as
-/// `conversation_messages` reads typed messages, from at most `EXCERPT_TAIL_BYTES_MAX`
-/// bytes past the offset, never following a link. Takes the harness, the record and the
-/// offset. Returns the typed texts oldest first, or none when the record cannot be read or
-/// is now shorter than the offset.
+/// `conversation_messages` reads typed messages, or a jsonl-append record as `typed_past`
+/// does, from at most `EXCERPT_TAIL_BYTES_MAX` bytes past the offset, never following a
+/// link. Takes the harness, the record and the offset. Returns the typed texts oldest
+/// first, or none when the record cannot be read or is now shorter than the offset.
 pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<String>> {
     let mut file = open_record(harness, record)?;
     let reader = records::stored(harness);
+    let rules: &[Rule] = match reader {
+        Some(Reader::JsonlAppend) => appended_rules(harness)?,
+        _ => &[],
+    };
     let length = file.metadata().ok()?.len();
     if length < offset {
         return None;
@@ -1570,7 +1618,10 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
         let said = match reader {
             Some(Reader::CodexRollouts) => codex_message(&value),
             Some(Reader::ClaudeSession) => claude_message(&value),
-            Some(Reader::JsonlAppend | Reader::JsonRewrite) | None => None,
+            Some(Reader::JsonlAppend) => {
+                appended_typed(rules, &value).map(|text| (Speaker::Input, text))
+            }
+            Some(Reader::JsonRewrite) | None => None,
         };
         if let Some((Speaker::Input, text)) = said {
             typed.push(text);
@@ -1596,11 +1647,10 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
 pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64, String)>, u64)> {
     let mut file = open_record(harness, record)?;
     let reader = records::stored(harness);
-    let settings = match reader {
-        Some(Reader::JsonlAppend) => Some(super::interactive::catalog_settings(harness).ok()?),
-        _ => None,
+    let rules: &[Rule] = match reader {
+        Some(Reader::JsonlAppend) => appended_rules(harness)?,
+        _ => &[],
     };
-    let rules = settings.as_ref().map_or(&[][..], TerminalSettings::rules);
     let length = file.metadata().ok()?.len();
     if length < offset {
         return None;
@@ -1657,8 +1707,7 @@ fn typed_line(reader: Option<Reader>, rules: &[Rule], line: &[u8]) -> Option<Str
     let reader = reader?;
     if reader == Reader::JsonlAppend {
         let value = serde_json::from_slice::<Value>(line).ok()?;
-        let found = rules::matched(rules, &value)?;
-        return found.text.filter(|_| found.fact == Fact::TurnStarted);
+        return appended_typed(rules, &value);
     }
     if !line.windows(USER.len()).any(|part| part == USER) {
         return None;
