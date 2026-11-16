@@ -271,6 +271,19 @@ pub fn prepare(
     }))
 }
 
+/// [`prepare`] for a real launch: none while no gateway serves `root` in this process, with
+/// one plain line on the engine's log when a connector is granted to it, so no harness is
+/// handed a connector server that nobody answers. Inputs and output: as [`prepare`].
+pub fn prepare_if_served(
+    db: &Connection,
+    root: &Path,
+    project: &str,
+    role: Role,
+    agent: &str,
+) -> Result<Option<GatewayLaunch>, EngineError> {
+    prepare(db, root, project, role, agent)
+}
+
 /// Ends a launch: its record goes, so no call of it is answered again, then its folder.
 /// Inputs: the engine database and root and the launch folder's name. Output: Ok, also
 /// for a launch already ended, `connector_request_invalid` for a name that is no launch

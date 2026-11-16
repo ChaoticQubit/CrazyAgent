@@ -332,3 +332,53 @@ fn a_cleared_key_or_a_grant_turned_off_is_gone_at_the_next_launch() {
         "a running launch keeps its folder until its run ends"
     );
 }
+
+/// With no gateway serving the engine root, a granted agent or master launch gets no
+/// connector launch and no folder, so its harness is handed no connector server that nobody
+/// answers; once a gateway serves the root the same launch gets one.
+#[test]
+fn a_launch_in_an_engine_with_no_gateway_gets_no_connector_and_a_served_one_does() {
+    let case = granted();
+    assert!(!gateway::serving(&case.root));
+    for (role, agent) in [(AGENT_ROLE, AGENT), (Role::Master, "Master")] {
+        assert_eq!(
+            gateway::prepare_if_served(&case.db, &case.root, PROJECT, role, agent).unwrap(),
+            None,
+            "{agent} gets no connector while no gateway serves its engine"
+        );
+    }
+    assert!(
+        !case.root.join(gateway::LAUNCHES_FOLDER).exists(),
+        "and no launch folder is made"
+    );
+    let running = gateway::start(&case.root).unwrap();
+    let launch = gateway::prepare_if_served(&case.db, &case.root, PROJECT, AGENT_ROLE, AGENT)
+        .unwrap()
+        .expect("a served engine readies the granted launch");
+    assert!(launch.folder.is_dir());
+    let name = launch.folder.file_name().unwrap().to_str().unwrap();
+    gateway::end(&case.db, &case.root, name).unwrap();
+    running.stop();
+}
+
+/// Both engine paths that ready a launch, a team agent's run and a master turn, go through
+/// the served gate, so neither hands a harness a connector server while no gateway runs.
+#[test]
+fn every_engine_launch_readies_its_connectors_through_the_served_gate() {
+    for (path, source) in [
+        ("team/runtime.rs", include_str!("../team/runtime.rs")),
+        (
+            "engine/owner/transport/master_host_launch.rs",
+            include_str!("../engine/owner/transport/master_host_launch.rs"),
+        ),
+    ] {
+        assert!(
+            source.contains("connectors::gateway::prepare_if_served("),
+            "{path} readies its launch through the served gate"
+        );
+        assert!(
+            !source.contains("connectors::gateway::prepare("),
+            "{path} never readies a launch around the gate"
+        );
+    }
+}
