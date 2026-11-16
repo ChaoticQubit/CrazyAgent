@@ -6,6 +6,8 @@ import { setTimeout as pause } from "node:timers/promises";
 import { SECRET_SOURCES, mask } from "./trial3-mask.mjs";
 import { teamWait } from "./trial3-team.mjs";
 import { click, shot, shown } from "./settings-steps.mjs";
+import { UNICODE_CHARACTERS } from "@wdio/utils";
+import { Key } from "webdriverio";
 import { PICKS_VARIABLE, RELAUNCHED, appBundle, attach, command, ended, listener } from "./trial-app.mjs";
 
 export { PICKS_VARIABLE };
@@ -328,16 +330,20 @@ const WEBDRIVER_KEYS = { "\uE000": "Release", "\uE003": "Backspace", "\uE004": "
 const MODIFIERS = { Shift: "shiftKey", Control: "ctrlKey", Alt: "altKey", Meta: "metaKey" };
 const TERMINAL_BYTES = { Backspace: "\u007f", Tab: "\t", Escape: "\u001b", Enter: "\r" };
 const KEY_GAP_MS = 60;
-const WEBDRIVER_META = ["", ""];
+const WEBDRIVER_META = ["\uE03D", "\uE053"];
+const META_NAMES = [Key.Ctrl, ...Object.keys(UNICODE_CHARACTERS).filter((name) => WEBDRIVER_META.includes(UNICODE_CHARACTERS[name]))];
+assert(META_NAMES.includes("WDIO_CONTROL") && META_NAMES.includes("Command") && META_NAMES.includes("Meta"), `WebdriverIO names its Cmd keys Key.Ctrl, Command and Meta, got ${META_NAMES.join(", ")}`);
 const typingInstalled = new WeakSet();
 
 /** Why browser.keys never sends a key sequence on this system, or null when it may. A sequence
- * holding Meta (Cmd, U+E03D or U+E053) is refused on macOS before any key goes out, as browser.mjs
- * refuses a DevTools Cmd key: test Cmd keys opened About This Mac on the owner's screen
- * (ABOUT-THIS-MAC). Inputs: what browser.keys was given and the platform. Output: the reason. */
+ * holding Meta (Cmd) is refused on macOS before any key goes out, as browser.mjs refuses a DevTools
+ * Cmd key: U+E03D or U+E053 in any part, or a whole part WebdriverIO sends as Cmd there (META_NAMES:
+ * Key.Ctrl, "Command", "Meta"). Inputs: what browser.keys was given and the platform. Output: the
+ * reason, which names ABOUT-THIS-MAC. */
 export function refusedKeys(value, platform = process.platform) {
   const parts = Array.isArray(value) ? value : [value];
-  if (platform !== "darwin" || !parts.some((part) => typeof part === "string" && WEBDRIVER_META.some((meta) => part.includes(meta)))) return null;
+  const meta = (part) => typeof part === "string" && (META_NAMES.includes(part) || WEBDRIVER_META.some((key) => part.includes(key)));
+  if (platform !== "darwin" || !parts.some(meta)) return null;
   return "a WebDriver key sequence with Meta (Cmd) never goes out on macOS (ABOUT-THIS-MAC): dispatch a KeyboardEvent in the page, or run the row on Linux";
 }
 
