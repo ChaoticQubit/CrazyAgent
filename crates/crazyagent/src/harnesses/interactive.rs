@@ -13,7 +13,7 @@ use std::ffi::OsStr;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub const KEY_FILE: &str = ".crazyagent-key";
@@ -1017,15 +1017,20 @@ pub fn write_teammate_command(
         .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32)
         .open(&path)
         .map_err(|_| failure("launch_teammate_command_unavailable"))?;
-    file.write_all(script.as_bytes())
+    let written = file
+        .set_permissions(std::fs::Permissions::from_mode(0o700))
+        .and_then(|()| file.write_all(script.as_bytes()))
         .and_then(|()| file.sync_all())
-        .map_err(|_| failure("launch_teammate_command_unavailable"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| failure("launch_teammate_command_unavailable"))?;
-    assert_eq!(metadata.mode() & 0o777, 0o700);
-    assert_eq!(metadata.len(), script.len() as u64);
-    Ok(())
+        .and_then(|()| file.metadata());
+    if let Ok(metadata) = &written
+        && metadata.mode() & 0o777 == 0o700
+        && metadata.len() == script.len() as u64
+    {
+        return Ok(());
+    }
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+    Err(failure("launch_teammate_command_unavailable"))
 }
 
 /// Refuses a native-team lead where no tmux teammate panes exist. Takes the agent home,
