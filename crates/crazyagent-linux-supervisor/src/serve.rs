@@ -1,14 +1,14 @@
 #![forbid(unsafe_code)]
 
 use crate::filter::{self, Call, Calls, Guards};
-use crate::rules::{self, Dest, GitOwn, Reach, Target};
+use crate::rules::{self, Dest, GitOwn, Held, HeldNodes, Node, Reach, Target};
 use crate::sys::{self, Notice};
 use rustix::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 use rustix::net::SocketAddrUnix;
 use rustix::process::{
-    DumpableBehavior, Pid, PidfdFlags, PidfdGetfdFlags, Signal, Uid, WaitOptions,
+    DumpableBehavior, Gid, Pid, PidfdFlags, PidfdGetfdFlags, Signal, Uid, WaitOptions,
 };
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -31,13 +31,14 @@ const F_OWNER_PGRP: i32 = 2;
 const CREAT_FLAGS: u64 = 0o1101;
 
 /// What one agent's supervisor holds: the ports it may reach and where, when its connects
-/// are guarded; its own git folders, when new entries are guarded; and whether its
-/// signals stay inside the programs it started.
+/// are guarded; its own git folders, when new entries are guarded; whether its signals
+/// stay inside the programs it started; and the entries it may not change (DEC-185 S2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Supervised {
     pub reach: Option<Reach>,
     pub git: Option<GitOwn>,
     pub signals: bool,
+    pub held: Option<Held>,
 }
 
 impl Supervised {
@@ -47,6 +48,7 @@ impl Supervised {
             connect: self.reach.is_some(),
             create: self.git.is_some(),
             signal: self.signals,
+            held: self.held.is_some(),
         }
     }
 }
@@ -72,6 +74,11 @@ pub fn run(config: Supervised, command: &mut Command) -> io::Result<i32> {
     may_serve(rustix::process::geteuid())?;
     let calls = Calls::host().ok_or(io::ErrorKind::Unsupported)?;
     sys::sizes_fit()?;
+    let nodes = config
+        .held
+        .as_ref()
+        .map(|held| HeldNodes::taken(held, node_at_path));
+    let nodes = nodes.transpose()?;
     let program = sys::Program::new(&filter::program(&calls, guards));
     let own = rustix::process::getpid();
     rustix::process::set_child_subreaper(Some(own))?;
@@ -85,8 +92,10 @@ pub fn run(config: Supervised, command: &mut Command) -> io::Result<i32> {
     let listener = sys::take_listener(ours.as_fd())?;
     rustix::process::umask(Mode::empty());
     let own = own.as_raw_nonzero().get();
+    assert_eq!(nodes.is_some(), config.held.is_some());
     let server = Arc::new(Server {
         config,
+        nodes,
         calls,
         own,
         leads: place_of(own).is_some_and(|stat| stat.group == own),
@@ -149,6 +158,55 @@ fn real_of(held: BorrowedFd<'_>) -> Result<PathBuf, Errno> {
     std::fs::read_link(format!("/proc/self/fd/{}", held.as_raw_fd())).map_err(errno)
 }
 
+/// What the kernel knows an entry as, whatever its name. Input: its stat. Output: its node.
+fn node_of(stat: &rustix::fs::Stat) -> Node {
+    (stat.st_dev, stat.st_ino)
+}
+
+/// Stats one held path without following a link, for [`HeldNodes::taken`]. Input: the
+/// absolute path. Output: its node, none when it is not there, or the stat's error.
+fn node_at_path(path: &Path) -> io::Result<Option<Node>> {
+    match rustix::fs::statat(CWD, path, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => Ok(Some(node_of(&stat))),
+        Err(Errno::NOENT) => Ok(None),
+        Err(errno) => Err(errno.into()),
+    }
+}
+
+/// The nodes of a folder and of each folder above it up to the root, nearest first, each
+/// reached through `..` from a descriptor this process holds, so no name decides it.
+/// Input: the folder. Output: the chain, or `ELOOP` past [`rules::TREE_DEPTH_MAX`] folders.
+fn chain_of(folder: BorrowedFd<'_>) -> Result<Vec<Node>, Errno> {
+    let up = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let mut chain = vec![node_of(&rustix::fs::fstat(folder)?)];
+    let mut at = rustix::fs::openat(folder, "..", up, Mode::empty())?;
+    while chain.len() <= rules::TREE_DEPTH_MAX {
+        let node = node_of(&rustix::fs::fstat(&at)?);
+        if chain.last() == Some(&node) {
+            return Ok(chain);
+        }
+        chain.push(node);
+        at = rustix::fs::openat(&at, "..", up, Mode::empty())?;
+    }
+    Err(Errno::LOOP)
+}
+
+/// The chain [`HeldNodes::holds`] needs for a folder: the whole walk when a held tree sits
+/// on the folder's device, else the folder alone, since an agent under Landlock mounts
+/// nothing into a tree. Inputs: the nodes and the folder. Output: the chain.
+fn chain_for(nodes: &HeldNodes, folder: BorrowedFd<'_>) -> Result<Vec<Node>, Errno> {
+    let own = node_of(&rustix::fs::fstat(folder)?);
+    if nodes.trees.iter().any(|tree| tree.0 == own.0) {
+        return chain_of(folder);
+    }
+    Ok(vec![own])
+}
+
+/// Tells whether open flags may change a file: write, read and write, cut or create.
+fn writes(asked: OFlags) -> bool {
+    asked.bits() & filter::O_WRITES != 0
+}
+
 /// Tells whether a name is there, a link itself and not what it points at.
 fn exists(place: &Place) -> bool {
     rustix::fs::statat(&place.folder, place.name(), AtFlags::SYMLINK_NOFOLLOW).is_ok()
@@ -163,10 +221,12 @@ fn node_type(mode: u32) -> FileType {
 }
 
 /// Logs an entry the supervisor made and could not take back after a filesystem read its
-/// name as `.git`. Input: the result of taking it back.
+/// name as `.git` or as a held name. Input: the result of taking it back.
 fn undone(taken_back: Result<(), Errno>) {
     if let Err(error) = taken_back {
-        eprintln!("crazyagent-landlock: an entry read as .git was not removed: {error}");
+        eprintln!(
+            "crazyagent-landlock: an entry read as .git or a held name was not removed: {error}"
+        );
     }
 }
 
@@ -223,6 +283,12 @@ enum Make {
     Folder(u64),
     Node(u64, u64),
     Link(Vec<u8>),
+}
+
+/// What a mode or owner call changes: the mode register, or the owner and group registers.
+enum Change {
+    Mode(u64),
+    Owner(u64, u64),
 }
 
 /// What a two-path creating call does, with its flags register: a hard link or a rename.
@@ -297,10 +363,12 @@ impl Caller {
     }
 }
 
-/// One agent's supervisor: what it holds, the architecture's call numbers, its own
-/// process id, whether it leads its process group, and the listener its workers share.
+/// One agent's supervisor: what it holds, the nodes of its held entries, the
+/// architecture's call numbers, its own process id, whether it leads its process group,
+/// and the listener its workers share.
 struct Server {
     config: Supervised,
+    nodes: Option<HeldNodes>,
     calls: Calls,
     own: i32,
     leads: bool,
@@ -352,6 +420,9 @@ impl Server {
             Call::Connect => job.connect(),
             Call::Fcntl | Call::Ioctl => job.owner(call == Call::Fcntl),
             call if filter::SIGNALLING.contains(&call) => job.signal(call),
+            Call::Truncate => job.truncate(),
+            call if filter::REMOVING.contains(&call) => job.remove(call),
+            call if filter::CHANGING.contains(&call) => job.change(call),
             call => job.create(call),
         }
     }
@@ -605,32 +676,117 @@ impl Job<'_> {
         })
     }
 
-    /// Refuses a new entry whose path holds a `.git` that is not one of the agent's own.
+    /// Refuses a new entry whose path holds a `.git` that is not one of the agent's own;
+    /// with no git guard every entry passes here.
     fn judged(&self, place: &Place) -> Result<(), Errno> {
-        let git = self.server.config.git.as_ref().ok_or(Errno::NOSYS)?;
-        let allowed = place.proc || git.allows(&place.entry());
+        let git = self.server.config.git.as_ref();
+        let allowed = place.proc || git.is_none_or(|git| git.allows(&place.entry()));
         allowed.then_some(()).ok_or(Errno::ACCESS)
     }
 
-    /// Refuses to move away a folder that holds one of the agent's own git folders.
+    /// Refuses to move away a folder that holds one of the agent's own git folders; with
+    /// no git guard every move passes here.
     fn moved(&self, place: &Place) -> Result<(), Errno> {
-        let git = self.server.config.git.as_ref().ok_or(Errno::NOSYS)?;
-        let allowed = place.proc || git.moves(&place.entry());
+        let git = self.server.config.git.as_ref();
+        let allowed = place.proc || git.is_none_or(|git| git.moves(&place.entry()));
         allowed.then_some(()).ok_or(Errno::ACCESS)
+    }
+
+    /// Refuses a target the held guard keeps (DEC-185 S2a): by its name first, then by
+    /// what the kernel knows of it and of its folders, so no spelling reaches a held entry.
+    /// A held entry never gains or changes a name, so the target judged is the one acted
+    /// on. Inputs: the place and whether the target is moved away or removed. Output: Ok,
+    /// or `EACCES`.
+    fn kept(&self, place: &Place, moves: bool) -> Result<(), Errno> {
+        let (Some(held), Some(nodes)) = (&self.server.config.held, &self.server.nodes) else {
+            return Ok(());
+        };
+        let entry = place.entry();
+        let named = if moves {
+            held.pins(&entry)
+        } else {
+            held.holds(&entry)
+        };
+        let target =
+            match rustix::fs::statat(&place.folder, place.name(), AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => Some(node_of(&stat)),
+                Err(Errno::NOENT) => None,
+                Err(errno) => return Err(errno),
+            };
+        let chain = chain_for(nodes, place.folder.as_fd())?;
+        let known = if moves {
+            nodes.pins(target, &chain)
+        } else {
+            nodes.holds(target, &chain)
+        };
+        (!named && !known).then_some(()).ok_or(Errno::ACCESS)
+    }
+
+    /// Refuses a file reached through a link the kernel follows itself, a procfs magic
+    /// link or a followed link source, once pinned: a held node, a held name, or a file in
+    /// a held tree, found from the folder its real path names once that folder is shown to
+    /// hold this very node. Pipes, sockets and devices pass. Input: the pinned descriptor.
+    /// Output: Ok, or `EACCES`.
+    fn kept_pin(&self, pin: BorrowedFd<'_>) -> Result<(), Errno> {
+        let (Some(held), Some(nodes)) = (&self.server.config.held, &self.server.nodes) else {
+            return Ok(());
+        };
+        let stat = rustix::fs::fstat(pin)?;
+        let kind = FileType::from_raw_mode(stat.st_mode);
+        if !matches!(kind, FileType::RegularFile | FileType::Directory) {
+            return Ok(());
+        }
+        let node = node_of(&stat);
+        let real = real_of(pin)?;
+        if held.holds(&real) || nodes.holds(Some(node), &[]) {
+            return Err(Errno::ACCESS);
+        }
+        if !nodes.trees.iter().any(|tree| tree.0 == node.0) {
+            return Ok(());
+        }
+        let (Some(folder), Some(name)) = (real.parent(), real.file_name()) else {
+            return Err(Errno::ACCESS);
+        };
+        let up = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        let folder = rustix::fs::openat(CWD, folder, up, Mode::empty())?;
+        let named = rustix::fs::statat(&folder, name, AtFlags::SYMLINK_NOFOLLOW);
+        if named.map(|stat| node_of(&stat)) != Ok(node) {
+            return Err(Errno::ACCESS);
+        }
+        let chain = chain_of(folder.as_fd())?;
+        (!nodes.holds(Some(node), &chain))
+            .then_some(())
+            .ok_or(Errno::ACCESS)
     }
 
     /// Tells whether the filesystem reads an entry just made as `.git` although its name
-    /// is spelled otherwise: the folder's `.git` then is that same entry.
+    /// is spelled otherwise, or as a held name that lives in the same folder: that name
+    /// then is the same entry. A folder that cannot be stated counts as such a read.
     fn aliases(&self, place: &Place) -> bool {
-        if place.proc || place.name() == ".git" {
+        if place.proc {
             return false;
         }
         let seen = |name: &OsStr| {
             let stat = rustix::fs::statat(&place.folder, name, AtFlags::SYMLINK_NOFOLLOW);
-            stat.ok().map(|stat| (stat.st_dev, stat.st_ino))
+            stat.ok().map(|stat| node_of(&stat))
         };
         let made = seen(place.name());
-        made.is_some() && made == seen(OsStr::new(".git"))
+        if made.is_none() {
+            return false;
+        }
+        let git = self.server.config.git.is_some()
+            && place.name() != ".git"
+            && made == seen(OsStr::new(".git"));
+        let held = self.server.nodes.as_ref().is_some_and(|nodes| {
+            match rustix::fs::fstat(&place.folder) {
+                Ok(folder) => nodes
+                    .names_in(node_of(&folder))
+                    .into_iter()
+                    .any(|name| name != place.name() && made == seen(name)),
+                Err(_) => true,
+            }
+        });
+        git || held
     }
 
     /// Answers an open with the file opened here, as a descriptor of the caller's own.
@@ -641,12 +797,180 @@ impl Job<'_> {
         handed.map(|()| Answer::Handed).map_err(errno)
     }
 
-    /// Opens a file that may be new for the caller: the last name is opened in its
-    /// resolved folder without following a link, and a link there is followed by hand so
-    /// every hop is judged. On procfs, and for a path-only open, nothing new can be made,
-    /// so the open runs as asked. Inputs: the folder register, the path, flags and mode.
+    /// Opens a file for the caller and answers with it as a descriptor of its own. Inputs:
+    /// the folder register, the path, flags and mode.
     fn open(&self, base: u64, path: Vec<u8>, flags: u64, mode: u64) -> Result<Answer, Errno> {
         let asked = OFlags::from_bits_retain(flags as u32);
+        let file = self.opened(base, path, asked, mode)?;
+        self.hand(file, asked)
+    }
+
+    /// Cuts a file to a length for the caller: the file is opened for writing as an open
+    /// would open it, every link hop judged, and cut through that descriptor. Output: zero,
+    /// or the error.
+    fn truncate(&self) -> Result<Answer, Errno> {
+        let [path, length, ..] = self.notice.args;
+        if (length as i64) < 0 {
+            return Err(Errno::INVAL);
+        }
+        let path = self.caller.text(path)?;
+        let here = AT_FDCWD as u32 as u64;
+        let file = self.opened(here, path, OFlags::WRONLY | OFlags::NONBLOCK, 0)?;
+        rustix::fs::ftruncate(&file, length)?;
+        Ok(Answer::Value(0))
+    }
+
+    /// Removes an entry for the caller, as `unlink`, `rmdir` or `unlinkat`, once the held
+    /// guard lets it go. `unlinkat` takes `AT_REMOVEDIR` and no other flag. Input: which
+    /// call. Output: zero, or the error.
+    fn remove(&self, call: Call) -> Result<Answer, Errno> {
+        let a = self.notice.args;
+        let here = AT_FDCWD as u32 as u64;
+        let (base, path, how) = match call {
+            Call::Unlink => (here, a[0], AtFlags::empty()),
+            Call::Rmdir => (here, a[0], AtFlags::REMOVEDIR),
+            Call::Unlinkat => {
+                let how = AtFlags::from_bits_retain(a[2] as u32);
+                if !(how - AtFlags::REMOVEDIR).is_empty() {
+                    return Err(Errno::INVAL);
+                }
+                (a[0], a[1], how)
+            }
+            _ => return Err(Errno::NOSYS),
+        };
+        let folder = how.contains(AtFlags::REMOVEDIR);
+        let path = self.caller.text(path)?;
+        let place = self
+            .place(&Base::of(base), &path)
+            .map_err(|errno| match errno {
+                Errno::EXIST if folder => Errno::INVAL,
+                Errno::EXIST => Errno::ISDIR,
+                errno => errno,
+            })?;
+        if path.ends_with(b"/") && !folder {
+            let stat = rustix::fs::statat(&place.folder, place.name(), AtFlags::SYMLINK_NOFOLLOW)?;
+            let kind = FileType::from_raw_mode(stat.st_mode);
+            return Err(if kind == FileType::Directory {
+                Errno::ISDIR
+            } else {
+                Errno::NOTDIR
+            });
+        }
+        self.kept(&place, true)?;
+        rustix::fs::unlinkat(&place.folder, place.name(), how)?;
+        Ok(Answer::Value(0))
+    }
+
+    /// Changes a file's mode or owner for the caller once the held guard lets it: a path
+    /// form pins the file its call names ([`Job::pinned`]), a descriptor form takes a copy
+    /// of the caller's descriptor, the pin is judged ([`Job::kept_pin`]) and the change is
+    /// made on that pin. An owner or group of -1 stays as it is. Input: which call.
+    /// Output: zero, or the error.
+    fn change(&self, call: Call) -> Result<Answer, Errno> {
+        let a = self.notice.args;
+        let here = AT_FDCWD as u32 as u64;
+        let text = |at: u64| self.caller.text(at);
+        let (pin, change) = match call {
+            Call::Fchmod => (self.taken(a[0])?, Change::Mode(a[1])),
+            Call::Fchown => (self.taken(a[0])?, Change::Owner(a[1], a[2])),
+            Call::Chmod => (self.pinned(here, text(a[0])?, true)?, Change::Mode(a[1])),
+            Call::Fchmodat => (self.pinned(a[0], text(a[1])?, true)?, Change::Mode(a[2])),
+            Call::Chown => (
+                self.pinned(here, text(a[0])?, true)?,
+                Change::Owner(a[1], a[2]),
+            ),
+            Call::Lchown => (
+                self.pinned(here, text(a[0])?, false)?,
+                Change::Owner(a[1], a[2]),
+            ),
+            Call::Fchownat => (self.owner_pin(a[0], a[1], a[4])?, Change::Owner(a[2], a[3])),
+            _ => return Err(Errno::NOSYS),
+        };
+        self.kept_pin(pin.as_fd())?;
+        let id = |raw: u64| Some(raw as u32).filter(|raw| *raw != u32::MAX);
+        match change {
+            Change::Mode(mode) => {
+                let mode = Mode::from_bits_truncate(mode as u32);
+                let own = format!("/proc/self/fd/{}", pin.as_raw_fd());
+                rustix::fs::chmodat(CWD, own.as_str(), mode, AtFlags::empty())?;
+            }
+            Change::Owner(owner, group) => {
+                let owner = id(owner).map(Uid::from_raw);
+                let group = id(group).map(Gid::from_raw);
+                rustix::fs::chownat(&pin, "", owner, group, AtFlags::EMPTY_PATH)?;
+            }
+        }
+        Ok(Answer::Value(0))
+    }
+
+    /// Pins the file `fchownat` names: its flags take `AT_SYMLINK_NOFOLLOW` and
+    /// `AT_EMPTY_PATH` and no other, and an empty path with `AT_EMPTY_PATH` names the
+    /// folder descriptor itself, or the working folder. Inputs: the folder, path and flags
+    /// registers. Output: the pin.
+    fn owner_pin(&self, base: u64, at: u64, flags: u64) -> Result<OwnedFd, Errno> {
+        let flags = AtFlags::from_bits_retain(flags as u32);
+        if !(flags - (AtFlags::SYMLINK_NOFOLLOW | AtFlags::EMPTY_PATH)).is_empty() {
+            return Err(Errno::INVAL);
+        }
+        let path = self.caller.text(at)?;
+        if flags.contains(AtFlags::EMPTY_PATH) && path.is_empty() {
+            return match Base::of(base) {
+                Base::Here => self.pinned(base, b".".to_vec(), true),
+                _ => self.taken(base),
+            };
+        }
+        self.pinned(base, path, !flags.contains(AtFlags::SYMLINK_NOFOLLOW))
+    }
+
+    /// Pins the file a path names for a change, as the caller's call would name it: each
+    /// link hop is judged by hand from the folder it lies in, the last link is followed
+    /// only when asked, a procfs link is followed by the kernel, which reads it as the
+    /// caller's, and a path that names no entry of its own (`.`, `..`, the root) is pinned
+    /// as the folder it names. Inputs: the folder register, the path and whether to follow
+    /// a last link. Output: an `O_PATH` descriptor of the file.
+    fn pinned(&self, base: u64, path: Vec<u8>, follow: bool) -> Result<OwnedFd, Errno> {
+        let up = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let (mut base, mut path) = (Base::of(base), path);
+        for _ in 0..=LINK_HOPS_MAX {
+            let place = match self.place(&base, &path) {
+                Err(Errno::EXIST) => {
+                    let named = [path.as_slice(), b"/x"].concat();
+                    return Ok(self.place(&base, &named)?.folder);
+                }
+                found => found?,
+            };
+            if place.proc && follow {
+                let magic = OFlags::PATH | OFlags::CLOEXEC;
+                return rustix::fs::openat(&place.folder, place.name(), magic, Mode::empty());
+            }
+            let pin = rustix::fs::openat(&place.folder, place.name(), up, Mode::empty())?;
+            let kind = FileType::from_raw_mode(rustix::fs::fstat(&pin)?.st_mode);
+            if !follow || kind != FileType::Symlink {
+                return Ok(pin);
+            }
+            path = rustix::fs::readlinkat(&place.folder, place.name(), Vec::new())?.into_bytes();
+            base = Base::Held(place.folder);
+        }
+        Err(Errno::LOOP)
+    }
+
+    /// Reopens a file this process pinned with `O_PATH`, through its own procfs entry, so
+    /// the file opened is the pinned one. Inputs: the pin and the asked flags, without
+    /// create. Output: the file.
+    fn reopened(pin: &OwnedFd, asked: OFlags) -> Result<OwnedFd, Errno> {
+        let plain = (asked - OFlags::CREATE - OFlags::EXCL) | OFlags::CLOEXEC;
+        let own = format!("/proc/self/fd/{}", pin.as_raw_fd());
+        rustix::fs::openat(CWD, own.as_str(), plain, Mode::empty())
+    }
+
+    /// Opens a file that may be new for the caller: the last name is opened in its
+    /// resolved folder without following a link, and a link there is followed by hand so
+    /// every hop is judged. Under the held guard an open that may write is judged first
+    /// ([`Job::kept`]). On procfs, and for a path-only open, nothing new can be made, so
+    /// the open runs as asked, but a procfs open that may write under the held guard pins
+    /// the file the kernel's link names and judges it first ([`Job::kept_pin`]). Inputs:
+    /// the folder register, the path, flags and mode. Output: the file.
+    fn opened(&self, base: u64, path: Vec<u8>, asked: OFlags, mode: u64) -> Result<OwnedFd, Errno> {
         if path.ends_with(b"/") && !asked.contains(OFlags::PATH) {
             return Err(Errno::ISDIR);
         }
@@ -660,11 +984,24 @@ impl Job<'_> {
                 errno => errno,
             })?;
             let (folder, name) = (&place.folder, place.name());
+            let held = self.server.nodes.is_some() && writes(asked);
+            if place.proc && held && !asked.contains(OFlags::PATH) {
+                if asked.contains(OFlags::CREATE | OFlags::EXCL) {
+                    return Err(Errno::EXIST);
+                }
+                let pin = OFlags::PATH | OFlags::CLOEXEC;
+                let pin = rustix::fs::openat(folder, name, pin, Mode::empty())?;
+                self.kept_pin(pin.as_fd())?;
+                return Self::reopened(&pin, asked);
+            }
             if place.proc || asked.contains(OFlags::PATH) {
                 let plain = asked | OFlags::CLOEXEC;
-                return self.hand(rustix::fs::openat(folder, name, plain, mode)?, asked);
+                return rustix::fs::openat(folder, name, plain, mode);
             }
             self.judged(&place)?;
+            if held {
+                self.kept(&place, false)?;
+            }
             let fresh = !exists(&place);
             let kept = asked | OFlags::NOFOLLOW | OFlags::CLOEXEC;
             match rustix::fs::openat(folder, name, kept, mode) {
@@ -672,7 +1009,7 @@ impl Job<'_> {
                     undone(rustix::fs::unlinkat(folder, name, AtFlags::empty()));
                     return Err(Errno::ACCESS);
                 }
-                Ok(file) => return self.hand(file, asked),
+                Ok(file) => return Ok(file),
                 Err(Errno::LOOP) if follows => {
                     path = rustix::fs::readlinkat(folder, name, Vec::new())?.into_bytes();
                     base = Base::Held(place.folder);
@@ -688,6 +1025,7 @@ impl Job<'_> {
     fn make(&self, base: u64, path: Vec<u8>, make: Make) -> Result<Answer, Errno> {
         let place = self.place(&Base::of(base), &path)?;
         self.judged(&place)?;
+        self.kept(&place, false)?;
         let umask = self.caller.umask;
         let mode = |raw: u64| Mode::from_bits_truncate(rules::mode_under(raw as u32, umask));
         let (folder, name) = (&place.folder, place.name());
@@ -711,8 +1049,11 @@ impl Job<'_> {
     }
 
     /// Links or renames for the caller between two resolved folders. The new name is
-    /// judged as a new entry, and a rename also by what it moves away. Inputs: each
-    /// path with its folder register, and which call with its flags.
+    /// judged as a new entry, and a rename also by what it moves away. Under the held
+    /// guard a link's source is judged as kept, after the kernel's link is followed when
+    /// asked, and the link is made from that pinned file; both sides of a rename are
+    /// judged as moved. Inputs: each path with its folder register, and which call with
+    /// its flags.
     fn pair(&self, old: (u64, Vec<u8>), new: (u64, Vec<u8>), pair: Pair) -> Result<Answer, Errno> {
         let from = self.place(&Base::of(old.0), &old.1)?;
         let to = self.place(&Base::of(new.0), &new.1)?;
@@ -722,7 +1063,17 @@ impl Job<'_> {
         match pair {
             Pair::Link(flags) => {
                 let follow = AtFlags::from_bits_retain(flags as u32) & AtFlags::SYMLINK_FOLLOW;
-                rustix::fs::linkat(a.0, a.1, b.0, b.1, follow)?;
+                self.kept(&to, false)?;
+                if self.server.nodes.is_some() && !follow.is_empty() {
+                    let pin = OFlags::PATH | OFlags::CLOEXEC;
+                    let pin = rustix::fs::openat(a.0, a.1, pin, Mode::empty())?;
+                    self.kept_pin(pin.as_fd())?;
+                    let own = format!("/proc/self/fd/{}", pin.as_raw_fd());
+                    rustix::fs::linkat(CWD, own.as_str(), b.0, b.1, AtFlags::SYMLINK_FOLLOW)?;
+                } else {
+                    self.kept(&from, false)?;
+                    rustix::fs::linkat(a.0, a.1, b.0, b.1, follow)?;
+                }
                 if fresh && self.aliases(&to) {
                     undone(rustix::fs::unlinkat(b.0, b.1, AtFlags::empty()));
                     return Err(Errno::ACCESS);
@@ -731,6 +1082,8 @@ impl Job<'_> {
             Pair::Rename(flags) => {
                 let flags = RenameFlags::from_bits_retain(flags as u32);
                 self.moved(&from)?;
+                self.kept(&from, true)?;
+                self.kept(&to, true)?;
                 if flags.contains(RenameFlags::EXCHANGE) {
                     self.judged(&from)?;
                     self.moved(&to)?;

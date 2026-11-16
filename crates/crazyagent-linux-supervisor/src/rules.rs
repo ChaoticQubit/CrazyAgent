@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::io;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::{Component, Path, PathBuf};
 
@@ -142,6 +143,14 @@ pub const IGNORED: [(u32, u32); 17] = [
 /// ignores anywhere in it. Input: one path component. Output: true for such a name; the
 /// agent's own git folders are spelled `.git` exactly ([`GitOwn`]).
 pub fn is_git(name: &OsStr) -> bool {
+    folded(name) == ".git"
+}
+
+/// Spells one name as the loosest filesystem compares it: without the code points a
+/// case-folding folder ignores, without dots and spaces at its end, in lower case. Input:
+/// one path component. Output: the spelling two names share when some folder reads them
+/// as one.
+fn folded(name: &OsStr) -> String {
     let text = String::from_utf8_lossy(name.as_encoded_bytes());
     let ignored = |point: &char| {
         let point = u32::from(*point);
@@ -150,8 +159,21 @@ pub fn is_git(name: &OsStr) -> bool {
             .any(|(first, last)| (*first..=*last).contains(&point))
     };
     let kept: String = text.chars().filter(|point| !ignored(point)).collect();
-    kept.trim_end_matches(['.', ' '])
-        .eq_ignore_ascii_case(".git")
+    kept.trim_end_matches(['.', ' ']).to_ascii_lowercase()
+}
+
+/// Spells a real, absolute path name by name with [`folded`]. Input: the path. Output: the
+/// names below the root, or none for a path that is relative or holds `.` or `..`.
+fn folded_parts(path: &Path) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    for (at, part) in path.components().enumerate() {
+        match part {
+            Component::RootDir if at == 0 => {}
+            Component::Normal(name) if at > 0 => parts.push(folded(name)),
+            _ => return None,
+        }
+    }
+    path.is_absolute().then_some(parts)
 }
 
 /// The git folders an agent may make entries in: the top-level `.git` of each working
@@ -214,6 +236,113 @@ impl GitOwn {
         let above = folder.parent();
         let kid = above.is_some_and(|above| self.kids.iter().any(|kid| kid == above));
         plain && (tree || kid || self.exact.iter().any(|own| own == git))
+    }
+}
+
+/// The entries an agent may not write, truncate, move, link or remove (DEC-185 S2): each
+/// path in `entries`, and each path in `trees` with everything below it. Paths are real and
+/// absolute, as the engine names them from the launch's guarded list.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Held {
+    pub entries: Vec<PathBuf>,
+    pub trees: Vec<PathBuf>,
+}
+
+impl Held {
+    /// Tells whether a path is held, each name compared as the loosest folder compares it
+    /// ([`folded`]). Input: the real, absolute path of an entry, its folder resolved.
+    /// Output: true for an entry, a path in a tree, and any path not in that form, and
+    /// for every path while a held path is itself not in that form.
+    pub fn holds(&self, real: &Path) -> bool {
+        let Some(path) = folded_parts(real) else {
+            return true;
+        };
+        let entry = |held: &PathBuf| folded_parts(held).is_none_or(|held| held == path);
+        let tree = |held: &PathBuf| folded_parts(held).is_none_or(|held| path.starts_with(&held));
+        self.entries.iter().any(entry) || self.trees.iter().any(tree)
+    }
+
+    /// Tells whether moving a path away would carry a held entry with it. Input: the real,
+    /// absolute source path. Output: true when it is held or a folder above a held entry.
+    pub fn pins(&self, real: &Path) -> bool {
+        let Some(path) = folded_parts(real) else {
+            return true;
+        };
+        let below = |held: &PathBuf| folded_parts(held).is_none_or(|held| held.starts_with(&path));
+        self.holds(real) || self.entries.iter().chain(&self.trees).any(below)
+    }
+}
+
+/// One entry as the kernel knows it whatever its name: its device and inode numbers.
+pub type Node = (u64, u64);
+
+/// The held entries as the kernel knows them, taken once before the harness starts
+/// (DEC-185 S2a): the node of each held entry and tree that exists, the node of each held
+/// tree, the node of every folder above a held path, and each held path's folder node with
+/// its last name, for a name that does not exist yet.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HeldNodes {
+    pub nodes: Vec<Node>,
+    pub trees: Vec<Node>,
+    pub above: Vec<Node>,
+    pub names: Vec<(Node, OsString)>,
+}
+
+impl HeldNodes {
+    /// Takes the nodes of the held paths. Inputs: the held paths and a stat that does not
+    /// follow a link, giving none for a path that does not exist. Output: the nodes, or an
+    /// error when a stat fails otherwise or the folder of a held path does not exist.
+    pub fn taken(
+        held: &Held,
+        stat: impl Fn(&Path) -> io::Result<Option<Node>>,
+    ) -> io::Result<Self> {
+        let mut nodes = Self::default();
+        let entries = held.entries.iter().map(|path| (path, false));
+        for (path, tree) in entries.chain(held.trees.iter().map(|path| (path, true))) {
+            let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
+                return Err(io::ErrorKind::InvalidInput.into());
+            };
+            if !path.is_absolute() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            if let Some(node) = stat(path)? {
+                nodes.nodes.push(node);
+                if tree {
+                    nodes.trees.push(node);
+                }
+            }
+            let there = |path: &Path| stat(path)?.ok_or_else(|| io::ErrorKind::NotFound.into());
+            nodes.names.push((there(folder)?, name.to_os_string()));
+            for above in path.ancestors().skip(1) {
+                nodes.above.push(there(above)?);
+            }
+        }
+        nodes.above.sort_unstable();
+        nodes.above.dedup();
+        assert_eq!(nodes.names.len(), held.entries.len() + held.trees.len());
+        assert!(nodes.trees.iter().all(|tree| nodes.nodes.contains(tree)));
+        Ok(nodes)
+    }
+
+    /// Tells whether a target is held. Inputs: the target's node, none when it does not
+    /// exist, and the nodes of its folder and each folder above it, nearest first. Output:
+    /// true for a held node, or when a folder on that chain is a held tree.
+    pub fn holds(&self, target: Option<Node>, chain: &[Node]) -> bool {
+        target.is_some_and(|node| self.nodes.contains(&node))
+            || chain.iter().any(|folder| self.trees.contains(folder))
+    }
+
+    /// Tells whether moving a target away would carry a held entry with it. Inputs: as
+    /// [`HeldNodes::holds`]. Output: true when it is held or a folder above a held path.
+    pub fn pins(&self, target: Option<Node>, chain: &[Node]) -> bool {
+        self.holds(target, chain) || target.is_some_and(|node| self.above.contains(&node))
+    }
+
+    /// The held names that live in one folder, which a new entry there must not turn out to
+    /// be. Input: the folder's node. Output: those last names.
+    pub fn names_in(&self, folder: Node) -> Vec<&OsStr> {
+        let here = self.names.iter().filter(|(parent, _)| *parent == folder);
+        here.map(|(_, name)| name.as_os_str()).collect()
     }
 }
 
@@ -689,6 +818,177 @@ mod tests {
         }
         assert!(!moved("work/project/src"), "not a real path");
         assert!(GitOwn::default().moves(Path::new("/work/project")));
+    }
+
+    fn held() -> Held {
+        Held {
+            entries: vec![
+                PathBuf::from("/p/.git/worktrees/a/HEAD"),
+                PathBuf::from("/p/.git/worktrees/a/commondir"),
+                PathBuf::from("/p/worktrees/a/.git"),
+            ],
+            trees: vec![PathBuf::from("/p/.git/worktrees/a/modules")],
+        }
+    }
+
+    #[test]
+    fn a_held_entry_and_everything_in_a_held_tree_is_held_and_a_neighbour_is_not() {
+        let held = held();
+        for path in [
+            "/p/.git/worktrees/a/HEAD",
+            "/p/.git/worktrees/a/commondir",
+            "/p/worktrees/a/.git",
+            "/p/.git/worktrees/a/modules",
+            "/p/.git/worktrees/a/modules/sub/config",
+        ] {
+            assert!(held.holds(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/p/.git/worktrees/a/HEAD.lock",
+            "/p/.git/worktrees/a/HEADS",
+            "/p/.git/worktrees/a/modulesx",
+            "/p/.git/worktrees/a/index",
+            "/p/worktrees/a/.gitignore",
+            "/p/worktrees/a/src/.git",
+        ] {
+            assert!(!held.holds(Path::new(path)), "{path}");
+        }
+        for path in ["p/.git/worktrees/a/index", "/p/.git/worktrees/b/../a/index"] {
+            assert!(held.holds(Path::new(path)), "{path} is not a real path");
+        }
+        assert!(!Held::default().holds(Path::new("/p/.git/worktrees/a/HEAD")));
+    }
+
+    #[test]
+    fn a_held_entry_or_a_folder_above_one_is_never_moved_away() {
+        let held = held();
+        for path in [
+            "/p/.git/worktrees/a",
+            "/p/.git/worktrees",
+            "/p/worktrees/a",
+            "/p",
+            "/",
+            "/p/.git/worktrees/a/modules",
+            "/p/.git/worktrees/a/modules/sub",
+            "/p/.git/worktrees/a/HEAD",
+        ] {
+            assert!(held.pins(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/p/worktrees/a/src",
+            "/p/.git/worktrees/a/index",
+            "/p/.git/worktrees/a/index.lock",
+            "/p/worktrees/b",
+        ] {
+            assert!(!held.pins(Path::new(path)), "{path}");
+        }
+        assert!(held.pins(Path::new("p/worktrees/a/src")), "not a real path");
+    }
+
+    fn nodes() -> HeldNodes {
+        let held = held();
+        let map = [
+            ("/", (1, 2)),
+            ("/p", (1, 10)),
+            ("/p/.git", (1, 11)),
+            ("/p/.git/worktrees", (1, 12)),
+            ("/p/.git/worktrees/a", (1, 13)),
+            ("/p/.git/worktrees/a/HEAD", (1, 14)),
+            ("/p/.git/worktrees/a/modules", (1, 16)),
+            ("/p/worktrees", (1, 20)),
+            ("/p/worktrees/a", (1, 21)),
+            ("/p/worktrees/a/.git", (1, 22)),
+        ];
+        let stat = |path: &Path| {
+            let found = map.iter().find(|(at, _)| Path::new(at) == path);
+            Ok(found.map(|(_, node)| *node))
+        };
+        HeldNodes::taken(&held, stat).unwrap()
+    }
+
+    #[test]
+    fn the_held_nodes_are_taken_once_and_a_held_name_that_is_not_there_yet_is_kept() {
+        let nodes = nodes();
+        let mut held = nodes.nodes.clone();
+        held.sort_unstable();
+        assert_eq!(
+            held,
+            vec![(1, 14), (1, 16), (1, 22)],
+            "commondir is not there yet"
+        );
+        assert_eq!(nodes.trees, vec![(1, 16)]);
+        let mut above = nodes.above.clone();
+        above.sort_unstable();
+        above.dedup();
+        assert_eq!(
+            above,
+            vec![(1, 2), (1, 10), (1, 11), (1, 12), (1, 13), (1, 20), (1, 21)]
+        );
+        assert_eq!(nodes.names.len(), 4);
+        let mut admin = nodes.names_in((1, 13));
+        admin.sort();
+        assert_eq!(
+            admin,
+            vec![
+                OsStr::new("HEAD"),
+                OsStr::new("commondir"),
+                OsStr::new("modules")
+            ]
+        );
+        assert_eq!(nodes.names_in((1, 21)), vec![OsStr::new(".git")]);
+        assert!(nodes.names_in((1, 99)).is_empty());
+        let failing = |path: &Path| match path.to_str() {
+            Some("/p/.git/worktrees/a/HEAD") => {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            }
+            _ => Ok(Some((1, 1))),
+        };
+        assert!(HeldNodes::taken(&held(), failing).is_err());
+        let no_folder =
+            |path: &Path| Ok(Some((1, 1)).filter(|_| path != Path::new("/p/worktrees/a")));
+        assert!(
+            HeldNodes::taken(&held(), no_folder).is_err(),
+            "a held path's folder must be there"
+        );
+    }
+
+    #[test]
+    fn a_held_node_or_anything_in_a_held_tree_is_held_whatever_name_reaches_it() {
+        let nodes = nodes();
+        let admin = [(1, 13), (1, 12), (1, 11), (1, 10), (1, 2)];
+        assert!(nodes.holds(Some((1, 14)), &admin), "HEAD by any name");
+        assert!(
+            nodes.holds(Some((1, 16)), &admin),
+            "the modules tree itself"
+        );
+        let in_modules = [(1, 30), (1, 16), (1, 13), (1, 12), (1, 11), (1, 10), (1, 2)];
+        assert!(nodes.holds(Some((1, 31)), &in_modules));
+        assert!(nodes.holds(None, &in_modules), "a new name in the tree");
+        assert!(!nodes.holds(Some((1, 15)), &admin), "the index");
+        assert!(!nodes.holds(None, &admin), "a new lock file");
+        let worktree = [(1, 21), (1, 20), (1, 10), (1, 2)];
+        assert!(nodes.holds(Some((1, 22)), &worktree));
+        assert!(!nodes.holds(Some((1, 40)), &worktree));
+        assert!(!HeldNodes::default().holds(Some((1, 14)), &admin));
+    }
+
+    #[test]
+    fn a_folder_above_a_held_entry_is_never_moved_and_a_sibling_folder_is() {
+        let nodes = nodes();
+        let root = [(1, 2)];
+        assert!(nodes.pins(Some((1, 10)), &root), "the project");
+        assert!(
+            nodes.pins(Some((1, 13)), &[(1, 12), (1, 11), (1, 10), (1, 2)]),
+            "the admin folder"
+        );
+        assert!(
+            nodes.pins(Some((1, 21)), &[(1, 20), (1, 10), (1, 2)]),
+            "the worktree"
+        );
+        assert!(nodes.pins(Some((1, 14)), &[(1, 13), (1, 12), (1, 11), (1, 10), (1, 2)]));
+        let src = [(1, 21), (1, 20), (1, 10), (1, 2)];
+        assert!(!nodes.pins(Some((1, 41)), &src), "a folder in the worktree");
+        assert!(!nodes.pins(None, &src));
     }
 
     #[test]
