@@ -410,29 +410,52 @@ async fn a_returned_project_has_no_grant_approval_or_allow() {
            VALUES ('setup-pooled','linear',1);",
     );
     let held = |engine: &Engine| {
-        ["connector_grants", "connector_approvals", "connector_write_allowed"].map(|table| {
+        [
+            "connector_grants",
+            "connector_approvals",
+            "connector_write_allowed",
+        ]
+        .map(|table| {
             engine.rows(&format!(
                 "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
             ))
         })
     };
-    assert_eq!(held(&engine), [1, 2, 1], "a switch, two approvals and an allow");
+    assert_eq!(
+        held(&engine),
+        [1, 2, 1],
+        "a switch, two approvals and an allow"
+    );
     let removed = owner.remove_project(project.clone(), 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
-    assert_eq!(held(&engine), [0, 0, 0], "removing the project forgets all of them");
+    assert_eq!(
+        held(&engine),
+        [0, 0, 0],
+        "removing the project forgets all of them"
+    );
     let back = owner
         .setup_project(project.clone(), spec(NAME), pooled_setup(vec![]), 3)
         .await
         .unwrap();
     assert_eq!(result(back), OwnerResult::Applied);
-    assert_eq!(held(&engine), [0, 0, 0], "the returned project has none of them");
+    assert_eq!(
+        held(&engine),
+        [0, 0, 0],
+        "the returned project has none of them"
+    );
     let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
-    assert!(crate::connectors::grants::of_project(&db, PROJECT).unwrap().is_empty());
+    assert!(
+        crate::connectors::grants::of_project(&db, PROJECT)
+            .unwrap()
+            .is_empty()
+    );
     assert!(!crate::connectors::approvals::writes_allowed(&db, PROJECT, "linear").unwrap());
-    assert!(crate::connectors::approvals::allowed_writes(&db, PROJECT)
-        .unwrap()
-        .connectors
-        .is_empty());
+    assert!(
+        crate::connectors::approvals::allowed_writes(&db, PROJECT)
+            .unwrap()
+            .connectors
+            .is_empty()
+    );
     drop(db);
     drop(owner);
     engine.stop().await;
