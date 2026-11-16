@@ -77,6 +77,7 @@ impl LastScreens {
             history: Vec::new(),
             screen: kept.screen.clone(),
             chunks,
+            #[cfg(unix)]
             at: None,
         })
     }
@@ -508,6 +509,7 @@ mod tests {
                 history: Vec::new(),
                 screen: b"last screen".to_vec(),
                 chunks,
+                #[cfg(unix)]
                 at: None,
             })
         }
