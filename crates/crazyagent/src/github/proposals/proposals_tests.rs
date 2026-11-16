@@ -698,7 +698,8 @@ fn a_full_conversation_holds_back_only_its_own_projects_outcomes() {
 }
 
 /// rv-code gh-s7 N5: a pass has work only while a proposal is approved, or has ended with
-/// its agent not told yet, so an answer to any other question starts no apply pass.
+/// its agent not told yet, as when a full conversation refused the decline the answer
+/// told at once; an answer to any other question starts no apply pass.
 #[test]
 fn a_pass_waits_only_on_an_approved_or_untold_proposal() {
     let case = Case::new();
@@ -713,15 +714,13 @@ fn a_pass_waits_only_on_an_approved_or_untold_proposal() {
     };
     assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 1);
     assert!(!waiting(&case.db), "applied and told");
-    let declined = case.asked(&Asker::Agent(5), GitHubRule::WikiOff, false);
-    assert_eq!(case.answer(declined, vec![1]), Settlement::Settled);
-    assert!(waiting(&case.db), "declined and not told yet");
+    let told = case.asked(&Asker::Agent(5), GitHubRule::WikiOff, false);
+    assert_eq!(case.answer(told, vec![1]), Settlement::Settled);
+    assert!(!waiting(&case.db), "declined and told with the answer");
     case.fill(&case.project);
-    assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 0);
-    assert!(
-        waiting(&case.db),
-        "an outcome the full conversation refused"
-    );
+    let refused = case.asked(&Asker::Agent(6), GitHubRule::NoDeletion, false);
+    assert_eq!(case.answer(refused, vec![1]), Settlement::Settled);
+    assert!(waiting(&case.db), "a decline the full conversation refused");
 }
 
 /// DEC-182 S7: a reason with a hidden character, such as a direction override or a
