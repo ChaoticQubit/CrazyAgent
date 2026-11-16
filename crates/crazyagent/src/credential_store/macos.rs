@@ -1,3 +1,4 @@
+use super::Piece::{Hex, Plain};
 use super::{SECRET_BYTES_MAX, SecretString, Store, StoreError, checked_name, parts, reference};
 use crate::protocol::CredentialRef;
 use std::io::{Read, Write};
@@ -103,12 +104,18 @@ impl Store for Keychain {
         let service = self.owned(service)?;
         let account = checked_name(account)?;
         let found = reference(service, account)?;
-        let mut line = format!(
-            "add-generic-password -U -s \"{service}\" -a \"{account}\" -X {} \"{}\"\n",
-            hex(secret.expose().as_bytes()),
-            self.keychain_text()
-        )
-        .into_bytes();
+        let mut line = super::sized(&[
+            Plain("add-generic-password -U -s \""),
+            Plain(service),
+            Plain("\" -a \""),
+            Plain(account),
+            Plain("\" -X "),
+            Hex(secret.expose().as_bytes()),
+            Plain(" \""),
+            Plain(self.keychain_text()),
+            Plain("\"\n"),
+        ])
+        .ok_or_else(|| StoreError::code("credential_secret_invalid"))?;
         let ran = run(&["-i".as_ref()], Some(&line), None);
         crate::credentials::wipe(&mut line);
         if ran?.code != Some(0) {
@@ -219,11 +226,6 @@ fn store_home(namespace: &str) -> Result<PathBuf, StoreError> {
             panic!("{namespace} has no temporary test keychain; lib tests never open the owner's")
         }),
     )
-}
-
-fn hex(bytes: &[u8]) -> String {
-    assert!(bytes.len() <= SECRET_BYTES_MAX);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn run(

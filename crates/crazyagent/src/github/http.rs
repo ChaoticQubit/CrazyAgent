@@ -1,3 +1,4 @@
+use crate::credentials::Piece::{Escaped, Form, Plain};
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use std::io::{Read, Write};
@@ -57,16 +58,6 @@ fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
 }
 
-fn quoted(value: &str) -> Result<String, EngineError> {
-    if value.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
-        return Err(failure("github_request_invalid"));
-    }
-    Ok(format!(
-        "\"{}\"",
-        value.replace('\\', "\\\\").replace('"', "\\\"")
-    ))
-}
-
 impl Request<'_> {
     /// Builds curl's config: the URL, headers, token, and either the form body or a
     /// method with its JSON body, never both; a bodyless PUT, POST or PATCH sends an empty
@@ -74,45 +65,57 @@ impl Request<'_> {
     /// form. Output: the config bytes, or `github_request_invalid` for a control character.
     fn config(&self, body: Option<(Verb, Option<&str>)>) -> Result<Vec<u8>, EngineError> {
         assert!(body.is_none() || self.form.is_none());
-        let mut config = format!(
-            "url = {}\nheader = {}\nuser-agent = {}\n",
-            quoted(self.url.as_str())?,
-            quoted(&format!("Accept: {}", self.accept))?,
-            quoted(USER_AGENT)?
-        );
+        let mut pieces = vec![
+            Plain("url = \""),
+            Escaped(self.url.as_str()),
+            Plain("\"\nheader = \"Accept: "),
+            Escaped(self.accept),
+            Plain("\"\nuser-agent = \""),
+            Escaped(USER_AGENT),
+            Plain("\"\n"),
+        ];
         if self.url.host_str() == Some("api.github.com") || self.allow_http {
-            config.push_str("header = \"X-GitHub-Api-Version: 2022-11-28\"\n");
+            pieces.push(Plain("header = \"X-GitHub-Api-Version: 2022-11-28\"\n"));
         }
         if let Some(token) = self.token {
-            config.push_str(&format!(
-                "header = {}\n",
-                quoted(&format!("Authorization: Bearer {}", token.expose()))?
-            ));
+            pieces.extend([
+                Plain("header = \"Authorization: Bearer "),
+                Escaped(token.expose()),
+                Plain("\"\n"),
+            ]);
         }
         for (name, value) in &self.headers {
-            config.push_str(&format!(
-                "header = {}\n",
-                quoted(&format!("{name}: {value}"))?
-            ));
+            pieces.extend([
+                Plain("header = \""),
+                Escaped(name),
+                Plain(": "),
+                Escaped(value),
+                Plain("\"\n"),
+            ]);
         }
         if let Some(form) = &self.form {
-            let body = url::form_urlencoded::Serializer::new(String::new())
-                .extend_pairs(form.iter())
-                .finish();
-            config.push_str(&format!("data = {}\n", quoted(&body)?));
+            pieces.push(Plain("data = \""));
+            for (index, (name, value)) in form.iter().enumerate() {
+                if index > 0 {
+                    pieces.push(Plain("&"));
+                }
+                pieces.extend([Form(name), Plain("="), Form(value)]);
+            }
+            pieces.push(Plain("\"\n"));
         }
         if let Some((verb, json)) = body {
-            config.push_str(&format!("request = \"{}\"\n", verb.name()));
+            pieces.extend([Plain("request = \""), Plain(verb.name()), Plain("\"\n")]);
             match json {
-                Some(json) => {
-                    config.push_str("header = \"Content-Type: application/json\"\n");
-                    config.push_str(&format!("data-raw = {}\n", quoted(json)?));
-                }
-                None if verb != Verb::Delete => config.push_str("data-raw = \"\"\n"),
+                Some(json) => pieces.extend([
+                    Plain("header = \"Content-Type: application/json\"\ndata-raw = \""),
+                    Escaped(json),
+                    Plain("\"\n"),
+                ]),
+                None if verb != Verb::Delete => pieces.push(Plain("data-raw = \"\"\n")),
                 None => {}
             }
         }
-        Ok(config.into_bytes())
+        crate::credentials::sized(&pieces).ok_or_else(|| failure("github_request_invalid"))
     }
 
     /// Builds the curl command without running it. Output: the command, whose arguments
