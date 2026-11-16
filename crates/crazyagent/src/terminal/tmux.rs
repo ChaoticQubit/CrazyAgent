@@ -128,6 +128,8 @@ const REPLY_CUT: &str = "terminal_reply_cut";
 /// attach's marker line: every history and screen row a capture can hold, then the
 /// capture's closing guard, the marker block's opening guard and the marker itself.
 const DRAIN_LINES_MAX: usize = HISTORY_ROWS_MAX + u16::MAX as usize + 3;
+/// How many random bytes an attach's marker holds, written as twice as many hex digits.
+const MARKER_BYTES: usize = 16;
 /// The most live views one tmux server feeds at once over all its panes: every view the
 /// engine serves, so one agent per tile never meets it first; `VIEWERS_MAX` bounds one pane.
 const SERVER_VIEWERS_MAX: usize = super::CONNECTIONS_MAX;
@@ -206,6 +208,9 @@ enum Pending {
         reply: SyncSender<Result<TerminalStream, HostError>>,
         marker: Vec<u8>,
     },
+    /// The block an answered attach's command line ends with, which prints only its marker:
+    /// the reader drops it, as it drops a cut capture, up to the marker line.
+    Marker(Vec<u8>),
 }
 
 /// Finds the tmux program the engine uses, anew on each call, through the one tool resolver:
@@ -1681,12 +1686,17 @@ fn error_code(lines: &[Vec<u8>]) -> HostError {
     })
 }
 
-fn finish(state: &mut State, answer: Answer) {
+/// Hands one closed reply block to the request at the front of the queue. `ran` is whether
+/// the block closed with `%end`, since tmux skips the rest of a command line after an
+/// `%error`: an attach whose located reply ran keeps its place for the capture, and one whose
+/// located reply was too large to keep, or whose capture ran, leaves its marker block to be
+/// dropped. Takes the state, the answer and whether the command ran.
+fn finish(state: &mut State, answer: Answer, ran: bool) {
     let Some(front) = state.pending.pop_front() else {
         return;
     };
     match front {
-        Pending::Startup => {}
+        Pending::Startup | Pending::Marker(_) => {}
         Pending::Reply(reply) => {
             let _ = reply.send(answer);
         }
@@ -1708,6 +1718,9 @@ fn finish(state: &mut State, answer: Answer) {
             }),
             Err(error) => {
                 let _ = reply.send(Err(error));
+                if ran {
+                    state.pending.push_front(Pending::Marker(marker));
+                }
             }
         },
         Pending::Attach {
@@ -1716,11 +1729,14 @@ fn finish(state: &mut State, answer: Answer) {
             history,
             view,
             reply,
-            ..
+            marker,
         } => {
             let opened =
                 answer.and_then(|screen| viewer(state, agent, &lines, &screen, history, view));
             let _ = reply.send(opened);
+            if ran {
+                state.pending.push_front(Pending::Marker(marker));
+            }
         }
     }
 }
@@ -1740,29 +1756,81 @@ fn guard<'a>(line: &'a [u8], word: &[u8]) -> Option<&'a [u8]> {
 
 /// How the reader finds the end of the reply block opening now: `Searched` looks for its
 /// closing guard, `Counted` takes that many rows of an attach's capture as data first, and
-/// `Unknown` is a capture whose located reply was cut, so its rows cannot be counted.
+/// `Drained` drops every line up to the attach's own marker line.
 enum Rows {
     Searched,
     Counted(usize),
-    Unknown,
+    Drained(Vec<u8>),
 }
 
-/// How many rows the reply block opening now holds, when it is an attach's capture: the
-/// history rows the attach read just before, then the screen rows. capture-pane prints one
-/// line per pane row and the pane's own text can look like any control line, including the
-/// block's closing guard, so those rows are counted as data, never searched for a guard.
-/// Takes the state. Returns the count, `Searched` for other replies, or `Unknown`.
-fn capture_rows(state: &State) -> Rows {
-    match state.pending.front() {
+/// How to read the reply block opening now, by the request at the front of the queue. An
+/// attach's capture holds the history rows the attach read just before, then the screen
+/// rows; capture-pane prints one line per pane row and the pane's own text can look like any
+/// control line, including the block's closing guard, so those rows are counted as data,
+/// never searched for a guard. An attach whose located reply was cut, so its rows cannot be
+/// counted, leaves the queue failing with `REPLY_CUT`, so its caller asks again, and its
+/// capture is drained; so is the marker block an answered attach left. Takes the state.
+/// Returns how to read the block.
+fn opening(state: &mut State) -> Rows {
+    match state.pending.pop_front() {
+        Some(Pending::Marker(marker)) => Rows::Drained(marker),
         Some(Pending::Attach {
+            agent,
             located: Some(lines),
             history,
-            ..
-        }) => located(lines).map_or(Rows::Unknown, |found| {
-            Rows::Counted(found.history.min(*history) + usize::from(found.rows))
-        }),
-        _ => Rows::Searched,
+            view,
+            reply,
+            marker,
+        }) => {
+            let Some(found) = located(&lines) else {
+                let _ = reply.send(Err(failure(REPLY_CUT)));
+                return Rows::Drained(marker);
+            };
+            let rows = found.history.min(history) + usize::from(found.rows);
+            state.pending.push_front(Pending::Attach {
+                agent,
+                located: Some(lines),
+                history,
+                view,
+                reply,
+                marker,
+            });
+            Rows::Counted(rows)
+        }
+        Some(other) => {
+            state.pending.push_front(other);
+            Rows::Searched
+        }
+        None => Rows::Searched,
     }
+}
+
+/// The lines the reader drops for one attach, from the opening guard of its cut capture or
+/// of its marker block up to the `%end` after its marker line. `opened` is the last opening
+/// guard seen, which once the marker shows is the marker block's own, since tmux prints that
+/// block after every row of the capture; `found` is whether the marker showed, and `lines`
+/// counts the lines dropped, at most `DRAIN_LINES_MAX`.
+struct Drain {
+    marker: Vec<u8>,
+    opened: Vec<u8>,
+    found: bool,
+    lines: usize,
+}
+
+/// Ends the views of the pane a dropped `%output` line names, so each reads `Chunk::Behind`
+/// and attaches again, since output meant for it may be gone; any other line changes
+/// nothing. Takes the state and the dropped line.
+fn lose(state: &mut State, line: &[u8]) {
+    let Some(rest) = guard(line, b"%output") else {
+        return;
+    };
+    let pane = rest.split(|byte| *byte == b' ').next().unwrap_or_default();
+    state.viewers.retain(|viewer| {
+        if viewer.pane != pane {
+            return viewer.feed.open();
+        }
+        viewer.feed.lost()
+    });
 }
 
 /// The pane ids a tmux window layout lists, as `%<id>`: each leaf cell is
@@ -1833,6 +1901,7 @@ fn read_line(output: &mut impl BufRead, line: &mut Vec<u8>) -> Option<usize> {
 fn read(output: ChildStdout, state: &Mutex<State>) {
     let mut output = BufReader::new(output);
     let mut block: Option<Block> = None;
+    let mut drain: Option<Drain> = None;
     loop {
         let mut line = Vec::new();
         let Some(dropped) = read_line(&mut output, &mut line) else {
@@ -1841,6 +1910,28 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
         let Ok(mut state) = state.lock() else {
             break;
         };
+        if let Some(dropping) = &mut drain {
+            assert!(block.is_none());
+            if dropping.found {
+                if dropped == 0 && guard(&line, b"%end") == Some(dropping.opened.as_slice()) {
+                    drain = None;
+                    continue;
+                }
+                break;
+            }
+            dropping.lines += 1;
+            if dropping.lines > DRAIN_LINES_MAX {
+                break;
+            }
+            if dropped == 0 && line == dropping.marker {
+                dropping.found = true;
+            } else if let Some(opened) = guard(&line, b"%begin").filter(|_| dropped == 0) {
+                dropping.opened = opened.to_vec();
+            } else {
+                lose(&mut state, &line);
+            }
+            continue;
+        }
         if let Some(open) = &mut block {
             let counted = open.rows.is_some_and(|rows| open.seen < rows);
             let closing = !counted && dropped == 0;
@@ -1856,7 +1947,7 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
                     Err(error_code(&lines))
                 };
                 block = None;
-                finish(&mut state, answer);
+                finish(&mut state, answer, ended);
                 continue;
             }
             if open.rows.is_some() && !counted {
@@ -1874,22 +1965,23 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
             continue;
         }
         if dropped > 0 {
-            if let Some(rest) = guard(&line, b"%output") {
-                let pane = rest.split(|byte| *byte == b' ').next().unwrap_or_default();
-                state.viewers.retain(|viewer| {
-                    if viewer.pane != pane {
-                        return viewer.feed.open();
-                    }
-                    viewer.feed.lost()
-                });
-            }
+            lose(&mut state, &line);
             continue;
         }
         if let Some(opened) = guard(&line, b"%begin") {
-            let rows = match capture_rows(&state) {
+            let rows = match opening(&mut state) {
                 Rows::Searched => None,
                 Rows::Counted(rows) => Some(rows),
-                Rows::Unknown => break,
+                Rows::Drained(marker) => {
+                    assert!(!marker.is_empty() && !marker.contains(&b'\n'));
+                    drain = Some(Drain {
+                        marker,
+                        opened: opened.to_vec(),
+                        found: false,
+                        lines: 0,
+                    });
+                    continue;
+                }
             };
             block = Some(Block {
                 opened: opened.to_vec(),
@@ -1932,6 +2024,20 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
     }
 }
 
+/// A fresh marker for one attach line: random bytes in hex, which no pane can have printed
+/// before tmux runs the line, so the reader drops a cut capture up to it and no further.
+/// Returns the marker, or `terminal_command_failed` when no random bytes are to be had.
+fn fresh_marker() -> Result<String, HostError> {
+    let mut random = [0u8; MARKER_BYTES];
+    getrandom::fill(&mut random).map_err(|_| failure("terminal_command_failed"))?;
+    let mut text = String::with_capacity(MARKER_BYTES * 2);
+    for byte in random {
+        let _ = write!(text, "{byte:02x}");
+    }
+    assert_eq!(text.len(), MARKER_BYTES * 2);
+    Ok(text)
+}
+
 fn windows(control: &Control) -> Result<Vec<AgentId>, HostError> {
     let lines = control.ask(&format!(
         "list-windows -t {SESSION} -F '#{{window_name}}{FORMAT_END}'"
@@ -1948,7 +2054,9 @@ fn windows(control: &Control) -> Result<Vec<AgentId>, HostError> {
 
 impl Tmux {
     /// Reads an agent terminal's screen and at most `history` rows above it in one tmux
-    /// command block, and opens a viewer on its live output when `view` is set.
+    /// command line, and opens a viewer on its live output when `view` is set. The line ends
+    /// by printing a fresh marker, so a capture whose rows cannot be counted is dropped up to
+    /// it and fails only this attach, which asks again while time is left.
     /// Takes the name, the history row limit and whether to view. Returns the stream.
     fn capture(
         &self,
@@ -1976,12 +2084,14 @@ impl Tmux {
         } else {
             format!("-{history}")
         };
-        let line = format!(
+        let asked = format!(
             "list-panes -t {target} -f '{filter}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{history_size}} #{{alternate_on}} #{{mouse_standard_flag}} #{{mouse_button_flag}} #{{mouse_all_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}}{FORMAT_END}' ; capture-pane {} -S {start} -t {target}",
             control.capture
         );
         let until = Instant::now() + REPLY_TIME;
         loop {
+            let marker = fresh_marker()?;
+            let line = format!("{asked} ; display-message -p '{marker}'");
             let (reply, answer) = sync_channel(1);
             control.send(
                 &line,
@@ -1991,7 +2101,7 @@ impl Tmux {
                     history,
                     view,
                     reply,
-                    marker: Vec::new(),
+                    marker: marker.into_bytes(),
                 },
             )?;
             match control.wait(&answer) {
