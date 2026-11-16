@@ -1,12 +1,13 @@
 use crate::engine::EngineError;
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 const FOLDER: &str = "keep-awake";
 const FILE: &str = "journal.json";
 const DRAFT: &str = "journal.json.new";
+const LOCK: &str = "journal.lock";
 
 /// The most entries one journal holds.
 pub const ENTRIES_MAX: usize = 64;
@@ -114,6 +115,41 @@ fn read(file: File) -> Result<Vec<Entry>, EngineError> {
     Ok(entries)
 }
 
+/// An exclusive hold on the journal's lock file (rv-sec3 KA T14 r1 F2): the engine holds
+/// it for its whole life and `crazyagent keep-awake restore` for its undo, so the journal
+/// has one writing process at a time. Dropping it lets go.
+#[derive(Debug)]
+pub struct JournalLock {
+    _file: File,
+}
+
+impl JournalLock {
+    /// Takes the lock without waiting, creating the journal folder and an owner-only lock
+    /// file that is never replaced, so every holder locks the same file. Input: the engine
+    /// root. Output: the lock, none while another holds it, or why the lock file cannot be
+    /// opened.
+    pub fn try_take(root: &Path) -> Result<Option<Self>, EngineError> {
+        assert!(!root.as_os_str().is_empty());
+        let folder = root.join(FOLDER);
+        private_folder(&folder)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(folder.join(LOCK)).map_err(unwritable)?;
+        let taken = match file.try_lock() {
+            Ok(()) => Some(Self { _file: file }),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Error(problem)) => return Err(unwritable(problem)),
+        };
+        assert!(folder.starts_with(root));
+        Ok(taken)
+    }
+}
+
 impl Journal {
     /// Opens the journal below the engine root, creating its folder. A missing file is an
     /// empty journal. A file that cannot be read stays where it is and is an error, so no
@@ -159,19 +195,45 @@ impl Journal {
     /// the first failure; the entries that failed stay recorded.
     pub fn reconcile(
         &mut self,
+        undo: impl FnMut(&Entry) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        self.undo_where(|_| true, undo)
+    }
+
+    /// Undoes the recorded changes of one kind, newest first, and forgets the ones whose
+    /// undo worked; entries of every other kind stay as they are (DEC-167 addendum 32).
+    /// Inputs: the kind and the undo for one entry. Output: Ok when no entry of that kind
+    /// is left, else the first failure; the entries that failed stay recorded.
+    pub fn settle(
+        &mut self,
+        kind: &str,
+        undo: impl FnMut(&Entry) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        assert!(!kind.is_empty());
+        self.undo_where(|entry| entry.kind == kind, undo)
+    }
+
+    /// Undoes the chosen entries, newest first, and forgets the ones whose undo worked;
+    /// every other entry stays, in its place. Inputs: which entries to undo and the undo for
+    /// one entry. Output: Ok when no chosen entry is left, else the first failure.
+    fn undo_where(
+        &mut self,
+        chosen: impl Fn(&Entry) -> bool,
         mut undo: impl FnMut(&Entry) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
         let mut kept = Vec::new();
         let mut first = None;
         for entry in self.entries.iter().rev() {
-            if let Err(problem) = undo(entry) {
+            if !chosen(entry) {
+                kept.push(entry.clone());
+            } else if let Err(problem) = undo(entry) {
                 kept.push(entry.clone());
                 first = first.or(Some(problem));
             }
         }
         kept.reverse();
         assert!(kept.len() <= self.entries.len());
-        assert_eq!(kept.is_empty(), first.is_none());
+        assert_eq!(kept.iter().any(&chosen), first.is_some());
         if kept.len() != self.entries.len() {
             self.persist(&kept)?;
             self.entries = kept;

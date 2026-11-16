@@ -1,6 +1,8 @@
+use super::journal::JournalLock;
 use super::state::{Heat, LidSupport, LowPowerSupport, PowerSource, Sensors};
 use crate::paths::Platform;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::time::{Duration, Instant};
 
@@ -77,13 +79,15 @@ pub struct LidAsk {
     pub low_power: bool,
 }
 
-/// An owner command for the lid helper (QUESTION 36a): Turn on lid-closed hold, or Remove
-/// lid helper. The lid line runs it on the sensor thread, never in the owner's change.
+/// An owner command for the lid line: Turn on lid-closed hold or Remove lid helper on
+/// macOS (QUESTION 36a), Put the lid setting back now on Windows (DEC-167 addendum 32).
+/// The lid line runs it on the sensor thread, never in the owner's change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LidCommand {
     TurnOn,
     Remove,
+    PutBack,
 }
 
 /// A lid command waiting in the run state, with its number in this engine run, which only
@@ -109,11 +113,15 @@ pub type LidReader = Box<dyn FnMut(LidAsk, Option<LidCommand>, i64) -> LidSuppor
 pub type PowerLine = Box<dyn FnMut(bool, i64) -> LowPowerSupport + Send>;
 
 /// Builds this platform's lid line and power line (QUESTION 40b). On macOS both ride the
-/// lid helper: the power line returns what the lid line's last step left and never calls
-/// the helper. On Linux only the power line runs, on power-profiles-daemon, and the
-/// reader's own lid support stands; Windows has neither. Output: each line, if this
-/// platform has it.
-pub fn platform_lines() -> (Option<LidReader>, Option<PowerLine>) {
+/// lid helper and the power line never calls it; on Linux only the power line runs, on
+/// power-profiles-daemon; on Windows only the lid line, built only with the journal lock,
+/// which it takes and keeps until the sensor thread ends (rv-ds241 KA T14 r2 N1). Inputs:
+/// the engine root and the lock, left in place off Windows. Output: each line, if any.
+pub fn platform_lines(
+    root: &Path,
+    #[cfg_attr(not(windows), allow(unused_variables))] journal: &mut Option<JournalLock>,
+) -> (Option<LidReader>, Option<PowerLine>) {
+    assert!(!root.as_os_str().is_empty());
     #[cfg(target_os = "macos")]
     let lines = {
         let (lid, power) = super::hold_macos::lines();
@@ -121,7 +129,14 @@ pub fn platform_lines() -> (Option<LidReader>, Option<PowerLine>) {
     };
     #[cfg(target_os = "linux")]
     let lines = (None, Some(super::low_power_linux::power_line()));
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    let lines = (
+        journal
+            .take()
+            .map(|lock| super::lid_windows::lid_reader(root, lock)),
+        None,
+    );
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     let lines = (None, None);
     lines
 }

@@ -102,7 +102,7 @@ test("the window names every engine option and default of Keep awake as the engi
   assert.deepEqual(variants(ENGINE_STATE, "LidSupport"), ["held", "off", "idle_only_on_battery", "needs_macos13", "needs_approval", "helper_missing", "not_turned_on", "remove_helper", "sleep_not_restored", "locked_by_policy", "not_available"]);
   assert.deepEqual(variants(ENGINE_STATE, "EndReason"), ["battery", "battery_unread", "heat", "cap", "manual", "off", "hold_lost"]);
   assert.deepEqual(variants(ENGINE_STATE, "Reason"), ["work", "timer", "grace", "idle", "off"]);
-  assert.deepEqual(variants(ENGINE, "KeepAwakeAction"), ["start", "extend", "end", "set", "turn_on_lid_hold", "remove_lid_helper"]);
+  assert.deepEqual(variants(ENGINE, "KeepAwakeAction"), ["start", "extend", "end", "set", "turn_on_lid_hold", "remove_lid_helper", "put_lid_back"]);
   assert.match(ENGINE, /minutes outside 1 to 1440/);
   assert.deepEqual([api.MINUTES_MIN, api.MINUTES_MAX], [1, 1440]);
 });
@@ -178,6 +178,8 @@ test("every refusal of a Keep awake change has its own sentence, the engine's se
     keep_awake_not_holding: "Nothing is held right now.",
     keep_awake_minutes_invalid: "Enter whole minutes from 1 to 1440.",
     keep_awake_no_lid_helper: "Lid-closed hold is set up only on macOS.",
+    keep_awake_no_lid_setting: "Put the lid setting back is only on Windows.",
+    keep_awake_lid_held: "The lid setting goes back when this hold ends.",
   };
   const refused = new Set([...ENGINE.matchAll(/return Some\("(keep_awake_[a-z_]+)"\);/g)].map(([, code]) => code));
   assert.deepEqual([...refused].sort(), Object.keys(words).sort(), "the engine refuses with these codes and no other");
@@ -662,13 +664,30 @@ test("Settings shows the lid helper line and its buttons whatever the lid rule, 
   assert.match(SETTINGS_PAGE, /onLid=\{\(action\) => void lid\(action\)\}/, "a press sends the command as it is");
 });
 
+test("Settings on Windows offers Put the lid setting back now with the crash line, and no other platform does (DEC-167 addendum 32)", () => {
+  const CRASH = "If the engine stops by a crash during a hold, the lid stays at Do nothing until the engine starts again.";
+  const left = { kind: "sleep_not_restored" };
+  const windows = settingsView(ok(view({}, { platform: "windows", lid_support: left, lid_platform: left })));
+  assert.ok(text(windows).includes(`Lid setting ${CRASH}`), text(windows));
+  assert.equal(disabled(windows, "Put the lid setting back now"), false);
+  assert.equal(text(windows).includes("Lid helper"), false, "Windows has no lid helper");
+  const busy = settingsView(ok(view({}, { platform: "windows" })), { saving: true });
+  assert.equal(disabled(busy, "Put the lid setting back now"), true, "one change at a time");
+  for (const platform of ["mac_os", "linux"]) {
+    const other = settingsView(ok(view({}, { platform, lid_support: left, lid_platform: left })));
+    assert.equal(button(other, "Put the lid setting back now"), undefined, platform);
+    assert.equal(text(other).includes(CRASH), false, platform);
+  }
+  assert.match(SETTINGS_PAGE, /onLid\("put_lid_back"\)/, "the button sends the command by its engine name");
+});
+
 test("Settings reads Keep awake again every 5 s while open, so a lid helper command shows what it did", () => {
   assert.match(SETTINGS_PAGE, /window\.setInterval\(reload, KEEP_AWAKE_POLL_MS\)/);
   assert.match(SETTINGS_PAGE, /window\.clearInterval\(/);
 });
 
-test("the two lid helper commands go to the engine by their plain names", () => {
-  for (const action of ["turn_on_lid_hold", "remove_lid_helper"]) {
+test("the three lid commands go to the engine by their plain names", () => {
+  for (const action of ["turn_on_lid_hold", "remove_lid_helper", "put_lid_back"]) {
     assert.doesNotThrow(() => api.keepAwakeArgs(action, 7), action);
     assert.deepEqual(api.keepAwakeArgs(action, 7), { action, generation: 7 });
   }

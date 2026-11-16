@@ -577,7 +577,8 @@ mod windows {
 #[cfg(unix)]
 mod journal {
     use crazyagent::engine::EngineError;
-    use crazyagent::keep_awake::journal::{Entry, Journal};
+    use crazyagent::keep_awake::journal::{Entry, Journal, JournalLock};
+    use crazyagent::keep_awake::{RESTORE_ENGINE_RUNNING, restore};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::process::Command;
@@ -636,6 +637,62 @@ mod journal {
         assert_eq!(std::fs::read_to_string(&setting).unwrap(), "before");
         assert!(journal.entries().is_empty());
         assert!(Journal::open(root.path()).unwrap().entries().is_empty());
+    }
+
+    /// rv-sec3 KA T14 r1 F2, QUESTION 01:16 Q3: the journal lock has one holder at a time,
+    /// and restore refuses while another holds it and leaves the journal as it is.
+    #[test]
+    fn the_journal_lock_has_one_holder_and_restore_refuses_beside_it() {
+        let root = tempfile::tempdir().unwrap();
+        let held = JournalLock::try_take(root.path()).unwrap();
+        assert!(held.is_some(), "a free lock is taken");
+        let again = JournalLock::try_take(root.path()).unwrap();
+        assert!(again.is_none(), "a held lock is not taken twice");
+        Journal::open(root.path()).unwrap().record(entry()).unwrap();
+        assert_eq!(restore(root.path()), Err(RESTORE_ENGINE_RUNNING));
+        assert_eq!(Journal::open(root.path()).unwrap().entries(), [entry()]);
+        drop(held);
+        assert!(
+            JournalLock::try_take(root.path()).unwrap().is_some(),
+            "a lock let go is free"
+        );
+    }
+
+    /// DEC-167 addendum 32: settle undoes the entries of one kind, newest first, keeps the
+    /// ones whose undo failed and every entry of another kind, and keeps the file in step.
+    #[test]
+    fn settle_undoes_one_kind_newest_first_and_keeps_every_other_kind() {
+        let root = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(root.path()).unwrap();
+        let lid = |restore: &str| Entry {
+            kind: "lid".into(),
+            restore: restore.into(),
+        };
+        for recorded in [lid("first"), entry(), lid("second"), lid("third")] {
+            journal.record(recorded).unwrap();
+        }
+        let mut seen = Vec::new();
+        let failed = journal.settle("lid", |undone| {
+            assert_eq!(undone.kind, "lid");
+            seen.push(undone.restore.clone());
+            match undone.restore.as_str() {
+                "second" => Err(EngineError("stand_in_undo_failed".into())),
+                _ => Ok(()),
+            }
+        });
+        assert_eq!(failed, Err(EngineError("stand_in_undo_failed".into())));
+        assert_eq!(seen, ["third", "second", "first"]);
+        assert_eq!(journal.entries(), [entry(), lid("second")]);
+        assert_eq!(
+            Journal::open(root.path()).unwrap().entries(),
+            [entry(), lid("second")]
+        );
+
+        let none = journal.settle("other", |_| panic!("no entry of this kind"));
+        assert_eq!(none, Ok(()));
+        journal.settle("lid", |_| Ok(())).unwrap();
+        assert_eq!(journal.entries(), [entry()]);
+        assert_eq!(Journal::open(root.path()).unwrap().entries(), [entry()]);
     }
 
     #[test]

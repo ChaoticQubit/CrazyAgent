@@ -59,7 +59,8 @@ export interface KeepAwakeView {
 }
 
 /** One change the owner makes: start a timer, move the running one later, end the hold,
- * save the settings, or on macOS turn on the lid-closed hold or remove the lid helper. */
+ * save the settings, on macOS turn on the lid-closed hold or remove the lid helper, or on
+ * Windows put the lid setting back now. */
 export type KeepAwakeAction =
   | { start: { minutes: number } }
   | { extend: { minutes: number } }
@@ -67,8 +68,9 @@ export type KeepAwakeAction =
   | { set: { settings: KeepAwakeSettings } }
   | LidAction;
 
-/** The two lid helper commands, sent by their engine names. */
-export type LidAction = "turn_on_lid_hold" | "remove_lid_helper";
+/** The lid commands, sent by their engine names: the two macOS lid helper ones and the
+ * Windows Put the lid setting back now. */
+export type LidAction = "turn_on_lid_hold" | "remove_lid_helper" | "put_lid_back";
 
 export const MINUTES_MIN = 1;
 export const MINUTES_MAX = 1440;

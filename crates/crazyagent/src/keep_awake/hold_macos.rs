@@ -234,6 +234,7 @@ impl LidLine {
         let gated = match command {
             LidCommand::TurnOn => self.platform.refusal().is_some(),
             LidCommand::Remove => !self.platform.bundled,
+            LidCommand::PutBack => true,
         };
         if gated {
             eprintln!("keep awake: this Mac cannot hold the lid, {command:?} is dropped");
@@ -243,6 +244,7 @@ impl LidLine {
         let trouble = match command {
             LidCommand::TurnOn => self.turn_on(status),
             LidCommand::Remove => self.remove(status, now_ms),
+            LidCommand::PutBack => unreachable!("the gate drops Put back on macOS"),
         };
         self.read_ms = None;
         self.last = None;

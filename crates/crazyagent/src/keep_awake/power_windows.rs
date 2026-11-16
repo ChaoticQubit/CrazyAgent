@@ -2,8 +2,8 @@ use super::power::PowerReading;
 use super::state::PowerSource;
 
 /// Reads this computer's power source and battery charge from the Windows system power
-/// status. Windows has no public heat signal and the lid is not read here, so both stay
-/// unknown, and the lid support stays the reason Windows starts with. Output: the
+/// status, and the lid position from Windows' lid switch notice. Windows has no public heat
+/// signal, so heat stays unknown; the lid line answers the lid support. Output: the
 /// reading, all unknown when the status call fails.
 pub(crate) fn read() -> PowerReading {
     let Ok(status) = crazyagent_win_sandbox::power::status() else {
@@ -18,6 +18,7 @@ pub(crate) fn read() -> PowerReading {
     PowerReading {
         source,
         battery_pct: status.battery_pct,
+        lid_closed: crazyagent_win_sandbox::lid::closed(),
         ..PowerReading::unknown()
     }
 }
