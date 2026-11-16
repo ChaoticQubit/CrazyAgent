@@ -115,6 +115,41 @@ async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_publish_question_and_its_answer_reach_a_real_engine_for_the_named_project() {
+    let root = private_root("ca-tprompt-");
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let mut native = NativeOwner::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    );
+    let (_, access) = native.attach().await;
+    assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+    let project = ProjectId::new("nowhere").unwrap();
+    for query in [
+        IntakeQuery::GitHubPublishPrompt {
+            project: project.clone(),
+        },
+        IntakeQuery::GitHubPublishPromptSet {
+            project: project.clone(),
+            answer: crate::github::GitHubPromptAnswer::Never,
+        },
+    ] {
+        let event = native.intake(IntakeJob::Query(query.clone())).await;
+        assert_eq!(event.query, query);
+        assert_eq!(
+            event.result,
+            Err("github_publish_project_unknown".into()),
+            "{query:?}"
+        );
+    }
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_tui_starts_an_intake_job_reads_it_to_done_and_dismisses_it() {
     let root = private_root("ca-tjob-");
     let work = private_root("ca-tjob-work-");

@@ -639,6 +639,8 @@ export function minutesOfCause(cause: string | null | undefined): number | null 
 export function turnLine(turn: MasterTurn): string {
   const code = ` (${stopCode(turn)})`;
   if (turn.cause === "rcli_master_key_setup_required" && turn.detail) return `${turn.detail}${code}`;
+  const configChanged = turn.cause === "rcli_profile_changed_in_conversation" ? failureSentence(turn.cause) : undefined;
+  if (configChanged !== undefined) return `${configChanged}${code}`;
   const steps = turn.reason === "step_limit" ? stepsOfCause(turn.cause) : null;
   if (steps !== null) return `Stopped after ${steps} steps; reply with 'continue' to go on.${code}`;
   const minutes = turn.reason === "time_limit" ? minutesOfCause(turn.cause) : null;

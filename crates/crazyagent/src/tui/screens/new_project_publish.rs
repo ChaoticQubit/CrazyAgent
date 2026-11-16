@@ -1,8 +1,10 @@
 use super::new_project_input::TextInput;
+use super::settings_accounts::plain;
 use crate::github::{
     GitHubOwner, GitHubOwners, GitHubPlanField, GitHubPublishPlan, default_description,
     default_repo_name, plan_problem,
 };
+use crate::tui::client::intake::{IntakeQuery, IntakeView};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub(in crate::tui) const PUBLISH_TOGGLE: &str = "Publish this project on GitHub";
@@ -119,6 +121,38 @@ impl Publish {
     pub fn set_owners(&mut self, owners: GitHubOwners) {
         self.owners = owners.owners;
         self.owners_problem = owners.problem;
+    }
+
+    /// Takes the engine's answer to a GitHub sign-in or accounts read: signed in reads the
+    /// accounts next, signed out or a failed read is kept as such, and accounts that could
+    /// not be read keep their problem. Takes the query and its result. Returns the read to
+    /// send next, if any.
+    pub fn arrived(
+        &mut self,
+        query: &IntakeQuery,
+        result: &Result<IntakeView, String>,
+    ) -> Option<IntakeQuery> {
+        match (query, result) {
+            (IntakeQuery::GitHubStatus, Ok(IntakeView::GitHub(status))) if status.signed_in => {
+                self.set_github(GitHub::SignedIn);
+                return Some(IntakeQuery::GitHubOwners);
+            }
+            (IntakeQuery::GitHubStatus, Ok(IntakeView::GitHub(_))) => {
+                self.set_github(GitHub::SignedOut);
+            }
+            (IntakeQuery::GitHubStatus, Err(code)) => {
+                self.set_github(GitHub::Failed(plain(code).to_owned()));
+            }
+            (IntakeQuery::GitHubOwners, Ok(IntakeView::Owners(owners))) => {
+                self.set_owners(owners.clone());
+            }
+            (IntakeQuery::GitHubOwners, Err(code)) => self.set_owners(GitHubOwners {
+                owners: Vec::new(),
+                problem: Some(plain(code).to_owned()),
+            }),
+            _ => {}
+        }
+        None
     }
 
     /// Gives the account the block shows: the picked one while GitHub still offers it, else
@@ -362,15 +396,19 @@ impl Publish {
         PublishReply::Handled
     }
 
-    /// Inserts pasted text into the open panel's text row. Takes the text, the project name
-    /// and the about text. Returns Handled when a text row took it.
+    /// Inserts pasted text into the open panel's text row, keeping the row as typed only when
+    /// the paste changed it. Takes the text, the project name and the about text. Returns
+    /// Handled when a text row took it.
     pub fn paste(&mut self, text: &str, project: &str, about: &str) -> PublishReply {
         let Some(row) = self.panel.filter(|_| self.typing()) else {
             return PublishReply::Ignored;
         };
         let mut input = self.input(row, project, about);
+        let before = input.value().to_owned();
         input.insert_str(text);
-        self.keep(row, input);
+        if input.value() != before {
+            self.keep(row, input);
+        }
         PublishReply::Handled
     }
 }

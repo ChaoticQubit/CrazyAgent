@@ -117,14 +117,17 @@ pub fn notice(project: Option<&str>, question: &Question) -> Notice {
 }
 
 /// The notification text for a job that ended, built from the engine's view: the folder's
-/// name, or a deleted project's name whole, and what happened to an add, a project move or a
-/// delete in plain words, never an engine code. Input: the job. Output: the notice, or None
-/// while the job still runs and for a delete an engine stop cut short, which is shown again at
-/// start, not ended then.
+/// name, or a deleted or new project's name whole, and what happened to an add, a project
+/// move, a delete or a New Project in plain words, never an engine code. Input: the job.
+/// Output: the notice, or None while the job still runs and for a delete an engine stop cut
+/// short, which is shown again at start, not ended then.
 pub fn intake_notice(job: &JobView) -> Option<Notice> {
     use crazyagent::projects_home::job::{JobKind, JobState, Phase};
     if job.kind == JobKind::Delete {
         return delete_notice(job);
+    }
+    if job.kind == JobKind::Setup {
+        return setup_notice(job);
     }
     let folder = std::path::Path::new(&job.source)
         .file_name()
@@ -168,6 +171,7 @@ pub fn intake_notice(job: &JobView) -> Option<Notice> {
         | JobState::Copying { .. }
         | JobState::Trashing { .. }
         | JobState::Clearing
+        | JobState::Building { .. }
         | JobState::CutShort { .. } => {
             return None;
         }
@@ -206,6 +210,44 @@ fn delete_notice(job: &JobView) -> Option<Notice> {
         | JobState::Trashing { .. }
         | JobState::Clearing
         | JobState::NeedsAnswer { .. }
+        | JobState::Building { .. }
+        | JobState::CutShort { .. } => return None,
+    };
+    assert!(title.chars().count() <= TITLE_CHARS_MAX);
+    assert!(body.chars().count() <= BODY_CHARS_MAX);
+    Some(Notice { title, body })
+}
+
+/// The notification text for a New Project that ended (DEC-177 add.2): the project's name
+/// whole, that it is set up in the projects folder, or that it stopped or failed with nothing
+/// kept. Input: the New Project. Output: the notice, or None while it builds.
+fn setup_notice(job: &JobView) -> Option<Notice> {
+    use crazyagent::projects_home::job::{JobKind, JobState};
+    assert_eq!(job.kind, JobKind::Setup);
+    let name = match plain_line(&job.source, TITLE_CHARS_MAX - 40) {
+        shown if shown.is_empty() => "The project".to_owned(),
+        shown => shown,
+    };
+    let (title, body) = match &job.state {
+        JobState::Done => (
+            format!("{name} is set up"),
+            "It's in your projects folder.".to_owned(),
+        ),
+        JobState::Cancelled { .. } => (
+            format!("Setting up {name} stopped"),
+            "Nothing was kept.".to_owned(),
+        ),
+        JobState::Failed { .. } => (
+            format!("Setting up {name} failed"),
+            "Open Home in CrazyAgent to see why.".to_owned(),
+        ),
+        JobState::Downloading { .. }
+        | JobState::Stopping { .. }
+        | JobState::Copying { .. }
+        | JobState::Trashing { .. }
+        | JobState::Clearing
+        | JobState::NeedsAnswer { .. }
+        | JobState::Building { .. }
         | JobState::CutShort { .. } => return None,
     };
     assert!(title.chars().count() <= TITLE_CHARS_MAX);
@@ -793,6 +835,48 @@ mod tests {
             }),
             None
         );
+    }
+
+    /// DEC-177 add.2: an ended New Project's notice names the project whole and says it is
+    /// set up, stopped or failed in New Project's words, never an add's, and a New Project
+    /// still building sends none.
+    #[test]
+    fn an_ended_setup_notice_names_the_project_and_speaks_of_setting_up() {
+        use crazyagent::projects_home::job::{JobKind, JobState, Phase};
+        let set_up = |state| {
+            let view = JobView {
+                kind: JobKind::Setup,
+                project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),
+                source: "Notes/2026 plans".into(),
+                ..job(state)
+            };
+            intake_notice(&view).map(|notice| (notice.title, notice.body))
+        };
+        let pair = |title: &str, body: &str| Some((title.to_owned(), body.to_owned()));
+        assert_eq!(
+            set_up(JobState::Done),
+            pair(
+                "Notes/2026 plans is set up",
+                "It's in your projects folder."
+            )
+        );
+        assert_eq!(
+            set_up(JobState::Cancelled {
+                phase: Phase::Building
+            }),
+            pair("Setting up Notes/2026 plans stopped", "Nothing was kept.")
+        );
+        assert_eq!(
+            set_up(JobState::Failed {
+                code: "project_folder_unwritable".into(),
+                phase: Phase::Building
+            }),
+            pair(
+                "Setting up Notes/2026 plans failed",
+                "Open Home in CrazyAgent to see why."
+            )
+        );
+        assert_eq!(set_up(JobState::Building { done: 1, total: 2 }), None);
     }
 
     /// A job's notification is claimed once, shares the bound with questions, and a click on

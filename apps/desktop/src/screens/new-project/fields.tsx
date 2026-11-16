@@ -7,7 +7,7 @@ import { useLoad } from "../../state";
 import { Checkbox, Icon, Segmented, Switch } from "../../ui";
 import { displayText } from "../conversation";
 import { GitHubSignIn } from "../intake/clone";
-import { PUBLISH_DOCS, PUBLISH_LINE, PUBLISH_TOGGLE, SIGN_IN_WAIT, emptyPublish, publishErrors, publishShown } from "./publish";
+import { OVERVIEW_SIGNED_OUT, PUBLISH_DOCS, PUBLISH_LINE, PUBLISH_TOGGLE, SIGN_IN_CHECKING, SIGN_IN_UNREAD, SIGN_IN_WAIT, emptyPublish, publishErrors, publishShown } from "./publish";
 import type { PublishDraft } from "./publish";
 import { RESEARCH_ICONS, RESEARCH_LABELS } from "./team-editor";
 import { ABOUT_CHARS_MAX, RESEARCH_COPY, addStack, chars, removeStack } from "./wizard";
@@ -160,8 +160,10 @@ export type GitHubPublishReads = ReturnType<typeof useGitHubPublish>;
 /** The New Project publish block: the GitHub toggle with its one line, then, while it is on,
  * the sign-in when CrazyAgent has none, or the visibility, account, repository name,
  * description and docs switch, each name and description following Basics until edited.
- * Inputs: an id prefix, the draft, its change handler and the page's GitHub reads. Output: the block. */
-export function PublishFields({ prefix, draft, onChange, github }: { prefix: string; draft: ProjectDraft; onChange: (draft: ProjectDraft) => void; github: GitHubPublishReads }) {
+ * On a made project's Overview it says the Overview's sign-in words, with Try again after a
+ * failed sign-in read. Inputs: an id prefix, the draft, its change handler, the page's
+ * GitHub reads and where the block sits. Output: the block. */
+export function PublishFields({ prefix, draft, onChange, github, place = "new-project" }: { prefix: string; draft: ProjectDraft; onChange: (draft: ProjectDraft) => void; github: GitHubPublishReads; place?: "new-project" | "overview" }) {
   const publish = draft.publish ?? emptyPublish();
   const { status, reloadStatus, owners, signedIn, offered } = github;
   const shown = publishShown(publish, draft.name, draft.about, offered);
@@ -176,10 +178,15 @@ export function PublishFields({ prefix, draft, onChange, github }: { prefix: str
       <span><strong>{PUBLISH_TOGGLE}</strong><span className="pj-secondary">{PUBLISH_LINE}</span></span>
       <Switch id={`${prefix}-publish`} label={PUBLISH_TOGGLE} hideLabel checked={publish.on} onChecked={(on) => set({ on })} />
     </div></div>
-    {publish.on && (status.kind === "loading" ? <p className="pj-help" role="status">Checking your GitHub sign-in...</p>
+    {publish.on && (status.kind === "loading" ? <p className="pj-help" role="status">{SIGN_IN_CHECKING}</p>
+      : status.kind === "error" && place === "overview" ? <div className="pj-stack">
+        <p className="pj-error" role="alert">{SIGN_IN_UNREAD}</p>
+        <p className="pj-help">{displayText(status.message)}</p>
+        <div className="pj-need"><button type="button" className="btn" id={`${prefix}-sign-in-reread`} onClick={() => reloadStatus()}>Try again</button></div>
+      </div>
       : status.kind !== "ok" ? <p className="pj-error" role="alert">{status.kind === "error" ? status.message : "Publishing on GitHub isn't in this build."}</p>
       : !status.value.signed_in ? <div className="pj-stack">
-        <p className="pj-help">{SIGN_IN_WAIT}</p>
+        <p className="pj-help">{place === "overview" ? OVERVIEW_SIGNED_OUT : SIGN_IN_WAIT}</p>
         <GitHubSignIn status={status.value} reloadStatus={reloadStatus} />
       </div>
       : <div className="pj-stack">

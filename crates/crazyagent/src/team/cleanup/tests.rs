@@ -1313,10 +1313,10 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
 }
 
 /// rv-sec3 F1 (B12, RV-DS241-204's flag leg): an agent-home entry at mode 000 that will not
-/// open has its immutable flag cleared on the inode its parent's handle read, never on a path,
-/// so a process that swaps its folder for a link to an owner folder holding an entry of the
-/// same name before `/usr/bin/chflags` runs leaves the owner's flag, and the agent's entry,
-/// moved aside, still loses its own.
+/// open has its immutable flag cleared through its parent's open handle, never on a path, so
+/// a process that swaps its folder for a link to an owner folder holding an entry of the same
+/// name before the clear leaves the owner's flag, and the agent's entry, moved aside, still
+/// loses its own.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_home_entry_that_will_not_open_is_unpinned_by_its_inode_never_through_a_swapped_folder() {
@@ -1348,19 +1348,20 @@ fn a_home_entry_that_will_not_open_is_unpinned_by_its_inode_never_through_a_swap
     )
     .unwrap();
     let (moved, held, target) = (shut.clone(), aside.clone(), owner.clone());
-    BEFORE_HOME_ENTRY_CHFLAGS.with(|step| {
+    BEFORE_HOME_ENTRY_FLAGS.with(|step| {
         *step.borrow_mut() = Some(Box::new(move || {
             std::fs::rename(&moved, &held).unwrap();
             std::os::unix::fs::symlink(&target, &moved).unwrap();
         }));
     });
 
-    unpin_home_entry(&parent, c"f");
+    let cleared = unpin_home_entry(&parent, c"f");
 
     assert!(
-        BEFORE_HOME_ENTRY_CHFLAGS.with(|step| step.borrow().is_none()),
+        BEFORE_HOME_ENTRY_FLAGS.with(|step| step.borrow().is_none()),
         "the entry opened, so no flag was cleared without a handle"
     );
+    assert!(cleared, "the clear did not take on the entry it read");
     let flags = |file: &Path| std::fs::symlink_metadata(file).unwrap().st_flags();
     assert_eq!(
         flags(&owner.join("f")) & immutable,
@@ -1374,19 +1375,42 @@ fn a_home_entry_that_will_not_open_is_unpinned_by_its_inode_never_through_a_swap
     );
 }
 
-/// rv-sec3 r2 F2 (B12): `/usr/bin/chflags` stops reading options at its flags word, so the
-/// flag clear ends its options before that word; a `--` after it is read as a file and
-/// clears the flags of an entry of that name in the engine's working folder.
+/// rv-sec3 r2 F1 (B12): an agent-home entry at mode 000 has its immutable flag cleared
+/// through its parent's open handle alone, with no path walked above that parent, so a
+/// folder above it that a process swaps for a link inside the clear is never followed. The
+/// row shuts the folder above the parent: a clear that walks a path, as a `/.vol` name
+/// does, is refused there, while one through the handle is not.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_home_entry_flag_clear_ends_the_chflags_options_before_its_flags_word() {
-    let command = flag_clear(Path::new("/.vol/1/2"));
-    assert_eq!(command.get_program().to_str(), Some("/usr/bin/chflags"));
-    let arguments: Vec<&str> = command
-        .get_args()
-        .map(|argument| argument.to_str().unwrap())
-        .collect();
-    assert_eq!(arguments, ["-h", "--", "nouchg,nouappnd", "/.vol/1/2"]);
+fn a_home_entry_under_a_shut_folder_is_unpinned_through_its_parents_handle_alone() {
+    use std::os::macos::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let immutable = nix::sys::stat::FileFlag::UF_IMMUTABLE.bits();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let git = root.join("home/.cargo/git");
+    let shut = git.join("x");
+    write(&shut.join("f"), b"left by a terminal\n");
+    std::fs::set_permissions(shut.join("f"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(chflags("uchg", &shut.join("f")));
+    let _left = Unlocked(shut.join("f"));
+    let parent = rustix::fs::openat(
+        rustix::fs::CWD,
+        &shut,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    unpin_home_entry(&parent, c"f");
+
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let flags = std::fs::symlink_metadata(shut.join("f")).unwrap().st_flags();
+    assert_eq!(flags & immutable, 0, "the entry kept its flag");
 }
 
 /// RV-DS241-182: removing an agent's tree of many folders that one read-only folder keeps

@@ -63,6 +63,56 @@ async fn github_selector_reports_signed_out_and_refuses_work_before_sign_in() {
     .await;
 }
 
+#[tokio::test]
+async fn the_publish_prompt_answers_over_the_owner_socket_and_keeps_not_now() {
+    run_case(false, |context| async move {
+        #[cfg(target_os = "macos")]
+        let _keychain = {
+            let mut keychain = crate::credentials::test_keychain::TestKeychain::temporary();
+            keychain.serve(&crate::github::namespace(&context.state));
+            keychain
+        };
+        let folder = tempfile::Builder::new()
+            .prefix("ca-gh-prompt-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let project = std::fs::canonicalize(folder.path()).unwrap();
+        {
+            let db = crate::landing::open(&context.state).unwrap();
+            crate::ide::workspace::tests::add_project(&db, "alpha", &project);
+        }
+        let (client, _) =
+            OwnerClient::discover(&context.state, OwnerClientKind::Tui, Duration::from_secs(2))
+                .await
+                .unwrap();
+        let alpha = crate::protocol::ProjectId::new("alpha").unwrap();
+        let beta = crate::protocol::ProjectId::new("beta").unwrap();
+        assert!(client.github_publish_prompt(alpha.clone()).await.unwrap());
+        client
+            .github_publish_prompt_set(alpha.clone(), crate::github::GitHubPromptAnswer::NotNow)
+            .await
+            .unwrap();
+        assert!(!client.github_publish_prompt(alpha).await.unwrap());
+        assert_eq!(
+            client
+                .github_publish_prompt(beta.clone())
+                .await
+                .unwrap_err()
+                .0,
+            "github_publish_project_unknown"
+        );
+        assert_eq!(
+            client
+                .github_publish_prompt_set(beta, crate::github::GitHubPromptAnswer::Never)
+                .await
+                .unwrap_err()
+                .0,
+            "github_publish_project_unknown"
+        );
+    })
+    .await;
+}
+
 #[cfg(target_os = "macos")]
 mod slow_remote {
     use super::*;

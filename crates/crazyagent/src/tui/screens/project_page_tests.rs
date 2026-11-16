@@ -119,10 +119,6 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         .shell(ShellRequest::EditPool { change, generation })
                         .unwrap();
                 }
-                Request::Creation(job) => {
-                    sent.push("create");
-                    connection.creation(*job).unwrap();
-                }
                 Request::Master(job) => {
                     sent.push("master");
                     connection.master(*job).unwrap();
@@ -164,9 +160,11 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push(match job.query() {
                         IntakeQuery::JobStart { .. } => "job start",
                         IntakeQuery::JobStatus => "job status",
+                        IntakeQuery::JobDismiss { .. } => "job dismiss",
                         IntakeQuery::Found => "found",
                         IntakeQuery::GitHubPublishStart { .. } => "github publish",
                         IntakeQuery::GitHubPublishStatus { .. } => "github publish status",
+                        IntakeQuery::GitHubPublishPrompt { .. } => "github publish prompt",
                         _ => "intake",
                     });
                     connection.intake(*job).unwrap();
@@ -728,9 +726,16 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
         1,
         "the Overview reads the project's GitHub publish once: {sent:?}"
     );
+    assert_eq!(
+        sent.iter()
+            .filter(|label| **label == "github publish prompt")
+            .count(),
+        1,
+        "a project with no publish asks once whether to offer one: {sent:?}"
+    );
     let sent: Vec<&str> = sent
         .into_iter()
-        .filter(|label| *label != "github publish status")
+        .filter(|label| !matches!(*label, "github publish status" | "github publish prompt"))
         .collect();
     assert_eq!(
         sent,
@@ -1719,6 +1724,176 @@ async fn a_delete_cut_short_shows_on_home_after_a_restart_and_d_keeps_the_projec
         "Keep the project ends the banner's mark"
     );
     assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
+}
+
+/// DEC-177 step 3c: while another project's move waits for its agents, Create on New project
+/// starts the engine's New Project job, which the held move refuses; the wizard keeps the
+/// draft and says another job runs, nothing is made and the move still waits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
+    let mut engine = Engine::start().await;
+    let (notes, origin) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
+    let next = crate::tui::test_home::projects_home(&mut engine.controller, 2).await;
+    let home = std::fs::canonicalize(next.path()).unwrap();
+    let copy = engine.root.path().join("agent-47");
+    engine_sql(
+        &engine,
+        &format!(
+            "INSERT OR IGNORE INTO team_paused_projects(project,since_ms) VALUES ('notes-cli',1);
+             INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
+             VALUES (47,'notes-cli','team','codex',1,'{}','working',0,0);",
+            copy.to_str().unwrap()
+        ),
+    );
+    let held = engine
+        .controller
+        .job_start(
+            RequestId::new("move-held-1").unwrap(),
+            JobSubject::MoveProject {
+                project_id: notes.clone(),
+            },
+            AddMode::Move,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert!(super::intake_job::running(&held), "{held:?}");
+
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    publishing_off(&mut shell);
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        sent.iter().filter(|sent| **sent == "job start").count(),
+        1,
+        "one start, never sent again after the refusal: {sent:?}"
+    );
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Could not create the project."), "{shown}");
+    assert!(shown.contains("Another job is running."), "{shown}");
+    assert!(!home.join("tidepool").exists(), "nothing was made");
+    assert!(origin.is_dir(), "the move still waits: {origin:?}");
+    go_to(&mut shell, "home");
+    assert_eq!(
+        kept_draft().as_deref(),
+        Some("Tidepool"),
+        "leaving the refused wizard keeps its draft"
+    );
+    drop(shell);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let mut shell = home_shell(&mut connection).await;
+    let shown = shell.ctx.store.intake.clone().expect("the held move");
+    assert_eq!(shown.id, held.id, "the held move is still the engine's job");
+    assert!(super::intake_job::running(&shown), "{shown:?}");
+    shell.key(Key::Home);
+    shell.key(Key::Enter);
+    let (ended, _) = job_until(&mut shell, &mut connection, |job| {
+        !super::intake_job::running(job)
+    })
+    .await;
+    assert!(
+        matches!(ended.state, JobState::Cancelled { .. }),
+        "the held move still stops: {ended:?}"
+    );
+    assert!(origin.is_dir(), "nothing was moved: {origin:?}");
+}
+
+/// DEC-177 step 3c: a New Project an engine stop cut short shows on Home after the next start
+/// as stopped part way and never goes on by itself; Enter opens New project and starts
+/// nothing, and d forgets it. Runs on macOS, where the restart helper runs.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_project_cut_short_shows_on_home_after_a_restart_and_d_forgets_it() {
+    let engine = Engine::start().await;
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let engine = engine
+        .restart(|root| {
+            drop(crate::ledger::open(root).unwrap());
+            rusqlite::Connection::open(root.join("engine.db"))
+                .unwrap()
+                .execute_batch(&format!(
+                    "INSERT INTO ledger_actions(kind,action_key,payload,started_ms)
+                     VALUES ('project_setup','project-cut-tui',
+                             '{{\"project\":\"project-cut-tui\",\"request\":\"setup-cut-tui\",\"name\":\"Cut Short\"}}',{started});"
+                ))
+                .unwrap();
+        })
+        .await;
+    assert_eq!(
+        engine_count(
+            &engine,
+            "SELECT count(*) FROM ledger_actions WHERE kind='project_setup' AND outcome IS NULL"
+        ),
+        0,
+        "the start ends the mark"
+    );
+    let mut connection = engine.connect();
+    let mut shell = home_shell(&mut connection).await;
+    let cut = shell
+        .ctx
+        .store
+        .intake
+        .clone()
+        .expect("the New Project cut short");
+    assert_eq!(cut.kind, JobKind::Setup);
+    assert_eq!(cut.source, "Cut Short");
+    assert_eq!(
+        cut.state,
+        JobState::Failed {
+            code: "home_new_project_interrupted".into(),
+            phase: crate::projects_home::job::Phase::Building,
+        }
+    );
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        rows.contains("Cut Short: Setting up the project stopped part way."),
+        "{rows}"
+    );
+    shell.key(Key::Home);
+    shell.key(Key::Enter);
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(
+        !sent.contains(&"job start"),
+        "nothing starts in one key: {sent:?}"
+    );
+    drop(shell);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let mut shell = home_shell(&mut connection).await;
+    assert_eq!(
+        shell.ctx.store.intake.as_ref().map(|job| &job.id),
+        Some(&cut.id)
+    );
+    shell.key(Key::Home);
+    shell.key(Key::Char('d'));
+    pump(&mut shell, &mut connection).await;
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(shell.ctx.store.intake, None, "d forgets the job");
+    assert_eq!(
+        engine_count(
+            &engine,
+            "SELECT count(*) FROM projects WHERE id='project-cut-tui'"
+        ),
+        0,
+        "a cut-short New Project leaves no project"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3104,9 +3279,15 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     assert!(shown.contains("Tidepool"), "{shown}");
     assert!(shown.contains("Main"), "{shown}");
     shell.key(Key::Enter);
-    let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(&sent[..2], ["create", "projects"], "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
+    assert!(sent.contains(&"projects"), "{sent:?}");
     assert!(sent.contains(&"edit pool"), "{sent:?}");
+    assert_eq!(
+        sent.iter().filter(|sent| **sent == "job dismiss").count(),
+        1,
+        "{sent:?}"
+    );
     let Some(Place::Project { id, name, tab }) = shell.place() else {
         panic!("the new project opens, got {:?}", shell.place());
     };
@@ -3127,6 +3308,24 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
             .any(|line| line.starts_with("  Tidepool  ") && line.trim_end().ends_with(&folder)),
         "the title row shows the name and the folder in the projects home: {shown}"
     );
+}
+
+/// Pumps the shell until the engine's job it keeps no longer runs, reading it again between
+/// pumps as the run loop does, so a New Project's start, its end and its follow-ups all go
+/// out. Takes the shell and its connection. Returns every request sent, oldest first.
+async fn pump_job(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut sent = pump(shell, connection).await;
+    while shell.read_running_job() {
+        assert!(
+            Instant::now() < deadline,
+            "the job never ended: {:?}",
+            shell.ctx.store.intake
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        sent.extend(pump(shell, connection).await);
+    }
+    sent
 }
 
 fn go_to(shell: &mut Shell, query: &str) {
@@ -3161,8 +3360,8 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
     assert_eq!(shell.place(), Some(Place::Home));
 
-    let sent = pump(&mut shell, &mut connection).await;
-    assert!(sent.contains(&"create"), "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"job start"), "{sent:?}");
     assert!(
         sent.contains(&"edit pool"),
         "the picked pool is assigned without the page: {sent:?}"
@@ -3205,8 +3404,8 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     shell.key(Key::Esc);
     go_to(&mut shell, "home");
     assert_eq!(shell.depth(), 1);
-    let sent = pump(&mut shell, &mut connection).await;
-    assert!(sent.contains(&"create"), "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"job start"), "{sent:?}");
     assert!(!sent.contains(&"edit pool"), "{sent:?}");
     let refused = shell.ctx.message().expect("the refusal is shown");
     assert!(
@@ -3238,7 +3437,7 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     shell.key(Key::Enter);
     shell.key(Key::Esc);
     go_to(&mut shell, "home");
-    pump(&mut shell, &mut connection).await;
+    pump_job(&mut shell, &mut connection).await;
     assert_eq!(
         shell.ctx.message().map(|message| message.lead.as_str()),
         Some("Tidepool is ready.")
@@ -3260,8 +3459,8 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     for character in "Harbor".chars() {
         shell.key(Key::Char(character));
     }
-    let sent = pump(&mut shell, &mut connection).await;
-    assert!(sent.contains(&"create"), "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"job start"), "{sent:?}");
     let refused = shell.ctx.message().expect("the refusal is shown");
     assert!(
         refused.lead.starts_with("Could not create"),
@@ -3291,6 +3490,673 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Harbor"), "{shown}");
     assert_eq!(kept_draft().as_deref(), Some("Tidepool"));
+}
+
+/// Pool Main as the engine lists it, with one Claude account.
+fn main_pool() -> PoolSummary {
+    PoolSummary {
+        id: CredentialRef::new("pool-a").unwrap(),
+        name: "Main".into(),
+        summary: "1 Claude".into(),
+        members: vec![member("a-claude", MemberKind::Claude)],
+        project_count: 0,
+        provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+    }
+}
+
+/// Takes every request the shell queued. Takes the shell. Returns them, oldest first.
+fn drain(shell: &mut Shell) -> Vec<Request> {
+    std::iter::from_fn(|| shell.ctx.next_request()).collect()
+}
+
+/// The intake queries among queued requests. Takes the requests. Returns the queries in
+/// order.
+fn intake_asks(sent: &[Request]) -> Vec<IntakeQuery> {
+    sent.iter()
+        .filter_map(|request| match request {
+            Request::Intake(job) => Some(job.query()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The New Project job start among queued requests. Takes the requests. Returns the start's
+/// id, the project it makes and the query, or none when no such start was queued.
+fn setup_start(sent: &[Request]) -> Option<(RequestId, ProjectId, IntakeQuery)> {
+    sent.iter().find_map(|request| {
+        let Request::Intake(job) = request else {
+            return None;
+        };
+        let query = job.query();
+        let IntakeQuery::JobStart {
+            id,
+            subject: JobSubject::Setup { project_id, .. },
+            ..
+        } = &query
+        else {
+            return None;
+        };
+        Some((id.clone(), project_id.clone(), query.clone()))
+    })
+}
+
+/// The engine's New Project job for Tidepool as a read shows it. Takes its id, its project
+/// and its state. Returns the view.
+fn tidepool_job(id: &RequestId, project: &ProjectId, state: JobState) -> JobView {
+    JobView {
+        id: id.clone(),
+        kind: JobKind::Setup,
+        project_id: Some(project.clone()),
+        source: "Tidepool".into(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+        stopping: false,
+        state,
+    }
+}
+
+/// One intake reply from the owner worker. Takes the query it answers and the result.
+/// Returns the arrival.
+fn intake_reply(
+    query: IntakeQuery,
+    result: Result<crate::tui::client::intake::IntakeView, String>,
+) -> Arrival {
+    owner_arrival(OwnerEvent::Intake(Box::new(
+        crate::tui::client::intake::IntakeEvent { query, result },
+    )))
+}
+
+/// A status read that finds this job. Takes the job, or none for no job. Returns the arrival.
+fn job_status(job: Option<JobView>) -> Arrival {
+    intake_reply(
+        IntakeQuery::JobStatus,
+        Ok(crate::tui::client::intake::IntakeView::Job(job)),
+    )
+}
+
+/// The building New Project job a start reply carries. Takes the id and the project.
+/// Returns the view.
+fn building(id: &RequestId, project: &ProjectId) -> JobView {
+    tidepool_job(id, project, JobState::Building { done: 0, total: 0 })
+}
+
+/// How many dismisses of this job the requests hold. Takes the requests and the id.
+/// Returns the count.
+fn dismisses(sent: &[Request], id: &RequestId) -> usize {
+    intake_asks(sent)
+        .iter()
+        .filter(|query| **query == IntakeQuery::JobDismiss { id: id.clone() })
+        .count()
+}
+
+/// Whether the requests assign pool Main to this project. Takes the requests and the
+/// project. Returns true when one such pool edit is queued.
+fn assigns_main(sent: &[Request], project: &ProjectId) -> bool {
+    sent.iter().any(|request| {
+        matches!(
+            request,
+            Request::EditPool {
+                change: crate::tui::seam::PoolChange::Assign {
+                    pool: Some(pool),
+                    project: assigned,
+                },
+            } if pool.as_str() == "pool-a" && assigned == project
+        )
+    })
+}
+
+/// Opens New project, gives it pool Main, names the project `name` and presses Enter on
+/// Review. Takes the name. Returns the shell and the requests that Enter queued.
+fn create_named(name: &str) -> (Shell, Vec<Request>) {
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    shell.arrive(Arrival::Pools(Ok(vec![main_pool()])));
+    drain(&mut shell);
+    for character in name.chars() {
+        shell.key(Key::Char(character));
+    }
+    publishing_off(&mut shell);
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let sent = drain(&mut shell);
+    (shell, sent)
+}
+
+/// DEC-177 step 3b: Create on New project starts the engine's New Project job with the
+/// draft and the picked pool under a fresh id and a new project id, as a move with no
+/// overrides; it is the one intake request Enter sends.
+#[test]
+fn create_starts_the_engines_new_project_job_with_the_draft_and_its_pool() {
+    let (shell, sent) = create_named("Tidepool");
+    let (id, project, query) = setup_start(&sent).expect("Create starts the New Project job");
+    let IntakeQuery::JobStart {
+        subject: JobSubject::Setup { spec, setup, .. },
+        mode,
+        overrides,
+        ..
+    } = query
+    else {
+        panic!("the start is a New Project job");
+    };
+    assert_eq!(spec.name, "Tidepool");
+    assert_eq!(
+        setup.pool.as_ref().map(CredentialRef::as_str),
+        Some("pool-a")
+    );
+    assert_eq!(mode, AddMode::Move);
+    assert!(overrides.is_empty());
+    assert!(project.as_str().starts_with("project-"), "{project:?}");
+    assert!(!id.as_str().is_empty());
+    assert_eq!(intake_asks(&sent).len(), 1, "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+}
+
+/// DEC-177 step 3b: the page follows its job by id in the job the shell keeps. Done assigns
+/// the picked pool, reads the projects and dismisses the job once; the empty read after
+/// that dismiss is not a lost job; the pool's answer opens the project.
+#[test]
+fn a_done_new_project_job_assigns_its_pool_dismisses_it_once_and_opens_the_project() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    assert_eq!(
+        dismisses(&drain(&mut shell), &id),
+        0,
+        "a running job is kept"
+    );
+
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(assigns_main(&sent, &project), "{sent:?}");
+    assert!(
+        sent.iter()
+            .any(|request| matches!(request, Request::Projects)),
+        "{sent:?}"
+    );
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+    assert_eq!(
+        shell.place(),
+        Some(Place::NewProject),
+        "the pool is assigned first"
+    );
+
+    shell.arrive(intake_reply(
+        IntakeQuery::JobDismiss { id: id.clone() },
+        Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
+    ));
+    shell.arrive(job_status(None));
+    let sent = drain(&mut shell);
+    assert_eq!(dismisses(&sent, &id), 0, "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(!shown.contains("could not confirm"), "{shown}");
+
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let Some(Place::Project {
+        id: opened,
+        name,
+        tab,
+    }) = shell.place()
+    else {
+        panic!("the new project opens, got {:?}", shell.place());
+    };
+    assert_eq!(
+        (opened, name.as_str(), tab),
+        (project, "Tidepool", ProjectTab::Overview)
+    );
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
+    assert_eq!(kept_draft(), None);
+    assert!(
+        setup_start(&drain(&mut shell)).is_none(),
+        "nothing starts again"
+    );
+}
+
+/// DEC-177 step 3b, add.3 decision 4: a New Project sent to the background and dropped by
+/// Home still follows its job, assigns its pool, dismisses the job and says it is ready.
+#[test]
+fn a_new_project_job_run_in_the_background_finishes_after_its_page_is_gone() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home), "Run in background");
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
+    drain(&mut shell);
+
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(
+        assigns_main(&sent, &project),
+        "the picked pool is assigned without the page: {sent:?}"
+    );
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+
+    shell.arrive(intake_reply(
+        IntakeQuery::JobDismiss { id: id.clone() },
+        Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
+    ));
+    shell.arrive(job_status(None));
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let sent = drain(&mut shell);
+    assert!(
+        sent.iter()
+            .any(|request| matches!(request, Request::PoolProjects)),
+        "{sent:?}"
+    );
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
+    assert_eq!(shell.place(), Some(Place::Home));
+    assert_eq!(kept_draft(), None, "a made project keeps no draft");
+}
+
+/// DEC-182 S5a, rv-ds241 Note A on a carried page: a New Project sent to the background with
+/// publishing on starts its GitHub publish once its pool is assigned, and the Start's
+/// refusal is said on Home with its reason.
+#[test]
+fn a_new_project_run_in_the_background_says_its_github_publish_refusal() {
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    shell.arrive(Arrival::Pools(Ok(vec![main_pool()])));
+    drain(&mut shell);
+    github_signed_in(&mut shell);
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let (id, project, start) =
+        setup_start(&drain(&mut shell)).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
+    drain(&mut shell);
+    shell.arrive(intake_reply(
+        start,
+        Ok(IntakeView::Job(Some(building(&id, &project)))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    drain(&mut shell);
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let publish: Vec<IntakeQuery> = intake_asks(&drain(&mut shell))
+        .into_iter()
+        .filter(|query| {
+            matches!(query, IntakeQuery::GitHubPublishStart { project: started, .. } if *started == project)
+        })
+        .collect();
+    assert_eq!(publish.len(), 1, "{publish:?}");
+    shell.arrive(intake_reply(
+        publish[0].clone(),
+        Err("github_not_signed_in".into()),
+    ));
+    let said = shell.ctx.message().expect("the Start's refusal is said");
+    assert_eq!(
+        (said.lead.as_str(), said.rest.as_str()),
+        (
+            "Publishing on GitHub didn't start.",
+            "Sign in with GitHub first."
+        )
+    );
+    assert_eq!(shell.place(), Some(Place::Home));
+}
+
+/// Sends a New Project to the background, drops its page with Home, ends its job done and
+/// answers its pool edit. Takes nothing. Returns the shell, the project and the requests the
+/// pool's answer queued.
+fn made_in_background() -> (Shell, ProjectId, Vec<Request>) {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
+    drain(&mut shell);
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    drain(&mut shell);
+    shell.arrive(intake_reply(
+        IntakeQuery::JobDismiss { id: id.clone() },
+        Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
+    ));
+    shell.arrive(job_status(None));
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let sent = drain(&mut shell);
+    (shell, project, sent)
+}
+
+/// One setup reply from the owner worker. Takes the query it answers and the result.
+/// Returns the arrival.
+fn setup_reply(query: SetupQuery, result: Result<SetupView, String>) -> Arrival {
+    owner_arrival(OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent { query, result },
+    )))
+}
+
+/// The agent policy writes the requests hold. Takes the requests. Returns the writes.
+fn access_writes(sent: &[Request]) -> Vec<SetupQuery> {
+    sent.iter()
+        .filter_map(|request| match request {
+            Request::Setup(
+                query @ SetupQuery::Change {
+                    action: crate::project_setup::SetupAction::SetAgentPolicy { .. },
+                    ..
+                },
+            ) => Some(query.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// DEC-177 add.3 decision 4 (rv-sec2 bgjobs-3b F1): a New Project carried in the background
+/// reads its project's agent policy once it is made and saves the picked access at the
+/// version read; a refused read or save says the project stays Sandboxed.
+#[test]
+fn a_new_project_carried_in_the_background_saves_its_agent_access_or_says_it_stays_sandboxed() {
+    use super::project_tests::access_view;
+    use crate::engine::owner::OwnerResult;
+    use crate::sandbox::policy::AgentAccess;
+    assert!(
+        AgentAccess::NEW_PROJECT.unavailable().is_none(),
+        "the wizard preselects a level it can save"
+    );
+    let sandboxed = "The project is made, but its agents stay Sandboxed.";
+
+    let (mut shell, project, sent) = made_in_background();
+    let read = SetupQuery::AgentPolicy {
+        project: project.clone(),
+    };
+    assert_eq!(
+        sent.iter()
+            .filter(|request| matches!(request, Request::Setup(query) if *query == read))
+            .count(),
+        1,
+        "{sent:?}"
+    );
+    shell.arrive(setup_reply(
+        read,
+        Ok(SetupView::AgentPolicy(access_view(
+            AgentAccess::Sandboxed,
+            7,
+        ))),
+    ));
+    let writes = access_writes(&drain(&mut shell));
+    let [write] = writes.as_slice() else {
+        panic!("the carried page saves the access once: {writes:?}");
+    };
+    let SetupQuery::Change {
+        action:
+            crate::project_setup::SetupAction::SetAgentPolicy {
+                project_id,
+                version,
+                policy,
+            },
+        ..
+    } = write
+    else {
+        unreachable!("access_writes keeps agent policy writes only");
+    };
+    assert_eq!(
+        (project_id, *version, policy.access),
+        (&project, 7, AgentAccess::NEW_PROJECT)
+    );
+    shell.arrive(setup_reply(
+        write.clone(),
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    ));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready."),
+        "a saved level adds nothing"
+    );
+    assert!(access_writes(&drain(&mut shell)).is_empty());
+
+    let (mut shell, project, _) = made_in_background();
+    shell.arrive(setup_reply(
+        SetupQuery::AgentPolicy { project },
+        Ok(SetupView::AgentPolicy(access_view(
+            AgentAccess::Sandboxed,
+            2,
+        ))),
+    ));
+    let writes = access_writes(&drain(&mut shell));
+    let [write] = writes.as_slice() else {
+        panic!("the carried page saves the access once: {writes:?}");
+    };
+    shell.arrive(setup_reply(
+        write.clone(),
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "agent_policy_version_conflict".into(),
+        })),
+    ));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some(sandboxed),
+        "a refused save is said"
+    );
+
+    let (mut shell, project, _) = made_in_background();
+    shell.arrive(setup_reply(
+        SetupQuery::AgentPolicy { project },
+        Err("owner_read_failed".into()),
+    ));
+    assert!(access_writes(&drain(&mut shell)).is_empty());
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some(sandboxed),
+        "a refused read is said"
+    );
+    assert_eq!(shell.place(), Some(Place::Home));
+}
+
+/// DEC-177 step 3b: a New Project job that failed keeps the open wizard's answers with the
+/// engine's sentence; one stopped in the background keeps the draft and says so in New
+/// project's words. Each ended job is dismissed once and assigns no pool.
+#[test]
+fn a_failed_or_stopped_new_project_job_keeps_the_draft_in_new_project_words() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Failed {
+            code: "home_new_project_failed".into(),
+            phase: crate::projects_home::job::Phase::Building,
+        },
+    ))));
+    let sent = drain(&mut shell);
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+    assert!(!assigns_main(&sent, &project), "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Could not create the project."), "{shown}");
+    assert!(
+        shown.contains("The project folder could not be created. Nothing was kept."),
+        "{shown}"
+    );
+
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Cancelled {
+            phase: crate::projects_home::job::Phase::Building,
+        },
+    ))));
+    let sent = drain(&mut shell);
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+    assert!(!assigns_main(&sent, &project), "{sent:?}");
+    let said = shell.ctx.message().expect("the stop is said");
+    assert_eq!(said.lead, "Setting up the project stopped.");
+    assert!(
+        said.rest.starts_with("Tidepool is kept as a draft."),
+        "{}",
+        said.rest
+    );
+    assert_eq!(kept_draft().as_deref(), Some("Tidepool"));
+}
+
+/// DEC-177 step 3b: a start whose reply is lost may have reached the engine, so the page
+/// reads the job before it says anything and never starts a second one. A failed read
+/// keeps it waiting; a read with its job follows that job to its end; a read without it
+/// says the start's own refusal.
+#[test]
+fn a_new_project_start_with_no_answer_follows_the_job_a_read_finds_and_never_starts_twice() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(start, Err("trusted_connection_lost".into())));
+    let asks = intake_asks(&drain(&mut shell));
+    assert!(asks.contains(&IntakeQuery::JobStatus), "{asks:?}");
+    assert!(
+        asks.iter()
+            .all(|query| !matches!(query, IntakeQuery::JobStart { .. })),
+        "{asks:?}"
+    );
+
+    shell.arrive(intake_reply(
+        IntakeQuery::JobStatus,
+        Err("trusted_connection_lost".into()),
+    ));
+    let shown = render(&mut shell, 80, 24);
+    assert!(!shown.contains("Could not create"), "{shown}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+
+    shell.arrive(job_status(Some(building(&id, &project))));
+    let shown = render(&mut shell, 80, 24);
+    assert!(!shown.contains("Could not create"), "{shown}");
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(assigns_main(&sent, &project), "{sent:?}");
+    assert!(setup_start(&sent).is_none(), "{sent:?}");
+
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, _, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(start, Err("project_exists".into())));
+    drain(&mut shell);
+    shell.arrive(job_status(None));
+    let sent = drain(&mut shell);
+    assert!(setup_start(&sent).is_none(), "{sent:?}");
+    assert_eq!(dismisses(&sent, &id), 0, "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Could not create the folder."), "{shown}");
+    assert!(
+        shown.contains("A folder for this project already exists."),
+        "{shown}"
+    );
+}
+
+/// DEC-177 step 3b: a status read concerns every New Project left running, so one page that
+/// follows its job and another whose start found the slot taken both read it: the first
+/// assigns its pool, the second keeps its draft.
+#[test]
+fn every_new_project_left_running_reads_each_job_status() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    go_to(&mut shell, "new project");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    drain(&mut shell);
+    for character in "Harbor".chars() {
+        shell.key(Key::Char(character));
+    }
+    publishing_off(&mut shell);
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let (_, _, harbor) = setup_start(&drain(&mut shell)).expect("Harbor starts its job too");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    shell.arrive(intake_reply(harbor, Err("job_busy".into())));
+    drain(&mut shell);
+
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(assigns_main(&sent, &project), "{sent:?}");
+    let said = shell.ctx.message().expect("Harbor's refusal is said");
+    assert!(
+        said.rest.starts_with("Harbor is kept as a draft"),
+        "{}",
+        said.rest
+    );
+    assert_eq!(kept_draft().as_deref(), Some("Harbor"));
+
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
 }
 
 #[test]
@@ -3496,9 +4362,9 @@ async fn a_project_folder_the_engine_cannot_make_says_why_in_the_wizard() {
     assert!(shown.contains("Tidepool"), "{shown}");
     std::fs::set_permissions(engine.home.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
     shell.key(Key::Enter);
-    let sent = pump(&mut shell, &mut connection).await;
+    let sent = pump_job(&mut shell, &mut connection).await;
     std::fs::set_permissions(engine.home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(sent.first(), Some(&"create"), "{sent:?}");
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
     assert_eq!(shell.place(), Some(Place::NewProject));
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Could not create the project."), "{shown}");
@@ -5851,107 +6717,6 @@ async fn shift_arrows_walk_the_project_tabs_across_the_master_view() {
     assert_eq!(shell.place(), Some(tab(ProjectTab::Overview)));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_creation_reconcile_the_full_queue_refuses_keeps_the_submission_and_reconciles_again() {
-    use crate::tui::client::{CreationEvent, MutationDelivery};
-    let engine = Engine::start().await;
-    let mut connection = engine.connect();
-    let mut ctx = ctx(80, 24);
-    ctx.store.pools = Load::Ready(Vec::new());
-    let screen = open(&Place::NewProject, &mut ctx);
-    let mut shell = Shell::with(ctx, screen);
-    pump(&mut shell, &mut connection).await;
-    for character in "Tidepool".chars() {
-        shell.key(Key::Char(character));
-    }
-    publishing_off(&mut shell);
-    shell.key(Key::ShiftLeft);
-    shell.key(Key::Enter);
-    let submission = std::iter::from_fn(|| shell.ctx.next_request())
-        .find_map(|request| match request {
-            Request::Creation(job) => Some(job.submission),
-            _ => None,
-        })
-        .expect("Enter sends the creation");
-    let mut filled = 0;
-    while filled < 64
-        && shell.ctx.try_request(Request::EditPool {
-            change: crate::tui::seam::PoolChange::Remove {
-                id: CredentialRef::new("pool-a").unwrap(),
-                opened_projects: 0,
-            },
-        })
-    {
-        filled += 1;
-    }
-    assert!(filled < 64, "the request queue is bounded");
-
-    shell.arrive(owner_arrival(OwnerEvent::Creation(Box::new(
-        CreationEvent {
-            submission: submission.clone(),
-            operation: None,
-            result: Err("trusted_owner_connection_failed".into()),
-            retained: true,
-        },
-    ))));
-    assert_eq!(shell.place(), Some(Place::NewProject));
-    let shown = render(&mut shell, 80, 24);
-    assert!(
-        !shown.contains("create the project again"),
-        "a creation whose outcome is unknown is never offered as a fresh create: {shown}"
-    );
-
-    while shell.ctx.next_request().is_some() {}
-    shell.tick();
-    let reconciles = std::iter::from_fn(|| shell.ctx.next_request())
-        .filter_map(|request| match request {
-            Request::Creation(job) => Some(*job),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        reconciles.len(),
-        1,
-        "the refused reconcile goes out once the queue has room"
-    );
-    assert!(matches!(
-        reconciles[0].delivery,
-        MutationDelivery::Reconcile
-    ));
-    assert_eq!(
-        reconciles[0].submission, submission,
-        "the same submission and project id, never a second one"
-    );
-}
-
-/// Opens New project on a real engine, names the project Tidepool and presses Enter on
-/// Review, then takes every request that event made. Takes the engine. Returns the shell,
-/// its connection and the submission the creation sent.
-async fn submitted_creation(
-    engine: &Engine,
-) -> (Shell, Connection, crate::tui::client::CreationSubmission) {
-    let mut connection = engine.connect();
-    let mut ctx = ctx(80, 24);
-    ctx.store.pools = Load::Ready(Vec::new());
-    let screen = open(&Place::NewProject, &mut ctx);
-    let mut shell = Shell::with(ctx, screen);
-    pump(&mut shell, &mut connection).await;
-    for character in "Tidepool".chars() {
-        shell.key(Key::Char(character));
-    }
-    publishing_off(&mut shell);
-    shell.key(Key::ShiftLeft);
-    shell.key(Key::Enter);
-    let submission = std::iter::from_fn(|| shell.ctx.next_request())
-        .find_map(|request| match request {
-            Request::Creation(job) => Some(job.submission),
-            _ => None,
-        })
-        .expect("Enter sends the creation");
-    while shell.ctx.next_request().is_some() {}
-    (shell, connection, submission)
-}
-
 /// Turns the New project publish block off from the About step, so Create goes on without
 /// a GitHub sign-in. Takes the shell with the project name typed. Returns nothing.
 fn publishing_off(shell: &mut Shell) {
@@ -6012,11 +6777,12 @@ async fn a_made_project_starts_its_github_publish_once_its_pool_is_assigned_and_
     }
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
-    let sent = pump(&mut shell, &mut connection).await;
+    let mut sent = pump_job(&mut shell, &mut connection).await;
+    sent.extend(pump(&mut shell, &mut connection).await);
     let at = |label: &str| sent.iter().position(|sent| *sent == label);
     assert!(
-        at("create").is_some()
-            && at("create") < at("edit pool")
+        at("job start").is_some()
+            && at("job start") < at("edit pool")
             && at("edit pool") < at("github publish"),
         "{sent:?}"
     );
@@ -6034,158 +6800,6 @@ async fn a_made_project_starts_its_github_publish_once_its_pool_is_assigned_and_
     assert_eq!(message.lead, "Publishing on GitHub didn't start.");
     assert_eq!(message.rest, "Sign in with GitHub first.");
 }
-
-/// Hands the page one creation reply from the engine worker. Takes the shell, the
-/// submission, the result and whether the worker still holds the submission. Returns the
-/// creation requests the page sent in answer, oldest first.
-fn creation_reply(
-    shell: &mut Shell,
-    submission: &crate::tui::client::CreationSubmission,
-    result: Result<Box<OwnerResponse>, String>,
-    retained: bool,
-) -> Vec<crate::tui::client::CreationJob> {
-    shell.arrive(owner_arrival(OwnerEvent::Creation(Box::new(
-        crate::tui::client::CreationEvent {
-            submission: submission.clone(),
-            operation: None,
-            result,
-            retained,
-        },
-    ))));
-    std::iter::from_fn(|| shell.ctx.next_request())
-        .filter_map(|request| match request {
-            Request::Creation(job) => Some(*job),
-            _ => None,
-        })
-        .collect()
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reconcile_that_finds_the_creation_unrecorded_retries_it_and_a_busy_retry_the_engine_dropped_says_busy()
- {
-    use crate::tui::client::MutationDelivery;
-    let engine = Engine::start().await;
-    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
-
-    let sent = creation_reply(
-        &mut shell,
-        &submission,
-        Err("trusted_owner_connection_failed".into()),
-        true,
-    );
-    assert_eq!(sent.len(), 1, "a lost reply is reconciled once");
-    assert!(matches!(sent[0].delivery, MutationDelivery::Reconcile));
-
-    let sent = creation_reply(
-        &mut shell,
-        &submission,
-        Ok(Box::new(OwnerResponse::NotRecordedAtBarrier {
-            revision: crate::protocol::Cursor::new(0),
-        })),
-        true,
-    );
-    assert_eq!(
-        sent.len(),
-        1,
-        "a creation the engine never recorded is sent again as the same request: {}",
-        render(&mut shell, 160, 24)
-    );
-    assert!(matches!(sent[0].delivery, MutationDelivery::Retry));
-    assert_eq!(
-        sent[0].submission, submission,
-        "the same submission and project id, never a second one"
-    );
-
-    let sent = creation_reply(
-        &mut shell,
-        &submission,
-        Ok(Box::new(OwnerResponse::Rejected {
-            code: crate::tui::seam::OWNER_BUSY.to_owned(),
-        })),
-        false,
-    );
-    assert!(sent.is_empty());
-    let shown = render(&mut shell, 160, 24);
-    assert!(
-        shown.contains("CrazyAgent is busy with other windows."),
-        "a busy retry the engine dropped changed nothing, so the page says busy: {shown}"
-    );
-    shell.tick();
-    assert!(
-        std::iter::from_fn(|| shell.ctx.next_request())
-            .all(|request| !matches!(request, Request::Creation(_))),
-        "nothing is held for the busy retry, so nothing is sent again"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_second_lost_reply_on_a_recovering_creation_says_the_project_is_unconfirmed() {
-    let engine = Engine::start().await;
-    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
-    let lost = || Err("trusted_owner_connection_failed".to_owned());
-
-    let sent = creation_reply(&mut shell, &submission, lost(), true);
-    assert_eq!(sent.len(), 1, "a lost reply is reconciled once");
-    let sent = creation_reply(&mut shell, &submission, lost(), true);
-    assert!(sent.is_empty(), "recovery runs once");
-    let shown = render(&mut shell, 160, 24);
-    assert!(
-        shown.contains("CrazyAgent could not confirm the new project."),
-        "the reconcile's reply was lost too, so the outcome is still unknown: {shown}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_creation_the_engine_still_runs_is_checked_again_on_each_tick_until_it_answers() {
-    use crate::tui::client::MutationDelivery;
-    let engine = Engine::start().await;
-    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
-    let late = || Err("owner_outcome_unknown_reconcile_same_identity".to_owned());
-    let running = || {
-        Ok(Box::new(OwnerResponse::InProgress {
-            operation_id: crate::protocol::RequestId::new("late-creation").unwrap(),
-        }))
-    };
-
-    let sent = creation_reply(&mut shell, &submission, late(), true);
-    assert_eq!(sent.len(), 1, "a late answer is reconciled once");
-    assert!(matches!(sent[0].delivery, MutationDelivery::Reconcile));
-
-    for _ in 0..2 {
-        let sent = creation_reply(&mut shell, &submission, running(), true);
-        assert!(
-            sent.is_empty(),
-            "a running creation waits for the next tick"
-        );
-        let shown = render(&mut shell, 160, 24);
-        assert!(
-            !shown.contains("could not confirm"),
-            "the engine still runs the creation, so it is not unconfirmed: {shown}"
-        );
-        assert_eq!(
-            shell.ctx.message().map(|message| message.lead.clone()),
-            Some("Still creating the project.".to_owned())
-        );
-        shell.tick();
-        let checks = std::iter::from_fn(|| shell.ctx.next_request())
-            .filter_map(|request| match request {
-                Request::Creation(job) => Some(*job),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            checks.len(),
-            1,
-            "each tick checks the running creation once"
-        );
-        assert!(matches!(checks[0].delivery, MutationDelivery::Reconcile));
-        assert_eq!(
-            checks[0].submission, submission,
-            "the same submission and project id, never a second one"
-        );
-    }
-}
-
 /// While the uncommitted-move banner takes rows above the tabs, the Changes tab offers
 /// Accept on a moved diff only once its last line was painted in the frame the owner
 /// sees, never from the taller view drawn after each key (RVA-1 r1 F2).
@@ -6354,10 +6968,13 @@ mod overview_tabs {
     };
     use crate::protocol::{CredentialRef, ProjectId};
     use crate::roadmap_status::Refresh;
+    use crate::tui::frame::{Hint, footer, hint};
+    use crate::tui::glyphs::UNICODE;
     use crate::tui::screens::new_project_view::{Look, Row};
     use crate::tui::screens::project::{
         OVERVIEW_TAB_LABELS, PoolInfo, ProjectReply, ProjectScreen,
     };
+    use crate::tui::screens::project_publish::PROMPT_LINE;
     use crate::tui::screens::project_view::project_screen;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -6667,6 +7284,55 @@ mod overview_tabs {
         let help = project_screen(&mut page, 100, 40, &Look::plain()).help;
         assert!(help.iter().any(|(_, what)| *what == "Overview tab"));
         assert!(help.iter().any(|(_, what)| *what == "Scroll"));
+    }
+
+    #[test]
+    fn an_80_by_24_overview_keeps_the_publish_question_and_the_keys_it_had_before() {
+        let text: String = (1..=12).map(|line| format!("- Point {line}\n")).collect();
+        let mut overview = overview_with(Tab::QuickInfo, &text);
+        overview.failure = Some(
+            "The agent stopped before it wrote the tabs, so they show what they said the last time they were read. "
+                .repeat(3),
+        );
+        let mut page = page_with_overview(overview);
+        page.pool = Some(PoolInfo {
+            id: CredentialRef::new("pool-main").unwrap(),
+            name: "Main".into(),
+            accounts: 1,
+            assigned: true,
+        });
+        page.github_notice = true;
+        let drawn = project_screen(&mut page, 80, 24, &Look::plain());
+        let shown = drawn
+            .rows
+            .iter()
+            .map(Row::text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(shown.contains("Main  1 account"), "pooled: {shown}");
+        let notice = shown.find(PROMPT_LINE);
+        let strip = shown.find(&marked("Quick info"));
+        assert!(notice.is_some(), "the question shows at 80x24: {shown}");
+        assert!(strip.is_some(), "{shown}");
+        assert!(
+            notice < strip,
+            "the question sits above the tabs, so their rows can't push it off: {shown}"
+        );
+        assert!(
+            shown.contains("G Publish on GitHub"),
+            "the body line names G: {shown}"
+        );
+        let hints: Vec<Hint> = drawn
+            .help
+            .iter()
+            .map(|(key, label)| hint(key, label))
+            .collect();
+        let ctx = super::ctx(80, 24);
+        let bar = footer(80, &hints, 0, &ctx.theme, &UNICODE);
+        let bar: String = bar.spans.iter().map(|span| span.content.as_ref()).collect();
+        for key in ["Enter Open", "o Open folder", "PgUp/PgDn Scroll"] {
+            assert!(bar.contains(key), "{key} stays in the bar: {bar}");
+        }
     }
 
     #[test]
@@ -7024,6 +7690,11 @@ fn publish_asks(shell: &mut Shell) -> Vec<IntakeQuery> {
             matches!(
                 query,
                 IntakeQuery::GitHubPublishStatus { .. }
+                    | IntakeQuery::GitHubPublishPrompt { .. }
+                    | IntakeQuery::GitHubPublishPromptSet { .. }
+                    | IntakeQuery::GitHubPublishStart { .. }
+                    | IntakeQuery::GitHubStatus
+                    | IntakeQuery::GitHubOwners
                     | IntakeQuery::GitHubPublishApprove { .. }
                     | IntakeQuery::GitHubPublishExclude { .. }
                     | IntakeQuery::GitHubPublishRecheck { .. }
@@ -7150,4 +7821,529 @@ fn a_project_without_a_publish_shows_no_pane_and_a_refused_answer_is_said() {
     assert_eq!(message.rest, super::intake::copy("github_publish_running"));
     let shown = render(&mut shell, 100, 30);
     assert!(shown.contains("[x] .env*"), "the pane stays: {shown}");
+}
+
+/// Opens the Overview of project `notes`, named Notes, and answers its publish read with
+/// no publish. Takes nothing. Returns the shell and the project.
+fn unpublished() -> (Shell, ProjectId) {
+    let mut ctx = ctx(100, 30);
+    let project = ProjectId::new("notes").unwrap();
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    (shell, project)
+}
+
+/// Opens the same Overview with the engine saying to offer a publish. Takes nothing.
+/// Returns the shell and the project.
+fn offered() -> (Shell, ProjectId) {
+    let (mut shell, project) = unpublished();
+    let prompt = IntakeQuery::GitHubPublishPrompt {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    (shell, project)
+}
+
+#[test]
+fn a_project_with_no_publish_shows_the_question_on_its_overview_and_keeps_not_now() {
+    let (mut shell, project) = offered();
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+    assert!(shown.contains("G Publish on GitHub"), "{shown}");
+    shell.key(Key::Char('G'));
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("x Don't ask again"), "{shown}");
+    shell.key(Key::Char('n'));
+    let kept = IntakeQuery::GitHubPublishPromptSet {
+        project: project.clone(),
+        answer: crate::github::GitHubPromptAnswer::NotNow,
+    };
+    assert_eq!(publish_asks(&mut shell), [kept.clone()]);
+    shell.key(Key::Char('x'));
+    assert!(publish_asks(&mut shell).is_empty(), "one answer at a time");
+    publish_reply(&mut shell, kept, Ok(IntakeView::PromptKept));
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        !shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+    assert!(!shown.contains("Don't ask again"), "{shown}");
+    shell.key(Key::Char('G'));
+    assert!(!render(&mut shell, 100, 30).contains("Don't ask again"));
+    let (mut quiet, project) = unpublished();
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut quiet), [prompt.clone()]);
+    publish_reply(&mut quiet, prompt, Err("github_store_unavailable".into()));
+    assert!(
+        quiet.ctx.message().is_none(),
+        "a failed question read stays quiet"
+    );
+    let shown = render(&mut quiet, 100, 30);
+    assert!(
+        !shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+}
+
+#[test]
+fn publish_from_the_overview_question_starts_the_publish_the_form_shows_and_says_so() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    shell.key(Key::Esc);
+    assert!(publish_asks(&mut shell).is_empty(), "Esc starts nothing");
+    let shown = render(&mut shell, 100, 30);
+    assert!(!shown.contains("[ Publish ]"), "{shown}");
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "the question stays: {shown}"
+    );
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("[ Publish ]"), "{shown}");
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert!(
+        publish_asks(&mut shell).is_empty(),
+        "the question is gone once a publish starts"
+    );
+    publish_reply(
+        &mut shell,
+        start,
+        Ok(IntakeView::Publish(Box::new(publish_job(
+            GitHubPublishStep::Drafting,
+        )))),
+    );
+    let message = shell.ctx.message().expect("the start is said");
+    assert_eq!(message.lead, super::new_project_publish::PUBLISH_STARTED);
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains("Drafting the .gitignore lines..."),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_refused_publish_from_the_question_says_why_and_asks_again_at_once() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    shell.key(Key::Esc);
+    assert!(
+        matches!(shell.place(), Some(Place::Project { .. })),
+        "Esc closes the form the Start went from, not the page: {:?}",
+        shell.place()
+    );
+    publish_reply(&mut shell, start, Err("github_publish_in_progress".into()));
+    let message = shell.ctx.message().expect("the refusal is said");
+    assert_eq!(
+        message.lead,
+        super::new_project_publish::PUBLISH_NOT_STARTED
+    );
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(
+        publish_asks(&mut shell),
+        [status.clone()],
+        "a refused Start reads the publish again at once"
+    );
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "the question is back: {shown}"
+    );
+}
+
+#[test]
+fn a_refused_publish_from_the_question_keeps_the_form_with_what_was_typed_and_says_why_in_it() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    shell.key(Key::Paste("-2".into()));
+    for _ in 0..3 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let name = format!("{}-2", crate::github::default_repo_name("Notes"));
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: name.clone(),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains("Starting the publish..."),
+        "the form waits on the Start: {shown}"
+    );
+    shell.key(Key::Enter);
+    assert!(publish_asks(&mut shell).is_empty(), "one Start at a time");
+    publish_reply(
+        &mut shell,
+        start.clone(),
+        Err("github_repo_name_taken".into()),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("[ Publish ]"), "the form stays: {shown}");
+    assert!(shown.contains(&name), "the typed name stays: {shown}");
+    assert!(
+        shown.contains("Pick another name."),
+        "the form says why: {shown}"
+    );
+    assert!(
+        !shown.contains("Sending your answer...") && shown.contains("Checking..."),
+        "the read after the refusal sends no answer: {shown}"
+    );
+    assert!(
+        shell.ctx.message().is_none(),
+        "the form says why, so the message line stays quiet"
+    );
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(false)));
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains("[ Publish ]") && shown.contains(&name),
+        "a form the owner opened stays when the engine stops asking: {shown}"
+    );
+    assert!(shown.contains("Pick another name."), "{shown}");
+    shell.key(Key::Enter);
+    assert_eq!(
+        publish_asks(&mut shell),
+        [start],
+        "Publish again sends the kept plan"
+    );
+}
+
+/// RV-DS241 S5b TUI nit 2: the Overview's publish question and a refused publish form, its
+/// three-line reason included, fit an 80x24 window with every key in the bar.
+#[test]
+fn the_publish_question_and_a_refused_form_fit_an_80_by_24_window() {
+    let (mut shell, project) = offered();
+    shell.ctx.width = 80;
+    shell.ctx.height = 24;
+    shell.key(Key::Char('G'));
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+    let bar = shown.lines().last().unwrap_or_default().to_owned();
+    for key in [
+        "Enter Publish",
+        "n Not now",
+        "x Don't ask again",
+        "Esc Close",
+    ] {
+        assert!(bar.contains(key), "{key}: {bar}");
+    }
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    publish_reply(
+        &mut shell,
+        start,
+        Err("github_publish_secret_in_history".into()),
+    );
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    let shown = render(&mut shell, 80, 24);
+    for text in [
+        "Visibility",
+        "Repository",
+        "[ Publish ]",
+        "Publishing on GitHub didn't start.",
+        "then check again.",
+    ] {
+        assert!(shown.contains(text), "{text}: {shown}");
+    }
+    let bar = shown.lines().last().unwrap_or_default().to_owned();
+    for key in ["Enter Publish", "Esc Cancel"] {
+        assert!(bar.contains(key), "{key}: {bar}");
+    }
+}
+
+#[test]
+fn a_refused_publish_whose_read_finds_a_publish_closes_the_form_and_says_why_on_the_message_line() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    publish_reply(&mut shell, start, Err("github_publish_in_progress".into()));
+    let status = IntakeQuery::GitHubPublishStatus { project };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status,
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Drafting,
+        ))))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        !shown.contains("[ Publish ]"),
+        "a publish closes the form: {shown}"
+    );
+    assert_eq!(
+        shell
+            .ctx
+            .message()
+            .map(|message| (message.lead.clone(), message.rest.clone())),
+        Some((
+            super::new_project_publish::PUBLISH_NOT_STARTED.to_owned(),
+            super::intake::copy("github_publish_in_progress"),
+        )),
+        "the reason the form showed is not lost with it"
+    );
+}
+
+#[test]
+fn sign_in_from_the_publish_question_closes_it_so_g_reads_the_sign_in_again() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    shell.arrive(owner_arrival(OwnerEvent::Intake(Box::new(IntakeEvent {
+        query: IntakeQuery::GitHubStatus,
+        result: Ok(IntakeView::GitHub(GitHubStatus {
+            signed_in: false,
+            login: None,
+            method: GitHubMethod::None,
+            waiting: false,
+            problem: None,
+        })),
+    }))));
+    shell.key(Key::Enter);
+    assert_eq!(shell.place(), Some(Place::CloneRepo));
+    shell.key(Key::Esc);
+    assert!(
+        matches!(shell.place(), Some(Place::Project { .. })),
+        "{:?}",
+        shell.place()
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        !shown.contains("Sign in to GitHub to publish this project."),
+        "the question closed for the sign-in: {shown}"
+    );
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert!(publish_asks(&mut shell).contains(&status));
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(
+        publish_asks(&mut shell),
+        [IntakeQuery::GitHubStatus],
+        "Publish reads the sign-in again"
+    );
+}
+
+#[test]
+fn g_on_an_overview_with_its_pool_picker_open_leaves_the_publish_question_closed() {
+    let mut ctx = ctx(100, 30);
+    ctx.store.pools = Load::Ready(vec![main_pool()]);
+    ctx.store.pool_projects = Load::Ready(Vec::new());
+    let project = ProjectId::new("notes").unwrap();
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    shell.key(Key::Enter);
+    let picker = "Agents of this project use its pool's accounts.";
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains(picker), "{shown}");
+    shell.key(Key::Char('G'));
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains(picker), "{shown}");
+    assert!(
+        !shown.contains("Don't ask again"),
+        "G stays with the open picker: {shown}"
+    );
+}
+
+#[test]
+fn a_refused_publish_answer_reads_the_publish_again_and_shows_where_it_stands() {
+    let mut ctx = ctx(100, 30);
+    let project = ProjectId::new("notes").unwrap();
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status.clone(),
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Lines {
+                lines: vec![".env*".into()],
+                draft: GitHubIgnoreDraft::Agent,
+            },
+        ))))),
+    );
+    shell.key(Key::Enter);
+    let approve = IntakeQuery::GitHubPublishApprove {
+        project,
+        lines: vec![".env*".into()],
+    };
+    assert_eq!(publish_asks(&mut shell), [approve.clone()]);
+    publish_reply(&mut shell, approve, Err("github_outcome_unknown".into()));
+    let message = shell.ctx.message().expect("the refusal is said");
+    assert_eq!(message.lead, "The publish answer wasn't taken.");
+    assert_eq!(
+        publish_asks(&mut shell),
+        [status.clone()],
+        "the publish is read again"
+    );
+    publish_reply(
+        &mut shell,
+        status,
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Done {
+                full_name: "me/tool".into(),
+                outcomes: Vec::<GitHubRuleOutcome>::new(),
+            },
+        ))))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("Published as me/tool."), "{shown}");
+    assert!(!shown.contains("[x] .env*"), "{shown}");
 }

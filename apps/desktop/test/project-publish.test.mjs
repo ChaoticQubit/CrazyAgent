@@ -56,10 +56,16 @@ test("the publish actions reach the engine through six bridge commands and come 
 });
 
 test("every code a publish can stop on passes the bridge and has a plain sentence", () => {
-  const engine = ["github/job.rs", "github/publish.rs", "github/api.rs", "github/draft.rs"].map((path) => read(`../../crates/crazyagent/src/${path}`)).join("\n");
-  const codes = [...new Set([...engine.matchAll(/"(github_publish_[a-z_]+|github_repo_[a-z_]+)"/g)].map((match) => match[1]))]
-    .filter((code) => !code.startsWith("github_publish_draft_"));
-  assert.ok(codes.length >= 20, codes.join(","));
+  const engine = ["github/job.rs", "github/publish.rs", "github/api.rs", "github/draft.rs", "github/prompt.rs"].map((path) => read(`../../crates/crazyagent/src/${path}`)).join("\n");
+  const transport = read("../../crates/crazyagent/src/engine/owner/transport/github.rs");
+  const named = [...engine.matchAll(/"(github_publish_[a-z_]+|github_repo_[a-z_]+)"/g)].map((match) => match[1]);
+  const failed = [...`${engine}\n${transport}`.matchAll(/failure\("([a-z_]+)"\)/g)].map((match) => match[1])
+    .filter((code) => !code.startsWith("owner_"));
+  const codes = [...new Set([...named, ...failed])].filter((code) => !code.startsWith("github_publish_draft_"));
+  assert.ok(codes.length >= 40, codes.join(","));
+  for (const code of ["project_folder_missing", "github_publish_project_unknown", "github_publish_unavailable", "github_store_unavailable"]) {
+    assert.ok(codes.includes(code), code);
+  }
   const bridge = read("src-tauri/src/bridge/intake.rs");
   const passed = bridge.slice(bridge.indexOf("const GITHUB_CODES"), bridge.indexOf("];", bridge.indexOf("const GITHUB_CODES")));
   for (const code of codes) {
@@ -106,10 +112,94 @@ test("a discarded publish says what it left on GitHub, and Discard is offered on
 
 test("the Overview mounts the publish card, which drives every publish action", () => {
   const overview = read("src/screens/project/overview.tsx");
-  assert.match(overview, /<GitHubPublishCard projectId=\{data\.id\} \/>/);
+  assert.match(overview, /<GitHubPublishCard projectId=\{data\.id\}[ />]/);
   const card = read("src/screens/project/github-publish.tsx");
   for (const name of ["loadGitHubPublish", "approveGitHubPublish", "excludeFromGitHubPublish", "recheckGitHubPublish", "continueGitHubPublish", "discardGitHubPublish", "ConfirmDialog", "publishView", "leftLine", "discardable", "DRAFT_POLL_MS"]) {
     assert.ok(card.includes(name), name);
   }
   assert.equal(publishJob.DRAFT_POLL_MS, 2000);
+});
+
+test("a failed publish read keeps the last job shown with its problem and Try again, and a failed answer reads the job again", () => {
+  const drafting = { kind: "ok", value: job({ step: "drafting" }) };
+  const lines = { kind: "ok", value: job({ step: "lines", lines: [".env*"], draft: { by: "agent" } }) };
+  const lost = { kind: "error", code: "github_outcome_unknown", message: "We couldn't confirm what GitHub did." };
+  assert.deepEqual(publishJob.readKept(drafting, lost), { read: drafting, failed: lost.message });
+  assert.deepEqual(publishJob.readKept(null, unreachable), { read: null, failed: unreachable.message });
+  assert.deepEqual(publishJob.readKept(drafting, { kind: "not_ready" }), { read: drafting, failed: publishJob.ENGINE_STARTING });
+  assert.deepEqual(publishJob.readKept(drafting, lines), { read: lines, failed: null });
+  const card = read("src/screens/project/github-publish.tsx");
+  assert.match(card, /readKept\(/);
+  assert.match(card, /setAnswered\(\(count\) => count \+ 1\);/, "a failed read counts as an answer");
+  assert.match(card, /\}, \[view\.kind, answered\]\);/, "the draft poll goes on after a failed read");
+  assert.match(card, /if \(result\.kind !== "ok"\) \{\n\s+failed\(result\);\n\s+setTick\(\(value\) => value \+ 1\);/, "a failed answer reads the job again");
+  assert.match(card, /id="pj-github-reread"/, "a failed read offers Try again");
+});
+
+test("the Overview asks to publish a project with no publish through two bridge commands, and Publish opens the New Project form", async () => {
+  assert.equal(publishJob.PROMPT_LINE, "This project is not on GitHub. Publish it?");
+  assert.deepEqual([publishJob.PROMPT_PUBLISH, publishJob.PROMPT_NOT_NOW, publishJob.PROMPT_NEVER], ["Publish", "Not now", "Don't ask again"]);
+  const none = { kind: "ok", value: null };
+  const ask = { kind: "ok", value: true };
+  assert.equal(publishJob.noticeShown(none, ask), true);
+  assert.equal(publishJob.noticeShown(none, { kind: "ok", value: false }), false);
+  assert.equal(publishJob.noticeShown({ kind: "ok", value: job({ step: "drafting" }) }, ask), false, "never over a publish");
+  assert.equal(publishJob.noticeShown(unreachable, ask), false);
+  assert.equal(publishJob.noticeShown(none, unreachable), false);
+  assert.equal(publishJob.noticeShown(null, ask), false);
+  assert.equal(publishJob.noticeShown(none, null), false);
+  const client = read("src/engine-client.ts");
+  assert.match(client, /export type GitHubPromptAnswer = "not_now" \| "never";/);
+  assert.match(client, /invoke<boolean>\("desktop_github_publish_prompt", \{ project \}\)/);
+  assert.match(client, /invoke<null>\("desktop_github_publish_prompt_set", \{ project, answer \}\)/);
+  for (const name of ["loadGitHubPublishPrompt", "answerGitHubPublishPrompt"]) assert.equal(typeof api[name], "function", name);
+  assert.deepEqual(await api.loadGitHubPublishPrompt("p"), unreachable);
+  assert.deepEqual(await api.answerGitHubPublishPrompt("p", "not_now"), unreachable);
+  const native = read("src-tauri/src/lib.rs");
+  const build = read("src-tauri/build.rs");
+  const allowed = read("src-tauri/capabilities/main-window.json");
+  const routes = read("src-tauri/e2e_bridge/routes.rs");
+  const bridge = read("src-tauri/src/bridge/intake.rs");
+  for (const command of ["prompt", "prompt_set"]) {
+    assert.match(native, new RegExp(`async fn desktop_github_publish_${command}\\(\\n    webview: Webview,`), command);
+    assert.match(native, new RegExp(`\\n    desktop_github_publish_${command},\\n`), command);
+    assert.ok(build.includes(`"desktop_github_publish_${command}",`), command);
+    assert.ok(allowed.includes(`"allow-desktop-github-publish-${command.replace("_", "-")}",`), command);
+    assert.ok(routes.includes(`"desktop_github_publish_${command}" => {`), command);
+    assert.match(bridge, new RegExp(`pub fn github_publish_${command}\\(`), command);
+  }
+  const card = read("src/screens/project/github-publish.tsx");
+  for (const name of ["loadGitHubPublishPrompt", "noticeShown", "PROMPT_LINE", "PublishFields", "useGitHubPublish", "createWait", "startPublish", "publishOutcome"]) {
+    assert.ok(card.includes(name), name);
+  }
+  assert.match(card, /answerGitHubPublishPrompt\(projectId, "not_now"\)/);
+  assert.match(card, /answerGitHubPublishPrompt\(projectId, "never"\)/);
+  const overview = read("src/screens/project/overview.tsx");
+  assert.match(overview, /<GitHubPublishCard projectId=\{data\.id\} name=\{data\.name\} about=\{setup\?\.about \?\? ""\} \/>/);
+});
+
+test("the Overview form says the TUI's sign-in words, offers Try again after a failed read and keeps New project's waits", async () => {
+  const publish = await import("../src/screens/new-project/publish.ts");
+  const tui = read("../../crates/crazyagent/src/tui/screens/project_publish.rs");
+  const tuiLine = (name) => tui.match(new RegExp(`const ${name}: &str = "([^"]+)";`))?.[1];
+  assert.equal(publish.SIGN_IN_CHECKING, tuiLine("CHECKING"));
+  assert.equal(publish.OVERVIEW_SIGNED_OUT, tuiLine("SIGNED_OUT"));
+  assert.equal(publish.SIGN_IN_UNREAD, tuiLine("STATUS_FAILED"));
+  assert.equal(publish.SIGN_IN_WAIT, "Sign in to GitHub, or turn publishing off.", "New project keeps its own wait");
+  assert.equal(publish.OVERVIEW_DETAILS_WAIT, "Fix the GitHub details above first.");
+  assert.equal(publish.overviewWait(publish.CHECKING_WAIT), null, "the fields already say the sign-in is being read");
+  assert.equal(publish.overviewWait(publish.SIGN_IN_WAIT), null, "the fields already say to sign in");
+  assert.equal(publish.overviewWait(publish.DETAILS_WAIT), publish.OVERVIEW_DETAILS_WAIT);
+  assert.equal(publish.overviewWait(null), null);
+  assert.throws(() => publish.overviewWait("A wait createWait never gives."), /overviewWait got a wait/);
+  const fields = read("src/screens/new-project/fields.tsx");
+  assert.match(fields, /place === "overview" \? OVERVIEW_SIGNED_OUT : SIGN_IN_WAIT/);
+  assert.match(fields, /\{SIGN_IN_CHECKING\}/);
+  assert.match(fields, /\{SIGN_IN_UNREAD\}/);
+  assert.match(fields, /onClick=\{\(\) => reloadStatus\(\)\}>Try again</);
+  const card = read("src/screens/project/github-publish.tsx");
+  assert.match(card, /<PublishFields [^>]*place="overview"/);
+  assert.match(card, /const why = overviewWait\(wait\);/);
+  const page = read("src/screens/new-project/index.tsx");
+  assert.doesNotMatch(page, /place="overview"/, "New project keeps its words");
 });

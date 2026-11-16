@@ -320,6 +320,9 @@ pub(crate) struct NativeProfileCustody {
     database_identity: Identity,
     root_hash: Option<String>,
     profiles: BTreeMap<String, String>,
+    /// The config each undone account save put back this engine run, by generated SDK home,
+    /// the one times-only change a master turn may re-pin (rv-sec3 G4 r2 F1).
+    undone: BTreeMap<std::path::PathBuf, generated_configured_rcli::PutBack>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -531,6 +534,7 @@ impl NativeProfileCustody {
             database_identity: Identity::of(opened),
             root_hash: None,
             profiles: BTreeMap::new(),
+            undone: BTreeMap::new(),
         };
         custody.verify()?;
         Ok(custody)
@@ -573,6 +577,7 @@ impl NativeProfileCustody {
             database_identity: self.database_identity,
             root_hash: self.root_hash.clone(),
             profiles: self.profiles.clone(),
+            undone: self.undone.clone(),
         };
         retained.verify()?;
         Ok(retained)

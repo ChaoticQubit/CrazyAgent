@@ -50,14 +50,18 @@ const HOME_PASSES_MAX: usize = 8;
 /// the deepest folder a launch keeps only part of.
 #[cfg(unix)]
 const KEPT_DEPTH_MAX: usize = 2;
+/// The entry of a Claude Code project folder in `projects` that holds the project's
+/// auto-memory, which every home reset removes ([`Kept::Transcripts`], B20).
+const CLAUDE_MEMORY: &str = "memory";
 /// What a launch keeps in an agent home (RV-DS241-137), every other entry going: the
 /// engine's launch state, lock, relay plugin and key file; both harnesses' instruction and
 /// Codex config files, which the launch rewrites, and a Codex home's skills ([`kept_in`]);
-/// Claude Code's sign-in, transcripts and team, task, todo and plan state; Codex's sign-in
-/// and sessions; the per-agent keychain; the download caches, unless the launch's caches
-/// choice clears them ([`clears_caches`]); and `.config` with nothing in it, which every
-/// agent sandbox makes and keeps in place, so no folder built elsewhere takes its name
-/// (RV-DS241-186). No entry kept holds config a tool runs.
+/// Claude Code's sign-in, transcripts without their auto-memory ([`Kept::Transcripts`]) and
+/// team, task, todo and plan state; Codex's sign-in and sessions; the per-agent keychain; the
+/// download caches, unless the launch's caches choice clears them ([`clears_caches`]); and
+/// `.config` with nothing in it, which every agent sandbox makes and keeps in place, so no
+/// folder built elsewhere takes its name (RV-DS241-186). No entry kept holds config a tool
+/// runs.
 const HOME_KEPT: &[(&str, Kept)] = &[
     (crate::launch_context::STATE, Kept::Folder),
     (crate::launch_context::LOCK, Kept::Lock),
@@ -69,7 +73,7 @@ const HOME_KEPT: &[(&str, Kept)] = &[
     (CODEX_SKILLS, Kept::Folder),
     (".claude.json", Kept::File),
     (".credentials.json", Kept::File),
-    ("projects", Kept::Folder),
+    ("projects", Kept::Transcripts),
     ("teams", Kept::Folder),
     ("tasks", Kept::Folder),
     ("todos", Kept::Folder),
@@ -197,6 +201,11 @@ enum Kept {
     Link,
     /// A real folder holding only the entries its list keeps, none when the list is empty.
     Only(&'static [(&'static str, Kept)]),
+    /// Claude Code's `projects` folder of per-project transcript folders, kept with all it
+    /// holds but the [`CLAUDE_MEMORY`] auto-memory entry each project folder may hold and any
+    /// link directly in it, which a harness would follow to such a folder elsewhere, so no
+    /// build that ignores the auto-memory switches loads a past run's memory (B20).
+    Transcripts,
 }
 
 /// The CrazyAgent default process the owner can seed the Process page with: the owner's
@@ -1383,15 +1392,16 @@ fn open_real_folder(folder: &Path) -> rustix::io::Result<std::os::fd::OwnedFd> {
     })
 }
 
-/// Removes from an agent home every entry `kept` does not name with its kind, and does the
-/// same in each kept folder that has its own list ([`keep_in`]), never following a link
-/// (RV-DS241-137). The home is opened once, by its path without following a link in its last
-/// part, and each folder below it is opened, listed and changed only through handles opened
-/// relative to its parent's, so a process an agent left that swaps a folder for a link
-/// meanwhile never leads the reset outside the home (sec F1 ds137-lock-linux). Flags an agent
-/// set on the home are cleared first (RV-DS241-138). Inputs: the home, what stays in it and
-/// the entries held so far. Output: unit, or `agent_home_unwritable` when a folder will not
-/// open or list, one entry stays or a folder still changes after [`HOME_PASSES_MAX`] passes.
+/// Removes from an agent home every entry `kept` does not name with its kind, does the same
+/// in each kept folder that has its own list and clears each project's auto-memory in a kept
+/// `projects` ([`keep_in`], B20), never following a link (RV-DS241-137). The home is opened
+/// once, by its path without following a link in its last part, and each folder below it is
+/// opened, listed and changed only through handles opened relative to its parent's, so a
+/// process an agent left that swaps a folder for a link meanwhile never leads the reset
+/// outside the home (sec F1 ds137-lock-linux). Flags an agent set on the home are cleared
+/// first (RV-DS241-138). Inputs: the home, what stays in it and the entries held so far.
+/// Output: unit, or `agent_home_unwritable` when a folder will not open or list, one entry
+/// stays or a folder still changes after [`HOME_PASSES_MAX`] passes.
 #[cfg(unix)]
 fn keep_only(
     home: &Path,
@@ -1406,7 +1416,8 @@ fn keep_only(
 }
 
 /// Removes from one open real folder of an agent home, at `at`, every entry `kept` does not
-/// name with its kind, and does the same in each kept folder that has its own list. A kept
+/// name with its kind, does the same in each kept folder that has its own list and walks into
+/// a kept `projects` to clear each project's auto-memory ([`clear_memory`], B20). A kept
 /// file stays only as this user's file with one link, so a name an agent linked to the
 /// owner's file goes as a plain unlink and that file never changes (V231-ACL, r3). Flags an
 /// agent set on an entry it keeps are cleared (RV-DS241-138), and the folder and every entry
@@ -1469,6 +1480,22 @@ fn keep_in(
                 Some(Kept::Folder | Kept::Cache) if form == FileType::Directory => {
                     unpin_at(folder, name)
                 }
+                Some(Kept::Transcripts) if form == FileType::Directory => {
+                    #[cfg(all(test, unix))]
+                    before_home_step(&path);
+                    unpin_at(folder, name);
+                    let opened = crate::team::cleanup::open_home_folder(folder, name);
+                    let Some(inside) = opened.map_err(unwritable)? else {
+                        remove(name)?;
+                        removed = true;
+                        continue;
+                    };
+                    clear_memory(inside.as_fd(), &path)?;
+                    if !same_entry(folder, name, &inside) {
+                        removed = true;
+                        continue;
+                    }
+                }
                 Some(Kept::Link) if form == FileType::Symlink => unpin_at(folder, name),
                 Some(Kept::Only(inner)) if form == FileType::Directory => {
                     #[cfg(all(test, unix))]
@@ -1501,9 +1528,82 @@ fn keep_in(
     Err(failure("agent_home_unwritable"))
 }
 
+/// Removes the auto-memory entry [`CLAUDE_MEMORY`] of each project folder in an open real
+/// `projects` folder of an agent home, at `at`, and each link directly in it, never following
+/// a link (B20): a project folder is opened relative to the `projects` handle and its entry
+/// removed relative to its own, so one swapped for a link meanwhile goes as that link and what
+/// the link names stays. It lists in passes, as [`keep_in`] does. Inputs: the folder and its
+/// path. Output: unit, or `agent_home_unwritable` when a folder will not open or list, one
+/// entry stays or the folder still changes after [`HOME_PASSES_MAX`] passes.
+#[cfg(unix)]
+fn clear_memory(folder: std::os::fd::BorrowedFd<'_>, at: &Path) -> Result<(), AgentHomeError> {
+    use rustix::fs::{AtFlags, FileType};
+    use std::os::fd::AsFd;
+    let unwritable = |_| failure("agent_home_unwritable");
+    let remove = |name: &std::ffi::CStr| {
+        crate::team::cleanup::remove_home_entry(folder, name)
+            .map_err(|_| failure("agent_home_unwritable"))
+    };
+    for _ in 0..HOME_PASSES_MAX {
+        let mut removed = false;
+        let listed = rustix::fs::Dir::read_from(folder).or_else(|_| {
+            crate::team::cleanup::release_acls([at]);
+            rustix::fs::Dir::read_from(folder)
+        });
+        for entry in listed.map_err(unwritable)? {
+            let entry = entry.map_err(unwritable)?;
+            let name = entry.file_name();
+            if matches!(name.to_bytes(), b"." | b"..") {
+                continue;
+            }
+            let found = match rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(_) => return Err(failure("agent_home_unwritable")),
+                Ok(found) => found,
+            };
+            match FileType::from_raw_mode(found.st_mode) {
+                FileType::Symlink => {
+                    remove(name)?;
+                    removed = true;
+                    continue;
+                }
+                FileType::Directory => {}
+                _ => continue,
+            }
+            #[cfg(all(test, unix))]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                before_home_step(&at.join(std::ffi::OsStr::from_bytes(name.to_bytes())));
+            }
+            unpin_at(folder, name);
+            let opened = crate::team::cleanup::open_home_folder(folder, name);
+            let Some(project) = opened.map_err(unwritable)? else {
+                remove(name)?;
+                removed = true;
+                continue;
+            };
+            match rustix::fs::statat(&project, CLAUDE_MEMORY, AtFlags::SYMLINK_NOFOLLOW) {
+                Err(rustix::io::Errno::NOENT) => {}
+                Err(_) => return Err(failure("agent_home_unwritable")),
+                Ok(_) => {
+                    crate::team::cleanup::remove_home_entry(project.as_fd(), CLAUDE_MEMORY)
+                        .map_err(|_| failure("agent_home_unwritable"))?;
+                    removed = true;
+                }
+            }
+            removed |= !same_entry(folder, name, &project);
+        }
+        if !removed {
+            return Ok(());
+        }
+    }
+    Err(failure("agent_home_unwritable"))
+}
+
 /// Removes from one real folder of an agent home every entry `kept` does not name with its
-/// kind, and does the same in each kept folder that has its own list, by path, where no
-/// agent sandbox runs and no handle walk is built. Inputs: the folder, what stays in it and
+/// kind, does the same in each kept folder that has its own list and clears each project's
+/// auto-memory in a kept `projects` ([`clear_memory`], B20), by path, where no agent sandbox
+/// runs and no handle walk is built. Inputs: the folder, what stays in it and
 /// the entries held so far. Output: unit, or `agent_home_unwritable` when it cannot be
 /// listed, one entry stays or it still changes after [`HOME_PASSES_MAX`] passes.
 #[cfg(not(unix))]
@@ -1538,6 +1638,7 @@ fn keep_only(
                 Some(Kept::File) if metadata.is_file() && sole_own_link(&metadata) => {}
                 Some(Kept::Lock) if crate::launch_context::lock_kept(&metadata) => {}
                 Some(Kept::Folder | Kept::Cache) if metadata.is_dir() => {}
+                Some(Kept::Transcripts) if metadata.is_dir() => clear_memory(&path)?,
                 Some(Kept::Link) if link => {}
                 Some(Kept::Only(inner)) if metadata.is_dir() => {
                     keep_only(&path, inner, held)?;
@@ -1556,6 +1657,30 @@ fn keep_only(
         }
     }
     Err(failure("agent_home_unwritable"))
+}
+
+/// Removes the auto-memory entry [`CLAUDE_MEMORY`] of each project folder in a real
+/// `projects` folder of an agent home, and each link directly in it, by path and without
+/// following a link, where no agent sandbox runs and no handle walk is built (B20). Input: the
+/// folder. Output: unit, or `agent_home_unwritable` when it cannot be listed or an entry
+/// stays.
+#[cfg(not(unix))]
+fn clear_memory(folder: &Path) -> Result<(), AgentHomeError> {
+    let listed = fs::read_dir(folder).map_err(|_| failure("agent_home_unwritable"))?;
+    for entry in listed {
+        let path = entry.map_err(|_| failure("agent_home_unwritable"))?.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(failure("agent_home_unwritable")),
+            Ok(metadata) => metadata,
+        };
+        if metadata.file_type().is_symlink() {
+            remove_entry(&path)?;
+        } else if metadata.is_dir() {
+            remove_entry(&path.join(CLAUDE_MEMORY))?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether `name` in an open folder still names the open entry `held`, judged by device and
@@ -1694,7 +1819,7 @@ fn pin_below(prefix: &str, kept: &[(&str, Kept)], pinned: &mut Vec<String>) {
                 pin_below(&path, inner, pinned);
             }
             Kept::Link => pinned.push(path),
-            Kept::File | Kept::Lock | Kept::Folder | Kept::Cache => {}
+            Kept::File | Kept::Lock | Kept::Folder | Kept::Cache | Kept::Transcripts => {}
         }
     }
 }
@@ -1718,7 +1843,7 @@ fn keep_below(prefix: &str, list: &[(&str, Kept)], kept: &mut Vec<String>) {
         let path = below(prefix, name);
         match kind {
             Kept::Only(inner) => keep_below(&path, inner, kept),
-            Kept::File | Kept::Lock | Kept::Folder => kept.push(path),
+            Kept::File | Kept::Lock | Kept::Folder | Kept::Transcripts => kept.push(path),
             Kept::Cache | Kept::Link => {}
         }
     }

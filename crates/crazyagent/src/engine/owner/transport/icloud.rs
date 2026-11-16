@@ -5,7 +5,9 @@ use crate::projects_home::{AddMode, AddOverride};
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
 
-const REQUEST_BYTES_MAX: usize = 8192;
+/// The most bytes one iCloud or job request may hold: one owner frame, as for any owner
+/// change, since a New Project job carries every answer the wizard gives (DEC-177 addendum 2).
+const REQUEST_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX;
 const ACTION_TIME: Duration = Duration::from_secs(10);
 pub(super) const ICLOUD_TIMEOUT: Duration = Duration::from_secs(DOWNLOAD_TIME_MAX.as_secs() + 60);
 

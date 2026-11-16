@@ -1,4 +1,5 @@
 import { intakeCopy } from "../../api-intake";
+import type { Result } from "../../api";
 import type { GitHubPublishJob, GitHubPublishLeft } from "../../engine-client";
 
 /**
@@ -101,4 +102,28 @@ export function leftLine(left: GitHubPublishLeft | null): string {
  * Discard is offered. */
 export function discardable(job: GitHubPublishJob | null): boolean {
   return job !== null && job.step.step !== "pushed" && job.step.step !== "done";
+}
+
+export const PROMPT_LINE = "This project is not on GitHub. Publish it?";
+export const PROMPT_PUBLISH = "Publish";
+export const PROMPT_NOT_NOW = "Not now";
+export const PROMPT_NEVER = "Don't ask again";
+
+/** Whether the Overview asks to publish the project on GitHub (DEC-182 S5b): its publish read
+ * found no job and the engine says to ask. Inputs: the publish read and the prompt read, each
+ * null until it answers. Output: true to show the notice. */
+export function noticeShown(read: Result<GitHubPublishJob | null> | null, prompt: Result<boolean> | null): boolean {
+  return read?.kind === "ok" && read.value === null && prompt?.kind === "ok" && prompt.value;
+}
+
+export const ENGINE_STARTING = "CrazyAgent's engine is still starting. Try again in a moment.";
+
+/** What the Overview card keeps after a publish read (rv-ds241 S5a F1): a read that answered
+ * replaces the last one and clears the read's problem, and a failed one keeps the last job
+ * shown, so its draft poll goes on, and gives the problem the card shows with Try again.
+ * Inputs: the read kept so far, null before any answered, and the new read. Output: the read
+ * to keep and the problem, null when the read answered. */
+export function readKept(kept: Result<GitHubPublishJob | null> | null, result: Result<GitHubPublishJob | null>): { read: Result<GitHubPublishJob | null> | null; failed: string | null } {
+  if (result.kind === "ok") return { read: result, failed: null };
+  return { read: kept, failed: result.kind === "error" ? result.message : ENGINE_STARTING };
 }

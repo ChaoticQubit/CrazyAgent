@@ -746,6 +746,55 @@ fn a_copy_leaves_the_old_folder_and_points_the_project_at_the_copy() {
     assert_eq!(git(&old_clone, &["rev-parse", "HEAD"]), head);
 }
 
+fn publish_job(folder: &Path) -> crate::github::GitHubPublishJob {
+    crate::github::GitHubPublishJob {
+        project: folder.to_path_buf(),
+        plan: crate::github::GitHubPublishPlan {
+            owner: "me".into(),
+            name: PROJECT.into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+        lines: vec![".env*".into()],
+        written: Vec::new(),
+        step: crate::github::GitHubPublishStep::Drafting,
+        stopped: None,
+        made: None,
+    }
+}
+
+/// rv-sec3 S5b F2: a project's GitHub publish job is named by its folder, so a Move or a
+/// Copy carries it to the project's new folder, where the publish and the Overview's
+/// "not on GitHub" check still find it, and nothing is left under the old folder.
+#[test]
+fn a_moved_or_copied_project_keeps_its_github_publish_at_its_new_folder() {
+    for mode in [AddMode::Move, AddMode::Copy] {
+        let case = Case::new();
+        let origin = case.repo.clone();
+        let target = case.target();
+        let job = publish_job(&origin);
+        crate::github::keep_job(&case.engine, &job);
+        assert!(
+            matches!(case.move_project(mode, &[]), Ok(Finished::Moved { .. })),
+            "{mode:?}"
+        );
+        assert_eq!(
+            crate::github::kept_job(&case.engine, &origin),
+            None,
+            "{mode:?}"
+        );
+        assert_eq!(
+            crate::github::kept_job(&case.engine, &target),
+            Some(crate::github::GitHubPublishJob {
+                project: target.clone(),
+                ..job
+            }),
+            "{mode:?}"
+        );
+    }
+}
+
 /// An agent's linked git worktree inside the folder follows a Move: both of its git
 /// pointer files name the new places, so git works in it and the repository lists it.
 #[test]

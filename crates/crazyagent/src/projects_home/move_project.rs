@@ -793,7 +793,8 @@ fn repoint(tx: &Transaction<'_>, origin: &Path, target: &Path) -> Result<usize, 
 
 /// Rewrites every stored path of the project's old folder to the same place in the new
 /// one, by whole path parts: the setup's folder, the repositories the project declares
-/// and each column of [`PATH_COLUMNS`]. A stale row already at the new path gives way to
+/// and each column of [`PATH_COLUMNS`], and carries the project's GitHub publish job to the
+/// new folder. A stale row already at the new path gives way to
 /// the moved one; [`plan`] refused a destination any other project still names, so such a
 /// row belongs to no project, and a plain UPDATE that failed here would leave a folder
 /// already moved unrecorded. Records of what was said or done (prompts, messages, events)
@@ -819,6 +820,7 @@ fn rewrite(
         let mut stored: crate::project_setup::StoredSetup =
             serde_json::from_str(&body).map_err(json)?;
         if let Some(place) = moved(Path::new(&stored.folder), origin, target) {
+            let before = stored.project_folder();
             stored.folder = text(&place)?.to_owned();
             assert!(Path::new(&stored.folder).starts_with(target));
             tx.execute(
@@ -829,6 +831,7 @@ fn rewrite(
                 ],
             )
             .map_err(sql)?;
+            crate::github::carry_publish(tx, &before, &stored.project_folder());
         }
     }
     let body: Option<String> = tx

@@ -10,9 +10,11 @@ use super::project::{
 use super::project_markdown::sanitize;
 use super::project_master::{MasterRead, master_problem, transcript_from};
 use super::project_plugins::PluginsReply;
-use super::project_publish::{DRAFT_POLL_MS, PaneKey, PublishPane, left_line, opens, query};
+use super::project_publish::{
+    AskKey, AskPane, DRAFT_POLL_MS, PaneKey, PublishPane, left_line, opens, query,
+};
 use super::project_time::local_offset;
-use super::project_view::project_screen;
+use super::project_view::{asks_github, project_screen};
 use super::settings_accounts::send as send_settings;
 use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage, ToolsPage};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
@@ -58,6 +60,9 @@ const CHANGED_MISSING: &str =
 const CHANGED_NOTE: &str =
     "That was your copy in the project folder. The agent's version lands there when you accept.";
 const ANSWER_NOT_TAKEN: &str = "The publish answer wasn't taken.";
+const ASK_STARTING: &str = "Starting the publish...";
+const ASK_SENDING: &str = "Sending your answer...";
+const ASK_READING: &str = "Checking...";
 const IMPORT_MODAL_WIDTH: u16 = 72;
 const IMPORT_ROWS_MAX: usize = 12;
 pub(in crate::tui) const BANNER_ROWS_MAX: usize = 3;
@@ -246,6 +251,8 @@ pub(in crate::tui) struct ProjectPage {
     publish_asked: Option<IntakeQuery>,
     publish_later: bool,
     publish_read_ms: Option<i64>,
+    ask_pane: Option<AskPane>,
+    publish_offered: bool,
     moving: Option<RequestId>,
 }
 
@@ -353,6 +360,8 @@ impl ProjectPage {
             publish_asked: None,
             publish_later: false,
             publish_read_ms: None,
+            ask_pane: None,
+            publish_offered: false,
             moving: None,
         };
         page.refresh_pool(ctx);
@@ -380,7 +389,8 @@ impl ProjectPage {
 
     /// Starts publishing the project the owner just made on GitHub with the plan from New
     /// project (DEC-182). The engine answers once its checks pass and drafts the .gitignore
-    /// lines after, and the reply says the publish started or why not.
+    /// lines after, and the reply says the publish started or why not; a refused Start reads
+    /// the publish again, so the Overview's question comes back.
     /// Takes the plan and the context. Returns nothing; the reply arrives later.
     pub(in crate::tui) fn start_publish(&mut self, plan: GitHubPublishPlan, ctx: &mut Ctx) {
         assert!(self.publish_sent.is_none());
@@ -410,6 +420,23 @@ impl ProjectPage {
         super::intake::ask(ctx, status);
     }
 
+    /// Asks the engine whether to offer publishing on GitHub, after a read that found no
+    /// publish, while the Overview shows and no publish request waits (DEC-182 S5b).
+    /// Takes the context. Returns nothing; the reply arrives later.
+    fn ask_prompt(&mut self, ctx: &mut Ctx) {
+        if self.screen.tab != Tab::Overview
+            || self.publish_asked.is_some()
+            || self.publish_sent.is_some()
+        {
+            return;
+        }
+        let prompt = IntakeQuery::GitHubPublishPrompt {
+            project: self.screen.project.clone(),
+        };
+        self.publish_asked = Some(prompt.clone());
+        super::intake::ask(ctx, prompt);
+    }
+
     /// Reads the publish again while its pane shows the draft running, at most every
     /// `DRAFT_POLL_MS`. Takes the context. Returns nothing.
     fn poll_publish(&mut self, ctx: &mut Ctx) {
@@ -426,20 +453,46 @@ impl ProjectPage {
     }
 
     /// Takes the engine's answer to this page's publish read or one of the pane's answers:
-    /// a read opens the pane on a publish the owner can act on or follow, an answer shows
-    /// where the publish now stands, a discard says what it left on GitHub, and a refused
-    /// answer says why with the pane kept. A failed read stays quiet. Takes the reply and the
-    /// context. Returns nothing.
+    /// a read opens the pane on a publish the owner can act on or follow and keeps an open
+    /// pane on where the publish stands, finished or not, an answer shows where the publish
+    /// now stands, a discard says what it left on GitHub, and a refused answer says why and
+    /// reads the publish again with the pane kept. A read that finds a publish closes the
+    /// Overview's question or form and says why the form's last Start was refused. With no
+    /// publish it asks whether to offer one, shows the question when the engine says to and
+    /// drops it once Not now or Don't ask again is kept. A failed read stays quiet. Takes the
+    /// reply and the context. Returns nothing.
     fn publish_answered(&mut self, event: &IntakeEvent, ctx: &mut Ctx) {
-        let read = matches!(event.query, IntakeQuery::GitHubPublishStatus { .. });
+        let read = matches!(
+            event.query,
+            IntakeQuery::GitHubPublishStatus { .. } | IntakeQuery::GitHubPublishPrompt { .. }
+        );
         self.publish_asked = None;
         match &event.result {
             Ok(IntakeView::PublishStatus(job)) => {
+                let shown = self.publish_shows();
                 self.publish_pane = job
                     .as_deref()
-                    .filter(|job| opens(job))
+                    .filter(|job| shown || opens(job))
                     .cloned()
                     .map(PublishPane::new);
+                if job.is_some() {
+                    self.screen.github_notice = false;
+                    if let Some(said) = self.ask_pane.take().and_then(AskPane::into_refusal) {
+                        ctx.say(said);
+                    }
+                } else {
+                    self.ask_prompt(ctx);
+                }
+            }
+            Ok(IntakeView::Prompt(ask)) => {
+                self.screen.github_notice = *ask;
+                if !ask && self.ask_pane.as_ref().is_some_and(AskPane::asking) {
+                    self.ask_pane = None;
+                }
+            }
+            Ok(IntakeView::PromptKept) => {
+                self.screen.github_notice = false;
+                self.ask_pane = None;
             }
             Ok(IntakeView::Publish(job)) => {
                 self.publish_pane = Some(PublishPane::new((**job).clone()));
@@ -450,16 +503,23 @@ impl ProjectPage {
                     "The publish was discarded.",
                     &left_line(left.as_ref()),
                 ));
+                self.ask_prompt(ctx);
             }
             Err(_) if read => {}
-            Err(code) => ctx.say(Message::warning(
-                ANSWER_NOT_TAKEN,
-                &super::intake::copy(code),
-            )),
-            Ok(_) => ctx.say(Message::warning(
-                ANSWER_NOT_TAKEN,
-                &super::intake::copy("github_outcome_unknown"),
-            )),
+            Err(code) => {
+                ctx.say(Message::warning(
+                    ANSWER_NOT_TAKEN,
+                    &super::intake::copy(code),
+                ));
+                self.ask_publish(ctx);
+            }
+            Ok(_) => {
+                ctx.say(Message::warning(
+                    ANSWER_NOT_TAKEN,
+                    &super::intake::copy("github_outcome_unknown"),
+                ));
+                self.ask_publish(ctx);
+            }
         }
     }
 
@@ -491,8 +551,94 @@ impl ProjectPage {
         Flow::Handled
     }
 
+    /// Handles a key while the Overview's publish question or its form is open: one answer,
+    /// read or Start goes to the engine at a time, Esc closes the pane meanwhile, Publish
+    /// starts the publish with the form's plan and keeps the form until the engine answers,
+    /// and the sign-in closes the pane, so G reads the sign-in again after it. Takes the key
+    /// and the context. Returns the GitHub sign-in to open, or handled, so no key reaches
+    /// the page meanwhile.
+    fn ask_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Some(pane) = self.ask_pane.as_mut() else {
+            return Flow::Handled;
+        };
+        if self.publish_asked.is_some() || self.publish_sent.is_some() {
+            if *key == Key::Esc {
+                self.ask_pane = None;
+            }
+            return Flow::Handled;
+        }
+        let about = self
+            .screen
+            .setup
+            .as_ref()
+            .map_or("", |setup| setup.about.as_str());
+        match pane.key(key, &self.screen.name, about) {
+            AskKey::Handled => {}
+            AskKey::Close => self.ask_pane = None,
+            AskKey::Answer(answer) => {
+                let sent = IntakeQuery::GitHubPublishPromptSet {
+                    project: self.screen.project.clone(),
+                    answer,
+                };
+                self.publish_asked = Some(sent.clone());
+                super::intake::ask(ctx, sent);
+            }
+            AskKey::Read(read) => super::intake::ask(ctx, read),
+            AskKey::SignIn => {
+                self.ask_pane = None;
+                self.covered = true;
+                return Flow::Open(Place::CloneRepo);
+            }
+            AskKey::Start(plan) => {
+                self.screen.github_notice = false;
+                self.publish_offered = true;
+                self.start_publish(plan, ctx);
+                self.redraw(ctx);
+            }
+        }
+        Flow::Handled
+    }
+
     fn publish_shows(&self) -> bool {
         self.publish_pane.is_some() && !self.publish_later
+    }
+
+    /// The Overview's publish question or its form as a modal, with the keys hidden and what
+    /// the page waits on said while an answer, a read or the Start is on its way. Takes the
+    /// context. Returns the modal and its keys, or none while the pane is closed.
+    fn ask_modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        let pane = self.ask_pane.as_ref()?;
+        let about = self
+            .screen
+            .setup
+            .as_ref()
+            .map_or("", |setup| setup.about.as_str());
+        let text = pane.text(&self.screen.name, about, &look(ctx));
+        let mut body: Vec<Line<'static>> = text.body.into_iter().map(Row::line).collect();
+        let waiting = match (&self.publish_sent, &self.publish_asked) {
+            (Some(_), _) => Some(ASK_STARTING),
+            (None, Some(IntakeQuery::GitHubPublishPromptSet { .. })) => Some(ASK_SENDING),
+            (None, Some(_)) => Some(ASK_READING),
+            (None, None) => None,
+        };
+        let hints = if let Some(words) = waiting {
+            body.push(styled(words.into(), Role::Muted, &ctx.theme));
+            Vec::new()
+        } else {
+            text.hints
+                .iter()
+                .map(|(key, label)| hint(key, label))
+                .collect()
+        };
+        Some((
+            Modal {
+                width: IMPORT_MODAL_WIDTH,
+                title: text.title.into(),
+                body,
+                top: None,
+            },
+            hints,
+        ))
     }
 
     /// The publish pane as a modal: where the publish stands and the keys for it, with the
@@ -500,7 +646,7 @@ impl ProjectPage {
     /// its keys, or none while the pane is closed.
     fn publish_modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
         if !self.publish_shows() {
-            return None;
+            return self.ask_modal(ctx);
         }
         let text = self.publish_pane.as_ref()?.text();
         let room = usize::from(IMPORT_MODAL_WIDTH) - 4;
@@ -534,34 +680,82 @@ impl ProjectPage {
         ))
     }
 
-    fn send_created_access(&mut self, access: AgentAccess, version: u64, ctx: &mut Ctx) {
+    /// The write that saves the agent access picked in New project at the version the
+    /// project's policy read found, for an open project page or a New Project carried in the
+    /// background (DEC-177 add.3 decision 4). Inputs: the project, the picked level, the
+    /// read's reply and the context, which numbers the write. Output: the write and its
+    /// generation, or why the project stays Sandboxed.
+    pub(in crate::tui) fn created_access_write(
+        project: &ProjectId,
+        access: AgentAccess,
+        read: &Result<SetupView, String>,
+        ctx: &mut Ctx,
+    ) -> Result<(SetupQuery, u64), String> {
+        assert_ne!(access, AgentAccess::Sandboxed);
+        let version = match read {
+            Ok(SetupView::AgentPolicy(view)) => view.version,
+            Err(code) => return Err(plain_problem(code)),
+            Ok(_) => return Err(plain_problem("change_outcome_unknown")),
+        };
         let generation = ctx.next_generation();
-        self.created_access = Some(generation);
-        self.send(
-            SetupQuery::Change {
-                action: SetupAction::SetAgentPolicy {
-                    project_id: self.screen.project.clone(),
-                    version,
-                    policy: AgentPolicy {
-                        access,
-                        toolchains: Vec::new(),
-                        ide_git_hooks: false,
-                        tool_cache: Default::default(),
-                        home_caches: Default::default(),
-                        ide_agent_files: Default::default(),
-                        shared_folders: Default::default(),
-                        network: crate::sandbox::policy::AgentNetwork::default(),
-                        apply_changes: Default::default(),
-                        grants: Vec::new(),
-                    },
+        let write = SetupQuery::Change {
+            action: SetupAction::SetAgentPolicy {
+                project_id: project.clone(),
+                version,
+                policy: AgentPolicy {
+                    access,
+                    toolchains: Vec::new(),
+                    ide_git_hooks: false,
+                    tool_cache: Default::default(),
+                    home_caches: Default::default(),
+                    ide_agent_files: Default::default(),
+                    shared_folders: Default::default(),
+                    network: crate::sandbox::policy::AgentNetwork::default(),
+                    apply_changes: Default::default(),
+                    grants: Vec::new(),
                 },
-                generation,
             },
-            ctx,
-        );
+            generation,
+        };
+        Ok((write, generation))
     }
 
-    fn stays_sandboxed(why: &str, ctx: &mut Ctx) {
+    /// Why the write that saves New project's agent access did not land. Input: the write's
+    /// reply. Output: none when it was applied, else the reason in plain words.
+    pub(in crate::tui) fn created_access_unsaved(
+        reply: &Result<SetupView, String>,
+    ) -> Option<String> {
+        match reply {
+            Ok(SetupView::Changed(OwnerResult::Applied)) => None,
+            Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code) => {
+                Some(plain_problem(code))
+            }
+            Ok(_) => Some(plain_problem("change_outcome_unknown")),
+        }
+    }
+
+    /// The line a made project's GitHub publish Start reply gives: the project is ready and
+    /// publishing started, or why publishing did not start. Takes the project's name and the
+    /// reply. Returns the message.
+    pub(in crate::tui) fn publish_start_said(
+        name: &str,
+        result: &Result<IntakeView, String>,
+    ) -> Message {
+        match result {
+            Ok(IntakeView::Publish(_)) => {
+                Message::success(&format!("{name} is ready."), PUBLISH_STARTED)
+            }
+            Ok(_) => Message::warning(
+                PUBLISH_NOT_STARTED,
+                &super::intake::copy("github_outcome_unknown"),
+            ),
+            Err(code) => Message::warning(PUBLISH_NOT_STARTED, &super::intake::copy(code)),
+        }
+    }
+
+    /// Says a made project's picked agent access was not saved, so its agents stay
+    /// Sandboxed. Inputs: the reason and the context. Output: none.
+    pub(in crate::tui) fn stays_sandboxed(why: &str, ctx: &mut Ctx) {
         ctx.say(Message::warning(
             "The project is made, but its agents stay Sandboxed.",
             &format!("{why} Choose Agent access again on the Settings tab with c."),
@@ -1206,20 +1400,35 @@ impl ProjectPage {
         }
         if self.publish_sent.as_ref() == Some(&event.query) {
             self.publish_sent = None;
+            let offered = std::mem::take(&mut self.publish_offered);
+            let started = matches!(event.result, Ok(IntakeView::Publish(_)));
             if let Ok(IntakeView::Publish(job)) = &event.result {
                 self.publish_pane = Some(PublishPane::new((**job).clone()));
                 self.publish_read_ms = Some(now_ms());
+                self.ask_pane = None;
             }
-            ctx.say(match &event.result {
-                Ok(IntakeView::Publish(_)) => {
-                    Message::success(&format!("{} is ready.", self.screen.name), PUBLISH_STARTED)
-                }
-                Ok(_) => Message::warning(
-                    PUBLISH_NOT_STARTED,
-                    &super::intake::copy("github_outcome_unknown"),
-                ),
-                Err(code) => Message::warning(PUBLISH_NOT_STARTED, &super::intake::copy(code)),
-            });
+            let said = match &event.result {
+                Ok(IntakeView::Publish(_)) if offered => Message::success(PUBLISH_STARTED, ""),
+                result => Self::publish_start_said(&self.screen.name, result),
+            };
+            match self.ask_pane.as_mut().filter(|pane| !pane.asking()) {
+                Some(form) => form.refused(said),
+                None => ctx.say(said),
+            }
+            if !started {
+                self.ask_publish(ctx);
+            }
+            return true;
+        }
+        if self
+            .ask_pane
+            .as_ref()
+            .is_some_and(|pane| pane.takes(&event.query))
+        {
+            let next = self.ask_pane.as_mut().and_then(|pane| pane.arrived(event));
+            if let Some(next) = next {
+                super::intake::ask(ctx, next);
+            }
             return true;
         }
         self.poll_publish(ctx);
@@ -1272,12 +1481,12 @@ impl ProjectPage {
         if matches!(query, SetupQuery::AgentPolicy { .. })
             && let Some(access) = self.access_wanted.take()
         {
-            match &event.result {
-                Ok(SetupView::AgentPolicy(view)) => {
-                    self.send_created_access(access, view.version, ctx);
+            match Self::created_access_write(&self.screen.project, access, &event.result, ctx) {
+                Ok((write, generation)) => {
+                    self.created_access = Some(generation);
+                    self.send(write, ctx);
                 }
-                Err(code) => Self::stays_sandboxed(&plain_problem(code), ctx),
-                Ok(_) => Self::stays_sandboxed(&plain_problem("change_outcome_unknown"), ctx),
+                Err(why) => Self::stays_sandboxed(&why, ctx),
             }
             return;
         }
@@ -1311,12 +1520,7 @@ impl ProjectPage {
         }
         if self.created_access == Some(*generation) {
             self.created_access = None;
-            if !applied {
-                let why = match &event.result {
-                    Err(code) => plain_problem(code),
-                    Ok(SetupView::Changed(OwnerResult::Rejected { code })) => plain_problem(code),
-                    Ok(_) => plain_problem("change_outcome_unknown"),
-                };
+            if let Some(why) = Self::created_access_unsaved(&event.result) {
                 Self::stays_sandboxed(&why, ctx);
             }
             return;
@@ -1900,6 +2104,7 @@ impl Screen for ProjectPage {
         self.import.is_some()
             || self.moved.is_some()
             || self.publish_shows()
+            || self.ask_pane.is_some()
             || self.screen.edit.is_some()
             || self.screen.adding.is_some()
             || self.screen.folders.is_some()
@@ -1921,6 +2126,9 @@ impl Screen for ProjectPage {
         }
         if self.publish_shows() {
             return self.publish_key(key, ctx);
+        }
+        if self.ask_pane.is_some() {
+            return self.ask_key(key, ctx);
         }
         if !self.uncommitted.is_empty() && *key == Key::Ctrl('g') {
             self.commit_move(ctx);
@@ -1972,6 +2180,15 @@ impl Screen for ProjectPage {
                 None => ProjectReply::Ignored,
             },
         };
+        if reply == ProjectReply::Ignored
+            && *key == Key::Char('G')
+            && self.screen.tab == Tab::Overview
+            && asks_github(&self.screen)
+            && self.publish_sent.is_none()
+        {
+            self.ask_pane = Some(AskPane::default());
+            return Flow::Handled;
+        }
         let flow = self.reply(reply, ctx);
         let flow = self.entered(before, flow);
         self.covered = matches!(&flow, Flow::Open(place) if Some(place) != self.place().as_ref());
@@ -2059,6 +2276,8 @@ impl Screen for ProjectPage {
                 self.job_sent = None;
                 self.publish_sent = None;
                 self.publish_asked = None;
+                self.ask_pane = None;
+                self.publish_offered = false;
                 self.sent.clear();
                 self.screen.schedule = None;
                 self.schedule_asked = false;

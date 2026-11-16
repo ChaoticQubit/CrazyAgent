@@ -192,6 +192,23 @@ impl GitHubDraft {
         drop(held);
         Ok(job)
     }
+
+    /// Runs the agent draft through `ask` on its own thread and answers at once with the
+    /// job at Drafting, so a Start never waits on the agent (RV gh-s4b F1). A thread that
+    /// cannot start drops the draft, which lets the publish go. Input: `ask`, as `run` takes
+    /// it. Output: the job the Start answers with.
+    pub fn spawn(
+        self,
+        ask: impl FnOnce(&str) -> Result<String, &'static str> + Send + 'static,
+    ) -> GitHubPublishJob {
+        let job = self.job().clone();
+        let _ = std::thread::Builder::new()
+            .name("github-draft".into())
+            .spawn(move || {
+                let _ = self.run(ask);
+            });
+        job
+    }
 }
 
 fn failure(code: &str) -> EngineError {

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, setUpProject, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const HDIUTIL = "/usr/bin/hdiutil";
@@ -35,15 +35,12 @@ function realTrashCount() {
 /** Sets up one project inside the projects home through the bridge. Input: its name. Output:
  * its id and folder. */
 async function made(name) {
-  const receipt = await value(run.bridge, "desktop_setup_project", {
-    spec: { name, repositories: [] },
-    setup: { about: `${name} for the remove dialog`, tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [] },
-    generation: run.generation++,
+  const id = await setUpProject(run.bridge, { name, repositories: [] }, {
+    about: `${name} for the remove dialog`, tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [],
   });
-  assert.equal(receipt.outcome, "applied", `${name} is made: ${JSON.stringify(receipt)}`);
-  const setup = await value(run.bridge, "desktop_project_setup", { id: receipt.project_id });
+  const setup = await value(run.bridge, "desktop_project_setup", { id });
   const folder = setup.folder.endsWith("/.crazyagent") ? setup.folder.slice(0, -"/.crazyagent".length) : setup.folder;
-  return { id: receipt.project_id, folder };
+  return { id, folder };
 }
 
 async function listed(id) {
