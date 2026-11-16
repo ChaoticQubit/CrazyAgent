@@ -9,6 +9,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 const CLIENT: &str = "board-own-client-1";
+const SECRET: &str = "own-secret-0001";
+const CIMD: &str = "https://crazyagent.example/oauth/client-metadata.json";
+const DCR_CLIENT: &str = "dcr-client-0001";
 const CODE: &str = "code-from-the-browser-1";
 const ACCESS: &str = "at-board-0001";
 const REFRESH: &str = "rt-board-0001";
@@ -33,8 +36,9 @@ oauth:
 
 /// How the stand-in vendor answers: the `resource_metadata` its 401 names (none for a bare
 /// challenge), the authorization servers its resource metadata lists, the two endpoints
-/// its server metadata gives, and whether it promises `iss` in every answer. Each `{base}`
-/// becomes the stand-in's own address.
+/// its server metadata gives, whether it promises `iss` in every answer, whether it takes
+/// client metadata documents, its registration endpoint and the token endpoint's client
+/// sign-in methods. Each `{base}` becomes the stand-in's own address.
 #[derive(Clone)]
 struct Shape {
     hint: Option<&'static str>,
@@ -42,6 +46,9 @@ struct Shape {
     authorize: &'static str,
     token: &'static str,
     iss: bool,
+    cimd: bool,
+    register: Option<&'static str>,
+    methods: &'static [&'static str],
 }
 
 fn shape() -> Shape {
@@ -51,6 +58,9 @@ fn shape() -> Shape {
         authorize: "{base}/authorize",
         token: "{base}/token",
         iss: true,
+        cimd: false,
+        register: None,
+        methods: &[],
     }
 }
 
@@ -94,6 +104,18 @@ fn vendor(shape: Shape) -> Vendor {
                     "response_types_supported": ["code"],
                     "code_challenge_methods_supported": ["S256"],
                     "authorization_response_iss_parameter_supported": shape.iss,
+                    "client_id_metadata_document_supported": shape.cimd,
+                    "registration_endpoint": shape.register.map(fill),
+                    "token_endpoint_auth_methods_supported": shape.methods,
+                }),
+            ),
+            ("POST", "/register") => json_reply(
+                "201 Created",
+                &[],
+                &json!({
+                    "client_id": DCR_CLIENT,
+                    "token_endpoint_auth_method": "none",
+                    "redirect_uris": seen.body["redirect_uris"],
                 }),
             ),
             ("POST", "/token") => json_reply(
@@ -148,19 +170,37 @@ impl Sign {
 /// client saved for it, signing in at a loopback stand-in. Inputs: the stand-in's shape and
 /// the OAuth hosts declared. Output: the case, the stand-in and the connector as declared.
 fn signing(shape: Shape, oauth_hosts: &[&str]) -> Sign {
+    prepared(
+        shape,
+        oauth_hosts,
+        &[Registration::Own],
+        Some((CLIENT, None)),
+    )
+}
+
+/// [`signing`] with the registration ways declared and the owner's own client, id and
+/// secret, saved or not.
+fn prepared(
+    shape: Shape,
+    oauth_hosts: &[&str],
+    registration: &[Registration],
+    own: Option<(&str, Option<&str>)>,
+) -> Sign {
     let case = case();
     add(&case, BOARD_OAUTH, false);
-    assert_eq!(
-        set_own_client(&case.db, &case.root, "board", CLIENT),
-        Ok(())
-    );
+    if let Some((id, secret)) = own {
+        assert_eq!(
+            set_own_client(&case.db, &case.root, "board", id, secret),
+            Ok(())
+        );
+    }
     let vendor = vendor(shape);
     let spec = ConnectorSpec {
         mcp: vendor.endpoint(),
         key: None,
         oauth: Some(OAuthSpec {
             hosts: oauth_hosts.iter().map(|host| (*host).to_owned()).collect(),
-            registration: vec![Registration::Own],
+            registration: registration.to_vec(),
             scopes_read: vec!["read".to_owned()],
             scopes_write: vec!["write".to_owned()],
         }),
@@ -174,6 +214,10 @@ fn redirect() -> url::Url {
 }
 
 fn start(sign: &Sign, writes: bool) -> Result<Pending, OAuthError> {
+    start_with(sign, writes, None)
+}
+
+fn start_with(sign: &Sign, writes: bool, cimd: Option<&url::Url>) -> Result<Pending, OAuthError> {
     begin_with(
         &sign.case.root,
         "board",
@@ -181,12 +225,17 @@ fn start(sign: &Sign, writes: bool) -> Result<Pending, OAuthError> {
         &sign.spec,
         &redirect(),
         writes,
+        cimd,
         &no_lookup(),
     )
 }
 
 fn begun(sign: &Sign, writes: bool) -> Pending {
-    let begun = start(sign, writes);
+    begun_with(sign, writes, None)
+}
+
+fn begun_with(sign: &Sign, writes: bool, cimd: Option<&url::Url>) -> Pending {
+    let begun = start_with(sign, writes, cimd);
     assert!(begun.is_ok(), "a declared sign-in begins: {begun:?}");
     begun.unwrap()
 }
@@ -415,4 +464,244 @@ fn an_authorization_url_on_an_undeclared_host_is_refused() {
         assert_eq!(refused, Err(OAuthError(REFUSED)), "{:?}", sign.paths());
         assert_eq!(sign.vendor.seen().len(), reached, "{:?}", sign.paths());
     }
+}
+
+fn document() -> url::Url {
+    url::Url::parse(CIMD).unwrap()
+}
+
+fn registrations(sign: &Sign) -> Vec<Seen> {
+    sign.vendor
+        .seen()
+        .into_iter()
+        .filter(|seen| seen.path == "/register")
+        .collect()
+}
+
+/// With no own client, the app's client metadata document is the client where the server
+/// takes one and the build has its address; otherwise the app registers itself once per
+/// issuer (RFC 7591) and uses that client again; with neither the owner needs an own app.
+#[test]
+fn cimd_is_used_when_advertised_else_dcr() {
+    let both = [Registration::Cimd, Registration::Dcr];
+    let open = Shape {
+        cimd: true,
+        register: Some("{base}/register"),
+        ..shape()
+    };
+    let advertised = prepared(open.clone(), &["127.0.0.1"], &both, None);
+    let pending = begun_with(&advertised, false, Some(&document()));
+    assert_eq!(query(&pending.authorize_url)["client_id"], CIMD);
+    assert_eq!(
+        finished(&advertised, &pending.state, Some(&advertised.issuer())),
+        Ok(())
+    );
+    let token = &advertised.token_requests()[0];
+    assert_eq!(form(token)["client_id"], CIMD);
+    assert_eq!(token.header("authorization"), None);
+    assert!(registrations(&advertised).is_empty());
+
+    for (bent, cimd) in [
+        (
+            Shape {
+                cimd: false,
+                ..open.clone()
+            },
+            Some(document()),
+        ),
+        (open.clone(), None),
+    ] {
+        let sign = prepared(bent, &["127.0.0.1"], &both, None);
+        let first = begun_with(&sign, false, cimd.as_ref());
+        assert_eq!(query(&first.authorize_url)["client_id"], DCR_CLIENT);
+        let registered = registrations(&sign);
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0].verb, "POST");
+        assert_eq!(registered[0].body["redirect_uris"], json!([REDIRECT]));
+        assert_eq!(registered[0].body["token_endpoint_auth_method"], "none");
+        assert_eq!(
+            registered[0].body["grant_types"],
+            json!(["authorization_code", "refresh_token"])
+        );
+        assert_eq!(registered[0].body["response_types"], json!(["code"]));
+        assert_eq!(registered[0].header("authorization"), None);
+        let again = begun_with(&sign, false, cimd.as_ref());
+        assert_eq!(query(&again.authorize_url)["client_id"], DCR_CLIENT);
+        assert_eq!(
+            registrations(&sign).len(),
+            1,
+            "a registered client is used again at its issuer"
+        );
+        assert_eq!(finished(&sign, &again.state, Some(&sign.issuer())), Ok(()));
+        assert_eq!(form(&sign.token_requests()[0])["client_id"], DCR_CLIENT);
+    }
+
+    let only = prepared(
+        Shape {
+            cimd: false,
+            ..open.clone()
+        },
+        &["127.0.0.1"],
+        &[Registration::Cimd],
+        None,
+    );
+    let closed = prepared(
+        Shape {
+            register: None,
+            cimd: false,
+            ..shape()
+        },
+        &["127.0.0.1"],
+        &both,
+        None,
+    );
+    for sign in [&only, &closed] {
+        assert_eq!(
+            start_with(sign, false, Some(&document())),
+            Err(OAuthError("connector_oauth_needs_own_app"))
+        );
+        assert!(registrations(sign).is_empty());
+    }
+    let elsewhere = prepared(
+        Shape {
+            register: Some("https://evil.example/register"),
+            ..shape()
+        },
+        &["127.0.0.1"],
+        &[Registration::Dcr],
+        None,
+    );
+    assert_eq!(
+        start_with(&elsewhere, false, None),
+        Err(OAuthError(REFUSED)),
+        "a registration endpoint on an undeclared host is never called"
+    );
+}
+
+/// The owner's own OAuth app comes before the app's document and registration, and its
+/// secret goes to the token endpoint alone: in a Basic header, or in the body where the
+/// server takes only that.
+#[test]
+fn own_client_wins_over_cimd() {
+    let all = [Registration::Own, Registration::Cimd, Registration::Dcr];
+    let open = Shape {
+        cimd: true,
+        register: Some("{base}/register"),
+        ..shape()
+    };
+    let sign = prepared(
+        open.clone(),
+        &["127.0.0.1"],
+        &all,
+        Some((CLIENT, Some(SECRET))),
+    );
+    let pending = begun_with(&sign, false, Some(&document()));
+    assert_eq!(query(&pending.authorize_url)["client_id"], CLIENT);
+    assert!(!pending.authorize_url.as_str().contains(SECRET));
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    let token = &sign.token_requests()[0];
+    let basic =
+        base64::engine::general_purpose::STANDARD.encode(format!("{CLIENT}:{SECRET}").as_bytes());
+    assert_eq!(
+        token.header("authorization"),
+        Some(format!("Basic {basic}").as_str())
+    );
+    assert!(!form(token).contains_key("client_secret"));
+    assert!(registrations(&sign).is_empty());
+    for seen in sign.vendor.seen() {
+        if seen.path != "/token" {
+            assert!(!seen.raw.contains(SECRET), "{}", seen.path);
+            assert_eq!(seen.header("authorization"), None, "{}", seen.path);
+        }
+    }
+
+    let posted = prepared(
+        Shape {
+            methods: &["client_secret_post"],
+            ..open.clone()
+        },
+        &["127.0.0.1"],
+        &all,
+        Some((CLIENT, Some(SECRET))),
+    );
+    let pending = begun_with(&posted, false, Some(&document()));
+    assert_eq!(
+        finished(&posted, &pending.state, Some(&posted.issuer())),
+        Ok(())
+    );
+    let token = &posted.token_requests()[0];
+    assert_eq!(token.header("authorization"), None);
+    let sent = form(token);
+    assert_eq!(sent["client_id"], CLIENT);
+    assert_eq!(sent["client_secret"], SECRET);
+
+    let unsaved = prepared(open, &["127.0.0.1"], &all, None);
+    let pending = begun_with(&unsaved, false, Some(&document()));
+    assert_eq!(query(&pending.authorize_url)["client_id"], CIMD);
+}
+
+/// A sign-in is redeemed through `finish` only while the connector's file is the one
+/// trusted when it began; a file trusted again since ends it with nothing sent.
+#[test]
+fn a_sign_in_whose_connector_file_changed_since_it_began_is_never_redeemed() {
+    let sign = signing(shape(), &["127.0.0.1"]);
+    let trusted =
+        crate::app_plugins::store::trusted_connector(&sign.case.db, &sign.case.root, "board")
+            .unwrap()
+            .sha256;
+    let begun_at = |sha: &str| {
+        let begun = begin_with(
+            &sign.case.root,
+            "board",
+            sha,
+            &sign.spec,
+            &redirect(),
+            false,
+            None,
+            &no_lookup(),
+        );
+        assert!(begun.is_ok(), "{begun:?}");
+        begun.unwrap()
+    };
+    let good = begun_at(&trusted);
+    assert_eq!(
+        finish(
+            &sign.case.db,
+            &sign.case.root,
+            &good.state,
+            CODE,
+            Some(&sign.issuer())
+        ),
+        Ok(())
+    );
+    assert_eq!(sign.token_requests().len(), 1);
+    let stale = begun_at(SHA);
+    assert_eq!(
+        finish(
+            &sign.case.db,
+            &sign.case.root,
+            &stale.state,
+            CODE,
+            Some(&sign.issuer())
+        ),
+        Err(OAuthError("connector_oauth_trust_changed"))
+    );
+    assert_eq!(
+        finish(
+            &sign.case.db,
+            &sign.case.root,
+            &stale.state,
+            CODE,
+            Some(&sign.issuer())
+        ),
+        Err(OAuthError("connector_oauth_state_unknown"))
+    );
+    assert_eq!(
+        sign.token_requests().len(),
+        1,
+        "a changed file's code is never sent"
+    );
 }

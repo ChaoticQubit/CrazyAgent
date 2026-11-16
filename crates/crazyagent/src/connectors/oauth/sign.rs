@@ -462,6 +462,7 @@ fn client(root: &Path, name: &str, oauth: &OAuthSpec) -> Result<String, OAuthErr
 /// one: the resource and server are found, the client picked, and the state and PKCE
 /// verifier made and kept. Inputs: engine root, connector, its file's sha256 and spec, the
 /// loopback redirect, whether writes are allowed and the lookup. Output: the pending sign-in.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn begin_with(
     root: &Path,
     name: &str,
@@ -469,8 +470,10 @@ pub(crate) fn begin_with(
     spec: &ConnectorSpec,
     redirect: &url::Url,
     writes: bool,
+    cimd: Option<&url::Url>,
     reach: &ProviderReach,
 ) -> Result<Pending, OAuthError> {
+    let _ = cimd;
     let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
     if !loopback_redirect(redirect) {
         return Err(OAuthError("connector_oauth_redirect_invalid"));

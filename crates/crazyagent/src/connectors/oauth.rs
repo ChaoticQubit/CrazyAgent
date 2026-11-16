@@ -85,7 +85,9 @@ pub fn set_own_client(
     root: &Path,
     name: &str,
     id: &str,
+    secret: Option<&str>,
 ) -> Result<(), OAuthError> {
+    let _ = secret;
     let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
     let declared = manifest
         .connector()
@@ -121,6 +123,7 @@ pub fn begin(
         spec,
         redirect,
         writes,
+        None,
         &ProviderReach::system(),
     )
 }
@@ -142,6 +145,7 @@ pub fn finish(
 /// No sign-in where curl's private request cannot be made. Output:
 /// `connector_unavailable_here`.
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn begin_with(
     _root: &Path,
     _name: &str,
@@ -149,6 +153,7 @@ pub(crate) fn begin_with(
     _spec: &crate::app_plugins::connector::ConnectorSpec,
     _redirect: &url::Url,
     _writes: bool,
+    _cimd: Option<&url::Url>,
     _reach: &ProviderReach,
 ) -> Result<Pending, OAuthError> {
     Err(OAuthError("connector_unavailable_here"))
