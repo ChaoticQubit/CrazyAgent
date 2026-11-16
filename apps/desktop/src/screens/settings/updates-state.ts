@@ -102,6 +102,12 @@ export function progressLabel(step: UpdateProgress): string {
   }
 }
 
+/** The line the installed view shows under Restart now about the engine. Input: where the
+ * engine stands after the install. Output: the line, or null when it answered. */
+export function engineAfterLine(engine: "ready" | "starting" | "failed"): string | null {
+  return engine === "ready" ? null : "The engine starts again when CrazyAgent restarts.";
+}
+
 /** Whether a background check should tell the owner about a release. Inputs: the version last
  * announced or null, and the release found or null. Output: true once per new version. */
 export function shouldAnnounce(announced: string | null, found: AvailableUpdate | null): boolean {

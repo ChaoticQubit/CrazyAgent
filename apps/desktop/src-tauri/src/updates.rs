@@ -49,6 +49,27 @@ pub struct InstallOutcome {
     pub engine_started: bool,
 }
 
+/// Where the engine stands when an install returns: answering on the new version, still
+/// starting under its service manager past the wait, or not running at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineAfterUpdate {
+    Ready,
+    Starting,
+    Failed,
+}
+
+/// Names where the engine stands after an install's wait. Inputs: whether the wait saw it
+/// answer and whether its service manager still runs it. Output: Ready when it answered,
+/// else Failed.
+fn engine_after(answered: bool, _running: bool) -> EngineAfterUpdate {
+    if answered {
+        EngineAfterUpdate::Ready
+    } else {
+        EngineAfterUpdate::Failed
+    }
+}
+
 fn refused(code: &'static str) -> BridgeError {
     BridgeError {
         code,
@@ -257,5 +278,13 @@ mod tests {
         assert_eq!(hold(&state).err().map(|refusal| refusal.code), Some("busy"));
         drop(installing);
         assert!(hold(&state).is_ok());
+    }
+
+    #[test]
+    fn an_engine_its_service_manager_still_runs_past_the_wait_reads_starting_not_failed() {
+        assert_eq!(engine_after(true, true), EngineAfterUpdate::Ready);
+        assert_eq!(engine_after(true, false), EngineAfterUpdate::Ready);
+        assert_eq!(engine_after(false, true), EngineAfterUpdate::Starting);
+        assert_eq!(engine_after(false, false), EngineAfterUpdate::Failed);
     }
 }

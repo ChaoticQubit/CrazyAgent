@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { CHECK_INTERVAL_MS, reduceUpdate, progressLabel, progressPercent, updateMessage, shouldAnnounce, createUpdateStore } = await import("../src/screens/settings/updates-state.ts");
+const { CHECK_INTERVAL_MS, reduceUpdate, progressLabel, progressPercent, updateMessage, shouldAnnounce, createUpdateStore, engineAfterLine } = await import("../src/screens/settings/updates-state.ts");
 const { UpdatesView } = await import("../src/screens/settings/updates.tsx");
 const { parseRoute, formatRoute } = await import("../src/ui/router.ts");
 
@@ -53,6 +53,19 @@ test("installing needs a found release and the owner's click, and reports each s
   assert.equal(progressLabel({ kind: "stopping_engine" }), "Stopping the engine. Your agents pick up where they were after the restart.");
   assert.equal(progressLabel({ kind: "installing" }), "Installing...");
   assert.deepEqual(reduceUpdate(half, { kind: "install_done", engineStarted: true }), { kind: "installed", update: found, engineStarted: true });
+});
+
+test("after an update the screen waits for the engine with its time, then says where it stands (UPDATE-ENGINE-WAIT)", () => {
+  const installing = run([{ kind: "check_done", update: found, at: 1 }, { kind: "install_started" }]);
+  assert.equal(progressLabel({ kind: "starting_engine", waited_s: 65, answering: false }), "Starting the engine on the new version (1:05). Updating your data can take a few minutes.");
+  assert.equal(progressLabel({ kind: "starting_engine", waited_s: 160, answering: true }), "The engine is opening your projects (2:40)...");
+  assert.equal(progressPercent({ kind: "starting_engine", waited_s: 5, answering: false }), null);
+  for (const engine of ["ready", "starting", "failed"]) {
+    assert.deepEqual(reduceUpdate(installing, { kind: "install_done", engine }), { kind: "installed", update: found, engine });
+  }
+  assert.equal(engineAfterLine("ready"), null);
+  assert.equal(engineAfterLine("starting"), "The engine is still starting on the new version. Restart now; CrazyAgent connects once it answers.");
+  assert.equal(engineAfterLine("failed"), "The engine didn't start. Restart now to try again; the engine log says why.");
 });
 
 test("a failed download or bad signature shows the error, changes nothing and offers the same release again", () => {
