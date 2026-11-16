@@ -133,7 +133,7 @@ enum Row {
     Who(usize),
 }
 
-/// A project's Connectors page (DEC-168 addenda 18, 20 and 23): every ready connector and
+/// A project's Connectors page (DEC-168 addenda 18, 20 and 27): every ready connector and
 /// every one turned on for this project, with its On switch and, while On, who it reaches;
 /// the rest are named once. Space or Enter turns a switch on or off, Left and Right change
 /// who; each change goes to the engine at once. Opened with b on the project's Settings tab.

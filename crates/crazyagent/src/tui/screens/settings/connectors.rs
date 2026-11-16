@@ -97,7 +97,7 @@ enum Open {
     Key(Box<KeyForm>),
 }
 
-/// Settings, Connectors (DEC-168 addenda 18 and 23): the catalog of every connector with
+/// Settings, Connectors (DEC-168 addenda 18 and 27): the catalog of every connector with
 /// its state, the harnesses that reach connectors and the two connector settings beside the
 /// locked line. Enter opens a connector's page with its address and secrets, where `k` sets
 /// a key typed once, `u` clears it, Enter reviews a changed file and `x` removes the
