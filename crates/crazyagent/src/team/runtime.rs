@@ -13497,9 +13497,15 @@ fn start_session(
 const SKILLS_KEPT_PROBLEM: &str = "The agent could not start: an earlier run locked skills into \
      its Codex home, so CrazyAgent could not remove them and Codex would have loaded them";
 
+/// The owner's line for a launch refused because resetting the agent's home ran past its
+/// walk budget ([`crate::team::cleanup::WALK_TOO_LONG`], RESET-WALK-CODE).
+const WALK_TOO_LONG_PROBLEM: &str = "The agent could not start: its home folder held too many \
+     files to reset at once, or something kept adding files to it. Try again";
+
 /// The owner's line for an agent whose harness could not start: a command that would hold
-/// an MCP secret names its server and secret, skills left in a Codex home say so, and any
-/// other refusal names its plain code. Input: the launch error. Output: the line.
+/// an MCP secret names its server and secret, skills left in a Codex home or a home reset
+/// past its walk budget say so, and any other refusal names its plain code. Input: the
+/// launch error. Output: the line.
 fn start_problem(problem: &LaunchError) -> String {
     match crate::launch_context::secret_in_command_text(problem) {
         Some(sentence) => format!("The agent could not start. {sentence}"),
@@ -13507,6 +13513,9 @@ fn start_problem(problem: &LaunchError) -> String {
             with_code(SKILLS_KEPT_PROBLEM, Some(&problem.0))
         }
         None if problem.0 == COMMANDS_LEFT => with_code(COMMANDS_LEFT_PROBLEM, Some(&problem.0)),
+        None if problem.0 == crate::team::cleanup::WALK_TOO_LONG => {
+            with_code(WALK_TOO_LONG_PROBLEM, Some(&problem.0))
+        }
         None => with_code("The agent could not start", Some(&problem.0)),
     }
 }

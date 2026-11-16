@@ -1291,10 +1291,27 @@ fn folder_failed() -> EngineError {
 }
 
 /// The code a removal of an agent home entry reports once its walk's listings returned more
-/// names than [`HOME_WALK_CHUNKS_MAX`] listings hold (RESET-WALK-F1).
+/// names than its budget holds (RESET-WALK-F1), which the callers that reset an agent's home
+/// pass on to the owner ([`home_code`], RESET-WALK-CODE).
+pub(crate) const WALK_TOO_LONG: &str = "cleanup_walk_too_long";
+
+/// The error [`WALK_TOO_LONG`] names. Output: the error.
 #[cfg(unix)]
 fn walk_too_long() -> EngineError {
-    EngineError("cleanup_walk_too_long".into())
+    EngineError(WALK_TOO_LONG.into())
+}
+
+/// The code a caller of [`remove_home_entry`] or [`remove_home_within`] reports for an error
+/// of it: [`WALK_TOO_LONG`] as it is, so the owner learns the walk ran past its budget and
+/// that another try gets further (RESET-WALK-CODE), and the caller's own code for any other.
+/// Inputs: the error and the caller's code. Output: the code.
+#[cfg(unix)]
+pub(crate) fn home_code(problem: &EngineError, otherwise: &'static str) -> &'static str {
+    if problem.0 == WALK_TOO_LONG {
+        WALK_TOO_LONG
+    } else {
+        otherwise
+    }
 }
 
 /// Deletes a folder. When a plain delete stops, it is walked clearing flags as `flags`

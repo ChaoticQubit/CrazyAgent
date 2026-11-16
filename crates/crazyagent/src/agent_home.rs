@@ -1366,7 +1366,9 @@ pub(crate) fn remove_home_code(
 /// Links the `registry` and `git` of an rcli master's cargo home to the owner's read-only
 /// caches, as every agent home has them, making the cargo home when it is gone
 /// ([`crate::sandbox::toolchains::prepare_cargo_home`]). Inputs: the home and the owner's
-/// tool homes. Output: unit, or `agent_home_unwritable` when a link will not be made.
+/// tool homes. Output: unit, or `agent_home_unwritable` when a link will not be made, or
+/// `cleanup_walk_too_long` when clearing a name for it ran past its walk budget
+/// (RESET-WALK-CODE).
 #[cfg(unix)]
 fn link_owner_crates(
     home: &Path,
@@ -1374,7 +1376,13 @@ fn link_owner_crates(
 ) -> Result<(), AgentHomeError> {
     crate::sandbox::toolchains::prepare_cargo_home(home, homes)
         .map(drop)
-        .map_err(|_| failure("agent_home_unwritable"))
+        .map_err(|problem| {
+            let walk = crate::team::cleanup::WALK_TOO_LONG;
+            failure(match problem.to_string() == walk {
+                true => walk,
+                false => "agent_home_unwritable",
+            })
+        })
 }
 
 /// Makes no links outside Unix, where no master sandbox runs and every master turn is
@@ -1395,7 +1403,8 @@ fn link_owner_crates(
 /// handles from there ([`crate::team::cleanup::remove_home_entry`]), with the flags, modes
 /// and ACLs an agent set cleared on the way (RV-DS241-138, -137 code r1 F2, sec r1 F2, code
 /// r2 F3, sec F1 ds137-lock-linux). Input: the entry. Output: unit, or
-/// `agent_home_unwritable` when it stays, refusing the launch.
+/// `agent_home_unwritable` when it stays, or `cleanup_walk_too_long` once its walk runs past
+/// its budget (RESET-WALK-CODE), either refusing the launch.
 #[cfg(unix)]
 pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
@@ -1405,8 +1414,12 @@ pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
         Err(rustix::io::Errno::NOENT) => return Ok(()),
         opened => opened.map_err(|_| failure("agent_home_unwritable"))?,
     };
-    crate::team::cleanup::remove_home_entry(folder, name)
-        .map_err(|_| failure("agent_home_unwritable"))
+    crate::team::cleanup::remove_home_entry(folder, name).map_err(|problem| {
+        failure(crate::team::cleanup::home_code(
+            &problem,
+            "agent_home_unwritable",
+        ))
+    })
 }
 
 /// Removes one entry of an agent home without following a link in its last part, where no
@@ -1457,9 +1470,10 @@ fn open_real_folder(folder: &Path) -> rustix::io::Result<std::os::fd::OwnedFd> {
 /// process an agent left that swaps a folder for a link meanwhile never leads the reset
 /// outside the home (sec F1 ds137-lock-linux). Flags an agent set on the home are cleared
 /// first (RV-DS241-138). Inputs: the home, what stays in it and the entries held so far.
-/// Output: unit, or `agent_home_unwritable` when a folder will not open or list, one entry
-/// stays, a folder still changes after [`HOME_PASSES_MAX`] passes or one pass lists and
-/// walks more than [`crate::team::cleanup::HOME_WALK_NAMES`] names (RESET-WALK-N1).
+/// Output: unit, `agent_home_unwritable` when a folder will not open or list, one entry
+/// stays or a folder still changes after [`HOME_PASSES_MAX`] passes, or
+/// `cleanup_walk_too_long` once one pass lists and walks more than
+/// [`crate::team::cleanup::HOME_WALK_NAMES`] names (RESET-WALK-N1, RESET-WALK-CODE).
 #[cfg(unix)]
 fn keep_only(
     home: &Path,
@@ -1504,8 +1518,12 @@ fn keep_in(
     assert!(depth > 0 || !kept.is_empty());
     let unwritable = |_| failure("agent_home_unwritable");
     let remove = |name: &std::ffi::CStr, left: &mut usize| {
-        crate::team::cleanup::remove_home_within(folder, name, left)
-            .map_err(|_| failure("agent_home_unwritable"))
+        crate::team::cleanup::remove_home_within(folder, name, left).map_err(|problem| {
+            failure(crate::team::cleanup::home_code(
+                &problem,
+                "agent_home_unwritable",
+            ))
+        })
     };
     let before = held.len();
     for _ in 0..HOME_PASSES_MAX {
@@ -1525,7 +1543,7 @@ fn keep_in(
             }
             left = left
                 .checked_sub(1)
-                .ok_or_else(|| failure("agent_home_unwritable"))?;
+                .ok_or_else(|| failure(crate::team::cleanup::WALK_TOO_LONG))?;
             let found = match rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
                 Err(rustix::io::Errno::NOENT) => continue,
                 Err(_) => return Err(failure("agent_home_unwritable")),
@@ -1600,9 +1618,10 @@ fn keep_in(
 /// a link (B20): a project folder is opened relative to the `projects` handle and its entry
 /// removed relative to its own, so one swapped for a link meanwhile goes as that link and what
 /// the link names stays. It lists in passes, each spending one budget, as [`keep_in`] does.
-/// Inputs: the folder, its path and the budget of each pass. Output: unit, or
+/// Inputs: the folder, its path and the budget of each pass. Output: unit,
 /// `agent_home_unwritable` when a folder will not open or list, one entry stays or the
-/// folder still changes after [`HOME_PASSES_MAX`] passes.
+/// folder still changes after [`HOME_PASSES_MAX`] passes, or `cleanup_walk_too_long` once a
+/// pass lists and walks more than its budget.
 #[cfg(unix)]
 fn clear_memory(
     folder: std::os::fd::BorrowedFd<'_>,
@@ -1613,8 +1632,12 @@ fn clear_memory(
     use std::os::fd::AsFd;
     let unwritable = |_| failure("agent_home_unwritable");
     let remove = |name: &std::ffi::CStr, left: &mut usize| {
-        crate::team::cleanup::remove_home_within(folder, name, left)
-            .map_err(|_| failure("agent_home_unwritable"))
+        crate::team::cleanup::remove_home_within(folder, name, left).map_err(|problem| {
+            failure(crate::team::cleanup::home_code(
+                &problem,
+                "agent_home_unwritable",
+            ))
+        })
     };
     for _ in 0..HOME_PASSES_MAX {
         let mut left = budget;
@@ -1631,7 +1654,7 @@ fn clear_memory(
             }
             left = left
                 .checked_sub(1)
-                .ok_or_else(|| failure("agent_home_unwritable"))?;
+                .ok_or_else(|| failure(crate::team::cleanup::WALK_TOO_LONG))?;
             let found = match rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
                 Err(rustix::io::Errno::NOENT) => continue,
                 Err(_) => return Err(failure("agent_home_unwritable")),
@@ -1667,7 +1690,12 @@ fn clear_memory(
                         CLAUDE_MEMORY,
                         &mut left,
                     )
-                    .map_err(|_| failure("agent_home_unwritable"))?;
+                    .map_err(|problem| {
+                        failure(crate::team::cleanup::home_code(
+                            &problem,
+                            "agent_home_unwritable",
+                        ))
+                    })?;
                     removed = true;
                 }
             }
