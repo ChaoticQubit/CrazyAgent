@@ -88,11 +88,10 @@ struct Saved {
 }
 
 /// The Windows lid line (DEC-167 addendum 32) on the sensor thread: with the closed lid
-/// wanted it records the old lid close action of the active plan in the engine journal,
-/// then sets Do nothing, and holds the plan it set; when the lid is no longer wanted it
-/// puts the old value back and, with the lid closed, does what the lid action says. It is
-/// the journal's one writer while the engine runs. `owed` is the sleep a closed lid still
-/// owes (QUESTION 01:16 Q2).
+/// wanted it journals the active plan's old lid close action, sets Do nothing and holds
+/// that plan; when the lid is no longer wanted it puts the old value back and pays the
+/// sleep a closed lid owes (`owed`, QUESTION 01:16 Q2). It is the journal's one writer
+/// while the engine runs, under the engine's journal lock.
 pub(crate) struct WindowsLid<S> {
     setting: S,
     root: PathBuf,
@@ -119,12 +118,11 @@ impl<S: LidSetting> WindowsLid<S> {
         }
     }
 
-    /// Answers one ask of the keeper. Each ask that does not want the lid puts back what
-    /// the journal holds (QUESTION 22:58 Q4) and then pays an owed sleep; Put the lid
-    /// setting back now only brings that ask sooner. A wanted ask reads a held lid again.
-    /// Inputs: the lid ask and the owner's command. Output: Held when the lid is held or
-    /// can be, `LockedByPolicy`, `SleepNotRestored` while a change is not put back or the
-    /// journal cannot be read, or not available with the reason.
+    /// Answers one ask of the keeper: a wanted ask holds the lid or reads a held one again;
+    /// any other puts back what the journal holds (QUESTION 22:58 Q4), then pays an owed
+    /// sleep, and Put the lid setting back now only brings it sooner. Inputs: the ask and
+    /// the owner's command. Output: Held, `LockedByPolicy`, `SleepNotRestored` while a
+    /// change is not put back or the journal is unreadable, or not available with the reason.
     pub(crate) fn step(&mut self, ask: LidAsk, command: Option<LidCommand>) -> LidSupport {
         assert!(ask.rule_on || !ask.wanted);
         assert!(matches!(command, None | Some(LidCommand::PutBack)));
@@ -355,9 +353,8 @@ fn parsed(restore: &str) -> Option<Saved> {
 }
 
 /// Puts back the lid close action one journal entry recorded (QUESTION 22:58 Q5, Q6):
-/// only a value still at Do nothing is written, so a value the owner set during the hold
-/// stays, and a plan that no longer exists counts as put back. Values already stored are
-/// applied again, since Windows applies a stored change to the active plan only then
+/// only a value still at Do nothing is written, so an owner's value set during the hold
+/// stays; a plan that is gone counts as put back; values already stored are applied again
 /// (rv-sec3 KA T14 r1 F4). Inputs: the lid setting and the entry. Output: Ok, or why it is
 /// not put back, and the entry then stays.
 pub(crate) fn undo_with(setting: &mut impl LidSetting, entry: &Entry) -> Result<(), EngineError> {
