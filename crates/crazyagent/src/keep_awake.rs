@@ -64,7 +64,7 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS keep_awake_state (
 /// One owner change to Keep awake: start a manual timer of 1 to 1440 minutes, move a
 /// running timer later, end the hold now, save the settings, a macOS lid helper command:
 /// Turn on lid-closed hold, or Remove lid helper (QUESTION 35i, 35j, 36a), or Put the lid
-/// setting back now on Windows (DEC-167 addendum 26).
+/// setting back now on Windows (DEC-167 addendum 32).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum KeepAwakeAction {
@@ -489,7 +489,7 @@ fn hold_failed(connection: &Connection, now_ms: i64) -> Result<KeepAwakeView, En
 }
 
 /// Undoes one persistent change an earlier engine recorded: on Windows the lid close
-/// action a hold changed (DEC-167 addendum 26); every other kind is refused and stays
+/// action a hold changed (DEC-167 addendum 32); every other kind is refused and stays
 /// recorded. Input: the entry. Output: Ok, or why it is not undone.
 fn undo(entry: &journal::Entry) -> Result<(), EngineError> {
     assert!(!entry.kind.is_empty());
@@ -759,7 +759,7 @@ impl Keeper {
     /// and clears it once the helper holds the lid, the one support that shows its journal
     /// reads; any other support, a rule Off or a daemon not enabled among them, leaves the
     /// row as it is. On Windows the lid line reads its own journal at every ask, so any
-    /// other support clears the row (DEC-167 addendum 26). A write that fails is logged and
+    /// other support clears the row (DEC-167 addendum 32). A write that fails is logged and
     /// tried again after the next reading. Input: the engine database outside any
     /// transaction.
     fn note_lid_journal(&mut self, connection: &Connection) {

@@ -511,7 +511,7 @@ fn on_windows(lid: LidSupport) -> KeepAwakeView {
     view
 }
 
-/// DEC-167 addendum 26, QUESTION 22:58 Q9: on Windows the page says what a crash during a
+/// DEC-167 addendum 32, QUESTION 22:58 Q9: on Windows the page says what a crash during a
 /// hold leaves and p sends Put the lid setting back now; a refused one says why.
 #[test]
 fn on_windows_the_settings_page_offers_put_the_lid_setting_back_now() {

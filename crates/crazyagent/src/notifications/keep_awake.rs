@@ -38,7 +38,7 @@ pub(crate) const LID_JOURNAL_TEXT: &str = "The lid helper cannot read its journa
     /Library/Application Support/dev.crazyagent.power with sudo, then Remove lid helper and \
     add it again.";
 /// The restore line on Windows of a lid close action Keep awake could not put back (DEC-167
-/// addendum 26), under the same subject, with the owner's two ways to fix it.
+/// addendum 32), under the same subject, with the owner's two ways to fix it.
 pub(crate) const LID_SETTING_TEXT: &str = "Keep awake could not put the lid setting back. Use \
     Put the lid setting back now in Settings, Keep awake, or set it in Power Options.";
 /// The approval subject and line (QUESTION 35j).
@@ -182,7 +182,7 @@ pub(crate) fn left_over(connection: &Connection, leftover: &Leftover) -> Result<
 /// Writes or clears the restore row of a lid line that cannot put back or read its
 /// journal (QUESTION 36b), under its own subject, which the engine start's undo leaves
 /// alone. On Windows a clear also clears the engine start's row for a lid close action
-/// not put back, as the lid line just put it back (DEC-167 addendum 26). Inputs: the
+/// not put back, as the lid line just put it back (DEC-167 addendum 32). Inputs: the
 /// engine database outside any transaction and whether the journal is unreadable. Output:
 /// Ok, or the SQLite failure.
 pub(crate) fn lid_journal(connection: &Connection, unreadable: bool) -> Result<(), EngineError> {

@@ -480,7 +480,7 @@ fn the_lid_helper_commands_are_owner_changes_with_plain_names() {
     }
 }
 
-/// DEC-167 addendum 26, QUESTION 22:58 Q3: Put the lid setting back now is an owner change
+/// DEC-167 addendum 32, QUESTION 22:58 Q3: Put the lid setting back now is an owner change
 /// on Windows only, and waits while a hold covers the closed lid, which puts it back as it
 /// ends.
 #[test]

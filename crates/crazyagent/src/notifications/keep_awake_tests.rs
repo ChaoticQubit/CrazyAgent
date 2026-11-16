@@ -276,7 +276,7 @@ fn the_lid_helper_journal_item_shows_the_fix_and_outlives_the_engine_start_undo(
     assert!(restores(&connection, NoticeFilter::Pending).is_empty());
 }
 
-/// DEC-167 addendum 26: on Windows the lid row names the Windows fix, and the lid line
+/// DEC-167 addendum 32: on Windows the lid row names the Windows fix, and the lid line
 /// clearing it also clears the engine start's row for a lid setting not put back, so one
 /// put back that works resolves both.
 #[cfg(windows)]

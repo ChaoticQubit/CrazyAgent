@@ -217,7 +217,7 @@ fn pick(setting: Setting, at: usize, picks: &mut Picks) {
 /// Settings, Keep awake (DEC-167 addendum 7): the nine settings in the desktop's four
 /// sections, with its labels, help, options and reasons, and on macOS the lid helper's
 /// line under the lid rule with t and d as it offers them, whatever the rule (QUESTION
-/// 36c), or on Windows the lid setting's line with p (DEC-167 addendum 26). Left and
+/// 36c), or on Windows the lid setting's line with p (DEC-167 addendum 32). Left and
 /// Right pick; the picks stay unsaved until Enter saves them over the settings the engine
 /// holds at that moment, and Esc drops them first. Opened by Go to and by s on the Keep
 /// awake screen.

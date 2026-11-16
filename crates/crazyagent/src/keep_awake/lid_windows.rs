@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use crazyagent_win_sandbox::lid;
 
 /// The journal kind of a lid close action Keep awake changed on Windows (DEC-167
-/// addendum 26).
+/// addendum 32).
 pub(crate) const KIND: &str = "windows_lid_action";
 
 /// The last lid close action value Windows names: 0 Do nothing, 1 Sleep, 2 Hibernate,
@@ -85,7 +85,7 @@ struct Saved {
     dc: u32,
 }
 
-/// The Windows lid line (DEC-167 addendum 26) on the sensor thread: with the closed lid
+/// The Windows lid line (DEC-167 addendum 32) on the sensor thread: with the closed lid
 /// wanted it records the old lid close action of the active plan in the engine journal,
 /// then sets Do nothing; when the lid is no longer wanted it puts the old value back and,
 /// with the lid closed, does what the lid action says. It is the journal's one writer

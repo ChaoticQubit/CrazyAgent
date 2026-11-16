@@ -165,7 +165,7 @@ impl Journal {
     }
 
     /// Undoes the recorded changes of one kind, newest first, and forgets the ones whose
-    /// undo worked; entries of every other kind stay as they are (DEC-167 addendum 26).
+    /// undo worked; entries of every other kind stay as they are (DEC-167 addendum 32).
     /// Inputs: the kind and the undo for one entry. Output: Ok when no entry of that kind
     /// is left, else the first failure; the entries that failed stay recorded.
     pub fn settle(

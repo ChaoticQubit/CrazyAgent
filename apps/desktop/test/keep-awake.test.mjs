@@ -664,7 +664,7 @@ test("Settings shows the lid helper line and its buttons whatever the lid rule, 
   assert.match(SETTINGS_PAGE, /onLid=\{\(action\) => void lid\(action\)\}/, "a press sends the command as it is");
 });
 
-test("Settings on Windows offers Put the lid setting back now with the crash line, and no other platform does (DEC-167 addendum 26)", () => {
+test("Settings on Windows offers Put the lid setting back now with the crash line, and no other platform does (DEC-167 addendum 32)", () => {
   const CRASH = "If the engine stops by a crash during a hold, the lid stays at Do nothing until the engine starts again.";
   const left = { kind: "sleep_not_restored" };
   const windows = settingsView(ok(view({}, { platform: "windows", lid_support: left, lid_platform: left })));

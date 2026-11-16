@@ -638,7 +638,7 @@ mod journal {
         assert!(Journal::open(root.path()).unwrap().entries().is_empty());
     }
 
-    /// DEC-167 addendum 26: settle undoes the entries of one kind, newest first, keeps the
+    /// DEC-167 addendum 32: settle undoes the entries of one kind, newest first, keeps the
     /// ones whose undo failed and every entry of another kind, and keeps the file in step.
     #[test]
     fn settle_undoes_one_kind_newest_first_and_keeps_every_other_kind() {

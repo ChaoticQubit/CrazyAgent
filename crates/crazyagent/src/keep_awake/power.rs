@@ -66,7 +66,7 @@ pub struct LidAsk {
 }
 
 /// An owner command for the lid line: Turn on lid-closed hold or Remove lid helper on
-/// macOS (QUESTION 36a), Put the lid setting back now on Windows (DEC-167 addendum 26).
+/// macOS (QUESTION 36a), Put the lid setting back now on Windows (DEC-167 addendum 32).
 /// The lid line runs it on the sensor thread, never in the owner's change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
