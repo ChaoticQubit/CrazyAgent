@@ -844,7 +844,9 @@ pub enum SandboxNetwork {
 }
 
 /// One outbound TCP destination a tools-off agent may still reach. Seatbelt
-/// filters by port only, either on loopback or on any host.
+/// filters by port only, either on loopback or on any host, so `accounts::account_url`
+/// refuses an endpoint on another machine on a port a cloud metadata service answers on
+/// when it is saved (MACOS-ANYHOST-METADATA).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxRemote {
     Loopback(u16),
@@ -1054,6 +1056,22 @@ pub(crate) const CLOUD_METADATA: [IpAddr; 8] = [
     IpAddr::V6(Ipv6Addr::new(0xfd00, 0xa9fe, 0xa9fe, 0, 0, 0, 0, 0x0001)),
     IpAddr::V6(Ipv6Addr::new(0xfd00, 0x0042, 0, 0, 0, 0, 0, 0x0042)),
 ];
+
+/// Tells whether `address` is a cloud's metadata or credential service: link-local
+/// (169.254.0.0/16, fe80::/10) or one of [`CLOUD_METADATA`], also as an IPv4 address inside
+/// an IPv6 one. No engine tunnel or account probe dials one (ACCOUNTS-PROBE-MAY-DIAL).
+/// Input: the address. Output: true when it is one.
+pub(crate) fn metadata_address(address: IpAddr) -> bool {
+    let address = match address {
+        IpAddr::V6(ip) => ip.to_ipv4().map_or(address, IpAddr::V4),
+        IpAddr::V4(_) => address,
+    };
+    CLOUD_METADATA.contains(&address)
+        || match address {
+            IpAddr::V4(ip) => ip.is_link_local(),
+            IpAddr::V6(ip) => ip.is_unicast_link_local(),
+        }
+}
 
 /// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
 /// computer's network on a Linux that could give them one of their own: on the project's

@@ -294,13 +294,30 @@ fn plain_url(raw: &str) -> Result<url::Url, EngineError> {
     Ok(url)
 }
 
+/// The ports besides 443 that cloud metadata services answer on: 80 (AWS IMDS and EKS Pod
+/// Identity, Azure IMDS and WireServer, Google, Alibaba, Oracle, Akamai), 32526 (Azure's
+/// WireServer) and 988 (GKE's metadata server at 169.254.169.252). A saved endpoint on
+/// another machine grants every agent with the HTTPS network its port on any host, and
+/// Seatbelt cannot name an address, so an endpoint is refused one when it is saved. 443
+/// stays, since every such agent needs it, though Google's Shielded VMs also serve
+/// metadata there (MACOS-ANYHOST-METADATA).
+const METADATA_PORTS: [u16; 3] = [80, 32526, 988];
+
 /// Parses an owner-entered endpoint as an HTTPS address, or plain HTTP only on this
 /// machine, without credentials, query or fragment, so a saved key never crosses a
-/// network in cleartext. Input: raw text. Output: the parsed URL or `account_url_invalid`.
+/// network in cleartext, and on another machine never on one of `METADATA_PORTS`.
+/// Input: raw text. Output: the parsed URL, `account_url_invalid` or
+/// `account_url_port_refused`.
 pub fn account_url(raw: &str) -> Result<url::Url, EngineError> {
     let url = plain_url(raw)?;
-    if url.scheme() == "http" && !loopback(&url) {
+    let here = loopback(&url);
+    if url.scheme() == "http" && !here {
         return Err(failure("account_url_invalid"));
+    }
+    let port = url.port_or_known_default();
+    assert!(port.is_some(), "an http or https URL has a known port");
+    if !here && port.is_some_and(|port| METADATA_PORTS.contains(&port)) {
+        return Err(failure("account_url_port_refused"));
     }
     Ok(url)
 }

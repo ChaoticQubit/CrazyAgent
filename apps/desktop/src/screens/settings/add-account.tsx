@@ -99,15 +99,17 @@ export function defaultAccountName(provider: ProviderEntry, accounts: AccountVie
   return `${short} ${index}`;
 }
 
-/** Checks a base URL the way the engine will: https anywhere, or http only on this Mac.
+/** Checks a base URL the way the engine will: https anywhere, or http only on this Mac, and
+ * on another machine never on a port a cloud metadata service answers on (80, 988, 32526).
  * Input: the text. Output: an error sentence, or undefined when it is acceptable. */
 export function urlError(text: string): string | undefined {
   const message = "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.";
   try {
     const url = new URL(text.trim());
     if (url.username || url.password) return message;
-    if (url.protocol === "https:") return undefined;
-    return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) ? undefined : message;
+    const here = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+    if (url.protocol === "https:") return here || !["80", "988", "32526"].includes(url.port) ? undefined : plainError("account_url_port_refused");
+    return url.protocol === "http:" && here ? undefined : message;
   } catch {
     return message;
   }

@@ -273,6 +273,45 @@ fn plain_http_is_accepted_only_for_this_machine() {
 }
 
 #[test]
+fn a_server_on_another_machine_takes_no_port_a_cloud_metadata_service_answers_on() {
+    let mut any = draft(Provider::OpenaiCompatible, SignInMethod::Url);
+    any.model = Some("m".into());
+    for remote in [
+        "https://models.example.test:80/v1",
+        "https://models.example.test:988/v1",
+        "https://models.example.test:32526/v1",
+        "https://10.0.0.5:80/v1",
+        "https://[fd00:ec2::254]:80/",
+    ] {
+        assert_eq!(
+            account_url(remote).err().map(|error| error.0).as_deref(),
+            Some("account_url_port_refused"),
+            "{remote}"
+        );
+        any.url = Some(remote.into());
+        assert_eq!(
+            any.build(true, "0123456789abcdef0123")
+                .err()
+                .map(|error| error.0)
+                .as_deref(),
+            Some("account_url_port_refused"),
+            "{remote}"
+        );
+    }
+    for kept in [
+        "https://models.example.test/v1",
+        "https://models.example.test:443/v1",
+        "https://models.example.test:8443/v1",
+        "https://localhost:80/v1",
+        "http://localhost:80/v1",
+        "http://127.0.0.1:32526/v1",
+        "http://[::1]:80/v1",
+    ] {
+        assert!(account_url(kept).is_ok(), "{kept}");
+    }
+}
+
+#[test]
 fn account_count_bound_is_large_but_finite() {
     let refs = |count: usize| -> Vec<CredentialRef> {
         (0..count)

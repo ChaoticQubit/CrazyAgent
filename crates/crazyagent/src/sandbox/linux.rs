@@ -4070,10 +4070,12 @@ mod tests {
     }
 
     /// rv-sa241 SBX-2-R2 N1: the host read asks a kept false route answer again, so one
-    /// failed probe (a timeout while the engine starts under load) leaves no launch unrouted
-    /// until a restart; a launch reads what is kept and never waits on the probe, a true
-    /// answer is never asked again, and a false probe never replaces a true another caller
-    /// kept meanwhile.
+    /// failed probe (a timeout while the engine starts under load) leaves launches unrouted
+    /// only until the next host read. The owner's read of the project catalog or a project's
+    /// agent policy runs that read at most once per `HOST_AGE_MAX`, and an engine nobody
+    /// reads keeps the false answer until a restart. A launch reads what is kept and never
+    /// waits on the probe, a true answer is never asked again, and a false probe never
+    /// replaces a true another caller kept meanwhile.
     #[test]
     fn a_false_route_answer_is_asked_again_by_the_host_read_and_a_true_one_is_kept() {
         let kept: KeptRoute = Mutex::new(None);
