@@ -1383,3 +1383,86 @@ fn a_tools_on_research_job_under_no_network_runs_with_its_model_proxy_bound() {
     );
     assert!(!profile.contains("(remote ip \"*:"), "{profile}");
 }
+
+/// Writes a harness standing in for Codex that exits at once with no report, for a row that
+/// reads what the runner wrote before the launch. Takes the folder. Returns the harness.
+fn exiting_harness(folder: &Path) -> PathBuf {
+    let harness = folder.canonicalize().unwrap().join("codex");
+    fs::write(&harness, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&harness, fs::Permissions::from_mode(0o700)).unwrap();
+    harness
+}
+
+/// Runs one queued research job through a stand-in Codex that exits at once, on a loopback
+/// endpoint that takes connections and never answers, so no model and no network is needed.
+/// Takes the case, the research kind and the tools switch. Returns the sandbox profile the
+/// runner wrote for the job and the endpoint's port.
+fn stand_in_profile(case: &Case, kind: &str, tools: bool) -> (String, u16) {
+    let folder = harness_folder();
+    let harness = exiting_harness(folder.path());
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs.enqueue("project-a", kind, "codex", tools).unwrap();
+    let provider = listening_provider();
+    let port = provider.local_addr().unwrap().port();
+    assert!(!crazyagent::sandbox::OWNER_PORTS.contains(&port), "{port}");
+    let run = ResearchRunner::new(
+        &case.database,
+        &case.state,
+        &harness,
+        limits(Duration::from_secs(60)),
+    )
+    .unwrap()
+    .run_once(&project(case, Some(endpoint(port))))
+    .unwrap()
+    .unwrap();
+    assert_eq!(run.job, id);
+    let profile =
+        fs::read_to_string(case.state.join("profiles").join(format!("job-{id}-1.sb"))).unwrap();
+    (profile, port)
+}
+
+/// A tools-on research job's written sandbox profile denies by default, opens the project
+/// folder and names both context folders. A stand-in harness runs the job, so the row needs
+/// no model; the live row checks a real run (rv-sec3 engine-hermetic F1).
+#[test]
+fn a_tools_on_research_job_profile_denies_by_default_and_opens_the_project_and_its_context() {
+    let case = case("A plain project.");
+    let (profile, _) = stand_in_profile(&case, "market_research", true);
+    assert!(
+        profile.starts_with("(version 1)\n(deny default)\n"),
+        "{profile}"
+    );
+    assert!(
+        profile.contains(&format!("(subpath \"{}\")", case.project.display())),
+        "{profile}"
+    );
+    assert_eq!(case.crazyagent, case.project.join(".crazyagent"));
+    let pattern = case.project.display().to_string().replace('.', "\\.");
+    let context = "[cC][oO][nN][tT][eE][xX][tT](/.*)?$";
+    assert!(
+        profile.contains(&format!("(regex #\"^{pattern}/{context}\")")),
+        "{profile}"
+    );
+    assert!(
+        profile.contains(&format!(
+            "(regex #\"^{pattern}/\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/{context}\")"
+        )),
+        "{profile}"
+    );
+}
+
+/// A tools-off research job's written sandbox profile allows no network but the model
+/// endpoint's port on loopback. A stand-in harness runs the job, so the row needs no model;
+/// the live row checks a real run (rv-sec3 engine-hermetic F1).
+#[test]
+fn a_tools_off_research_job_profile_reaches_only_its_model_port_on_loopback() {
+    let case = case("A plain project.");
+    let (profile, port) = stand_in_profile(&case, "design_research", false);
+    assert!(!profile.contains("(allow network*)"), "{profile}");
+    assert!(
+        profile.contains(&format!(
+            "(allow network-outbound (remote ip \"localhost:{port}\"))"
+        )),
+        "{profile}"
+    );
+}
