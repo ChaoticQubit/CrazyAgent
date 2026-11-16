@@ -194,11 +194,33 @@ export async function speedSide(app) {
   return side;
 }
 
+/** Times one onboarding start of a new folder in the projects folder, the step that picks the
+ * folder's project id past held ids and leftover rows (rv-code4 r2 F2), then removes that
+ * project from the dashboard so the app's rows read the same projects every run. Inputs: the
+ * bridge, the projects folder and the first client generation free. Output: the ms from asking
+ * to the engine's receipt. */
+async function onboardStart(bridge, projects, generation) {
+  assert.ok(Number.isSafeInteger(generation) && generation >= 1, "a client generation");
+  const name = `speed-onboard-${Date.now()}`;
+  const folder = join(projects, name);
+  mkdirSync(folder, { mode: 0o700 });
+  const asked = performance.now();
+  const started = await value(bridge, "desktop_start_onboarding", { path: folder, pool: "local-pool", generation });
+  const ms = performance.now() - asked;
+  assert.equal(started?.outcome, "applied", `onboarding starts: ${JSON.stringify(started)}`);
+  assert.equal(started.project_id, name, "the new folder gets its own name's id");
+  const removed = await value(bridge, "desktop_remove_project", { id: started.project_id, generation: generation + 1 });
+  assert.equal(removed?.outcome, "applied", `the timed project leaves the dashboard: ${JSON.stringify(removed)}`);
+  assert.ok(Number.isFinite(ms) && ms >= 0, "an onboarding start time");
+  return ms;
+}
+
 /** Readies a speed side once its engine runs: checks that a start over seeded leftover ids
- * held every one, seeds the side on first use, then times the project page's reads (row T5)
- * through the side's own bridge, which stops before the app starts. Inputs: the side, the run
- * environment and the evidence folder. Output: the seeded project, its sessions, the leftover
- * ids seeded and held at this start, and the round-trip samples. */
+ * held every one, seeds the side on first use, times the project page's reads (row T5)
+ * through the side's own bridge, which stops before the app starts, and, on a run that did not
+ * seed, one onboarding start. Inputs: the side, the run environment and the evidence folder.
+ * Output: the seeded project, its sessions, the leftover ids seeded and held at this start,
+ * the round-trip samples and the onboarding start time, or null on the seeding run. */
 export async function prepareSpeedSide(side, env, evidence) {
   assert.ok(Number.isInteger(side.leftovers) && side.leftovers >= 0, "speedSide counted the leftover ids");
   const leftovers = { seeded: side.leftovers, held: side.leftovers ? heldLeftovers(side.runtime) : 0 };
@@ -206,11 +228,14 @@ export async function prepareSpeedSide(side, env, evidence) {
   const started = await start(side.bridge, [join(side.runtime, "engine.sock")], { ...env }, evidence, "speed-bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
   try {
     const bridge = { port: Number(started.match[1]), token: started.match[2] };
-    if (!existsSync(side.seeded)) writeFileSync(side.seeded, JSON.stringify(await seedSide(bridge, side.projects)), { flag: "wx", mode: 0o600 });
+    const seeding = !existsSync(side.seeded);
+    if (seeding) writeFileSync(side.seeded, JSON.stringify(await seedSide(bridge, side.projects)), { flag: "wx", mode: 0o600 });
     const seeded = JSON.parse(readFileSync(side.seeded, "utf8"));
     assert.equal((await value(bridge, "desktop_connect")).connected, true, "the bridge connects");
     const { ticket } = await value(bridge, "desktop_open_project", { id: seeded.project });
-    return { seeded, leftovers, round_trip_ms: await roundTrips(bridge, speedReads(seeded, ticket)) };
+    const round_trip_ms = await roundTrips(bridge, speedReads(seeded, ticket));
+    const onboard_start_ms = seeding ? null : await onboardStart(bridge, side.projects, 1);
+    return { seeded, leftovers, round_trip_ms, onboard_start_ms };
   } finally {
     await stop(started.child);
   }

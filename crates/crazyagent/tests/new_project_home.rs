@@ -1059,3 +1059,50 @@ async fn a_demo_made_again_is_in_only_the_pool_it_picked() {
     drop(owner);
     engine.stop().await;
 }
+
+/// rv-code4 r2 F1: the demo's folder is named so its id is the live demo's id, so adding that
+/// folder is refused `project_exists`, never onboarded as `crazyagent-demo-2` in the same
+/// folder.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_the_demos_own_folder_is_refused() {
+    use crazyagent::protocol::CredentialRef;
+    let engine = Engine::with_settings(DEMO_POOL).await;
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let home = place.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    sign_in(engine.root.path(), "profile-codex");
+    let mut owner = OwnerController::attach(
+        engine.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    let response = owner
+        .set_projects_home(home.to_str().unwrap().into(), 1)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let pool = CredentialRef::new("pool-codex").unwrap();
+    let response = owner.create_demo(pool.clone(), 2).await.unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let folders: Vec<PathBuf> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir() && !path.file_name().unwrap().to_string_lossy().starts_with('.'))
+        .collect();
+    assert_eq!(folders.len(), 1, "the demo's one folder: {folders:?}");
+    let response = owner
+        .start_onboarding(folders[0].to_str().unwrap().into(), pool, 3)
+        .await
+        .unwrap();
+    assert_eq!(result(response), rejected("project_exists"));
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    let projects: i64 = db
+        .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(projects, 1, "the demo stays the folder's one project");
+    drop(owner);
+    engine.stop().await;
+}

@@ -179,17 +179,16 @@ fn the_backfill_runs_once_and_every_later_open_skips_it() {
 }
 
 /// Leader 01:11, run-once vetoed alone: an id with rows left after the backfill ran, as a
-/// build without the removal record leaves them, is stepped over as if held, whatever the
-/// case of the rows' id; a leftover onboarding row alone is not, since starting onboarding
-/// replaces or refuses that row itself.
+/// build without the removal record leaves them, is stepped over as if held; a leftover
+/// onboarding row alone is not, since starting onboarding replaces or refuses that row
+/// itself.
 #[test]
 fn a_leftover_written_after_the_backfill_still_blocks_its_id() {
     let (_directory, db) = database();
     assert!(hold_left(&db).unwrap().is_some());
     db.execute_batch(
         "INSERT INTO memory_library(id,project,origin,text) VALUES
-            ('m1','late-app','{\"kind\":\"written\"}','Written after the first open.'),
-            ('m2','Loud-App','{\"kind\":\"written\"}','Written under capitals.');
+            ('m1','late-app','{\"kind\":\"written\"}','Written after the first open.');
          INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
             VALUES ('draft-app','/gone/draft-app','pool-team','done','done','{}',1,1);",
     )
@@ -202,15 +201,85 @@ fn a_leftover_written_after_the_backfill_still_blocks_its_id() {
         "a leftover written after the backfill still blocks its id"
     );
     assert_eq!(
-        free_id(&db, Path::new("/p/loud-app")).unwrap(),
-        Ok(id("loud-app-2"))
-    );
-    assert_eq!(
         free_id(&db, Path::new("/p/draft-app")).unwrap(),
         Ok(id("draft-app"))
     );
     assert!(!held(&db, &id("late-app")).unwrap(), "the probe holds nothing itself");
     assert_eq!(count(&db, "SELECT count(*) FROM projects_removed"), recorded);
+}
+
+/// rv-code4 r2 F2: the probe reads each table by the exact id first, through its index; it
+/// reads every row case-insensitively only where a row under another case can exist: the id
+/// asked about has capitals, or a live or removed project's id has, as only CreateProject
+/// ids can.
+#[test]
+fn the_case_pass_runs_only_where_a_row_under_another_case_can_exist() {
+    let (_directory, db) = database();
+    db.execute_batch(
+        "INSERT INTO memory_library(id,project,origin,text) VALUES
+            ('m1','Loud-App','{\"kind\":\"written\"}','Written under capitals.'),
+            ('m2','quiet-app','{\"kind\":\"written\"}','Written in lower case.');",
+    )
+    .unwrap();
+    assert!(left(&db, &id("quiet-app")).unwrap(), "the exact pass");
+    assert!(
+        !left(&db, &id("loud-app")).unwrap(),
+        "no id under another case is known, so only the exact pass runs"
+    );
+    assert!(
+        left(&db, &id("Quiet-App")).unwrap(),
+        "an id with capitals reads every case"
+    );
+    db.execute(
+        "INSERT INTO projects_removed(project,folder,returns,removed_ms) VALUES ('Was-Loud',NULL,0,0)",
+        [],
+    )
+    .unwrap();
+    assert!(
+        left(&db, &id("loud-app")).unwrap(),
+        "a removed id with capitals turns the case pass on"
+    );
+    db.execute("DELETE FROM projects_removed", []).unwrap();
+    assert!(!left(&db, &id("loud-app")).unwrap());
+    live(&db, "Shout-App");
+    assert!(
+        left(&db, &id("loud-app")).unwrap(),
+        "a live id with capitals turns the case pass on"
+    );
+    assert_eq!(
+        free_id(&db, Path::new("/p/loud-app")).unwrap(),
+        Ok(id("loud-app-2"))
+    );
+    assert!(!left(&db, &id("shout-app")).unwrap(), "a live id's rows are its own");
+}
+
+/// Leader 01:25 and 01:27: CreateProject goes through the probe too, so no create path gives
+/// out an id an old build's removal left rows under; a refused create writes nothing.
+#[test]
+fn create_project_refuses_an_id_with_leftover_rows() {
+    let (_directory, mut db) = database();
+    db.execute_batch(
+        "INSERT INTO memory_library(id,project,origin,text) VALUES
+            ('m1','left-app','{\"kind\":\"written\"}','A note an old build left.');",
+    )
+    .unwrap();
+    let spec = ProjectSpec {
+        name: "Left app".into(),
+        repositories: vec![],
+    };
+    let tx = db.transaction().unwrap();
+    assert_eq!(
+        crate::storage::create_project(&tx, &id("left-app"), &spec).unwrap(),
+        Outcome::Rejected {
+            code: "project_id_removed".into()
+        }
+    );
+    tx.commit().unwrap();
+    assert_eq!(count(&db, "SELECT count(*) FROM projects"), 0);
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM memory_library WHERE project='left-app'"),
+        1
+    );
 }
 
 /// rv-sa241 N2: the backfill never fills the record past `REMOVED_MAX`, so leftover ids of an

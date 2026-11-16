@@ -2509,11 +2509,11 @@ async fn removed_project_kept_research_does_not_reach_a_project_reusing_the_id()
     engine.stop().await;
 }
 
-/// SA research id reuse: knowledge rows a build before the fix left for a removed project's
-/// id, kept research among them, are gone once a project is created under that id, so its
-/// agents never get them.
+/// SA research id reuse, now with the leftover probe (leader 01:27): knowledge rows a build
+/// before the fix left for a removed project's id, kept research among them, keep that id
+/// from being given out, so no project is created under it and no agent ever gets them.
 #[test]
-fn a_project_created_under_a_removed_projects_id_starts_with_none_of_its_knowledge() {
+fn a_project_id_with_a_removed_projects_knowledge_left_is_refused_so_none_attaches() {
     let directory = tempfile::tempdir().unwrap();
     let mut db = rusqlite::Connection::open(directory.path().join("engine.db")).unwrap();
     crate::storage::initialize_authority_schemas(&db).unwrap();
@@ -2536,33 +2536,23 @@ fn a_project_created_under_a_removed_projects_id_starts_with_none_of_its_knowled
     };
     assert_eq!(
         crate::storage::create_project(&tx, &ProjectId::new("mem-left").unwrap(), &spec).unwrap(),
-        Outcome::Applied
+        Outcome::Rejected {
+            code: "project_id_removed".into()
+        }
     );
     tx.commit().unwrap();
-    for table in [
-        "knowledge_sources",
-        "knowledge_entries",
-        "knowledge_heads",
-        "knowledge_activity",
-        "knowledge_nominations",
-        "knowledge_jobs",
-        "knowledge_watermarks",
-    ] {
-        let left: i64 = db
-            .query_row(
-                &format!("SELECT COUNT(*) FROM {table} WHERE project='mem-left'"),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(left, 0, "{table} keeps a row of the removed project");
-    }
+    let made: i64 = db
+        .query_row("SELECT COUNT(*) FROM projects WHERE id='mem-left'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(made, 0, "no project takes the removed project's id");
     let globals: i64 = db
         .query_row("SELECT COUNT(*) FROM knowledge_globals", [], |row| {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(globals, 0, "an app-wide candidate of its entry is left");
+    assert_eq!(globals, 1, "a refused create changes nothing");
     let other: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM knowledge_heads WHERE project='mem-kept'",

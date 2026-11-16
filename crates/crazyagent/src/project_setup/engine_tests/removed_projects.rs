@@ -299,6 +299,43 @@ async fn new_project_refuses_an_id_with_leftover_rows() {
     engine.stop().await;
 }
 
+/// rv-code4 r2 F1: a live project's own folder, which has no onboarding row when New Project
+/// made it, is refused `project_exists` when it is added, never onboarded as a second
+/// project in the same folder.
+#[tokio::test]
+async fn adding_a_live_new_projects_own_folder_is_refused() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let created = owner
+        .setup_project(project.clone(), spec("Meal planner"), pooled_setup(vec![]), 1)
+        .await
+        .unwrap();
+    assert_eq!(result(created), OwnerResult::Applied);
+    let own = {
+        let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+        db.busy_timeout(ENGINE_WAIT).unwrap();
+        crate::project_setup::load_setup(&db, &project)
+            .unwrap()
+            .unwrap()
+            .project_folder()
+    };
+    assert!(own.is_dir());
+    assert_eq!(
+        onboard(&mut owner, &own, 2).await,
+        rejected("project_exists"),
+        "a live project's own folder is never a second project"
+    );
+    assert_eq!(engine.rows("SELECT count(*) FROM projects"), 1);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM onboarding"),
+        0,
+        "nothing of an onboarding is written"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
 #[tokio::test]
 async fn a_full_record_refuses_a_removal_before_anything_is_removed() {
     let engine = Engine::start().await;
