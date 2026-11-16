@@ -1431,9 +1431,9 @@ mod tests {
     }
 
     /// DEC-178 addendum 1: a started onboarding's receipt names the project the engine gave,
-    /// `my-app-2` when `my-app` is held by a removal, not the folder slug guessed when the
-    /// change began; a replayed plain Applied keeps the guess, and no other change may carry
-    /// an engine-given project.
+    /// `my-app-2` when `my-app` is held by a removal; a replayed plain Applied names none, so
+    /// the window finds the project by its folder (rv-secreview S2 F1), and no other change
+    /// may carry an engine-given project.
     #[test]
     fn a_started_onboarding_receipt_names_the_project_the_engine_gave() {
         let started = || OwnerResult::OnboardingStarted {
@@ -1445,10 +1445,10 @@ mod tests {
         assert_eq!(refused, None);
         assert_eq!(intent.project_id.as_deref(), Some("my-app-2"));
 
-        let mut replayed = kept("start_onboarding", Some("my-app"));
+        let mut replayed = kept("start_onboarding", None);
         let (outcome, _) = settled(&mut replayed, OwnerResult::Applied).unwrap();
         assert_eq!(outcome, ActionOutcome::Applied);
-        assert_eq!(replayed.project_id.as_deref(), Some("my-app"));
+        assert_eq!(replayed.project_id, None);
 
         let mut other = kept("remove_project", Some("notes"));
         assert_eq!(

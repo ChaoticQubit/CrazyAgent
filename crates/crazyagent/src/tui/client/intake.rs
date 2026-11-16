@@ -502,3 +502,11 @@ fn started(path: &str) -> Result<ProjectId, String> {
     crate::onboarding::project_id_for(std::path::Path::new(path))
         .map_err(|error| bounded_problem(&error.0))
 }
+
+/// Reads the project a started onboarding opens from the engine's answer: the id the engine
+/// gave, or `intake_change_outcome_unknown` for a plain Applied, never an id guessed from the
+/// folder. Input: the applied result. Output: the project id, or the code.
+fn onboarded(result: OwnerResult) -> Result<ProjectId, String> {
+    let _ = result;
+    Err(String::new())
+}

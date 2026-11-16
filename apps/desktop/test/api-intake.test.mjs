@@ -174,3 +174,9 @@ test("an iCloud refusal reads as a plain sentence that keeps the folder safe", (
   assert.match(api.intakeCopy("home_permission_denied"), /System Settings > Privacy & Security > Files and Folders/);
   assert.equal(api.intakeCopy("icloud_download_busy"), "Another iCloud download is running. Wait for it to finish.");
 });
+
+test("a started onboarding's kept change guesses no project from the folder name, so only the engine's id names it (rv-secreview S2 F1)", () => {
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge.rs", import.meta.url), "utf8");
+  assert.match(bridge, /OwnerMutation::StartOnboarding \{ \.\. \} => \("start_onboarding", None, None\)/);
+  assert.ok(!bridge.includes("onboarded_project("), "no folder-name guess is left in the bridge");
+});

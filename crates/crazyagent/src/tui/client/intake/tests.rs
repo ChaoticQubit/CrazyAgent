@@ -458,3 +458,21 @@ async fn a_second_rule_switch_while_one_runs_is_refused_at_once() {
     assert!(event.result.is_err(), "{:?}", event.result);
     service.shutdown().await.unwrap();
 }
+
+/// rv-secreview S2 F1: a started onboarding opens only the id the engine gave; a plain
+/// Applied, which only a record a pre-S1 engine stored can answer, is not confirmed, never
+/// opened under an id guessed from the folder name.
+#[test]
+fn only_the_engine_given_id_opens_a_started_onboarding() {
+    let given = crate::protocol::ProjectId::new("my-app-2").unwrap();
+    assert_eq!(
+        super::onboarded(OwnerResult::OnboardingStarted {
+            project_id: given.clone(),
+        }),
+        Ok(given)
+    );
+    assert_eq!(
+        super::onboarded(OwnerResult::Applied),
+        Err("intake_change_outcome_unknown".to_owned())
+    );
+}
