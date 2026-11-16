@@ -23,6 +23,18 @@ const NOT_PUT_BACK: &str = "Keep awake could not put back a sleep setting it cha
                             again when the engine starts.";
 const NOT_READ: &str = "Keep awake could not read its list of sleep settings to put back. It \
                         tries again when the engine starts.";
+const NOT_THAWED: &str = "Keep awake could not start an app again that it paused while the lid \
+                          was closed. Run crazyagent keep-awake restore, or quit the app and \
+                          open it again.";
+const NOT_UNMUTED: &str = "Keep awake could not put the sound back after the lid was closed. Run \
+                           crazyagent keep-awake restore, or check the sound settings.";
+const AGENTS_UNKNOWN_TEXT: &str = "Keep awake did not pause the apps you chose while the \
+                                   lid was closed: it could not tell which processes belong \
+                                   to agents. They kept running.";
+const APPS_UNREAD_TEXT: &str = "Keep awake did not pause the apps you chose while the lid \
+                                was closed: it could not read which apps are running. They \
+                                kept running.";
+const APPS_NOT_PAUSED_SUBJECT: &str = "keep_awake_apps_not_paused:";
 const HOT_UNTIL_CRITICAL: &str =
     "This computer is running hot. Keep awake goes on and ends if the heat gets critical.";
 const HOT_NEVER_ENDS: &str =
@@ -54,6 +66,11 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS keep_awake_restore (
 const _: () = assert!(ENTRIES_MAX < SOURCE_ROWS_MAX);
 const _: () = assert!(NOT_PUT_BACK.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(NOT_READ.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(NOT_THAWED.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(NOT_UNMUTED.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(AGENTS_UNKNOWN_TEXT.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(APPS_UNREAD_TEXT.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(APPS_NOT_PAUSED_SUBJECT.len() + 20 <= 128);
 const _: () = assert!(HOT_UNTIL_CRITICAL.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(HOT_NEVER_ENDS.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(LID_JOURNAL_TEXT.len() <= TEXT_BYTES_MAX);
@@ -123,6 +140,34 @@ pub(crate) fn hold_ended(connection: &Connection, ended: EndReason, since_ms: i6
         project_id: None,
         subject: &subject,
         text: &text,
+        target: NoticeTarget::KeepAwake,
+    };
+    note(connection, &info, now);
+}
+
+/// The words of an "Apps not paused" notice (QUESTION-03:02 A): why the lid-closed lane
+/// froze none of the chosen apps. Input: true when it could not tell which processes
+/// belong to agents, false when it could not read the running apps. Output: the text.
+pub fn apps_not_paused_text(agents_unknown: bool) -> &'static str {
+    if agents_unknown {
+        AGENTS_UNKNOWN_TEXT
+    } else {
+        APPS_UNREAD_TEXT
+    }
+}
+
+/// Records that the lid-closed lane froze none of the chosen apps, once per refusal
+/// (rv-code T17b r1 F1, QUESTION-03:02 A). Inputs: the engine database, whether agents
+/// could not be told apart, and the time of the step that saw it. Output: none; a write
+/// that fails is logged.
+pub(crate) fn apps_not_paused(connection: &Connection, agents_unknown: bool, now: i64) {
+    assert!(now > 0);
+    let subject = format!("{APPS_NOT_PAUSED_SUBJECT}{now}");
+    let info = InfoNotice {
+        kind: NoticeKind::KeepAwakeAppsNotPaused,
+        project_id: None,
+        subject: &subject,
+        text: apps_not_paused_text(agents_unknown),
         target: NoticeTarget::KeepAwake,
     };
     note(connection, &info, now);
@@ -212,6 +257,41 @@ pub(crate) fn lid_journal(connection: &Connection, unreadable: bool) -> Result<(
     Ok(())
 }
 
+/// Writes or clears the restore rows of the lid-closed lane (rv-secreview and rv-code T17
+/// r1): one row per kind the lane could not put back after three tries while the engine
+/// runs, freeze or mute only, and none once it put everything back. Rows of any other
+/// subject stay. Inputs: the engine database outside any transaction and the kinds left.
+/// Output: Ok, or the SQLite failure, with nothing changed.
+pub(crate) fn lid_closed_left(connection: &Connection, kinds: &[&str]) -> Result<(), EngineError> {
+    assert!(connection.is_autocommit());
+    let lane = [
+        crate::keep_awake::freeze::KIND,
+        crate::keep_awake::mute::KIND,
+    ];
+    assert!(kinds.len() <= lane.len());
+    assert!(kinds.iter().all(|kind| lane.contains(kind)));
+    let tx =
+        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    for kind in lane {
+        let subject = format!("{ENTRY_SUBJECT}{kind}");
+        let changed = if kinds.contains(&kind) {
+            tx.execute(
+                "INSERT INTO keep_awake_restore(subject,unreadable) VALUES(?1,0) \
+                 ON CONFLICT(subject) DO NOTHING",
+                [&subject],
+            )
+        } else {
+            tx.execute(
+                "DELETE FROM keep_awake_restore WHERE subject=?1",
+                [&subject],
+            )
+        }
+        .map_err(error)?;
+        assert!(changed <= 1);
+    }
+    tx.commit().map_err(error)
+}
+
 /// The approval source (QUESTION 35j): one condition while the lid helper waits for the
 /// owner's approval in System Settings. A missing Keep awake state reports nothing.
 /// Inputs: the engine database and the model access, which it does not need. Output: the
@@ -241,12 +321,16 @@ pub(super) fn approvals(
 
 /// The line of a restore item. Inputs: its subject and whether the journal could not be
 /// read. Output: the line; the lid row has the fix of threat model section 8 on macOS and
-/// the Windows fix on Windows.
+/// the Windows fix on Windows, and an app left paused or a sound left muted names the
+/// restore command (Task 17).
 fn restore_text(subject: &str, unreadable: bool) -> &'static str {
+    let kind = subject.strip_prefix(ENTRY_SUBJECT);
     match (subject == LID_SUBJECT, unreadable) {
         (true, _) if cfg!(windows) => LID_SETTING_TEXT,
         (true, _) => LID_JOURNAL_TEXT,
         (false, true) => NOT_READ,
+        (false, false) if kind == Some(crate::keep_awake::freeze::KIND) => NOT_THAWED,
+        (false, false) if kind == Some(crate::keep_awake::mute::KIND) => NOT_UNMUTED,
         (false, false) => NOT_PUT_BACK,
     }
 }

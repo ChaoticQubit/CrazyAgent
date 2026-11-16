@@ -116,10 +116,11 @@ pub enum NoticeKind {
     TeamAlert,
     KeepAwakeEnded,
     KeepAwakeHeat,
+    KeepAwakeAppsNotPaused,
 }
 
 impl NoticeKind {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::Question,
         Self::AccountSignIn,
         Self::ResearchPool,
@@ -144,6 +145,7 @@ impl NoticeKind {
         Self::TeamAlert,
         Self::KeepAwakeEnded,
         Self::KeepAwakeHeat,
+        Self::KeepAwakeAppsNotPaused,
     ];
 
     /// The kind's class. Input: the kind. Output: Action for the seven kinds the owner must
@@ -189,6 +191,7 @@ impl NoticeKind {
             Self::KeepAwakeApproval => "keep_awake_approval",
             Self::KeepAwakeEnded => "keep_awake_ended",
             Self::KeepAwakeHeat => "keep_awake_heat",
+            Self::KeepAwakeAppsNotPaused => "keep_awake_apps_not_paused",
         }
     }
 
@@ -220,6 +223,7 @@ impl NoticeKind {
             Self::KeepAwakeApproval => "Lid hold approval",
             Self::KeepAwakeEnded => "Keep awake ended",
             Self::KeepAwakeHeat => "Hot during Keep awake",
+            Self::KeepAwakeAppsNotPaused => "Apps not paused",
         }
     }
 

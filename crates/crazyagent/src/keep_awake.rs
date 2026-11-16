@@ -1,5 +1,6 @@
 #[cfg(target_os = "linux")]
 mod display_linux;
+pub mod freeze;
 pub mod hold;
 #[cfg(target_os = "linux")]
 mod hold_linux;
@@ -12,6 +13,7 @@ pub mod journal;
 pub(crate) mod lid_windows;
 #[cfg(target_os = "linux")]
 mod low_power_linux;
+pub mod mute;
 pub mod power;
 pub mod power_linux;
 pub mod power_macos;
@@ -26,10 +28,11 @@ pub mod work;
 #[cfg(test)]
 mod tests;
 
+pub use freeze::FreezeApp;
 pub use hold::{Held, Hold, HoldError, REASON, platform_hold};
 pub use settings::{
-    BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeSettings, LidDisplay,
-    LidRule, LowPower, Mode,
+    BatteryFloor, Cap, DisplayAwake, Freeze, Grace, HeatEnd, HeatNotice, KeepAwakeSettings,
+    LidDisplay, LidRule, LowPower, Mode, Mute,
 };
 pub use state::{
     Decision, EndReason, Heat, Inputs, LidSupport, LowPowerSupport, PowerSource, Reason,
@@ -69,9 +72,9 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS keep_awake_state (
 /// One owner change to Keep awake: start a manual timer of 1 to 1440 minutes, move a
 /// running timer later, end the hold now, save the settings over the settings version the
 /// client read, a macOS lid helper command: Turn on lid-closed hold, or Remove lid helper
-/// (QUESTION 35i, 35j, 36a), or Put the lid setting back now on Windows (DEC-167
-/// addendum 32).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// (QUESTION 35i, 35j, 36a), Put the lid setting back now on Windows (DEC-167 addendum
+/// 32), or save the apps frozen while the lid is closed (Task 17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum KeepAwakeAction {
     Start {
@@ -88,14 +91,19 @@ pub enum KeepAwakeAction {
     TurnOnLidHold,
     RemoveLidHelper,
     PutLidBack,
+    FreezeApps {
+        apps: Vec<FreezeApp>,
+    },
 }
 
 impl KeepAwakeAction {
-    /// Checks the bounds a change carries by itself. Input: the change. Output: Ok, or
-    /// `keep_awake_minutes_invalid` for minutes outside 1 to 1440.
+    /// Checks the bounds a change carries by itself. Input: the change. Output: Ok,
+    /// `keep_awake_minutes_invalid` for minutes outside 1 to 1440, or
+    /// `keep_awake_apps_invalid` for an app list out of bounds.
     pub fn validate(&self) -> Result<(), EngineError> {
         let minutes = match self {
             Self::Start { minutes } | Self::Extend { minutes } => *minutes,
+            Self::FreezeApps { apps } => return freeze::validate_apps(apps),
             Self::End
             | Self::Set { .. }
             | Self::TurnOnLidHold
@@ -121,6 +129,7 @@ pub fn refusal_words(code: &str) -> Option<&'static str> {
         "keep_awake_no_lid_setting" => Some("Put the lid setting back is only on Windows."),
         "keep_awake_lid_held" => Some("The lid setting goes back when this hold ends."),
         versioned::STALE_CODE => Some("Keep awake changed in another window meanwhile. Try again."),
+        "keep_awake_apps_invalid" => Some("Pick at most 16 apps, each once."),
         _ => None,
     }
 }
@@ -128,8 +137,8 @@ pub fn refusal_words(code: &str) -> Option<&'static str> {
 /// What the owner sees of Keep awake: the settings, the last decision (with the reason the
 /// last hold ended until a new one starts), whether the lid is covered, what the platform
 /// itself says of the lid whatever the rule (QUESTION 36c: Settings offers Turn on and
-/// Remove lid helper from it), the platform, the running work count and the settings
-/// version a save sends back.
+/// Remove lid helper from it), the platform, the running work count, the settings version
+/// a save sends back and the apps frozen while the lid is closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeepAwakeView {
@@ -140,6 +149,7 @@ pub struct KeepAwakeView {
     pub lid_platform: LidSupport,
     pub platform: Platform,
     pub work: u32,
+    pub freeze_apps: Vec<FreezeApp>,
 }
 
 /// The run state the engine keeps between evaluations, gone at every engine start: the
@@ -183,6 +193,7 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// database. Output: Ok, or the database error.
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     settings::initialize(connection)?;
+    freeze::initialize(connection)?;
     connection.execute_batch(TABLE).map_err(error)
 }
 
@@ -348,6 +359,7 @@ fn change(
             }
             *settings = chosen;
         }
+        KeepAwakeAction::FreezeApps { .. } => {}
         KeepAwakeAction::TurnOnLidHold | KeepAwakeAction::RemoveLidHelper => {
             if !cfg!(target_os = "macos") {
                 return Some("keep_awake_no_lid_helper");
@@ -382,8 +394,15 @@ fn lid_order(stored: &mut Stored, command: power::LidCommand) {
     assert_eq!(stored.lid_order.map(|order| order.command), Some(command));
 }
 
-/// Builds the owner's view from the settings, their version and the run state.
-fn view_of(settings: KeepAwakeSettings, version: u64, stored: &Stored) -> KeepAwakeView {
+/// Builds the owner's view from the settings, their version, the chosen apps and the run
+/// state.
+fn view_of(
+    settings: KeepAwakeSettings,
+    version: u64,
+    freeze_apps: Vec<FreezeApp>,
+    stored: &Stored,
+) -> KeepAwakeView {
+    assert!(freeze_apps.len() <= freeze::APPS_MAX);
     KeepAwakeView {
         settings,
         version,
@@ -392,6 +411,7 @@ fn view_of(settings: KeepAwakeSettings, version: u64, stored: &Stored) -> KeepAw
         lid_platform: stored.sensors.lid_support.clone(),
         platform: Platform::CURRENT,
         work: stored.work,
+        freeze_apps,
     }
 }
 
@@ -427,6 +447,7 @@ fn evaluated(
         stored.sensors = sensors.clone();
     }
     let work = work::count(&tx)?;
+    let apps = freeze::load_apps(&tx)?;
     advance(&settings, &mut stored, work, now_ms);
     if dirty || stored != before {
         save_state(&tx, &stored, false)?;
@@ -434,7 +455,7 @@ fn evaluated(
     }
     tx.commit().map_err(error)?;
     assert!(stored.lid_order.is_none_or(|order| order.number > 0));
-    Ok((view_of(settings, version, &stored), stored.lid_order))
+    Ok((view_of(settings, version, apps, &stored), stored.lid_order))
 }
 
 /// Applies one owner change (DEC-167): a timer start, a timer move, End, or new settings,
@@ -465,6 +486,9 @@ pub(crate) fn apply(
         }
         settings::save(tx, &settings)?;
     }
+    if let KeepAwakeAction::FreezeApps { apps } = action {
+        freeze::save_apps(tx, apps)?;
+    }
     let work = work::count(tx)?;
     advance(&settings, &mut stored, work, now_ms);
     save_state(tx, &stored, true)?;
@@ -486,7 +510,12 @@ pub fn view(connection: &Connection) -> Result<KeepAwakeView, EngineError> {
     let version = settings_version(connection)?;
     let settings = settings::load(connection)?;
     let (stored, _) = load_state(connection)?;
-    Ok(view_of(settings, version, &stored))
+    Ok(view_of(
+        settings,
+        version,
+        freeze::load_apps(connection)?,
+        &stored,
+    ))
 }
 
 /// The owner read of Keep awake. Input: the open transaction. Output: the view as owner
@@ -521,24 +550,29 @@ fn hold_failed(connection: &Connection, now_ms: i64) -> Result<KeepAwakeView, En
     };
     save_state(&tx, &stored, dirty)?;
     noted(&tx, &settings, &before, &stored, now_ms);
+    let apps = freeze::load_apps(&tx)?;
     tx.commit().map_err(error)?;
     assert_eq!(stored.decision.want, Want::Nothing);
-    Ok(view_of(settings, version, &stored))
+    Ok(view_of(settings, version, apps, &stored))
 }
 
 /// Undoes one persistent change an earlier engine recorded: on Windows the lid close
-/// action a hold changed (DEC-167 addendum 32); every other kind is refused and stays
-/// recorded. Input: the entry. Output: Ok, or why it is not undone.
+/// action a hold changed (DEC-167 addendum 32), a frozen app thawed when its identity still
+/// matches, and a muted sound put back (Task 17); every other kind is refused and stays
+/// recorded. Input: the entry. Output: Ok, or why it stays.
 fn undo(entry: &journal::Entry) -> Result<(), EngineError> {
     assert!(!entry.kind.is_empty());
     #[cfg(windows)]
     if entry.kind == lid_windows::KIND {
         return lid_windows::undo_with(&mut lid_windows::Windows, entry);
     }
-    Err(error(format!(
-        "keep_awake_journal_kind_unknown: {}",
-        entry.kind
-    )))
+    match entry.kind.as_str() {
+        freeze::KIND | mute::KIND => freeze::undo(entry),
+        _ => Err(error(format!(
+            "keep_awake_journal_kind_unknown: {}",
+            entry.kind
+        ))),
+    }
 }
 
 /// What the engine start's undo left (DEC-167 addendum 10): the kinds of the recorded
@@ -562,25 +596,32 @@ pub fn remove_lid_helper() -> Option<String> {
 
 /// Undoes at engine start every persistent change an earlier engine left behind (DEC-167)
 /// and says what it could not: the kinds of the entries still recorded, or a journal it
-/// could not open or read, which never counts as empty. A failure is logged by its code.
+/// could not open or read, which never counts as empty. Each journal file is undone on its
+/// own, so one that cannot be read never stops the others (Task 17 ASK item 1). The
+/// caller holds the journal lock, which covers both files, so no thaw guard or other
+/// process writes either meanwhile (DEC-167 addendum 36). A failure is logged by its code.
 /// Input: the engine root. Output: what was left.
-pub(crate) fn reconcile(root: &Path) -> Leftover {
-    let mut found = match journal::Journal::open(root) {
-        Ok(found) => found,
-        Err(problem) => {
-            eprintln!("keep awake journal: {}", short(&problem.0));
-            return Leftover::Unreadable;
+pub fn reconcile(root: &Path) -> Leftover {
+    let mut unreadable = false;
+    let mut kinds: Vec<String> = Vec::new();
+    for name in journal::NAMES {
+        let mut found = match journal::Journal::open_named(root, name) {
+            Ok(found) => found,
+            Err(problem) => {
+                eprintln!("keep awake journal {name}: {}", short(&problem.0));
+                unreadable = true;
+                continue;
+            }
+        };
+        if let Err(problem) = found.reconcile(undo) {
+            eprintln!("keep awake journal {name}: {}", short(&problem.0));
         }
-    };
-    if let Err(problem) = found.reconcile(undo) {
-        eprintln!("keep awake journal: {}", short(&problem.0));
+        kinds.extend(found.entries().iter().map(|entry| entry.kind.clone()));
     }
-    let kinds: Vec<String> = found
-        .entries()
-        .iter()
-        .map(|entry| entry.kind.clone())
-        .collect();
-    assert!(kinds.len() <= journal::ENTRIES_MAX);
+    assert!(kinds.len() <= journal::ENTRIES_MAX * journal::NAMES.len());
+    if unreadable {
+        return Leftover::Unreadable;
+    }
     Leftover::Kinds(kinds)
 }
 
@@ -684,6 +725,22 @@ fn noted(
     }
 }
 
+/// What the lid-closed lane covers (Task 17): the cover, only while the hold wants the lid,
+/// the lid reads closed, no external display is in use (fix5 QUESTION-01:45 A, leader
+/// 01:45: a closed computer driving a display is the owner at a desk) and the cover asks
+/// for a change. Inputs: whether the hold wants the lid, the last readings and the cover.
+/// Output: the cover, or none.
+pub(crate) fn lid_cover(
+    wanted: bool,
+    sensors: Option<&Sensors>,
+    cover: freeze::Cover,
+) -> Option<freeze::Cover> {
+    let closed = sensors.is_some_and(|sensors| {
+        sensors.lid_closed == Some(true) && sensors.external_display != Some(true)
+    });
+    (wanted && closed && cover.any()).then_some(cover)
+}
+
 /// The engine's Keep awake pacer: looks once a second for a changed work count, an owner
 /// change or a new platform reading and evaluates at once when it finds one, and every
 /// `TICK_MS` otherwise. After every evaluation it brings the platform hold, when it has
@@ -691,7 +748,9 @@ fn noted(
 /// every `power::READ_MS`; with a lid line there too, it hands the line what the lid
 /// wants with each ask, and at once when that changes, each owner lid command once, and
 /// notes a lid helper journal the line cannot read for the notification center. With a
-/// power line, it hands the line the low power ask the same way (Task 16).
+/// power line, it hands the line the low power ask the same way (Task 16). With a
+/// lid-closed lane it asks the lane to freeze the chosen apps and mute the sound while the
+/// lid is closed during a hold, and to undo both when that ends (Task 17).
 #[derive(Debug, Default)]
 pub struct Keeper {
     looked_ms: Option<i64>,
@@ -711,7 +770,14 @@ pub struct Keeper {
     battery_unread_twice: bool,
     lid_refused: bool,
     leftover: Option<Leftover>,
-    journal: Option<journal::JournalLock>,
+    journal: Option<std::sync::Arc<journal::JournalLock>>,
+    #[cfg(unix)]
+    lane: Option<freeze::Lane>,
+    covered: Option<freeze::Cover>,
+    #[cfg(unix)]
+    lane_noted: Vec<String>,
+    #[cfg(unix)]
+    lane_refused: u64,
 }
 
 impl Keeper {
@@ -769,6 +835,59 @@ impl Keeper {
         self
     }
 
+    /// Gives the keeper the lid-closed lane (Task 17). Input: the lane. Output: the keeper.
+    #[cfg(unix)]
+    pub fn with_lid_closed_lane(mut self, lane: freeze::Lane) -> Self {
+        assert!(self.lane.is_none());
+        self.lane = Some(lane);
+        self
+    }
+
+    /// Starts this engine's lid-closed lane (Task 17): the thaw guard runs this program,
+    /// the sound tool is the one this computer has, and the lane shares the journal lock
+    /// the keeper holds (DEC-167 addendum 36). Input: the engine root. Output: the keeper;
+    /// with no lock held, or a lane that cannot start, it is logged, and then nothing is
+    /// frozen or muted.
+    #[cfg(unix)]
+    pub fn with_platform_lane(self, root: &Path) -> Self {
+        let Some(lock) = self.journal.clone() else {
+            eprintln!("keep awake: no lid-closed lane: the journal lock is not held");
+            return self;
+        };
+        let program = match std::env::current_exe() {
+            Ok(program) => program,
+            Err(problem) => {
+                eprintln!("keep awake: no lid-closed lane: {problem}");
+                return self;
+            }
+        };
+        let engine = std::process::id();
+        match freeze::Lane::start(root.to_path_buf(), program, mute::platform(), engine, lock) {
+            Ok(lane) => self.with_lid_closed_lane(lane),
+            Err(problem) => {
+                eprintln!("keep awake: no lid-closed lane: {problem}");
+                self
+            }
+        }
+    }
+
+    /// Asks the lane for a changed cover: freeze and mute, or undo both. Input: what the
+    /// closed lid asks now, none when nothing is to be frozen or muted.
+    fn cover(&mut self, cover: Option<freeze::Cover>) {
+        assert!(cover.as_ref().is_none_or(freeze::Cover::any));
+        if self.covered == cover {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(lane) = self.lane.as_ref() {
+            match cover.clone() {
+                Some(cover) => lane.cover(cover),
+                None => lane.uncover(),
+            }
+        }
+        self.covered = cover;
+    }
+
     /// Gives the keeper what the engine start's undo left, which its next step writes to
     /// the restore state the notification center reads. Input: what was left. Output: the
     /// keeper.
@@ -780,11 +899,12 @@ impl Keeper {
 
     /// Keeps the journal lock the engine start took for the keeper's whole life (QUESTION
     /// 01:16 Q3), so `crazyagent keep-awake restore` refuses while this engine runs; on
-    /// Windows the lid line holds it instead, until the sensor thread ends. Input: the
-    /// lock, none when it was not taken or the lid line holds it. Output: the keeper.
+    /// Windows the lid line holds it instead, until the sensor thread ends. The lid-closed
+    /// lane shares it (DEC-167 addendum 36). Input: the lock, none when it was not taken or
+    /// the lid line holds it. Output: the keeper.
     pub fn with_journal(mut self, lock: Option<journal::JournalLock>) -> Self {
         assert!(self.journal.is_none());
-        self.journal = lock;
+        self.journal = lock.map(std::sync::Arc::new);
         self
     }
 
@@ -838,20 +958,34 @@ impl Keeper {
         self.lid_ask.sleep_display = false;
         self.lid_ask.low_power = false;
         self.low_power_under = None;
+        self.cover(None);
     }
 
-    /// Drops every hold as the engine stops (QUESTION 36d): the platform hold at once, and
-    /// the lid lease or the power saver hold through one last ask the sensor thread answers
-    /// within `STOP_WAIT`, or the lease runs out and the bus connection closes by itself.
+    /// Drops every hold as the engine stops (QUESTION 36d): the platform hold at once, the
+    /// lid lease or the power saver hold through one last ask the sensor thread answers,
+    /// and the lid-closed lane's thaw and unmute, all within one `STOP_WAIT` (Task 17 ASK
+    /// item 5); what is not done by then the lease, the bus connection or the thaw guard
+    /// finishes by itself.
     pub fn stop(&mut self) {
+        #[cfg(unix)]
+        let until = std::time::Instant::now() + STOP_WAIT;
         self.release();
         assert!(!self.lid_ask.wanted);
         assert!(!self.lid_ask.low_power);
-        if !self.lid_line && !self.power_line {
-            return;
+        #[cfg(unix)]
+        if let Some(lane) = self.lane.as_ref() {
+            lane.finish();
         }
-        if let Some(sensing) = self.sensing.as_mut() {
+        if (self.lid_line || self.power_line)
+            && let Some(sensing) = self.sensing.as_mut()
+        {
             sensing.finish(self.lid_ask, STOP_WAIT);
+        }
+        #[cfg(unix)]
+        if let Some(lane) = self.lane.as_mut()
+            && !lane.wait(until)
+        {
+            eprintln!("keep awake: the lid-closed lane is still busy; the thaw guard finishes");
         }
     }
 
@@ -893,6 +1027,46 @@ impl Keeper {
             Ok(()) => self.lid_journal = Some(unreadable),
             Err(problem) => eprintln!("keep awake lid journal notice: {}", short(&problem.0)),
         }
+    }
+
+    /// Writes the restore rows of what the lid-closed lane could not put back after three
+    /// tries, and clears them once it put everything back (rv-secreview and rv-code T17
+    /// r1). It writes only when that changes, starting from nothing named, so the engine
+    /// start's own rows stay until the lane names its kinds. A write that fails is logged
+    /// and tried again at the next step. A freeze the lane refused whole since the last
+    /// step gets one "Apps not paused" notice with the latest refusal's reason (rv-code
+    /// T17b r1 F1); that write is logged when it fails and not tried again. Inputs: the
+    /// engine database outside any transaction and the time.
+    fn note_lane(&mut self, connection: &Connection, now_ms: i64) {
+        #[cfg(unix)]
+        {
+            let Some(lane) = self.lane.as_ref() else {
+                return;
+            };
+            if let Some((count, code)) = lane.refused()
+                && count != self.lane_refused
+            {
+                assert!(count > self.lane_refused);
+                let agents_unknown = code.starts_with(freeze::AGENTS_UNKNOWN);
+                crate::notifications::keep_awake::apps_not_paused(
+                    connection,
+                    agents_unknown,
+                    now_ms,
+                );
+                self.lane_refused = count;
+            }
+            let stuck = lane.stuck();
+            if stuck == self.lane_noted {
+                return;
+            }
+            let kinds: Vec<&str> = stuck.iter().map(String::as_str).collect();
+            match crate::notifications::keep_awake::lid_closed_left(connection, &kinds) {
+                Ok(()) => self.lane_noted = stuck,
+                Err(problem) => eprintln!("keep awake lid closed notice: {}", short(&problem.0)),
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (connection, now_ms);
     }
 
     /// Brings the platform hold in step with the wanted state. A hold found lost is logged
@@ -969,6 +1143,7 @@ impl Keeper {
         if sensed.is_some() {
             self.note_lid_journal(connection);
         }
+        self.note_lane(connection, now_ms);
         let settled = since(self.evaluated_ms, TICK_MS) && self.work == Some(work);
         if settled && sensed.is_none() && !dirty(connection)? {
             return Ok(None);
@@ -1010,6 +1185,12 @@ impl Keeper {
         assert!(self.lid_ask.wanted || !self.lid_ask.sleep_display);
         assert!(holding || !self.lid_ask.low_power);
         assert_eq!(self.low_power_under.is_some(), self.lid_ask.low_power);
+        let cover = freeze::Cover {
+            freeze: view.settings.freeze == Freeze::On,
+            mute: view.settings.mute == Mute::On,
+            apps: view.freeze_apps.clone(),
+        };
+        self.cover(lid_cover(wanted, self.sensors().as_ref(), cover));
         assert!(view.work <= work::WORK_MAX);
         Ok(Some(view))
     }

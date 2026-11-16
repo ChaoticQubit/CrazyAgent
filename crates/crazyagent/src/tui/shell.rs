@@ -924,7 +924,7 @@ impl Shell {
             (KeepAwakeQuery::Read, Ok(KeepAwakeReply::View(view))) => {
                 self.ctx.store.keep_awake = Some(view.as_ref().clone());
             }
-            (KeepAwakeQuery::Read, _) => {}
+            (KeepAwakeQuery::Read | KeepAwakeQuery::Apps, _) => {}
             (KeepAwakeQuery::Act { .. } | KeepAwakeQuery::Save { .. }, result) => {
                 if let (KeepAwakeQuery::Save { picks, .. }, Ok(_)) = (&event.query, result)
                     && let Some(view) = self.ctx.store.keep_awake.as_mut()

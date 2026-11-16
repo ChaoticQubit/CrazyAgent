@@ -227,7 +227,7 @@ export function lidHelperLine(view: KeepAwakeView): string {
 /** Why this computer cannot honour one setting, or null when it can. Inputs: the setting
  * and the view. Output: the reason shown on the setting's line, or null. */
 export function unavailable(id: KeepAwakeSettingId, view: KeepAwakeView): string | null {
-  if ((id === "heat_end" || id === "heat_notice") && view.platform === "windows") return "Not available on Windows";
+  if ((id === "heat_end" || id === "heat_notice" || id === "freeze" || id === "mute") && view.platform === "windows") return "Not available on Windows";
   if (id === "lid_display" && view.platform !== "mac_os") return "Only on macOS";
   return id === "lid" ? lidReason(view) : null;
 }

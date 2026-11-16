@@ -54,8 +54,8 @@ test("every kind has one engine name, its class and the label the engine gives i
   const arms = (text) => new Map([...text.matchAll(/Self::(\w+) => "([^"]+)",/g)].map(([, variant, words]) => [variant, words]));
   const names = arms(body("pub fn name(self)", "pub fn label(self)"));
   const labels = arms(body("pub fn label(self)", "pub fn parse("));
-  assert.equal(api.NOTICE_KINDS.length, 24);
-  assert.equal(labels.size, 24);
+  assert.equal(api.NOTICE_KINDS.length, 25);
+  assert.equal(labels.size, 25);
   for (const entry of api.NOTICE_KINDS) {
     const variant = entry.kind.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join("");
     assert.equal(names.get(variant), entry.kind, `the engine names ${entry.kind}`);
@@ -63,7 +63,9 @@ test("every kind has one engine name, its class and the label the engine gives i
   }
   assert.deepEqual(api.NOTICE_KINDS.filter((entry) => entry.class === "action").map((entry) => entry.kind),
     ["question", "account_sign_in", "research_pool", "memory_review", "change_set_review", "keep_awake_restore", "keep_awake_approval"]);
-  assert.deepEqual(api.NOTICE_KINDS.slice(-2).map((entry) => entry.kind), ["keep_awake_ended", "keep_awake_heat"]);
+  assert.deepEqual(api.NOTICE_KINDS.slice(-3).map((entry) => entry.kind), ["keep_awake_ended", "keep_awake_heat", "keep_awake_apps_not_paused"]);
+  assert.equal(api.kindLabel("keep_awake_apps_not_paused"), "Apps not paused");
+  assert.deepEqual(api.deliveryChoices("keep_awake_apps_not_paused"), ["on", "bell_only", "off"]);
   assert.equal(api.kindLabel("change_set_landed"), "Change set landed");
   assert.equal(api.kindLabel("keep_awake_heat"), "Hot during Keep awake");
   assert.deepEqual(api.deliveryChoices("keep_awake_restore"), ["on", "bell_only"], "an Action kind is never Off");

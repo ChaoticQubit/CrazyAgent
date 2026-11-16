@@ -1107,20 +1107,26 @@ async fn offer_restart(
 
 /// `crazyagent keep-awake restore` (plan Task 14, for an uninstaller): puts back every
 /// setting Keep awake changed that an engine left recorded under the default engine root,
-/// and refuses while an engine holds that journal. Input: the arguments. Output: Ok, or
-/// why not in words.
+/// paused apps and muted sound among them, and refuses while an engine holds that journal.
+/// `crazyagent keep-awake guard ROOT` is the thaw guard the engine starts while the lid is
+/// closed during a hold (DEC-167 Task 17): it waits on its stdin, the engine's pipe, and
+/// thaws and unmutes from the engine root's journal once the engine is gone. Input: the
+/// arguments. Output: Ok, or why not in words.
 fn run_keep_awake(args: &[OsString]) -> Result<(), String> {
-    let usage = "usage: crazyagent keep-awake restore";
-    let [_, action] = args else {
-        return Err(usage.into());
-    };
-    if action != "restore" {
-        return Err(usage.into());
+    let usage = "usage: crazyagent keep-awake restore|guard ROOT";
+    match args {
+        [_, action] if action == "restore" => {
+            let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;
+            crazyagent::keep_awake::restore(layout.root()).map_err(str::to_owned)?;
+            println!("Keep awake has nothing left to put back.");
+            Ok(())
+        }
+        [_, action, root] if action == "guard" && Path::new(root).is_absolute() => {
+            crazyagent::keep_awake::freeze::guard(Path::new(root), io::stdin().lock())
+                .map_err(|error| error.0)
+        }
+        _ => Err(usage.into()),
     }
-    let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;
-    crazyagent::keep_awake::restore(layout.root()).map_err(str::to_owned)?;
-    println!("Keep awake has nothing left to put back.");
-    Ok(())
 }
 
 /// Runs `crazyagent service ACTION` for the default engine service. Input: the arguments.

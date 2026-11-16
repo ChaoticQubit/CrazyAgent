@@ -2525,6 +2525,10 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { read(state).await?.keep_awake_read().await }.await;
             routed(result)
         }
+        "desktop_keep_awake_apps" => {
+            let result: Result<_, BridgeError> = async { read(state).await?.keep_awake_apps().await }.await;
+            routed(result)
+        }
         "desktop_keep_awake_act" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

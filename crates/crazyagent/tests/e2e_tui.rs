@@ -2467,6 +2467,36 @@ fn the_tui_saves_the_heat_notice_kind_on() {
 }
 
 #[test]
+fn the_tui_saves_the_apps_not_paused_notice_kind_as_bell_only() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeAppsNotPaused,
+        Delivery::On,
+        1,
+        Delivery::BellOnly,
+    );
+}
+
+#[test]
+fn the_tui_saves_the_apps_not_paused_notice_kind_off() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeAppsNotPaused,
+        Delivery::On,
+        2,
+        Delivery::Off,
+    );
+}
+
+#[test]
+fn the_tui_saves_the_apps_not_paused_notice_kind_on() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeAppsNotPaused,
+        Delivery::Off,
+        1,
+        Delivery::On,
+    );
+}
+
+#[test]
 fn the_tui_saves_the_days_done_items_stay() {
     let saved = notice_settings_after(NoticeSettings::default(), &["End", "4", "5"]);
     assert_eq!(
@@ -2486,8 +2516,8 @@ fn the_tui_saves_the_days_done_items_stay() {
 mod keep_awake {
     use super::*;
     use crazyagent::keep_awake::{
-        BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeAction,
-        KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode, Reason, Want,
+        BatteryFloor, Cap, DisplayAwake, Freeze, Grace, HeatEnd, HeatNotice, KeepAwakeAction,
+        KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode, Mute, Reason, Want,
     };
 
     const KEEP_AWAKE_PROJECT: &str = "e2e-keep-awake";
@@ -2580,7 +2610,7 @@ mod keep_awake {
             owner.controller.detach();
         });
         for action in seed {
-            change(&runtime, &engine, *action);
+            change(&runtime, &engine, action.clone());
         }
         let pty = Pty::launch(tmux, &engine.socket());
         reach_home(&pty, |screen| at_home(screen, PROJECT));
@@ -2620,7 +2650,7 @@ mod keep_awake {
     /// Inputs: the settings stored first and the setting's place on the page. Output: the
     /// settings after the save; panics when the page or the save never shows.
     fn saved_after(seed: KeepAwakeSettings, row: usize) -> KeepAwakeSettings {
-        assert!(row < 9);
+        assert!(row < 11);
         let first = KeepAwakeAction::Set {
             settings: seed,
             version: 0,
@@ -2902,6 +2932,100 @@ mod keep_awake {
             8,
             |settings| settings.display_awake = DisplayAwake::Off,
             |settings| settings.display_awake = DisplayAwake::WhileHolding,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_freeze_off() {
+        option_row(
+            9,
+            |settings| settings.freeze = Freeze::On,
+            |settings| settings.freeze = Freeze::Off,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_freeze_on() {
+        option_row(
+            9,
+            |settings| settings.freeze = Freeze::Off,
+            |settings| settings.freeze = Freeze::On,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_mute_off() {
+        option_row(
+            10,
+            |settings| settings.mute = Mute::On,
+            |settings| settings.mute = Mute::Off,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_mute_on() {
+        option_row(
+            10,
+            |settings| settings.mute = Mute::Off,
+            |settings| settings.mute = Mute::On,
+        );
+    }
+
+    /// Task 17 row: on the Freeze row a lists the running apps the engine offers in a
+    /// chooser, Esc closes it with nothing saved, and Enter saves the ticked apps: the first
+    /// offered one when any app runs, none otherwise. CrazyAgent is never among them.
+    #[test]
+    fn the_tui_chooses_the_apps_to_freeze() {
+        let offered = std::cell::Cell::new(false);
+        let after = on_screen(&[], |pty, runtime, engine| {
+            pty.keys(&["s"]);
+            pty.until("s opens Settings / Keep awake", |screen| {
+                header_row(screen).contains("Settings  /  Keep awake")
+                    && screen.contains("When it holds")
+            });
+            for _ in 0..9 {
+                pty.keys(&["Down"]);
+            }
+            pty.until("the Freeze row offers a", |screen| {
+                screen.contains("Choose apps")
+            });
+            pty.keys(&["a"]);
+            pty.until("a opens the chooser", |screen| {
+                screen.contains("Apps to freeze")
+            });
+            pty.keys(&["Escape"]);
+            pty.until("Esc closes only the chooser", |screen| {
+                !screen.contains("Apps to freeze") && screen.contains("Choose apps")
+            });
+            assert!(
+                view(runtime, engine).freeze_apps.is_empty(),
+                "Esc saves nothing"
+            );
+            pty.keys(&["a"]);
+            pty.until("the chooser lists the running apps", |screen| {
+                offered.set(screen.contains("[ ] "));
+                screen.contains("Apps to freeze")
+                    && (offered.get() || screen.contains("No running app can be frozen"))
+            });
+            if offered.get() {
+                pty.keys(&["Space"]);
+                pty.until("Space ticks the first app", |screen| {
+                    screen.contains("[x] ")
+                });
+            }
+            pty.keys(&["Enter"]);
+            let wanted = usize::from(offered.get());
+            settled(runtime, engine, "the ticked apps saved", |view| {
+                view.freeze_apps.len() == wanted
+            });
+        });
+        assert_eq!(after.freeze_apps.len(), usize::from(offered.get()));
+        assert!(
+            after
+                .freeze_apps
+                .iter()
+                .all(|app| !app.name.to_lowercase().contains("crazyagent")),
+            "{after:?}"
         );
     }
 

@@ -1,6 +1,6 @@
 use crate::keep_awake::{
-    BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeSettings, KeepAwakeView,
-    LidDisplay, LidRule, LidSupport, Mode,
+    BatteryFloor, Cap, DisplayAwake, Freeze, FreezeApp, Grace, HeatEnd, HeatNotice,
+    KeepAwakeAction, KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, LidSupport, Mode, Mute,
 };
 use crate::paths::Platform;
 use crate::tui::client::OwnerEvent;
@@ -71,7 +71,7 @@ fn after_arrow(row: usize, arrow: Key) -> KeepAwakeSettings {
 }
 
 #[test]
-fn the_page_lists_the_nine_settings_in_the_desktops_sections_and_words() {
+fn the_page_lists_the_eleven_settings_in_the_desktops_sections_and_words() {
     let text = shown(&mut page(resting()));
     let in_order = [
         "Keep awake",
@@ -109,6 +109,18 @@ fn the_page_lists_the_nine_settings_in_the_desktops_sections_and_words() {
         "Display awake with the lid open",
         "[Off]  While holding",
         "Whether a hold also keeps the display on. While it does, the screen stays unlocked.",
+        "While the lid is closed",
+        "What a hold quiets while the lid is closed.",
+        "Freeze apps while the lid is closed",
+        "[Off]  On for the listed apps",
+        "The listed apps pause while a hold runs with the lid closed and go on when the lid opens.",
+        "external",
+        "crazyagent keep-awake restore",
+        "Apps  None listed. Press a to choose apps.",
+        "Mute audio while the lid is closed",
+        "[Off]  On",
+        "The sound goes off while a hold runs with the lid closed and comes back as it was",
+        "external",
     ];
     let mut from = 0;
     for part in in_order {
@@ -158,6 +170,14 @@ fn right_picks_the_next_option_of_each_setting() {
             display_awake: DisplayAwake::WhileHolding,
             ..DEFAULT
         },
+        KeepAwakeSettings {
+            freeze: Freeze::On,
+            ..DEFAULT
+        },
+        KeepAwakeSettings {
+            mute: Mute::On,
+            ..DEFAULT
+        },
     ];
     for (row, want) in cases.into_iter().enumerate() {
         assert_eq!(after_arrow(row, Key::Right), want, "row {row}");
@@ -203,6 +223,14 @@ fn left_picks_the_option_before_and_wraps_at_the_first() {
             display_awake: DisplayAwake::WhileHolding,
             ..DEFAULT
         },
+        KeepAwakeSettings {
+            freeze: Freeze::On,
+            ..DEFAULT
+        },
+        KeepAwakeSettings {
+            mute: Mute::On,
+            ..DEFAULT
+        },
     ];
     for (row, want) in cases.into_iter().enumerate() {
         assert_eq!(after_arrow(row, Key::Left), want, "row {row}");
@@ -211,7 +239,7 @@ fn left_picks_the_option_before_and_wraps_at_the_first() {
 
 #[test]
 fn every_option_of_every_setting_is_reachable_and_a_full_turn_saves_nothing() {
-    let counts = [3, 4, 4, 3, 2, 4, 3, 2, 2];
+    let counts = [3, 4, 4, 3, 2, 4, 3, 2, 2, 2, 2];
     for (row, count) in counts.into_iter().enumerate() {
         let mut seen = vec![DEFAULT];
         for presses in 1..count {
@@ -264,7 +292,7 @@ fn enter_saves_the_picks_only_and_says_saved() {
     let (picks, query) = saved(&mut shell);
     let want = Picks {
         grace: Some(Grace::Min30),
-        display_awake: Some(DisplayAwake::WhileHolding),
+        mute: Some(Mute::On),
         ..Picks::default()
     };
     assert_eq!(picks, want);
@@ -352,8 +380,12 @@ fn a_setting_this_computer_cannot_honour_says_why() {
     let text = shown(&mut page(windows));
     assert_eq!(
         text.matches("Not available on Windows").count(),
-        2,
-        "{text}"
+        4,
+        "heat end, heat notice, freeze and mute: {text}"
+    );
+    assert!(
+        !text.contains("Apps  "),
+        "no app list where apps cannot freeze: {text}"
     );
     assert_eq!(text.matches("Only on macOS").count(), 1, "{text}");
     assert!(text.contains("Not set up on this computer yet"), "{text}");
@@ -377,9 +409,12 @@ fn the_selected_setting_stays_in_view_in_a_short_window() {
     );
     shell.key(Key::End);
     let last = render(&mut shell, 80, 24).join("\n");
-    assert!(last.contains("> Display awake with the lid open"), "{last}");
     assert!(
-        last.contains("Whether a hold also keeps the display on."),
+        last.contains("> Mute audio while the lid is closed"),
+        "{last}"
+    );
+    assert!(
+        last.contains("The sound goes off while a hold runs"),
         "{last}"
     );
     shell.key(Key::Home);
@@ -442,7 +477,6 @@ fn the_settings_page_shows_the_lid_helper_line_and_its_keys_whatever_the_rule() 
     assert!(text.contains(&format!("Lid helper  {APPROVAL}")), "{text}");
     assert!(text.contains("Open Login Items"), "the hint for t: {text}");
     assert!(text.contains("Remove lid helper"), "the hint for d: {text}");
-    use crate::keep_awake::KeepAwakeAction;
     assert_eq!(lid_key(&mut shell, 't'), KeepAwakeAction::TurnOnLidHold);
     assert_eq!(lid_key(&mut shell, 'd'), KeepAwakeAction::RemoveLidHelper);
 
@@ -483,7 +517,10 @@ fn the_settings_page_has_no_lid_helper_line_off_macos() {
     }
     let mut shell = page(resting());
     let text = shown(&mut shell);
-    assert!(text.contains("Lid helper  Not set up on this computer yet"), "{text}");
+    assert!(
+        text.contains("Lid helper  Not set up on this computer yet"),
+        "{text}"
+    );
     assert!(!text.contains("Turn on lid-closed hold"), "{text}");
 }
 
@@ -494,11 +531,189 @@ fn a_refused_lid_command_in_settings_says_why_and_keeps_the_picks() {
     shell.key(Key::Char('t'));
     let sent = saves(&mut shell);
     assert_eq!(sent.len(), 1, "{sent:?}");
-    answer(&mut shell, sent[0].clone(), Err("keep_awake_no_lid_helper".into()));
+    answer(
+        &mut shell,
+        sent[0].clone(),
+        Err("keep_awake_no_lid_helper".into()),
+    );
     let text = shown(&mut shell);
     assert!(text.contains("The lid helper was not changed."), "{text}");
-    assert!(text.contains("Lid-closed hold is set up only on macOS."), "{text}");
-    assert!(text.contains("Save changes"), "the pick is still there: {text}");
+    assert!(
+        text.contains("Lid-closed hold is set up only on macOS."),
+        "{text}"
+    );
+    assert!(
+        text.contains("Save changes"),
+        "the pick is still there: {text}"
+    );
+}
+
+fn app(name: &str, id: &str) -> FreezeApp {
+    FreezeApp {
+        name: name.into(),
+        id: id.into(),
+    }
+}
+
+const FREEZE_ROW: usize = 9;
+
+/// Opens the settings page on `view`, moves to the Freeze row, presses a and answers the
+/// app list with `running`. Inputs: the view and the running apps. Output: the shell with
+/// the chooser open.
+fn chooser(view: KeepAwakeView, running: Vec<FreezeApp>) -> Shell {
+    let mut shell = page(view);
+    for _ in 0..FREEZE_ROW {
+        shell.key(Key::Down);
+    }
+    assert!(shown(&mut shell).contains("Choose apps"), "the hint for a");
+    shell.key(Key::Char('a'));
+    let sent = saves(&mut shell);
+    assert_eq!(
+        sent,
+        vec![KeepAwakeQuery::Apps],
+        "a asks for the running apps once"
+    );
+    assert!(shown(&mut shell).contains("Listing the running apps"));
+    answer(
+        &mut shell,
+        KeepAwakeQuery::Apps,
+        Ok(KeepAwakeReply::Apps(running)),
+    );
+    shell
+}
+
+/// Presses Enter in the chooser and returns the one app list it sent. Input: the shell.
+/// Output: the apps and the query, to answer it.
+fn chosen_apps(shell: &mut Shell) -> (Vec<FreezeApp>, KeepAwakeQuery) {
+    shell.key(Key::Enter);
+    let mut sent = saves(shell);
+    assert_eq!(sent.len(), 1, "Enter sends one change: {sent:?}");
+    let query = sent.remove(0);
+    let KeepAwakeQuery::Act {
+        action: KeepAwakeAction::FreezeApps { apps },
+        generation,
+    } = query.clone()
+    else {
+        panic!("not an app list: {query:?}");
+    };
+    assert!(generation > 0);
+    (apps, query)
+}
+
+#[test]
+fn a_on_the_freeze_row_lists_the_running_apps_and_enter_saves_the_ticked_ones() {
+    let running = vec![
+        app("Notes", "com.example.notes"),
+        app("Music", "com.example.music"),
+    ];
+    let mut shell = chooser(resting(), running);
+    let text = shown(&mut shell);
+    assert!(text.contains("Apps to freeze"), "{text}");
+    assert!(text.contains("[ ] Notes"), "{text}");
+    assert!(text.contains("[ ] Music"), "{text}");
+    shell.key(Key::Down);
+    shell.key(Key::Char(' '));
+    assert!(shown(&mut shell).contains("[x] Music"));
+    let (apps, query) = chosen_apps(&mut shell);
+    assert_eq!(apps, vec![app("Music", "com.example.music")]);
+    assert!(
+        !shown(&mut shell).contains("Apps to freeze"),
+        "Enter closes the chooser"
+    );
+    answer(&mut shell, query, Ok(KeepAwakeReply::Done));
+    assert_eq!(saves(&mut shell), Vec::new());
+}
+
+#[test]
+fn the_listed_apps_show_under_the_freeze_row_and_open_ticked_even_when_not_running() {
+    let mut view = resting();
+    view.freeze_apps = vec![app("Notes", "com.example.notes")];
+    let text = shown(&mut page(view.clone()));
+    assert!(text.contains("Apps  Notes"), "{text}");
+    assert!(!text.contains("None listed"), "{text}");
+    let mut shell = chooser(view, vec![app("Music", "com.example.music")]);
+    let text = shown(&mut shell);
+    assert!(text.contains("[x] Notes"), "{text}");
+    assert!(text.contains("[ ] Music"), "{text}");
+    shell.key(Key::Char(' '));
+    let (apps, _) = chosen_apps(&mut shell);
+    assert_eq!(apps, Vec::new(), "unticking the last app empties the list");
+}
+
+#[test]
+fn esc_closes_the_chooser_without_a_change_and_a_is_only_on_the_freeze_row() {
+    let mut shell = chooser(resting(), vec![app("Notes", "com.example.notes")]);
+    shell.key(Key::Char(' '));
+    shell.key(Key::Esc);
+    assert_eq!(saves(&mut shell), Vec::new());
+    assert_eq!(
+        shell.place(),
+        Some(Place::KeepAwakeSettings),
+        "Esc closes only the chooser"
+    );
+    assert!(!shown(&mut shell).contains("Apps to freeze"));
+    let mut shell = page(resting());
+    assert!(!shown(&mut shell).contains("Choose apps"));
+    shell.key(Key::Char('a'));
+    assert_eq!(
+        saves(&mut shell),
+        Vec::new(),
+        "a does nothing on the Mode row"
+    );
+    let mut windows = resting();
+    windows.platform = Platform::Windows;
+    let mut shell = page(windows);
+    for _ in 0..FREEZE_ROW {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Char('a'));
+    assert_eq!(
+        saves(&mut shell),
+        Vec::new(),
+        "no chooser where apps cannot freeze"
+    );
+}
+
+#[test]
+fn the_chooser_refuses_a_seventeenth_app() {
+    let running: Vec<FreezeApp> = (0..17)
+        .map(|at| app(&format!("App {at}"), &format!("com.example.app{at}")))
+        .collect();
+    let mut shell = chooser(resting(), running);
+    for _ in 0..16 {
+        shell.key(Key::Char(' '));
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Char(' '));
+    let text = shown(&mut shell);
+    assert!(text.contains("Pick at most 16 apps, each once."), "{text}");
+    let (apps, _) = chosen_apps(&mut shell);
+    assert_eq!(apps.len(), 16);
+    assert!(!apps.iter().any(|app| app.id == "com.example.app16"));
+}
+
+#[test]
+fn a_failed_app_list_or_a_refused_app_change_says_why() {
+    let mut shell = page(resting());
+    for _ in 0..FREEZE_ROW {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Char('a'));
+    assert_eq!(saves(&mut shell), vec![KeepAwakeQuery::Apps]);
+    answer(&mut shell, KeepAwakeQuery::Apps, Err("owner_busy".into()));
+    let text = shown(&mut shell);
+    assert!(text.contains("Couldn't list the running apps."), "{text}");
+    assert!(!text.contains("Apps to freeze"), "{text}");
+    let mut shell = chooser(resting(), vec![app("Notes", "com.example.notes")]);
+    shell.key(Key::Char(' '));
+    let (_, query) = chosen_apps(&mut shell);
+    answer(&mut shell, query, Err("keep_awake_apps_invalid".into()));
+    let text = shown(&mut shell);
+    assert!(
+        text.contains("The apps to freeze were not changed."),
+        "{text}"
+    );
+    assert!(text.contains("Pick at most 16 apps, each once."), "{text}");
 }
 
 const CRASH_GAP: &str = "the lid stays at Do nothing until the engine starts";

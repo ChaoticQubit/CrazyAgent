@@ -185,7 +185,7 @@ impl KeepAwakeScreen {
         if event.query == KeepAwakeQuery::Read {
             self.problem = match &event.result {
                 Ok(KeepAwakeReply::View(_)) => None,
-                Ok(KeepAwakeReply::Done) => self.problem.take(),
+                Ok(KeepAwakeReply::Done | KeepAwakeReply::Apps(_)) => self.problem.take(),
                 Err(code) => Some(code.clone()),
             };
             return;

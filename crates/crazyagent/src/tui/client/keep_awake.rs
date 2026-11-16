@@ -1,8 +1,8 @@
 use super::settings::{applied, problem};
 use super::*;
 use crate::keep_awake::{
-    BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeAction,
-    KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode,
+    BatteryFloor, Cap, DisplayAwake, Freeze, FreezeApp, Grace, HeatEnd, HeatNotice,
+    KeepAwakeAction, KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode, Mute,
 };
 use crate::storage::versioned::STALE_CODE;
 
@@ -20,6 +20,8 @@ pub(in crate::tui) struct Picks {
     pub heat_end: Option<HeatEnd>,
     pub heat_notice: Option<HeatNotice>,
     pub display_awake: Option<DisplayAwake>,
+    pub freeze: Option<Freeze>,
+    pub mute: Option<Mute>,
 }
 
 impl Picks {
@@ -37,6 +39,8 @@ impl Picks {
             lid_display: self.lid_display.unwrap_or(stored.lid_display),
             display_awake: self.display_awake.unwrap_or(stored.display_awake),
             low_power: stored.low_power,
+            freeze: self.freeze.unwrap_or(stored.freeze),
+            mute: self.mute.unwrap_or(stored.mute),
         };
         assert!(*self != Self::default() || sent == stored);
         sent
@@ -68,12 +72,14 @@ pub(in crate::tui) fn again(result: &Result<(), String>, attempts: usize) -> boo
     beaten && attempts < SAVE_ATTEMPTS
 }
 
-/// One Keep awake request a screen or the shell sends (DEC-167): read the view, make one
-/// change, or save picks over the settings the engine holds at that moment. Runs on the
-/// owner worker; the reply arrives as `OwnerEvent::KeepAwake` with this query.
+/// One Keep awake request a screen or the shell sends (DEC-167): read the view, list the
+/// running apps that may be frozen (Task 17), make one change, or save picks over the
+/// settings the engine holds at that moment. Runs on the owner worker; the reply arrives
+/// as `OwnerEvent::KeepAwake` with this query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum KeepAwakeQuery {
     Read,
+    Apps,
     Act {
         action: KeepAwakeAction,
         generation: u64,
@@ -84,11 +90,12 @@ pub(in crate::tui) enum KeepAwakeQuery {
     },
 }
 
-/// What the engine answered a Keep awake request with: the view, or that the change took
-/// effect.
+/// What the engine answered a Keep awake request with: the view, the running apps that
+/// may be frozen, or that the change took effect.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum KeepAwakeReply {
     View(Box<KeepAwakeView>),
+    Apps(Vec<FreezeApp>),
     Done,
 }
 
@@ -151,6 +158,13 @@ impl NativeOwner {
                     .keep_awake()
                     .await
                     .map(|view| KeepAwakeReply::View(Box::new(view)))
+                    .map_err(|error| problem(&error, lost));
+            }
+            KeepAwakeQuery::Apps => {
+                return controller
+                    .keep_awake_apps()
+                    .await
+                    .map(KeepAwakeReply::Apps)
                     .map_err(|error| problem(&error, lost));
             }
             KeepAwakeQuery::Act { action, generation } => {

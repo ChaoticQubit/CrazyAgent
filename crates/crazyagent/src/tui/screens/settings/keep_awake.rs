@@ -1,12 +1,13 @@
+use crate::keep_awake::freeze::APPS_MAX;
 use crate::keep_awake::{
-    BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeAction,
-    KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode,
+    BatteryFloor, Cap, DisplayAwake, Freeze, FreezeApp, Grace, HeatEnd, HeatNotice,
+    KeepAwakeAction, KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode, Mute,
 };
 use crate::paths::Platform;
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::keep_awake::{KeepAwakeEvent, KeepAwakeQuery, KeepAwakeReply, Picks};
 use crate::tui::ctx::Ctx;
-use crate::tui::frame::{Hint, Message, draw_lines, hint};
+use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::keep_awake::refusal;
 use crate::tui::screens::keep_awake::words::{
@@ -23,11 +24,15 @@ use ratatui::text::{Line, Span};
 const GUTTER: u16 = 2;
 const TITLE: &str = "Keep awake";
 const PURPOSE: &str = "When the computer stays awake for your agents, and when that ends.";
-const ROWS: usize = 9;
+const ROWS: usize = 11;
 const OPTIONS_MAX: usize = 4;
 const DISPLAY_AWAKE_HELP: &str =
     "Whether a hold also keeps the display on. While it does, the screen stays unlocked.";
-const SECTIONS: [(&str, &str, &[Setting]); 4] = [
+const FREEZE_HELP: &str = "The listed apps pause while a hold runs with the lid closed and go on when the lid opens. Not while an external display is in use. If one stays paused, run crazyagent keep-awake restore; the next start also puts it back.";
+const MUTE_HELP: &str = "The sound goes off while a hold runs with the lid closed and comes back as it was when the lid opens. Not while an external display is in use.";
+const CHOOSER_ROWS: usize = 12;
+const CHOOSER_WIDTH: u16 = 64;
+const SECTIONS: [(&str, &str, &[Setting]); 5] = [
     (
         "When it holds",
         "What keeps the computer awake and for how long.",
@@ -47,6 +52,11 @@ const SECTIONS: [(&str, &str, &[Setting]); 4] = [
         "Display",
         "What a hold does with the display.",
         &[Setting::DisplayAwake],
+    ),
+    (
+        "While the lid is closed",
+        "What a hold quiets while the lid is closed.",
+        &[Setting::Freeze, Setting::Mute],
     ),
 ];
 const MODE: [(Mode, &str); 3] = [
@@ -94,6 +104,8 @@ const DISPLAY_AWAKE: [(DisplayAwake, &str); 2] = [
     (DisplayAwake::Off, "Off"),
     (DisplayAwake::WhileHolding, "While holding"),
 ];
+const FREEZE: [(Freeze, &str); 2] = [(Freeze::Off, "Off"), (Freeze::On, "On for the listed apps")];
+const MUTE: [(Mute, &str); 2] = [(Mute::Off, "Off"), (Mute::On, "On")];
 const SAVED: &str = "Keep awake settings saved.";
 const NOT_SAVED: &str = "The Keep awake settings were not saved.";
 const NOT_READ: &str = "Couldn't load the Keep awake settings.";
@@ -102,6 +114,10 @@ const LID_NOT_PUT_BACK: &str = "The lid setting was not put back.";
 const LID_CRASH_GAP: &str = "If the engine stops by a crash during a hold, the lid stays at Do \
     nothing until the engine starts again.";
 const PUT_BACK: &str = "Put the lid setting back now";
+const APPS_NOT_CHANGED: &str = "The apps to freeze were not changed.";
+const APPS_NOT_READ: &str = "Couldn't list the running apps.";
+const APPS_TOO_MANY: &str = "Pick at most 16 apps, each once.";
+const NO_APPS: &str = "None listed. Press a to choose apps.";
 
 /// One setting's label and help, in the desktop Settings page's words. Input: the
 /// setting. Output: the label and the help sentence.
@@ -140,10 +156,12 @@ fn words(setting: Setting) -> (&'static str, &'static str) {
             "Tells you when the computer gets hot during a hold.",
         ),
         Setting::DisplayAwake => ("Display awake with the lid open", DISPLAY_AWAKE_HELP),
+        Setting::Freeze => ("Freeze apps while the lid is closed", FREEZE_HELP),
+        Setting::Mute => ("Mute audio while the lid is closed", MUTE_HELP),
     }
 }
 
-/// The settings in page order: the four sections' settings, one after the other. Input:
+/// The settings in page order: the five sections' settings, one after the other. Input:
 /// none. Output: the settings, `ROWS` of them.
 fn rows() -> Vec<Setting> {
     let rows: Vec<Setting> = SECTIONS
@@ -176,6 +194,8 @@ fn labels(setting: Setting) -> Vec<&'static str> {
         Setting::HeatEnd => names(&HEAT_END),
         Setting::HeatNotice => names(&HEAT_NOTICE),
         Setting::DisplayAwake => names(&DISPLAY_AWAKE),
+        Setting::Freeze => names(&FREEZE),
+        Setting::Mute => names(&MUTE),
     };
     assert!((2..=OPTIONS_MAX).contains(&labels.len()));
     labels
@@ -194,6 +214,8 @@ fn chosen(setting: Setting, settings: &KeepAwakeSettings) -> usize {
         Setting::HeatEnd => index(&HEAT_END, settings.heat_end),
         Setting::HeatNotice => index(&HEAT_NOTICE, settings.heat_notice),
         Setting::DisplayAwake => index(&DISPLAY_AWAKE, settings.display_awake),
+        Setting::Freeze => index(&FREEZE, settings.freeze),
+        Setting::Mute => index(&MUTE, settings.mute),
     }
 }
 
@@ -211,22 +233,88 @@ fn pick(setting: Setting, at: usize, picks: &mut Picks) {
         Setting::HeatEnd => picks.heat_end = Some(HEAT_END[at].0),
         Setting::HeatNotice => picks.heat_notice = Some(HEAT_NOTICE[at].0),
         Setting::DisplayAwake => picks.display_awake = Some(DISPLAY_AWAKE[at].0),
+        Setting::Freeze => picks.freeze = Some(FREEZE[at].0),
+        Setting::Mute => picks.mute = Some(MUTE[at].0),
     }
 }
 
-/// Settings, Keep awake (DEC-167 addendum 7): the nine settings in the desktop's four
-/// sections, with its labels, help, options and reasons, and on macOS the lid helper's
-/// line under the lid rule with t and d as it offers them, whatever the rule (QUESTION
-/// 36c), or on Windows the lid setting's line with p (DEC-167 addendum 32). Left and
-/// Right pick; the picks stay unsaved until Enter saves them over the settings the engine
-/// holds at that moment, and Esc drops them first. Opened by Go to and by s on the Keep
-/// awake screen.
+/// The app chooser that a opens on the Freeze row (DEC-167 Task 17): the apps already
+/// listed, then the running apps the engine offers, whether each is ticked and the line
+/// the cursor is on. Space ticks, Enter saves the ticked apps as the list, Esc drops it.
+struct Chooser {
+    offered: Vec<FreezeApp>,
+    ticked: Vec<bool>,
+    at: usize,
+}
+
+impl Chooser {
+    /// Opens the chooser on the listed apps, all ticked, then every running app not
+    /// listed yet. Inputs: the listed apps and the running ones. Output: the chooser.
+    fn new(listed: &[FreezeApp], running: Vec<FreezeApp>) -> Self {
+        assert!(listed.len() <= APPS_MAX);
+        let mut offered = listed.to_vec();
+        for app in running {
+            if !offered.iter().any(|known| known.id == app.id) {
+                offered.push(app);
+            }
+        }
+        let ticked = (0..offered.len()).map(|at| at < listed.len()).collect();
+        Self {
+            offered,
+            ticked,
+            at: 0,
+        }
+    }
+
+    /// The ticked apps in the order they are offered. Output: at most `APPS_MAX` apps.
+    fn chosen(&self) -> Vec<FreezeApp> {
+        assert_eq!(self.offered.len(), self.ticked.len());
+        let apps: Vec<FreezeApp> = (self.offered.iter().zip(&self.ticked))
+            .filter(|(_, ticked)| **ticked)
+            .map(|(app, _)| app.clone())
+            .collect();
+        assert!(apps.len() <= APPS_MAX);
+        apps
+    }
+
+    /// Ticks or unticks the app under the cursor, unless that would tick more than
+    /// `APPS_MAX`. Output: false when the tick was refused.
+    fn toggle(&mut self) -> bool {
+        let Some(ticked) = self.ticked.get(self.at).copied() else {
+            return true;
+        };
+        if !ticked && self.chosen().len() == APPS_MAX {
+            return false;
+        }
+        self.ticked[self.at] = !ticked;
+        true
+    }
+
+    fn moved(&mut self, down: bool) {
+        let last = self.offered.len().saturating_sub(1);
+        self.at = if down {
+            (self.at + 1).min(last)
+        } else {
+            self.at.saturating_sub(1)
+        };
+    }
+}
+
+/// Settings, Keep awake (DEC-167 addendum 7): the eleven settings in the desktop's five
+/// sections, with its labels, help, options and reasons, on macOS the lid helper's line
+/// under the lid rule with t and d as it offers them, whatever the rule (QUESTION 36c), on
+/// Windows the lid setting's line with p (DEC-167 addendum 32), and the listed apps under
+/// the Freeze row with a to choose them. Left and Right pick; the picks stay unsaved until
+/// Enter saves them over the settings the engine holds at that moment, and Esc drops them
+/// first. Opened by Go to and by s on the Keep awake screen.
 pub(in crate::tui) struct KeepAwakeSettingsPage {
     picks: Picks,
     selected: usize,
     top: usize,
     saving: Option<KeepAwakeQuery>,
     acting: Option<KeepAwakeQuery>,
+    asking: bool,
+    choosing: Option<Chooser>,
     problem: Option<String>,
 }
 
@@ -240,20 +328,27 @@ impl KeepAwakeSettingsPage {
             top: 0,
             saving: None,
             acting: None,
+            asking: false,
+            choosing: None,
             problem: None,
         }
     }
 
-    /// Sends one lid command, unless a save or another command is on its way. Inputs: the
-    /// command and the context. Output: none.
+    fn waiting(&self) -> bool {
+        self.saving.is_some() || self.acting.is_some() || self.asking
+    }
+
+    /// Sends one lid command or the chosen apps, unless a save, another command or the app
+    /// list is on its way. Inputs: the command and the context. Output: none.
     fn lid(&mut self, action: KeepAwakeAction, ctx: &mut Ctx) {
         assert!(matches!(
             action,
             KeepAwakeAction::TurnOnLidHold
                 | KeepAwakeAction::RemoveLidHelper
                 | KeepAwakeAction::PutLidBack
+                | KeepAwakeAction::FreezeApps { .. }
         ));
-        if self.saving.is_some() || self.acting.is_some() {
+        if self.waiting() {
             return;
         }
         let query = KeepAwakeQuery::Act {
@@ -284,7 +379,7 @@ impl KeepAwakeSettingsPage {
     /// Sends the picks as one save, unless nothing differs from the stored settings or a
     /// save is on its way. Inputs: the stored settings and the context. Output: none.
     fn save(&mut self, stored: &KeepAwakeSettings, ctx: &mut Ctx) {
-        if !self.edited(stored) || self.saving.is_some() {
+        if !self.edited(stored) || self.waiting() {
             return;
         }
         let query = KeepAwakeQuery::Save {
@@ -295,20 +390,83 @@ impl KeepAwakeSettingsPage {
         ctx.request(Request::KeepAwake(Box::new(query)));
     }
 
+    /// Asks the engine for the running apps, so the chooser can open on them. Input: the
+    /// context. Output: none.
+    fn ask_apps(&mut self, ctx: &mut Ctx) {
+        if self.waiting() || self.choosing.is_some() {
+            return;
+        }
+        self.asking = true;
+        ctx.request(Request::KeepAwake(Box::new(KeepAwakeQuery::Apps)));
+    }
+
+    /// Opens the chooser on the running apps the engine listed, or says why they could
+    /// not be listed. Inputs: the reply and the context. Output: none.
+    fn take_apps(&mut self, result: &Result<KeepAwakeReply, String>, ctx: &mut Ctx) {
+        if !self.asking {
+            return;
+        }
+        self.asking = false;
+        match result {
+            Ok(KeepAwakeReply::Apps(running)) => {
+                let listed = (ctx.store.keep_awake.as_ref())
+                    .map(|view| view.freeze_apps.clone())
+                    .unwrap_or_default();
+                self.choosing = Some(Chooser::new(&listed, running.clone()));
+            }
+            Ok(_) => ctx.say(Message::error(APPS_NOT_READ, "")),
+            Err(code) => ctx.say(Message::error(APPS_NOT_READ, refusal(code))),
+        }
+    }
+
+    /// Handles one key while the chooser is open: move, tick, save the ticked apps or
+    /// drop the chooser. Inputs: the key and the context. Output: always handled.
+    fn choose_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Some(chooser) = self.choosing.as_mut() else {
+            return Flow::Ignored;
+        };
+        match key {
+            Key::Up => chooser.moved(false),
+            Key::Down => chooser.moved(true),
+            Key::Char(' ') => {
+                if !chooser.toggle() {
+                    ctx.say(Message::error(APPS_NOT_CHANGED, APPS_TOO_MANY));
+                }
+            }
+            Key::Enter => {
+                let apps = chooser.chosen();
+                self.choosing = None;
+                self.lid(KeepAwakeAction::FreezeApps { apps }, ctx);
+            }
+            Key::Esc => self.choosing = None,
+            _ => {}
+        }
+        Flow::Handled
+    }
+
     fn take(&mut self, event: &KeepAwakeEvent, ctx: &mut Ctx) {
+        if event.query == KeepAwakeQuery::Apps {
+            self.take_apps(&event.result, ctx);
+            return;
+        }
         if event.query == KeepAwakeQuery::Read {
             self.problem = match &event.result {
                 Ok(KeepAwakeReply::View(_)) => None,
-                Ok(KeepAwakeReply::Done) => self.problem.take(),
+                Ok(KeepAwakeReply::Done | KeepAwakeReply::Apps(_)) => self.problem.take(),
                 Err(code) => Some(code.clone()),
             };
             return;
         }
         if self.acting.as_ref() == Some(&event.query) {
-            self.acting = None;
-            let put_back = KeepAwakeAction::PutLidBack;
-            let title = match event.query {
-                KeepAwakeQuery::Act { action, .. } if action == put_back => LID_NOT_PUT_BACK,
+            let title = match self.acting.take() {
+                Some(KeepAwakeQuery::Act {
+                    action: KeepAwakeAction::FreezeApps { .. },
+                    ..
+                }) => APPS_NOT_CHANGED,
+                Some(KeepAwakeQuery::Act {
+                    action: KeepAwakeAction::PutLidBack,
+                    ..
+                }) => LID_NOT_PUT_BACK,
                 _ => LID_NOT_CHANGED,
             };
             if let Err(code) = &event.result {
@@ -404,6 +562,21 @@ impl KeepAwakeSettingsPage {
                 if let Some(reason) = unavailable(*setting, view) {
                     lines.push(Line::styled(format!("  {reason}"), theme.warning));
                 }
+                if *setting == Setting::Freeze && unavailable(*setting, view).is_none() {
+                    let names: Vec<&str> = view
+                        .freeze_apps
+                        .iter()
+                        .map(|app| app.name.as_str())
+                        .collect();
+                    let listed = if names.is_empty() {
+                        NO_APPS.to_owned()
+                    } else {
+                        names.join(", ")
+                    };
+                    for part in wrap(&format!("Apps  {listed}"), width.saturating_sub(2).max(8)) {
+                        lines.push(Line::raw(format!("  {part}")));
+                    }
+                }
                 if *setting == Setting::Lid && !lid_line.is_empty() {
                     let room = width.saturating_sub(2).max(8);
                     if lid_line.chars().count() <= room {
@@ -425,6 +598,12 @@ impl KeepAwakeSettingsPage {
     fn moved(&mut self, to: usize) {
         self.selected = to.min(ROWS - 1);
     }
+
+    /// Whether a may open the chooser: the Freeze row is selected and this computer can
+    /// freeze apps. Input: the view. Output: the answer.
+    fn may_choose(&self, view: &KeepAwakeView) -> bool {
+        rows()[self.selected] == Setting::Freeze && unavailable(Setting::Freeze, view).is_none()
+    }
 }
 
 impl Screen for KeepAwakeSettingsPage {
@@ -433,6 +612,12 @@ impl Screen for KeepAwakeSettingsPage {
     }
 
     fn status(&self, ctx: &Ctx) -> Line<'static> {
+        if self.asking {
+            return Line::styled(
+                format!("Listing the running apps{}", ctx.glyphs.ellipsis),
+                ctx.theme.muted,
+            );
+        }
         if self.saving.is_some() || self.acting.is_some() {
             return Line::styled(format!("Saving{}", ctx.glyphs.ellipsis), ctx.theme.muted);
         }
@@ -450,12 +635,15 @@ impl Screen for KeepAwakeSettingsPage {
             }
             return vec![hint("Esc", "Back")];
         };
-        if self.saving.is_some() || self.acting.is_some() {
+        if self.waiting() {
             return Vec::new();
         }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
         let sideways = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
         let mut hints = vec![hint(&vertical, "Move"), hint(&sideways, "Change")];
+        if self.may_choose(view) {
+            hints.push(hint("a", "Choose apps"));
+        }
         let offers = lid_offers(view, LidPlace::Settings);
         if let Some(turn_on) = offers.turn_on {
             hints.push(hint("t", turn_on));
@@ -484,6 +672,9 @@ impl Screen for KeepAwakeSettingsPage {
             .map_or(none, |view| lid_offers(view, LidPlace::Settings));
         let windows = (ctx.store.keep_awake.as_ref())
             .is_some_and(|view| view.platform == Platform::Windows);
+        if self.choosing.is_some() {
+            return self.choose_key(key, ctx);
+        }
         let Some(stored) = ctx.store.keep_awake.as_ref().map(|view| view.settings) else {
             if self.problem.is_some() && *key == Key::Char('r') {
                 ctx.request(Request::KeepAwake(Box::new(KeepAwakeQuery::Read)));
@@ -491,10 +682,12 @@ impl Screen for KeepAwakeSettingsPage {
             }
             return Flow::Ignored;
         };
-        if self.saving.is_some() || self.acting.is_some() {
+        if self.waiting() {
             return Flow::Handled;
         }
+        let may_choose = (ctx.store.keep_awake.as_ref()).is_some_and(|view| self.may_choose(view));
         match key {
+            Key::Char('a') if may_choose => self.ask_apps(ctx),
             Key::Char('t') if offers.turn_on.is_some() => {
                 self.lid(KeepAwakeAction::TurnOnLidHold, ctx);
             }
@@ -523,6 +716,8 @@ impl Screen for KeepAwakeSettingsPage {
             Arrival::Disconnected(_) => {
                 self.saving = None;
                 self.acting = None;
+                self.asking = false;
+                self.choosing = None;
             }
             _ => {}
         }
@@ -562,6 +757,56 @@ impl Screen for KeepAwakeSettingsPage {
         };
         draw_lines(frame.buffer_mut(), inner, &lines);
         None
+    }
+
+    fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        let chooser = self.choosing.as_ref()?;
+        let room = usize::from(CHOOSER_WIDTH) - 6;
+        let mut body: Vec<Line<'static>> = wrap(
+            "Ticked apps pause while a hold runs with the lid closed. CrazyAgent, its agents and the system are never listed.",
+            room,
+        )
+        .into_iter()
+        .map(|part| Line::styled(part, ctx.theme.muted))
+        .collect();
+        body.push(Line::default());
+        if chooser.offered.is_empty() {
+            body.push(Line::raw(
+                "No running app can be frozen. Open the app first.",
+            ));
+        }
+        let first = chooser.at.saturating_sub(CHOOSER_ROWS - 1);
+        for (at, app) in chooser
+            .offered
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(CHOOSER_ROWS)
+        {
+            let tick = if chooser.ticked[at] { "[x]" } else { "[ ]" };
+            let name: String = app.name.chars().take(room.saturating_sub(4)).collect();
+            let text = format!("{tick} {name}");
+            body.push(if at == chooser.at {
+                Line::styled(text, ctx.theme.heading)
+            } else {
+                Line::raw(text)
+            });
+        }
+        let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
+        Some((
+            Modal {
+                width: CHOOSER_WIDTH,
+                title: "Apps to freeze".into(),
+                body,
+                top: None,
+            },
+            vec![
+                hint(&vertical, "Move"),
+                hint("Space", "Tick"),
+                hint("Enter", "Save apps"),
+                hint("Esc", "Cancel"),
+            ],
+        ))
     }
 
     fn place(&self) -> Option<Place> {

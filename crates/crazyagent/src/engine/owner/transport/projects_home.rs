@@ -240,7 +240,8 @@ enum Planned {
 /// True for the owner requests that touch folders outside the engine data:
 /// AddExistingFolder, MoveProjectsHome that moves the projects, MoveProjectHome,
 /// SetupProject (New Project), CreateDemo (the demo's New Project with its web page),
-/// DeleteProject (Delete everything), FolderSize and ProjectFiles.
+/// DeleteProject (Delete everything), FolderSize and ProjectFiles, and the Keep awake app
+/// list, whose system tools run for seconds at worst (rv-code T17 r1 F2).
 /// These run their slow disk work here, off the storage actor, and only then
 /// reach the engine database.
 pub(super) fn handles(request: &OwnerRequest) -> bool {
@@ -257,7 +258,9 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
                 | OwnerMutation::CreateDemo { .. }
                 | OwnerMutation::DeleteProject { .. }
         } | OwnerOperation::Read {
-            query: OwnerRead::FolderSize { .. } | OwnerRead::ProjectFiles { .. }
+            query: OwnerRead::FolderSize { .. }
+                | OwnerRead::ProjectFiles { .. }
+                | OwnerRead::KeepAwakeApps
         }
     )
 }
@@ -581,6 +584,9 @@ async fn plan(
             query: OwnerRead::FolderSize { path },
         } => return measure(path, deadline).await.map(Planned::Step),
         OwnerOperation::Read {
+            query: OwnerRead::KeepAwakeApps,
+        } => return keep_awake_apps(engine, a).await.map(Planned::Step),
+        OwnerOperation::Read {
             query:
                 OwnerRead::ProjectFiles {
                     project_id,
@@ -777,6 +783,26 @@ async fn files(
                 project_id: project_id.clone(),
                 paths,
             };
+            Step::Reply(Box::new(OwnerResponse::Read { state }))
+        }
+        Err(e) => rejected(&e.0),
+    })
+}
+
+/// Lists the apps the owner may freeze off the storage actor (rv-code T17 r1 F2): a Keep
+/// awake read checks the admission first, then the system tools run on a blocking thread,
+/// each bounded to two seconds. Inputs: the engine and the admission. Output: the read
+/// reply with the apps, or the listing's refusal.
+async fn keep_awake_apps(engine: &Arc<Engine>, a: &Admission) -> Result<Step, EngineError> {
+    let mut state = engine
+        .owner_job(|reply| Job::OwnerRead(a.clone(), OwnerRead::KeepAwake, reply))
+        .await?;
+    let listed = tokio::task::spawn_blocking(crate::keep_awake::freeze::choices)
+        .await
+        .map_err(|_| failure("keep_awake_apps_interrupted"))?;
+    Ok(match listed {
+        Ok(apps) => {
+            state.data = OwnerData::KeepAwakeApps { apps };
             Step::Reply(Box::new(OwnerResponse::Read { state }))
         }
         Err(e) => rejected(&e.0),

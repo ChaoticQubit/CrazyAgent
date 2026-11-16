@@ -11,6 +11,8 @@ export type HeatNotice = "serious" | "off";
 export type LidDisplay = "sleep" | "leave_on";
 export type DisplayAwake = "off" | "while_holding";
 export type LowPower = "battery_below40" | "on_battery" | "off";
+export type Freeze = "off" | "on";
+export type Mute = "off" | "on";
 
 /** The Keep awake settings as the engine stores them (DEC-167), one field per setting. */
 export interface KeepAwakeSettings {
@@ -24,6 +26,15 @@ export interface KeepAwakeSettings {
   lid_display: LidDisplay;
   display_awake: DisplayAwake;
   low_power: LowPower;
+  freeze: Freeze;
+  mute: Mute;
+}
+
+/** One app the owner may freeze while the lid is closed (Task 17): the name shown and its
+ * id, the bundle id on macOS and the executable path on Linux. */
+export interface FreezeApp {
+  name: string;
+  id: string;
 }
 
 export type KeepAwakeSettingId = keyof KeepAwakeSettings;
@@ -50,7 +61,8 @@ export type KeepAwakePlatform = "mac_os" | "linux" | "windows";
 
 /** Keep awake as the engine last evaluated it: the settings, the settings version a save
  * sends back, the decision, the lid support, what this computer itself says of the lid
- * whatever the rule, the platform and how many agents work. */
+ * whatever the rule, the platform, how many agents work and the apps frozen while the lid
+ * is closed. */
 export interface KeepAwakeView {
   settings: KeepAwakeSettings;
   version: number;
@@ -59,17 +71,20 @@ export interface KeepAwakeView {
   lid_platform: LidSupport;
   platform: KeepAwakePlatform;
   work: number;
+  freeze_apps: FreezeApp[];
 }
 
 /** One change the owner makes: start a timer, move the running one later, end the hold,
  * save the settings over the settings version read, on macOS turn on the lid-closed hold or
- * remove the lid helper, or on Windows put the lid setting back now. */
+ * remove the lid helper, on Windows put the lid setting back now, or save the apps frozen
+ * while the lid is closed. */
 export type KeepAwakeAction =
   | { start: { minutes: number } }
   | { extend: { minutes: number } }
   | "end"
   | { set: { settings: KeepAwakeSettings; version: number } }
-  | LidAction;
+  | LidAction
+  | { freeze_apps: { apps: FreezeApp[] } };
 
 /** The lid commands, sent by their engine names: the two macOS lid helper ones and the
  * Windows Put the lid setting back now. */
@@ -77,6 +92,7 @@ export type LidAction = "turn_on_lid_hold" | "remove_lid_helper" | "put_lid_back
 
 export const MINUTES_MIN = 1;
 export const MINUTES_MAX = 1440;
+export const FREEZE_APPS_MAX = 16;
 export const KEEP_AWAKE_POLL_MS = 5000;
 
 /** How many times a save reads and lays its picks, the first time included, while another
@@ -100,6 +116,7 @@ export const KEEP_AWAKE_DEFAULTS: KeepAwakeSettings = {
   mode: "auto", grace: "min10", cap: "h24", lid: "ac_only", battery_floor: "pct10",
   heat_end: "critical", heat_notice: "serious", lid_display: "sleep", display_awake: "off",
   low_power: "battery_below40",
+  freeze: "off", mute: "off",
 };
 
 interface SettingWords { id: KeepAwakeSettingId; label: string; help: string; options: readonly { value: string; label: string }[] }
@@ -127,6 +144,10 @@ export const KEEP_AWAKE_SETTINGS: readonly SettingWords[] = [
     options: [{ value: "off", label: "Off" }, { value: "while_holding", label: "While holding" }] },
   { id: "low_power", label: "Low Power Mode", help: "During a hold on battery, turns on the computer's low power mode to save charge, and puts it back when the hold ends.",
     options: [{ value: "battery_below40", label: "On battery below 40 %" }, { value: "on_battery", label: "Whenever on battery" }, { value: "off", label: "Off" }] },
+  { id: "freeze", label: "Freeze apps while the lid is closed", help: "The listed apps pause while a hold runs with the lid closed and go on when the lid opens. Not while an external display is in use. If one stays paused, run crazyagent keep-awake restore; the next start also puts it back.",
+    options: [{ value: "off", label: "Off" }, { value: "on", label: "On for the listed apps" }] },
+  { id: "mute", label: "Mute audio while the lid is closed", help: "The sound goes off while a hold runs with the lid closed and comes back as it was when the lid opens. Not while an external display is in use.",
+    options: [{ value: "off", label: "Off" }, { value: "on", label: "On" }] },
 ];
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -134,13 +155,17 @@ function assert(condition: boolean, message: string): asserts condition {
 }
 
 /** The arguments one change sends to the bridge. Inputs: the change and its draft
- * generation. Output: the arguments; minutes outside 1 to 1440 are a caller's mistake and
- * throw. */
+ * generation. Output: the arguments; minutes outside 1 to 1440, or more than 16 apps or
+ * one app twice, are a caller's mistake and throw. */
 export function keepAwakeArgs(action: KeepAwakeAction, generation: number): { action: KeepAwakeAction; generation: number } {
   assert(Number.isSafeInteger(generation) && generation > 0, "a Keep awake change needs a draft generation");
-  if (typeof action === "object" && !("set" in action)) {
+  if (typeof action === "object" && ("start" in action || "extend" in action)) {
     const minutes = "start" in action ? action.start.minutes : action.extend.minutes;
     assert(Number.isInteger(minutes) && minutes >= MINUTES_MIN && minutes <= MINUTES_MAX, `Keep awake minutes must be ${MINUTES_MIN} to ${MINUTES_MAX}`);
+  }
+  if (typeof action === "object" && "freeze_apps" in action) {
+    const ids = action.freeze_apps.apps.map((app) => app.id);
+    assert(ids.length <= FREEZE_APPS_MAX && new Set(ids).size === ids.length, `Keep awake freezes at most ${FREEZE_APPS_MAX} apps, each once`);
   }
   return { action, generation };
 }
@@ -148,6 +173,12 @@ export function keepAwakeArgs(action: KeepAwakeAction, generation: number): { ac
 /** Reads Keep awake as the engine last evaluated it. Output: the view. */
 export function loadKeepAwake(): Promise<Result<KeepAwakeView>> {
   return call<KeepAwakeView>("desktop_keep_awake_read");
+}
+
+/** Reads the running apps the owner may freeze while the lid is closed: never CrazyAgent,
+ * its engine, agents or system processes. Output: the apps by name. */
+export function loadKeepAwakeApps(): Promise<Result<FreezeApp[]>> {
+  return call<FreezeApp[]>("desktop_keep_awake_apps");
 }
 
 /** Sends one Keep awake change and, once the engine took it, tells the window so the

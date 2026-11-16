@@ -40,7 +40,7 @@ use crazyagent::harnesses::HarnessEntry;
 use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
 use crazyagent::ide::extensions::{Approved, AskView};
-use crazyagent::keep_awake::{KeepAwakeAction, KeepAwakeView};
+use crazyagent::keep_awake::{FreezeApp, KeepAwakeAction, KeepAwakeView};
 use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, OwnerDirty, TargetBranches};
 use crazyagent::learning::{LearningProgress, MarkStep};
 use crazyagent::master_frame_limit::MasterFrameSettings;
@@ -3274,6 +3274,15 @@ async fn desktop_keep_awake_read(
 }
 
 #[tauri::command]
+async fn desktop_keep_awake_apps(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Vec<FreezeApp>, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.keep_awake_apps().await
+}
+
+#[tauri::command]
 async fn desktop_keep_awake_act(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5788,6 +5797,7 @@ native_commands! {
     desktop_notification_settings,
     desktop_notification_action,
     desktop_keep_awake_read,
+    desktop_keep_awake_apps,
     desktop_keep_awake_act,
     desktop_master_step_settings,
     desktop_set_master_step_settings,

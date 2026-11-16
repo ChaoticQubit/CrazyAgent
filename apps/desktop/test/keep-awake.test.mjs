@@ -12,6 +12,8 @@ const control = await import("../src/screens/keep-awake/control.tsx");
 const panel = await import("../src/screens/keep-awake/panel.tsx");
 const TUI_SETTINGS = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/settings/keep_awake.rs", import.meta.url), "utf8");
 const DISPLAY_HELP = "Whether a hold also keeps the display on. While it does, the screen stays unlocked.";
+const FREEZE_HELP = "The listed apps pause while a hold runs with the lid closed and go on when the lid opens. Not while an external display is in use. If one stays paused, run crazyagent keep-awake restore; the next start also puts it back.";
+const MUTE_HELP = "The sound goes off while a hold runs with the lid closed and comes back as it was when the lid opens. Not while an external display is in use.";
 const settings = await import("../src/screens/settings/keep-awake.tsx");
 const bar = await import("../src/ui/top-bar.tsx");
 const shell = await import("../src/ui/shell.tsx");
@@ -60,6 +62,7 @@ const view = (state = {}, extra = {}) => ({
   platform: extra.platform ?? "mac_os",
   work: extra.work ?? 0,
   version: extra.version ?? 0,
+  freeze_apps: extra.freeze_apps ?? [],
 });
 const working = (count, extra = {}) => view({ want: HELD, reason: "work" }, { work: count, ...extra });
 const timer = (left, extra = {}) => view({ want: HELD, reason: "timer", ends_at_ms: NOW + left }, extra);
@@ -89,7 +92,7 @@ const STATES = [
 ];
 
 test("the window names every engine option and default of Keep awake as the engine does", () => {
-  const enums = { mode: "Mode", grace: "Grace", cap: "Cap", lid: "LidRule", battery_floor: "BatteryFloor", heat_end: "HeatEnd", heat_notice: "HeatNotice", lid_display: "LidDisplay", display_awake: "DisplayAwake", low_power: "LowPower" };
+  const enums = { mode: "Mode", grace: "Grace", cap: "Cap", lid: "LidRule", battery_floor: "BatteryFloor", heat_end: "HeatEnd", heat_notice: "HeatNotice", lid_display: "LidDisplay", display_awake: "DisplayAwake", low_power: "LowPower", freeze: "Freeze", mute: "Mute" };
   const fields = [...ENGINE_SETTINGS.slice(ENGINE_SETTINGS.indexOf("pub struct KeepAwakeSettings {")).split("\n}")[0].matchAll(/pub (\w+): (\w+),/g)].map(([, field, type]) => [field, type]);
   assert.deepEqual(fields, Object.entries(enums), "the settings fields in engine order");
   assert.deepEqual(api.KEEP_AWAKE_SETTINGS.map((setting) => setting.id), Object.keys(enums), "one line per engine setting, in engine order");
@@ -103,7 +106,9 @@ test("the window names every engine option and default of Keep awake as the engi
   assert.deepEqual(variants(ENGINE_STATE, "LidSupport"), ["held", "off", "idle_only_on_battery", "needs_macos13", "needs_approval", "helper_missing", "not_turned_on", "remove_helper", "sleep_not_restored", "locked_by_policy", "not_available"]);
   assert.deepEqual(variants(ENGINE_STATE, "EndReason"), ["battery", "battery_unread", "heat", "cap", "manual", "off", "hold_lost"]);
   assert.deepEqual(variants(ENGINE_STATE, "Reason"), ["work", "timer", "grace", "idle", "off"]);
-  assert.deepEqual(variants(ENGINE, "KeepAwakeAction"), ["start", "extend", "end", "set", "turn_on_lid_hold", "remove_lid_helper", "put_lid_back"]);
+  assert.deepEqual(variants(ENGINE, "KeepAwakeAction"), ["start", "extend", "end", "set", "turn_on_lid_hold", "remove_lid_helper", "put_lid_back", "freeze_apps"]);
+  assert.match(source("../../../crates/crazyagent/src/keep_awake/freeze.rs"), /pub const APPS_MAX: usize = 16;/);
+  assert.equal(api.FREEZE_APPS_MAX, 16);
   assert.match(ENGINE, /minutes outside 1 to 1440/);
   assert.deepEqual([api.MINUTES_MIN, api.MINUTES_MAX], [1, 1440]);
 });
@@ -121,12 +126,19 @@ test("the settings matrix words are the plan's, with the default of each", () =>
     "Display with the lid closed (macOS)": ["Sleep the display", "Leave on"],
     "Display awake with the lid open": ["Off", "While holding"],
     "Low Power Mode": ["On battery below 40 %", "Whenever on battery", "Off"],
+    "Freeze apps while the lid is closed": ["Off", "On for the listed apps"],
+    "Mute audio while the lid is closed": ["Off", "On"],
   });
-  assert.equal(api.KEEP_AWAKE_SETTINGS.reduce((count, setting) => count + setting.options.length, 0), 30);
+  assert.equal(api.KEEP_AWAKE_SETTINGS.reduce((count, setting) => count + setting.options.length, 0), 34);
   assert.match(ENGINE_SETTINGS, /pub const BELOW_PCT: u8 = 40;/, "the 40 % is the engine's");
   const display = api.KEEP_AWAKE_SETTINGS.find((setting) => setting.id === "display_awake");
   assert.equal(display.help, DISPLAY_HELP, "the help says plainly that the screen stays unlocked");
   assert.ok(TUI_SETTINGS.includes(JSON.stringify(DISPLAY_HELP)), "the TUI says the same words");
+  const freeze = api.KEEP_AWAKE_SETTINGS.find((setting) => setting.id === "freeze");
+  assert.equal(freeze.help, FREEZE_HELP, "the help names the restore command and the next start");
+  assert.ok(TUI_SETTINGS.includes(JSON.stringify(FREEZE_HELP)), "the TUI says the same freeze words");
+  assert.equal(api.KEEP_AWAKE_SETTINGS.find((setting) => setting.id === "mute").help, MUTE_HELP);
+  assert.ok(TUI_SETTINGS.includes(JSON.stringify(MUTE_HELP)), "the TUI says the same mute words");
 });
 
 test("every decision and lid support gives the approved label and its tone", () => {
@@ -191,6 +203,10 @@ test("every refusal of a Keep awake change has its own sentence, the engine's se
     assert.doesNotMatch(core.plainError(code), /Something went wrong/, code);
     assert.ok(ENGINE.includes(`"${sentence}"`), `the engine has the same words for ${code}`);
   }
+  const apps = "Pick at most 16 apps, each once.";
+  assert.equal(core.plainError("keep_awake_apps_invalid"), apps);
+  assert.ok(ENGINE.includes(`"keep_awake_apps_invalid" => Some("${apps}")`), "the engine has the same words for an app list out of bounds");
+  assert.ok(TUI_SETTINGS.includes(JSON.stringify(apps)), "the TUI says the same words");
 });
 
 test("time left rounds up to the minute and never reads zero", () => {
@@ -270,6 +286,11 @@ test("a setting this computer cannot honour carries its reason, and the others n
   assert.equal(model.unavailable("lid", view()), "Not set up on this computer yet");
   for (const setting of api.KEEP_AWAKE_SETTINGS) assert.equal(model.unavailable(setting.id, mac), null, `${setting.id} works on a Mac with the lid hold`);
   for (const id of ["mode", "grace", "cap", "battery_floor", "display_awake"]) assert.equal(model.unavailable(id, windows), null, id);
+  for (const id of ["freeze", "mute"]) {
+    assert.equal(model.unavailable(id, windows), "Not available on Windows", id);
+    assert.equal(model.unavailable(id, linux), null, id);
+  }
+  assert.ok(TUI_WORDS.includes("Setting::Freeze | Setting::Mute if view.platform == Platform::Windows"), "the TUI gives the same reason");
 });
 
 test("custom minutes take whole numbers from 1 to 1440 and nothing else", () => {
@@ -623,6 +644,9 @@ test("Settings shows the reason on a setting this computer cannot honour and kee
   assert.ok(text(lineOf(windows, "heat_notice")).includes("Not available on Windows"));
   assert.ok(text(lineOf(windows, "lid_display")).includes("Only on macOS"));
   assert.ok(text(lineOf(windows, "lid")).includes("Lid-closed hold is not set up on this computer"));
+  assert.ok(text(lineOf(windows, "freeze")).includes("Not available on Windows"));
+  assert.ok(text(lineOf(windows, "mute")).includes("Not available on Windows"));
+  assert.equal(text(windows).includes("Apps to freeze"), false, "no app list where apps cannot freeze");
   assert.equal(text(lineOf(windows, "mode")).includes("Not available"), false);
   assert.equal(/<fieldset[^>]*disabled=""/.test(windows), false, "the choice stays editable and is stored");
   const mac = settingsView(ok(view({}, { lid_support: { kind: "held" }, lid_platform: { kind: "held" } })));
@@ -639,7 +663,7 @@ test("Settings, Keep awake keeps its title while it loads, is not ready or fails
 
 test("the window reads and changes Keep awake through two commands the app registers", () => {
   const registered = LIB.slice(LIB.indexOf("native_commands! {"));
-  for (const command of ["desktop_keep_awake_read", "desktop_keep_awake_act"]) {
+  for (const command of ["desktop_keep_awake_read", "desktop_keep_awake_apps", "desktop_keep_awake_act"]) {
     assert.match(LIB, new RegExp(`async fn ${command}\\(`), command);
     assert.match(registered, new RegExp(`\\b${command},`), `${command} is registered`);
   }
@@ -653,6 +677,13 @@ test("the window reads and changes Keep awake through two commands the app regis
   assert.throws(() => api.keepAwakeArgs("end", 0), /generation/);
   assert.match(API, /call<KeepAwakeView>\("desktop_keep_awake_read"\)/);
   assert.match(API, /call<IntentReceipt>\("desktop_keep_awake_act", keepAwakeArgs\(/);
+  assert.match(API, /call<FreezeApp\[\]>\("desktop_keep_awake_apps"\)/);
+  const notes = { name: "Notes", id: "com.example.notes" };
+  assert.deepEqual(sent({ freeze_apps: { apps: [notes] } }).action, { freeze_apps: { apps: [notes] } });
+  assert.deepEqual(sent("turn_on_lid_hold").action, "turn_on_lid_hold");
+  const many = Array.from({ length: 17 }, (_, at) => ({ name: `App ${at}`, id: `com.example.app${at}` }));
+  assert.throws(() => api.keepAwakeArgs({ freeze_apps: { apps: many } }, 7), /at most 16 apps/);
+  assert.throws(() => api.keepAwakeArgs({ freeze_apps: { apps: [notes, notes] } }, 7), /each once/);
 });
 
 test("the lid helper buttons follow what this Mac says of the lid, on macOS only", () => {
@@ -781,4 +812,51 @@ test("the three lid commands go to the engine by their plain names", () => {
     assert.deepEqual(api.keepAwakeArgs(action, 7), { action, generation: 7 });
   }
   assert.match(ENGINE, /KeepAwakeAction::TurnOnLidHold => power::LidCommand::TurnOn/);
+});
+
+const NOTES = { name: "Notes", id: "com.example.notes" };
+const MUSIC = { name: "Music", id: "com.example.music" };
+const appsLine = (markup) => {
+  const start = markup.indexOf("Apps to freeze");
+  assert.ok(start > 0, "the page has the apps line");
+  const from = markup.lastIndexOf('<div class="set-row', start);
+  const next = markup.indexOf('<div class="set-row', start);
+  return markup.slice(from, next === -1 ? undefined : next);
+};
+const checked = (markup) => [...markup.matchAll(/<input[^>]*type="checkbox"[^>]*>/g)].map(([input]) => input);
+
+test("the apps line names the listed apps under the freeze setting and offers Choose apps", () => {
+  const none = settingsView(ok(view({}, { lid_support: { kind: "held" } })));
+  assert.ok(none.indexOf("Apps to freeze") > none.indexOf('data-setting="freeze"'), "under the freeze setting");
+  assert.ok(none.indexOf("Apps to freeze") < none.indexOf('data-setting="mute"'), "before the mute setting");
+  assert.ok(text(appsLine(none)).includes("None listed."));
+  assert.ok(text(appsLine(none)).includes("Choose apps"));
+  const listed = settingsView(ok(view({}, { freeze_apps: [NOTES, MUSIC] })));
+  assert.ok(text(appsLine(listed)).includes("Notes, Music"));
+  assert.match(settingsView(ok(view()), { saving: true }), /<button type="button" class="btn" disabled="">Choose apps<\/button>/, "one change at a time");
+});
+
+test("the chooser lists the listed apps ticked first, then the running ones, and says how it loads", () => {
+  assert.deepEqual(settings.offeredApps([NOTES], [MUSIC, NOTES]), [NOTES, MUSIC], "each id once, listed first");
+  assert.deepEqual(settings.offeredApps([], []), []);
+  const loaded = settingsView(ok(view({}, { freeze_apps: [NOTES] })), { running: ok([MUSIC]) });
+  const boxes = checked(appsLine(loaded));
+  assert.equal(boxes.length, 2);
+  assert.match(boxes[0], /checked=""/, "the listed app starts ticked");
+  assert.doesNotMatch(boxes[1], /checked=""/, "a running app starts unticked");
+  assert.ok(text(appsLine(loaded)).includes("Save apps"));
+  assert.ok(text(appsLine(loaded)).includes("Cancel"));
+  assert.ok(text(settingsView(ok(view()), { running: ok([]) })).includes("No running app can be frozen. Open the app first."));
+  assert.ok(text(settingsView(ok(view()), { running: { kind: "loading" } })).includes("Listing the running apps..."));
+  const failed = settingsView(ok(view()), { running: { kind: "error", message: "The engine is not connected." } });
+  assert.ok(text(failed).includes("Couldn't list the running apps. The engine is not connected."));
+  const full = Array.from({ length: 16 }, (_, at) => ({ name: `App ${at}`, id: `com.example.app${at}` }));
+  const atMost = settingsView(ok(view({}, { freeze_apps: full })), { running: ok([MUSIC]) });
+  assert.ok(text(atMost).includes("Pick at most 16 apps, each once."));
+  assert.match(checked(appsLine(atMost)).at(-1), /disabled=""/, "a seventeenth app cannot be ticked");
+});
+
+test("Settings saves the chosen apps through freeze_apps and reads the running apps on Choose apps", () => {
+  assert.match(SETTINGS_PAGE, /setRunning\(await loadKeepAwakeApps\(\)\);/);
+  assert.match(SETTINGS_PAGE, /sendKeepAwake\(\{ freeze_apps: \{ apps: chosen \} \}\)/);
 });

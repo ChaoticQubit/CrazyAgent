@@ -53,6 +53,7 @@ const COPY: Record<string, string> = {
   keep_awake_no_lid_helper: "Lid-closed hold is set up only on macOS.",
   keep_awake_no_lid_setting: "Put the lid setting back is only on Windows.",
   keep_awake_lid_held: "The lid setting goes back when this hold ends.",
+  keep_awake_apps_invalid: "Pick at most 16 apps, each once.",
   change_may_be_recorded: "This change may still go through, so it can't be dismissed. Use Check again.",
   stale_revision: "This changed since you opened it. Review and save again.",
   stale_model_access: "This changed since you opened it. Review and save again.",

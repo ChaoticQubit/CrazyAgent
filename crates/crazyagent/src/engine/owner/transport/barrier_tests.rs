@@ -835,3 +835,19 @@ async fn a_revocation_that_never_reaches_storage_still_refuses_the_client() {
     );
     owner.stop().await;
 }
+
+/// rv-code T17 r1 F2: the Keep awake app list runs its system tools off the storage actor,
+/// as FolderSize and ProjectFiles do, so opening the chooser never holds up other owner
+/// requests or engine steps.
+#[test]
+fn the_keep_awake_app_list_is_read_off_the_storage_actor() {
+    let request = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new("keep-awake-apps").unwrap(),
+        expected_revision: Cursor::new(0),
+        operation: OwnerOperation::Read {
+            query: OwnerRead::KeepAwakeApps,
+        },
+    };
+    assert!(projects_home::handles(&request));
+}

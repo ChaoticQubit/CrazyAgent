@@ -212,7 +212,7 @@ fn a_timer_in_auto_holds_until_the_later_of_the_timer_and_the_work() {
     let (_folder, connection) = engine();
     let worker = agent(&connection, "working");
     let start = KeepAwakeAction::Start { minutes: 1 };
-    assert_eq!(act(&connection, start, NOW_MS), Outcome::Applied);
+    assert_eq!(act(&connection, start.clone(), NOW_MS), Outcome::Applied);
     let both = view(&connection).unwrap();
     assert_eq!(both.state.want, IDLE);
     assert_eq!(both.state.reason, Reason::Work);
@@ -426,7 +426,7 @@ fn every_refusal_of_an_owner_change_has_plain_words() {
         act(&connection, KeepAwakeAction::End, NOW_MS),
         rejected("keep_awake_not_holding")
     );
-    assert_eq!(act(&connection, start, NOW_MS), Outcome::Applied);
+    assert_eq!(act(&connection, start.clone(), NOW_MS), Outcome::Applied);
     assert_eq!(
         act(&connection, far, NOW_MS + SECOND_MS),
         rejected("keep_awake_minutes_invalid")
@@ -480,17 +480,17 @@ fn the_lid_helper_commands_are_owner_changes_with_plain_names() {
         (KeepAwakeAction::TurnOnLidHold, "\"turn_on_lid_hold\""),
         (KeepAwakeAction::RemoveLidHelper, "\"remove_lid_helper\""),
     ];
-    for (action, name) in names {
-        assert_eq!(serde_json::to_string(&action).unwrap(), name);
+    for (action, name) in &names {
+        assert_eq!(serde_json::to_string(action).unwrap(), *name);
         assert_eq!(
-            serde_json::from_str::<KeepAwakeAction>(name).unwrap(),
+            &serde_json::from_str::<KeepAwakeAction>(name).unwrap(),
             action
         );
         assert!(action.validate().is_ok());
     }
     let (_folder, connection) = engine();
     for (action, _) in names {
-        let outcome = act(&connection, action, NOW_MS);
+        let outcome = act(&connection, action.clone(), NOW_MS);
         if cfg!(target_os = "macos") {
             assert_eq!(outcome, Outcome::Applied, "{action:?}");
         } else {
@@ -742,6 +742,8 @@ fn every_settings_value() -> Vec<KeepAwakeSettings> {
         ..base
     }));
     all.extend(LowPower::ALL.map(|low_power| KeepAwakeSettings { low_power, ..base }));
+    all.extend(Freeze::ALL.map(|freeze| KeepAwakeSettings { freeze, ..base }));
+    all.extend(Mute::ALL.map(|mute| KeepAwakeSettings { mute, ..base }));
     all
 }
 
@@ -872,10 +874,12 @@ fn every_setting_option_round_trips_through_the_owner_protocol() {
             lid_display: LidDisplay::Sleep,
             display_awake: DisplayAwake::Off,
             low_power: LowPower::BatteryBelow40,
+            freeze: Freeze::Off,
+            mute: Mute::Off,
         }
     );
     let all = every_settings_value();
-    assert_eq!(all.len(), 1 + 3 + 4 + 4 + 3 + 4 + 3 + 2 + 2 + 2 + 3);
+    assert_eq!(all.len(), 1 + 3 + 4 + 4 + 3 + 4 + 3 + 2 + 2 + 2 + 3 + 2 + 2);
     for settings in all {
         let mutation = OwnerMutation::KeepAwake {
             action: saved(&connection, settings),
@@ -1395,4 +1399,59 @@ fn the_engine_start_takes_the_journal_lock_and_restore_waits_for_it() {
     assert_eq!(restore(root.path()), Err(RESTORE_ENGINE_RUNNING));
     drop(lock);
     assert_eq!(restore(root.path()), Ok(()));
+}
+
+/// fix5 QUESTION-01:45 A, leader 01:45 (KA-ED decides the Mac's reading): Freeze and Mute
+/// cover a closed lid only while no external display is in use. At a desk nothing is
+/// covered, unplugging the display covers, plugging it in again uncovers, an unread display
+/// covers as before, and an open lid or a hold that does not want the lid never covers.
+#[test]
+fn freeze_and_mute_cover_a_closed_lid_only_without_an_external_display() {
+    let cover = freeze::Cover {
+        freeze: true,
+        mute: true,
+        apps: vec![FreezeApp {
+            name: "Notes".into(),
+            id: "com.example.notes".into(),
+        }],
+    };
+    let read = |lid_closed: Option<bool>, external_display: Option<bool>| Sensors {
+        lid_closed,
+        external_display,
+        ..sensors(PowerSource::Ac, Some(80))
+    };
+    let desk = read(Some(true), Some(true));
+    let away = read(Some(true), Some(false));
+    let unread = read(Some(true), None);
+    let open = read(Some(false), Some(false));
+
+    assert_eq!(
+        lid_cover(true, Some(&desk), cover.clone()),
+        None,
+        "at a desk"
+    );
+    assert_eq!(
+        lid_cover(true, Some(&away), cover.clone()),
+        Some(cover.clone()),
+        "the display unplugged"
+    );
+    assert_eq!(
+        lid_cover(true, Some(&desk), cover.clone()),
+        None,
+        "plugged in again"
+    );
+    assert_eq!(
+        lid_cover(true, Some(&unread), cover.clone()),
+        Some(cover.clone()),
+        "an unread display covers as before"
+    );
+    assert_eq!(lid_cover(true, Some(&open), cover.clone()), None);
+    assert_eq!(lid_cover(false, Some(&away), cover.clone()), None);
+    assert_eq!(lid_cover(true, None, cover.clone()), None);
+    let nothing = freeze::Cover {
+        freeze: false,
+        mute: false,
+        apps: Vec::new(),
+    };
+    assert_eq!(lid_cover(true, Some(&away), nothing), None);
 }

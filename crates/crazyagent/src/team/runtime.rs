@@ -15134,6 +15134,7 @@ pub fn start_for_engine(
     } else {
         crate::keep_awake::Leftover::Unreadable
     };
+    let root = runtime.clone();
     let settings = (global.to_path_buf(), project.to_path_buf());
     let (global, project) = settings.clone();
     let access: AccessSource = Box::new(move || {
@@ -15182,6 +15183,12 @@ pub fn start_for_engine(
             .with_lines(crate::keep_awake::power::platform_reader(), lid, power)
             .with_leftover(leftover)
             .with_journal(journal);
+    #[cfg(unix)]
+    {
+        runtime.keep_awake = std::mem::take(&mut runtime.keep_awake).with_platform_lane(&root);
+    }
+    #[cfg(not(unix))]
+    let _ = root;
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
 

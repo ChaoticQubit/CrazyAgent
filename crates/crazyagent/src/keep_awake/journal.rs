@@ -6,8 +6,16 @@ use std::path::{Path, PathBuf};
 
 const FOLDER: &str = "keep-awake";
 const FILE: &str = "journal.json";
-const DRAFT: &str = "journal.json.new";
+const DRAFT: &str = ".new";
 const LOCK: &str = "journal.lock";
+
+/// The lid-closed lane's own journal file: the apps it froze and the sound it muted
+/// (DEC-167 Task 17).
+pub const LID_CLOSED: &str = "lid-closed.json";
+
+/// Every journal file below `<engine root>/keep-awake`, one writer each (DEC-167 Task 17
+/// ASK item 1). Engine start undoes each on its own.
+pub const NAMES: [&str; 2] = [FILE, LID_CLOSED];
 
 /// The most entries one journal holds.
 pub const ENTRIES_MAX: usize = 64;
@@ -25,12 +33,13 @@ pub struct Entry {
     pub restore: String,
 }
 
-/// The list of persistent changes not undone yet (DEC-167), in
-/// `<engine root>/keep-awake/journal.json`. An entry is on disk, synced, before its change
-/// is made, so an engine that dies in between still finds it at its next start.
+/// The list of persistent changes not undone yet (DEC-167), in one file of `NAMES` below
+/// `<engine root>/keep-awake`. An entry is on disk, synced, before its change is made, so
+/// an engine that dies in between still finds it at its next start.
 #[derive(Debug)]
 pub struct Journal {
     folder: PathBuf,
+    file: &'static str,
     entries: Vec<Entry>,
 }
 
@@ -150,21 +159,40 @@ impl JournalLock {
     }
 }
 
+/// Creates the journal folder below the engine root for the owner alone, or accepts the
+/// real folder already there. Input: the engine root. Output: `<engine root>/keep-awake`.
+pub fn folder(root: &Path) -> Result<PathBuf, EngineError> {
+    assert!(!root.as_os_str().is_empty());
+    let folder = root.join(FOLDER);
+    private_folder(&folder)?;
+    Ok(folder)
+}
+
 impl Journal {
     /// Opens the journal below the engine root, creating its folder. A missing file is an
     /// empty journal. A file that cannot be read stays where it is and is an error, so no
     /// undo is skipped. Input: the engine root. Output: the journal.
     pub fn open(root: &Path) -> Result<Self, EngineError> {
-        assert!(!root.as_os_str().is_empty());
-        let folder = root.join(FOLDER);
-        private_folder(&folder)?;
-        let entries = match File::open(folder.join(FILE)) {
-            Ok(file) => read(file)?,
+        Self::open_named(root, FILE)
+    }
+
+    /// Opens one journal file of `NAMES` below the engine root, as `open` does. Inputs: the
+    /// engine root and the file name, which must be one of `NAMES`. Output: the journal.
+    pub fn open_named(root: &Path, file: &'static str) -> Result<Self, EngineError> {
+        assert!(NAMES.contains(&file));
+        assert!(file.ends_with(".json") && !file.contains('/'));
+        let folder = folder(root)?;
+        let entries = match File::open(folder.join(file)) {
+            Ok(found) => read(found)?,
             Err(problem) if problem.kind() == ErrorKind::NotFound => Vec::new(),
             Err(problem) => return Err(unreadable(problem)),
         };
         assert!(entries.len() <= ENTRIES_MAX);
-        Ok(Self { folder, entries })
+        Ok(Self {
+            folder,
+            file,
+            entries,
+        })
     }
 
     /// The changes not undone yet, oldest first.
@@ -241,6 +269,35 @@ impl Journal {
         first.map_or(Ok(()), Err)
     }
 
+    /// Undoes and forgets the entries of one kind, newest first, and keeps every other
+    /// kind. Inputs: the kind and the undo for one entry. Output: Ok when no entry of that
+    /// kind is left, else the first failure; the entries that failed stay recorded.
+    pub fn settle(
+        &mut self,
+        kind: &str,
+        mut undo: impl FnMut(&Entry) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        assert!(!kind.is_empty());
+        let mut kept = Vec::new();
+        let mut first = None;
+        for entry in self.entries.iter().rev() {
+            if entry.kind != kind {
+                kept.push(entry.clone());
+            } else if let Err(problem) = undo(entry) {
+                kept.push(entry.clone());
+                first = first.or(Some(problem));
+            }
+        }
+        kept.reverse();
+        assert!(kept.len() <= self.entries.len());
+        if kept.len() != self.entries.len() {
+            self.persist(&kept)?;
+            self.entries = kept;
+        }
+        assert!(first.is_some() || self.entries.iter().all(|entry| entry.kind != kind));
+        first.map_or(Ok(()), Err)
+    }
+
     /// Replaces the journal file with the given entries: writes a draft, syncs it, renames
     /// it over the file and syncs the folder. Input: the entries. Output: Ok, or why not.
     fn persist(&self, entries: &[Entry]) -> Result<(), EngineError> {
@@ -249,12 +306,12 @@ impl Journal {
         if bytes.len() as u64 > FILE_BYTES_MAX {
             return Err(EngineError("keep_awake_journal_full".into()));
         }
-        let path = self.folder.join(DRAFT);
+        let path = self.folder.join(format!("{}{DRAFT}", self.file));
         let mut file = draft(&path).map_err(unwritable)?;
         file.write_all(&bytes).map_err(unwritable)?;
         file.sync_all().map_err(unwritable)?;
         drop(file);
-        std::fs::rename(&path, self.folder.join(FILE)).map_err(unwritable)?;
+        std::fs::rename(&path, self.folder.join(self.file)).map_err(unwritable)?;
         #[cfg(unix)]
         File::open(&self.folder)
             .and_then(|folder| folder.sync_all())

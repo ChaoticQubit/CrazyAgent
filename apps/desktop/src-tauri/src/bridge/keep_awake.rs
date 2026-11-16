@@ -1,6 +1,6 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::{OwnerMutation, OwnerRead};
-use crazyagent::keep_awake::{KeepAwakeAction, KeepAwakeView, Want};
+use crazyagent::keep_awake::{FreezeApp, KeepAwakeAction, KeepAwakeView, Want};
 
 /// The highest draft generation the window may send, the largest integer JavaScript holds
 /// exactly.
@@ -25,10 +25,27 @@ impl NativeBridge {
         bounded(view)
     }
 
+    /// Reads the running apps the owner may freeze while the lid is closed (Task 17): never
+    /// CrazyAgent, its engine, agents or system processes. Input: none. Output: the apps by
+    /// name, or `not_connected` without an engine.
+    pub async fn keep_awake_apps(&self) -> Result<Vec<FreezeApp>, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        let apps = self
+            .reader()?
+            .keep_awake_apps()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        bounded(apps)
+    }
+
     /// Sends one Keep awake change as a retained owner intent: start a timer, move the
-    /// running one later, end the hold, or save the settings. Inputs: the change and a
-    /// fresh draft generation. Output: the intent receipt, or `keep_awake_minutes_invalid`
-    /// for minutes outside 1 to 1440; the engine refuses any other change in the receipt.
+    /// running one later, end the hold, save the settings, a lid helper command or the
+    /// apps to freeze. Inputs: the change and a fresh draft generation. Output: the intent
+    /// receipt, `keep_awake_minutes_invalid` for minutes outside 1 to 1440 or
+    /// `keep_awake_apps_invalid` for an app list out of bounds; the engine refuses any other
+    /// change in the receipt.
     pub async fn keep_awake_act(
         &mut self,
         action: KeepAwakeAction,
@@ -41,9 +58,12 @@ impl NativeBridge {
         if generation == 0 || generation > GENERATION_MAX {
             return Err(failure("draft_generation_limit"));
         }
-        action
-            .validate()
-            .map_err(|_| failure("keep_awake_minutes_invalid"))?;
+        action.validate().map_err(|_| {
+            failure(match action {
+                KeepAwakeAction::FreezeApps { .. } => "keep_awake_apps_invalid",
+                _ => "keep_awake_minutes_invalid",
+            })
+        })?;
         self.controller()?
             .read(OwnerRead::KeepAwake)
             .await
