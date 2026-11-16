@@ -1848,6 +1848,12 @@ impl Session {
         self.child.id()
     }
 
+    /// Returns how long a stop waits for the harness before it is killed, the request's
+    /// stop grace, which a turn asked to stop also waits on for the harness to end it.
+    pub fn stop_grace(&self) -> Duration {
+        self.limits.stop_grace
+    }
+
     /// Sends one prompt. A prompt sent before the harness is ready is held until it is.
     /// Input: prompt text. Output: Ok, or `launch_busy` while a turn is running.
     pub fn send(&mut self, prompt: &str) -> Result<(), LaunchError> {

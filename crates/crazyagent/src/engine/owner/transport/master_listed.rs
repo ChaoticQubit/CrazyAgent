@@ -7,7 +7,9 @@ use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::credentials::SecretString;
 use crate::engine::claude_host::MasterTools;
 use crate::harnesses::accounts::Handover;
-use crate::harnesses::launch::{LaunchError, LaunchEvent, LaunchRequest, Session, listed_command};
+use crate::harnesses::launch::{
+    LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, RUN_TIME_MAX, Session, listed_command,
+};
 use crate::harnesses::registry::Harness;
 use crate::launch_context::EngineServer;
 use crate::model_gateway::relay::Relay;
@@ -16,7 +18,7 @@ use crate::usage::capture::Tokens;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The code of a listed master turn its harness ended as failed, without a rate limit.
 pub(super) const TURN_FAILED: &str = "listed_master_turn_failed";
@@ -240,20 +242,36 @@ pub(super) fn collect(collected: &mut Collected, event: LaunchEvent) {
 }
 
 /// Drives one listed master turn on its running harness: sends the prompt, then folds every
-/// event until the turn ends, asking the harness once to stop the turn when `stop` says so;
-/// a turn the harness has already ended needs no stop. Inputs: the session, the prompt and
-/// the stop check. Output: what the turn gathered, with its end set, or the refusal code.
+/// event until the turn ends, asking the harness once to stop the turn when `stop` says so
+/// and ending it cancelled once the session's stop grace passes after that; a turn the
+/// harness has already ended needs no stop. Inputs: the session, the prompt and the stop
+/// check. Output: what the turn gathered, with its end set, or the refusal code.
+#[cfg(test)]
 pub(super) fn drive(
     session: &mut Session,
     prompt: &str,
     stop: &dyn Fn() -> bool,
 ) -> Result<Collected, EngineError> {
+    drive_with(session, prompt, stop, &mut |_| Ok(()))
+}
+
+/// Drives one listed master turn as [`drive`] does, handing every event to `record` before
+/// it is folded, so the turn's capture holds each one. Inputs: the session, the prompt, the
+/// stop check and the recorder. Output: what the turn gathered, with its end set, or the
+/// refusal code of the session or the recorder.
+pub(super) fn drive_with(
+    session: &mut Session,
+    prompt: &str,
+    stop: &dyn Fn() -> bool,
+    record: &mut dyn FnMut(&LaunchEvent) -> Result<(), EngineError>,
+) -> Result<Collected, EngineError> {
     let mut collected = Collected::default();
-    let mut asked = false;
+    let mut asked: Option<Instant> = None;
+    let grace = session.stop_grace();
     session.send(prompt).map_err(engine_error)?;
     while collected.ended.is_none() {
-        if !asked && stop() {
-            asked = true;
+        if asked.is_none() && stop() {
+            asked = Some(Instant::now());
             match session.interrupt() {
                 Ok(()) => {}
                 Err(error) if error.0 == "launch_not_running" => {}
@@ -261,7 +279,11 @@ pub(super) fn drive(
             }
         }
         if let Some(event) = session.next_event(EVENT_WAIT).map_err(engine_error)? {
+            record(&event)?;
             collect(&mut collected, event);
+        }
+        if collected.ended.is_none() && asked.is_some_and(|asked| asked.elapsed() >= grace) {
+            collected.ended = Some(Err(CANCELLED));
         }
     }
     assert!(collected.ended.is_some());
@@ -275,9 +297,14 @@ pub(super) fn drive(
 pub(super) fn turn_limits(
     time: crate::master_time_limit::TimeLimit,
     retry: crate::provider_retry::ProviderRetry,
-) -> crate::harnesses::launch::LaunchLimits {
-    let _ = (time, retry);
-    crate::harnesses::launch::LaunchLimits::default()
+) -> LaunchLimits {
+    let limits = LaunchLimits {
+        run_time: time.run_time().unwrap_or(RUN_TIME_MAX),
+        provider_retry: retry,
+        ..LaunchLimits::default()
+    };
+    assert!(!limits.run_time.is_zero() && limits.run_time <= RUN_TIME_MAX);
+    limits
 }
 
 /// Makes the private home one listed master session's turns run in, below its account's
@@ -285,12 +312,31 @@ pub(super) fn turn_limits(
 /// two sessions on one account never share an instruction file, an MCP file or harness
 /// state, and refuses one that holds a sign-in's record. Inputs: the slot home, the session,
 /// the harness and the account. Output: the home, or the refusal.
+#[cfg(unix)]
 pub(super) fn listed_home(
     base: &std::path::Path,
     session: &crate::protocol::SessionId,
     harness: &Harness,
     account: &crate::protocol::CredentialRef,
 ) -> Result<PathBuf, EngineError> {
-    let _ = (base, session, harness, account);
-    Err(failure(UNSUPPORTED))
+    crate::harnesses::home::private_folder(base, &[session.as_str()]).map_err(engine_error)?;
+    let folder = base.join(session.as_str());
+    let home = crate::harnesses::home::private_home(&folder, &harness.manifest().id, account)
+        .map_err(engine_error)?;
+    crate::harnesses::launch::holds_no_sign_in(&home).map_err(engine_error)?;
+    assert!(home.starts_with(&folder) && folder.starts_with(base));
+    Ok(home)
+}
+
+/// Refuses a listed master session's private home where its Unix owner and 0700 mode cannot
+/// be checked. Takes the slot home, the session, the harness and the account, all unused.
+/// Returns `launch_account_home_unavailable`.
+#[cfg(not(unix))]
+pub(super) fn listed_home(
+    _base: &std::path::Path,
+    _session: &crate::protocol::SessionId,
+    _harness: &Harness,
+    _account: &crate::protocol::CredentialRef,
+) -> Result<PathBuf, EngineError> {
+    Err(failure("launch_account_home_unavailable"))
 }

@@ -1438,11 +1438,13 @@ fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
 }
 
-/// The host codes for a master host whose wall clock ran out: Claude, Codex and rcli.
-const CLOCK_ENDED: [&str; 3] = [
+/// The host codes for a master host whose wall clock ran out: Claude, Codex, rcli and a
+/// listed master's launch.
+const CLOCK_ENDED: [&str; 4] = [
     "claude_host_deadline",
     "codex_host_deadline",
     "rcli_master_turn_deadline",
+    "launch_deadline",
 ];
 
 /// Names the owner's time limit in the error of a turn its host's wall clock ended, so the
@@ -1467,10 +1469,12 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "master_sign_in_missing"
         | "native_profile_credential_unavailable"
         | "native_profile_codex_api_key"
-        | "native_profile_codex_token_unreadable" => MasterReason::ReadinessUnknown,
+        | "native_profile_codex_token_unreadable"
+        | "account_key_missing" => MasterReason::ReadinessUnknown,
         "gateway_invalid_authentication"
         | "native_profile_credential_expiring"
-        | "native_profile_sign_in_revoked" => MasterReason::InvalidAuthentication,
+        | "native_profile_sign_in_revoked"
+        | "launch_account_unsupported" => MasterReason::InvalidAuthentication,
         "gateway_connection_changed_or_denied"
         | "agent_access_lowered"
         | "agent_toolchain_lowered"
@@ -1499,7 +1503,7 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "master_capture_unavailable"
         | "master_capture_encoding" => MasterReason::CaptureIncomplete,
         "codex_host_approval_required" => MasterReason::ApprovalRequired,
-        "codex_host_cancelled" => MasterReason::Cancelled,
+        "codex_host_cancelled" | super::master_listed::CANCELLED => MasterReason::Cancelled,
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
         "master_repository_missing" => MasterReason::RepositoryMissing,
         "master_instructions_too_large" => MasterReason::InstructionsTooLarge,
@@ -1513,7 +1517,9 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "claude_host_protocol_invalid_message"
         | "claude_host_protocol_stale_message"
         | "claude_host_protocol_disconnected"
-        | "claude_host_protocol_unsupported" => MasterReason::ProtocolFault,
+        | "claude_host_protocol_unsupported"
+        | "launch_protocol_failed"
+        | "launch_request_failed" => MasterReason::ProtocolFault,
         "codex_host_protocol_frame_too_large"
         | "claude_host_protocol_frame_too_large"
         | "codex_host_input_limit"
@@ -1529,7 +1535,14 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "master_runtime_host_unavailable"
         | "rcli_profile_configuration_required"
         | "codex_host_startup_timeout"
-        | "claude_host_startup_timeout" => MasterReason::RuntimeUnavailable,
+        | "claude_host_startup_timeout"
+        | super::master_listed::TURN_FAILED
+        | super::master_listed::PROCESS_EXITED
+        | super::master_listed::NOT_INSTALLED
+        | super::master_listed::TOO_OLD
+        | "launch_spawn_failed"
+        | "launch_closed"
+        | "launch_input_closed" => MasterReason::RuntimeUnavailable,
         _ => MasterReason::Unknown,
     }
 }
