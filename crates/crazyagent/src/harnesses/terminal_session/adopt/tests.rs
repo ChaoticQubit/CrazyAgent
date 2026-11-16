@@ -759,11 +759,11 @@ fn long_record(fixture: &Fixture, turns: usize) -> PathBuf {
     fixture.transcript(&lines)
 }
 
-/// RV-DS241-72 and -143: an agent can grow its record without end, so adoption reads it only
-/// while the launch's run time lasts, at most `REPLAY_WAIT`. A read cut short passes over the
-/// rest of the record as it stands, unread, so no earlier turn reaches the session as a new
-/// one; whether a turn is open there is unknown, so nothing is typed (the stand-in records
-/// every Escape), the turn is told as dropped and the next turn is followed alone.
+/// RV-DS241-72, -143 and -190: an agent can grow its record without end, so adoption reads it
+/// only while the launch's run time lasts, at most `REPLAY_WAIT`. A read cut short passes over
+/// the rest of the record as it stands, unread, so no earlier turn reaches the session as a
+/// new one. On a pane that shows the app's input prompt nothing is typed (the stand-in records
+/// every Escape), the unknown turn is told as dropped and the next turn is followed alone.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_adoption_replay_cut_at_the_run_time_passes_over_the_rest_and_hands_the_session_no_old_turn() {
@@ -773,8 +773,9 @@ fn an_adoption_replay_cut_at_the_run_time_passes_over_the_rest_and_hands_the_ses
     let file = long_record(&fixture, 1_024);
     let length = std::fs::metadata(&file).unwrap().len();
     assert!(length > 4 * READ_BYTES_MAX as u64);
-    let record = fixture.spawn(&host, &agent, ESCAPE_HARNESS, &file);
-    std::thread::sleep(Duration::from_millis(500));
+    let harness = format!("{IDLE_PROMPT}{ESCAPE_HARNESS}");
+    let record = fixture.spawn(&host, &agent, &harness, &file);
+    std::thread::sleep(Duration::from_secs(5));
     let launched = PaneRecord {
         since_ms: record.since_ms - 60_000,
         ..record
