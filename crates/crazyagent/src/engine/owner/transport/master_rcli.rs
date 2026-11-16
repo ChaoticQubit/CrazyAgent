@@ -107,7 +107,7 @@ fn turn_instruction_text(
     Ok(instruction_file_text(instructions, given))
 }
 
-fn cleanup_uncertain(error: &EngineError) -> bool {
+pub(super) fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
         || error.0.split(';').any(|part| {
             matches!(
@@ -173,8 +173,11 @@ impl OwnerRuntimeHandle {
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
+        listed: crate::sandbox::hidden_paths::HiddenRun,
     ) -> Result<MasterTurnView, EngineError> {
-        match self.run_rcli_master_turn(prepared, turn_id).await {
+        let ran = self.run_rcli_master_turn(prepared, turn_id).await;
+        super::master_runtime::keep_listed_if_uncertain(listed, &ran);
+        match ran {
             Ok(observation) => {
                 self.observe_master_turn(prepared, turn_id, observation)
                     .await

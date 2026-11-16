@@ -622,6 +622,7 @@ mod run {
             let run = ReadOnlyRun {
                 name: &name,
                 agent: request.agent,
+                kind: None,
                 project: request.project,
                 folder: &empty,
                 prompt: request.prompt,

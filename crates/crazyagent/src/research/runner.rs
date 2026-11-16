@@ -1126,14 +1126,20 @@ impl ResearchRunner {
         sandbox = allow_harness(sandbox, &program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
-        let sandbox = self.keep_held(job, || -> Result<ProjectSandbox, RunError> {
+        let (sandbox, listed) = self.keep_held(job, || -> Result<_, RunError> {
             let _setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
             ensure_repository(&root, &tmp)?;
             add_worktree(&sandbox, &profile, &worktree)?;
             let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
+            let listed = crate::sandbox::hidden_paths::starting(
+                crate::sandbox::hidden_paths::RunKind::Research,
+                project.as_str(),
+            )
+            .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?;
             let hidden = jobs
                 .hidden_paths(&project)
                 .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
+            listed.hid(if unconfined { &[] } else { &hidden });
             if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&root, &hidden) {
                 return Err(RunError::Invalid(code.into()));
             }
@@ -1146,7 +1152,7 @@ impl ResearchRunner {
                         .map_err(|code| RunError::Invalid(code.into()))?;
             }
             sandbox.install(&profile)?;
-            Ok(sandbox)
+            Ok((sandbox, listed))
         })??;
         still_held(jobs, job)?;
         let linked = self.linked_research(job, &root)?;
@@ -1200,6 +1206,7 @@ impl ResearchRunner {
                         credential.retain();
                     }
                     std::mem::forget(lease);
+                    std::mem::forget(listed);
                     return Err(RunError::Uncertain(leftovers::UNCERTAIN));
                 }
                 Err(Unstopped::Left(left)) => {
@@ -1211,7 +1218,12 @@ impl ResearchRunner {
                         who: format!("research job {}", job.id),
                     };
                     let mode = jobs.leftover_mode(&job.project);
-                    left.hold(account, lease, by, mode);
+                    if mode == leftovers::LeftoverMode::End {
+                        left.hold(account, (lease, listed), by, mode);
+                    } else {
+                        std::mem::forget(listed);
+                        left.hold(account, lease, by, mode);
+                    }
                     return Err(RunError::Uncertain(code));
                 }
             }
@@ -1344,6 +1356,7 @@ impl ResearchRunner {
                 credential.retain();
             }
             std::mem::forget(lease);
+            std::mem::forget(listed);
             return Err(RunError::Uncertain(code));
         }
         drop(credential);
@@ -1663,13 +1676,17 @@ impl ResearchRunner {
 /// One agent run outside the research queue that may only read `folder`,
 /// such as onboarding's mapping agent: `name` names its agent state and
 /// sandbox profile, `agent` and `project` name whose usage its tokens count
-/// as, `prompt` goes to it on stdin, `wall_time` bounds it and
+/// as, `kind` names it on the project's hidden folders list while it runs (none
+/// for a run whose folder holds nothing of the project), `prompt` goes to it on
+/// stdin, `wall_time` bounds it and
 /// `output_tokens` caps each Claude Code request (`None` for Claude Code's own
 /// limit; a Codex run has no such cap).
 pub(crate) struct ReadOnlyRun<'a> {
     pub name: &'a str,
     #[cfg(unix)]
     pub agent: &'a str,
+    #[cfg(unix)]
+    pub kind: Option<crate::sandbox::hidden_paths::RunKind>,
     #[cfg(unix)]
     pub project: Option<&'a ProjectId>,
     #[cfg(unix)]
@@ -1817,12 +1834,22 @@ impl ResearchRunner {
             sandbox = sandbox.allow_read(parent)?;
         }
         sandbox = allow_harness(sandbox, &program)?;
+        let listed = match (run.kind, run.project) {
+            (Some(kind), Some(project)) => Some(
+                crate::sandbox::hidden_paths::starting(kind, project.as_str())
+                    .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?,
+            ),
+            _ => None,
+        };
         let hidden = match run.project {
             Some(project) => ResearchJobs::open(&self.database)?
                 .hidden_paths(project)
                 .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?,
             None => Vec::new(),
         };
+        if let Some(listed) = &listed {
+            listed.hid(&hidden);
+        }
         if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &hidden) {
             return Err(RunError::Invalid(code.into()));
         }
@@ -1937,6 +1964,7 @@ impl ResearchRunner {
                 credential.retain();
             }
             std::mem::forget(lease);
+            std::mem::forget(listed);
             return Err(RunError::Uncertain(code));
         }
         drop(credential);
@@ -5398,6 +5426,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "onboard-m-alpha-1",
             agent: "onboarding",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
             project: Some(&project),
             folder: &folder,
             prompt: "Map this repository.",
@@ -5477,6 +5506,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-1",
             agent: "overview",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
             project: Some(&project),
             folder: &folder,
             prompt: "Describe this project.",
@@ -5544,6 +5574,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-6",
             agent: "overview",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
             project: None,
             folder: &folder,
             prompt: "Describe this project.",
@@ -5616,6 +5647,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-2",
             agent: "overview",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
             project: Some(&project),
             folder: &folder,
             prompt: "Describe this project.",
@@ -5727,6 +5759,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-3",
             agent: "overview",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
             project: None,
             folder: &folder,
             prompt: "Describe this project.",
@@ -5777,6 +5810,7 @@ mod tests {
             let run = ReadOnlyRun {
                 name,
                 agent: "overview",
+                kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
                 project: None,
                 folder: &folder,
                 prompt: "Describe this project.",

@@ -1158,6 +1158,7 @@ fn a_status_run_names_only_its_own_folder_and_profile_for_removal() {
         let run = ReadOnlyRun {
             name,
             agent: "roadmap-status",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Roadmap),
             project: Some(&project),
             folder: &folder,
             prompt: "Check the roadmap.",

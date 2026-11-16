@@ -733,6 +733,7 @@ impl OwnerRuntimeHandle {
         if routed.phase == MasterTurnPhase::Queued {
             self.reprove_sign_ins(Some(session_id.clone())).await;
         }
+        let listed = listed_master_turn(project_id)?;
         let prepared = match self
             .prepare_master_turn(project_id, session_id, turn_id)
             .await?
@@ -750,6 +751,7 @@ impl OwnerRuntimeHandle {
                 return Err(failure("master_runtime_result"));
             }
         };
+        listed.hid(master_turn_hides(&prepared));
         if prepared.session.project_id != *project_id
             || prepared.session.session_id != *session_id
             || prepared.session.current_turn.as_ref() != Some(turn_id)
@@ -761,11 +763,14 @@ impl OwnerRuntimeHandle {
         }
         let result = match self.record_master_start(&prepared).await {
             Ok(()) if prepared.session.selection.backend == MasterBackend::Rcli => {
-                return self.launch_rcli_master_turn(&prepared, turn_id).await;
+                return self
+                    .launch_rcli_master_turn(&prepared, turn_id, listed)
+                    .await;
             }
             Ok(()) => self.launch_master_turn(&prepared, turn_id).await,
             Err(error) => Err(error),
         };
+        keep_listed_if_uncertain(listed, &result);
         match result {
             Ok(turn) => Ok(turn),
             Err(error) if error.0 == "master_runtime_profile_not_acquired" => {
@@ -1429,6 +1434,47 @@ pub(super) fn account_failure(read: &AuthControl) -> Result<(), EngineError> {
         } => Ok(()),
         AuthControl::AccountRead { account: None, .. } => Err(failure("master_sign_in_missing")),
         _ => Err(failure("gateway_invalid_authentication")),
+    }
+}
+
+/// Puts one headless master turn on its project's hidden folders list before its prepare
+/// reads the saved hidden folders, for the whole turn (SA-VID14-MASTER-TURNS, r1); the turn
+/// records [`master_turn_hides`] once prepared. Input: the project. Output: the guard, or
+/// `master_sandbox_unavailable` when the list is full.
+fn listed_master_turn(
+    project: &ProjectId,
+) -> Result<crate::sandbox::hidden_paths::HiddenRun, EngineError> {
+    crate::sandbox::hidden_paths::starting(
+        crate::sandbox::hidden_paths::RunKind::Master,
+        project.as_str(),
+    )
+    .ok_or_else(|| failure("master_sandbox_unavailable"))
+}
+
+/// The folders a headless master turn's sandbox keeps it out of, as the hidden folders list
+/// records them: the native and the RCLI sandbox hide `hidden_paths`, and under Full access
+/// the turn runs unconfined and hides none (SA-VID14 r1 sec F3). Input: the prepared turn.
+/// Output: the folders.
+fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
+    if prepared.agent_policy.access == crate::sandbox::policy::AgentAccess::Full {
+        &[]
+    } else {
+        &prepared.hidden_paths
+    }
+}
+
+/// Keeps a headless master turn on the hidden folders list after it returns when its close
+/// or retirement was uncertain, since its processes may still run, until the engine starts
+/// again (SA-VID14 r1); the RCLI test is the wider one. Inputs: the guard and the result.
+pub(super) fn keep_listed_if_uncertain<T>(
+    listed: crate::sandbox::hidden_paths::HiddenRun,
+    result: &Result<T, EngineError>,
+) {
+    if result
+        .as_ref()
+        .is_err_and(super::master_rcli::cleanup_uncertain)
+    {
+        std::mem::forget(listed);
     }
 }
 

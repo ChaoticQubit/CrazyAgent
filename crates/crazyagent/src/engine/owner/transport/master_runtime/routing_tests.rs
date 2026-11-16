@@ -1522,6 +1522,7 @@ async fn an_unregistered_rcli_profile_stops_the_turn_with_its_own_cause() {
 async fn an_unclassified_cause_is_kept_as_a_code_and_private_text_is_redacted() {
     for (cause, stored) in [
         ("master_runtime_binding", "master_runtime_binding"),
+        ("master_sandbox_unavailable", "master_sandbox_unavailable"),
         (
             "Provider said: token sk-live-123 rejected at /private/tmp/x",
             "master_cause_redacted",
@@ -1615,6 +1616,104 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
         .unwrap();
     assert_eq!(saved(read().await.unwrap()), None);
     case.finish().await;
+}
+
+/// SA-VID14-MASTER-TURNS and its r1: a headless master turn is listed before its folders are
+/// read, so any saved folder names it; once it records what its sandbox hides, only a folder
+/// hidden later names it, and under Full access it records nothing (sec F3). Its guard's drop
+/// takes it off the list. A project id of its own keeps other tests' turns off this list.
+#[tokio::test]
+async fn a_headless_master_turn_is_on_the_hidden_folders_list_while_it_runs() {
+    use crate::sandbox::hidden_paths::{RunKind, runs_seeing};
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    case.register().await;
+    let result = case
+        .command(MasterRuntimeCommand::Prepare {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+        })
+        .await
+        .unwrap();
+    let MasterRuntimeResult::Prepared(prepared) = result else {
+        panic!("the master turn was prepared");
+    };
+    let mut prepared = *prepared;
+    let project = ProjectId::new("sa-vid14-master-turn").unwrap();
+    prepared.session.project_id = project.clone();
+    let (hid, later) = (prepared.cwd.join("vault"), prepared.cwd.join("dump"));
+    prepared.hidden_paths = vec![hid.clone()];
+    prepared.agent_policy.access = crate::sandbox::policy::AgentAccess::Sandboxed;
+    let listed = listed_master_turn(&prepared.session.project_id).unwrap();
+    assert_eq!(
+        runs_seeing(project.as_str(), std::slice::from_ref(&hid)),
+        vec![RunKind::Master],
+        "before its folders are read any saved folder names it"
+    );
+    listed.hid(master_turn_hides(&prepared));
+    assert_eq!(
+        runs_seeing(project.as_str(), &[hid.join("keys"), later.clone()]),
+        vec![RunKind::Master],
+        "a folder hidden after the turn started names it"
+    );
+    assert!(
+        runs_seeing(project.as_str(), std::slice::from_ref(&hid)).is_empty(),
+        "a folder its start hid does not"
+    );
+    drop(listed);
+    assert!(runs_seeing(project.as_str(), std::slice::from_ref(&later)).is_empty());
+    prepared.agent_policy.access = crate::sandbox::policy::AgentAccess::Full;
+    assert!(
+        master_turn_hides(&prepared).is_empty(),
+        "a turn that runs unconfined under Full access hides nothing (sec F3)"
+    );
+    let unconfined = listed_master_turn(&prepared.session.project_id).unwrap();
+    unconfined.hid(master_turn_hides(&prepared));
+    assert_eq!(
+        runs_seeing(project.as_str(), std::slice::from_ref(&hid)),
+        vec![RunKind::Master],
+        "so after Full turns sandboxed, a folder saved under Full names it"
+    );
+    drop(unconfined);
+    assert!(runs_seeing(project.as_str(), &[later]).is_empty());
+    case.finish().await;
+}
+
+/// SA-VID14 r1 (rv-sec3 b, rv-sec2 F1): a master turn whose close or retirement was
+/// uncertain stays on the hidden folders list after drive_turn returns, since its processes
+/// may still run; any other ending takes it off. Project ids of its own keep the two kept
+/// guards off every other list.
+#[test]
+fn an_uncertain_master_cleanup_keeps_the_turn_listed_after_it_returns() {
+    use crate::sandbox::hidden_paths::{RunKind, runs_seeing};
+    let saved = [std::path::PathBuf::from("/tmp/sa-vid14-master-left/vault")];
+    let ended = |cause: &str| Err(EngineError(cause.into()));
+    for (project, result, kept) in [
+        ("sa-vid14-master-ok", Ok(()), false),
+        (
+            "sa-vid14-master-failed",
+            ended("master_sandbox_unavailable"),
+            false,
+        ),
+        (
+            "sa-vid14-master-closed",
+            ended("master_runtime_cleanup_uncertain:codex_host_close_failed"),
+            true,
+        ),
+        (
+            "sa-vid14-master-retired",
+            ended("master_turn_failed;rcli_master_cleanup_incomplete"),
+            true,
+        ),
+    ] {
+        let project = ProjectId::new(project).unwrap();
+        let listed = listed_master_turn(&project).unwrap();
+        listed.hid(&[]);
+        keep_listed_if_uncertain(listed, &result);
+        let named = runs_seeing(project.as_str(), &saved) == vec![RunKind::Master];
+        assert_eq!(named, kept, "{result:?}");
+    }
 }
 
 #[tokio::test]

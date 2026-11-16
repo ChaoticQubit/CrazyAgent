@@ -2634,8 +2634,9 @@ fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
 
 /// What the hidden-folders editor says the Settings list of agents that can still open a
 /// hidden folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A
-/// r1): team agents, taken-over panes included, and not the engine's other sandboxed runs.
-const HIDDEN_SEERS_COVER: &str = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named under Hidden with h Restart them. A research, overview, roadmap or onboarding run that started before keeps its access until it ends.";
+/// r1): team agents, taken-over panes included, and the engine runs that started before
+/// (SA-VID14-R2-N2).
+const HIDDEN_SEERS_COVER: &str = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named under Hidden with h Restart them. Master turns, research jobs and overview, roadmap, onboarding, code graph and lockfile rebuild runs that started before are named there too, and keep their access until they end.";
 
 /// The Settings line naming the running agents that can still open a folder hidden after
 /// they started, with the key that restarts them (SA-VID14-A). Takes the screen and look.
@@ -2649,6 +2650,45 @@ fn seers_line(screen: &ProjectScreen, look: &Look) -> Option<Row> {
         )
         .push("   h Restart them", look.muted)
     })
+}
+
+/// The Settings line naming the kinds of engine runs still running that started before a
+/// folder was hidden and can open it until they end (SA-VID14-R2-N2), wrapped to the page;
+/// a run has no restart key. Takes the screen, the width the lines wrap at and the look.
+/// Returns the rows, none while no run is listed.
+fn runs_lines(screen: &ProjectScreen, width: usize, look: &Look) -> Vec<Row> {
+    let runs = screen
+        .hidden_paths
+        .as_ref()
+        .map(|saved| saved.runs.as_slice())
+        .unwrap_or_default();
+    if runs.is_empty() {
+        return Vec::new();
+    }
+    let named: Vec<&str> = runs.iter().map(|kind| run_words(*kind)).collect();
+    let line = format!(
+        "Runs that can still open a hidden folder until they end: {}",
+        named.join(", ")
+    );
+    wrap_words(&line, width)
+        .into_iter()
+        .map(|part| Row::of(part, look.warning))
+        .collect()
+}
+
+/// The words the hidden folders list names one kind of engine run by (SA-VID14-R2-N2).
+/// Takes the kind. Returns the words.
+fn run_words(kind: crate::sandbox::hidden_paths::RunKind) -> &'static str {
+    use crate::sandbox::hidden_paths::RunKind;
+    match kind {
+        RunKind::Master => "master turn",
+        RunKind::Research => "research job",
+        RunKind::Overview => "overview run",
+        RunKind::Roadmap => "roadmap run",
+        RunKind::Onboarding => "onboarding run",
+        RunKind::CodeGraph => "code graph build",
+        RunKind::Lockfiles => "lockfile rebuild run",
+    }
 }
 
 /// The Settings line for a project's hidden folders: how many, or loading.
@@ -2712,6 +2752,11 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         entry("Hidden", hidden_line(screen, look)),
     ];
     lines.extend(seers_line(screen, look).map(|row| entry("", row)));
+    lines.extend(
+        runs_lines(screen, content.saturating_sub(10), look)
+            .into_iter()
+            .map(|row| entry("", row)),
+    );
     lines.extend([
         entry(
             "Access",

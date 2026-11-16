@@ -88,6 +88,7 @@ fn read_only_run(base: &Path, stop: &dyn Fn() -> bool) -> Result<ReadOnlyEnding,
         &ReadOnlyRun {
             name: "onboarding-warden",
             agent: "onboarding",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
             project: None,
             folder: &folder,
             prompt: "Describe this repository.",

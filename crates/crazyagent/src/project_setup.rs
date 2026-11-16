@@ -440,12 +440,15 @@ pub struct ReadPaths {
 }
 
 /// The folders a project's agents are kept out of in saved order, with the version the
-/// owner's screen sends back when it changes them.
+/// owner's screen sends back when it changes them, and the kinds of engine runs still
+/// running that started before one of them was hidden (SA-VID14-R2-N2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HiddenPaths {
     pub paths: Vec<String>,
     pub version: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<crate::sandbox::hidden_paths::RunKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
