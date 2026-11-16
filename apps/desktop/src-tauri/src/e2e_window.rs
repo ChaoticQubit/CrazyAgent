@@ -3,15 +3,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::plugin::{Builder, TauriPlugin};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime, Window};
 
 const LEVELS_FILE: &str = "CRAZYAGENT_E2E_WINDOW_LEVELS";
 const LOOK_EVERY: Duration = Duration::from_millis(500);
 const LOOKS_MAX: usize = 3_600;
 
-/// Test builds only: with the environment naming a file, writes there whether each app window
-/// floats above other apps' windows, once at start and again whenever that changes, so a
-/// spec can read the real window levels. Input: none. Output: the plugin.
+/// Test builds only: keeps every app window above other apps' windows and on every desktop
+/// Space, so the owner's windows never cover the app and stop its WebKit pages drawing. With
+/// the environment naming a file, writes there whether each window floats, once at start and
+/// again whenever that changes. Input: none. Output: the plugin.
 pub(crate) fn plugin<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("e2e-window")
         .setup(|app, _| {
@@ -21,7 +22,20 @@ pub(crate) fn plugin<R: Runtime>() -> TauriPlugin<R> {
             }
             Ok(())
         })
+        .on_window_ready(|window| float(&window))
         .build()
+}
+
+fn float<R: Runtime>(window: &Window<R>) {
+    if let Err(error) = window.set_always_on_top(true) {
+        eprintln!("e2e window {} did not float: {error}", window.label());
+    }
+    if let Err(error) = window.set_visible_on_all_workspaces(true) {
+        eprintln!(
+            "e2e window {} did not join every Space: {error}",
+            window.label()
+        );
+    }
 }
 
 fn watch<R: Runtime>(app: &AppHandle<R>, file: &Path) {
