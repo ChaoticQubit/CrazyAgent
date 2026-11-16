@@ -1519,14 +1519,72 @@ async fn a_mixed_device_lease_record_is_still_refused() {
     }
 }
 
-#[tokio::test]
-async fn an_uncertain_lease_on_an_unrenumbered_volume_stays_uncertain() {
-    use crazyagent::worktrees::LeaseState;
+/// Makes a Ready lease, lets `change` touch its worktree, stores the lease Uncertain with
+/// `renumber` applied, and opens the engine once more. Inputs: the change, given the lease
+/// worktree, and the renumber. Output: the lease state the reopened engine reads.
+async fn uncertain_after(
+    change: impl FnOnce(&Path),
+    renumber: fn(u64) -> Renumber,
+) -> crazyagent::worktrees::LeaseState {
     let temporary = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(temporary.path()).unwrap();
-    let (_, config, _) = ready_lease(&root).await;
-    rewrite_rows(&root.join("db"), Renumber::Nothing, true);
+    let (repo, config, lease) = ready_lease(&root).await;
+    change(Path::new(&lease.path));
+    rewrite_rows(&root.join("db"), renumber(volume(&repo) ^ 1), true);
     let engine = Engine::open(&root.join("db"), config).await.unwrap();
-    assert_eq!(leases(&engine).await[0].state, LeaseState::Uncertain);
+    let state = leases(&engine).await.remove(0).state;
     engine.close().await.unwrap();
+    state
+}
+
+/// LEASE-LEGACY-UNCERTAIN: an Uncertain lease whose worktree still matches its own Git
+/// index, the checkout as made or with its agent's change staged, is checked again at the
+/// next start and waits for recovery.
+#[tokio::test]
+async fn an_uncertain_lease_whose_worktree_matches_its_index_waits_for_recovery() {
+    use crazyagent::worktrees::LeaseState;
+    assert_eq!(
+        uncertain_after(|_| {}, |_| Renumber::Nothing).await,
+        LeaseState::RecoveryRequired,
+        "the checkout as made"
+    );
+    let staged = |worktree: &Path| {
+        std::fs::write(worktree.join("tracked"), "the agent's change\n").unwrap();
+        git(worktree, &["add", "tracked"]);
+    };
+    assert_eq!(
+        uncertain_after(staged, |_| Renumber::Nothing).await,
+        LeaseState::RecoveryRequired,
+        "the agent's change, staged"
+    );
+}
+
+/// LEASE-LEGACY-UNCERTAIN and rv-sec3 N1: a checkout that failed after its folder was
+/// pinned (a tracked file missing or short, or no Git index yet) stays Uncertain at the
+/// next start, on a plain volume and on a renumbered one, so it is never requalified on its
+/// pins alone.
+#[tokio::test]
+async fn a_failed_checkout_stays_uncertain_on_a_plain_and_a_renumbered_volume() {
+    use crazyagent::worktrees::LeaseState;
+    let missing = |worktree: &Path| std::fs::remove_file(worktree.join("tracked")).unwrap();
+    let short = |worktree: &Path| std::fs::write(worktree.join("tracked"), "comm").unwrap();
+    let unindexed =
+        |worktree: &Path| std::fs::remove_file(admin_folder(worktree).join("index")).unwrap();
+    let damages: [(&str, &dyn Fn(&Path)); 3] = [
+        ("missing", &missing),
+        ("short", &short),
+        ("no index", &unindexed),
+    ];
+    for (damage, change) in damages {
+        for (place, renumber) in [
+            ("plain", (|_| Renumber::Nothing) as fn(u64) -> Renumber),
+            ("renumbered", Renumber::Volume as fn(u64) -> Renumber),
+        ] {
+            assert_eq!(
+                uncertain_after(change, renumber).await,
+                LeaseState::Uncertain,
+                "{damage} on a {place} volume"
+            );
+        }
+    }
 }
