@@ -2512,6 +2512,99 @@ mod tests {
         assert!(!String::from_utf8_lossy(&listed.stdout).contains(&"b".repeat(64)));
     }
 
+    /// A listed master's home is its session's private home in its own keyless slot inside
+    /// the engine's native profiles folder (DEC-180 Task 20): the sandbox carves that one
+    /// home back out while the folder of profiles stays denied, so a real child reads and
+    /// writes its own home but neither another session's home in that slot nor another
+    /// slot. Runs on macOS only: it checks Seatbelt.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_listed_master_reaches_its_own_session_home_and_no_other() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let engine = root.engine_root().unwrap().to_path_buf();
+        let profiles = engine.join("native-profiles");
+        let slot = profiles.join("a".repeat(64)).join("home");
+        let own = slot.join("session-a").join("standin-acp").join("account-1");
+        let neighbour = slot.join("session-b").join("standin-acp").join("account-1");
+        let other = profiles.join("b".repeat(64)).join("home");
+        for (home, text) in [(&own, "own"), (&neighbour, "neighbour"), (&other, "other")] {
+            private_directory(home);
+            std::fs::write(home.join("mcp.json"), text).unwrap();
+        }
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("standin-acp");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _capture_ref, _capture) = allocate_master_capture(&root).unwrap();
+        let built = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &own,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            &[],
+        );
+        assert!(
+            built.is_ok(),
+            "a listed master's own session home is refused: {:?}",
+            built.as_ref().err()
+        );
+        let sandbox = built.unwrap();
+        let text = sandbox.sandbox().profile();
+        let deny = text
+            .find(&format!("\n  (subpath \"{}\")", profiles.display()))
+            .expect("the profile denies the native profiles folder");
+        let allow = text
+            .find(&format!(
+                "(allow file-read* file-write*\n  (subpath \"{}\"))",
+                own.display()
+            ))
+            .expect("the profile allows the master's own session home");
+        assert!(deny < allow, "{text}");
+        assert!(!text.contains(&neighbour.display().to_string()), "{text}");
+        assert!(!text.contains(&other.display().to_string()), "{text}");
+        let run = |script: &str| {
+            let mut harness = Command::new("/bin/sh");
+            harness.arg("-c").arg(script).current_dir(&worktree);
+            let mut child = sandbox.wrap(&harness).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            crate::spawn_gate::output(&mut child).unwrap()
+        };
+        let quoted = |path: &Path| format!("'{}'", path.display());
+        let read = run(&format!("cat {}", quoted(&own.join("mcp.json"))));
+        assert!(read.status.success(), "{read:?}");
+        assert_eq!(String::from_utf8_lossy(&read.stdout), "own");
+        let write = run(&format!("echo turn > {}", quoted(&own.join("turn.txt"))));
+        assert!(write.status.success(), "{write:?}");
+        for (home, text) in [(&neighbour, "neighbour"), (&other, "other")] {
+            let stolen = run(&format!("cat {}", quoted(&home.join("mcp.json"))));
+            assert!(!stolen.status.success(), "{stolen:?}");
+            assert!(!String::from_utf8_lossy(&stolen.stdout).contains(text));
+            let planted = run(&format!("echo x > {}", quoted(&home.join("planted"))));
+            assert!(!planted.status.success());
+            assert!(!home.join("planted").exists());
+        }
+        for folder in [&profiles, &slot] {
+            let listed = run(&format!("ls {}", quoted(folder)));
+            assert!(!listed.status.success(), "{listed:?}");
+            assert!(!String::from_utf8_lossy(&listed.stdout).contains("session-b"));
+        }
+    }
+
     /// A hidden folder inside the project reaches the master's own boundary: the installed
     /// master profile denies it and a real sandboxed read of a file inside it is refused,
     /// while a plain file elsewhere in the repository stays readable. Runs on macOS only:
