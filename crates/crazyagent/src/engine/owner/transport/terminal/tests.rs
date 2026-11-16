@@ -573,11 +573,12 @@ async fn fifty_typed_keys_echo_back_within_budget() {
     while seen.len() < KEYS {
         let left = BUDGET.saturating_sub(started.elapsed());
         let frame = tokio::time::timeout(left, output.next()).await;
-        let Ok(Ok(TerminalFrame::Output { bytes })) = frame else {
-            panic!(
-                "all {KEYS} keys echoed within {BUDGET:?}, {} did: {frame:?}",
+        let bytes = match frame {
+            Ok(Ok(TerminalFrame::Output { bytes })) => bytes,
+            other => panic!(
+                "all {KEYS} keys echoed within {BUDGET:?}, {} did: {other:?}",
                 seen.len()
-            );
+            ),
         };
         let at = std::time::Instant::now();
         seen.extend(bytes.iter().filter(|byte| **byte == b'%').map(|_| at));
