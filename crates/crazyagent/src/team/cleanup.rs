@@ -1735,10 +1735,11 @@ thread_local! {
     pub(super) static AFTER_UNPIN_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 
-    /// A step a cleanup test runs in [`unpin_home_entry`] once it has named an entry that
-    /// will not open for `/usr/bin/chflags` and before that runs, standing in for a process
-    /// an agent left that swaps a folder meanwhile. Runs once; None runs nothing.
-    pub(super) static BEFORE_HOME_ENTRY_CHFLAGS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+    /// A step a cleanup test runs in [`unpin_home_entry`] once it has read an entry that
+    /// will not open and before its flags change through its parent's handle, standing in
+    /// for a process an agent left that swaps a folder meanwhile. Runs once; None runs
+    /// nothing.
+    pub(super) static BEFORE_HOME_ENTRY_FLAGS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -1788,23 +1789,23 @@ pub(crate) fn unpin<P: rustix::path::Arg>(parent: impl std::os::fd::AsFd, name: 
 
 /// Clears the immutable and append-only flags of one entry of an agent home as [`unpin`]
 /// does and, when the entry will not open, such as one at mode 000, which changing flags
-/// does not need to read, by its inode (RV-DS241-137 code r1 F2): its status is read from
-/// its parent's handle without following a link, and only when one of those flags is set is
-/// `/usr/bin/chflags -h` run on `/.vol/<device>/<inode>` from that status, which changes a
-/// link itself rather than what it names (rv-sec3 F1, RV-DS241-204): a confined agent can
-/// flag an entry in its project and move it into the home, where the profile denies setting
-/// flags only. No path is built in the engine, so a folder swapped before the run is not
-/// followed; the kernel still turns those numbers into the entry's current path and walks
-/// it, so a folder above it swapped for a link to an owner folder within that one call is
-/// followed (rv-sec3 r2 F1, backlog: a parent-handle flag call needs code this crate's
-/// forbid of unsafe code rules out). A Shared tool cache keeps [`unpin`] alone (T8-R2-F1). A file with a
-/// second link keeps its flags, as with [`unpin`]. Inputs: the entry's parent and its name
-/// there, absolute when the parent is the working folder.
+/// does not need to read (RV-DS241-137 code r1 F2), through its parent's handle and its
+/// name there: its status is read from that handle without following a link, and only when
+/// one of those flags is set is the flag word set relative to the same handle without
+/// following a link (`crazyagent_macos_fs::set_flags_at`), so a link is changed itself and
+/// no path above the parent is walked. A folder above it swapped for a link to an owner
+/// folder, even inside that call, is never followed (rv-sec3 F1 and r2 F1, RV-DS241-204): a
+/// confined agent can flag an entry in its project and move it into the home, where the
+/// profile denies setting flags only. A Shared tool cache keeps [`unpin`] alone (T8-R2-F1).
+/// A file with a second link keeps its flags, as with [`unpin`]. Inputs: the entry's parent
+/// and its name there, absolute when the parent is the working folder. Output: false when a
+/// clear it made did not take on the entry it read, which the call refused or which is no
+/// longer at that name with neither flag set; true otherwise.
 #[cfg(target_os = "macos")]
 pub(crate) fn unpin_home_entry<P: rustix::path::Arg + Copy>(
     parent: impl std::os::fd::AsFd,
     name: P,
-) {
+) -> bool {
     use nix::sys::stat::FileFlag;
     use rustix::fs::{AtFlags, FileType};
     let parent = parent.as_fd();
@@ -1821,34 +1822,27 @@ pub(crate) fn unpin_home_entry<P: rustix::path::Arg + Copy>(
             })
     };
     if pinned().is_none() {
-        return;
+        return true;
     }
     unpin(parent, name);
     let Some(found) = pinned() else {
-        return;
+        return true;
     };
-    let entry = PathBuf::from(format!("/.vol/{}/{}", found.st_dev, found.st_ino));
+    let Ok(component) = name.as_cow_c_str() else {
+        return false;
+    };
     #[cfg(test)]
-    if let Some(step) = BEFORE_HOME_ENTRY_CHFLAGS.with(|step| step.borrow_mut().take()) {
+    if let Some(step) = BEFORE_HOME_ENTRY_FLAGS.with(|step| step.borrow_mut().take()) {
         step();
     }
-    let _ = crate::spawn_gate::status(&mut flag_clear(&entry));
-}
-
-/// The `/usr/bin/chflags` run that clears the immutable and append-only flags of one entry,
-/// a link itself rather than what it names, with no input or output. Its options end before
-/// the flags word, since chflags reads anything after that word as a file (rv-sec3 r2 F2).
-/// Input: the entry. Output: the command, not started.
-#[cfg(target_os = "macos")]
-fn flag_clear(entry: &Path) -> std::process::Command {
-    let mut command = std::process::Command::new("/usr/bin/chflags");
-    command
-        .args(["-h", "--", "nouchg,nouappnd"])
-        .arg(entry)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    command
+    let kept = FileFlag::from_bits_retain(found.st_flags).difference(pinning);
+    if crazyagent_macos_fs::set_flags_at(parent, &component, kept.bits()).is_err() {
+        return false;
+    }
+    rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|after| {
+        (after.st_dev, after.st_ino) == (found.st_dev, found.st_ino)
+            && !FileFlag::from_bits_retain(after.st_flags).intersects(pinning)
+    })
 }
 
 /// Leaves flags alone where no flag an agent may set keeps an entry from going. Inputs:
@@ -1857,9 +1851,11 @@ fn flag_clear(entry: &Path) -> std::process::Command {
 fn unpin<P: rustix::path::Arg>(_: impl std::os::fd::AsFd, _: P) {}
 
 /// Leaves flags alone where no flag an agent may set keeps an entry of its home from going.
-/// Inputs: unused.
+/// Inputs: unused. Output: true, since nothing there is pinned.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn unpin_home_entry<P: rustix::path::Arg + Copy>(_: impl std::os::fd::AsFd, _: P) {}
+fn unpin_home_entry<P: rustix::path::Arg + Copy>(_: impl std::os::fd::AsFd, _: P) -> bool {
+    true
+}
 
 /// Counts what a folder holds on disk, never following a link, visiting at most `budget`
 /// entries. Inputs: the folder and the entries left. Output: the bytes and whether every
