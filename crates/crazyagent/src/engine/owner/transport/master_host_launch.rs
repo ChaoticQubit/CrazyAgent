@@ -316,14 +316,15 @@ pub(super) struct MasterConnector {
 
 impl MasterConnector {
     /// Readies the connector launch of one master turn of `project` in the engine root: none
-    /// when no connector is granted to the project's master. Inputs: the engine root and the
-    /// project. Output: the launch, none, or the refusal.
+    /// when no connector is granted to the project's master, or when no gateway serves the
+    /// root, which the served gate also says in one plain line when a connector was granted.
+    /// Inputs: the engine root and the project. Output: the launch, none, or the refusal.
     pub(super) fn open(
         root: &Path,
         project: &crate::protocol::ProjectId,
     ) -> Result<Option<Self>, EngineError> {
         let db = crate::storage::versioned::open(root)?;
-        let launch = crate::connectors::gateway::prepare(
+        let launch = crate::connectors::gateway::prepare_if_served(
             &db,
             root,
             project.as_str(),

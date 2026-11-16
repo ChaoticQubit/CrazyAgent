@@ -10323,7 +10323,7 @@ impl TeamRuntime {
                 (Role::Agent { tools_on: true }, format!("Agent {id}"))
             }
         };
-        let made = crate::connectors::gateway::prepare(
+        let made = crate::connectors::gateway::prepare_if_served(
             &self.connection,
             &self.root,
             project.as_str(),
