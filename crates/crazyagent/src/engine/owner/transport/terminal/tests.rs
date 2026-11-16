@@ -435,3 +435,117 @@ async fn output_reaches_the_view_while_a_typed_keys_send_is_held() {
     );
     drop(feed);
 }
+
+/// v242 typing timing row (BRIEF-typing-path): 50 keys typed as fast as a view sends them
+/// into a stand-in agent whose terminal echoes each key all echo back within a loose
+/// budget; prints each key's echo time at p50 and p95 and the last echo's time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fifty_typed_keys_echo_back_within_budget() {
+    const KEYS: usize = 50;
+    const BUDGET: Duration = Duration::from_secs(10);
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-term-typing-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = tmp.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let tmux = installed(root).expect("tmux must be installed on this machine");
+    let folder = root.join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/cat".into()],
+        cwd: root.to_path_buf(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let _launcher = {
+        let (agent, folder) = (agent.clone(), folder.clone());
+        tokio::task::spawn_blocking(move || {
+            let launcher = Tmux::open(Some(tmux), &folder);
+            launcher.spawn(&agent, &command).unwrap();
+            launcher
+        })
+        .await
+        .unwrap()
+    };
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root,
+        "e.sock",
+        &global,
+        &root.join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let (_, owner, _) = Client::new(root.join("e.sock"), WAIT)
+        .unwrap()
+        .with_owner(OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = owner.terminal_attach(agent).await.unwrap();
+
+    let typing = tokio::spawn(async move {
+        let mut sent = Vec::with_capacity(KEYS);
+        for _ in 0..KEYS {
+            sent.push(std::time::Instant::now());
+            let bytes = b"%".to_vec();
+            control
+                .send(&TerminalRequest::Input { bytes })
+                .await
+                .unwrap();
+        }
+        (control, sent)
+    });
+    let started = std::time::Instant::now();
+    let mut seen = Vec::with_capacity(KEYS);
+    while seen.len() < KEYS {
+        let left = BUDGET.saturating_sub(started.elapsed());
+        let frame = tokio::time::timeout(left, output.next()).await;
+        let Ok(Ok(TerminalFrame::Output { bytes })) = frame else {
+            panic!(
+                "all {KEYS} keys echoed within {BUDGET:?}, {} did: {frame:?}",
+                seen.len()
+            );
+        };
+        let at = std::time::Instant::now();
+        seen.extend(bytes.iter().filter(|byte| **byte == b'%').map(|_| at));
+    }
+    let (control, sent) = typing.await.unwrap();
+    assert_eq!(seen.len(), KEYS, "each key echoed once");
+    assert_eq!(sent.len(), KEYS);
+    let mut waits: Vec<Duration> = seen
+        .iter()
+        .zip(&sent)
+        .map(|(seen, sent)| seen.saturating_duration_since(*sent))
+        .collect();
+    waits.sort();
+    let last = seen[KEYS - 1].saturating_duration_since(sent[0]);
+    eprintln!(
+        "typing timing: {KEYS} keys, echo p50 {:?}, p95 {:?}, last echo {last:?} after the first key",
+        waits[KEYS / 2],
+        waits[KEYS * 95 / 100]
+    );
+    assert!(
+        last <= BUDGET,
+        "the last echo came within {BUDGET:?}: {last:?}"
+    );
+
+    drop(control);
+    drop(owner);
+    tokio::time::timeout(WAIT, service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+}
