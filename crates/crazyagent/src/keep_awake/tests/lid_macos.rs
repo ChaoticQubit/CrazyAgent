@@ -5,7 +5,7 @@ use crate::keep_awake::hold_macos::{
     ENDED_TO_PROTECT, HELPER_UNANSWERED, HelperLine, LEASE_S, LID_UNREAD, LID_WITHHELD_MACOS,
     LidLine, LidPlatform, PIN_FILE_KEPT, PIN_NONE, PIN_OTHER, READ_EVERY_MS, REMOVE_NOT_PUT_BACK,
     REMOVE_NOT_YOURS, REMOVE_REFUSED, REMOVE_UNANSWERED, REMOVE_UNFINISHED, STATUS_UNREAD,
-    TURN_ON_FAILED, VERSION_UNREAD, gate, macos_major,
+    TURN_ON_FAILED, UNINSTALL_SLEEP_KEPT, VERSION_UNREAD, gate, macos_major,
 };
 use crate::keep_awake::power::{
     LID_REFUSED, LidAsk, LidCommand, LidReader, PowerReading, READ_MS, Reader,
@@ -835,4 +835,55 @@ fn a_command_is_followed_by_one_read_of_the_helper() {
         [Request::Read; 2],
         "one read after the approval and one after the command (QUESTION 35d)"
     );
+}
+
+#[test]
+fn uninstall_on_a_mac_that_cannot_hold_the_lid_reaches_no_smappservice() {
+    let unbundled = LidPlatform {
+        bundled: false,
+        ..mac(15)
+    };
+    for platform in [unbundled, mac(12), LidPlatform { macos: None, ..mac(15) }] {
+        let mut rig = Rig::new(platform, Some(Status::Enabled));
+        assert_eq!(rig.line.uninstall(NOW_MS), None, "{platform:?}");
+        assert_eq!(*rig.status_reads.lock().unwrap(), 0, "{platform:?}");
+        assert!(rig.seen().is_empty(), "{platform:?}");
+    }
+}
+
+#[test]
+fn uninstall_removes_the_lid_helper_and_says_nothing_when_it_did() {
+    let mut rig = Rig::enabled();
+    assert_eq!(rig.line.uninstall(NOW_MS), None);
+    assert_eq!(
+        rig.seen(),
+        [Seen::Helper(Request::Forget), Seen::Unregister],
+        "Forget, then unregister, as Remove lid helper does (QUESTION 37b)"
+    );
+    let mut never = Rig::new(mac(15), Some(Status::NotRegistered));
+    assert_eq!(never.line.uninstall(NOW_MS), None, "nothing to remove");
+    assert!(never.seen().is_empty());
+}
+
+#[test]
+fn uninstall_says_what_it_could_not_remove() {
+    let mut unfinished = Rig::enabled();
+    unfinished.refuse("Operation not permitted");
+    let words = format!("{REMOVE_UNFINISHED}Operation not permitted");
+    assert_eq!(unfinished.line.uninstall(NOW_MS), Some(words));
+
+    let mut pmset = Rig::enabled();
+    pmset.forget_answer(Ok(Reply::Refused {
+        reason: Refusal::Pmset,
+    }));
+    assert_eq!(pmset.line.uninstall(NOW_MS), Some(REMOVE_NOT_PUT_BACK.into()));
+
+    let mut sleep = Rig::enabled();
+    sleep.forget_answer(Ok(Reply::Refused {
+        reason: Refusal::JournalUnreadable,
+    }));
+    let unreadable = Reply::State(view(PinView::You, FloorView::None, false));
+    sleep.answer(Ok(held()), Ok(unreadable));
+    assert_eq!(sleep.line.uninstall(NOW_MS), Some(UNINSTALL_SLEEP_KEPT.into()));
+    assert!(!sleep.seen().contains(&Seen::Unregister), "the helper stays to put sleep back");
 }

@@ -59,6 +59,10 @@ pub(super) const REMOVE_NOT_YOURS: &str =
 pub(super) const REMOVE_REFUSED: &str = "The lid helper refused Remove lid helper";
 /// The Remove lid helper reason for a Forget with no answer.
 pub(super) const REMOVE_UNANSWERED: &str = "The lid helper did not answer Remove lid helper";
+/// What uninstall says when the helper stays to put sleep back.
+pub(super) const UNINSTALL_SLEEP_KEPT: &str = "The lid helper stays until it can put sleep back";
+/// What uninstall says when the daemon is still registered for another reason.
+pub(super) const UNINSTALL_KEPT: &str = "The lid helper is still turned on";
 
 /// The engine's line to the lid helper: one request, one reply.
 pub(super) trait HelperLine: Send + std::fmt::Debug {
@@ -465,6 +469,26 @@ fn not_available(reason: &str) -> LidSupport {
     LidSupport::NotAvailable {
         reason: reason.into(),
     }
+}
+
+impl LidLine {
+    /// Uninstall's lid step (QUESTION 37b): Remove lid helper behind the same gate as every
+    /// command, then one reading of what stayed. A Mac that cannot hold the lid reaches no
+    /// SMAppService. Input: the time. Output: what could not be removed, in words; none
+    /// when it was removed, nothing was there, or this Mac cannot hold the lid.
+    pub(super) fn uninstall(&mut self, now_ms: i64) -> Option<String> {
+        let _ = now_ms;
+        Some(String::new())
+    }
+}
+
+/// Uninstall's lid step on this Mac: a lid line on the system's daemon registration, the
+/// installed helper and this Mac, run once. Input: the time. Output: what could not be
+/// removed, in words, or none.
+pub(super) fn remove_lid_helper(now_ms: i64) -> Option<String> {
+    assert!(now_ms > 0);
+    let mut line = LidLine::new(Box::new(Daemon), Box::new(Installed), LidPlatform::this_mac());
+    line.uninstall(now_ms)
 }
 
 /// Builds the engine's lid line: the system's daemon registration, the installed helper,

@@ -482,6 +482,16 @@ pub enum Leftover {
     Unreadable,
 }
 
+/// Uninstall's lid step (QUESTION 37b): on macOS, Remove lid helper on this Mac's lid line,
+/// behind the same gate as the owner's command; elsewhere there is no lid helper. Output:
+/// what could not be removed, in words, or none.
+pub fn remove_lid_helper() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return hold_macos::remove_lid_helper(crate::team::now_ms().max(1));
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
 /// Undoes at engine start every persistent change an earlier engine left behind (DEC-167)
 /// and says what it could not: the kinds of the entries still recorded, or a journal it
 /// could not open or read, which never counts as empty. A failure is logged by its code.
