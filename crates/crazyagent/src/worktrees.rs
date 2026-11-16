@@ -2674,31 +2674,74 @@ fn verify_record(record: &LeaseRecord) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Tells whether an Uncertain lease may have been left Uncertain only by a volume renumber
-/// that an older engine refused: its worktree identities were pinned and the live
-/// repository folder now has another device. Such a lease is verified again and can only
-/// become RecoveryRequired. Input: the stored record. Output: true to verify it again.
+/// Checks that an Uncertain lease's worktree is whole: its Git index exists, and the
+/// worktree holds what that index records, the checkout or what its agent or a turn end
+/// staged. A checkout that failed after its folder was pinned has no index, or misses or
+/// cuts short a file. Read only. Input: the record. Output: success, or the refusal code.
 #[cfg(unix)]
-fn renumbered(record: &LeaseRecord) -> bool {
-    record.directory.is_some()
-        && record.metadata.is_some()
-        && identity(Path::new(&record.lease.repository), true)
-            .is_ok_and(|live| live.device != record.admission.root.device)
+fn worktree_matches_index(record: &LeaseRecord) -> Result<(), EngineError> {
+    let metadata = worktree_metadata(record)?;
+    if !std::fs::symlink_metadata(metadata.join("index"))
+        .map_err(error)?
+        .is_file()
+    {
+        return Err(error("worktree_index_missing"));
+    }
+    let gitdir = metadata.to_str().ok_or_else(|| error("non_utf8_gitdir"))?;
+    let changed = git(
+        Path::new(&record.lease.repository),
+        &[
+            "-c",
+            "core.protectHFS=true",
+            "-c",
+            "core.protectNTFS=true",
+            "--git-dir",
+            gitdir,
+            "--work-tree",
+            &record.lease.path,
+            "-C",
+            &record.lease.path,
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=all",
+            "--name-only",
+            "-z",
+        ],
+    )?;
+    if !changed.is_empty() {
+        return Err(error("worktree_content_differs_from_index"));
+    }
+    Ok(())
+}
+
+/// Checks a stored lease at an engine start: [`verify_record`], and for an Uncertain lease
+/// also [`worktree_matches_index`], so a checkout that failed after its folder was pinned
+/// is never requalified on its pins alone. Input: the stored record. Output: success, or
+/// the refusal code.
+#[cfg(unix)]
+fn verify_at_start(record: &LeaseRecord) -> Result<(), EngineError> {
+    verify_record(record)?;
+    if record.lease.state == LeaseState::Uncertain {
+        worktree_matches_index(record)?;
+    }
+    Ok(())
 }
 
 /// Settles every stored lease when the engine starts, checking each through
-/// [`verify_record`]. Input: the connection, outside any transaction. Output: success, or
-/// `lease_capacity` or the storage failure.
+/// [`verify_at_start`]. Input: the connection, outside any transaction. Output: success,
+/// or `lease_capacity` or the storage failure.
 #[cfg(unix)]
 pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
-    reconcile_with(connection, verify_record)
+    reconcile_with(connection, verify_at_start)
 }
 
-/// Settles every stored lease at an engine start. A Ready or RecoveryRequired lease that
-/// verifies, or whose check ran out of time on a slow start, becomes RecoveryRequired and
-/// is checked again before any use; a Reserved lease, or one whose check failed otherwise,
-/// becomes Uncertain. Each failed check is logged. Inputs: the connection, outside any
-/// transaction, and the lease check. Output: success, `lease_capacity` or the storage error.
+/// Settles every stored lease at an engine start. A lease that verifies, Ready,
+/// RecoveryRequired or pinned Uncertain, or a Ready or RecoveryRequired one whose check ran
+/// out of time, becomes RecoveryRequired, checked again before any use; any other lease is
+/// Uncertain. Each failed check is logged. Inputs: the connection, outside any transaction,
+/// and the lease check. Output: success, `lease_capacity` or the storage error.
 #[cfg(unix)]
 fn reconcile_with(
     connection: &Connection,
@@ -2720,7 +2763,8 @@ fn reconcile_with(
             record.lease.state,
             LeaseState::Ready | LeaseState::RecoveryRequired
         );
-        let due = held || (record.lease.state == LeaseState::Uncertain && renumbered(&record));
+        let pinned = record.directory.is_some() && record.metadata.is_some();
+        let due = held || (record.lease.state == LeaseState::Uncertain && pinned);
         record.lease.state = match due.then(|| checked(|| verify(&record))) {
             Some(Ok(())) => LeaseState::RecoveryRequired,
             Some(Err((problem, retried))) => {
