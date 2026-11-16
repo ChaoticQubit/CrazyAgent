@@ -1,9 +1,6 @@
-#![cfg(target_os = "macos")]
-
-use crazyagent_mac_power::client::{self, CallError, Endpoint, PRODUCTION};
-use crazyagent_mac_power::protocol::{REPLY_BYTES_MAX, Reply, Request, encode_request, write_reply};
-use crazyagent_mac_power::server;
-use crazyagent_mac_power::service::Status;
+use super::{CallError, Endpoint, PRODUCTION, call};
+use crate::protocol::{REPLY_BYTES_MAX, Reply, Request, encode_request, write_reply};
+use crate::server;
 use std::cell::Cell;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::MetadataExt;
@@ -35,11 +32,7 @@ fn place() -> Place {
 }
 
 fn endpoint(socket: &Path, peer_uid: u32) -> Endpoint<'_> {
-    Endpoint {
-        socket: socket.to_str().unwrap(),
-        peer_uid,
-        wait: WAIT,
-    }
+    Endpoint::stand_in(socket.to_str().unwrap(), peer_uid, WAIT)
 }
 
 /// A gate that only runs the connect, as the engine's spawn gate does with no child starting.
@@ -78,7 +71,7 @@ fn a_call_sends_one_request_line_and_reads_one_reply() {
     let place = place();
     let held = Reply::Held { lease_left_s: 120 };
     let served = stand_in(&place.socket, reply_line(&held), Duration::ZERO);
-    let reply = client::call(&endpoint(&place.socket, place.my_uid), &HOLD, &open_gate);
+    let reply = call(&endpoint(&place.socket, place.my_uid), &HOLD, &open_gate);
     assert_eq!(reply, Ok(held));
     assert_eq!(served.join().unwrap(), encode_request(&HOLD));
 }
@@ -87,7 +80,7 @@ fn a_call_sends_one_request_line_and_reads_one_reply() {
 fn a_helper_socket_not_owned_by_root_is_refused() {
     let place = place();
     let served = stand_in(&place.socket, reply_line(&Reply::Released), Duration::ZERO);
-    let reply = client::call(
+    let reply = call(
         &endpoint(&place.socket, PRODUCTION.peer_uid),
         &Request::Release,
         &open_gate,
@@ -105,7 +98,7 @@ fn the_helper_socket_is_made_only_inside_the_gate() {
     let shut = |_: &mut dyn FnMut() -> io::Result<UnixStream>| -> io::Result<UnixStream> {
         Err(io::Error::from(io::ErrorKind::PermissionDenied))
     };
-    let reply = client::call(&endpoint(&place.socket, place.my_uid), &Request::Read, &shut);
+    let reply = call(&endpoint(&place.socket, place.my_uid), &Request::Read, &shut);
     assert_eq!(reply, Err(CallError::Connect(io::ErrorKind::PermissionDenied)));
     let accepted = listener.accept().map(|_| ()).map_err(|error| error.kind());
     assert_eq!(accepted, Err(io::ErrorKind::WouldBlock), "no connection outside the gate");
@@ -117,7 +110,7 @@ fn the_helper_socket_is_made_only_inside_the_gate() {
         connect()
     };
     let served = stand_in(&place.socket, reply_line(&Reply::Released), Duration::ZERO);
-    let reply = client::call(&endpoint(&place.socket, place.my_uid), &Request::Release, &counted);
+    let reply = call(&endpoint(&place.socket, place.my_uid), &Request::Release, &counted);
     assert_eq!(reply, Ok(Reply::Released));
     assert_eq!(calls.get(), 1, "one connect, through the gate");
     served.join().unwrap();
@@ -128,14 +121,14 @@ fn a_reply_over_the_bound_or_without_its_newline_is_refused() {
     let place = place();
     let long = vec![b'a'; REPLY_BYTES_MAX + 1];
     let served = stand_in(&place.socket, long, Duration::ZERO);
-    let reply = client::call(&endpoint(&place.socket, place.my_uid), &Request::Read, &open_gate);
+    let reply = call(&endpoint(&place.socket, place.my_uid), &Request::Read, &open_gate);
     assert_eq!(reply, Err(CallError::Reply));
     served.join().unwrap();
     std::fs::remove_file(&place.socket).unwrap();
     let mut cut = reply_line(&Reply::Released);
     assert_eq!(cut.pop(), Some(b'\n'));
     let served = stand_in(&place.socket, cut, Duration::ZERO);
-    let reply = client::call(&endpoint(&place.socket, place.my_uid), &Request::Read, &open_gate);
+    let reply = call(&endpoint(&place.socket, place.my_uid), &Request::Read, &open_gate);
     assert_eq!(reply, Err(CallError::Reply), "a reply closed before its newline");
     served.join().unwrap();
 }
@@ -145,7 +138,7 @@ fn a_helper_that_never_answers_is_cut_off_at_the_endpoint_wait() {
     let place = place();
     let served = stand_in(&place.socket, reply_line(&Reply::Released), WAIT * 3);
     let started = Instant::now();
-    let reply = client::call(&endpoint(&place.socket, place.my_uid), &Request::Read, &open_gate);
+    let reply = call(&endpoint(&place.socket, place.my_uid), &Request::Read, &open_gate);
     let took = started.elapsed();
     assert!(matches!(reply, Err(CallError::Exchange(_))), "{reply:?}");
     assert!(took >= WAIT, "{took:?}");
@@ -158,14 +151,4 @@ fn the_production_endpoint_is_launchds_socket_run_as_root() {
     assert_eq!(PRODUCTION.socket, format!("/private{}", server::SOCKET));
     assert_eq!(PRODUCTION.peer_uid, 0);
     assert_eq!(PRODUCTION.wait, Duration::from_secs(12));
-}
-
-#[test]
-fn the_service_status_is_read_from_apples_raw_values() {
-    assert_eq!(Status::from_raw(0), Some(Status::NotRegistered));
-    assert_eq!(Status::from_raw(1), Some(Status::Enabled));
-    assert_eq!(Status::from_raw(2), Some(Status::RequiresApproval));
-    assert_eq!(Status::from_raw(3), Some(Status::NotFound));
-    assert_eq!(Status::from_raw(4), None);
-    assert_eq!(Status::from_raw(-1), None);
 }

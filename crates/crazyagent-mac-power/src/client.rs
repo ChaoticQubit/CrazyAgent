@@ -12,11 +12,28 @@ use std::time::{Duration, Instant};
 const CHUNK_BYTES: usize = 256;
 
 /// Where the helper listens, the uid it must run as, and how long one call may take in all.
+/// The fields are private: a shipped build has only `PRODUCTION`, and a stand-in endpoint
+/// exists only in this crate's unit tests, so no env, argv or setting reaches another one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Endpoint<'a> {
-    pub socket: &'a str,
-    pub peer_uid: u32,
-    pub wait: Duration,
+    socket: &'a str,
+    peer_uid: u32,
+    wait: Duration,
+}
+
+impl<'a> Endpoint<'a> {
+    /// A stand-in helper for rows: a temp socket, the uid it must run as and a short wait.
+    /// Inputs: the three values. Output: the endpoint.
+    #[cfg(test)]
+    pub(crate) fn stand_in(socket: &'a str, peer_uid: u32, wait: Duration) -> Self {
+        assert!(socket.starts_with('/'));
+        assert!(!wait.is_zero());
+        Self {
+            socket,
+            peer_uid,
+            wait,
+        }
+    }
 }
 
 /// The installed helper: launchd's socket under `/private/var/run`, root, and 12 s for a call
@@ -106,3 +123,6 @@ fn read_line(stream: &UnixStream, until: Instant) -> Result<Vec<u8>, CallError> 
     assert!(line.len() <= REPLY_BYTES_MAX);
     Ok(line)
 }
+
+#[cfg(test)]
+mod tests;
