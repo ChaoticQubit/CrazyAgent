@@ -66,7 +66,8 @@ async function effect({ bridge, me, page }, id, value) {
     await me.click("End now", `${PANEL} button`);
     return until("the hold ended", "nothing", async () => (await engineView(bridge)).state.want.kind);
   }
-  assert.ok(["heat_notice", "lid_display"].includes(id), `${id} has an effect row`);
+  if (id === "freeze") await until("the apps line under the freeze setting", true, async () => (await page.evaluate("document.body.innerText")).includes("Apps to freeze"));
+  assert.ok(["heat_notice", "lid_display", "freeze", "mute"].includes(id), `${id} has an effect row`);
   const view = await engineView(bridge);
   assert.equal(view.settings[id], value, `${id} is stored; its effect lands with its own task and is proven there`);
 }
@@ -245,4 +246,46 @@ test("Keep awake: an engine with no lid helper in its bundle offers no lid helpe
     assert.equal((await engineView(bridge)).lid_platform.kind, "helper_missing", "a lid command stops at the bundle check");
   }
   assert.deepEqual(await lidButtons(page), []);
+}));
+
+const TICKED = ".keep-awake-apps input[type=checkbox]:checked";
+
+/** The names of the apps the chooser shows ticked. Input: the page. Output: the names. */
+async function ticked(page) {
+  return page.evaluate(`[...document.querySelectorAll(${JSON.stringify(TICKED)})].map((box) => box.parentElement.innerText.trim())`);
+}
+
+test("Keep awake: Choose apps lists the running apps, Save apps stores the ticked ones and Cancel stores nothing", { timeout: 900000 }, (t) => onEngine(t, "ca-ka-freeze-apps-", async (tools) => {
+  const { bridge, me, open, page, reload } = tools;
+  const first = await engineView(bridge);
+  assert.deepEqual(first.freeze_apps, [], "a new engine lists no app");
+  if (first.platform === "windows") {
+    const receipt = await engineTry(bridge, { freeze_apps: { apps: [] } });
+    assert.equal(receipt.outcome, "applied", "an empty list is stored where apps cannot freeze");
+    return;
+  }
+  await settingsPage(me, open);
+  await tools.t.test("ka freeze apps choose and save", async () => {
+    await me.click("Choose apps", `${FORM} button`);
+    await me.waitFor("the running apps", (text) => text.includes("Save apps"));
+    const offered = await page.evaluate("[...document.querySelectorAll('.keep-awake-apps label')].map((label) => label.innerText.trim())");
+    assert.ok(!offered.some((name) => /crazyagent/i.test(name)), `CrazyAgent and its engine are never offered: ${offered}`);
+    if (offered.length > 0) await me.click(offered[0], ".keep-awake-apps label");
+    const names = await ticked(page);
+    assert.equal(names.length, Math.min(offered.length, 1));
+    await me.click("Save apps", `${FORM} button`);
+    await me.waitFor("the saved note", (text) => text.includes("Apps to freeze saved."));
+    await until("the engine stores the ticked apps", names, async () => (await engineView(bridge)).freeze_apps.map((app) => app.name));
+    await reload(SETTINGS_TITLE);
+    const line = names.length === 0 ? "None listed." : names.join(", ");
+    await me.waitFor("the listed apps after a reload", (text) => text.includes(line));
+  });
+  await tools.t.test("ka freeze apps cancel", async () => {
+    const before = (await engineView(bridge)).freeze_apps;
+    await me.click("Choose apps", `${FORM} button`);
+    await me.waitFor("the running apps", (text) => text.includes("Save apps"));
+    await me.click("Cancel", `${FORM} button`);
+    await me.waitFor("the chooser closed", (text) => text.includes("Choose apps") && !text.includes("Save apps"));
+    assert.deepEqual((await engineView(bridge)).freeze_apps, before, "Cancel stores nothing");
+  });
 }));

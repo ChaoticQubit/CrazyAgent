@@ -21,4 +21,8 @@
 .keep-awake-custom input { width: 96px; }
 .keep-awake-custom .pj-error { flex-basis: 100%; margin: 0; }
 .keep-awake-reason { display: block; color: var(--warn); }
+.keep-awake-apps { display: flex; flex-direction: column; gap: var(--space-2); }
+.keep-awake-apps fieldset { display: flex; flex-direction: column; gap: var(--space-1); max-height: 240px; overflow: auto; margin: 0; padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-segment); }
+.keep-awake-apps label { display: flex; align-items: center; gap: var(--space-2); cursor: pointer; }
+.keep-awake-apps > span { display: flex; gap: var(--space-2); }
 @media (prefers-reduced-motion: reduce) { .keep-awake-control { transition: none; } }

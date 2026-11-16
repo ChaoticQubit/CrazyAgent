@@ -51,6 +51,7 @@ const COPY: Record<string, string> = {
   keep_awake_no_timer: "The timer already ended. Start a new one.",
   keep_awake_not_holding: "Nothing is held right now.",
   keep_awake_no_lid_helper: "Lid-closed hold is set up only on macOS.",
+  keep_awake_apps_invalid: "Pick at most 16 apps, each once.",
   change_may_be_recorded: "This change may still go through, so it can't be dismissed. Use Check again.",
   stale_revision: "This changed since you opened it. Review and save again.",
   stale_model_access: "This changed since you opened it. Review and save again.",

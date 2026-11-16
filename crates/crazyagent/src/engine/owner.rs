@@ -691,7 +691,9 @@ impl OwnerMutation {
             },
             Self::KeepAwake { action } => {
                 action.validate()?;
-                Command::OwnerKeepAwake { action: *action }
+                Command::OwnerKeepAwake {
+                    action: action.clone(),
+                }
             }
             Self::Memory { action } => {
                 action.validate()?;
@@ -907,6 +909,7 @@ pub enum OwnerRead {
     },
     NotificationSettings,
     KeepAwake,
+    KeepAwakeApps,
     FoundProjects,
     FolderSize {
         path: String,
@@ -1016,6 +1019,7 @@ impl OwnerRead {
             | Self::LearningProgress
             | Self::NotificationSettings
             | Self::KeepAwake
+            | Self::KeepAwakeApps
             | Self::FoundProjects
             | Self::Onboarding { .. }
             | Self::Memory { .. }
@@ -1497,6 +1501,9 @@ pub enum OwnerData {
     },
     KeepAwake {
         view: crate::keep_awake::KeepAwakeView,
+    },
+    KeepAwakeApps {
+        apps: Vec<crate::keep_awake::FreezeApp>,
     },
     ProjectsHome {
         home: crate::projects_home::ProjectsHome,

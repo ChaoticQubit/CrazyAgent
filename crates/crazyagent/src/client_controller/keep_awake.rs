@@ -1,5 +1,5 @@
 use super::*;
-use crate::keep_awake::{KeepAwakeAction, KeepAwakeView};
+use crate::keep_awake::{FreezeApp, KeepAwakeAction, KeepAwakeView};
 
 impl OwnerController {
     /// Reads Keep awake (DEC-167): the settings, what is held and why, the lid support,
@@ -8,6 +8,16 @@ impl OwnerController {
     pub async fn keep_awake(&mut self) -> Result<KeepAwakeView, EngineError> {
         match self.read(OwnerRead::KeepAwake).await?.data {
             OwnerData::KeepAwake { view } => Ok(view),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Reads the running apps the owner may choose to freeze while the lid is closed
+    /// (Task 17): never CrazyAgent, its engine, agents or system processes. Input: none.
+    /// Output: the apps by name, or why they cannot be listed.
+    pub async fn keep_awake_apps(&mut self) -> Result<Vec<FreezeApp>, EngineError> {
+        match self.read(OwnerRead::KeepAwakeApps).await?.data {
+            OwnerData::KeepAwakeApps { apps } => Ok(apps),
             _ => Err(EngineError("controller_read_response".into())),
         }
     }

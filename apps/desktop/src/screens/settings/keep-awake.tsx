@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState, type FormEvent } from "react";
-import { KEEP_AWAKE_CHANGED, KEEP_AWAKE_DEFAULTS, KEEP_AWAKE_POLL_MS, KEEP_AWAKE_SETTINGS, loadKeepAwake, sendKeepAwake, type KeepAwakeSettingId, type KeepAwakeSettings as Stored, type KeepAwakeView, type LidAction } from "../../api-keep-awake";
+import { FREEZE_APPS_MAX, KEEP_AWAKE_CHANGED, KEEP_AWAKE_DEFAULTS, KEEP_AWAKE_POLL_MS, KEEP_AWAKE_SETTINGS, loadKeepAwake, loadKeepAwakeApps, sendKeepAwake, type FreezeApp, type KeepAwakeSettingId, type KeepAwakeSettings as Stored, type KeepAwakeView, type LidAction } from "../../api-keep-awake";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, NotReady, Notice, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { lidHelperLine, unavailable } from "../keep-awake/model";
@@ -21,7 +21,10 @@ const SECTIONS: readonly { title: string; about: string; ids: readonly KeepAwake
   { title: "Lid closed", about: "Whether a hold goes on with the lid closed.", ids: ["lid", "lid_display"] },
   { title: "Ends by itself", about: "The limits that end a hold to protect the battery and the computer.", ids: ["battery_floor", "heat_end", "heat_notice"] },
   { title: "Display", about: "What a hold does with the display.", ids: ["display_awake"] },
+  { title: "While the lid is closed", about: "What a hold quiets while the lid is closed.", ids: ["freeze", "mute"] },
 ];
+
+const RUNNING_MAX = 512;
 
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -73,22 +76,81 @@ function LidHelperLine({ view, saving, onLid }: { view: KeepAwakeView; saving: b
   </SettingLine>;
 }
 
+/** The apps the chooser offers: the listed apps first, then every running app not listed
+ * yet, each id once. Inputs: the listed apps and the running ones. Output: the apps. */
+export function offeredApps(listed: readonly FreezeApp[], running: readonly FreezeApp[]): FreezeApp[] {
+  assert(listed.length <= FREEZE_APPS_MAX, "the engine lists at most 16 apps");
+  const offered = [...listed];
+  for (const app of running.slice(0, RUNNING_MAX)) if (!offered.some((known) => known.id === app.id)) offered.push(app);
+  assert(offered.length <= FREEZE_APPS_MAX + RUNNING_MAX, "the chooser stays bounded");
+  return offered;
+}
+
+/** The chooser of apps to freeze: the listed apps ticked, then the running ones, one
+ * checkbox each, at most 16 ticked, with Save apps and Cancel. Inputs: the listed apps,
+ * the running ones, a lock flag and the handlers. Output: the chooser. */
+function FreezeChooser({ listed, running, saving, onApps, onClose }: { listed: readonly FreezeApp[]; running: readonly FreezeApp[]; saving: boolean; onApps: (apps: FreezeApp[]) => void; onClose: () => void }) {
+  const offered = offeredApps(listed, running);
+  const [ticked, setTicked] = useState<readonly string[]>(listed.map((app) => app.id));
+  const full = ticked.length >= FREEZE_APPS_MAX;
+  return <div className="keep-awake-apps">
+    <fieldset disabled={saving}>
+      <legend className="visually-hidden">Apps to freeze</legend>
+      {offered.length === 0 && <p>No running app can be frozen. Open the app first.</p>}
+      {offered.map((app) => {
+        const on = ticked.includes(app.id);
+        return <label key={app.id}>
+          <input type="checkbox" checked={on} disabled={!on && full} onChange={() => setTicked(on ? ticked.filter((id) => id !== app.id) : [...ticked, app.id])} />
+          {app.name}
+        </label>;
+      })}
+    </fieldset>
+    {full && <p className="keep-awake-reason">Pick at most 16 apps, each once.</p>}
+    <span>
+      <Button variant="primary" pending={saving} pendingLabel="Saving..." onClick={() => onApps(offered.filter((app) => ticked.includes(app.id)))}>Save apps</Button>
+      <Button variant="quiet" disabled={saving} onClick={onClose}>Cancel</Button>
+    </span>
+  </div>;
+}
+
+/** The apps line under the freeze setting: the listed apps by name and Choose apps, or
+ * while choosing the running apps as they load. Hidden where apps cannot be frozen.
+ * Inputs: the view, the running apps while choosing, a lock flag and the handlers.
+ * Output: the line, or null. */
+function FreezeAppsLine({ view, running, saving, onChoose, onApps, onClose }: { view: KeepAwakeView; running: Loaded<FreezeApp[]> | null; saving: boolean; onChoose: () => void; onApps: (apps: FreezeApp[]) => void; onClose: () => void }) {
+  if (unavailable("freeze", view) !== null) return null;
+  const listed = view.freeze_apps;
+  const names = listed.length === 0 ? "None listed." : listed.map((app) => app.name).join(", ");
+  return <SettingLine label="Apps to freeze" help={names}>
+    {running === null && <Button disabled={saving} onClick={onChoose}>Choose apps</Button>}
+    {running?.kind === "loading" && <span>Listing the running apps...</span>}
+    {running?.kind === "error" && <span><Notice tone="danger" alert>{`Couldn't list the running apps. ${running.message}`}</Notice><Button variant="quiet" onClick={onClose}>Close</Button></span>}
+    {running?.kind === "not_ready" && <span><Notice tone="danger" alert>{NOT_READY}</Notice><Button variant="quiet" onClick={onClose}>Close</Button></span>}
+    {running?.kind === "ok" && <FreezeChooser listed={listed} running={running.value} saving={saving} onApps={onApps} onClose={onClose} />}
+  </SettingLine>;
+}
+
 /** Settings, Keep awake as a view of its state: the title in every state, then every
  * setting with its options, the stored one picked, a changed mark away from the default,
- * the lid helper's line on macOS, and Save changes, enabled only after a pick that differs
- * from what is stored. Inputs: the view read, the picks, a saving flag, the last problem
- * and the handlers. Output: the tab. */
-export function KeepAwakeSettingsView({ view, picks, saving, problem, onPick, onSave, onLid, onRetry }: {
+ * the lid helper's line on macOS, the apps to freeze under the freeze setting, and Save
+ * changes, enabled only after a pick that differs from what is stored. Inputs: the view
+ * read, the picks, the running apps while choosing, a saving flag, the last problem and
+ * the handlers. Output: the tab. */
+export function KeepAwakeSettingsView({ view, picks, running = null, saving, problem, onPick, onSave, onLid, onChoose = () => undefined, onApps = () => undefined, onClose = () => undefined, onRetry }: {
   view: Loaded<KeepAwakeView>;
   picks: KeepAwakePicks;
+  running?: Loaded<FreezeApp[]> | null;
   saving: boolean;
   problem: string;
   onPick: (id: KeepAwakeSettingId, value: string) => void;
   onSave: () => void;
   onLid: (action: LidAction) => void;
+  onChoose?: () => void;
+  onApps?: (apps: FreezeApp[]) => void;
+  onClose?: () => void;
   onRetry: () => void;
 }) {
-  if (view.kind === "loading") return <>{TOP}<Skeleton shape="line" count={9} /></>;
+  if (view.kind === "loading") return <>{TOP}<Skeleton shape="line" count={11} /></>;
   if (view.kind === "not_ready") return <>{TOP}<NotReady what="Keep awake" /></>;
   if (view.kind === "error") return <>{TOP}<LoadError message={`Couldn't load the Keep awake settings. ${view.message}`} onRetry={onRetry} /></>;
   const stored = view.value.settings;
@@ -105,6 +167,7 @@ export function KeepAwakeSettingsView({ view, picks, saving, problem, onPick, on
         {section.ids.map((id) => <Fragment key={id}>
           <OptionLine id={id} view={view.value} value={sent[id]} saving={saving} onPick={onPick} />
           {id === "lid" && <LidHelperLine view={view.value} saving={saving} onLid={onLid} />}
+          {id === "freeze" && <FreezeAppsLine view={view.value} running={running} saving={saving} onChoose={onChoose} onApps={onApps} onClose={onClose} />}
         </Fragment>)}
       </SettingSection>)}
       <div className="set-body">
@@ -119,15 +182,17 @@ const NOT_READY = "The engine is not ready yet. Try again.";
 
 /** Settings, Keep awake: reads the owner's Keep awake settings, reads them again whenever
  * Keep awake changes in this window and every 5 s, so a lid helper command shows what it
- * did once the engine ran it, and saves the picked options over the settings the engine
- * holds at that moment, so a change made in the panel or by another client while the page
- * was open is kept. The picks stay until a save took them. */
+ * did once the engine ran it, saves the picked options over the settings the engine holds
+ * at that moment, so a change made in the panel or by another client while the page was
+ * open is kept, and lists the running apps to choose the apps to freeze. The picks stay
+ * until a save took them. */
 export function KeepAwakeSettings() {
   const session = useAppSession();
   const [view, reload] = useLoad(loadKeepAwake);
   const [picks, setPicks] = useState<KeepAwakePicks>({});
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState("");
+  const [running, setRunning] = useState<Loaded<FreezeApp[]> | null>(null);
   useEffect(() => {
     window.addEventListener(KEEP_AWAKE_CHANGED, reload);
     return () => window.removeEventListener(KEEP_AWAKE_CHANGED, reload);
@@ -144,6 +209,22 @@ export function KeepAwakeSettings() {
     setSaving(false);
     if (result.kind === "error") setProblem(result.message);
     if (result.kind === "not_ready") setProblem(NOT_READY);
+  }
+  async function choose() {
+    if (view.kind !== "ok" || saving || running !== null) return;
+    setRunning({ kind: "loading" });
+    setRunning(await loadKeepAwakeApps());
+  }
+  async function apps(chosen: FreezeApp[]) {
+    if (view.kind !== "ok" || saving) return;
+    setSaving(true);
+    setProblem("");
+    const result = await sendKeepAwake({ freeze_apps: { apps: chosen } });
+    setSaving(false);
+    if (result.kind === "error") { setProblem(result.message); return; }
+    if (result.kind === "not_ready") { setProblem(NOT_READY); return; }
+    setRunning(null);
+    session.showToast("Apps to freeze saved.");
   }
   async function save() {
     if (view.kind !== "ok" || saving) return;
@@ -163,8 +244,9 @@ export function KeepAwakeSettings() {
     session.showToast("Keep awake settings saved.");
   }
   return <div className="stack">
-    <KeepAwakeSettingsView view={view} picks={picks} saving={saving} problem={problem}
+    <KeepAwakeSettingsView view={view} picks={picks} running={running} saving={saving} problem={problem}
       onPick={(id, value) => { setPicks((before) => ({ ...before, [id]: value })); setProblem(""); }} onSave={() => void save()}
-      onLid={(action) => void lid(action)} onRetry={reload} />
+      onLid={(action) => void lid(action)} onChoose={() => void choose()} onApps={(chosen) => void apps(chosen)}
+      onClose={() => setRunning(null)} onRetry={reload} />
   </div>;
 }

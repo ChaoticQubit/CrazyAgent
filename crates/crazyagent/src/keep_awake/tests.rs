@@ -201,7 +201,7 @@ fn a_timer_in_auto_holds_until_the_later_of_the_timer_and_the_work() {
     let (_folder, connection) = engine();
     let worker = agent(&connection, "working");
     let start = KeepAwakeAction::Start { minutes: 1 };
-    assert_eq!(act(&connection, start, NOW_MS), Outcome::Applied);
+    assert_eq!(act(&connection, start.clone(), NOW_MS), Outcome::Applied);
     let both = view(&connection).unwrap();
     assert_eq!(both.state.want, IDLE);
     assert_eq!(both.state.reason, Reason::Work);
@@ -414,7 +414,7 @@ fn every_refusal_of_an_owner_change_has_plain_words() {
         act(&connection, KeepAwakeAction::End, NOW_MS),
         rejected("keep_awake_not_holding")
     );
-    assert_eq!(act(&connection, start, NOW_MS), Outcome::Applied);
+    assert_eq!(act(&connection, start.clone(), NOW_MS), Outcome::Applied);
     assert_eq!(
         act(&connection, far, NOW_MS + SECOND_MS),
         rejected("keep_awake_minutes_invalid")
@@ -456,14 +456,17 @@ fn the_lid_helper_commands_are_owner_changes_with_plain_names() {
         (KeepAwakeAction::TurnOnLidHold, "\"turn_on_lid_hold\""),
         (KeepAwakeAction::RemoveLidHelper, "\"remove_lid_helper\""),
     ];
-    for (action, name) in names {
-        assert_eq!(serde_json::to_string(&action).unwrap(), name);
-        assert_eq!(serde_json::from_str::<KeepAwakeAction>(name).unwrap(), action);
+    for (action, name) in &names {
+        assert_eq!(serde_json::to_string(action).unwrap(), *name);
+        assert_eq!(
+            &serde_json::from_str::<KeepAwakeAction>(name).unwrap(),
+            action
+        );
         assert!(action.validate().is_ok());
     }
     let (_folder, connection) = engine();
     for (action, _) in names {
-        let outcome = act(&connection, action, NOW_MS);
+        let outcome = act(&connection, action.clone(), NOW_MS);
         if cfg!(target_os = "macos") {
             assert_eq!(outcome, Outcome::Applied, "{action:?}");
         } else {
@@ -656,6 +659,8 @@ fn every_settings_value() -> Vec<KeepAwakeSettings> {
         display_awake,
         ..base
     }));
+    all.extend(Freeze::ALL.map(|freeze| KeepAwakeSettings { freeze, ..base }));
+    all.extend(Mute::ALL.map(|mute| KeepAwakeSettings { mute, ..base }));
     all
 }
 
@@ -674,10 +679,12 @@ fn every_setting_option_round_trips_through_the_owner_protocol() {
             heat_notice: HeatNotice::Serious,
             lid_display: LidDisplay::Sleep,
             display_awake: DisplayAwake::Off,
+            freeze: Freeze::Off,
+            mute: Mute::Off,
         }
     );
     let all = every_settings_value();
-    assert_eq!(all.len(), 1 + 3 + 4 + 4 + 3 + 4 + 3 + 2 + 2 + 2);
+    assert_eq!(all.len(), 1 + 3 + 4 + 4 + 3 + 4 + 3 + 2 + 2 + 2 + 2 + 2);
     for settings in all {
         let mutation = OwnerMutation::KeepAwake {
             action: KeepAwakeAction::Set { settings },

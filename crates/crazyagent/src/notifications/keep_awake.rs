@@ -23,6 +23,11 @@ const NOT_PUT_BACK: &str = "Keep awake could not put back a sleep setting it cha
                             again when the engine starts.";
 const NOT_READ: &str = "Keep awake could not read its list of sleep settings to put back. It \
                         tries again when the engine starts.";
+const NOT_THAWED: &str = "Keep awake could not start an app again that it paused while the lid \
+                          was closed. Run crazyagent keep-awake restore, or quit the app and \
+                          open it again.";
+const NOT_UNMUTED: &str = "Keep awake could not put the sound back after the lid was closed. Run \
+                           crazyagent keep-awake restore, or check the sound settings.";
 const HOT_UNTIL_CRITICAL: &str =
     "This computer is running hot. Keep awake goes on and ends if the heat gets critical.";
 const HOT_NEVER_ENDS: &str =
@@ -50,6 +55,8 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS keep_awake_restore (
 const _: () = assert!(ENTRIES_MAX < SOURCE_ROWS_MAX);
 const _: () = assert!(NOT_PUT_BACK.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(NOT_READ.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(NOT_THAWED.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(NOT_UNMUTED.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(HOT_UNTIL_CRITICAL.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(HOT_NEVER_ENDS.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(LID_JOURNAL_TEXT.len() <= TEXT_BYTES_MAX);
@@ -225,11 +232,15 @@ pub(super) fn approvals(
 }
 
 /// The line of a restore item. Inputs: its subject and whether the journal could not be
-/// read. Output: the line; the lid helper row has the fix of threat model section 8.
+/// read. Output: the line; the lid helper row has the fix of threat model section 8, and
+/// an app left paused or a sound left muted names the restore command (Task 17).
 fn restore_text(subject: &str, unreadable: bool) -> &'static str {
+    let kind = subject.strip_prefix(ENTRY_SUBJECT);
     match (subject == LID_SUBJECT, unreadable) {
         (true, _) => LID_JOURNAL_TEXT,
         (false, true) => NOT_READ,
+        (false, false) if kind == Some(crate::keep_awake::freeze::KIND) => NOT_THAWED,
+        (false, false) if kind == Some(crate::keep_awake::mute::KIND) => NOT_UNMUTED,
         (false, false) => NOT_PUT_BACK,
     }
 }

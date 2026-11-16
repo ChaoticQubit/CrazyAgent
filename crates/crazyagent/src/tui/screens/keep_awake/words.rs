@@ -1,8 +1,8 @@
+use crate::keep_awake::power::TURN_ON_FAILED;
 use crate::keep_awake::{
     BatteryFloor, Cap, EndReason, HeatEnd, KeepAwakeSettings, KeepAwakeView, LidRule, LidSupport,
     MINUTES_MAX, Mode, Reason, Want,
 };
-use crate::keep_awake::power::TURN_ON_FAILED;
 use crate::paths::Platform;
 
 /// The longest Keep awake label the header shows, in characters.
@@ -329,6 +329,8 @@ pub(in crate::tui) enum Setting {
     HeatEnd,
     HeatNotice,
     DisplayAwake,
+    Freeze,
+    Mute,
 }
 
 /// Why this computer cannot honour one setting, or none when it can. Inputs: the setting
@@ -340,6 +342,9 @@ pub(in crate::tui) fn unavailable(setting: Setting, view: &KeepAwakeView) -> Opt
         }
         Setting::LidDisplay if view.platform != Platform::MacOs => Some("Only on macOS".into()),
         Setting::Lid => lid_reason(&view.lid_support),
+        Setting::Freeze | Setting::Mute if view.platform == Platform::Windows => {
+            Some("Not available on Windows".into())
+        }
         _ => None,
     }
 }

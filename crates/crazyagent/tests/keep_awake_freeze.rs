@@ -473,3 +473,59 @@ fn mute_restores_the_previous_state_not_unmuted() {
         }
     }
 }
+
+/// How many entries the lid-closed journal holds now, read without its lock. Input: the
+/// engine root. Output: the count, or none while the file cannot be read.
+fn journaled(root: &Path) -> Option<usize> {
+    freeze::journal(root)
+        .ok()
+        .map(|journal| journal.entries().len())
+}
+
+/// Task 17 row: the lid-closed lane mutes the sound when a hold covers the closed lid,
+/// with the state journaled first, puts it back when the lid opens and settles the entry,
+/// and finish ends the lane within the stop wait. The stand-in is the tool this computer
+/// does not use (pactl on macOS, osascript elsewhere), so even a guard left by a crashed
+/// row can never reach the real sound tool.
+#[test]
+fn the_lane_mutes_while_covered_and_puts_the_sound_back_when_uncovered() {
+    let disk = tempfile::tempdir().unwrap();
+    let root = disk.path().canonicalize().unwrap();
+    let folder = root.join("bin");
+    std::fs::create_dir(&folder).unwrap();
+    let foreign = if cfg!(target_os = "macos") {
+        "pactl"
+    } else {
+        "osascript"
+    };
+    let sound = Sound::new(&folder, foreign, false);
+    let program = PathBuf::from(env!("CARGO_BIN_EXE_crazyagent"));
+    let mut lane = freeze::Lane::start(
+        root.clone(),
+        program,
+        Some(sound.tool.clone()),
+        std::process::id(),
+    )
+    .unwrap();
+
+    lane.cover(freeze::Cover {
+        freeze: false,
+        mute: true,
+        apps: Vec::new(),
+    });
+
+    assert!(settles(|| sound.muted()), "covered: the sound is muted");
+    assert!(
+        settles(|| journaled(&root) == Some(1)),
+        "the state before is journaled"
+    );
+    lane.uncover();
+    assert!(settles(|| !sound.muted()), "uncovered: the sound is back");
+    assert!(settles(|| journaled(&root) == Some(0)), "the entry settles");
+    assert!(
+        sound.unmuted_ever(),
+        "put back by setting the journaled state"
+    );
+    lane.finish();
+    assert!(lane.wait(Instant::now() + WAIT), "finish ends the lane");
+}

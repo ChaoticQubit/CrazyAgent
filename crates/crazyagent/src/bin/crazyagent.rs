@@ -92,6 +92,15 @@ fn main() -> ExitCode {
             }
         };
     }
+    if args.first().is_some_and(|arg| arg == "keep-awake") {
+        return match run_keep_awake(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if args
         .first()
         .is_some_and(|arg| arg == "native-auth-custodian")
@@ -1092,6 +1101,46 @@ async fn offer_restart(
             "{message}. The service runs another crazyagent; reinstall it from this one: crazyagent service install"
         )),
         crazyagent::service::EngineCheck::Unavailable { reason } => Err(reason),
+    }
+}
+
+/// Runs `crazyagent keep-awake restore`, which puts back what Keep awake changed while
+/// the engine is stopped (paused apps, muted sound), or `crazyagent keep-awake guard
+/// ROOT`, the thaw guard the engine starts while the lid is closed during a hold (DEC-167
+/// Task 17): it waits on its stdin, the engine's pipe, and thaws and unmutes from the
+/// engine root's journal once the engine is gone. Input: the arguments. Output: unit, or
+/// why it stopped.
+fn run_keep_awake(args: &[OsString]) -> Result<(), String> {
+    let usage = "usage: crazyagent keep-awake restore|guard ROOT";
+    match args {
+        [_, action] if action == "restore" => {
+            let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;
+            if crazyagent::service::answering(&layout.socket()) {
+                return Err(
+                    "The engine is running and puts these back itself. Stop it, then try again."
+                        .into(),
+                );
+            }
+            let root = layout.root().canonicalize().map_err(|e| e.to_string())?;
+            match crazyagent::keep_awake::reconcile(&root) {
+                crazyagent::keep_awake::Leftover::Kinds(kinds) if kinds.is_empty() => {
+                    println!("Keep awake has nothing left to put back.");
+                    Ok(())
+                }
+                crazyagent::keep_awake::Leftover::Kinds(_) => Err(
+                    "Keep awake could not put everything back yet. Try again, or start CrazyAgent."
+                        .into(),
+                ),
+                crazyagent::keep_awake::Leftover::Unreadable => {
+                    Err("Keep awake could not read what it has to put back.".into())
+                }
+            }
+        }
+        [_, action, root] if action == "guard" && Path::new(root).is_absolute() => {
+            crazyagent::keep_awake::freeze::guard(Path::new(root), io::stdin().lock())
+                .map_err(|error| error.0)
+        }
+        _ => Err(usage.into()),
     }
 }
 

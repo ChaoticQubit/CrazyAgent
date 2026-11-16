@@ -30,6 +30,7 @@ pub(in crate::tui) fn resting() -> KeepAwakeView {
         lid_platform: LidSupport::HelperMissing,
         platform: Platform::MacOs,
         work: 0,
+        freeze_apps: Vec::new(),
     }
 }
 

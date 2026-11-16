@@ -15127,6 +15127,7 @@ pub fn start_for_engine(
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;
     let leftover = crate::keep_awake::reconcile(&runtime);
+    let root = runtime.clone();
     let settings = (global.to_path_buf(), project.to_path_buf());
     let (global, project) = settings.clone();
     let access: AccessSource = Box::new(move || {
@@ -15177,6 +15178,12 @@ pub fn start_for_engine(
                 crate::keep_awake::power::platform_lid(),
             )
             .with_leftover(leftover);
+    #[cfg(unix)]
+    {
+        runtime.keep_awake = std::mem::take(&mut runtime.keep_awake).with_platform_lane(&root);
+    }
+    #[cfg(not(unix))]
+    let _ = root;
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
 

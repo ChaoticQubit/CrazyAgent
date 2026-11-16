@@ -227,6 +227,7 @@
     "allow-desktop-notification-settings",
     "allow-desktop-notification-action",
     "allow-desktop-keep-awake-read",
+    "allow-desktop-keep-awake-apps",
     "allow-desktop-keep-awake-act",
     "allow-desktop-pool-summaries",
     "allow-desktop-account-schedule",

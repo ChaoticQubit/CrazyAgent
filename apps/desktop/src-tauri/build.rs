@@ -225,6 +225,7 @@ fn main() {
         "desktop_notification_settings",
         "desktop_notification_action",
         "desktop_keep_awake_read",
+        "desktop_keep_awake_apps",
         "desktop_keep_awake_act",
         "desktop_master_step_settings",
         "desktop_set_master_step_settings",

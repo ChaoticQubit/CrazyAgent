@@ -177,9 +177,40 @@ impl DisplayAwake {
     pub const ALL: [Self; 2] = [Self::Off, Self::WhileHolding];
 }
 
+/// Whether the owner's chosen apps are frozen while the lid is closed during a hold
+/// (DEC-167 Task 17, owner question 4: Off by default, with an empty list).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Freeze {
+    #[default]
+    Off,
+    On,
+}
+
+impl Freeze {
+    /// Every choice, in the order the settings show them.
+    pub const ALL: [Self; 2] = [Self::Off, Self::On];
+}
+
+/// Whether the sound is muted while the lid is closed during a hold (DEC-167 Task 17,
+/// owner question 4: Off by default).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mute {
+    #[default]
+    Off,
+    On,
+}
+
+impl Mute {
+    /// Every choice, in the order the settings show them.
+    pub const ALL: [Self; 2] = [Self::Off, Self::On];
+}
+
 /// The owner's Keep awake choices for this computer (DEC-167). Before the first save they
 /// are `DEFAULT`: Auto, 10 minutes of grace, a 24 hour cap, lid hold on AC power only, end
-/// at 10 % battery and at critical heat, a notice at serious heat.
+/// at 10 % battery and at critical heat, a notice at serious heat, no app frozen and the
+/// sound left as it is. A row saved before freeze and mute existed reads them as Off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeepAwakeSettings {
@@ -192,6 +223,10 @@ pub struct KeepAwakeSettings {
     pub heat_notice: HeatNotice,
     pub lid_display: LidDisplay,
     pub display_awake: DisplayAwake,
+    #[serde(default)]
+    pub freeze: Freeze,
+    #[serde(default)]
+    pub mute: Mute,
 }
 
 impl KeepAwakeSettings {
@@ -206,6 +241,8 @@ impl KeepAwakeSettings {
         heat_notice: HeatNotice::Serious,
         lid_display: LidDisplay::Sleep,
         display_awake: DisplayAwake::Off,
+        freeze: Freeze::Off,
+        mute: Mute::Off,
     };
 }
 
