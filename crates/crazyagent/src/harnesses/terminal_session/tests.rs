@@ -1120,3 +1120,84 @@ fn dropping_a_key_file_whose_path_now_holds_more_than_a_key_keeps_it() {
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 16 << 20);
     assert!(took < Duration::from_secs(1), "the drop took {took:?}");
 }
+
+/// Makes a keyed listed launch's private home, `<agent home>/standin-acp/account-1` as
+/// `home::prepare` lays it out, and a request on it holding the local placeholder as its
+/// key. Input: the agent home, a 0700 folder. Output: the private home and the request.
+#[cfg(unix)]
+fn keyed_listed(base: &Path) -> (PathBuf, LaunchRequest) {
+    use crate::harnesses::launch::{AccountBinding, Secret};
+    let account = crate::protocol::CredentialRef::new("account-1").unwrap();
+    let home = crate::harnesses::home::prepare(base, "standin-acp", &account).unwrap();
+    let placeholder = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    let request = LaunchRequest {
+        harness: "standin-acp".into(),
+        executable: base.join("standin-acp"),
+        working_dir: base.to_path_buf(),
+        account: AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            key: Some(Secret::new(placeholder.to_owned()).unwrap()),
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: None,
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    (home, request)
+}
+
+/// T18 LEAD-1 re-check at 4f66cf20e (fix8): a keyed listed launch writes its key file
+/// through the no-follow walk from the agent home, so a link its harness plants at the
+/// harness folder after the install's walk leads the write nowhere: the launch is refused,
+/// and the folder the link names keeps its own key file.
+#[cfg(unix)]
+#[test]
+fn a_listed_launch_s_key_file_is_never_written_through_a_link_at_its_harness_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let (agents, victim) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let base = agents.path().canonicalize().unwrap();
+    let target = victim.path().canonicalize().unwrap();
+    let kept = target.join("account-1");
+    std::fs::create_dir(&kept).unwrap();
+    for folder in [&base, &target, &kept] {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(kept.join(interactive::KEY_FILE), "kept").unwrap();
+    let (_home, request) = keyed_listed(&base);
+    std::fs::rename(base.join("standin-acp"), base.join("moved")).unwrap();
+    std::os::unix::fs::symlink(&target, base.join("standin-acp")).unwrap();
+
+    let written = write_key_file(&request);
+
+    let code = written.err().map(|problem| problem.0);
+    assert_eq!(code.as_deref(), Some("launch_account_home_unsafe"));
+    let left = std::fs::read_to_string(kept.join(interactive::KEY_FILE)).unwrap();
+    assert_eq!(left, "kept");
+}
+
+/// T18 LEAD-1 re-check, guard: with no link planted, a keyed listed launch's key file is
+/// the 0600 file at `<private home>/.crazyagent-key` holding its key, the path the pane's
+/// bridge reads the key from.
+#[cfg(unix)]
+#[test]
+fn a_listed_launch_s_key_file_sits_in_its_private_home_and_holds_its_key() {
+    use std::os::unix::fs::PermissionsExt;
+    let agents = tempfile::tempdir().unwrap();
+    let base = agents.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (home, request) = keyed_listed(&base);
+
+    let written = write_key_file(&request);
+
+    assert!(written.as_ref().is_ok_and(Option::is_some));
+    let path = home.join(interactive::KEY_FILE);
+    let metadata = std::fs::symlink_metadata(&path).unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    let placeholder = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), placeholder);
+    drop(written);
+}
