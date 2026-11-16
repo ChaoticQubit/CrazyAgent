@@ -5667,6 +5667,75 @@ mod tests {
         .map(|_| ())
     }
 
+    /// UI-5-F3: the close walls command refuses a wall of another project and admits the main
+    /// window and the project's own wall; close_walls closes every wall of the removed project
+    /// and no other window, and every wall once main is gone. The mock runtime keeps a closed
+    /// window listed, as it runs no event loop, so the walls a close reached are read from
+    /// close_walls's own answer.
+    #[test]
+    fn a_removal_closes_every_wall_of_its_project_and_only_those_and_another_project_s_wall_is_refused()
+     {
+        let app = mock_builder()
+            .manage(ide::IdeViews::default())
+            .invoke_handler(admit_pages(tauri::generate_handler![
+                desktop_close_project_walls,
+            ]))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let page = |label: &str| {
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
+                .build()
+                .unwrap()
+        };
+        let (one, other) = (
+            ProjectId::new("project-one").unwrap(),
+            ProjectId::new("project-other").unwrap(),
+        );
+        let own = [
+            bridge::terminal::wall_label(&one, 1),
+            bridge::terminal::wall_label(&one, 2),
+        ];
+        let other_wall = bridge::terminal::wall_label(&other, 1);
+        let main = page("main");
+        let own_page = page(&own[0]);
+        let _ = page(&own[1]);
+        let other_page = page(&other_wall);
+        let close = json!({ "id": one.as_str() });
+        let refused = ask(
+            other_page.as_ref(),
+            "desktop_close_project_walls",
+            close.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(refused["code"], "window_denied");
+        for admitted in [&own_page, &main] {
+            assert_eq!(
+                ask(
+                    admitted.as_ref(),
+                    "desktop_close_project_walls",
+                    close.clone()
+                ),
+                Ok(()),
+                "{}",
+                admitted.label()
+            );
+        }
+        let sorted = |mut labels: Vec<String>| {
+            labels.sort();
+            labels
+        };
+        assert_eq!(
+            sorted(close_walls(app.handle(), Some(&one))),
+            sorted(own.to_vec()),
+            "every wall of the removed project closes, and no other window"
+        );
+        assert_eq!(
+            sorted(close_walls(app.handle(), None)),
+            sorted(vec![own[0].clone(), own[1].clone(), other_wall.clone()]),
+            "once main is gone every wall closes, and main is not one"
+        );
+    }
+
     #[test]
     fn a_wall_title_shows_hidden_characters_as_their_escapes_and_stays_bounded() {
         assert_eq!(
