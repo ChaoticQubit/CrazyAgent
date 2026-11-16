@@ -126,3 +126,17 @@ test("the page letting go after the pool assign starts still saves the agent acc
   const state = read("src/state.ts");
   assert.match(state, /carryFollowUps\(result\.value\.id, result\.value\.project_id\)/, "Home's poll runs them for a page closed");
 });
+
+test("the follow-ups apply only to the project the kept job makes: a caller naming another project is refused before any call (rv-secreview S3 r1)", () => {
+  const { calls, deps } = api();
+  carry.keepStarted(started());
+  assert.throws(() => carry.carryFollowUps("setup-1", "other", deps), /project/);
+  assert.deepEqual(calls, { assign: [], read: [], save: [] }, "nothing is assigned or saved for another project");
+  carry.dropStarted();
+});
+
+test("a page left after Done while the follow-ups run says how they ended in a toast, not only on Home's row (rv-code2 S3C-1)", () => {
+  const wizard = read("src/screens/new-project/index.tsx");
+  const finish = wizard.slice(wizard.indexOf("async function finish("));
+  assert.match(finish, /let message = await carried\.outcome;\n\s*if \(!mounted\.current\) \{\n\s*session\?\.showToast\(message, \{ name: "home" \}\);\n\s*return;\n\s*\}/);
+});
