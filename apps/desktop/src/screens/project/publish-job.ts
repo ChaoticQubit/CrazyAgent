@@ -1,3 +1,5 @@
+import type { GitHubPublishJob, GitHubPublishLeft } from "../../engine-client";
+
 /**
  * The words a person reads for each rule of the standard secure setup, keyed by the
  * engine's rule name. The TUI shows the same text (DEC-182).
@@ -29,3 +31,27 @@ export const RULE_LABELS: Readonly<Record<string, string>> = {
   dependabot_version_updates: "Dependabot version updates",
   security_policy: "Security policy (SECURITY.md)",
 };
+
+export const DRAFT_POLL_MS = 0;
+export const DRAFT_AGENT = "";
+export const DRAFT_STOPPED = "";
+export const DRAFT_BASELINE = "";
+export const PART_WAY = "";
+
+/** Where a publish stands, as the Overview card shows it. */
+export type PublishView = { kind: "none" };
+
+/** Turns a publish job into what the Overview card shows. Input: the job, or null. Output: the view. */
+export function publishView(_job: GitHubPublishJob | null): PublishView {
+  return { kind: "none" };
+}
+
+/** Says what a discarded publish left on GitHub. Input: the discard's answer. Output: the sentence. */
+export function leftLine(_left: GitHubPublishLeft | null): string {
+  return "";
+}
+
+/** Tells whether Discard is offered. Input: the job, or null. Output: true before the push. */
+export function discardable(_job: GitHubPublishJob | null): boolean {
+  return false;
+}
