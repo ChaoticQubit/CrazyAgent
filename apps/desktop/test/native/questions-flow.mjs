@@ -823,8 +823,8 @@ async function main() {
       try {
         let home = null;
         for (let pressed = 0; pressed <= TABS_MAX && !home; pressed += 1) {
-          const now = await pty.until("home_or_first_run", (screen) => screen.includes(REPO) || screen.includes("c Continue without"));
-          if (now.includes(REPO) && !now.includes("c Continue without")) home = now;
+          const now = await pty.until("home_or_first_run", (screen) => screen.includes(REPO) || screen.includes("c Skip for now"));
+          if (now.includes(REPO) && !now.includes("c Skip for now")) home = now;
           else pty.keys("c");
           await pause(POLL_MS);
         }
