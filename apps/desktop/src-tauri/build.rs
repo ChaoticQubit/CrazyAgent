@@ -340,6 +340,8 @@ fn main() {
         "desktop_app_plugin_bind_account",
         "desktop_app_plugin_set_key",
         "desktop_app_plugin_unbind",
+        "desktop_connector_activity",
+        "desktop_connector_settings_set",
         "desktop_search_settings",
         "desktop_set_search",
         "desktop_search_model_download",

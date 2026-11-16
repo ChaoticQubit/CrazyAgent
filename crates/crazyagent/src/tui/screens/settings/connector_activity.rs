@@ -3,10 +3,11 @@ use crate::connectors::{ConnectorSettings, KeepLog};
 use crate::engine::owner::ConnectorsSaved;
 use crate::tui::client::connectors::{ConnectorsEvent, ConnectorsJob};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
-use crate::tui::clock::{local_offset, stamp};
+use crate::tui::clock::stamp;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
+use crate::tui::screens::project_time::{local_zone, zone_offset};
 use crate::tui::screens::settings_accounts::{plain, send, settings_event};
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::Arrival;
@@ -335,11 +336,12 @@ impl ConnectorActivityPage {
         &self,
         at: usize,
         call: &CallView,
+        zone: Option<&[u8]>,
         width: usize,
         ctx: &Ctx,
     ) -> [Line<'static>; 2] {
         let mut head = vec![
-            stamp(call.started_ms, local_offset()),
+            stamp(call.started_ms, zone_offset(zone, call.started_ms)),
             call.connector.clone(),
         ];
         if !call.tool.is_empty() {
@@ -415,9 +417,10 @@ impl ConnectorActivityPage {
                     .map(|part| Line::styled(part, theme.muted)),
             );
         }
+        let zone = local_zone();
         for (at, call) in view.calls.iter().enumerate() {
             spans.push((lines.len(), lines.len() + 1));
-            lines.extend(self.call_lines(at, call, width, ctx));
+            lines.extend(self.call_lines(at, call, zone.as_deref(), width, ctx));
         }
         assert_eq!(spans.len(), CONTROLS + view.calls.len());
         (lines, spans)

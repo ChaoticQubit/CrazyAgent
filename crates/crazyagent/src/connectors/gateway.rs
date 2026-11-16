@@ -447,6 +447,15 @@ fn echoes(forms: &[SecretString], text: &str) -> bool {
     forms.iter().any(|form| text.contains(form.expose()))
 }
 
+/// The vendor client's refusals that come before a call's request goes out, so a call
+/// they end sent nothing to the vendor; any other failure may come after the send.
+const NOT_SENT: [&str; 4] = [
+    "connector_arguments_invalid",
+    "connector_request_too_large",
+    "connector_tool_name_invalid",
+    "connector_tool_unknown",
+];
+
 /// Whether a session stays open after a refusal: it does when the engine refused before
 /// or after the vendor answered, and is closed after any failure on the way to the vendor,
 /// so the next call opens it again. Input: the refusal code. Output: the answer.
@@ -1002,8 +1011,9 @@ impl Gateway {
             return Err("connector_writes_not_yet");
         }
         let line = third_party_line(&title_of(connector));
-        row.sent = true;
-        let (text, error, outcome) = match held.session.call(&vendor, args) {
+        let called = held.session.call(&vendor, args);
+        row.sent = !matches!(&called, Err(problem) if NOT_SENT.contains(&problem.code()));
+        let (text, error, outcome) = match called {
             Ok(result) => {
                 let outcome = if result.is_error { "tool_error" } else { "ok" };
                 (result.text, result.is_error, outcome)

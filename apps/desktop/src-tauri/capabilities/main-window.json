@@ -290,6 +290,8 @@
     "allow-desktop-app-plugin-bind-account",
     "allow-desktop-app-plugin-set-key",
     "allow-desktop-app-plugin-unbind",
+    "allow-desktop-connector-activity",
+    "allow-desktop-connector-settings-set",
     "allow-desktop-pick-app-plugin-file",
     "allow-desktop-search-settings",
     "allow-desktop-set-search",

@@ -33,7 +33,7 @@ const VIEW_CALL_BYTES_MAX: usize = 40 * 1024;
 const VIEW_CHOICE_BYTES_MAX: usize = 12 * 1024;
 
 const _: () = assert!(QUIET_ROWS_PER_LAUNCH_MAX < ROWS_MAX as usize / 10);
-const _: () = assert!(QUIET_ROWS_PER_LAUNCH_MAX < QUIET_ROWS_MAX);
+const _: () = assert!(QUIET_ROWS_PER_LAUNCH_MAX + 1 < QUIET_ROWS_MAX);
 const _: () = assert!(QUIET_ROWS_MAX <= ROWS_MAX as usize / 10);
 const _: () = assert!(VIEW_CALLS_MAX <= READ_MAX);
 const _: () = assert!(
@@ -153,12 +153,30 @@ fn sqlite(_: rusqlite::Error) -> EngineError {
     EngineError("connectors_unavailable".into())
 }
 
-/// Writes one row and drops what the keep setting, the row cap and, for a row that sent
-/// nothing, its launch's quiet cap no longer hold. Inputs: the engine database, the row
-/// and the keep setting. Output: Ok, or `connectors_unavailable` when the row does not fit
-/// the log or the database fails.
+/// Writes one row, then drops what the keep setting and the row caps no longer hold. A
+/// row that sent nothing past its launch's quiet cap is written as the one
+/// `QUIET_CAP_REACHED` row, or not at all once that row is there. Inputs: the engine
+/// database, the row and the keep setting. Output: Ok, or `connectors_unavailable` when the
+/// row does not fit the log or the database fails.
 pub fn record(db: &Connection, row: &CallRow, keep: KeepLog) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(sqlite)?;
+    let marker;
+    let row = match quiet_room(db, row)? {
+        QuietRoom::Open => row,
+        QuietRoom::Full => return Ok(()),
+        QuietRoom::Reached => {
+            marker = CallRow {
+                tool: String::new(),
+                kind: CallKind::Unknown,
+                ms: 0,
+                bytes_in: 0,
+                bytes_out: 0,
+                outcome: QUIET_CAP_REACHED.into(),
+                ..row.clone()
+            };
+            &marker
+        }
+    };
     let added = db
         .execute(
             "INSERT INTO connector_calls
@@ -184,16 +202,45 @@ pub fn record(db: &Connection, row: &CallRow, keep: KeepLog) -> Result<(), Engin
     if added != 1 {
         return Err(sqlite(rusqlite::Error::QueryReturnedNoRows));
     }
-    if !row.sent {
-        db.execute(
-            "DELETE FROM connector_calls WHERE launch=?1 AND sent=0 AND id <= (
-                 SELECT id FROM connector_calls WHERE launch=?1 AND sent=0
-                 ORDER BY id DESC LIMIT 1 OFFSET ?2)",
-            params![row.launch, QUIET_ROWS_PER_LAUNCH_MAX as i64],
+    prune(db, keep)
+}
+
+enum QuietRoom {
+    Open,
+    Reached,
+    Full,
+}
+
+/// Where a row stands against its launch's quiet cap: a sent row, or one under the cap, is
+/// written; the first past it becomes the cap row; later ones, the newest row being that
+/// cap row, are left out. Inputs: the database and the row. Output: the standing.
+fn quiet_room(db: &Connection, row: &CallRow) -> Result<QuietRoom, EngineError> {
+    if row.sent {
+        return Ok(QuietRoom::Open);
+    }
+    let held: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM connector_calls WHERE launch=?1 AND sent=0",
+            [&row.launch],
+            |found| found.get(0),
         )
         .map_err(sqlite)?;
+    if held < QUIET_ROWS_PER_LAUNCH_MAX as i64 {
+        return Ok(QuietRoom::Open);
     }
-    prune(db, keep)
+    let newest: String = db
+        .query_row(
+            "SELECT outcome FROM connector_calls WHERE launch=?1 AND sent=0
+             ORDER BY id DESC LIMIT 1",
+            [&row.launch],
+            |found| found.get(0),
+        )
+        .map_err(sqlite)?;
+    Ok(if newest == QUIET_CAP_REACHED {
+        QuietRoom::Full
+    } else {
+        QuietRoom::Reached
+    })
 }
 
 fn cutoff(keep: KeepLog) -> i64 {

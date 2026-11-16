@@ -100,6 +100,10 @@ const PLAIN: &[(&str, &str)] = &[
         "this tool can change things at the vendor; writes arrive with the approval step.",
     ),
     (
+        audit::QUIET_CAP_REACHED,
+        "this launch made more calls that reached no vendor than the log keeps; later ones are not listed.",
+    ),
+    (
         "connector_outcome_unknown",
         "the engine did not answer in time; check the list again.",
     ),

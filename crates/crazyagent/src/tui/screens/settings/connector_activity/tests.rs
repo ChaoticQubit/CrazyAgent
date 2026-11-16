@@ -5,9 +5,10 @@ use crate::engine::owner::ConnectorsSaved;
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::connectors::{ConnectorsEvent, ConnectorsJob};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
-use crate::tui::clock::{local_offset, stamp};
+use crate::tui::clock::stamp;
 use crate::tui::render_tests::{check, ready, render, shell_at};
 use crate::tui::screens::open;
+use crate::tui::screens::project_time::{local_zone, zone_offset};
 use crate::tui::seam::{Arrival, Request};
 use crate::tui::shell::{Shell, targets};
 
@@ -135,12 +136,12 @@ fn key(shell: &mut Shell, key: Key) {
 #[test]
 fn the_page_shows_each_call_with_every_field_and_the_keep_setting_beside_the_list() {
     let mut shell = page(view());
-    let local = local_offset();
+    let zone = local_zone();
     let swaps: Vec<(String, String)> = [0, 1, 6]
         .into_iter()
         .map(|back| {
             let at = NOV_15_1204_UTC - back * MINUTE;
-            (stamp(at, 0), stamp(at, local))
+            (stamp(at, 0), stamp(at, zone_offset(zone.as_deref(), at)))
         })
         .collect();
     let swaps: Vec<(&str, &str)> = swaps

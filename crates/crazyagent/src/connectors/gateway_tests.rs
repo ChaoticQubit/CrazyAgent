@@ -1689,4 +1689,11 @@ fn a_call_the_client_refuses_before_sending_is_logged_as_never_reaching_the_vend
         1,
         "the call that reached the vendor reads as sent"
     );
+    for code in NOT_SENT {
+        assert!(keeps_session(code), "{code}");
+        assert!(
+            crate::connectors::mcp_client::MCP_CODES.contains(&code),
+            "{code}"
+        );
+    }
 }

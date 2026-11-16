@@ -16,20 +16,27 @@ pub(in crate::tui) fn tzif_offset(bytes: &[u8], at: i64) -> Option<i64> {
 /// Takes a moment in milliseconds since 1970; reads `/etc/localtime` once per call.
 /// Returns the offset in seconds, or zero when the zone cannot be read.
 pub(in crate::tui) fn local_offset(at_ms: i64) -> i64 {
+    local_zone()
+        .and_then(|bytes| tzif_offset(&bytes, at_ms.div_euclid(1000)))
+        .unwrap_or(0)
+}
+
+/// Reads this Mac's compiled zone, so many moments can take their offsets from one read.
+/// Takes nothing. Returns the TZif bytes of `/etc/localtime`, or none when it cannot be
+/// read or is larger than any zone file.
+pub(in crate::tui) fn local_zone() -> Option<Vec<u8>> {
     std::fs::read("/etc/localtime")
         .ok()
         .filter(|bytes| bytes.len() <= 1 << 20)
-        .and_then(|bytes| tzif_offset(&bytes, at_ms.div_euclid(1000)))
-        .unwrap_or(0)
 }
 
 /// The UTC offset a compiled zone held at one moment, so a stamp of a date on the other
 /// side of a daylight-saving change reads that date's clock. Takes the TZif bytes, or none
 /// for the offset `date` gives now, and the moment in milliseconds since 1970.
-/// Returns the offset in seconds.
+/// Returns the offset in seconds; bytes that are not TZif also read as `date`'s offset.
 pub(in crate::tui) fn zone_offset(zone: Option<&[u8]>, at_ms: i64) -> i64 {
-    let _ = (zone, at_ms);
-    0
+    zone.and_then(|bytes| tzif_offset(bytes, at_ms.div_euclid(1000)))
+        .unwrap_or_else(crate::tui::clock::local_offset)
 }
 
 /// Formats a moment as local 24-hour time.
