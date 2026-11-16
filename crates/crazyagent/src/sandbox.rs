@@ -926,6 +926,16 @@ pub const GIT_STATE_FILES: [&str; 6] = [
     "config.worktree",
 ];
 
+/// The links in a linked worktree's admin folder that tie it to the project and to its
+/// worktree: no confined agent rewrites, removes or relinks one. Seatbelt denies each by
+/// name and the Linux call supervisor holds each (DEC-185 S2a).
+pub const ADMIN_LINKS: [&str; 2] = ["commondir", "gitdir"];
+
+/// The files in a linked worktree's admin folder no confined agent writes: the branch it
+/// stands on and the config git reads for that worktree alone. Seatbelt denies each by name
+/// and the Linux call supervisor holds each (DEC-185 S2a).
+pub const ADMIN_WRITES: [&str; 2] = ["HEAD", "config.worktree"];
+
 /// The lowest port a loopback bridge carries on Linux: inside a network namespace of its
 /// own an agent's helper has no capability to listen below it.
 pub const BRIDGE_PORT_MIN: u16 = 1024;
