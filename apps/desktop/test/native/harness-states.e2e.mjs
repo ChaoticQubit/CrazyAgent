@@ -5,7 +5,7 @@ import { click, finishWelcome, observeModelAccess, pick, settingsTab, shot, show
 const NAME = "Gemini dummy";
 const KEY = `AIza${"T21DummyKeyNeverReal".padEnd(35, "x")}`;
 const MODEL = "gemini-2.5-pro";
-const GOOGLE = "https://generativelanguage.googleapis.com";
+const GOOGLE = /^https:\/\/generativelanguage\.googleapis\.com\/?$/u;
 const LIMITED = "Limited control: ";
 const STATUS = /^(Ready|Not installed|Can't run.*|Limited control: .+)$/u;
 
@@ -33,7 +33,8 @@ describe("Task 21: harness states and the Gemini API key tile on the real deskto
     const engine = await observeModelAccess();
     const saved = engine.registry.find((account) => account.name === NAME);
     assert.ok(saved, "the engine keeps the Gemini API account");
-    assert.deepEqual([saved.provider, saved.url, saved.model], ["gemini", GOOGLE, MODEL]);
+    assert.deepEqual([saved.provider, saved.model], ["gemini", MODEL]);
+    assert.match(saved.url, GOOGLE, "the account keeps Google's preset address");
     assert.ok(engine.connections.some((connection) => connection.protocol === "gemini"), "its connection speaks the Gemini wire format");
     assert.ok(!JSON.stringify(engine).includes(KEY), "what the engine keeps names the key by reference only");
     await shot("gemini-key-listed");
@@ -44,9 +45,9 @@ describe("Task 21: harness states and the Gemini API key tile on the real deskto
     const bundled = bundledHarnesses();
     await until(async () => (await settingsRows()).length === bundled.length, 30000, "the Harnesses page did not list every catalog harness");
     const rows = await settingsRows();
-    assert.deepEqual(rows.map((row) => row.name).sort(), bundled.map((harness) => harness.name).sort());
+    assert.deepEqual(rows.map((row) => row.id).sort(), bundled.map((harness) => harness.id).sort());
     for (const row of rows) {
-      const harness = bundled.find((item) => item.name === row.name);
+      const harness = bundled.find((item) => item.id === row.id);
       assert.match(row.status, STATUS, row.name);
       if (row.status.startsWith(LIMITED)) assert.ok(harness.reasons.includes(row.status.slice(LIMITED.length)), `${row.name}: ${row.status}`);
       assert.ok(row.accounts.length > 0, `${row.name} says which accounts it can use`);

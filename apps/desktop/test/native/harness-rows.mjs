@@ -24,9 +24,17 @@ export function bundledHarnesses() {
   return harnesses;
 }
 
-/** Reads the harness lines of Settings, Harnesses as the owner sees them: each line's name, its
- * status badge word, the accounts it can use, what it says of its tools and every help line.
- * Input: none. Output: the rows, in page order. */
+/** Gives each row read off the window the catalog id of the harness it names, so a row can
+ * name a harness the way the engine does. Input: the rows. Output: the rows with their id, null
+ * for a name no bundled manifest gives. */
+function withIds(rows) {
+  const ids = new Map(bundledHarnesses().map((harness) => [harness.name, harness.id]));
+  return rows.map((row) => ({ id: ids.get(row.name) ?? null, ...row }));
+}
+
+/** Reads the harness lines of Settings, Harnesses as the owner sees them: each line's id and
+ * name, its status badge word, the accounts it can use, what it says of its tools and every
+ * help line. Input: none. Output: the rows, in page order. */
 export async function settingsRows() {
   const rows = await browser.execute(() => [...document.querySelectorAll(".set-row")]
     .filter((row) => row.querySelector("button.set-label[aria-expanded]"))
@@ -42,15 +50,30 @@ export async function settingsRows() {
       };
     }));
   assert.ok(Array.isArray(rows) && rows.length <= ROWS_MAX, "the Harnesses page lists a bounded number of lines");
-  return rows;
+  return withIds(rows);
 }
 
-/** Reads the harness rows of first run's Harnesses step: each harness's name, whether it is
- * picked and whether the owner can change that. Input: none. Output: the rows, in page order. */
+/** Reads the harness rows of first run's Harnesses step: each harness's id and name, whether it
+ * is picked and whether the owner can change that. Input: none. Output: the rows, in page order. */
 export async function firstRunRows() {
   const rows = await browser.execute(() => [...document.querySelectorAll("main input[type=checkbox][aria-label]")]
     .map((box) => ({ name: box.getAttribute("aria-label"), picked: box.checked, locked: box.disabled })));
   assert.ok(Array.isArray(rows) && rows.length <= ROWS_MAX, "the Harnesses step lists a bounded number of rows");
+  return withIds(rows);
+}
+
+/** Reads one harness picker, the master or a team picker, as the owner sees it: each option's
+ * harness id and name, the status group it sits under and whether the owner can pick it.
+ * Input: the picker's CSS selector. Output: the options, in picker order. */
+export async function pickerRows(selector) {
+  const rows = await browser.execute((picker) => [...document.querySelectorAll(`${picker} option`)]
+    .map((option) => ({
+      id: option.value,
+      name: option.textContent.trim(),
+      status: option.closest("optgroup")?.getAttribute("label") ?? "",
+      disabled: option.disabled,
+    })), selector);
+  assert.ok(Array.isArray(rows) && rows.length <= ROWS_MAX, `${selector} lists a bounded number of harnesses`);
   return rows;
 }
 

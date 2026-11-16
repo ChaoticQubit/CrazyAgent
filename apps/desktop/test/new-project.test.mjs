@@ -456,7 +456,7 @@ test("a pool with one account runs every agent of the team and never tells them 
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { TeamEditor } = await import("../src/screens/new-project/team-editor.tsx");
   const managed = { method: "native_managed", profile_ref: "r" };
-  const member = { id: "solo", provider: "p", harness: "codex", protocol: "x", account_ref: "solo", endpoint: { kind: "native" }, model: { id: "m", author: "a" }, auth: managed };
+  const member = { id: "solo", provider: "p", harness: "codex", protocol: "native", account_ref: "solo", endpoint: { kind: "native" }, model: { id: "m", author: "a" }, auth: managed };
   const pool = { pool: { id: "solo-pool", name: "Solo", members: ["solo"], projects: [], roles: [], fallback_allowed: false }, members: [member] };
   const team = engineTeam("codex", 2);
   assert.equal(team.max_agents, 3);
@@ -488,7 +488,7 @@ test("a master stored as the alias claude gets the pool warning and the fixed To
   const { TeamEditor } = await import("../src/screens/new-project/team-editor.tsx");
   const limited = { kind: "limited", reason: "tools can't be turned off" };
   const named = [harness("codex", "Codex", ready), harness("claude-code", "Claude Code", ready, limited, undefined, undefined, ["claude"])];
-  const member = { id: "cx", provider: "openai", harness: "codex", protocol: "x", account_ref: "cx", endpoint: { kind: "native" }, model: { id: "m", author: "a" }, auth: { method: "native_managed", profile_ref: "r" } };
+  const member = { id: "cx", provider: "openai", harness: "codex", protocol: "native", account_ref: "cx", endpoint: { kind: "native" }, model: { id: "m", author: "a" }, auth: { method: "native_managed", profile_ref: "r" } };
   const pool = { pool: { id: "codex-pool", name: "Codex only", members: ["cx"], projects: [], roles: [], fallback_allowed: false }, members: [member] };
   for (const master of ["claude-code", "claude"]) {
     const team = { master, master_tools: false, sub_harnesses: [], min_agents: 1, max_agents: 2 };
