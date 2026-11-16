@@ -5006,6 +5006,7 @@ fn every_delete_refusal_reads_its_own_sentence() {
         "delete_agents_running",
         "delete_trash_partial",
         "delete_shared_folder",
+        "projects_removed_full",
     ] {
         let sentence = plain_problem(code);
         assert!(

@@ -348,6 +348,9 @@ mod tests {
             "clone_destination_exists",
             "home_move_partial",
             "home_move_nested",
+            "onboarding_project_ids_used",
+            "project_id_removed",
+            "projects_removed_full",
         ] {
             let text = copy(code);
             assert!(known(code).is_some(), "{code} has a sentence");

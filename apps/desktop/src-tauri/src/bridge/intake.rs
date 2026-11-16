@@ -1288,6 +1288,7 @@ mod tests {
             "delete_platform_unqualified",
             "delete_outside_home",
             "invalid_project",
+            "projects_removed_full",
         ] {
             assert_eq!(intake_code(code), Some(code), "{code}");
             assert_eq!(
@@ -1327,6 +1328,7 @@ mod tests {
             "home_destination_exists",
             "projects_home_unset",
             "project_exists",
+            "project_id_removed",
             "pool_missing",
             "team_harness_unavailable",
             "documents_too_many",

@@ -872,7 +872,7 @@ impl NativeBridge {
     /// reads it as not running.
     /// Input: whether to reconcile instead of send. Output: the receipt for the kept change.
     async fn deliver_intent(&mut self, reconcile: bool) -> Result<IntentReceipt, BridgeError> {
-        let intent = self
+        let mut intent = self
             .pending_intent()?
             .ok_or_else(|| failure("no_pending_intent"))?;
         self.selected = None;
@@ -889,20 +889,9 @@ impl NativeBridge {
         let mut rejection = None;
         let outcome = match response {
             Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
-                match operation.result {
-                    OwnerResult::Applied | OwnerResult::OnboardingStarted { .. } => {
-                        ActionOutcome::Applied
-                    }
-                    OwnerResult::DispatchPrepared { .. }
-                    | OwnerResult::RcliProfileRegistered { .. } => {
-                        return Err(failure("unexpected_reply"));
-                    }
-                    OwnerResult::Rejected { code } => {
-                        rejection = Some(rejection_code(&code));
-                        ActionOutcome::Rejected
-                    }
-                    OwnerResult::VerificationUnavailable { .. } => ActionOutcome::Unavailable,
-                }
+                let (outcome, refused) = settled(&mut intent, operation.result)?;
+                rejection = refused;
+                outcome
             }
             Ok(OwnerResponse::Rejected { code }) => {
                 rejection = Some(rejection_code(&code));
@@ -1283,6 +1272,27 @@ fn rejection_code(code: &str) -> String {
     crazyagent::protocol::plain_code(code).to_owned()
 }
 
+/// Reads an applied or committed change's result into its receipt: the outcome, the refusal
+/// code, and for a started onboarding the project the engine gave, in place of the folder
+/// slug guessed when the change began. Inputs: the kept change and the engine's result.
+/// Output: the outcome and refusal, or `unexpected_reply` for a result this change can't have.
+fn settled(
+    intent: &mut PendingIntent,
+    result: OwnerResult,
+) -> Result<(ActionOutcome, Option<String>), BridgeError> {
+    assert!(!intent.kind.is_empty(), "every kept change names its kind");
+    match result {
+        OwnerResult::Applied | OwnerResult::OnboardingStarted { .. } => {
+            Ok((ActionOutcome::Applied, None))
+        }
+        OwnerResult::DispatchPrepared { .. } | OwnerResult::RcliProfileRegistered { .. } => {
+            Err(failure("unexpected_reply"))
+        }
+        OwnerResult::Rejected { code } => Ok((ActionOutcome::Rejected, Some(rejection_code(&code)))),
+        OwnerResult::VerificationUnavailable { .. } => Ok((ActionOutcome::Unavailable, None)),
+    }
+}
+
 /// The code for a change whose send and whose check by the same identity both went
 /// unanswered: the connection or its grant is gone, so the bridge lets go of the engine.
 const CHECK_UNANSWERED: &str = "owner_check_unanswered";
@@ -1403,6 +1413,58 @@ fn cut_projects(mut items: Vec<ProjectRow>, more: bool) -> Result<ProjectList, B
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn kept(kind: &'static str, project_id: Option<&str>) -> PendingIntent {
+        PendingIntent {
+            kind,
+            project_id: project_id.map(str::to_owned),
+            baseline_id: None,
+            generation: "1".into(),
+            model_access: None,
+            project_spec: None,
+            operation_id: "operation-1".into(),
+        }
+    }
+
+    /// DEC-178 addendum 1: a started onboarding's receipt names the project the engine gave,
+    /// `my-app-2` when `my-app` is held by a removal, not the folder slug guessed when the
+    /// change began; a replayed plain Applied keeps the guess, and no other change may carry
+    /// an engine-given project.
+    #[test]
+    fn a_started_onboarding_receipt_names_the_project_the_engine_gave() {
+        let started = || OwnerResult::OnboardingStarted {
+            project_id: ProjectId::new("my-app-2").unwrap(),
+        };
+        let mut intent = kept("start_onboarding", Some("my-app"));
+        let (outcome, refused) = settled(&mut intent, started()).unwrap();
+        assert_eq!(outcome, ActionOutcome::Applied);
+        assert_eq!(refused, None);
+        assert_eq!(intent.project_id.as_deref(), Some("my-app-2"));
+
+        let mut replayed = kept("start_onboarding", Some("my-app"));
+        let (outcome, _) = settled(&mut replayed, OwnerResult::Applied).unwrap();
+        assert_eq!(outcome, ActionOutcome::Applied);
+        assert_eq!(replayed.project_id.as_deref(), Some("my-app"));
+
+        let mut other = kept("remove_project", Some("notes"));
+        assert_eq!(
+            settled(&mut other, started()).unwrap_err().code,
+            "unexpected_reply"
+        );
+        assert_eq!(other.project_id.as_deref(), Some("notes"));
+
+        let mut refused = kept("start_onboarding", Some("my-app"));
+        let (outcome, code) = settled(
+            &mut refused,
+            OwnerResult::Rejected {
+                code: "onboarding_project_ids_used".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, ActionOutcome::Rejected);
+        assert_eq!(code.as_deref(), Some("onboarding_project_ids_used"));
+        assert_eq!(refused.project_id.as_deref(), Some("my-app"));
+    }
 
     #[test]
     fn every_bridge_error_function_keeps_an_engine_version_mismatch() {
