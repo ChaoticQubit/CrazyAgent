@@ -2309,6 +2309,85 @@ fn publish_job_falls_back_to_the_baseline_and_says_why_no_agent_drafted() {
 }
 
 #[test]
+fn publish_start_records_the_job_at_drafting_and_holds_the_publish_while_the_agent_drafts() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let seen = std::cell::RefCell::new(None);
+    let started = account
+        .publish_start(&project, &plan("tool"), |_| {
+            *seen.borrow_mut() = Some((
+                account.publish_status(&project).map_err(|error| error.0),
+                account
+                    .publish_start(&project, &plan("tool"), no_draft)
+                    .map_err(|error| error.0),
+                account
+                    .publish_approve(&project, &project, &baseline())
+                    .map_err(|error| error.0),
+            ));
+            Ok("node_modules/\n".to_owned())
+        })
+        .unwrap();
+    let seen = seen.into_inner();
+    let Some((status, again, approve)) = seen else {
+        panic!("the agent was not asked");
+    };
+    assert!(
+        matches!(&status, Ok(Some(job)) if job.step == GitHubPublishStep::Drafting && job.lines.is_empty()),
+        "{status:?}"
+    );
+    assert_eq!(again.unwrap_err(), "github_publish_running");
+    assert_eq!(approve.unwrap_err(), "github_publish_running");
+    assert!(
+        matches!(
+            &started.step,
+            GitHubPublishStep::Lines {
+                draft: GitHubIgnoreDraft::Agent,
+                ..
+            }
+        ),
+        "{started:?}"
+    );
+    assert_eq!(account.publish_status(&project).unwrap(), Some(started));
+    assert!(creates(&server).is_empty());
+}
+
+#[test]
+fn a_draft_that_stopped_leaves_the_baseline_lines_at_the_next_status() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let mut stopped = account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    stopped.step = GitHubPublishStep::Drafting;
+    state::save_job(&account.root, &stopped).unwrap();
+    let closed = account.publish_status(&project).unwrap().unwrap();
+    assert_eq!(
+        closed.step,
+        GitHubPublishStep::Lines {
+            lines: baseline(),
+            draft: GitHubIgnoreDraft::Baseline {
+                reason: "github_publish_draft_stopped".into(),
+            },
+        }
+    );
+    assert_eq!(closed.plan, plan("tool"));
+    assert_eq!(
+        state::load_job(&account.root, &project).unwrap(),
+        Some(closed.clone())
+    );
+    assert_eq!(account.publish_status(&project).unwrap(), Some(closed));
+    assert!(creates(&server).is_empty());
+}
+
+#[test]
 fn a_publish_record_from_before_the_draft_still_loads() {
     let step: Option<GitHubPublishStep> =
         serde_json::from_str(r#"{"step":"lines","lines":[".env*"]}"#).ok();

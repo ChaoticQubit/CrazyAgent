@@ -63,11 +63,13 @@ pub enum GitHubPublishLeft {
     Maybe { full_name: String },
 }
 
-/// Where a publish job stands: waiting for the owner to approve the .gitignore lines or
-/// to deal with a secret, or the last step it finished on the way to the rules.
+/// Where a publish job stands: its .gitignore lines still being drafted, waiting for the
+/// owner to approve them or to deal with a secret, or the last step it finished on the way
+/// to the rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GitHubPublishStep {
+    Drafting,
     Lines {
         lines: Vec<String>,
         #[serde(default = "not_asked")]
@@ -465,7 +467,8 @@ impl GitHub {
         let mut rechecked = false;
         loop {
             let next = match &job.step {
-                GitHubPublishStep::Lines { .. }
+                GitHubPublishStep::Drafting
+                | GitHubPublishStep::Lines { .. }
                 | GitHubPublishStep::Blocked { .. }
                 | GitHubPublishStep::Done { .. } => return Ok(()),
                 GitHubPublishStep::Checked => GitHubPublishStep::Committed {

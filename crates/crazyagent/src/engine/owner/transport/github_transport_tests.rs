@@ -3,7 +3,7 @@ use crate::engine::owner::AccountSecret;
 use crate::github::GitHubMethod;
 
 #[test]
-fn a_publish_start_has_time_for_the_agent_that_drafts_its_gitignore() {
+fn a_publish_start_answers_before_the_agent_drafts_its_gitignore() {
     let start = crate::engine::owner::transport::github::Action::PublishStart {
         project: crate::protocol::ProjectId::new("alpha").unwrap(),
         plan: crate::github::GitHubPublishPlan {
@@ -14,7 +14,7 @@ fn a_publish_start_has_time_for_the_agent_that_drafts_its_gitignore() {
             docs: false,
         },
     };
-    assert!(start.time() > crate::instruction_cleanup::WALL_TIME + Duration::from_secs(120));
+    assert!(start.time() < crate::instruction_cleanup::WALL_TIME);
 }
 
 #[tokio::test]
@@ -594,15 +594,27 @@ mod slow_remote {
                 .await
                 .unwrap();
             assert_eq!(started.project, project);
+            assert_eq!(started.step, GitHubPublishStep::Drafting, "{started:?}");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let drafted = loop {
+                let job = client.github_publish_status(alpha.clone()).await.unwrap();
+                match job {
+                    Some(job) if job.step != GitHubPublishStep::Drafting => break job,
+                    _ if Instant::now() < deadline => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    other => panic!("the draft did not end: {other:?}"),
+                }
+            };
             assert!(
                 matches!(
-                    &started.step,
+                    &drafted.step,
                     GitHubPublishStep::Lines {
                         draft: crate::github::GitHubIgnoreDraft::Baseline { reason },
                         ..
                     } if reason.starts_with("instructions_cleanup_")
                 ),
-                "{started:?}"
+                "{drafted:?}"
             );
             let lines = vec![".env*".to_owned()];
             let blocked = client
