@@ -32,12 +32,14 @@ impl OwnerRuntimeHandle {
             }
         };
         for start in starts {
-            if !self.reprovable(start.method) {
+            let harness = start.method.harness();
+            if let Some(cause) = self.unreprovable(start.method) {
+                eprintln!("native_auth_reproof_skipped harness={harness} cause={cause}");
                 continue;
             }
             if let Err(error) = self.reprove(&admission, start).await {
                 eprintln!(
-                    "native_auth_reproof_unsettled cause={}",
+                    "native_auth_reproof_unsettled harness={harness} cause={}",
                     plain_cause(&error, "native_auth_reproof_error_redacted")
                 );
             }
@@ -67,17 +69,14 @@ impl OwnerRuntimeHandle {
         self.authority.reproving.clone()
     }
 
-    fn reprovable(&self, method: NativeAuthMethod) -> bool {
+    /// Names why this run's account-check host cannot re-prove a sign-in of this method, so
+    /// a skipped re-proof is logged by cause instead of passing unseen. Input: the method.
+    /// Output: the cause code, or none when the host can run it.
+    fn unreprovable(&self, method: NativeAuthMethod) -> Option<&'static str> {
         let Ok(registration) = self.authority.native_auth_host.lock() else {
-            return false;
+            return Some("native_auth_recovery_required");
         };
-        !registration.disabled
-            && registration.executable.is_some()
-            && match method {
-                NativeAuthMethod::ClaudeExisting => registration.claude_executable.is_some(),
-                NativeAuthMethod::CodexExisting => registration.codex_executable.is_some(),
-                _ => false,
-            }
+        skip_cause(&registration, method)
     }
 
     /// Re-proves one earlier sign-in, waiting for the account-check host to be free first
@@ -105,7 +104,7 @@ impl OwnerRuntimeHandle {
                 }
                 return settled;
             }
-            if Instant::now() >= deadline || !self.reprovable(attempt.method) {
+            if Instant::now() >= deadline || self.unreprovable(attempt.method).is_some() {
                 return settled;
             }
             tokio::time::sleep(REPROOF_POLL).await;
@@ -176,6 +175,30 @@ fn unrun(settled: &Result<NativeAuthPhase, EngineError>) -> bool {
             "native_auth_host_busy" | "native_auth_host_unavailable" | "native_profile_in_use"
         )
     })
+}
+
+/// Names why a registration cannot re-prove a sign-in of this method: only an existing
+/// Claude Code or Codex sign-in is re-proved, by an enabled account-check host registered
+/// with that harness's executable. Inputs: the registration and the method. Output: the
+/// cause code, or none when it can.
+pub(super) fn skip_cause(
+    registration: &NativeAuthHostRegistration,
+    method: NativeAuthMethod,
+) -> Option<&'static str> {
+    let harness = match method {
+        NativeAuthMethod::ClaudeExisting => &registration.claude_executable,
+        NativeAuthMethod::CodexExisting => &registration.codex_executable,
+        _ => return Some("native_auth_method_not_reprovable"),
+    };
+    if registration.disabled {
+        Some("native_auth_host_disabled")
+    } else if registration.executable.is_none() {
+        Some("native_auth_host_unregistered")
+    } else if harness.is_none() {
+        Some("native_auth_harness_unregistered")
+    } else {
+        None
+    }
 }
 
 /// Clears the engine-start re-proof flag when its task ends or is dropped unpolled, so no
