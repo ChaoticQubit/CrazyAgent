@@ -826,7 +826,8 @@ pub struct NetworkView {
 /// What a network choice cannot hold on this Linux, for the Agent access page: a port agents
 /// may reach on this computer is open on every host. Under `TcpOnly` the call supervisor
 /// keeps those ports to this computer, though Https reaches port 53 on any host; without it
-/// a nesting host's bridge does under None, unless a granted port is below its lowest.
+/// a nesting host's bridge does under None, unless a granted port is below its lowest; a
+/// host that routes keeps Https to its ports in a network of its own (DEC-179 SBX-2).
 /// Inputs: the choice, the host under the setting, sockets, grants. Output: the line, or none.
 pub fn linux_network_gap(
     network: AgentNetwork,
@@ -836,6 +837,13 @@ pub fn linux_network_gap(
 ) -> Option<String> {
     let host = host?;
     let tcp = sockets == Some(crate::sandbox::LinuxSockets::TcpOnly);
+    let low = grants.iter().any(|grant| {
+        matches!(grant, AccessGrant::Port { port } if *port < crate::sandbox::BRIDGE_PORT_MIN)
+    });
+    if host.routed && tcp && network == AgentNetwork::Https && !low {
+        assert!(host.nested);
+        return None;
+    }
     if host.supervised && tcp && network != AgentNetwork::Open {
         return (network == AgentNetwork::Https)
             .then(|| crate::sandbox::LINUX_DNS_ANY_HOST_LINE.to_owned());

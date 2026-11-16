@@ -942,6 +942,8 @@ pub fn linux_unbridged_line(port: u16) -> String {
 
 /// What a launch tells the owner in the agent's messages when a Linux that nests agents
 /// still leaves it, with a port on this computer, on this computer's network:
+/// [`LINUX_UNROUTED_LINE`] for an agent with such a port that could have a network of its
+/// own on a host that cannot route ([`ProjectSandbox::routed`]), none when it routes, then
 /// [`linux_unbridged_line`] for a port below [`BRIDGE_PORT_MIN`], else under None, whose
 /// page drops it, [`LINUX_PORTS_ANY_HOST_LINE`]. Inputs: what this Linux holds, the
 /// project's network choice, the sandbox as launched. Output: the sentences, or none.
@@ -950,15 +952,18 @@ pub fn linux_unbridged_notice_on(
     choice: policy::AgentNetwork,
     sandbox: &ProjectSandbox,
 ) -> Option<String> {
-    if !host.is_some_and(|host| host.nested) {
+    let Some(host) = host.filter(|host| host.nested) else {
         return None;
+    };
+    let reaches = matches!(&sandbox.network, SandboxNetwork::Only(remotes)
+        if remotes.iter().any(|remote| matches!(remote, SandboxRemote::Loopback(_))));
+    if sandbox.routed().is_some() {
+        return (reaches && !host.routed).then(|| LINUX_UNROUTED_LINE.to_owned());
     }
     if let Some(port) = sandbox.unbridged_port() {
         assert!(port < BRIDGE_PORT_MIN);
         return Some(linux_unbridged_line(port));
     }
-    let reaches = matches!(&sandbox.network, SandboxNetwork::Only(remotes)
-        if remotes.iter().any(|remote| matches!(remote, SandboxRemote::Loopback(_))));
     let unsaid = choice == policy::AgentNetwork::None && sandbox.bridged_ports().is_none();
     (reaches && unsaid).then(|| LINUX_PORTS_ANY_HOST_LINE.to_owned())
 }
