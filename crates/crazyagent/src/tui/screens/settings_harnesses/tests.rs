@@ -444,6 +444,47 @@ fn a_harness_below_the_floor_it_runs_at_says_it_needs_x_or_newer_beside_update()
     assert!(!frame(&mut current).contains("is too old for CrazyAgent"));
 }
 
+/// Task 21 (Q3): with every bundled harness installed, the Control sentence of each one names
+/// each Limited control reason its manifest gives, word for word and once, the reasons the
+/// desktop shows; the TUI holds no list of reasons of its own.
+#[test]
+fn every_served_limited_reason_reads_once_word_for_word_in_the_control_sentence() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-th-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    for spec in crate::harnesses::specs() {
+        let path = root.path().join(spec.binaries[0]);
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let entries = catalog(&Search::new(
+        vec![root.path().to_path_buf()],
+        None,
+        Vec::new(),
+    ));
+    let mut limited = 0;
+    for (entry, spec) in entries.iter().zip(crate::harnesses::specs()) {
+        assert_eq!(entry.id, spec.id);
+        let sentence = control_sentence(entry);
+        let reasons: Vec<&str> = [spec.launch, spec.tools_limited]
+            .into_iter()
+            .flatten()
+            .collect();
+        for reason in &reasons {
+            let reason = reason.trim_end_matches('.');
+            assert_eq!(
+                sentence.matches(reason).count(),
+                1,
+                "{}: {sentence}",
+                entry.id
+            );
+        }
+        limited += usize::from(!reasons.is_empty());
+    }
+    assert!(limited >= 10, "the bundled manifests limit most harnesses");
+}
+
 #[test]
 fn u_shows_the_exact_command_and_updates_only_after_y() {
     let found = found();

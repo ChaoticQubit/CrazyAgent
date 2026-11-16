@@ -1,6 +1,6 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const model = await import("../src/screens/first-run/harnesses.ts");
@@ -47,4 +47,30 @@ test("the TUI says needs Node and a bad list in the desktop's words", () => {
     assert.ok(at >= 0, code);
     assert.equal(copy[at + 1], api.updateCopy(code), code);
   }
+});
+
+test("Task 21 (Q3): every Limited control reason the bundled manifests give reads word for word in Settings, Harnesses and in the pickers' team notes", async () => {
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const view = await import("../src/screens/settings/harnesses.tsx");
+  const wizard = await import("../src/screens/new-project/wizard.ts");
+  const folder = new URL("../../../crates/crazyagent/harness-manifests/", import.meta.url);
+  const field = (text, key) => new RegExp(`^${key}:\\s*"([^"]*)"`, "mu").exec(text)?.[1] ?? null;
+  const quiet = () => undefined;
+  let limited = 0;
+  for (const file of readdirSync(folder).filter((name) => name.endsWith(".yaml"))) {
+    const text = readFileSync(new URL(file, folder), "utf8");
+    const [id, name, tools, start] = ["id", "name", "tools_limited", "cannot_start"].map((key) => field(text, key));
+    if (tools === null && start === null) continue;
+    limited += 1;
+    const entry = { id, name, status: { kind: "limited", reason: start ?? tools }, status_label: "", executable: `/opt/homebrew/bin/${id}`, headless: `${id} -p`,
+      tools: tools === null ? { kind: "switchable" } : { kind: "limited", reason: tools }, model_selection: true, account_kinds: ["api_key"], team: { kind: "lead" }, aliases: [] };
+    const row = renderToStaticMarkup(createElement(view.HarnessRowView, { entry, versions: null, mode: "check_and_update", onCheck: quiet, onUpdate: quiet, onInstall: quiet, onGuide: quiet }))
+      .replace(/&#x27;/g, "'");
+    assert.ok(row.includes(`Limited control: ${start ?? tools}`), `${id}: ${row}`);
+    if (tools !== null) assert.ok(row.includes(tools), `${id}: ${row}`);
+    const notes = wizard.teamNotes({ master: id, sub_harnesses: [] }, [entry]);
+    for (const reason of [tools, start].filter((reason) => reason !== null)) assert.ok(notes.includes(`${name}: ${reason.replace(/\.$/u, "")}.`), `${id}: ${notes}`);
+  }
+  assert.ok(limited >= 10, "the bundled manifests limit most harnesses");
 });
