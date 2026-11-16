@@ -280,7 +280,10 @@ fn enter_opens_a_connector_s_page_and_esc_goes_back_to_all_connectors() {
     check("connector-detail-80", &render(&mut shell, 80, 24), &[]);
     keys(&mut shell, &[Key::Esc]);
     assert!(shows(&mut shell, "Catalog"));
-    assert!(!shows(&mut shell, "/  Linear"), "Esc closes the connector's page");
+    assert!(
+        !shows(&mut shell, "/  Linear"),
+        "Esc closes the connector's page"
+    );
     let mut gone = view();
     keys(&mut shell, &[Key::End, Key::Home, Key::Enter]);
     gone.connectors.remove(0);
@@ -313,16 +316,28 @@ fn the_native_setting_and_the_size_cap_wait_for_enter_and_save_with_the_version_
         ConnectorsEvent::Saved(Ok(ConnectorsSaved::Saved(Box::new(stored)))),
     );
     assert!(said(&shell).contains("Connector settings saved."));
-    assert!(requests(&mut shell).is_empty(), "the save answered with the page");
+    assert!(
+        requests(&mut shell).is_empty(),
+        "the save answered with the page"
+    );
     keys(&mut shell, &[Key::Down, Key::Left, Key::Enter]);
-    assert!(matches!(one(&mut shell), ConnectorsJob::SaveSettings { version: 8, .. }));
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::SaveSettings { version: 8, .. }
+    ));
     arrive(
         &mut shell,
         ConnectorsEvent::Saved(Ok(ConnectorsSaved::Stale(9))),
     );
     assert!(said(&shell).contains("The connector settings changed elsewhere."));
-    assert!(read_all(&one(&mut shell)), "a stale save reads the page again");
-    assert!(shows(&mut shell, "[256 KiB]"), "a stale save drops the pick");
+    assert!(
+        read_all(&one(&mut shell)),
+        "a stale save reads the page again"
+    );
+    assert!(
+        shows(&mut shell, "[256 KiB]"),
+        "a stale save drops the pick"
+    );
 }
 
 #[test]
@@ -401,10 +416,16 @@ fn esc_drops_an_unsaved_pick_and_a_failed_save_says_why() {
     assert!(shows(&mut shell, "Esc Discard changes"));
     keys(&mut shell, &[Key::Esc]);
     assert!(shows(&mut shell, "[256 KiB]"));
-    assert!(shows(&mut shell, "Settings  /  Connectors "), "Esc stayed on the page");
+    assert!(
+        shows(&mut shell, "Settings  /  Connectors "),
+        "Esc stayed on the page"
+    );
     assert!(requests(&mut shell).is_empty());
     keys(&mut shell, &[Key::Right, Key::Enter]);
-    assert!(matches!(one(&mut shell), ConnectorsJob::SaveSettings { .. }));
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::SaveSettings { .. }
+    ));
     arrive(
         &mut shell,
         ConnectorsEvent::Saved(Err("connectors_unavailable".into())),
@@ -422,7 +443,10 @@ fn a_typed_key_is_masked_and_leaves_only_inside_the_set_key_job() {
         &mut shell,
         "Linear sends this key to mcp.linear.app. Only the engine keeps it."
     ));
-    assert!(shows(&mut shell, "Sent to the engine once and never shown again."));
+    assert!(shows(
+        &mut shell,
+        "Sent to the engine once and never shown again."
+    ));
     keys(&mut shell, &[Key::Enter]);
     assert!(requests(&mut shell).is_empty(), "an empty key is not sent");
     assert!(shows(&mut shell, "Enter a key."));
@@ -449,7 +473,11 @@ fn a_typed_key_is_masked_and_leaves_only_inside_the_set_key_job() {
     );
     assert!(said(&shell).contains("The key for api_key was saved."));
     assert!(shows(&mut shell, "api_key: Key you entered"));
-    assert!(!render(&mut shell, 80, 24).iter().any(|row| row.contains("lin-secret")));
+    assert!(
+        !render(&mut shell, 80, 24)
+            .iter()
+            .any(|row| row.contains("lin-secret"))
+    );
 }
 
 #[test]
@@ -471,7 +499,10 @@ fn u_clears_a_saved_key_and_a_gone_connector_reads_the_page_again() {
     assert!(shows(&mut shell, "token: Not set"));
     keys(&mut shell, &[Key::Char('r')]);
     assert!(read_all(&one(&mut shell)));
-    arrive(&mut shell, ConnectorsEvent::Page(Ok(with_secret(Binding::Key, 1))));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Page(Ok(with_secret(Binding::Key, 1))),
+    );
     keys(&mut shell, &[Key::Char('u')]);
     assert!(matches!(one(&mut shell), ConnectorsJob::ClearKey { .. }));
     arrive(
@@ -479,7 +510,10 @@ fn u_clears_a_saved_key_and_a_gone_connector_reads_the_page_again() {
         ConnectorsEvent::Page(Err("app_plugin_not_found".into())),
     );
     assert!(said(&shell).contains("That connector is gone. The page now shows the current ones."));
-    assert!(read_all(&one(&mut shell)), "a gone connector reads the page again");
+    assert!(
+        read_all(&one(&mut shell)),
+        "a gone connector reads the page again"
+    );
 }
 
 #[test]
@@ -488,7 +522,10 @@ fn adding_shows_the_trust_screen_and_confirm_sends_the_text_and_its_sha() {
     keys(&mut shell, &[Key::Char('a')]);
     assert!(shows(&mut shell, "Add a connector"));
     assert!(shows(&mut shell, "Connector manifest (YAML)"));
-    assert!(shows(&mut shell, "Nothing is used until you confirm its trust screen."));
+    assert!(shows(
+        &mut shell,
+        "Nothing is used until you confirm its trust screen."
+    ));
     typed(&mut shell, "name: board");
     keys(&mut shell, &[Key::Enter]);
     assert!(matches!(
@@ -499,7 +536,9 @@ fn adding_shows_the_trust_screen_and_confirm_sends_the_text_and_its_sha() {
         &mut shell,
         ConnectorsEvent::Preview {
             read: None,
-            result: Ok(Preview::Ready { trust: trust(false) }),
+            result: Ok(Preview::Ready {
+                trust: trust(false),
+            }),
         },
     );
     for words in [
@@ -546,7 +585,10 @@ fn a_manifest_that_is_not_a_connector_is_refused_and_e_edits_it_again() {
     assert!(shows(&mut shell, "app_plugin_not_connector, kind"));
     assert!(shows(&mut shell, "e Edit manifest"));
     keys(&mut shell, &[Key::Char('y')]);
-    assert!(requests(&mut shell).is_empty(), "a refused manifest has no confirm");
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a refused manifest has no confirm"
+    );
     keys(&mut shell, &[Key::Char('e')]);
     assert!(shows(&mut shell, "Add a connector"));
     assert!(shows(&mut shell, "kind: embedding"));
@@ -565,7 +607,10 @@ fn a_manifest_that_is_not_a_connector_is_refused_and_e_edits_it_again() {
             result: Ok(Preview::Refused { problem }),
         },
     );
-    assert!(shows(&mut shell, "(app_plugin_manifest_invalid, line 2, mcp.url)"));
+    assert!(shows(
+        &mut shell,
+        "(app_plugin_manifest_invalid, line 2, mcp.url)"
+    ));
 }
 
 #[test]
@@ -586,7 +631,9 @@ fn a_connector_that_needs_review_is_trusted_from_its_page_and_the_owner_s_own_is
         &mut shell,
         ConnectorsEvent::Preview {
             read: None,
-            result: Ok(Preview::Ready { trust: trust(false) }),
+            result: Ok(Preview::Ready {
+                trust: trust(false),
+            }),
         },
     );
     assert!(shows(&mut shell, "Review Board"));
@@ -610,7 +657,10 @@ fn a_connector_that_needs_review_is_trusted_from_its_page_and_the_owner_s_own_is
     trusted.connectors.truncate(2);
     arrive(&mut shell, ConnectorsEvent::Page(Ok(trusted)));
     assert!(said(&shell).contains("Board was removed."));
-    assert!(shows(&mut shell, "Catalog"), "a removed connector's page closes");
+    assert!(
+        shows(&mut shell, "Catalog"),
+        "a removed connector's page closes"
+    );
 }
 
 #[test]
@@ -622,7 +672,10 @@ fn a_failed_first_read_offers_a_retry() {
         ConnectorsEvent::Page(Err("app_plugins_unavailable".into())),
     );
     assert!(shows(&mut shell, "Couldn't load the connectors."));
-    assert!(shows(&mut shell, "Connectors aren't available in this engine yet."));
+    assert!(shows(
+        &mut shell,
+        "Connectors aren't available in this engine yet."
+    ));
     assert!(shows(&mut shell, "r Try again"));
     keys(&mut shell, &[Key::Char('r')]);
     assert!(read_all(&one(&mut shell)));
@@ -694,7 +747,10 @@ fn a_trust_screen_lists_every_field_in_the_desktop_s_order() {
         }
     }
     let lines = trust_lines(&plain);
-    assert_eq!(lines[3], "Read-only address: https://board.example.com/mcp/readonly");
+    assert_eq!(
+        lines[3],
+        "Read-only address: https://board.example.com/mcp/readonly"
+    );
     assert_eq!(lines[4], "Key: the Authorization header, from api_key");
     assert_eq!(lines[5], "Tools it says only read: none");
     assert_eq!(lines[6], "Secrets it needs: none");
@@ -740,14 +796,27 @@ fn a_refused_file_is_listed_by_its_name_with_why_and_where_to_fix_it_and_never_o
     assert!(tall.contains("broken. Added by you."), "{tall}");
     assert!(tall.contains("linear. Added by you."), "{tall}");
     assert!(!tall.contains("broken, version"), "{tall}");
-    assert!(tall.contains("The address must start with https://."), "{tall}");
-    assert!(tall.contains("a plugin with this name already exists;"), "{tall}");
+    assert!(
+        tall.contains("The address must start with https://."),
+        "{tall}"
+    );
+    assert!(
+        tall.contains("a plugin with this name already exists;"),
+        "{tall}"
+    );
     let fix = "Fix its file, or remove it on the App plugins page.";
     assert_eq!(tall.matches(fix).count(), 2, "{tall}");
-    assert_eq!(tall.matches("Reaches ").count(), 1, "only Linear reaches a host");
+    assert_eq!(
+        tall.matches("Reaches ").count(),
+        1,
+        "only Linear reaches a host"
+    );
     assert!(shows(&mut shell, "Enter Open"), "Linear opens");
     keys(&mut shell, &[Key::Down]);
-    assert!(!shows(&mut shell, "Enter Open"), "a refused file has no page to open");
+    assert!(
+        !shows(&mut shell, "Enter Open"),
+        "a refused file has no page to open"
+    );
     keys(&mut shell, &[Key::Enter, Key::Down, Key::Enter]);
     assert!(!shows(&mut shell, "/  broken"));
     assert!(
@@ -771,13 +840,22 @@ fn a_page_whose_file_turns_refused_shows_why_and_offers_no_review_no_remove_and_
     assert!(shows(&mut shell, "Settings  /  Connectors  /  board"));
     assert!(shows(&mut shell, "board. Added by you."));
     assert!(shows(&mut shell, "The address must start with https://."));
-    assert!(shows(&mut shell, "Fix its file, or remove it on the App plugins page."));
+    assert!(shows(
+        &mut shell,
+        "Fix its file, or remove it on the App plugins page."
+    ));
     assert!(!shows(&mut shell, "Reaches ") && !shows(&mut shell, "Address:"));
-    assert!(!shows(&mut shell, "Signs in with OAuth"), "a refused file is not an OAuth one");
+    assert!(
+        !shows(&mut shell, "Signs in with OAuth"),
+        "a refused file is not an OAuth one"
+    );
     assert!(!shows(&mut shell, "Enter Review") && !shows(&mut shell, "x Remove"));
     assert!(!shows(&mut shell, "k Set key"));
     keys(&mut shell, &[Key::Char('x'), Key::Enter, Key::Char('k')]);
-    assert!(!shows(&mut shell, "Remove board?"), "x removes nothing here");
+    assert!(
+        !shows(&mut shell, "Remove board?"),
+        "x removes nothing here"
+    );
     assert!(!said(&shell).contains("OAuth"), "{}", said(&shell));
     assert!(requests(&mut shell).is_empty());
 }
@@ -791,7 +869,10 @@ fn hidden_characters_in_a_title_or_description_show_as_escapes_on_the_catalog_ro
     assert!(shows(&mut shell, "Lin\\u200bear"));
     assert!(shows(&mut shell, "Issues\\u202e in Linear."));
     keys(&mut shell, &[Key::Enter]);
-    assert!(shows(&mut shell, "Settings  /  Connectors  /  Lin\\u200bear"));
+    assert!(shows(
+        &mut shell,
+        "Settings  /  Connectors  /  Lin\\u200bear"
+    ));
     assert!(shows(&mut shell, "Issues\\u202e in Linear."));
 }
 
@@ -806,19 +887,32 @@ fn an_oauth_only_connector_reads_unavailable_with_the_oauth_line_once_and_review
     let mut shell = page(read);
     let tall = render(&mut shell, 80, 48);
     let reads = |title: &str, word: &str| {
-        tall.iter().any(|row| row.contains(title) && row.trim_end().ends_with(word))
+        tall.iter()
+            .any(|row| row.contains(title) && row.trim_end().ends_with(word))
     };
     assert!(reads("GitHub", "Unavailable"), "{tall:#?}");
-    assert!(reads("Board", "Needs review"), "review comes before Unavailable");
+    assert!(
+        reads("Board", "Needs review"),
+        "review comes before Unavailable"
+    );
     assert_eq!(tall.join("\n").matches(oauth).count(), 1, "{tall:#?}");
     keys(&mut shell, &[Key::Down, Key::Enter]);
     assert!(shows(&mut shell, "Settings  /  Connectors  /  GitHub"));
-    assert_eq!(render(&mut shell, 80, 24).join("\n").matches(oauth).count(), 1);
+    assert_eq!(
+        render(&mut shell, 80, 24).join("\n").matches(oauth).count(),
+        1
+    );
     assert!(!shows(&mut shell, "k Set key"));
     keys(&mut shell, &[Key::Esc, Key::Down, Key::Enter]);
     assert!(shows(&mut shell, "Settings  /  Connectors  /  Board"));
-    assert!(shows(&mut shell, "Review this connector before a project can use it."));
-    assert!(!shows(&mut shell, oauth), "a connector under review shows the review line only");
+    assert!(shows(
+        &mut shell,
+        "Review this connector before a project can use it."
+    ));
+    assert!(
+        !shows(&mut shell, oauth),
+        "a connector under review shows the review line only"
+    );
 }
 
 fn checked(shell: &mut Shell, trust: TrustView) {
@@ -850,12 +944,21 @@ fn a_long_trust_screen_scrolls_to_its_end_before_y_confirms() {
     assert!(shows(&mut shell, "more lines below"));
     assert!(!shows(&mut shell, "read_tool_60"));
     assert!(!shows(&mut shell, "Replaces your connector named board."));
-    assert!(shows(&mut shell, "Esc Cancel"), "the box leaves the help bar");
-    assert!(!shows(&mut shell, "y Confirm"), "no confirm before the end was shown");
+    assert!(
+        shows(&mut shell, "Esc Cancel"),
+        "the box leaves the help bar"
+    );
+    assert!(
+        !shows(&mut shell, "y Confirm"),
+        "no confirm before the end was shown"
+    );
     keys(&mut shell, &[Key::Char('y')]);
     assert!(requests(&mut shell).is_empty(), "y waits for the end");
     keys(&mut shell, &[Key::Down]);
-    assert!(!shows(&mut shell, "Version 0.2.0"), "Down moves the body one line");
+    assert!(
+        !shows(&mut shell, "Version 0.2.0"),
+        "Down moves the body one line"
+    );
     keys(&mut shell, &[Key::Up]);
     assert!(shows(&mut shell, "Version 0.2.0"));
     for _ in 0..40 {
@@ -893,25 +996,39 @@ fn esc_while_a_request_is_on_its_way_keeps_the_form_and_the_dialog() {
     typed(&mut shell, "name: board");
     keys(&mut shell, &[Key::Enter]);
     assert!(matches!(one(&mut shell), ConnectorsJob::Preview { .. }));
-    assert!(!shows(&mut shell, "Esc Cancel"), "no Esc is offered while it is checked");
+    assert!(
+        !shows(&mut shell, "Esc Cancel"),
+        "no Esc is offered while it is checked"
+    );
     keys(&mut shell, &[Key::Esc]);
-    assert!(shows(&mut shell, "Add a connector"), "the form stays while it is checked");
+    assert!(
+        shows(&mut shell, "Add a connector"),
+        "the form stays while it is checked"
+    );
     arrive(
         &mut shell,
         ConnectorsEvent::Preview {
             read: None,
-            result: Ok(Preview::Ready { trust: trust(false) }),
+            result: Ok(Preview::Ready {
+                trust: trust(false),
+            }),
         },
     );
     assert!(shows(&mut shell, "Trust Board?"));
     keys(&mut shell, &[Key::Char('y')]);
     assert!(matches!(one(&mut shell), ConnectorsJob::Add { .. }));
     keys(&mut shell, &[Key::Esc]);
-    assert!(shows(&mut shell, "Trust Board?"), "the trust screen stays while it saves");
+    assert!(
+        shows(&mut shell, "Trust Board?"),
+        "the trust screen stays while it saves"
+    );
     arrive(&mut shell, ConnectorsEvent::Page(Ok(view())));
     assert!(said(&shell).contains("Board was added."));
 
-    keys(&mut shell, &[Key::Down, Key::Down, Key::Enter, Key::Char('x')]);
+    keys(
+        &mut shell,
+        &[Key::Down, Key::Down, Key::Enter, Key::Char('x')],
+    );
     assert!(shows(&mut shell, "Remove Board?"));
     keys(&mut shell, &[Key::Char('y')]);
     assert!(matches!(
@@ -919,12 +1036,18 @@ fn esc_while_a_request_is_on_its_way_keeps_the_form_and_the_dialog() {
         ConnectorsJob::Remove { ref name } if name == "board"
     ));
     keys(&mut shell, &[Key::Esc]);
-    assert!(shows(&mut shell, "Remove Board?"), "the dialog stays while it removes");
+    assert!(
+        shows(&mut shell, "Remove Board?"),
+        "the dialog stays while it removes"
+    );
     let mut gone = view();
     gone.connectors.truncate(2);
     arrive(&mut shell, ConnectorsEvent::Page(Ok(gone)));
     assert!(said(&shell).contains("Board was removed."));
-    assert!(shows(&mut shell, "Catalog"), "the removed connector's page closes");
+    assert!(
+        shows(&mut shell, "Catalog"),
+        "the removed connector's page closes"
+    );
     assert!(!shows(&mut shell, "No connector named"));
 }
 
@@ -989,7 +1112,10 @@ fn w_switches_a_connector_that_offers_both_between_a_key_and_the_browser() {
     assert!(shows(&mut shell, "Sign in with: Key"));
     assert!(shows(&mut shell, "w Sign in with Browser"));
     assert!(shows(&mut shell, "token: Key you entered"));
-    assert!(shows(&mut shell, "k Set key"), "rv-code note 0: a key is set under Key");
+    assert!(
+        shows(&mut shell, "k Set key"),
+        "rv-code note 0: a key is set under Key"
+    );
     keys(&mut shell, &[Key::Char('w')]);
     assert!(matches!(
         one(&mut shell),
@@ -1000,21 +1126,33 @@ fn w_switches_a_connector_that_offers_both_between_a_key_and_the_browser() {
     assert!(said(&shell).contains("GitHub signs in with Browser."));
     assert!(shows(&mut shell, "Sign in with: Browser"));
     assert!(shows(&mut shell, "w Sign in with Key"));
-    assert!(shows(&mut shell, "token: Key you entered"), "rv-sec2 F1: a saved key stays");
+    assert!(
+        shows(&mut shell, "token: Key you entered"),
+        "rv-sec2 F1: a saved key stays"
+    );
     assert!(shows(&mut shell, "u Clear key") && !shows(&mut shell, "k Set key"));
     keys(&mut shell, &[Key::Char('k')]);
-    assert!(requests(&mut shell).is_empty(), "no key is set under Browser");
+    assert!(
+        requests(&mut shell).is_empty(),
+        "no key is set under Browser"
+    );
     keys(&mut shell, &[Key::Char('w')]);
     assert!(matches!(
         one(&mut shell),
-        ConnectorsJob::SetSignInWith { way: SignInWith::Key, .. }
+        ConnectorsJob::SetSignInWith {
+            way: SignInWith::Key,
+            ..
+        }
     ));
     let read = both(SignInWith::Key);
     arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
     assert!(shows(&mut shell, "token: Key you entered") && shows(&mut shell, "k Set key"));
     keys(&mut shell, &[Key::Esc, Key::Up, Key::Enter]);
     assert!(shows(&mut shell, "api_key: Not set"));
-    assert!(!shows(&mut shell, "Sign in with"), "a connector with one way has nothing to switch");
+    assert!(
+        !shows(&mut shell, "Sign in with"),
+        "a connector with one way has nothing to switch"
+    );
     keys(&mut shell, &[Key::Char('w')]);
     assert!(requests(&mut shell).is_empty());
 }
@@ -1030,24 +1168,39 @@ fn a_switch_to_browser_while_on_a_later_secret_moves_the_cursor_back() {
     keys(&mut shell, &[Key::Char('w')]);
     assert!(matches!(
         one(&mut shell),
-        ConnectorsJob::SetSignInWith { way: SignInWith::Browser, .. }
+        ConnectorsJob::SetSignInWith {
+            way: SignInWith::Browser,
+            ..
+        }
     ));
     let read = both_two_secrets(SignInWith::Browser);
     arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
-    assert!(shows(&mut shell, "Sign in with: Browser"), "the TUI's own switch draws");
+    assert!(
+        shows(&mut shell, "Sign in with: Browser"),
+        "the TUI's own switch draws"
+    );
     let read = both_two_secrets(SignInWith::Key);
     keys(&mut shell, &[Key::Char('w')]);
     one(&mut shell);
     arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
     keys(&mut shell, &[Key::Char('k')]);
-    assert!(shows(&mut shell, "Key for token"), "Key again starts at the first secret");
+    assert!(
+        shows(&mut shell, "Key for token"),
+        "Key again starts at the first secret"
+    );
 
     let mut shell = page(both_two_secrets(SignInWith::Key));
-    keys(&mut shell, &[Key::Down, Key::Enter, Key::Down, Key::Char('r')]);
+    keys(
+        &mut shell,
+        &[Key::Down, Key::Enter, Key::Down, Key::Char('r')],
+    );
     assert!(read_all(&one(&mut shell)));
     let read = both_two_secrets(SignInWith::Browser);
     arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
-    assert!(shows(&mut shell, "Sign in with: Browser"), "a desktop switch read again draws");
+    assert!(
+        shows(&mut shell, "Sign in with: Browser"),
+        "a desktop switch read again draws"
+    );
 }
 
 /// rv-sec2 T10 pages Q1 F1, leader 02:04: under Browser a saved key is listed with Clear
@@ -1058,7 +1211,10 @@ fn under_browser_a_saved_key_can_be_cleared_without_switching_to_key() {
     let mut shell = page(both_two_secrets(SignInWith::Browser));
     keys(&mut shell, &[Key::Down, Key::Enter]);
     assert!(shows(&mut shell, "token: Key you entered") && shows(&mut shell, "u Clear key"));
-    assert!(!shows(&mut shell, "site: Not set"), "a secret with no key is not listed");
+    assert!(
+        !shows(&mut shell, "site: Not set"),
+        "a secret with no key is not listed"
+    );
     assert!(!shows(&mut shell, "k Set key"));
     keys(&mut shell, &[Key::Char('u')]);
     assert!(matches!(

@@ -97,7 +97,8 @@ pub(in crate::tui) const ADD_TITLE: &str = "Add a connector";
 /// The add dialog's manifest field (WORDS r4).
 pub(in crate::tui) const ADD_FIELD: &str = "Connector manifest (YAML)";
 /// The add dialog's helper line (WORDS r4).
-pub(in crate::tui) const ADD_HELP: &str = "Paste a manifest or pick a .yaml file. Nothing is used until you confirm its trust screen.";
+pub(in crate::tui) const ADD_HELP: &str =
+    "Paste a manifest or pick a .yaml file. Nothing is used until you confirm its trust screen.";
 /// The add dialog's check action and its busy line (WORDS r4).
 pub(in crate::tui) const CHECK: &str = "Check";
 /// The status line while a manifest is checked (WORDS r4).
@@ -260,11 +261,9 @@ pub(in crate::tui) fn state(connector: &ConnectorView) -> (&'static str, Role, O
             Role::Warning,
             Some("Review this connector before a project can use it.".into()),
         ),
-        _ if connector.sign_in == SignIn::NotYet => (
-            "Unavailable",
-            Role::Warning,
-            Some(OAUTH_NOT_YET.into()),
-        ),
+        _ if connector.sign_in == SignIn::NotYet => {
+            ("Unavailable", Role::Warning, Some(OAUTH_NOT_YET.into()))
+        }
         PluginStatus::NeedsKey => (
             "Needs a key",
             Role::Warning,
@@ -389,15 +388,27 @@ pub(in crate::tui) fn trust_lines(trust: &TrustView) -> Vec<String> {
             lines.push(format!("Signs in on {}", listed(&oauth.hosts)));
             let ways: Vec<String> = oauth.registration.iter().map(|way| safe(way)).collect();
             lines.push(format!("Registers by {}", ways.join(", then ")));
-            lines.push(format!("Scopes while reading: {}", listed(&oauth.scopes_read)));
-            lines.push(format!("Scopes when writing: {}", listed(&oauth.scopes_write)));
+            lines.push(format!(
+                "Scopes while reading: {}",
+                listed(&oauth.scopes_read)
+            ));
+            lines.push(format!(
+                "Scopes when writing: {}",
+                listed(&oauth.scopes_write)
+            ));
         }
-        lines.push(format!("Tools it says only read: {}", listed(&block.read_tools)));
+        lines.push(format!(
+            "Tools it says only read: {}",
+            listed(&block.read_tools)
+        ));
     }
     lines.push(format!("Secrets it needs: {}", listed(&trust.secrets)));
     lines.push(format!("SHA-256 {}", safe(&trust.sha256)));
     if trust.replaces {
-        lines.push(format!("Replaces your connector named {}.", safe(&trust.name)));
+        lines.push(format!(
+            "Replaces your connector named {}.",
+            safe(&trust.name)
+        ));
     }
     assert!(lines.len() >= 4, "version, reaches, secrets and the hash");
     lines

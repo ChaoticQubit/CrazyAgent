@@ -293,7 +293,10 @@ impl ConnectorsPage {
             return;
         }
         if connector.origin == Origin::Bundled {
-            ctx.say(Message::error("Not removed.", &refusal("app_plugin_bundled")));
+            ctx.say(Message::error(
+                "Not removed.",
+                &refusal("app_plugin_bundled"),
+            ));
             return;
         }
         self.open = Open::Remove {
@@ -341,7 +344,10 @@ impl ConnectorsPage {
             return;
         };
         if secret.binding == Binding::None {
-            ctx.say(Message::warning("Nothing to clear.", "This secret has no key."));
+            ctx.say(Message::warning(
+                "Nothing to clear.",
+                "This secret has no key.",
+            ));
             return;
         }
         let job = ConnectorsJob::ClearKey {
@@ -384,7 +390,11 @@ impl ConnectorsPage {
             return;
         };
         self.done = Some(format!("The key for {} was saved.", safe(&secret)));
-        self.ask(ConnectorsJob::SetKey { name, secret, key }, Pending::Change, ctx);
+        self.ask(
+            ConnectorsJob::SetKey { name, secret, key },
+            Pending::Change,
+            ctx,
+        );
     }
 
     fn check(&mut self, ctx: &mut Ctx) {
@@ -526,12 +536,7 @@ impl ConnectorsPage {
         }
     }
 
-    fn preview(
-        &mut self,
-        read: Option<&String>,
-        result: &Result<Preview, String>,
-        ctx: &mut Ctx,
-    ) {
+    fn preview(&mut self, read: Option<&String>, result: &Result<Preview, String>, ctx: &mut Ctx) {
         let yaml = match &self.open {
             Open::Add(_) => read.cloned().or_else(|| self.sent.take()),
             _ => None,

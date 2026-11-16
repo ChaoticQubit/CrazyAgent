@@ -204,7 +204,10 @@ impl NativeOwner {
             }
             other => (other, None),
         };
-        assert!(!matches!(job, ConnectorsJob::ReadFile { .. }), "a typed path is read above");
+        assert!(
+            !matches!(job, ConnectorsJob::ReadFile { .. }),
+            "a typed path is read above"
+        );
         let controller = match self.settings_controller() {
             Ok(controller) => controller,
             Err(code) => return failed(&job, code),
