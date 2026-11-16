@@ -110,3 +110,14 @@ test("terminal keys refuse what the terminal path cannot send instead of typing 
   assert.throws(() => terminalKeys(["\uE009", "1"]), /Control only with a letter/);
   assert.throws(() => terminalKeys([7]), /strings/);
 });
+
+test("browser.keys with Meta (Cmd) is refused on macOS before any key goes out, other keys and systems pass, and the kit's keys refuses first (TRIAL-KIT-WEBDRIVER-META)", () => {
+  assert.equal(typeof kit.refusedKeys, "function", "the kit names why a key sequence never goes out");
+  assert.match(kit.refusedKeys(["", "c"], "darwin"), /ABOUT-THIS-MAC/);
+  assert.notEqual(kit.refusedKeys("a", "darwin"), null, "the right Meta key too");
+  assert.notEqual(kit.refusedKeys(["x", ""], "darwin"), null, "a Meta in any part");
+  for (const value of ["a", ["", "c"], [SHIFT, ENTER], "", []]) assert.equal(kit.refusedKeys(value, "darwin"), null, JSON.stringify(value));
+  assert.equal(kit.refusedKeys(["", "c"], "linux"), null, "off a Mac a Meta key reaches no Mac menu bar");
+  const source = readFileSync(new URL("./trial-kit.mjs", import.meta.url), "utf8");
+  assert.match(source, /overwriteCommand\("keys", async function keys\(webdriverKeys, value\) \{\s*const refused = refusedKeys\(value\);\s*if \(refused !== null\) throw /u, "the kit's keys refuses before it types or calls WebDriver");
+});
