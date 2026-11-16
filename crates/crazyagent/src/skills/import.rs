@@ -1000,6 +1000,48 @@ mod tests {
         );
     }
 
+    /// DEC-180 Task 25a on the Task 19 check: `import.conversations` names the pattern of a
+    /// harness's past conversation records inside its own owner folders, with the same
+    /// lexical check as the other import keys.
+    #[test]
+    fn a_manifest_import_block_names_its_conversations_inside_its_own_owner_folders() {
+        use crate::harnesses::manifest;
+        let refused = |import: &str| -> Option<(&'static str, String)> {
+            let text = listed("standin-skills", "Stand-in skills", ".standin", import);
+            Registry::build(&[("standin-skills", text.as_str())])
+                .err()
+                .map(|refused| (refused.code, refused.message))
+        };
+        let pattern = |path: &str| refused(&format!("import:\n  conversations: \"{path}\"\n"));
+        for kept in [
+            ".standin/sessions/*.jsonl",
+            ".standin/sessions/**/rollout-*.jsonl",
+        ] {
+            assert_eq!(pattern(kept), None, "{kept}");
+        }
+        let outside = Some((
+            manifest::VALUE,
+            "standin-skills: import.conversations: this must be inside one of home.owner_folders."
+                .to_owned(),
+        ));
+        for path in [
+            ".other/*.jsonl",
+            "*/sessions/*.jsonl",
+            ".claude/projects/*/*.jsonl",
+        ] {
+            assert_eq!(pattern(path), outside, "{path}");
+        }
+        assert_eq!(
+            pattern("/home/mira/.standin/*.jsonl"),
+            Some((
+                manifest::VALUE,
+                "standin-skills: import.conversations: this must be a pattern under the home \
+                 folder, written without ~, . or .. parts or a leading /."
+                    .to_owned()
+            ))
+        );
+    }
+
     #[test]
     fn every_import_source_keeps_its_wire_name_both_ways() {
         let built = leaked(&[(
