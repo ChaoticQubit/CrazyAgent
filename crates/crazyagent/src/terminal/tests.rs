@@ -183,6 +183,7 @@ fn a_leads_next_start_puts_a_plain_file_over_earlier_teammates_sockets_nothing_l
     std::fs::create_dir_all(&home).unwrap();
     let tmp = LeadTmp(home);
     let folder = crate::sandbox::toolchains::make_tmp(&tmp.0).unwrap();
+    crate::sandbox::toolchains::fresh_native_lead_tmp(&folder).unwrap();
     let planted = folder.join("teammates-00000000000000ff.sock");
     std::fs::write(&planted, "not a socket").unwrap();
 
@@ -220,6 +221,73 @@ fn a_leads_next_start_puts_a_plain_file_over_earlier_teammates_sockets_nothing_l
         .filter(|name| name.to_string_lossy().ends_with(".tmp"))
         .collect();
     assert!(staged.is_empty(), "{staged:?}: no staged file is left");
+}
+
+/// KA-KEPT-CAP-R2-NOTES Note 2 (rv-secreview kept-cap r2): the plain file that takes a dead
+/// teammates' socket's place is staged in the lead's own temp folder, which no teammate
+/// reads or writes, never in the short temp folder they share. So with no such folder that
+/// is this user's private one (missing, a link to a private folder, open to others) the dead
+/// socket stays, and once the folder is made private the next start retires it and leaves
+/// no staged file in either folder.
+#[cfg(unix)]
+#[test]
+fn a_dead_teammates_socket_is_retired_only_through_the_leads_own_private_temp_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let disk = tempfile::tempdir().unwrap();
+    let root = disk.path();
+    let lead = AgentId::team(1).unwrap();
+    let team = root.join("team");
+    let record = crate::team::runtime::agent_teammates_server_pid(&team, 1);
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    let home = crate::team::runtime::agent_home(&team, 1);
+    std::fs::create_dir_all(&home).unwrap();
+    let tmp = LeadTmp(home);
+    let folder = crate::sandbox::toolchains::make_tmp(&tmp.0).unwrap();
+    let own = crate::sandbox::toolchains::native_lead_tmp(&folder);
+    assert_eq!(own.parent(), Some(folder.as_path()));
+    let dead = renew_teammates_socket(root, &lead).unwrap();
+    drop(crate::spawn_gate::bind_unix_std(&dead).unwrap());
+    assert!(is_socket(&dead));
+
+    renew_teammates_socket(root, &lead).unwrap();
+    assert!(
+        is_socket(&dead),
+        "with no lead's own temp folder the dead socket stays"
+    );
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), &own).unwrap();
+    renew_teammates_socket(root, &lead).unwrap();
+    assert!(
+        is_socket(&dead),
+        "a link in the folder's place is never staged in"
+    );
+    assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+    std::fs::remove_file(&own).unwrap();
+    std::fs::create_dir(&own).unwrap();
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o755)).unwrap();
+    renew_teammates_socket(root, &lead).unwrap();
+    assert!(
+        is_socket(&dead),
+        "a folder open to others is never staged in"
+    );
+
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o700)).unwrap();
+    renew_teammates_socket(root, &lead).unwrap();
+    assert!(
+        std::fs::symlink_metadata(&dead).is_ok_and(|metadata| metadata.is_file()),
+        "through a private lead's own temp folder the dead socket becomes a plain file"
+    );
+    for place in [&folder, &own] {
+        let staged: Vec<_> = std::fs::read_dir(place)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(
+            staged.is_empty(),
+            "{staged:?} in {place:?}: no staged file is left"
+        );
+    }
 }
 
 /// PLCC-L1: a lead's start marks its teammates' server pin pending, so a record that is
