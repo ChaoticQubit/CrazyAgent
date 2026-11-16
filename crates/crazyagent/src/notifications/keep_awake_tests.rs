@@ -1,7 +1,9 @@
-use super::keep_awake::{ended_text, hot_text, left_over};
+use super::keep_awake::{
+    APPROVAL_TEXT, LID_JOURNAL_TEXT, ended_text, hot_text, left_over, lid_journal,
+};
 use super::*;
 use crate::config::ModelAccess;
-use crate::keep_awake::{EndReason, HeatEnd, Leftover};
+use crate::keep_awake::{EndReason, HeatEnd, Leftover, LidSupport, Sensors};
 use rusqlite::{Connection, params};
 
 const NOW_MS: i64 = 1_800_000_000_000;
@@ -213,4 +215,89 @@ fn a_missing_restore_state_resolves_nothing() {
         1,
         "a source that cannot be read resolves nothing"
     );
+}
+
+/// An engine database with every table, Keep awake's included.
+fn engine_store() -> (tempfile::TempDir, Connection) {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    crate::landing::number_change_sets(&connection).unwrap();
+    (folder, connection)
+}
+
+fn approvals(connection: &Connection, filter: NoticeFilter) -> Vec<Notice> {
+    let query = NoticeQuery {
+        filter,
+        project_id: None,
+        kind: Some(NoticeKind::KeepAwakeApproval),
+        fold: false,
+        before: None,
+        after: None,
+        limit: PAGE_MAX,
+    };
+    page(connection, &query).unwrap().items
+}
+
+#[test]
+fn the_lid_helper_journal_item_shows_the_fix_and_outlives_the_engine_start_undo() {
+    let (_folder, mut connection) = store();
+    lid_journal(&connection, true).unwrap();
+    left_over(&connection, &kinds(&["sleep_disabled"])).unwrap();
+    reconciled(&mut connection, NOW_MS);
+    let pending = restores(&connection, NoticeFilter::Pending);
+    assert_eq!(pending.len(), 2, "the undo's item and the lid helper's");
+    let lid = pending
+        .iter()
+        .find(|item| item.text == LID_JOURNAL_TEXT)
+        .expect("the lid helper item");
+    assert!(lid.text.contains("sudo pmset -a disablesleep 0"));
+    let sleep_back = lid.text.find("disablesleep").unwrap();
+    let journal = lid.text.find("journal.json").unwrap();
+    let removed = lid.text.find("Remove lid helper").unwrap();
+    assert!(
+        sleep_back < journal && journal < removed,
+        "sleep goes back before the journal and the helper go (threat model section 8)"
+    );
+    assert!(LID_JOURNAL_TEXT.len() <= TEXT_BYTES_MAX);
+
+    left_over(&connection, &kinds(&[])).unwrap();
+    reconciled(&mut connection, NOW_MS + 1);
+    let pending = restores(&connection, NoticeFilter::Pending);
+    assert_eq!(pending.len(), 1, "the undo clears only its own rows");
+    assert_eq!(pending[0].text, LID_JOURNAL_TEXT);
+
+    lid_journal(&connection, false).unwrap();
+    lid_journal(&connection, false).unwrap();
+    reconciled(&mut connection, NOW_MS + 2);
+    assert!(restores(&connection, NoticeFilter::Pending).is_empty());
+}
+
+#[test]
+fn the_approval_notice_shows_while_the_lid_helper_waits_for_approval() {
+    let (_folder, mut connection) = engine_store();
+    let waiting = Sensors {
+        lid_support: LidSupport::NeedsApproval,
+        ..Sensors::unread()
+    };
+    crate::keep_awake::evaluate(&connection, NOW_MS, Some(&waiting)).unwrap();
+    reconciled(&mut connection, NOW_MS);
+    let pending = approvals(&connection, NoticeFilter::Pending);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].text, APPROVAL_TEXT);
+    assert_eq!(pending[0].target, NoticeTarget::KeepAwake);
+    assert_eq!(pending[0].class, NoticeClass::Action);
+    assert_eq!(
+        APPROVAL_TEXT,
+        "Allow the lid helper in System Settings to hold with the lid closed."
+    );
+
+    let approved = Sensors {
+        lid_support: LidSupport::Held,
+        ..Sensors::unread()
+    };
+    crate::keep_awake::evaluate(&connection, NOW_MS + 1, Some(&approved)).unwrap();
+    reconciled(&mut connection, NOW_MS + 1);
+    assert!(approvals(&connection, NoticeFilter::Pending).is_empty());
+    assert_eq!(approvals(&connection, NoticeFilter::Done).len(), 1);
 }

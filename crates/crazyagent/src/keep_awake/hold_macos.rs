@@ -1,5 +1,5 @@
 use super::hold::{Held, Hold, HoldError, wanted};
-use super::power::{LID_REFUSED, LidAsk, LidReader};
+use super::power::{LID_REFUSED, LidAsk, LidCommand, LidReader};
 use super::state::{LidSupport, Want};
 use crazyagent_mac_power::client::{self, CallError};
 use crazyagent_mac_power::protocol::{FloorView, PinView, Refusal, Reply, Request, View};
@@ -46,6 +46,22 @@ pub(super) const PIN_OTHER: &str = "The lid helper belongs to another account on
 pub(super) const PIN_NONE: &str = "The lid helper was approved with no account at the screen";
 /// The lid words while the rule is Off and the helper was never read.
 pub(super) const LID_UNREAD: &str = "The lid helper is read once the lid rule is on";
+/// The start of the lid words for a Turn on that SMAppService refused.
+pub(super) const TURN_ON_FAILED: &str = "Lid-closed hold could not be turned on: ";
+/// The start of the Remove lid helper reason for an unregister that failed.
+pub(super) const REMOVE_UNFINISHED: &str = "Remove lid helper did not finish: ";
+/// The Remove lid helper reason for a Forget refused while the journal reads fine: the
+/// pin file is still there (rv-sec2 r2 F1).
+pub(super) const PIN_FILE_KEPT: &str = "The lid helper could not remove its pin file";
+/// The Remove lid helper reason for a Forget refused while a sleep value is not put back.
+pub(super) const REMOVE_NOT_PUT_BACK: &str = "The lid helper could not put sleep back yet";
+/// The Remove lid helper reason for a Forget from an account the helper is not pinned to.
+pub(super) const REMOVE_NOT_YOURS: &str =
+    "The lid helper belongs to another account; remove it in System Settings > Login Items";
+/// The Remove lid helper reason for any other refused Forget.
+pub(super) const REMOVE_REFUSED: &str = "The lid helper refused Remove lid helper";
+/// The Remove lid helper reason for a Forget with no answer.
+pub(super) const REMOVE_UNANSWERED: &str = "The lid helper did not answer Remove lid helper";
 
 /// The engine's line to the lid helper: one request, one reply.
 pub(super) trait HelperLine: Send + std::fmt::Debug {
@@ -175,6 +191,13 @@ impl LidLine {
             read_ms: None,
             last: None,
         }
+    }
+
+    /// Runs one owner command behind the same gate as every step, so a Mac that cannot
+    /// hold the lid never reaches SMAppService. Inputs: the command and the engine time.
+    pub(super) fn run(&mut self, command: LidCommand, now_ms: i64) {
+        assert!(now_ms > 0);
+        let _ = command;
     }
 
     /// Takes one step at a reading. Inputs: the keeper's lid ask and the engine time.
@@ -336,11 +359,14 @@ fn not_available(reason: &str) -> LidSupport {
 /// no system tool for it. Output: the lid line the sensor thread runs.
 pub(super) fn lid_reader() -> LidReader {
     let mut line: Option<LidLine> = None;
-    Box::new(move |ask, now_ms| {
-        line.get_or_insert_with(|| {
+    Box::new(move |ask, command, now_ms| {
+        let line = line.get_or_insert_with(|| {
             LidLine::new(Box::new(Daemon), Box::new(Installed), LidPlatform::this_mac())
-        })
-        .step(ask, now_ms)
+        });
+        if let Some(command) = command {
+            line.run(command, now_ms);
+        }
+        line.step(ask, now_ms)
     })
 }
 

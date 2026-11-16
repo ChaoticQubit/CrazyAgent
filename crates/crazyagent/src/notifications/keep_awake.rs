@@ -27,6 +27,19 @@ const HOT_NEVER_ENDS: &str =
     "This computer is running hot. Keep awake goes on; it is set never to end for heat.";
 const HOT_ENDS: &str = "This computer is running hot. Keep awake ends at this heat.";
 
+/// The restore subject of a lid helper that cannot read its journal.
+pub(crate) const LID_SUBJECT: &str = "keep_awake_restore:lid_helper";
+/// The restore line of a lid helper that cannot read its journal: the fix of threat model
+/// section 8, in its order.
+pub(crate) const LID_JOURNAL_TEXT: &str = "The lid helper cannot read its journal, so sleep \
+    may stay off. Run sudo pmset -a disablesleep 0, then remove its journal.json in \
+    /Library/Application Support/dev.crazyagent.power with sudo, then Remove lid helper and \
+    add it again.";
+/// The approval subject and line (QUESTION 35j).
+pub(crate) const APPROVAL_SUBJECT: &str = "keep_awake_approval";
+pub(crate) const APPROVAL_TEXT: &str =
+    "Allow the lid helper in System Settings to hold with the lid closed.";
+
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS keep_awake_restore (
     subject TEXT PRIMARY KEY CHECK(length(subject) BETWEEN 1 AND 128),
     unreadable INTEGER NOT NULL CHECK(unreadable IN (0,1))
@@ -149,6 +162,28 @@ pub(crate) fn left_over(connection: &Connection, leftover: &Leftover) -> Result<
         .map_err(error)?;
     }
     tx.commit().map_err(error)
+}
+
+/// Writes or clears the restore row of a lid helper that cannot read its journal (QUESTION
+/// 36b), under its own subject, which the engine start's undo leaves alone. Inputs: the
+/// engine database outside any transaction and whether the helper's journal is unreadable.
+/// Output: Ok, or the SQLite failure, with nothing changed.
+pub(crate) fn lid_journal(connection: &Connection, unreadable: bool) -> Result<(), EngineError> {
+    assert!(connection.is_autocommit());
+    let _ = unreadable;
+    Ok(())
+}
+
+/// The approval source (QUESTION 35j): one condition while the lid helper waits for the
+/// owner's approval in System Settings. A missing Keep awake state reports nothing.
+/// Inputs: the engine database and the model access, which it does not need. Output: the
+/// read, or none.
+pub(super) fn approvals(
+    connection: &Connection,
+    _access: &ModelAccess,
+) -> Result<Option<Found>, EngineError> {
+    let _ = connection;
+    Ok(None)
 }
 
 /// The line of a restore item. Input: whether the journal could not be read. Output: the

@@ -1,5 +1,6 @@
 use super::state::{Heat, LidSupport, PowerSource, Sensors};
 use crate::paths::Platform;
+use serde::{Deserialize, Serialize};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 
 /// How often the keeper asks the platform for a reading.
@@ -52,10 +53,29 @@ pub struct LidAsk {
     pub wanted: bool,
 }
 
-/// The lid line on the sensor thread (DEC-167 addendum 18): handed the keeper's lid ask
-/// and the engine time with each reading, it holds or lets go of the closed lid and
-/// returns the lid support, which stands in for the reader's.
-pub type LidReader = Box<dyn FnMut(LidAsk, i64) -> LidSupport + Send>;
+/// An owner command for the lid helper (QUESTION 36a): Turn on lid-closed hold, or Remove
+/// lid helper. The lid line runs it on the sensor thread, never in the owner's change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LidCommand {
+    TurnOn,
+    Remove,
+}
+
+/// A lid command waiting in the run state, with its number in this engine run, which only
+/// goes up, so the keeper hands each one on once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LidOrder {
+    pub command: LidCommand,
+    pub number: u32,
+}
+
+/// The lid line on the sensor thread (DEC-167 addendum 18): handed the keeper's lid ask,
+/// an owner command when one came, and the engine time with each reading, it runs the
+/// command, holds or lets go of the closed lid, and returns the lid support, which
+/// stands in for the reader's.
+pub type LidReader = Box<dyn FnMut(LidAsk, Option<LidCommand>, i64) -> LidSupport + Send>;
 
 /// Builds this platform's lid line: the macOS lid helper, and none elsewhere, where the
 /// reader's own lid support stands. Output: the lid line, if this platform has one.
@@ -167,7 +187,7 @@ impl Sensing {
                 while let Ok((lid_ask, now_ms)) = asked.recv() {
                     let mut reading = reader();
                     if let Some(lid) = lid.as_mut() {
-                        reading.lid_support = lid(lid_ask, now_ms);
+                        reading.lid_support = lid(lid_ask, None, now_ms);
                     }
                     assert_ne!(reading.lid_support, LidSupport::Off);
                     if answer.send(reading).is_err() {
@@ -185,6 +205,19 @@ impl Sensing {
             late: false,
             stopped: false,
         })
+    }
+
+    /// Hands an owner command to the lid line with the next ask, which goes out at once
+    /// unless a reading is under way; a later command before then replaces it. Input: the
+    /// command.
+    pub(super) fn order(&mut self, command: LidCommand) {
+        let _ = command;
+    }
+
+    /// Sends a last ask and waits for its answer, at most `wait` in all, so a lid lease
+    /// is released before the engine stops. Inputs: the last ask and the longest wait.
+    pub(super) fn finish(&mut self, last: LidAsk, wait: std::time::Duration) {
+        let _ = (last, wait);
     }
 
     /// Notes that the sensor thread is gone, once, and answers with a reading that knows

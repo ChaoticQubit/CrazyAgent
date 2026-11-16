@@ -24,8 +24,10 @@ pub enum Heat {
 /// Whether a closed lid can be held on this computer now, or the plain reason it cannot.
 /// From a platform reader `Held` means the platform can hold the lid; from `lid_status`
 /// it means the lid rule and the power source allow it too. `NotTurnedOn` is a macOS lid
-/// helper never registered (the panel offers Turn on), and `RemoveHelper` one the owner
-/// must remove and add again, with the reason (the panel offers Remove lid helper).
+/// helper never registered (the panel offers Turn on), `RemoveHelper` one the owner must
+/// remove and add again, with the reason (the panel offers Remove lid helper), and
+/// `SleepNotRestored` a lid helper that cannot read its journal (the restore notice says
+/// how to put sleep back).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LidSupport {
@@ -37,6 +39,7 @@ pub enum LidSupport {
     HelperMissing,
     NotTurnedOn,
     RemoveHelper { reason: String },
+    SleepNotRestored,
     LockedByPolicy,
     NotAvailable { reason: String },
 }

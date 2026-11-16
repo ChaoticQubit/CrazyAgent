@@ -438,12 +438,38 @@ fn every_refusal_of_an_owner_change_has_plain_words() {
             "keep_awake_minutes_invalid",
             "Enter whole minutes from 1 to 1440.",
         ),
+        (
+            "keep_awake_no_lid_helper",
+            "Lid-closed hold is set up only on macOS.",
+        ),
     ];
     for (code, sentence) in words {
         assert_eq!(refusal_words(code), Some(sentence), "{code}");
     }
     assert_eq!(refusal_words("owner_busy"), None);
     assert_eq!(refusal_words(""), None);
+}
+
+#[test]
+fn the_lid_helper_commands_are_owner_changes_with_plain_names() {
+    let names = [
+        (KeepAwakeAction::TurnOnLidHold, "\"turn_on_lid_hold\""),
+        (KeepAwakeAction::RemoveLidHelper, "\"remove_lid_helper\""),
+    ];
+    for (action, name) in names {
+        assert_eq!(serde_json::to_string(&action).unwrap(), name);
+        assert_eq!(serde_json::from_str::<KeepAwakeAction>(name).unwrap(), action);
+        assert!(action.validate().is_ok());
+    }
+    let (_folder, connection) = engine();
+    for (action, _) in names {
+        let outcome = act(&connection, action, NOW_MS);
+        if cfg!(target_os = "macos") {
+            assert_eq!(outcome, Outcome::Applied, "{action:?}");
+        } else {
+            assert_eq!(outcome, rejected("keep_awake_no_lid_helper"), "{action:?}");
+        }
+    }
 }
 
 #[test]

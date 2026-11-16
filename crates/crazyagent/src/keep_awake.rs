@@ -44,6 +44,9 @@ pub const TICK_MS: i64 = 5000;
 /// How often the keeper looks for a changed work count or an owner change.
 const LOOK_MS: i64 = 1000;
 
+/// The longest the engine stop waits for the lid line to release its lease.
+pub const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The longest manual timer, and the furthest Extend may move one from now: 24 hours.
 pub const MINUTES_MAX: u16 = 1440;
 
@@ -57,7 +60,8 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS keep_awake_state (
 )";
 
 /// One owner change to Keep awake: start a manual timer of 1 to 1440 minutes, move a
-/// running timer later, end the hold now, or save the settings.
+/// running timer later, end the hold now, save the settings, or a macOS lid helper
+/// command: Turn on lid-closed hold, or Remove lid helper (QUESTION 35i, 35j, 36a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum KeepAwakeAction {
@@ -65,6 +69,8 @@ pub enum KeepAwakeAction {
     Extend { minutes: u16 },
     End,
     Set { settings: KeepAwakeSettings },
+    TurnOnLidHold,
+    RemoveLidHelper,
 }
 
 impl KeepAwakeAction {
@@ -73,7 +79,9 @@ impl KeepAwakeAction {
     pub fn validate(&self) -> Result<(), EngineError> {
         let minutes = match self {
             Self::Start { minutes } | Self::Extend { minutes } => *minutes,
-            Self::End | Self::Set { .. } => return Ok(()),
+            Self::End | Self::Set { .. } | Self::TurnOnLidHold | Self::RemoveLidHelper => {
+                return Ok(());
+            }
         };
         if !(1..=MINUTES_MAX).contains(&minutes) {
             return Err(error("keep_awake_minutes_invalid"));
@@ -95,21 +103,24 @@ pub fn refusal_words(code: &str) -> Option<&'static str> {
 }
 
 /// What the owner sees of Keep awake: the settings, the last decision (with the reason the
-/// last hold ended until a new one starts), whether the lid is covered, the platform and
-/// the running work count.
+/// last hold ended until a new one starts), whether the lid is covered, what the platform
+/// itself says of the lid whatever the rule (QUESTION 36c: Settings offers Turn on and
+/// Remove lid helper from it), the platform and the running work count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeepAwakeView {
     pub settings: KeepAwakeSettings,
     pub state: Decision,
     pub lid_support: LidSupport,
+    pub lid_platform: LidSupport,
     pub platform: Platform,
     pub work: u32,
 }
 
 /// The run state the engine keeps between evaluations, gone at every engine start: the
 /// manual deadline, when the running hold began, when work was last seen ending, whether
-/// Auto stands down until the running work ends, the last readings, decision and count.
+/// Auto stands down until the running work ends, the last readings, decision and count,
+/// and the last lid command the owner gave.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stored {
@@ -120,6 +131,8 @@ struct Stored {
     sensors: Sensors,
     decision: Decision,
     work: u32,
+    #[serde(default)]
+    lid_order: Option<power::LidOrder>,
 }
 
 impl Stored {
@@ -132,6 +145,7 @@ impl Stored {
             sensors: Sensors::unread(),
             decision: Decision::NONE,
             work: 0,
+            lid_order: None,
         }
     }
 }
@@ -304,6 +318,7 @@ fn change(
             }
             *settings = chosen;
         }
+        KeepAwakeAction::TurnOnLidHold | KeepAwakeAction::RemoveLidHelper => {}
     }
     None
 }
@@ -314,6 +329,7 @@ fn view_of(settings: KeepAwakeSettings, stored: &Stored) -> KeepAwakeView {
         settings,
         state: stored.decision,
         lid_support: lid_status(&settings, &stored.sensors),
+        lid_platform: Sensors::unread().lid_support,
         platform: Platform::CURRENT,
         work: stored.work,
     }
@@ -617,6 +633,13 @@ impl Keeper {
         }
         self.lost = false;
         self.lid_ask.wanted = false;
+    }
+
+    /// Drops every hold as the engine stops (QUESTION 36d): the platform hold at once, and
+    /// the lid lease through one last ask the sensor thread answers within `STOP_WAIT`, or
+    /// the lease runs out by itself.
+    pub fn stop(&mut self) {
+        self.release();
     }
 
     /// Brings the platform hold in step with the wanted state. A hold found lost is logged

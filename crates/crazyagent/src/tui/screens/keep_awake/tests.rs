@@ -27,6 +27,7 @@ pub(in crate::tui) fn resting() -> KeepAwakeView {
             ended: None,
         },
         lid_support: LidSupport::Off,
+        lid_platform: LidSupport::HelperMissing,
         platform: Platform::MacOs,
         work: 0,
     }
@@ -308,6 +309,10 @@ fn the_lid_line_says_what_a_closed_lid_does_now() {
     let reason = "r".repeat(300);
     let cut = words::lid_now(&limited(LidSupport::RemoveHelper { reason }));
     assert_eq!(cut.chars().count(), 200, "a long remove reason is cut");
+    assert_eq!(
+        words::lid_now(&limited(LidSupport::SleepNotRestored)),
+        "Sleep not restored: see Notifications"
+    );
 }
 
 #[test]

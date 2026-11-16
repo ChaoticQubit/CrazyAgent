@@ -3,10 +3,13 @@ use super::{IDLE, IDLE_AND_LID, NOW_MS, SECOND_MS, agent, engine};
 use crate::keep_awake::{Heat, Keeper, LidSupport, PowerSource};
 use crate::keep_awake::hold_macos::{
     ENDED_TO_PROTECT, HELPER_UNANSWERED, HelperLine, LEASE_S, LID_UNREAD, LID_WITHHELD_MACOS,
-    LidLine, LidPlatform, PIN_NONE, PIN_OTHER, READ_EVERY_MS, SLEEP_NOT_RESTORED, STATUS_UNREAD,
-    VERSION_UNREAD, gate, macos_major,
+    LidLine, LidPlatform, PIN_FILE_KEPT, PIN_NONE, PIN_OTHER, READ_EVERY_MS, REMOVE_NOT_PUT_BACK,
+    REMOVE_NOT_YOURS, REMOVE_REFUSED, REMOVE_UNANSWERED, REMOVE_UNFINISHED, STATUS_UNREAD,
+    TURN_ON_FAILED, VERSION_UNREAD, gate, macos_major,
 };
-use crate::keep_awake::power::{LID_REFUSED, LidAsk, LidReader, PowerReading, READ_MS, Reader};
+use crate::keep_awake::power::{
+    LID_REFUSED, LidAsk, LidCommand, LidReader, PowerReading, READ_MS, Reader,
+};
 use crazyagent_mac_power::client::CallError;
 use crazyagent_mac_power::protocol::{FloorView, PinView, Refusal, Reply, Request, View};
 use crazyagent_mac_power::service::{Service, Status};
@@ -27,12 +30,36 @@ const WANTED: LidAsk = LidAsk {
 };
 const READING_MS: i64 = 30 * SECOND_MS;
 
-/// A daemon registration the row steers: it answers with the status set last, counts the
-/// status reads, and refuses to register or unregister anything.
+/// One call the stand-ins saw, in the order they saw them: a helper request or a call
+/// on the daemon's registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    Helper(Request),
+    Register,
+    Unregister,
+    LoginItems,
+}
+
+/// A daemon registration the row steers: it answers with the status set last and counts
+/// the status reads. Register and unregister move the status as macOS does, unless the
+/// row set a refusal, which they return instead.
 #[derive(Debug, Clone)]
 struct StandInService {
     status: Arc<Mutex<Option<Status>>>,
     reads: Arc<Mutex<u32>>,
+    seen: Arc<Mutex<Vec<Seen>>>,
+    refusal: Arc<Mutex<Option<String>>>,
+}
+
+impl StandInService {
+    fn change(&self, seen: Seen, then: Status) -> Result<(), String> {
+        self.seen.lock().unwrap().push(seen);
+        if let Some(refusal) = self.refusal.lock().unwrap().clone() {
+            return Err(refusal);
+        }
+        *self.status.lock().unwrap() = Some(then);
+        Ok(())
+    }
 }
 
 impl Service for StandInService {
@@ -42,23 +69,25 @@ impl Service for StandInService {
     }
 
     fn register(&self) -> Result<(), String> {
-        panic!("the lid line never registers the daemon")
+        self.change(Seen::Register, Status::RequiresApproval)
     }
 
     fn unregister(&self) -> Result<(), String> {
-        panic!("the lid line never unregisters the daemon")
+        self.change(Seen::Unregister, Status::NotRegistered)
     }
 
     fn open_login_items(&self) -> Result<(), String> {
-        panic!("the lid line never opens System Settings")
+        self.seen.lock().unwrap().push(Seen::LoginItems);
+        Ok(())
     }
 }
 
-/// What the stand-in helper answers to a hold and to a read.
+/// What the stand-in helper answers to a hold, a read and a forget.
 #[derive(Debug, Clone, Copy)]
 struct Answers {
     hold: Result<Reply, CallError>,
     read: Result<Reply, CallError>,
+    forget: Result<Reply, CallError>,
 }
 
 /// A helper the row steers: it records every request and answers from `Answers`; a
@@ -66,18 +95,20 @@ struct Answers {
 #[derive(Debug, Clone)]
 struct StandInHelper {
     calls: Arc<Mutex<Vec<Request>>>,
+    seen: Arc<Mutex<Vec<Seen>>>,
     answers: Arc<Mutex<Answers>>,
 }
 
 impl HelperLine for StandInHelper {
     fn call(&mut self, request: &Request) -> Result<Reply, CallError> {
         self.calls.lock().unwrap().push(*request);
+        self.seen.lock().unwrap().push(Seen::Helper(*request));
         let answers = *self.answers.lock().unwrap();
         match request {
             Request::Hold { .. } => answers.hold,
             Request::Read => answers.read,
             Request::Release => Ok(Reply::Released),
-            Request::Forget => panic!("the lid line never forgets the pin"),
+            Request::Forget => answers.forget,
         }
     }
 }
@@ -130,26 +161,35 @@ struct Rig {
     status: Arc<Mutex<Option<Status>>>,
     status_reads: Arc<Mutex<u32>>,
     calls: Arc<Mutex<Vec<Request>>>,
+    seen: Arc<Mutex<Vec<Seen>>>,
+    refusal: Arc<Mutex<Option<String>>>,
     answers: Arc<Mutex<Answers>>,
 }
 
 impl Rig {
     fn new(platform: LidPlatform, status: Option<Status>) -> Self {
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let service = StandInService {
             status: Arc::new(Mutex::new(status)),
             reads: Arc::new(Mutex::new(0)),
+            seen: seen.clone(),
+            refusal: Arc::new(Mutex::new(None)),
         };
         let helper = StandInHelper {
             calls: Arc::new(Mutex::new(Vec::new())),
+            seen: seen.clone(),
             answers: Arc::new(Mutex::new(Answers {
                 hold: Ok(held()),
                 read: Ok(ready()),
+                forget: Ok(Reply::Forgotten),
             })),
         };
         Self {
             status: service.status.clone(),
             status_reads: service.reads.clone(),
             calls: helper.calls.clone(),
+            seen,
+            refusal: service.refusal.clone(),
             answers: helper.answers.clone(),
             line: LidLine::new(Box::new(service), Box::new(helper), platform),
         }
@@ -164,7 +204,21 @@ impl Rig {
     }
 
     fn answer(&self, hold: Result<Reply, CallError>, read: Result<Reply, CallError>) {
-        *self.answers.lock().unwrap() = Answers { hold, read };
+        let mut answers = self.answers.lock().unwrap();
+        answers.hold = hold;
+        answers.read = read;
+    }
+
+    fn forget_answer(&self, forget: Result<Reply, CallError>) {
+        self.answers.lock().unwrap().forget = forget;
+    }
+
+    fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    fn refuse(&self, refusal: &str) {
+        *self.refusal.lock().unwrap() = Some(refusal.into());
     }
 
     fn set_status(&self, status: Option<Status>) {
@@ -359,7 +413,7 @@ fn the_helper_view_picks_the_lid_words() {
         (ready(), LidSupport::Held),
         (
             Reply::State(view(PinView::You, FloorView::None, false)),
-            not_available(SLEEP_NOT_RESTORED),
+            LidSupport::SleepNotRestored,
         ),
         (
             Reply::State(view(PinView::You, FloorView::Battery, true)),
@@ -506,7 +560,7 @@ fn the_keeper_keeps_the_lid_through_failed_renewals_while_the_lease_runs() {
     let calls = rig.calls.clone();
     let answers = rig.answers.clone();
     let mut line = rig.line;
-    let lid: LidReader = Box::new(move |ask, now_ms| line.step(ask, now_ms));
+    let lid: LidReader = Box::new(move |ask, _, now_ms| line.step(ask, now_ms));
     let reader: Reader = Box::new(|| PowerReading {
         source: PowerSource::Ac,
         battery_pct: Some(80),
@@ -522,12 +576,9 @@ fn the_keeper_keeps_the_lid_through_failed_renewals_while_the_lease_runs() {
     step_until(&mut keeper, &connection, &mut now_ms, |view| {
         view.state.want == IDLE_AND_LID && called(HOLD)
     });
-    *answers.lock().unwrap() = Answers {
-        hold: Ok(Reply::Refused {
-            reason: Refusal::Pmset,
-        }),
-        read: Ok(ready()),
-    };
+    answers.lock().unwrap().hold = Ok(Reply::Refused {
+        reason: Refusal::Pmset,
+    });
     let held = steps(&mut keeper, &connection, &mut now_ms, 65).unwrap();
     assert_eq!(
         held.state.want, IDLE_AND_LID,
@@ -601,4 +652,187 @@ fn this_mac_reads_its_version_and_finds_no_helper_next_to_a_test_binary() {
     );
     assert!(!mac.bundled, "a test binary has no helper next to it");
     assert_eq!(mac.withheld, LID_WITHHELD_MACOS);
+}
+
+fn remove_helper(reason: &str) -> LidSupport {
+    LidSupport::RemoveHelper {
+        reason: reason.into(),
+    }
+}
+
+#[test]
+fn remove_lid_helper_sends_forget_before_unregister() {
+    let mut rig = Rig::enabled();
+    assert_eq!(rig.line.step(WANTED, NOW_MS), LidSupport::Held);
+    rig.line.run(LidCommand::Remove, NOW_MS + SECOND_MS);
+    assert_eq!(
+        rig.seen()[1..],
+        [Seen::Helper(Request::Forget), Seen::Unregister],
+        "Forget, then unregister only on Forgotten (QUESTION 35i)"
+    );
+    let removed_ms = NOW_MS + 2 * SECOND_MS;
+    assert_eq!(rig.line.step(OFF, removed_ms), LidSupport::NotTurnedOn);
+    drop(rig.line);
+    assert_eq!(
+        rig.calls.lock().unwrap().len(),
+        2,
+        "the lease Forget ended is not released"
+    );
+}
+
+#[test]
+fn a_failed_unregister_keeps_offering_remove_lid_helper() {
+    let mut rig = Rig::enabled();
+    rig.refuse("Operation not permitted");
+    rig.line.run(LidCommand::Remove, NOW_MS);
+    assert_eq!(
+        rig.seen(),
+        [Seen::Helper(Request::Forget), Seen::Unregister]
+    );
+    let failed = remove_helper(&format!("{REMOVE_UNFINISHED}Operation not permitted"));
+    for reading in 1..4 {
+        let support = rig.line.step(RESTING, NOW_MS + reading * READING_MS);
+        assert_eq!(support, failed, "the failure stands while the daemon stays registered");
+    }
+    rig.set_status(Some(Status::NotRegistered));
+    let later_ms = NOW_MS + 5 * READING_MS;
+    assert_eq!(rig.line.step(RESTING, later_ms), LidSupport::NotTurnedOn);
+}
+
+#[test]
+fn a_refused_forget_keeps_the_daemon_registered_and_says_why() {
+    let journal = Ok(Reply::Refused {
+        reason: Refusal::JournalUnreadable,
+    });
+    let unreadable = Reply::State(view(PinView::You, FloorView::None, false));
+    let cases = [
+        (journal, Ok(ready()), remove_helper(PIN_FILE_KEPT)),
+        (journal, Ok(unreadable), LidSupport::SleepNotRestored),
+        (
+            Ok(Reply::Refused {
+                reason: Refusal::Pmset,
+            }),
+            Ok(ready()),
+            remove_helper(REMOVE_NOT_PUT_BACK),
+        ),
+        (
+            Ok(Reply::Refused {
+                reason: Refusal::Unpinned,
+            }),
+            Ok(ready()),
+            remove_helper(REMOVE_NOT_YOURS),
+        ),
+        (
+            Ok(Reply::Refused {
+                reason: Refusal::Version,
+            }),
+            Ok(ready()),
+            remove_helper(REMOVE_REFUSED),
+        ),
+        (
+            Err(CallError::Exchange(io::ErrorKind::TimedOut)),
+            Ok(ready()),
+            remove_helper(REMOVE_UNANSWERED),
+        ),
+    ];
+    for (forget, read, words) in cases {
+        let mut rig = Rig::enabled();
+        rig.forget_answer(forget);
+        rig.answer(Ok(held()), read);
+        rig.line.run(LidCommand::Remove, NOW_MS);
+        assert!(
+            !rig.seen().contains(&Seen::Unregister),
+            "a refused Forget never unregisters: {forget:?}"
+        );
+        assert_eq!(rig.line.step(RESTING, NOW_MS + SECOND_MS), words, "{forget:?}");
+    }
+}
+
+#[test]
+fn remove_while_the_daemon_is_not_enabled_goes_straight_to_unregister() {
+    let mut waiting = Rig::new(mac(15), Some(Status::RequiresApproval));
+    waiting.line.run(LidCommand::Remove, NOW_MS);
+    assert_eq!(waiting.seen(), [Seen::Unregister], "no helper runs to forget");
+    assert_eq!(
+        waiting.line.step(RESTING, NOW_MS + SECOND_MS),
+        LidSupport::NotTurnedOn
+    );
+
+    let mut never = Rig::new(mac(15), Some(Status::NotRegistered));
+    never.line.run(LidCommand::Remove, NOW_MS);
+    assert!(never.seen().is_empty(), "nothing to remove");
+}
+
+#[test]
+fn turn_on_registers_then_opens_login_items_and_again_while_approval_waits() {
+    let mut rig = Rig::new(mac(15), Some(Status::NotRegistered));
+    assert_eq!(rig.line.step(RESTING, NOW_MS), LidSupport::NotTurnedOn);
+    rig.line.run(LidCommand::TurnOn, NOW_MS + SECOND_MS);
+    assert_eq!(rig.seen(), [Seen::Register, Seen::LoginItems]);
+    let pending_ms = NOW_MS + 2 * SECOND_MS;
+    assert_eq!(rig.line.step(RESTING, pending_ms), LidSupport::NeedsApproval);
+
+    rig.line.run(LidCommand::TurnOn, pending_ms + SECOND_MS);
+    assert_eq!(
+        rig.seen(),
+        [Seen::Register, Seen::LoginItems, Seen::LoginItems],
+        "pressed while approval waits it opens Login Items again (QUESTION 35j)"
+    );
+
+    let mut enabled = Rig::enabled();
+    enabled.line.run(LidCommand::TurnOn, NOW_MS);
+    assert!(enabled.seen().is_empty(), "an enabled daemon is not registered again");
+}
+
+#[test]
+fn a_failed_turn_on_says_why_until_the_status_changes() {
+    let mut rig = Rig::new(mac(15), Some(Status::NotRegistered));
+    rig.refuse("Invalid argument");
+    rig.line.run(LidCommand::TurnOn, NOW_MS);
+    assert_eq!(rig.seen(), [Seen::Register], "Login Items opens only after a register");
+    let failed = not_available(&format!("{TURN_ON_FAILED}Invalid argument"));
+    assert_eq!(rig.line.step(RESTING, NOW_MS + SECOND_MS), failed);
+    assert_eq!(rig.line.step(RESTING, NOW_MS + READING_MS), failed);
+    rig.set_status(Some(Status::RequiresApproval));
+    let later_ms = NOW_MS + 2 * READING_MS;
+    assert_eq!(rig.line.step(RESTING, later_ms), LidSupport::NeedsApproval);
+}
+
+#[test]
+fn a_lid_command_runs_only_behind_the_platform_gate() {
+    for platform in [mac(12), LidPlatform { macos: None, ..mac(15) }] {
+        let mut rig = Rig::new(platform, Some(Status::NotRegistered));
+        rig.line.run(LidCommand::TurnOn, NOW_MS);
+        rig.line.run(LidCommand::Remove, NOW_MS + SECOND_MS);
+        assert!(rig.seen().is_empty(), "{platform:?}");
+        assert_eq!(*rig.status_reads.lock().unwrap(), 0, "{platform:?}");
+    }
+    let unbundled = LidPlatform {
+        bundled: false,
+        ..mac(15)
+    };
+    let mut rig = Rig::new(unbundled, Some(Status::NotRegistered));
+    rig.line.run(LidCommand::TurnOn, NOW_MS);
+    assert!(rig.seen().is_empty(), "no helper in the bundle, nothing to register");
+}
+
+#[test]
+fn a_command_is_followed_by_one_read_of_the_helper() {
+    let mut rig = Rig::new(mac(15), Some(Status::RequiresApproval));
+    for reading in 0..3 {
+        rig.line.step(RESTING, NOW_MS + reading * READING_MS);
+    }
+    rig.set_status(Some(Status::Enabled));
+    let approved_ms = NOW_MS + 3 * READING_MS;
+    assert_eq!(rig.line.step(RESTING, approved_ms), LidSupport::Held);
+    rig.line.run(LidCommand::TurnOn, approved_ms + SECOND_MS);
+    assert_eq!(
+        rig.line.step(RESTING, approved_ms + 2 * SECOND_MS),
+        LidSupport::Held
+    );
+    assert_eq!(
+        rig.calls(),
+        [Request::Read; 2],
+        "one read after the approval and one after the command (QUESTION 35d)"
+    );
 }
