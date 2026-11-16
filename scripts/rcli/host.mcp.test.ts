@@ -115,16 +115,24 @@ test("the host builds the one gateway server itself, trusting its annotations, w
   });
 });
 
-test("the host's gateway words and waits match the engine's shim, gateway and launch entry", async () => {
+test("the host's gateway words and waits match the engine's shim, gateway and launch entry, and a write waits past the longest owner approval", async () => {
   const source = (path: string) => readFile(new URL(`../../crates/crazyagent/src/connectors/${path}`, import.meta.url), "utf8");
   const shim = await source("shim.rs");
+  const launch = await source("launch.rs");
   expect(shim).toContain(`pub const SERVER_NAME: &str = "${GATEWAY_SERVER}";`);
   expect(shim).toContain(`pub const SERVER_COMMAND: &str = "${GATEWAY_COMMAND}";`);
-  expect(await source("launch.rs")).toContain(`pub const SERVER_NAME: &str = "${GATEWAY_SERVER}";`);
+  expect(launch).toContain(`pub const SERVER_NAME: &str = "${GATEWAY_SERVER}";`);
   expect(await source("gateway.rs")).toContain(`pub const LAUNCHES_FOLDER: &str = "${GATEWAY_LAUNCHES}";`);
   const wait = /pub\(crate\) const REPLY_WAIT: Duration = Duration::from_secs\((\d+)\);/.exec(shim);
   assert(wait !== null, "the shim names its reply wait");
   expect(GATEWAY_TIMEOUT_MS).toBeGreaterThan(Number(wait[1]) * 1000);
+  const minutes = (text: string, name: string): number => {
+    const found = new RegExp(`const ${name}: Duration = Duration::from_secs\\((\\d+) \\* 60\\);`).exec(text);
+    assert(found !== null, `the engine names ${name}`);
+    return Number(found[1]) * 60_000;
+  };
+  expect(GATEWAY_TIMEOUT_MS).toBe(minutes(launch, "HARNESS_WAIT"));
+  expect(GATEWAY_TIMEOUT_MS).toBeGreaterThan(minutes(shim, "HELD_WAIT"));
   expect(GATEWAY_CONNECT_MS).toBeLessThanOrEqual(10_000);
   expect(GATEWAY_TOOLS_MAX).toBeGreaterThan(0);
 });
@@ -178,40 +186,48 @@ test("the host admits only a private gateway folder reached without a link and a
   });
 }, 20_000);
 
-test("a granted host lists the gateway's tools once, a read tool runs in manual mode with no prompt and a write tool asks", async () => {
+test("a granted host lists the gateway's tools once and allows exactly those in manual mode with no prompt, so a write reaches the gateway, which asks the owner", async () => {
   await withFixture(async ({ cwd, gateway }) => {
     const registry = new ToolRegistry();
-    const tools = new GatewayTools(gateway, cwd, registry, new EventBus());
+    const permissions = buildPermissionContext(cwd, "manual", false);
+    const tools = new GatewayTools(gateway, cwd, registry, new EventBus(), permissions);
     try {
+      expect(permissions.rules.allow).toEqual([]);
       await tools.sync(AbortSignal.timeout(GATEWAY_CONNECT_MS));
       expect(registry.list().map((tool) => tool.name).sort()).toEqual([CREATE, LIST]);
       expect([...tools.names].sort()).toEqual([CREATE, LIST]);
-      const permissions = buildPermissionContext(cwd, "manual", false);
       expect(decidePermission(registry.get(LIST)!, {}, permissions, cwd).behavior).toBe("allow");
-      expect(decidePermission(registry.get(CREATE)!, {}, permissions, cwd).behavior).toBe("ask");
+      expect(decidePermission(registry.get(CREATE)!, {}, permissions, cwd).behavior).toBe("allow");
+      expect(permissions.rules.allow.map((rule) => rule.toolName).sort()).toEqual([CREATE, LIST]);
+      expect(permissions.rules.allow.every((rule) => rule.behavior === "allow" && rule.pattern === undefined)).toBe(true);
+      expect(permissions.mode).toBe("manual");
+      expect(permissions.interactive).toBe(false);
       await tools.sync(AbortSignal.timeout(GATEWAY_CONNECT_MS));
       expect(registry.list()).toHaveLength(2);
+      expect(permissions.rules.allow).toHaveLength(2);
     } finally {
       await tools.close();
     }
   });
 }, 20_000);
 
-test("a gateway that does not start leaves the turn without connector tools and fails nothing", async () => {
+test("a gateway that does not start leaves the turn without connector tools or allow rules and fails nothing", async () => {
   await withFixture(async ({ cwd, gateway }) => {
     const registry = new ToolRegistry();
-    const tools = new GatewayTools(gateway, cwd, registry, new EventBus());
+    const permissions = buildPermissionContext(cwd, "manual", false);
+    const tools = new GatewayTools(gateway, cwd, registry, new EventBus(), permissions);
     try {
       await tools.sync(AbortSignal.timeout(GATEWAY_CONNECT_MS));
       expect(registry.list()).toEqual([]);
       expect(tools.names).toEqual([]);
+      expect(permissions.rules.allow).toEqual([]);
     } finally {
       await tools.close();
     }
   }, () => "process.exit(1);\n");
 }, 20_000);
 
-test("a granted master turn calls a gateway read tool, the write tool is refused before the server, and every event is accepted", async () => {
+test("a granted master turn calls a gateway read tool and write tool, both reach the gateway with no prompt, and every event is accepted", async () => {
   await withFixture(async ({ cwd, home, gateway, calls }) => {
     const client = new ScriptedClient(
       [{ kind: "thread", threadId: "thr_gateway" }, { kind: "requires_action", runId: "run_1", calls: [
@@ -235,9 +251,11 @@ test("a granted master turn calls a gateway read tool, the write tool is refused
       expect(offered).toContain(CREATE);
       const outputs = new Map(client.outputs[0]?.tool_outputs.map((output) => [output.tool_call_id, output.output]));
       expect(outputs.get("c1")).toContain("ISSUE-77 open");
-      expect(outputs.get("c2") ?? "").not.toContain("ISSUE-77");
-      expect(await readFile(calls, "utf8")).toBe("linear_list_issues\n");
+      expect(outputs.get("c2")).toContain("ISSUE-77 open");
+      const reached = (await readFile(calls, "utf8")).split("\n").filter((line) => line !== "");
+      expect(reached.sort()).toEqual(["linear_create_issue", "linear_list_issues"]);
       expect(events.some((event) => event.type === "tool:result" && event.name === LIST)).toBe(true);
+      expect(events.some((event) => event.type === "tool:result" && event.name === CREATE)).toBe(true);
       for (const event of events) expect(() => normalizeSdkObservation(event)).not.toThrow();
     } finally {
       detach();

@@ -418,8 +418,8 @@
     },
     {
       "path": "scripts/rcli/host.mcp.test.ts",
-      "sha256": "cdf3de79d086318ecb77946451073adfad7b1f7885ad029527d523d1574e0fb9",
-      "bytes": 14514
+      "sha256": "d56f2c2deaf9299a4c07cb67a82859f4aee28fe63dd701ebf9ecab3f922d1fa3",
+      "bytes": 15844
     }
   ],
   "bun": {
