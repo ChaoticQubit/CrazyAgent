@@ -505,10 +505,12 @@ pub fn check(manifest: &Manifest) -> Result<(), Refused> {
 /// The command line of an ACP agent process: `piped.argv`, with `piped.tools_off` before its
 /// first `--` entry while tools are off, each `{home}`, `{cwd}` and `{model}` filled once.
 /// Inputs: the manifest, the agent home, the working folder, the model, if any, and the
-/// tools switch. Output: the arguments, `launch_model_unsupported` for `{model}` with no
-/// model, `launch_account_home_unavailable` or `launch_working_dir_unavailable` for a folder
-/// that is not UTF-8, or `launch_harness_unsupported` for a manifest that does not read as
-/// an ACP harness or names any other placeholder.
+/// tools switch. Output: the arguments, `launch_tools_off_unsupported` for tools off on a
+/// manifest that says `tools_limited`, whose tools nothing switches off,
+/// `launch_model_unsupported` for `{model}` with no model, `launch_account_home_unavailable`
+/// or `launch_working_dir_unavailable` for a folder that is not UTF-8, or
+/// `launch_harness_unsupported` for a manifest that does not read as an ACP harness or names
+/// any other placeholder.
 pub fn arguments(
     manifest: &Manifest,
     home: &Path,
@@ -521,6 +523,9 @@ pub fn arguments(
         .block("piped")
         .filter(|_| manifest.piped == Some(DriverKind::Acp))
         .ok_or_else(|| failure("launch_harness_unsupported"))?;
+    if !tools && manifest.tools_limited.is_some() {
+        return Err(failure("launch_tools_off_unsupported"));
+    }
     let argv = super::jsonl_turn::arguments(piped, "argv")
         .map_err(unsupported)?
         .unwrap_or_default();

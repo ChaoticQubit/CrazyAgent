@@ -4786,6 +4786,39 @@ fn a_hookless_agent_row_says_only_its_receipts_are_unavailable_for_its_account_k
     );
 }
 
+/// rv-code4 T19b F6: a hookless agent of a listed harness says its receipts are unavailable
+/// for its harness, not for its account kind.
+#[test]
+fn a_hookless_listed_agent_row_says_its_receipts_are_unavailable_for_its_harness() {
+    let mut shell = fresh(120, 30);
+    let mut graph = graph();
+    graph.nodes[2].hookless = true;
+    graph.nodes[2].harness = "standin-acp".into();
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph),
+    });
+    let rows = render(&mut shell);
+    let tree: Vec<String> = rows.iter().map(|row| chars(row, 2, 46)).collect();
+    let under = tree
+        .iter()
+        .position(|row| row.contains("claude-2"))
+        .expect("the hookless agent is drawn");
+    let words: String = tree[under + 1..]
+        .iter()
+        .take_while(|row| !row.contains("codex-1"))
+        .map(|row| {
+            row.trim_matches(|c: char| c == '│' || c == ' ' || c == '└' || c == '├' || c == '─')
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        words.trim(),
+        "Receipts unavailable for this harness",
+        "{tree:#?}"
+    );
+}
+
 fn messages_page(agent: i64, older: bool) -> Box<crate::team::agent_messages::AgentMessages> {
     use crate::team::agent_messages::{
         AgentMessage, AgentMessages, EntryKind, MessageSettings, Source, Speaker,

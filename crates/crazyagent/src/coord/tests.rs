@@ -3573,7 +3573,7 @@ fn a_listed_harness_kind_is_stored_as_its_id_and_answers_every_question_asked_of
         );
         for endpoint in [false, true] {
             for protection in Protection::ALL {
-                assert_eq!(kind.lacks(endpoint, protection), None, "{id}");
+                assert!(kind.lacks(endpoint, protection).is_some(), "{id}");
             }
         }
         assert_eq!(
@@ -3596,6 +3596,53 @@ fn a_listed_harness_kind_is_stored_as_its_id_and_answers_every_question_asked_of
         );
         assert!(!words.contains('\u{2014}'), "{words}");
     }
+}
+
+/// rv-sec3 T19b F2: a listed harness's launch writes no hooks, so its agent gets none of
+/// the owner's hooks, no edit guard and no receipts; every listed kind says why on every
+/// account kind, and its team agents are counted hookless.
+#[test]
+fn a_listed_harness_kind_lacks_hooks_the_edit_guard_and_receipts_and_says_why() {
+    use super::settings::{LISTED_NO_HOOKS, LISTED_NO_RECEIPTS, Protection};
+    for id in LISTED {
+        let kind = HarnessKind::Listed(id);
+        for endpoint in [false, true] {
+            assert_eq!(
+                kind.lacks(endpoint, Protection::Receipts),
+                Some(LISTED_NO_RECEIPTS),
+                "{id}"
+            );
+            for protection in [Protection::OwnerHooks, Protection::EditGuard] {
+                assert_eq!(
+                    kind.lacks(endpoint, protection),
+                    Some(LISTED_NO_HOOKS),
+                    "{id}"
+                );
+            }
+        }
+    }
+    for words in [LISTED_NO_HOOKS, LISTED_NO_RECEIPTS] {
+        assert!(
+            words.ends_with('.') && !words.contains('\u{2014}'),
+            "{words}"
+        );
+    }
+}
+
+/// rv-code4 T19b F6: a hookless agent of a listed harness shows the harness reason in place
+/// of receipts, the same words its settings sentence ends with; Claude Code started
+/// `--bare` keeps the account-kind reason.
+#[test]
+fn a_hookless_listed_agent_shows_the_harness_reason_in_place_of_receipts() {
+    use super::adoption::{HOOKLESS_WORDS, LISTED_HOOKLESS_WORDS, hookless_words};
+    assert_eq!(hookless_words("standin-acp"), LISTED_HOOKLESS_WORDS);
+    for native in ["claude", "claude-code", "codex", "rcli"] {
+        assert_eq!(hookless_words(native), HOOKLESS_WORDS, "{native}");
+    }
+    assert_eq!(
+        super::settings::LISTED_NO_RECEIPTS,
+        format!("Receipts are {LISTED_HOOKLESS_WORDS}.")
+    );
 }
 
 /// DEC-180 Phase 1: the kind of a harness follows its manifest. A harness that is not one
