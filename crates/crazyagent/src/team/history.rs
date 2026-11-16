@@ -414,8 +414,8 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
         });
     }
     let kept = kept_records(connection, project).unwrap_or_default();
-    let trees = record_trees(connection, project, agents);
-    let (mut visits_left, mut records_left) = (VISITS_MAX, RECORDS_MAX);
+    let (trees, listed) = record_trees(connection, project, agents);
+    let (mut visits_left, mut records_left) = (VISITS_MAX - listed, RECORDS_MAX);
     let mut records = Vec::new();
     for (at, tree) in trees.iter().rev().enumerate() {
         let trees_left = trees.len() - at;
@@ -460,7 +460,11 @@ struct Tree {
 /// and a listed agent's ([`listed_trees`]), each only while the agent's folder and that home
 /// are plain folders. Takes the engine database, the project and the agents folder. Returns
 /// the folders.
-fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> Vec<Tree> {
+fn record_trees(
+    connection: &Connection,
+    project: &ProjectId,
+    agents: &Path,
+) -> (Vec<Tree>, usize) {
     let mut trees = Vec::new();
     for (agent, harness, role) in team_agents(connection, project).unwrap_or_default() {
         let found = crate::harnesses::registry::registry().get(&harness);
@@ -500,7 +504,7 @@ fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> 
             });
         }
     }
-    trees
+    (trees, 0)
 }
 
 /// Lists the record folders of one team agent of a listed harness that keeps a jsonl-append

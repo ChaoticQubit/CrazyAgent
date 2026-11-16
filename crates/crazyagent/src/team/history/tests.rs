@@ -1418,3 +1418,24 @@ fn a_listed_agent_s_records_are_named_with_their_account_and_only_its_record_pat
     assert!(has(typed("account-2")), "{text}");
     assert!(hits.iter().all(|hit| !hit.contains("/s-9 #")), "{text}");
 }
+
+/// rv-secreview t20trees F1: listing a listed agent's accounts counts each entry it reads
+/// against the visit budget, as the walks below it do, so a harness home holding very many
+/// entries cannot make every search read them all.
+#[test]
+fn a_listed_agent_s_account_listing_counts_against_the_visit_budget() {
+    let fixture = Fixture::new();
+    let (_, home) = fixture.agent("standin-jsonl-append");
+    let listed = home.join("standin-jsonl-append");
+    let records = listed.join("account-1").join("standin").join("records");
+    let line = json!({"type": "started", "prompt": "zebra"}).to_string();
+    record(&records.join("s-7.jsonl"), &[line]);
+    for at in 0..3 {
+        std::fs::write(listed.join(format!("junk-{at}")), "").unwrap();
+    }
+
+    let (trees, visits) = record_trees(&fixture.db, &project(), &fixture.agents);
+
+    assert_eq!(trees.len(), 1);
+    assert_eq!(visits, 4);
+}
