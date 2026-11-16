@@ -251,16 +251,7 @@ pub(super) fn inner(
     ports: &[u16],
     helper: &Path,
 ) -> Result<Vec<OsString>, String> {
-    let named = args
-        .iter()
-        .skip(NEST_ARGS.len())
-        .position(|arg| arg == "--")
-        .map(|at| at + NEST_ARGS.len() + 1);
-    let own = named
-        .and_then(|at| args.get(at))
-        .and_then(|word| std::fs::canonicalize(word).ok())
-        .is_some_and(|path| path == helper);
-    let (Some(at), true) = (named, own) else {
+    let Some(at) = own_command(args, helper) else {
         return Err(format!("{BRIDGE} needs this helper as the nest's command"));
     };
     let mut written = args[..=at].to_vec();
@@ -274,6 +265,23 @@ pub(super) fn inner(
     assert_eq!(written.len(), args.len() + 2 + 2 * ports.len());
     assert_eq!(written[at + 1], BRIDGE_FD);
     Ok(written)
+}
+
+/// Finds where the nest names its command: the word after the nest's `--`, past
+/// [`NEST_ARGS`], when that word is this helper. Inputs: the nest's arguments and this
+/// helper. Output: the word's index, or none for another program or no command.
+pub(super) fn own_command(args: &[OsString], helper: &Path) -> Option<usize> {
+    let at = args
+        .iter()
+        .skip(NEST_ARGS.len())
+        .position(|arg| arg == "--")?
+        + NEST_ARGS.len()
+        + 1;
+    let own = args
+        .get(at)
+        .and_then(|word| std::fs::canonicalize(word).ok())
+        .is_some_and(|path| path == helper);
+    own.then_some(at)
 }
 
 /// Writes the handover's text: for each listener its family (4 or 6) and its port, high

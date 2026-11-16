@@ -2,8 +2,8 @@ use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS};
 use super::{
     BRIDGE_PORT_MIN, GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED,
     LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP,
-    LinuxSockets, LinuxSupervisor, OWNER_PORTS, ProjectSandbox, Sandbox, SandboxError,
-    SandboxNetwork, SandboxRemote, agent_env, clean_absolute, invalid,
+    LinuxSockets, LinuxSupervisor, OWNER_PORTS, ProjectSandbox, REMOTES_MAX, Routed, Sandbox,
+    SandboxError, SandboxNetwork, SandboxRemote, agent_env, clean_absolute, invalid,
 };
 use crazyagent_linux_supervisor::rules::{GitOwn, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
@@ -21,7 +21,7 @@ use std::fs;
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -31,8 +31,10 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 mod bridge;
+mod egress;
 
 pub use bridge::Bridge;
+pub use egress::{NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS};
 
 /// The Landlock helper's file name. It ships next to the engine's own executable.
 pub const HELPER_NAME: &str = "crazyagent-landlock";
@@ -79,6 +81,8 @@ const HOST_AGE_MAX: Duration = Duration::from_secs(60);
 /// The longest the call supervisor probe may run: its one wait is a 2 s connect timeout,
 /// reached only when a guard does not hold (rv-sec3 linux-t4b N4).
 const SUPERVISOR_PROBE_TIME_MAX: Duration = Duration::from_secs(10);
+/// How long the routed-network probe may run: slirp4netns's ready wait and the rules.
+const ROUTE_PROBE_TIME_MAX: Duration = Duration::from_secs(15);
 /// How the name of each private folder a supervisor probe runs in starts ([`private_folder`]).
 const PROBE_FOLDER_PREFIX: &str = "supervisor-probe-";
 /// The most names [`private_folder`] tries: each is 128 random bits, so only a name someone
@@ -89,6 +93,8 @@ const PROBE_POLL: Duration = Duration::from_millis(20);
 /// The set-user-ID and set-group-ID mode bits: a bubblewrap with either runs as someone
 /// other than the engine's user, so [`trusted`] refuses it.
 const SET_ID_BITS: u32 = 0o6000;
+/// The group and other write bits: a program anyone but its owner may change is never run.
+const OTHERS_WRITE_BITS: u32 = 0o022;
 /// The bubblewrap arguments a nested agent starts under, before its working folder: user,
 /// process, IPC and host-name namespaces of its own and a fresh `/proc`, with the whole
 /// root bound through, devices too, so the helper's Landlock rules stay the only file
@@ -367,8 +373,9 @@ pub(crate) fn holds_file_rules(helper: &Path) -> bool {
 /// Landlock ruleset, apply a policy and start a harness, inside bubblewrap install only
 /// the socket filter and start a harness, start bubblewrap from a fixed place with
 /// [`NEST_ARGS`], which then starts the helper again inside its namespaces, tell whether
-/// the kernel scopes signals, carry a nested agent's bridged ports as its broker, tell
-/// whether this machine runs the call supervisor, or be the check that question starts.
+/// the kernel scopes signals, carry a nested agent's bridged ports as its broker, build a
+/// routed agent's network as its setup child, tell whether this machine runs the call
+/// supervisor, or be the check that question starts.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HelperRequest {
     Probe {
@@ -394,6 +401,10 @@ pub enum HelperRequest {
         parent: u32,
         ports: Vec<u16>,
     },
+    Egress {
+        parent: u32,
+        ports: Vec<u16>,
+    },
     Supervisor {
         folder: PathBuf,
     },
@@ -409,7 +420,8 @@ impl HelperRequest {
     /// `--probe` with an optional `--limit-network`, `--open-sockets` and `--keep-free`
     /// with a port, or `--filter-sockets` alone then `--` and the harness, or `--nest`
     /// alone then `--` and what [`nest_request`] takes, or `--scoped` with nothing else, or
-    /// `--broker` with what [`bridge::broker_request`] takes.
+    /// `--broker` with what [`bridge::broker_request`] takes, or `--egress` with what
+    /// [`egress::request`] takes.
     /// `--open-sockets` needs `--limit-network`. Output: the request, or the reason the
     /// arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
@@ -420,6 +432,9 @@ impl HelperRequest {
         }
         if args.first().is_some_and(|flag| flag == bridge::BROKER) {
             return bridge::broker_request(args);
+        }
+        if args.first().is_some_and(|flag| flag == egress::EGRESS) {
+            return egress::request(args);
         }
         if let Some(probe) = supervisor_probe(&args) {
             return probe;
@@ -604,10 +619,22 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     Ok(())
 }
 
+/// The bubblewrap options no caller names before the nest's `--`, beside stage 1's own
+/// descriptor flags: one reads more arguments from a descriptor, past every check here,
+/// and the others block on or write to a descriptor the caller holds (rv-code2 N5).
+const NEST_REFUSED: [&str; 4] = [
+    "--args",
+    "--userns-block-fd",
+    "--sync-fd",
+    "--json-status-fd",
+];
+
 /// Reads what follows `--nest --`: bubblewrap at one of its fixed places, then exactly
 /// [`NEST_ARGS`], then at least the command bubblewrap starts, so the helper starts nothing
-/// else on a caller's word. Inputs: whether `--nest` was the only flag, and those
-/// arguments. Output: the request, or the reason they are refused.
+/// else on a caller's word. No option before the nest's `--` is one of the descriptor
+/// flags stage 1 writes itself ([`egress::DESCRIPTOR_FLAGS`]) or [`NEST_REFUSED`]. Inputs:
+/// whether `--nest` was the only flag, and those arguments. Output: the request, or the
+/// reason they are refused.
 fn nest_request(
     alone: bool,
     mut rest: impl Iterator<Item = OsString>,
@@ -629,6 +656,18 @@ fn nest_request(
     if !fixed || args.len() <= NEST_ARGS.len() {
         return Err(format!(
             "{NEST} needs bubblewrap's fixed arguments and a command"
+        ));
+    }
+    let named = args[NEST_ARGS.len()..]
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| {
+            let mut refused = egress::DESCRIPTOR_FLAGS.iter().chain(NEST_REFUSED.iter());
+            refused.any(|flag| arg == flag)
+        });
+    if named {
+        return Err(format!(
+            "{NEST} takes no descriptor flag; stage 1 writes its own"
         ));
     }
     Ok(HelperRequest::Nest { bwrap, args })
@@ -938,8 +977,9 @@ fn die_with_parent(parent: u32) -> Result<(), String> {
 /// filter to itself, moves into a session of its own and then replaces itself with the
 /// harness, or with a guard stays as its parent and ends with its exit code ([`supervise`]);
 /// a nest becomes bubblewrap, which starts a run inside its namespaces ([`nest`]).
-/// Bridge flags may lead a nest and the run or probe inside it ([`Bridge::fits`]). No mode
-/// runs while the environment holds a variable that loads code ([`LOADER_REFUSED`]).
+/// Route and bridge flags may lead a nest, and bridge flags the run or probe inside it
+/// ([`read_request`]). No mode runs while the environment holds a variable that loads code
+/// ([`LOADER_REFUSED`]).
 /// Output: the exit code, 2 for refused arguments or such a variable, 3 when the kernel
 /// cannot hold the policy, the session or the signal mask, or the process it dies with is
 /// gone, 126 when the harness or bubblewrap cannot start.
@@ -954,12 +994,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let asked = Bridge::leading(args).and_then(|(bridge, args)| {
-        let request = HelperRequest::parse(args)?;
-        Bridge::fits(bridge.as_ref(), &request)?;
-        Ok((bridge, request))
-    });
-    let (bridge, request) = match asked {
+    let (routes, bridge, started, request) = match read_request(args) {
         Ok(asked) => asked,
         Err(reason) => {
             eprintln!("crazyagent-landlock: {reason}");
@@ -968,9 +1003,12 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     };
     let (policy, launch) = match request {
         HelperRequest::Filter { program, args } => return filtered(&program, args),
-        HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args, bridge.as_ref()),
+        HelperRequest::Nest { bwrap, args } => {
+            return nest(&bwrap, &args, bridge.as_ref(), &routes);
+        }
         HelperRequest::Scoped => return scoped(),
         HelperRequest::Broker { parent, ports } => return bridge::broker(parent, &ports),
+        HelperRequest::Egress { parent, ports } => return egress::setup(parent, &ports),
         HelperRequest::Supervisor { folder } => return probe_supervisor(&folder),
         HelperRequest::Supervised { port, folder } => return probe_supervised(port, &folder),
         HelperRequest::Probe {
@@ -992,20 +1030,53 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             args,
         } => (policy, Some((program, args))),
     };
-    hold(&policy, launch, bridge.as_ref())
+    hold(&policy, launch, bridge.as_ref(), started)
 }
 
+/// Reads what the helper was asked: the route flags first ([`egress::leading`]), then the
+/// bridge flags ([`Bridge::leading`]), then the go descriptor ([`egress::handed`]), then
+/// the request, each set of flags only where the request takes it ([`Bridge::fits`],
+/// [`egress::fits`]). A routed nest with no bridged port unshares the network for its
+/// routes alone, so the bridge's check is left to the route's. Input: the helper
+/// arguments. Output: the route ports, empty for none, the bridge, the go descriptor and
+/// the request; or the reason.
+fn read_request(args: Vec<OsString>) -> Result<Asked, String> {
+    let (routes, args) = egress::leading(args)?;
+    let (bridge, args) = Bridge::leading(args)?;
+    let (started, args) = egress::handed(args)?;
+    let request = HelperRequest::parse(args)?;
+    if routes.is_empty() || bridge.is_some() {
+        Bridge::fits(bridge.as_ref(), &request)?;
+    }
+    egress::fits(&routes, started, &request)?;
+    assert!(routes.len() <= REMOTES_MAX);
+    assert!(started.is_none() || routes.is_empty());
+    Ok((routes, bridge, started, request))
+}
+
+/// What [`read_request`] reads: the route ports, the bridge, the go descriptor and the
+/// request.
+type Asked = (Vec<u16>, Option<Bridge>, Option<RawFd>, HelperRequest);
+
 /// Holds a policy on this process, then becomes the harness, or with a guard stays as its
-/// parent ([`supervise`]); for a probe it only tells
-/// whether this kernel held it. Under a bridge it first hands the bridged listeners to the
-/// broker, before any rule; the ports it would keep free are then ports of a network of
-/// its own, so the picked range is not asked. Inputs: the policy, the harness if any, and
-/// the bridge. Output: the exit code as [`helper_main`] gives it.
+/// parent ([`supervise`]); for a probe it only tells whether this kernel held it. In a
+/// routed nest it first waits for the go byte and refuses without it
+/// ([`egress::started`]). Under a bridge it then hands the bridged listeners to the broker,
+/// before any rule; the ports it would keep free are then ports of a network of its own, so
+/// the picked range is not asked. Inputs: the policy, the harness if any, the bridge and
+/// the go descriptor. Output: the exit code as [`helper_main`] gives it.
 fn hold(
     policy: &LandlockPolicy,
     launch: Option<(PathBuf, Vec<OsString>)>,
     bridge: Option<&Bridge>,
+    started: Option<RawFd>,
 ) -> ExitCode {
+    if let Some(fd) = started
+        && let Err(reason) = egress::started(fd)
+    {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
     if let Some(parent) = policy.die_with
         && let Err(reason) = die_with_parent(parent)
     {
@@ -1184,10 +1255,13 @@ fn scoped() -> ExitCode {
 /// first process inside inherit the mask, so they end only with the harness or by KILL,
 /// and a stop signal to the group is the harness's to handle. Last it gives up new
 /// privileges. Output: 3 when bubblewrap is refused or any of the three fails, 126 when
-/// bubblewrap cannot start. With a bridge it first starts the
-/// broker on this network and writes the bridge flags for the helper inside
-/// ([`bridge::open`]), keeping its end of the bridge open until bubblewrap has it.
-fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
+/// bubblewrap cannot start. With route ports it first starts the setup child that builds
+/// the agent's network and writes the descriptor flags bubblewrap reports and waits on
+/// ([`egress::open`]); with a bridge it then starts the broker on this network and writes
+/// the bridge flags for the helper inside ([`bridge::open`]). It keeps every end open until
+/// bubblewrap has it, and hands the route ends over only after both children started.
+fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>, routes: &[u16]) -> ExitCode {
+    assert!(routes.len() <= REMOTES_MAX);
     let Some(program) = trusted_file(bwrap) else {
         eprintln!(
             "crazyagent-landlock: {} is not a bubblewrap to nest under",
@@ -1196,11 +1270,20 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
         return ExitCode::from(3);
     };
     let ready = own_session()
-        .and_then(|()| match bridge {
-            Some(bridge) => bridge::open(&bridge.ports, args).map(|(end, args)| (Some(end), args)),
-            None => Ok((None, args.to_vec())),
+        .and_then(|()| match routes {
+            [] => Ok((None, args.to_vec())),
+            routes => egress::open(routes, args).map(|(ends, args)| (Some(ends), args)),
+        })
+        .and_then(|(ends, args)| match bridge {
+            Some(bridge) => {
+                bridge::open(&bridge.ports, &args).map(|(end, args)| (ends, Some(end), args))
+            }
+            None => Ok((ends, None, args)),
         })
         .and_then(|opened| {
+            if let Some(ends) = &opened.0 {
+                ends.hand_over()?;
+            }
             nix::sys::signal::SigSet::all()
                 .thread_block()
                 .map_err(|error| format!("signal mask: {error}"))?;
@@ -1208,13 +1291,14 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
                 .map_err(|error| format!("no new privileges: {error}"))?;
             Ok(opened)
         });
-    let (_end, args) = match ready {
+    let (_ends, _end, args) = match ready {
         Ok(opened) => opened,
         Err(reason) => {
             eprintln!("crazyagent-landlock: {reason}");
             return ExitCode::from(3);
         }
     };
+    assert!(routes.is_empty() || egress::placed(&args).is_ok());
     assert_eq!(nix::sys::prctl::get_no_new_privs(), Ok(true));
     let error = exec_keeping_mask(&program, bwrap, &args);
     eprintln!(
@@ -1316,6 +1400,7 @@ pub struct LinuxSandbox {
     sandbox: ProjectSandbox,
     backend: LinuxBackend,
     supervision: Option<Supervision>,
+    routed: Option<Routed>,
 }
 
 /// What the call supervisor holds for a launch on this host beyond the guards every
@@ -1379,6 +1464,7 @@ impl LinuxSandbox {
             sandbox,
             backend,
             supervision: None,
+            routed: None,
         })
     }
 
@@ -1481,7 +1567,18 @@ impl LinuxSandbox {
                 },
                 None => LinuxBackend::Landlock { helper },
             };
-            return Self::new(sandbox, backend);
+            let mut detected = Self::new(sandbox, backend)?;
+            if let LinuxBackend::Nested { bwrap, helper } = &detected.backend
+                && let Some(routed) = detected.sandbox.routed()
+            {
+                if route_held(bwrap, helper) {
+                    detected.routed = Some(routed);
+                } else {
+                    eprintln!("linux_route_not_started: this agent keeps the shared network");
+                }
+            }
+            assert!(detected.routed.is_none() || detected.sandbox.bridged_ports().is_none());
+            return Ok(detected);
         }
         if open {
             return Err(SandboxError::Unavailable(
@@ -1515,6 +1612,12 @@ impl LinuxSandbox {
     /// The project policy this sandbox holds.
     pub fn sandbox(&self) -> &ProjectSandbox {
         &self.sandbox
+    }
+
+    /// The network of its own this sandbox gives its agent, as detection found this machine
+    /// holds it ([`ProjectSandbox::routed`]); none when the agent keeps the shared network.
+    pub fn routed(&self) -> Option<&Routed> {
+        self.routed.as_ref()
     }
 
     /// The program every wrapped command starts: the Landlock helper or bwrap.
@@ -1623,11 +1726,11 @@ fn passes(probe: &mut Command) -> bool {
     .is_ok_and(|status| status.success())
 }
 
-/// Opens a bubblewrap the helper may nest an agent under and checks the file it opened, not
-/// the path again: a file that root or this user owns, with neither [`SET_ID_BITS`] bit, so
-/// it runs with this user's privileges and was put there by root or by this user. It opens
-/// without reading, so a bubblewrap that can only be run still opens. Input: its path.
-/// Output: the open file, which [`nest`] starts, or none.
+/// Opens a bubblewrap or tool the helper may run and checks the file it opened, not the
+/// path again: a file that root or this user owns, with neither [`SET_ID_BITS`] bit nor
+/// [`OTHERS_WRITE_BITS`], so it runs with this user's privileges and only root or this user
+/// put it there or may change it. It opens without reading, so a program that can only be
+/// run still opens. Input: its path. Output: the open file, which [`nest`] starts, or none.
 fn trusted_file(bwrap: &Path) -> Option<fs::File> {
     let own = rustix::process::geteuid().as_raw();
     let file = fs::OpenOptions::new()
@@ -1636,7 +1739,7 @@ fn trusted_file(bwrap: &Path) -> Option<fs::File> {
         .open(bwrap)
         .ok()?;
     let held = file.metadata().ok()?;
-    let plain = held.is_file() && held.mode() & SET_ID_BITS == 0;
+    let plain = held.is_file() && held.mode() & (SET_ID_BITS | OTHERS_WRITE_BITS) == 0;
     (plain && [0, own].contains(&held.uid())).then_some(file)
 }
 
@@ -1673,6 +1776,84 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
         )
 }
 
+/// Tells whether this machine gives a nested agent a network of its own that leaves only
+/// through its route ports: the widest routed nest a launch asks for, one route port and
+/// one bridged port, starts the helper's probe inside it within [`ROUTE_PROBE_TIME_MAX`];
+/// that probe passes only on the setup child's go byte ([`egress::started`]). Asked through
+/// [`route_held`] only. Inputs: bubblewrap and the helper. Output: true when it exits 0.
+fn routes(bwrap: &Path, helper: &Path) -> bool {
+    clean_absolute(bwrap)
+        && trusted(bwrap)
+        && passes_within(
+            Command::new(helper)
+                .arg(egress::ROUTE)
+                .arg("1")
+                .arg(bridge::BRIDGE)
+                .arg(BRIDGE_PORT_MIN.to_string())
+                .arg(NEST)
+                .arg("--")
+                .arg(bwrap)
+                .args(NEST_ARGS)
+                .arg(bridge::UNSHARE_NET)
+                .arg("--")
+                .arg(helper)
+                .arg(PROBE),
+            ROUTE_PROBE_TIME_MAX,
+        )
+}
+
+/// The route answer kept for this engine's life ([`kept_route`]): the bubblewrap and the
+/// helper it was asked for, and whether the probe passed.
+type KeptRoute = Mutex<Option<(PathBuf, PathBuf, bool)>>;
+
+/// Tells whether a nested agent gets a routed network of its own from one answer kept for
+/// the engine's life, so the Agent access page, the launch notice and the launch read the
+/// same fact (rv-code2 SX2-2, SX2B-1): false at once when `refused`, else the answer kept
+/// for this bubblewrap and helper, else the probe's, then kept, with no lock held while the
+/// probe runs. Inputs: the cell, bubblewrap, the helper, the refusal, the probe. Output: it.
+fn kept_route(
+    kept: &KeptRoute,
+    bwrap: &Path,
+    helper: &Path,
+    refused: bool,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    if refused {
+        return false;
+    }
+    let held = kept.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    if let Some((asked_bwrap, asked_helper, answer)) = held
+        && asked_bwrap == bwrap
+        && asked_helper == helper
+    {
+        return answer;
+    }
+    let answer = probe();
+    let asked = (bwrap.to_path_buf(), helper.to_path_buf(), answer);
+    *kept.lock().unwrap_or_else(PoisonError::into_inner) = Some(asked);
+    answer
+}
+
+/// What [`route_held`] answered, read by the host facts and every launch alike.
+static ROUTE_READ: KeptRoute = Mutex::new(None);
+
+/// [`kept_route`] for this machine: refused as root (rv-sa241 NOTE-2), where slirp4netns
+/// would run with root's network before it joins the agent's. The tools check runs inside
+/// the probe, so a kept answer never changes for a key: a tool removed after a true answer
+/// gives a routed launch whose setup fails, which the go byte refuses. Inputs: bubblewrap
+/// and the helper. Output: true when the agent is routed.
+fn route_held(bwrap: &Path, helper: &Path) -> bool {
+    let root = rustix::process::geteuid().is_root();
+    let probe = || {
+        let tools = SLIRP_PATHS
+            .iter()
+            .chain(egress::IPTABLES_PATHS.iter())
+            .all(|path| Path::new(path).is_file());
+        tools && routes(bwrap, helper)
+    };
+    kept_route(&ROUTE_READ, bwrap, helper, root, probe)
+}
+
 /// Tells whether AppArmor keeps unprivileged programs out of user namespaces, from what
 /// [`APPARMOR_USERNS`] reads: only `1`, with or without its newline, does. Input: the text,
 /// none where the file cannot be read (no AppArmor, or an older one). Output: true when it
@@ -1684,9 +1865,11 @@ fn restricts(setting: Option<&str>) -> bool {
 /// Reads what this machine holds for an agent beyond its Landlock rules: whether the
 /// kernel scopes signals (the helper's `--scoped`), whether a launch gives the agent a
 /// process namespace ([`nests`], or the plain probe fails), whether the call supervisor
-/// holds ([`supervises`]), whether this runs as root and whether AppArmor's user namespace
-/// restriction, which never covers root, is why nothing nests ([`restricts`]). Inputs: the
-/// helper and the engine's data folder, none where no probe may run. Output: the facts.
+/// holds ([`supervises`]), whether a nested agent gets a routed network of its own
+/// ([`route_held`], the answer every launch reads), whether this runs as root and whether
+/// AppArmor's user namespace restriction, which never covers root, is why nothing nests
+/// ([`restricts`]). Inputs: the helper and the engine's data folder, none where no probe
+/// may run. Output: the facts.
 pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let usable = clean_absolute(helper) && helper.is_file();
     let scoped = usable && passes(Command::new(helper).arg(SCOPED));
@@ -1700,8 +1883,11 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let root = rustix::process::geteuid().is_root();
     let nest = bwrap.filter(|_| nested);
     let supervised = held && data.is_some_and(|data| supervises(helper, nest, data, root));
+    let routed = held && nest.is_some_and(|bwrap| route_held(bwrap, helper));
     let setting = fs::read_to_string(APPARMOR_USERNS).ok();
     let armored = !nested && !root && restricts(setting.as_deref());
+    assert!(!routed || nested);
+    assert!(!(root && routed));
     assert!(!(root && supervised));
     assert!(!(armored && nested));
     assert!(!(armored && root));
@@ -1711,6 +1897,7 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
         supervised,
         root,
         armored,
+        routed,
     }
 }
 
@@ -1867,8 +2054,11 @@ impl Sandbox for LinuxSandbox {
                     nested: true,
                     ..landlock_policy(&grants, &self.sandbox)
                 })?;
-                let bridged = self.sandbox.bridged_ports().unwrap_or_default();
-                nest_command(bwrap, helper, &policy, cwd, &bridged)
+                let (bridged, routes) = match &self.routed {
+                    Some(routed) => (routed.bridged.clone(), routed.any.clone()),
+                    None => (self.sandbox.bridged_ports().unwrap_or_default(), Vec::new()),
+                };
+                nest_command(bwrap, helper, &policy, cwd, &bridged, &routes)
             }
             LinuxBackend::Bubblewrap { bwrap, helper } => {
                 bwrap_command(bwrap, helper, &grants, cwd, self.sandbox.network())
@@ -2125,25 +2315,30 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
 
 /// The command for a nested agent up to its harness: the helper asked to start bubblewrap
 /// ([`NEST`]) with [`NEST_ARGS`] in the working folder, and inside it the helper again with
-/// the policy. With bridged ports the bridge flags lead and bubblewrap gives the agent a
-/// network of its own. Inputs: bubblewrap, the helper, the policy, marked nested, the
-/// working folder and the bridged ports. Output: the command, which the harness follows
-/// after `--`.
+/// the policy. With route or bridged ports the route flags lead, then the bridge flags,
+/// and bubblewrap gives the agent a network of its own. Inputs: bubblewrap, the helper,
+/// the policy, marked nested, the working folder, the bridged ports and the route ports.
+/// Output: the command, which the harness follows after `--`.
 fn nest_command(
     bwrap: &Path,
     helper: &Path,
     policy: &LandlockPolicy,
     cwd: &Path,
     bridged: &[u16],
+    routes: &[u16],
 ) -> Command {
     assert!(policy.nested);
     assert!(policy.die_with.is_none());
+    assert!(routes.len() <= REMOTES_MAX);
     let mut command = Command::new(helper);
+    for port in routes {
+        command.arg(egress::ROUTE).arg(port.to_string());
+    }
     for port in bridged {
         command.arg(bridge::BRIDGE).arg(port.to_string());
     }
     command.arg(NEST).arg("--").arg(bwrap).args(NEST_ARGS);
-    if !bridged.is_empty() {
+    if !bridged.is_empty() || !routes.is_empty() {
         command.arg(bridge::UNSHARE_NET);
     }
     command
@@ -2647,6 +2842,157 @@ mod tests {
     }
 
     #[test]
+    fn only_a_tcp_only_agent_with_a_port_on_any_host_and_loopback_ports_from_1024_up_is_routed() {
+        use SandboxRemote::{AnyHost, Loopback};
+        let routed = |remotes: &[SandboxRemote], sockets: LinuxSockets| {
+            let (_temp, sandbox) = project(SandboxNetwork::Only(remotes.to_vec()));
+            let sandbox = sandbox.limit_sockets(sockets);
+            let routed = sandbox.routed();
+            assert!(routed.is_none() || sandbox.bridged_ports().is_none());
+            routed.map(|routed| (routed.any, routed.bridged))
+        };
+        let default = LinuxSockets::TcpOnly;
+        assert_eq!(routed(&[AnyHost(443)], default), Some((vec![443], vec![])));
+        assert_eq!(
+            routed(&[Loopback(18080), AnyHost(8443), AnyHost(443)], default),
+            Some((vec![443, 8443], vec![18080]))
+        );
+        assert_eq!(
+            routed(&[AnyHost(443), Loopback(1024)], default),
+            Some((vec![443], vec![1024]))
+        );
+        assert_eq!(routed(&[AnyHost(443), Loopback(1023)], default), None);
+        assert_eq!(routed(&[AnyHost(443), Loopback(53)], default), None);
+        assert_eq!(
+            routed(&[Loopback(8080)], default),
+            None,
+            "the bridge's case"
+        );
+        assert_eq!(routed(&[], default), None);
+        assert_eq!(routed(&[AnyHost(443)], LinuxSockets::TcpPorts), None);
+        assert_eq!(routed(&[AnyHost(443)], LinuxSockets::Refuse), None);
+        let (_temp, open) = project(SandboxNetwork::Open);
+        assert_eq!(open.routed(), None);
+    }
+
+    #[test]
+    fn a_routed_agent_starts_with_its_route_flags_first_and_a_network_of_its_own() {
+        use bridge::{BRIDGE, UNSHARE_NET};
+        let (_temp, sandbox) = project(SandboxNetwork::Only(vec![
+            SandboxRemote::AnyHost(443),
+            SandboxRemote::Loopback(18080),
+        ]));
+        let cwd = sandbox.project_root().to_path_buf();
+        let grants = Grants::of(&sandbox).unwrap();
+        let policy = LandlockPolicy {
+            nested: true,
+            ..landlock_policy(&grants, &sandbox)
+        };
+        let bwrap = Path::new(BWRAP_PATHS[0]);
+        let helper = helper();
+        let words = |bridged: &[u16], routes: &[u16]| -> Vec<OsString> {
+            nest_command(bwrap, &helper, &policy, &cwd, bridged, routes)
+                .get_args()
+                .map(OsStr::to_os_string)
+                .collect()
+        };
+        let expected = |head: &[&str]| -> Vec<OsString> {
+            let mut expected: Vec<OsString> = head.iter().map(OsString::from).collect();
+            expected.extend([NEST, "--"].map(OsString::from));
+            expected.push(bwrap.into());
+            expected.extend(NEST_ARGS.map(OsString::from));
+            expected.extend([UNSHARE_NET, "--chdir"].map(OsString::from));
+            expected.push(cwd.clone().into());
+            expected.push("--".into());
+            expected.push(helper.clone().into());
+            expected.extend(policy.args());
+            expected
+        };
+        let both = [egress::ROUTE, "443", BRIDGE, "18080"];
+        assert_eq!(words(&[18080], &[443]), expected(&both));
+        let routes = [egress::ROUTE, "443", egress::ROUTE, "8443"];
+        assert_eq!(words(&[], &[443, 8443]), expected(&routes));
+        for routed in [words(&[18080], &[443]), words(&[], &[443])] {
+            for flag in egress::DESCRIPTOR_FLAGS {
+                assert!(
+                    !routed.iter().any(|word| word == flag),
+                    "{flag}: {routed:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn route_flags_lead_only_a_nest_that_unshares_the_network_and_no_caller_names_its_descriptors()
+    {
+        use bridge::{BRIDGE, UNSHARE_NET};
+        let nest = |head: &[&str], options: &[&str]| -> Vec<OsString> {
+            let mut args: Vec<OsString> = head.iter().map(OsString::from).collect();
+            args.extend([NEST, "--", BWRAP_PATHS[0]].map(OsString::from));
+            args.extend(NEST_ARGS.map(OsString::from));
+            args.extend(options.iter().map(OsString::from));
+            args.push("--".into());
+            args.push(helper().into());
+            args.push(PROBE.into());
+            args
+        };
+        let read = |args: Vec<OsString>| {
+            read_request(args).map(|(routes, bridge, _, _)| (routes, bridge.map(|held| held.ports)))
+        };
+        let route = [egress::ROUTE, "443"];
+        let bridged = [BRIDGE, "18080"];
+        assert_eq!(read(nest(&route, &[UNSHARE_NET])), Ok((vec![443], None)));
+        let both = [egress::ROUTE, "443", egress::ROUTE, "8443", BRIDGE, "18080"];
+        assert_eq!(
+            read(nest(&both, &[UNSHARE_NET])),
+            Ok((vec![443, 8443], Some(vec![18080])))
+        );
+        assert_eq!(read(nest(&[], &[])), Ok((Vec::new(), None)));
+        assert!(
+            read(nest(&route, &[])).is_err(),
+            "a route needs --unshare-net"
+        );
+        assert!(
+            read(nest(&[], &[UNSHARE_NET])).is_err(),
+            "--unshare-net needs a port"
+        );
+        let mut probe: Vec<OsString> = route.iter().map(OsString::from).collect();
+        probe.push(PROBE.into());
+        assert!(read(probe).is_err(), "a route leads a nest only");
+        for options in [
+            &[UNSHARE_NET, "--info-fd", "5"][..],
+            &[UNSHARE_NET, "--block-fd", "6"],
+            &[UNSHARE_NET, "--ro-bind-data", "7", "/etc/resolv.conf"],
+            &["--info-fd", "5", UNSHARE_NET],
+            &[UNSHARE_NET, "--args", "5"],
+            &[UNSHARE_NET, "--userns-block-fd", "5"],
+            &[UNSHARE_NET, "--sync-fd", "5"],
+            &[UNSHARE_NET, "--json-status-fd", "5"],
+        ] {
+            assert!(read(nest(&route, options)).is_err(), "{options:?}");
+            assert!(read(nest(&bridged, options)).is_err(), "{options:?}");
+        }
+    }
+
+    #[test]
+    fn a_slirp4netns_or_bubblewrap_that_others_may_write_to_is_never_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let moded = |mode: u32| {
+            let path = root.join(format!("slirp4netns-{mode:o}"));
+            fs::write(&path, b"").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        assert!(trusted(&moded(0o755)));
+        assert!(trusted(&moded(0o700)));
+        for refused in [0o757, 0o775, 0o777, 0o722] {
+            assert!(!trusted(&moded(refused)), "{refused:o}");
+        }
+    }
+
+    #[test]
     fn a_set_user_or_set_group_id_bubblewrap_is_never_nested_under() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
@@ -2789,6 +3135,7 @@ mod tests {
                 supervised: false,
                 root: false,
                 armored: false,
+                routed: false,
             })
         };
         let launched = |remotes: &[SandboxRemote]| {
@@ -2810,8 +3157,13 @@ mod tests {
         let (_temp, open) = project(SandboxNetwork::Open);
         assert_eq!(said(true, &open), None);
         let plain = Some(super::super::LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        let unrouted = Some(super::super::LINUX_UNROUTED_LINE.to_owned());
         let hosted = launched(&[AnyHost(443), Loopback(8080)]);
-        assert_eq!(said(true, &hosted), plain, "a model on a host, tools off");
+        assert_eq!(
+            said(true, &hosted),
+            unrouted,
+            "a model on a host, tools off"
+        );
         assert_eq!(
             said(false, &hosted),
             None,
@@ -2819,14 +3171,163 @@ mod tests {
         );
         let ports = launched(&[Loopback(8080)]).limit_sockets(LinuxSockets::TcpPorts);
         assert_eq!(said(true, &ports), plain);
-        assert_eq!(said(true, &launched(&[AnyHost(443)])), None, "no port here");
+        let any_host = Some(super::super::LINUX_UNROUTED_ANY_HOST_LINE.to_owned());
+        assert_eq!(
+            said(true, &launched(&[AnyHost(443)])),
+            any_host,
+            "unrouted, any host"
+        );
         assert_eq!(said(true, &launched(&[])), None);
         for choice in [AgentNetwork::Https, AgentNetwork::Open] {
             let said = |sandbox| linux_unbridged_notice_on(host(true), choice, sandbox);
-            assert_eq!(said(&hosted), None, "{choice:?}: the page says it");
+            assert_eq!(said(&hosted), unrouted, "{choice:?}: no network of its own");
             assert_eq!(said(&ports), None, "{choice:?}: the page says it");
             assert_eq!(said(&low), Some(linux_unbridged_line(80)), "{choice:?}");
         }
+    }
+
+    #[test]
+    fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself() {
+        use super::super::policy::AgentNetwork;
+        use super::super::{LINUX_UNROUTED_ANY_HOST_LINE, LINUX_UNROUTED_LINE, LinuxHost};
+        use super::super::{linux_unbridged_line, linux_unbridged_notice_on};
+        use SandboxRemote::{AnyHost, Loopback};
+        let host = |routed, supervised| {
+            Some(LinuxHost {
+                nested: true,
+                scoped: false,
+                supervised,
+                root: false,
+                armored: false,
+                routed,
+            })
+        };
+        let launched = |remotes: &[SandboxRemote]| {
+            let (_temp, sandbox) = project(SandboxNetwork::Only(remotes.to_vec()));
+            sandbox
+        };
+        let said = |held, sandbox: &ProjectSandbox| {
+            linux_unbridged_notice_on(held, AgentNetwork::Https, sandbox)
+        };
+        let wide = Some(LINUX_UNROUTED_LINE.to_owned());
+        let any_host = Some(LINUX_UNROUTED_ANY_HOST_LINE.to_owned());
+        let model = launched(&[AnyHost(443), Loopback(18080)]);
+        let remote = launched(&[AnyHost(443)]);
+        assert!(model.routed().is_some() && remote.routed().is_some());
+        assert_eq!(said(host(false, false), &model), wide);
+        assert_eq!(
+            said(host(false, true), &model),
+            any_host,
+            "loopback kept by the supervisor"
+        );
+        assert_eq!(
+            said(host(false, false), &remote),
+            any_host,
+            "no loopback port"
+        );
+        assert_eq!(said(host(false, true), &remote), any_host);
+        for supervised in [false, true] {
+            assert_eq!(said(host(true, supervised), &model), None, "routed");
+            assert_eq!(said(host(true, supervised), &remote), None, "routed");
+        }
+        for line in [LINUX_UNROUTED_LINE, LINUX_UNROUTED_ANY_HOST_LINE] {
+            let why = "On this Linux, this agent has no network of its own: ";
+            assert!(line.starts_with(why), "{line}");
+            assert!(
+                line.contains("AppArmor") && line.contains("as root"),
+                "{line}"
+            );
+        }
+        assert!(LINUX_UNROUTED_LINE.contains("on every host, this computer included."));
+        assert!(LINUX_UNROUTED_ANY_HOST_LINE.contains("on any host include this computer"));
+        let low = launched(&[AnyHost(443), Loopback(18080), Loopback(80), Loopback(53)]);
+        assert!(low.routed().is_none());
+        let named = Some(linux_unbridged_line(53));
+        assert_eq!(
+            said(host(true, false), &low),
+            named,
+            "the low port keeps it unrouted"
+        );
+        assert_eq!(said(host(true, true), &low), named);
+        assert_eq!(
+            said(host(false, false), &low),
+            None,
+            "the page says it on this host"
+        );
+    }
+
+    #[test]
+    fn the_route_answer_is_asked_once_per_engine_and_never_when_refused() {
+        let kept: KeptRoute = Mutex::new(None);
+        let probes = &std::cell::Cell::new(0u32);
+        let probe = |answer: bool| {
+            move || {
+                probes.set(probes.get() + 1);
+                answer
+            }
+        };
+        let (bwrap, helper) = (Path::new(BWRAP_PATHS[0]), helper());
+        assert!(
+            !kept_route(&kept, bwrap, &helper, true, probe(true)),
+            "as root"
+        );
+        assert_eq!(probes.get(), 0, "a refusal starts no probe");
+        assert!(kept_route(&kept, bwrap, &helper, false, probe(true)));
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, probe(false)),
+            "kept"
+        );
+        assert_eq!(probes.get(), 1, "page, notice and launch read one answer");
+        assert!(
+            !kept_route(&kept, bwrap, &helper, true, probe(true)),
+            "refused while kept"
+        );
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, probe(false)),
+            "still kept"
+        );
+        assert_eq!(probes.get(), 1);
+        let other = Path::new("/usr/local/bin/bwrap");
+        assert!(
+            !kept_route(&kept, other, &helper, false, probe(false)),
+            "another bubblewrap"
+        );
+        assert!(
+            !kept_route(&kept, other, &helper, false, probe(true)),
+            "a failed answer too"
+        );
+        assert_eq!(probes.get(), 2);
+    }
+
+    #[test]
+    fn a_launch_that_could_have_a_network_of_its_own_says_why_it_has_none() {
+        use super::super::policy::AgentNetwork;
+        use super::super::{LINUX_UNROUTED_LINE, LinuxHost, linux_unbridged_notice_on};
+        use SandboxRemote::{AnyHost, Loopback};
+        let host = |nested, routed| {
+            Some(LinuxHost {
+                nested,
+                scoped: false,
+                supervised: false,
+                root: false,
+                armored: false,
+                routed,
+            })
+        };
+        let (_temp, eligible) = project(SandboxNetwork::Only(vec![AnyHost(443), Loopback(18080)]));
+        assert!(eligible.routed().is_some());
+        let unrouted = Some(LINUX_UNROUTED_LINE.to_owned());
+        for choice in AgentNetwork::ALL {
+            let said = |held| linux_unbridged_notice_on(held, choice, &eligible);
+            assert_eq!(said(host(true, false)), unrouted, "{choice:?}");
+            assert_eq!(said(host(true, true)), None, "{choice:?}: routed");
+            assert_eq!(said(host(false, false)), None, "{choice:?}: no nest");
+        }
+        assert!(LINUX_UNROUTED_LINE.contains("has no network of its own: "));
+        let ports = eligible.limit_sockets(LinuxSockets::TcpPorts);
+        assert!(ports.routed().is_none());
+        let said = linux_unbridged_notice_on(host(true, false), AgentNetwork::Https, &ports);
+        assert_eq!(said, None, "not routed-eligible, the page says it");
     }
 
     #[test]
@@ -3333,6 +3834,7 @@ mod tests {
             supervised: true,
             root: false,
             armored: false,
+            routed: false,
         };
         let at = Instant::now();
         let kept: KeptHost = Mutex::new(Some((at, host)));

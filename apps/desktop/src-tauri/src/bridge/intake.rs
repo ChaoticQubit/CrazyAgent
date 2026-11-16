@@ -28,7 +28,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 114] = [
+pub const INTAKE_CODES: [&str; 116] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -143,6 +143,8 @@ pub const INTAKE_CODES: [&str; 114] = [
     "document_not_a_regular_file",
     "document_unreadable",
     "document_changed_while_copying",
+    "project_id_removed",
+    "projects_removed_full",
 ];
 
 const GITHUB_CODES: [&str; 69] = [
@@ -1372,19 +1374,6 @@ mod tests {
     }
 
     #[test]
-    fn a_started_onboarding_names_the_project_the_engine_registers() {
-        assert_eq!(
-            crate::bridge::onboarded_project("/Users/mira/Projects/Plant Shop").as_deref(),
-            Some("plant-shop")
-        );
-        assert_eq!(
-            crate::bridge::onboarded_project("/Users/mira/Projects/---").as_deref(),
-            Some("project")
-        );
-        assert_eq!(crate::bridge::onboarded_project("/"), None);
-    }
-
-    #[test]
     fn pack_ids_are_bounded_plain_names() {
         assert_eq!(
             pack_ids(vec!["context-mode".into(), "i_have_adhd".into()])
@@ -1559,6 +1548,7 @@ mod tests {
             "delete_platform_unqualified",
             "delete_outside_home",
             "invalid_project",
+            "projects_removed_full",
         ] {
             assert_eq!(intake_code(code), Some(code), "{code}");
             assert_eq!(
@@ -1598,6 +1588,7 @@ mod tests {
             "home_destination_exists",
             "projects_home_unset",
             "project_exists",
+            "project_id_removed",
             "pool_missing",
             "team_harness_unavailable",
             "documents_too_many",

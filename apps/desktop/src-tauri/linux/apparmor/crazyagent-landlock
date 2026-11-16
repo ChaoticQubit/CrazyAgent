@@ -18,6 +18,9 @@ profile crazyagent-landlock /usr/bin/crazyagent-landlock flags=(attach_disconnec
   allow pivot_root,
   allow dbus,
   allow /usr/bin/bwrap ix,
+  allow /usr/bin/crazyagent-landlock ix,
+  allow /usr/bin/slirp4netns ix,
+  allow /usr/sbin/xtables-nft-multi ix,
   allow px /** -> crazyagent-landlock//&crazyagent-agent,
 
   include if exists <local/crazyagent-landlock>

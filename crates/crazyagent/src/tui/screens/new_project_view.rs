@@ -763,7 +763,7 @@ fn publish_row(draw: &mut Draw) {
     draw.add(Row::of(format!("    {line}"), look.muted));
 }
 
-fn shown_tail(text: &str, width: usize) -> String {
+pub(in crate::tui) fn shown_tail(text: &str, width: usize) -> String {
     let count = text.chars().count();
     if count <= width {
         return text.to_owned();

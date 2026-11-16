@@ -122,14 +122,14 @@ export function RemoveDialogView({ preview, choice, typed, pending, onChoice, on
         <input type="radio" name="remove-choice" aria-label="Remove from dashboard (keep files)" value="dashboard" checked={!everything} disabled={pending} onChange={() => onChoice("dashboard")} />
         <span className="pj-radio-body">
           <strong>Remove from dashboard (keep files)</strong>
-          <span className="pj-secondary">Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.</span>
+          <span className="pj-secondary">Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk, with every file in it.</span>
         </span>
       </label>
       {offered && <label className={`pj-radio-card ${everything ? "selected" : ""}`}>
         <input type="radio" name="remove-choice" aria-label="Delete everything" value="everything" checked={everything} disabled={pending} onChange={() => onChoice("everything")} />
         <span className="pj-radio-body">
           <strong>Delete everything</strong>
-          <span className="pj-secondary">Stops its agents, moves its folders to the Trash and removes its records. Its token counts stay under Removed projects.</span>
+          <span className="pj-secondary">Stops its agents, moves its folders to the Trash and removes its records, your notes, imports and saved selections for it included. Its token counts stay under Removed projects.</span>
         </span>
       </label>}
     </div>

@@ -149,7 +149,7 @@ fn rejection(response: &OwnerResponse) -> Option<String> {
     match response {
         OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
             match &operation.result {
-                OwnerResult::Applied => None,
+                OwnerResult::Applied | OwnerResult::OnboardingStarted { .. } => None,
                 OwnerResult::Rejected { code } => Some(code.clone()),
                 other => panic!("unexpected owner result: {other:?}"),
             }
@@ -1299,6 +1299,45 @@ async fn a_draft_brief_or_overview_the_folder_came_with_is_never_taken_as_the_en
         ["Rust"],
         "the draft this engine saved is reused when the folder is added again"
     );
+    bench.stop().await;
+}
+
+/// rv-sec2 N2 (DEC-178 addendum 1): a project removed from the dashboard comes back from its
+/// own folder, and a draft written into its `.crazyagent/setup/draft.json` after the removal is
+/// not taken as the engine's, since the seal rule holds on the return.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_return_does_not_take_a_draft_changed_after_removal() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    bench.generation += 1;
+    let removed = bench
+        .owner
+        .remove_project(project.clone(), bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&removed), None, "{removed:?}");
+    fs::create_dir_all(bench.repo.join(".crazyagent/setup")).unwrap();
+    fs::write(bench.repo.join(".crazyagent/setup/draft.json"), SAVED_DRAFT).unwrap();
+
+    let repo = bench.repo.clone();
+    let response = bench.start_onboarding_at(&repo).await;
+    let (OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) = &response
+    else {
+        panic!("the return is recorded: {response:?}");
+    };
+    assert_eq!(
+        operation.result,
+        OwnerResult::OnboardingStarted {
+            project_id: project.clone()
+        },
+        "the folder brings its own project back"
+    );
+    let back = bench.view(&project).await;
+    assert_eq!(
+        back.draft.about, "",
+        "a draft changed after the removal is not the engine's"
+    );
+    assert!(back.draft.tech_stack.is_empty(), "{back:?}");
     bench.stop().await;
 }
 

@@ -900,6 +900,16 @@ impl Storage {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::NewProject(&staged)))
                             });
+                            if let Ok(applied) = &result
+                                && applied.result == OwnerResult::Applied
+                                && !applied.historical_replay
+                                && let OwnerOperation::Apply {
+                                    mutation: OwnerMutation::CreateDemo { project_id, pool },
+                                } = &request.operation
+                                && let Err(e) = accounts::settle_demo_pool(&mut connection, &mut config, sources.as_ref(), &admission, project_id, pool)
+                            {
+                                eprintln!("demo_pool_not_settled cause={}", e.0);
+                            }
                             let _ = reply.send(result);
                         }
                         Job::OwnerApply(admission, request, reply) => {
@@ -1247,6 +1257,13 @@ fn open_actor_database(
     } else {
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
+        let started = std::time::Instant::now();
+        if let Some(held) = crate::project_setup::removed::hold_left(&connection)? {
+            eprintln!(
+                "projects_removed_backfill held={held} ms={}",
+                started.elapsed().as_millis()
+            );
+        }
     }
     assert!(connection.is_autocommit());
     assert_eq!(
@@ -1296,6 +1313,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
     crate::worktrees::reconcile(connection)?;
+    crate::project_setup::removed::initialize(connection)?;
     crate::project_setup::forget_removed(connection, &["repository_admissions"])?;
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
@@ -1945,20 +1963,36 @@ fn execute(
 }
 
 /// Records a new project and clears any plugin rows a prior project of the same id left
-/// behind, so a reused id (re-adding a folder with the same name is the normal way to reuse
-/// one) inherits none of the old project's MCP servers, secrets, skills or switches. The
+/// behind, so a reused id (a project removed from the dashboard and brought back from its own
+/// folder, or the demo made again) inherits none of the old project's MCP servers,
+/// secrets, skills or switches. The
 /// clear runs only once the row is confirmed new, so a rejected duplicate leaves a live
 /// project's plugins untouched. The reused id's old skill store folder is removed at once,
 /// not left for the next start's trash sweep, so the new project starts with a clean skill
 /// store and a same-name skill import is not refused by a stale folder. Creation is refused
 /// before any clearing when an existing project id equals the new one ignoring ASCII case,
 /// so a case-insensitive filesystem never lets one project's skill store delete another's.
+/// An id a removal holds is refused as `project_id_removed` (DEC-178 addendum 1).
 /// Inputs: the transaction, the id and the spec. Output: Applied, or Rejected when the id is
-/// already in use or clashes with one only by ASCII case.
+/// already in use, held by a removal or clashes with one only by ASCII case.
 pub(crate) fn create_project(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     spec: &ProjectSpec,
+) -> Result<Outcome, EngineError> {
+    create_project_at(tx, project_id, spec, None)
+}
+
+/// Records a new project as [`create_project`] does, at the project's own folder: a project
+/// removed from the dashboard whose recorded folder is exactly this one comes back under its
+/// id, and any other return to this folder ends. Any other id a removal holds or leftover rows
+/// keep is refused, so no create path gives one out. Every refusal comes before any write.
+/// Inputs: the transaction, the id, the spec and the folder text. Output: as `create_project`.
+pub(crate) fn create_project_at(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    spec: &ProjectSpec,
+    folder: Option<&str>,
 ) -> Result<Outcome, EngineError> {
     let case_clash: bool = tx
         .query_row(
@@ -1970,6 +2004,20 @@ pub(crate) fn create_project(
     if case_clash {
         return Ok(Outcome::Rejected {
             code: "project_id_case_conflict".into(),
+        });
+    }
+    let returns = match folder {
+        Some(folder) => {
+            crate::project_setup::removed::returning(tx, folder)?.as_ref() == Some(project_id)
+        }
+        None => false,
+    };
+    if !returns
+        && (crate::project_setup::removed::held(tx, project_id)?
+            || crate::project_setup::removed::left(tx, project_id)?)
+    {
+        return Ok(Outcome::Rejected {
+            code: "project_id_removed".into(),
         });
     }
     let stored = StoredProject {
@@ -1992,6 +2040,10 @@ pub(crate) fn create_project(
     }
     enforce_snapshot_bound(tx)?;
     assert_eq!(count, 1);
+    if let Some(folder) = folder {
+        crate::project_setup::removed::claim(tx, project_id, folder)?;
+    }
+    assert!(!crate::project_setup::removed::held(tx, project_id)?);
     crate::activity::note_created(tx, project_id, &spec.name, created_ms());
     plugins::remove_project(tx, project_id)?;
     crate::memory::forget_project(tx, project_id)?;
@@ -2569,7 +2621,7 @@ fn setup_plan(
         return Ok(Err("stale_revision".into()));
     }
     let OwnerMutation::CreateDemo { pool, .. } = mutation else {
-        return crate::project_setup::plan_new(&tx, config, path, &action);
+        return crate::project_setup::plan_new(&tx, config, path, &action, false);
     };
     if crate::demo::exists(&tx)? {
         return Ok(Err("demo_exists".into()));
@@ -2577,7 +2629,10 @@ fn setup_plan(
     if let Some(code) = crate::demo::pool_unavailable(&tx, config, pool)? {
         return Ok(Err(code.into()));
     }
-    Ok(crate::project_setup::plan_new(&tx, config, path, &action)?.map_err(crate::demo::refusal))
+    Ok(
+        crate::project_setup::plan_new(&tx, config, path, &action, true)?
+            .map_err(crate::demo::refusal),
+    )
 }
 
 /// Applies one owner mutation, optionally with a disk effect already done.
@@ -2621,12 +2676,19 @@ fn owner_apply_with(
             current_revision: Cursor::new(revision),
         });
     }
+    let mut onboarded = None;
     let outcome = match (effect, &command) {
         (Some(Effect::Home(effect)), _) => {
             projects_home::record(&tx, path, &request.request_id, &command, effect)?
         }
         (Some(Effect::NewProject(staged)), Command::ProjectSetup { action }) => {
-            let outcome = crate::project_setup::record_new(&tx, config, action, staged)?;
+            let demo = matches!(
+                &request.operation,
+                OwnerOperation::Apply {
+                    mutation: OwnerMutation::CreateDemo { .. }
+                }
+            );
+            let outcome = crate::project_setup::record_new(&tx, config, action, staged, demo)?;
             if let (
                 Outcome::Applied,
                 OwnerOperation::Apply {
@@ -2652,6 +2714,12 @@ fn owner_apply_with(
         (None, _) if request.expected_revision.value() != revision => Outcome::Rejected {
             code: "stale_revision".into(),
         },
+        (None, Command::Onboarding { action }) => {
+            let (outcome, started) = crate::onboarding::start(&tx, config, path, action)?;
+            assert_eq!(outcome == Outcome::Applied, started.is_some());
+            onboarded = started;
+            outcome
+        }
         (None, _) => execute(&tx, config, path, &command, revision)?,
     };
     let (result, changed) = match outcome {
@@ -2663,6 +2731,8 @@ fn owner_apply_with(
                 OwnerResult::VerificationUnavailable {
                     attempt_id: attempt_id.clone(),
                 }
+            } else if let Some(project_id) = onboarded {
+                OwnerResult::OnboardingStarted { project_id }
             } else {
                 OwnerResult::Applied
             };

@@ -147,6 +147,12 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "home_destination_exists" | "clone_destination_exists" => {
             "Your projects folder already has a folder with this name. Rename one of them first."
         }
+        "onboarding_project_ids_used" => {
+            "Every id this folder's name can get, 99 in all, is taken by your projects or ones you removed. Rename the folder first."
+        }
+        "project_id_removed" => {
+            "A project you removed used this name, so it can't be used again. Choose another project name."
+        }
         "home_copy_special_file" => "The folder holds a device or pipe file that can't be copied.",
         "home_copy_too_large" => "The folder has too many files or levels to copy.",
         "home_override_invalid" => {
@@ -435,6 +441,9 @@ mod tests {
             "clone_destination_exists",
             "home_move_partial",
             "home_move_nested",
+            "onboarding_project_ids_used",
+            "project_id_removed",
+            "projects_removed_full",
         ] {
             let text = copy(code);
             assert!(known(code).is_some(), "{code} has a sentence");
@@ -445,6 +454,18 @@ mod tests {
         assert_eq!(
             copy("home_move_partial"),
             crate::projects_home::plain_problem("home_move_partial").unwrap()
+        );
+        assert_eq!(
+            copy("onboarding_project_ids_used"),
+            "Every id this folder's name can get, 99 in all, is taken by your projects or ones you removed. Rename the folder first."
+        );
+        assert_eq!(
+            copy("project_id_removed"),
+            "A project you removed used this name, so it can't be used again. Choose another project name."
+        );
+        assert_eq!(
+            copy("projects_removed_full"),
+            "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash."
         );
         assert_eq!(known("something_new_and_odd"), None);
         assert_eq!(

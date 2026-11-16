@@ -875,3 +875,235 @@ async fn the_demo_lands_once_as_a_seeded_project_with_the_engines_own_question()
     drop(owner);
     engine.stop().await;
 }
+
+/// rv-sec2 22:51 F1 (DEC-178 addendum 1): a demo made again after Delete everything inherits
+/// nothing of the old one: not its notes, not a standing connector allow a V3 build kept for
+/// it, and not its removal record. The connector table is made here as that build makes it.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_demo_made_again_inherits_nothing_of_the_old_one() {
+    use crazyagent::demo::{NAME, PROJECT_ID};
+    use crazyagent::memory::library::MemoryScope;
+    use crazyagent::protocol::CredentialRef;
+    let engine = Engine::with_settings(DEMO_POOL).await;
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let home = place.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    sign_in(engine.root.path(), "profile-codex");
+    let mut owner = OwnerController::attach(
+        engine.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let pool = CredentialRef::new("pool-codex").unwrap();
+    let response = owner
+        .set_projects_home(home.to_str().unwrap().into(), next())
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let response = owner.create_demo(pool.clone(), next()).await.unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let demo = ProjectId::new(PROJECT_ID).unwrap();
+    let response = owner
+        .add_memory(
+            MemoryScope::Project {
+                project_id: demo.clone(),
+            },
+            "An old demo note.".into(),
+            next(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS connector_write_allowed
+            (project TEXT NOT NULL, connector TEXT NOT NULL);
+         INSERT INTO connector_write_allowed VALUES ('crazyagent-demo','linear');",
+    )
+    .unwrap();
+    let rows = |sql: &str| -> i64 { db.query_row(sql, [], |row| row.get(0)).unwrap() };
+
+    let response = owner
+        .delete_project(demo.clone(), NAME.into(), next())
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(
+        rows("SELECT count(*) FROM projects_removed WHERE project='crazyagent-demo'"),
+        1,
+        "the deleted demo's id is held until a demo is made again"
+    );
+    db.execute_batch(
+        "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,model,
+            input,output,cache_read,cache_write,cost_nanos)
+         VALUES (3600000,'master','crazyagent-demo','pool-codex','account-codex','master',
+            'codex','late-session','native-default',7001,0,0,0,0);",
+    )
+    .unwrap();
+    let removed_before =
+        rows("SELECT coalesce(sum(input),0) FROM usage_tokens WHERE project='<removed>'");
+    let response = owner.create_demo(pool, next()).await.unwrap();
+    assert_eq!(
+        result(response),
+        OwnerResult::Applied,
+        "Create demo still works after Delete everything"
+    );
+    for (sql, why) in [
+        (
+            "SELECT count(*) FROM memory_library WHERE project='crazyagent-demo'",
+            "no note of the old demo",
+        ),
+        (
+            "SELECT count(*) FROM connector_write_allowed WHERE project='crazyagent-demo'",
+            "no standing allow of the old demo",
+        ),
+        (
+            "SELECT count(*) FROM projects_removed WHERE project='crazyagent-demo'",
+            "no removal record of the live demo",
+        ),
+    ] {
+        assert_eq!(rows(sql), 0, "{why}");
+    }
+    assert_eq!(
+        rows("SELECT count(*) FROM usage_tokens WHERE project='crazyagent-demo'"),
+        0,
+        "the old demo's token counts never merge into the new demo"
+    );
+    assert_eq!(
+        rows("SELECT coalesce(sum(input),0) FROM usage_tokens WHERE project='<removed>'"),
+        removed_before + 7001,
+        "the old demo's token counts stay under Removed projects (leader 01:02, N1 C)"
+    );
+    drop(db);
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A pool that still lists an earlier demo's id, as one does after that demo was removed
+/// from the dashboard, or deleted when taking it out of its pools failed.
+#[cfg(target_os = "macos")]
+const DEMO_POOL_LEFT_OVER: &str = r#"
+[[model_access.pools]]
+id = "pool-old"
+members = ["m-codex"]
+projects = ["crazyagent-demo"]
+roles = ["project_leader"]
+fallback_allowed = false
+"#;
+
+/// The pools the saved settings list a project in. Inputs: the engine root and the project.
+/// Output: the pool ids, in saved order.
+#[cfg(target_os = "macos")]
+fn pools_listing(root: &Path, project: &str) -> Vec<String> {
+    let global: toml::Table =
+        toml::from_str(&fs::read_to_string(root.join("global.toml")).unwrap()).unwrap();
+    global["model_access"]["pools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|pool| {
+            pool.get("projects")
+                .and_then(|listed| listed.as_array())
+                .is_some_and(|listed| listed.iter().any(|one| one.as_str() == Some(project)))
+        })
+        .map(|pool| pool["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// rv-sa241 LOW-1: a demo made again is in exactly the pool its Create picked as soon as it
+/// is made, before any client assigns a pool, never in a pool that still lists the earlier
+/// demo of the same id.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_demo_made_again_is_in_only_the_pool_it_picked() {
+    use crazyagent::demo::PROJECT_ID;
+    use crazyagent::protocol::CredentialRef;
+    let engine = Engine::with_settings(&format!("{DEMO_POOL}{DEMO_POOL_LEFT_OVER}")).await;
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let home = place.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    sign_in(engine.root.path(), "profile-codex");
+    let mut owner = OwnerController::attach(
+        engine.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    assert_eq!(pools_listing(engine.root.path(), PROJECT_ID), ["pool-old"]);
+    let response = owner
+        .set_projects_home(home.to_str().unwrap().into(), 1)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let response = owner
+        .create_demo(CredentialRef::new("pool-codex").unwrap(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(
+        pools_listing(engine.root.path(), PROJECT_ID),
+        ["pool-codex"],
+        "the earlier demo's pool no longer serves the new demo"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// rv-code4 r2 F1: the demo's folder is named so its id is the live demo's id, so adding that
+/// folder is refused `project_exists`, never onboarded as `crazyagent-demo-2` in the same
+/// folder.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_the_demos_own_folder_is_refused() {
+    use crazyagent::protocol::CredentialRef;
+    let engine = Engine::with_settings(DEMO_POOL).await;
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let home = place.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    sign_in(engine.root.path(), "profile-codex");
+    let mut owner = OwnerController::attach(
+        engine.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    let response = owner
+        .set_projects_home(home.to_str().unwrap().into(), 1)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let pool = CredentialRef::new("pool-codex").unwrap();
+    let response = owner.create_demo(pool.clone(), 2).await.unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let folders: Vec<PathBuf> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.is_dir() && !path.file_name().unwrap().to_string_lossy().starts_with('.')
+        })
+        .collect();
+    assert_eq!(folders.len(), 1, "the demo's one folder: {folders:?}");
+    let response = owner
+        .start_onboarding(folders[0].to_str().unwrap().into(), pool, 3)
+        .await
+        .unwrap();
+    assert_eq!(result(response), rejected("project_exists"));
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    let projects: i64 = db
+        .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(projects, 1, "the demo stays the folder's one project");
+    drop(owner);
+    engine.stop().await;
+}

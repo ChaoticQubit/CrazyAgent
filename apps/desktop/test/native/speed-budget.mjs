@@ -205,6 +205,7 @@ export function sampleMetrics(engine, app) {
   metrics.launch_webview_ms = app.launch.webview_ms;
   metrics.reload_home_ms = app.launch.reload_ms;
   metrics.engine_start_ms = engine.engine_start_ms;
+  if (engine.onboard_start_ms !== undefined && engine.onboard_start_ms !== null) metrics.onboard_start_ms = engine.onboard_start_ms;
   for (const [name, ms] of Object.entries(app.big)) metrics[`big_${name}`] = ms;
   for (const [page, ms] of Object.entries(app.switch_cold)) metrics[`switch_cold_${page}_ms`] = ms;
   for (const [page, ms] of Object.entries(app.switch_warm)) metrics[`switch_warm_${page}_ms`] = ms;
