@@ -2233,7 +2233,11 @@ fn hook_command(root: &str, command: &str) -> String {
     )
 }
 
-fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
+/// Writes Claude Code's `--mcp-config` text: each approved server with its secrets as the
+/// variables of a command server or the headers of a URL server. Input: the servers.
+/// Output: the JSON text, or `launch_context_secret_invalid` or
+/// `launch_context_server_name_taken`.
+pub fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
     let mut declared = serde_json::Map::new();
     for server in servers {
         let mut values = serde_json::Map::new();
