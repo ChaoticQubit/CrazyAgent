@@ -37,6 +37,8 @@ const SNIPPET_LEAD_BYTES: usize = 100;
 const MESSAGE_CHARS_MAX: usize = 3000;
 const ROWS_MAX: usize = 20_000;
 const AGENTS_MAX: usize = 1024;
+/// The most account homes of one listed agent whose records the search walks.
+const ACCOUNTS_MAX: usize = 8;
 #[cfg(unix)]
 const DEPTH_MAX: usize = 5;
 const VISITS_MAX: usize = 50_000;
@@ -451,9 +453,10 @@ struct Tree {
 }
 
 /// Lists the record folders of the project's team agents, newest agent first: each Claude
-/// Code or Codex home's own and, for a Claude Code agent, the home its native teammates run
-/// with, each only while the agent's folder and that home are plain folders. Takes the
-/// engine database, the project and the agents folder. Returns the folders.
+/// Code or Codex home's own, for a Claude Code agent the home its native teammates run with
+/// and a listed agent's ([`listed_trees`]), each only while the agent's folder and that home
+/// are plain folders. Takes the engine database, the project and the agents folder. Returns
+/// the folders.
 fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> Vec<Tree> {
     let mut trees = Vec::new();
     for (agent, harness, role) in team_agents(connection, project).unwrap_or_default() {
@@ -463,7 +466,11 @@ fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> 
         let folder = match harness {
             "claude-code" => "projects",
             "codex" => "sessions",
-            _ => continue,
+            _ => {
+                let listed = listed_trees(connection, project, agents, (agent, &role), harness);
+                trees.extend(listed);
+                continue;
+            }
         };
         let own = PathBuf::from(format!("agent-{agent}"));
         let home = own.join("home");
@@ -488,6 +495,59 @@ fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> 
         }
     }
     trees
+}
+
+/// Lists the record folders of one team agent of a listed harness that keeps a jsonl-append
+/// record: in each account's private home, `<home>/<harness id>/<account>` (T18), the
+/// folder its manifest's record path fixes, for at most `ACCOUNTS_MAX` accounts that are
+/// plain folders. Takes the database, project, agents folder, agent with its role and the
+/// harness. Returns the folders, none for any other harness.
+fn listed_trees(
+    connection: &Connection,
+    project: &ProjectId,
+    agents: &Path,
+    (agent, role): (i64, &str),
+    harness: &'static str,
+) -> Vec<Tree> {
+    use crate::harnesses::records::{self, Reader, json_files::Pattern};
+    let Some(found) = crate::harnesses::registry::registry().get(harness) else {
+        return Vec::new();
+    };
+    let own = PathBuf::from(format!("agent-{agent}"));
+    let home = own.join("home");
+    let listed = home.join(harness);
+    let plain = |below: &Path| plain_dir(&agents.join(below));
+    let appended = records::stored(harness) == Some(Reader::JsonlAppend);
+    let folders = [&own, &home, &listed];
+    if !appended || !agents.is_absolute() || !folders.iter().all(|below| plain(below)) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(agents.join(&listed)) else {
+        return Vec::new();
+    };
+    let mut accounts: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| listed.join(entry.file_name()))
+        .filter(|account| plain(account))
+        .collect();
+    accounts.sort();
+    accounts.truncate(ACCOUNTS_MAX);
+    if accounts.is_empty() {
+        return Vec::new();
+    }
+    let label = agent_label(connection, project, agent, role, harness);
+    accounts
+        .into_iter()
+        .filter_map(|account| {
+            let pattern = Pattern::learning(found.manifest(), &agents.join(&account)).ok()?;
+            Some(Tree {
+                place: account.join(pattern.fixed_folder()),
+                prefix: format!("agent-{agent}"),
+                label: label.clone(),
+                harness,
+            })
+        })
+        .collect()
 }
 
 /// Reads one record folder's records within its share of the budgets: at most `visits_max`

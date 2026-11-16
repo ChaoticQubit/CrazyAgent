@@ -323,6 +323,22 @@ impl Pattern {
         entries
     }
 
+    /// The folder below the private home every record this path matches lies in: its
+    /// plain-name parts before the first one with a wildcard, `**` or the record's own name.
+    /// Input: the pattern. Output: the folder below the home, empty when the first part is
+    /// not a plain name.
+    pub fn fixed_folder(&self) -> PathBuf {
+        assert!(!self.parts.is_empty());
+        let folders = &self.parts[..self.parts.len() - 1];
+        folders
+            .iter()
+            .map_while(|part| match part {
+                Part::Name(name) => Some(name.as_str()),
+                Part::Glob(_) | Part::Deep => None,
+            })
+            .collect()
+    }
+
     /// Gives the private home this record path is filled in for, which a pane record keeps
     /// so a later engine fills the path in again. Input: the pattern. Output: the absolute
     /// home.
