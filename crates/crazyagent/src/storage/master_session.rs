@@ -1842,7 +1842,7 @@ fn validate_registration(
     if proof.engine_epoch != session.engine_epoch()
         || (&proof.config_id, proof.source_hash.as_str()) != session.binding()
     {
-        return Err(stale_or_changed(record, &host));
+        return Err(error("master_configured_receipt_stale"));
     }
     check_owner_host(tx, &host)?;
     check_owner_admission(
@@ -1902,26 +1902,27 @@ fn validate_registration(
     Ok(())
 }
 
-/// The refusal of a configured registration made under an older engine run or settings
-/// binding: custody's rcli_profile_identity_changed when the home it pinned changed since,
-/// so turn preparation re-registers it only on that pinned home, as for a current one, and
-/// a write-and-restore stays refused across a rebinding (rv-code4 B22 F2); else
-/// master_configured_receipt_stale. Inputs: the registration and its host. Output: the
-/// refusal.
-fn stale_or_changed(record: &ConfiguredRegistration, host: &HostStamp) -> EngineError {
+/// Whether the home a configured registration made under an older engine run or settings
+/// binding pinned has changed since, read from a fresh custody capture so the actor's own
+/// custody is left as it was: a stale registration is then re-registered only on that
+/// pinned home, as a current one is, and a write-and-restore stays refused across a
+/// rebinding (rv-code4 B22 F2). Input: the registration. Output: true when custody gives
+/// rcli_profile_identity_changed for it.
+fn pinned_home_changed(record: &ConfiguredRegistration) -> bool {
     let proof = &record.proof;
+    let host = HostStamp {
+        db_instance: proof.database_instance.clone(),
+        engine_epoch: proof.engine_epoch.clone(),
+    };
     let loaded = std::fs::symlink_metadata(&record.database_path)
         .map_err(error)
         .and_then(|metadata| NativeProfileCustody::capture(&record.database_path, &metadata))
         .and_then(|mut custody| {
             custody
-                .configured_rcli_profile(host, &proof.connection, &proof.profile_ref)
+                .configured_rcli_profile(&host, &proof.connection, &proof.profile_ref)
                 .map(|_| ())
         });
-    match loaded {
-        Err(failure) if failure.0 == "rcli_profile_identity_changed" => failure,
-        Ok(()) | Err(_) => error("master_configured_receipt_stale"),
-    }
+    matches!(loaded, Err(failure) if failure.0 == "rcli_profile_identity_changed")
 }
 
 /// Proves one RCLI member's configured registration can authorize a turn now.
@@ -4023,10 +4024,16 @@ fn register_generated_rcli_profile(
         let (stale, pinned) = match registration(&tx, session_id, &profile)? {
             None => (None, None),
             Some(record) => match validate_registration(&tx, &session, &record) {
-                Err(failure) if failure.0 == "master_configured_receipt_stale" => {
+                Err(failure)
+                    if failure.0 == "master_configured_receipt_stale"
+                        && !pinned_home_changed(&record) =>
+                {
                     (Some(record), None)
                 }
-                Err(failure) if failure.0 == "rcli_profile_identity_changed" => {
+                Err(failure)
+                    if failure.0 == "rcli_profile_identity_changed"
+                        || failure.0 == "master_configured_receipt_stale" =>
+                {
                     let Some(pinned) = custody.as_ref().ok().and_then(|custody| {
                         custody
                             .configured_rcli_home(host, &record.proof.profile_ref)
