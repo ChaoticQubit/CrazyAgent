@@ -1282,12 +1282,14 @@ fn settled(
 ) -> Result<(ActionOutcome, Option<String>), BridgeError> {
     assert!(!intent.kind.is_empty(), "every kept change names its kind");
     match result {
-        OwnerResult::Applied | OwnerResult::OnboardingStarted { .. } => {
+        OwnerResult::Applied => Ok((ActionOutcome::Applied, None)),
+        OwnerResult::OnboardingStarted { project_id } if intent.kind == "start_onboarding" => {
+            intent.project_id = Some(project_id.as_str().to_owned());
             Ok((ActionOutcome::Applied, None))
         }
-        OwnerResult::DispatchPrepared { .. } | OwnerResult::RcliProfileRegistered { .. } => {
-            Err(failure("unexpected_reply"))
-        }
+        OwnerResult::OnboardingStarted { .. }
+        | OwnerResult::DispatchPrepared { .. }
+        | OwnerResult::RcliProfileRegistered { .. } => Err(failure("unexpected_reply")),
         OwnerResult::Rejected { code } => Ok((ActionOutcome::Rejected, Some(rejection_code(&code)))),
         OwnerResult::VerificationUnavailable { .. } => Ok((ActionOutcome::Unavailable, None)),
     }

@@ -147,6 +147,12 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "home_destination_exists" | "clone_destination_exists" => {
             "Your projects folder already has a folder with this name. Rename one of them first."
         }
+        "onboarding_project_ids_used" => {
+            "Every id this folder's name can get, 99 in all, is taken by your projects or ones you removed. Rename the folder first."
+        }
+        "project_id_removed" => {
+            "A project you removed used this name, so it can't be used again. Choose another project name."
+        }
         "home_copy_special_file" => "The folder holds a device or pipe file that can't be copied.",
         "home_copy_too_large" => "The folder has too many files or levels to copy.",
         "home_override_invalid" => {

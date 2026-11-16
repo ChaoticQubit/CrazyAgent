@@ -215,7 +215,7 @@ export function ApplySwitch({ data }: { data: Pick<ProjectData, "id" | "team" | 
  * null when the project has no saved setup. Output: one plain paragraph. */
 export function removeLine(folder: string | null): string {
   const where = folder ? `at ${folderLabel(folder)}` : "where it is";
-  return `Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk ${where}, with every file in it.`;
+  return `Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk ${where}, with every file in it.`;
 }
 
 /** Takes the ask a route to Remove project carries, once: the choice the Remove dialog opens on,

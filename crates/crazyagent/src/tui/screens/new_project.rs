@@ -1919,6 +1919,12 @@ fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) 
                 .into(),
             Step::Review,
         ),
+        "project_id_removed" => (
+            "Could not create the project.",
+            "A project you removed used this name, so it can't be used again. Choose another project name."
+                .into(),
+            Step::About,
+        ),
         "home_destination_exists" => (
             "Could not create the project.",
             "Your projects folder already has a folder with this name. Choose another project name."

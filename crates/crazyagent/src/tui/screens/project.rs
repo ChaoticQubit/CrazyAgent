@@ -3243,7 +3243,8 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         code if code.starts_with("move_project_")
             || code.starts_with("home_")
-            || code.starts_with("delete_") =>
+            || code.starts_with("delete_")
+            || code == "projects_removed_full" =>
         {
             return crate::projects_home::plain_problem(code).map_or_else(
                 || coded("That didn't work. Try again.", code),

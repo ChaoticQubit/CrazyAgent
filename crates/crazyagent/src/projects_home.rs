@@ -1339,7 +1339,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "This project is already being deleted. Wait for that to finish; nothing else was changed."
         }
         "projects_removed_full" => {
-            "CrazyAgent has recorded 100000 removed projects, the most it keeps. Nothing was removed."
+            "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash."
         }
         "delete_not_recorded" => {
             "Nothing was deleted. CrazyAgent couldn't record the delete before starting it. Try again; if it keeps failing, restart CrazyAgent."

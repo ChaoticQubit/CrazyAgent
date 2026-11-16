@@ -343,14 +343,20 @@ impl NativeOwner {
                 pool,
                 generation,
             } => {
-                let project = started(&path)?;
-                applied(
+                let guessed = started(&path)?;
+                let result = applied(
                     controller
                         .start_onboarding(path, pool, generation)
                         .await
                         .map_err(problem)?,
                 )?;
-                IntakeView::OnboardingStarted(project)
+                match result {
+                    OwnerResult::OnboardingStarted { project_id } => {
+                        IntakeView::OnboardingStarted(project_id)
+                    }
+                    OwnerResult::Applied => IntakeView::OnboardingStarted(guessed),
+                    _ => return Err("unexpected_reply".into()),
+                }
             }
             IntakeQuery::Onboarding { project } => IntakeView::Onboarding(Box::new(
                 controller.onboarding(project).await.map_err(problem)?,
