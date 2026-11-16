@@ -836,6 +836,9 @@ pub enum TeamAction {
         project_id: ProjectId,
         agent: i64,
     },
+    RestartHiddenSeers {
+        project_id: ProjectId,
+    },
     MessageSettings {
         project_id: ProjectId,
         settings: agent_messages::MessageSettings,
@@ -1125,7 +1128,8 @@ impl TeamAction {
             | Self::LiveMaster { .. }
             | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
-            | Self::Resume { .. } => Ok(()),
+            | Self::Resume { .. }
+            | Self::RestartHiddenSeers { .. } => Ok(()),
         }
     }
 
@@ -1175,6 +1179,7 @@ impl TeamAction {
             },
             Self::Rename { project_id, .. }
             | Self::WakeAgent { project_id, .. }
+            | Self::RestartHiddenSeers { project_id }
             | Self::StopAgent { project_id, .. }
             | Self::StopTeammate { project_id, .. }
             | Self::MessageAgent { project_id, .. }
@@ -3014,6 +3019,14 @@ fn perform(
             Ok(()) => Outcome::Applied,
             Err(code) => rejected(code),
         }),
+        TeamAction::RestartHiddenSeers { .. } => {
+            if crate::sandbox::hidden_paths::ask_restart(tx, project.as_str()).map_err(error)? == 0
+            {
+                return Ok(rejected("team_no_hidden_seers"));
+            }
+            note_owner_action(tx, project, OWNER_RESTARTED_HIDDEN_SEERS, now);
+            Ok(Outcome::Applied)
+        }
         TeamAction::AnswerQuestion { message, text, .. } => {
             questions::answer(tx, project, *message, text, now)
         }
@@ -3152,6 +3165,10 @@ pub fn cancel_reason(by: Option<CancelBy>, path: CancelPath) -> &'static str {
 pub const OWNER_STOPPED_TEAM: &str = "You stopped the team";
 /// The activity line of the owner's start of a stopped team again (F17 audit).
 pub const OWNER_RESUMED_TEAM: &str = "You started the team again";
+/// The activity line of the owner's Restart them for the running agents that could still
+/// open a folder hidden after they started (SA-VID14-A).
+const OWNER_RESTARTED_HIDDEN_SEERS: &str =
+    "You restarted the agents that could still open a hidden folder";
 /// The most bytes a queued task's wait reason keeps (F11), as its column's check says.
 pub const WAIT_BYTES_MAX: usize = 300;
 
@@ -3437,6 +3454,8 @@ pub struct TeamAgent {
     pub instructions_changed: bool,
     #[serde(default)]
     pub message_note: Option<String>,
+    #[serde(default)]
+    pub sees_hidden: bool,
 }
 
 /// One teammate a harness split off in its own pane of the harness's terminal, such as a
@@ -3752,6 +3771,7 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         hookless: row.get(18)?,
         instructions_changed: false,
         message_note: None,
+        sees_hidden: false,
     })
 }
 
@@ -5657,9 +5677,11 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             .map_err(error)?
     };
     let changed = crate::instruction_files::badges(connection, project).map_err(error)?;
+    let seers = crate::sandbox::hidden_paths::seers(connection, project.as_str()).map_err(error)?;
     for agent in &mut agents {
         agent.owner_stopped = stopped.contains(&agent.id);
         agent.instructions_changed = changed.contains(&agent.id) && agent.status.live();
+        agent.sees_hidden = seers.contains(&agent.id) && agent.status.live();
         agent.teammates = teammates(connection, project, agent.id)?;
     }
     let (live_master, live_problem) = master::switch(connection, project)?;

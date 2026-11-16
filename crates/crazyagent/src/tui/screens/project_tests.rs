@@ -1425,6 +1425,7 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
             hookless: false,
             message_note: None,
             started_ms: None,
+            sees_hidden: false,
         }],
         edges: Vec::new(),
         messages: Vec::new(),
@@ -3480,6 +3481,7 @@ fn console_screen() -> ProjectScreen {
         hookless: false,
         message_note: None,
         started_ms: None,
+        sees_hidden: false,
     };
     screen.team = crate::tui::ctx::Load::Ready(Box::new(TeamGraph {
         project_id: project.clone(),
@@ -5260,4 +5262,101 @@ fn a_folder_cut_to_its_tail_fits_its_cells() {
     assert!(cells <= 9, "{tail:?} takes {cells} cells");
     assert!(tail.ends_with("メモ"), "{tail:?}");
     assert!(tail.starts_with('\u{2026}'), "{tail:?}");
+}
+
+/// SA-VID14-A: on the Settings tab the running agents that can still open a folder hidden
+/// after they started are named under the hidden folders, with h to restart them, which
+/// sends Restart them for the project; with none listed h sends nothing. The editor says the
+/// list covers team agents and not research, overview, roadmap or onboarding runs (r1).
+#[test]
+fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them() {
+    use crate::team::{GraphNode, NodeKind, TeamAction, TeamGraph};
+    let look = Look::plain();
+    let project = ProjectId::new("hidden").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.jobs = Some(Vec::new());
+    screen.hidden_paths = Some(crate::project_setup::HiddenPaths {
+        paths: vec!["/Users/owner/secret".into()],
+        version: 0,
+    });
+    let node = |id: &str, kind, label: &str, sees_hidden: bool| GraphNode {
+        id: id.into(),
+        kind,
+        parent: None,
+        label: label.into(),
+        harness: "codex".into(),
+        status: None,
+        status_label: None,
+        account: None,
+        branch: None,
+        terminal: None,
+        questions: None,
+        agent: None,
+        pane: None,
+        presence: None,
+        waiting: None,
+        waits_for: None,
+        owner_questions: 0,
+        no_worktree: false,
+        hookless: false,
+        message_note: None,
+        started_ms: None,
+        sees_hidden,
+    };
+    let graph = |nodes: Vec<GraphNode>| {
+        crate::tui::ctx::Load::Ready(Box::new(TeamGraph {
+            project_id: project.clone(),
+            nodes,
+            edges: vec![],
+            messages: Vec::new(),
+            overlaps: Vec::new(),
+            relations: Vec::new(),
+            master_live_terminal: true,
+        }))
+    };
+    screen.team = graph(vec![
+        node("master", NodeKind::Master, "Master", false),
+        node("team-1", NodeKind::Lead, "Ada", false),
+    ]);
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(!shown.contains("can still open"), "{shown}");
+    assert!(!matches!(
+        screen.key(key(KeyCode::Char('h'))),
+        ProjectReply::TeamChange(_)
+    ));
+
+    screen.team = graph(vec![
+        node("master", NodeKind::Master, "Master", true),
+        node("team-1", NodeKind::Lead, "Ada", true),
+        node("team-2", NodeKind::Lead, "Cy", false),
+    ]);
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Hidden    /Users/owner/secret   k Edit hidden folders"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("          Master, Ada can still open a hidden folder   h Restart them"),
+        "{shown}"
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('h'))),
+        ProjectReply::TeamChange(Box::new(TeamAction::RestartHiddenSeers {
+            project_id: project.clone(),
+        }))
+    );
+
+    screen.key(key(KeyCode::Char('k')));
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    for line in [
+        "Team agents that started before you hid a folder,",
+        "research, overview, roadmap or onboarding run that",
+        "started before keeps its access until it ends.",
+    ] {
+        assert!(
+            shown.contains(line),
+            "the editor says what the list covers: {shown}"
+        );
+    }
 }

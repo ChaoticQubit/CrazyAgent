@@ -86,6 +86,7 @@ fn agent(
         hookless: false,
         instructions_changed: false,
         message_note: None,
+        sees_hidden: false,
     }
 }
 

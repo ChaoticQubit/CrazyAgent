@@ -36,6 +36,9 @@ mod live_terminal_probe_tests;
 #[path = "freeze_tests.rs"]
 mod freeze_tests;
 
+#[path = "hidden_seers_tests.rs"]
+mod hidden_seers_tests;
+
 #[cfg(target_os = "macos")]
 #[path = "stop_race_tests.rs"]
 mod stop_race_tests;
@@ -15539,6 +15542,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
+        hidden: Vec::new(),
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),
@@ -17544,6 +17548,7 @@ fn between_turns(
         reasked: None,
         starts: crate::coord::relay::TaskStarts::default(),
         after_done: AfterDone::default(),
+        hidden: None,
     }
 }
 
@@ -23330,6 +23335,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
+        hidden: Vec::new(),
     }
 }
 
@@ -25098,6 +25104,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
+        hidden: Vec::new(),
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),

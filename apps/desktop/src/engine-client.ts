@@ -779,6 +779,7 @@ export interface TeamAgent {
   pane?: string | null;
   hookless?: boolean;
   message_note?: string | null;
+  sees_hidden?: boolean;
 }
 
 /** One teammate a harness split off in its own pane of the harness's terminal: its pane id,
@@ -1300,6 +1301,13 @@ export function teamRename(id: string, agent: number, handle: string, generation
  * commit receipt; an agent that cannot wake is rejected with a plain code. */
 export function teamWakeAgent(id: string, agent: number, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
+}
+
+/** Restarts the project's running agents that can still open a folder hidden after they
+ * started, as one team action. Inputs: project id and a generation. Output: the commit receipt;
+ * with no such agent it is rejected as `team_no_hidden_seers`. */
+export function teamRestartHiddenSeers(id: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_restart_hidden_seers", { id, generation });
 }
 
 /** Changes a project's name, description, stack, platforms, research, pool and team.

@@ -45,13 +45,15 @@ pub(crate) const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teamm
 pub(crate) const MASTER_STOPPED_AGENT: &str = "The master stopped it and its teammates. Its unfinished tasks failed. The master or the owner can wake it.";
 pub(crate) const LEAD_STOPPED_AGENT: &str = "Its lead stopped it and its teammates. Its unfinished tasks failed. Its lead, the master or the owner can wake it.";
 pub(crate) const INSTRUCTIONS_RESTARTED: &str = "It restarted in its own worktree and conversation to load the owner's changed instructions. It is idle and takes the next task for its harness.";
-const OWNER_NOTICES: [&str; 6] = [
+pub(crate) const HIDDEN_RESTARTED: &str = "The owner restarted it in its own worktree and conversation so it can no longer open a folder hidden after it started. It is idle and takes the next task for its harness.";
+const OWNER_NOTICES: [&str; 7] = [
     OWNER_RESTARTED,
     OWNER_WOKE,
     OWNER_STOPPED_AGENT,
     MASTER_STOPPED_AGENT,
     LEAD_STOPPED_AGENT,
     INSTRUCTIONS_RESTARTED,
+    HIDDEN_RESTARTED,
 ];
 const SCREEN_ROWS_SCANNED: usize = 40;
 const QUESTION_ROWS_ABOVE: usize = 12;
@@ -78,6 +80,7 @@ const _: () = assert!(OWNER_STOPPED_AGENT.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(MASTER_STOPPED_AGENT.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(LEAD_STOPPED_AGENT.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(INSTRUCTIONS_RESTARTED.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(HIDDEN_RESTARTED.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(COLD_WAKES_PER_HOUR_MAX <= HOURLY_CAP_DEFAULT);
 const _: () = assert!(EVENT_TEXT_BYTES_MAX + 256 < WAKE_BYTES_MAX);
 const _: () = assert!(HOURLY_CAP_DEFAULT <= HOURLY_CAP_MAX);
@@ -1383,8 +1386,9 @@ pub fn forward_to_parents(
 }
 
 /// Tells whether an event is the engine's own notice that the owner woke, restarted or
-/// stopped the agent, or restarted it for the owner's changed instructions (run 5 task 73:
-/// a lead woken for one spent a turn on nothing). Takes the event. Returns the answer.
+/// stopped the agent, or restarted it for the owner's changed instructions or hidden
+/// folders (run 5 task 73: a lead woken for one spent a turn on nothing). Takes the event.
+/// Returns the answer.
 fn owner_notice(event: &TeamEvent) -> bool {
     event.kind == EventKind::Progress && OWNER_NOTICES.contains(&event.text.as_str())
 }

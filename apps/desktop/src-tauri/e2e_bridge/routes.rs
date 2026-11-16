@@ -1450,6 +1450,20 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_wake_agent(&id, agent, generation) .await }.await;
             routed(result)
         }
+        "desktop_team_restart_hidden_seers" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                generation: u64,
+            }
+            let Args { id, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_restart_hidden_seers(&id, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_seen" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

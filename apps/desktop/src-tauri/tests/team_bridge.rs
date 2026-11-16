@@ -29,6 +29,7 @@ const COMMANDS: [&str; 14] = [
     "desktop_team_hand_off",
     "desktop_team_rename",
     "desktop_team_wake_agent",
+    "desktop_team_restart_hidden_seers",
 ];
 
 #[test]
