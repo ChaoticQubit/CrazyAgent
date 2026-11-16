@@ -475,6 +475,17 @@ struct Signals {
     go: std::sync::mpsc::Receiver<bool>,
 }
 
+/// Sets a listed master turn's stop flag when the turn's async side ends, also when its
+/// future is dropped at engine shutdown, so the thread that owns the harness stops it
+/// within its stop grace instead of running on to the harness's run clock.
+struct StopOnDrop(Arc<AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Opens one listed master turn's process: takes the private home's lock, writes the
 /// turn's files there under it, reads the program's digest and starts the harness holding
 /// the relay. Inputs: the harness, the request, the hand-over, the relay and the instruction
@@ -715,6 +726,7 @@ impl OwnerRuntimeHandle {
         (runtime_ref, capture_ref): (RequestId, RequestId),
     ) -> Result<MasterRuntimeObservation, EngineError> {
         let stop = Arc::new(AtomicBool::new(false));
+        let _stopping = StopOnDrop(Arc::clone(&stop));
         let (started, opened) = tokio::sync::oneshot::channel();
         let (go, going) = std::sync::mpsc::channel();
         let signals = Signals {
