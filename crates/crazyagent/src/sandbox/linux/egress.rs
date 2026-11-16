@@ -64,10 +64,6 @@ const LOOPBACK_NETWORK: &str = "127.0.0.0/8";
 /// The link-local addresses, where a cloud VM answers its metadata service: no route port
 /// reaches them, even 80 or 443 on any host (rv-sa241 NOTE-1).
 const LINK_LOCAL_NETWORK: &str = "169.254.0.0/16";
-/// Alibaba Cloud ECS's metadata service, the one a major cloud serves outside the
-/// link-local range: no route port reaches it either (rv-sa241 SBX-2-R2 NOTE-A). Only this
-/// address, so the rest of the shared range, such as Tailscale's 100.100.100.100, stays.
-const ECS_METADATA: &str = "100.100.100.200/32";
 const TAP: &str = "tap0";
 const CHILD_PID_KEY: &[u8] = b"\"child-pid\":";
 const INFO_BYTES_MAX: usize = 4096;
@@ -672,9 +668,9 @@ fn stop(parent: u32, child: u32) {
 /// The IPv4 rules inside the agent's network, as `iptables-restore` reads them and in the
 /// form `iptables-save` prints them: loopback for the bridged ports, TCP 53 to slirp's
 /// resolver alone, then nothing to slirp's network ([`SLIRP_NETWORK`]), a loopback address
-/// off `lo` ([`LOOPBACK_NETWORK`]), a link-local one ([`LINK_LOCAL_NETWORK`]) or Alibaba's
-/// metadata ([`ECS_METADATA`]), then out through `tap0` to each port. Input: the ports on
-/// any host. Output: the rules.
+/// off `lo` ([`LOOPBACK_NETWORK`]), a link-local one ([`LINK_LOCAL_NETWORK`]) or a cloud's
+/// metadata service outside it ([`crate::sandbox::CLOUD_METADATA`], each IPv4 one, in order),
+/// then out through `tap0` to each port. Input: the ports on any host. Output: the rules.
 fn egress_rules(any: &[u16]) -> String {
     assert!(!any.is_empty() && any.len() <= REMOTES_MAX);
     assert!(!any.contains(&0));
@@ -686,9 +682,16 @@ fn egress_rules(any: &[u16]) -> String {
     let _ = writeln!(rules, "-A OUTPUT -d {SLIRP_NETWORK} -j DROP");
     let _ = writeln!(rules, "-A OUTPUT -d {LOOPBACK_NETWORK} -j DROP");
     let _ = writeln!(rules, "-A OUTPUT -d {LINK_LOCAL_NETWORK} -j DROP");
-    let _ = writeln!(rules, "-A OUTPUT -d {ECS_METADATA} -j DROP");
+    let mut metadata = 0;
+    for address in crate::sandbox::CLOUD_METADATA {
+        if let std::net::IpAddr::V4(address) = address {
+            let _ = writeln!(rules, "-A OUTPUT -d {address}/32 -j DROP");
+            metadata += 1;
+        }
+    }
+    assert!(metadata > 0);
     assert_eq!(rules.matches(" -j ACCEPT\n").count(), 2);
-    assert_eq!(rules.matches(" -j DROP\n").count(), 4);
+    assert_eq!(rules.matches(" -j DROP\n").count(), 3 + metadata);
     assert_eq!(rules.matches(SANDBOX_RESOLVER).count(), 1);
     for port in any {
         let _ = writeln!(
@@ -906,6 +909,7 @@ mod tests {
         "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
         "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
         "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
+        "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
         "COMMIT\n",
     );
@@ -931,6 +935,7 @@ mod tests {
         "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
         "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
         "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
+        "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
         "COMMIT\n",
         "# Completed on Sun Nov 15 23:10:00 2026\n",
@@ -983,6 +988,7 @@ mod tests {
         let belt = "-A OUTPUT -d 127.0.0.0/8 -j DROP";
         let link = "-A OUTPUT -d 169.254.0.0/16 -j DROP";
         let metadata = "-A OUTPUT -d 100.100.100.200/32 -j DROP";
+        let wire = "-A OUTPUT -d 168.63.129.16/32 -j DROP";
         for ports in [&[443][..], &[53, 443], &[1, 8443, 65535]] {
             let rules = egress_rules(ports);
             let lines: Vec<&str> = rules.lines().collect();
@@ -999,10 +1005,11 @@ mod tests {
             assert_eq!(lines.get(fenced + 1), Some(&belt), "{rules}");
             assert_eq!(lines.get(fenced + 2), Some(&link), "{rules}");
             assert_eq!(lines.get(fenced + 3), Some(&metadata), "{rules}");
+            assert_eq!(lines.get(fenced + 4), Some(&wire), "{rules}");
             for port in ports {
                 let line = format!("-A OUTPUT -o tap0 -p tcp -m tcp --dport {port} -j ACCEPT");
                 let at = lines.iter().position(|kept| *kept == line);
-                assert!(at.is_some_and(|at| at > fenced + 3), "{port}: {rules}");
+                assert!(at.is_some_and(|at| at > fenced + 4), "{port}: {rules}");
             }
             assert!(
                 !rules.contains("10.0.2.2"),
@@ -1025,6 +1032,7 @@ mod tests {
             "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
             "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
             "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
+            "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
             "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
             "COMMIT\n",
         );
@@ -1034,7 +1042,8 @@ mod tests {
         let added = SAVED.replace("COMMIT\n", "-A OUTPUT -o tap0 -p udp -j ACCEPT\nCOMMIT\n");
         let dropped = SAVED.replace("-A OUTPUT -d 10.0.2.0/24 -j DROP\n", "");
         let reached = SAVED.replace("-A OUTPUT -d 100.100.100.200/32 -j DROP\n", "");
-        for changed in [widened, added, dropped, reached] {
+        let wired = SAVED.replace("-A OUTPUT -d 168.63.129.16/32 -j DROP\n", "");
+        for changed in [widened, added, dropped, reached, wired] {
             assert_ne!(canonical_rules(&changed), canonical, "{changed}");
         }
         assert_eq!(
