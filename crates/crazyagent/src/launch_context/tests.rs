@@ -5276,3 +5276,63 @@ fn a_context_file_written_under_a_narrow_umask_is_private() {
         "ok 600 {}"
     );
 }
+
+const REAL_CODEX_HOME: &str = "CRAZYAGENT_TEST_REAL_CODEX_HOME";
+
+/// Writes a Codex launch's `config.toml`, MCP secrets included, into the 0700 home named by
+/// `REAL_CODEX_HOME` and keeps it, so a job can run the installed Codex on it (SECRET-CLAUDE-
+/// CONFIG). Input: the home; without the variable the row does nothing.
+#[test]
+#[ignore]
+fn a_codex_launch_config_kept_for_a_real_codex() {
+    let Some(home) = std::env::var_os(REAL_CODEX_HOME) else {
+        return;
+    };
+    let secret = |name: &str, value: &str| LaunchSecret {
+        name: name.into(),
+        value: crate::plugins::SecretValue::new(value.as_bytes().to_vec()),
+    };
+    let context = AgentContext {
+        plugins: LaunchPlugins {
+            skills: Vec::new(),
+            servers: vec![
+                LaunchServer {
+                    name: "tools".into(),
+                    spec: ServerSpec::Stdio {
+                        command: "/usr/bin/true".into(),
+                        args: vec!["--stdio".into()],
+                    },
+                    secrets: vec![
+                        secret("API_TOKEN", r#"say "hi" \ bye"#),
+                        secret("OTHER", "plain"),
+                    ],
+                },
+                LaunchServer {
+                    name: "remote.docs".into(),
+                    spec: ServerSpec::Http {
+                        url: "https://mcp.example.invalid/mcp".into(),
+                    },
+                    secrets: vec![secret("Authorization", r"Bearer a\b")],
+                },
+            ],
+            context_mode_off: None,
+            left_out: Vec::new(),
+        },
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        native_threads: None,
+        relay: None,
+        model_proxy: None,
+        freeze_record: None,
+        terminal_display: TerminalDisplay::Classic,
+        catch_up_main: true,
+    };
+    context
+        .install("codex", Path::new(&home), true)
+        .unwrap()
+        .keep();
+    assert!(Path::new(&home).join("config.toml").is_file());
+}
