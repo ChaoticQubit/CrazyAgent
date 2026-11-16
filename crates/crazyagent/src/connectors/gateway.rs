@@ -753,6 +753,7 @@ impl Gateway {
         if locked(&self.parked).is_empty() {
             return 0;
         }
+        let began = Instant::now();
         let _ = approvals::expire(db, now_ms);
         let Ok(found) = launches(db) else {
             return 0;
@@ -790,7 +791,8 @@ impl Gateway {
                 mut row,
             } = entry;
             let mailbox = Mailbox::open_for_engine(&mailbox_path(&self.root, &launch.id)).ok();
-            let late = now_ms - row.started_ms >= ALLOW_ROOM_MS;
+            let spent = i64::try_from(began.elapsed().as_millis()).unwrap_or(i64::MAX);
+            let late = now_ms.saturating_add(spent) - row.started_ms >= ALLOW_ROOM_MS;
             let expired = Err("connector_write_expired");
             let (result, reply) = match (waiter, state) {
                 (Waiter::Waits, Some(State::Allowed)) if late => (expired, true),

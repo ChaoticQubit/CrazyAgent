@@ -43,6 +43,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connector_approvals (
     tool TEXT NOT NULL,
     preview TEXT NOT NULL,
     arguments TEXT NOT NULL,
+    hidden INTEGER NOT NULL CHECK (hidden IN (0, 1)),
     state TEXT NOT NULL CHECK (state IN ('waiting', 'allowed', 'denied', 'expired')),
     created_ms INTEGER NOT NULL,
     expires_ms INTEGER NOT NULL,
@@ -108,7 +109,8 @@ pub struct PendingWrite {
     pub hidden: bool,
 }
 
-/// One approval as the owner's approval page shows it: what asks, where, the preview,
+/// One approval as the owner's approval page shows it: what asks, where, the preview, the
+/// full arguments with hidden characters escaped and `hidden` marking that it holds some,
 /// where it stands, and its times in milliseconds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -191,17 +193,51 @@ fn plain(text: &str, secrets: &[SecretString]) -> String {
     clean
 }
 
-/// One argument value whole, every name and text as [`plain`] shows it.
+/// One name or text as the full arguments show it: each hidden or control character other
+/// than a line break or tab written as a visible `\u{XXXX}` escape, never left out, or
+/// `[withheld]` when it holds a secret form as sent, as escaped or as [`plain`] cleans it.
+fn whole(text: &str, secrets: &[SecretString]) -> String {
+    let mut shown = String::with_capacity(text.len());
+    for found in text.chars() {
+        if crate::memory::hidden_char(found) {
+            shown.push_str(&format!("\\u{{{:04X}}}", u32::from(found)));
+        } else {
+            shown.push(found);
+        }
+    }
+    if leaks(&shown, secrets) || plain(text, secrets) == WITHHELD {
+        return WITHHELD.to_owned();
+    }
+    assert!(!holds(&shown), "an escaped text holds no hidden character");
+    shown
+}
+
+/// Whether one name or text holds a character that [`whole`] escapes.
+fn holds(text: &str) -> bool {
+    text.chars().any(crate::memory::hidden_char)
+}
+
+/// Whether any name or text in one argument value holds a character that [`whole`] escapes.
+fn hides(value: &Value) -> bool {
+    match value {
+        Value::String(text) => holds(text),
+        Value::Array(items) => items.iter().any(hides),
+        Value::Object(fields) => fields.iter().any(|(key, item)| holds(key) || hides(item)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+/// One argument value whole, every name and text as [`whole`] shows it.
 fn scrubbed(value: &Value, secrets: &[SecretString]) -> Value {
     match value {
-        Value::String(text) => Value::String(plain(text, secrets)),
+        Value::String(text) => Value::String(whole(text, secrets)),
         Value::Array(items) => {
             Value::Array(items.iter().map(|item| scrubbed(item, secrets)).collect())
         }
         Value::Object(fields) => Value::Object(
             fields
                 .iter()
-                .map(|(key, item)| (plain(key, secrets), scrubbed(item, secrets)))
+                .map(|(key, item)| (whole(key, secrets), scrubbed(item, secrets)))
                 .collect(),
         ),
         Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
@@ -260,9 +296,10 @@ pub fn preview(tool: &str, arguments: &Map<String, Value>, secrets: &[SecretStri
     cut(shown, PREVIEW_BYTES_MAX)
 }
 
-/// Every argument of one write call as JSON text, each name and text value shown as a
-/// preview shows it, so the owner reads what the vendor would get. Inputs: the arguments
-/// and the connector's secret forms. Output: the text, or none past `ARGUMENTS_BYTES_MAX`.
+/// Every argument of one write call as JSON text, each name and text value shown whole with
+/// its hidden characters escaped, so the owner reads every character the vendor would get.
+/// Inputs: the arguments and the connector's secret forms. Output: the text, or none past
+/// `ARGUMENTS_BYTES_MAX`.
 pub fn arguments(arguments: &Map<String, Value>, secrets: &[SecretString]) -> Option<String> {
     let shown = scrubbed(&Value::Object(arguments.clone()), secrets);
     let text = serde_json::to_string(&shown).ok()?;
@@ -275,8 +312,10 @@ pub fn arguments(arguments: &Map<String, Value>, secrets: &[SecretString]) -> Op
 /// Whether any name or text of one write call's arguments holds a hidden or control
 /// character, which the full arguments show escaped. Input: the arguments. Output: whether
 /// the owner's view is marked.
-pub fn hidden(_arguments: &Map<String, Value>) -> bool {
-    false
+pub fn hidden(arguments: &Map<String, Value>) -> bool {
+    arguments
+        .iter()
+        .any(|(key, value)| holds(key) || hides(value))
 }
 
 /// Records one write that waits for the owner, unless `WAITING_PER_LAUNCH_MAX` of its launch
@@ -297,9 +336,9 @@ pub fn ask(
     let added = db
         .execute(
             "INSERT INTO connector_approvals
-                 (launch, project, agent, connector, title, tool, preview, arguments, state,
-                  created_ms, expires_ms)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?12, 'waiting', ?8, ?9
+                 (launch, project, agent, connector, title, tool, preview, arguments, hidden,
+                  state, created_ms, expires_ms)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?12, ?13, 'waiting', ?8, ?9
              WHERE (SELECT COUNT(*) FROM connector_approvals
                     WHERE state='waiting' AND launch=?1) < ?10
                AND (SELECT COUNT(*) FROM connector_approvals WHERE state='waiting') < ?11",
@@ -316,6 +355,7 @@ pub fn ask(
                 WAITING_PER_LAUNCH_MAX as i64,
                 WAITING_MAX as i64,
                 write.arguments,
+                write.hidden,
             ],
         )
         .map_err(sqlite)?;
@@ -424,7 +464,7 @@ pub fn get(db: &Connection, id: i64) -> Result<Option<ApprovalView>, EngineError
     db.query_row(
         "SELECT a.id, a.project, json_extract(p.body, '$.spec.name'), a.agent, a.connector,
                 a.title, a.tool, a.preview, a.state, a.created_ms, a.expires_ms, a.answered_ms,
-                a.arguments
+                a.arguments, a.hidden
          FROM connector_approvals a LEFT JOIN projects p ON p.id = a.project
          WHERE a.id=?1",
         [id],
@@ -441,7 +481,7 @@ pub fn get(db: &Connection, id: i64) -> Result<Option<ApprovalView>, EngineError
                 tool: row.get(6)?,
                 preview: row.get(7)?,
                 arguments: row.get(12)?,
-                hidden: false,
+                hidden: row.get(13)?,
                 state: State::parse(&state).ok_or(rusqlite::Error::InvalidQuery)?,
                 created_ms: row.get(9)?,
                 expires_ms: row.get(10)?,
