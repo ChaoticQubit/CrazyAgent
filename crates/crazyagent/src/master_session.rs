@@ -202,6 +202,7 @@ pub enum MasterReason {
     ProtocolFault,
     FrameLimit,
     WorktreeUncertain,
+    SandboxStopped,
     Cancelled,
     Unknown,
 }

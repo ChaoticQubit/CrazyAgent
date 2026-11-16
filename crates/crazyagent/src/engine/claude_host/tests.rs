@@ -2077,6 +2077,38 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
     );
 }
 
+/// A stand-in Claude Code that takes its turn, writes half a line and exits with the Linux
+/// call supervisor's held-stop code, as a harness ends when its supervisor stops.
+#[cfg(target_os = "linux")]
+const HELD_STOP_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s' '{"type":"assistant"'
+exit 122
+"#;
+
+/// DEC-185 S2a (rv-sec3 F1): a Claude master whose harness ends with the held-stop code
+/// ends its turn with the sandbox cause, not a protocol fault for the half line nor the
+/// native exit code, so the owner reads that the sandbox stopped it.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_claude_master_the_sandbox_stopped_for_a_held_name_says_so() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master(&mut fixture, HELD_STOP_HARNESS).await;
+    claude
+        .start_turn(RequestId::new("claude-held-turn").unwrap(), "Reply")
+        .await
+        .unwrap();
+    let failed = loop {
+        match claude.next_event().await {
+            Ok(_) => continue,
+            Err(error) => break error.0,
+        }
+    };
+    assert_eq!(failed, crate::sandbox::HELD_STOP_CAUSE);
+}
+
 const EARLY_ASSISTANT_HARNESS: &str = r#"#!/bin/sh
 IFS= read -r turn
 printf '%s\n' '{"type":"assistant","uuid":"early-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"sk-ant-oat01-notarealtoken"}]}}'

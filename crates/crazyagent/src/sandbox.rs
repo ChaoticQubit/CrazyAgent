@@ -135,6 +135,11 @@ pub fn held_stop(os: &str, code: i32) -> Option<&'static str> {
     (os == "linux" && code == HELD_NOT_PUT_BACK_EXIT).then_some(HELD_NOT_PUT_BACK)
 }
 
+/// The cause every master host gives a turn whose harness the Linux call supervisor stopped
+/// because it could not take back an entry read as a held name ([`held_stop`]); the engine
+/// names it `MasterReason::SandboxStopped`.
+pub const HELD_STOP_CAUSE: &str = "sandbox_held_not_put_back";
+
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 /// The most folder links one sandbox makes readable by name beside its roots: the links

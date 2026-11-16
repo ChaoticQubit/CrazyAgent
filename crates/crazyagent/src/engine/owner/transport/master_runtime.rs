@@ -2094,6 +2094,15 @@ mod tests {
         }
     }
 
+    /// DEC-185 S2a (rv-sec3 F1): a master turn whose harness the Linux call supervisor
+    /// stopped, because it could not take back an entry read as a held name, names the
+    /// sandbox as its reason, never the runtime or Unknown.
+    #[test]
+    fn a_held_name_the_sandbox_could_not_put_back_names_the_sandbox() {
+        let cause = EngineError(crate::sandbox::HELD_STOP_CAUSE.into());
+        assert_eq!(reason_for_error(&cause), MasterReason::SandboxStopped);
+    }
+
     #[test]
     fn a_harness_with_no_sign_in_fails_the_turn_without_a_provider_rejection() {
         let read = |account| AuthControl::AccountRead {

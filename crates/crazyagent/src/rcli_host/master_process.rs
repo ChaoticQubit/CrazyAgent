@@ -658,4 +658,34 @@ read -r _
         assert!(process.stdout_bytes <= STDOUT_BYTES_MAX + 4096);
         process.cleanup().unwrap();
     }
+
+    /// DEC-185 S2a (rv-sec3 F1): an rcli master host that exits with the Linux call
+    /// supervisor's held-stop code ends with the sandbox cause, whether it left half a frame
+    /// or nothing, never the truncated event nor the plain exit code.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_rcli_master_the_sandbox_stopped_ends_with_the_sandbox_cause() {
+        for host in [r"printf '\000\000\000\020ab'; exit 122", "exit 122"] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", host])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+            let mut process =
+                HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let failure = loop {
+                assert!(Instant::now() < deadline, "{host}");
+                match process.frame() {
+                    Ok(Some(_)) => panic!("{host} wrote no whole frame"),
+                    Ok(None) => thread::sleep(Duration::from_millis(1)),
+                    Err(failure) => break failure,
+                }
+            };
+            assert_eq!(failure.0, crate::sandbox::HELD_STOP_CAUSE, "{host}");
+            process.cleanup().unwrap();
+        }
+    }
 }

@@ -251,6 +251,14 @@ fn real_exit_categories_never_qualify_a_provider_reply_or_authentication() {
     assert_eq!(reason("unrecognized_failure"), MasterReason::Unknown);
 }
 
+/// DEC-185 S2a (rv-sec3 F1): an rcli master stopped by the Linux call supervisor, because
+/// it could not take back an entry read as a held name, names the sandbox, not the runtime.
+#[test]
+fn an_rcli_master_the_sandbox_stopped_names_the_sandbox() {
+    let named = reason(crate::sandbox::HELD_STOP_CAUSE);
+    assert_eq!(named, MasterReason::SandboxStopped);
+}
+
 #[test]
 fn retirement_uncertainty_takes_precedence_over_budget_and_scope_reasons() {
     for code in [
