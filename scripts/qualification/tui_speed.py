@@ -48,6 +48,7 @@ STEPS = (
     ("tab_conversation", SHIFT_RIGHT, (PROJECT, "Conversation")),
     ("tab_agents", SHIFT_RIGHT, (PROJECT, "Agents")),
 )
+ALSO = {"tab_conversation": (PROJECT, "Master")}
 
 
 def crumb(screen):
@@ -77,6 +78,16 @@ def usable(screen, path, project):
     assert project.strip(), "a project name"
     listed = tuple(path) != ("Home",) or project in screen
     return at(screen, path) and listed and not SPINNER.search(screen)
+
+
+def step_paths(name, crumbs, project):
+    """The header paths a step may land on, with the project filled in: its own crumbs, and
+    for a step a newer TUI draws as another view, that view's crumbs too. Takes the step's
+    name, its crumbs and the project. Returns a list of crumb tuples, its own first."""
+    views = [crumbs] + ([ALSO[name]] if name in ALSO else [])
+    paths = [tuple(project if part == PROJECT else part for part in view) for view in views]
+    assert paths and all(paths) and len(set(paths)) == len(paths), paths
+    return paths
 
 
 def metrics(times):
@@ -118,17 +129,17 @@ class Terminal:
         output.extend(part)
         assert len(output) <= OUTPUT_MAX, "the TUI wrote over %d bytes" % OUTPUT_MAX
 
-    def until(self, name, path, project, began):
+    def until(self, name, paths, project, began):
         deadline = began + STEP_SECONDS
         while True:
             self.pump(LOOK_SECONDS)
             screen = self.screen()
-            if usable(screen, path, project):
+            if any(usable(screen, path, project) for path in paths):
                 return (time.monotonic() - began) * 1000.0
             assert self.child.poll() is None, \
                 "%s: the TUI exited with %r:\n%s" % (name, self.child.poll(), screen)
             assert time.monotonic() < deadline, \
-                "%s: %r not usable within %d s:\n%s" % (name, path, STEP_SECONDS, screen)
+                "%s: %r not usable within %d s:\n%s" % (name, paths, STEP_SECONDS, screen)
 
     def settle(self):
         deadline = time.monotonic() + SETTLE_SECONDS
@@ -152,13 +163,14 @@ def walk(term, project):
     and the project. Returns `{step: ms}`."""
     times = {}
     for name, key, crumbs in STEPS:
-        path = tuple(project if part == PROJECT else part for part in crumbs)
+        paths = step_paths(name, crumbs, project)
         began = term.began
         if key is not None:
-            assert not at(term.screen(), path), "%s: already at %r before the key" % (name, path)
+            assert not any(at(term.screen(), path) for path in paths), \
+                "%s: already at %r before the key" % (name, paths)
             began = time.monotonic()
             os.write(term.master, key)
-        times[name] = term.until(name, path, project, began)
+        times[name] = term.until(name, paths, project, began)
         term.settle()
     assert len(times) == len(STEPS)
     return times
