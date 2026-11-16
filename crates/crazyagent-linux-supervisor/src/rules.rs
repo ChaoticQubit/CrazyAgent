@@ -945,8 +945,7 @@ mod tests {
             _ => Ok(Some((1, 1))),
         };
         assert!(HeldNodes::taken(&held(), failing).is_err());
-        let no_folder =
-            |path: &Path| Ok(Some((1, 1)).filter(|_| path != Path::new("/p/worktrees/a")));
+        let no_folder = |path: &Path| Ok((path != Path::new("/p/worktrees/a")).then_some((1, 1)));
         assert!(
             HeldNodes::taken(&held(), no_folder).is_err(),
             "a held path's folder must be there"
