@@ -156,6 +156,14 @@ impl Harness {
                 .any(|listed| listed == super::accounts::CHATGPT_SIGN_IN_FORMAT)
     }
 
+    /// Whether it runs on a sign-in through that sign-in's own credential copy: the sign-in
+    /// was made with this harness and the harness lists subscription accounts. A harness a
+    /// ChatGPT sign-in reaches through the ChatGPT relay never gets the copy.
+    /// Input: the stored connection. Output: the answer.
+    pub fn signs_in_natively(&self, connection: &crate::config::ModelConnection) -> bool {
+        self.account_fits(connection)
+    }
+
     /// Whether it can run on one account (DEC-141 PA-4), the one rule every master, team
     /// agent and research job uses: a sign-in fits the harness it was made with, when that
     /// harness lists subscription accounts, and a ChatGPT sign-in also fits a harness that

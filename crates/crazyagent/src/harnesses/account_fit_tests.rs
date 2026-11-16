@@ -397,3 +397,46 @@ fn a_chatgpt_sign_in_fits_a_listed_harness_that_lists_openai_responses_and_no_ot
         assert_eq!(harness.account_fits(&chatgpt), expected, "{}", harness.id());
     }
 }
+
+/// T22 (tokens never reach agents): only the harness a sign-in was made with runs on that
+/// sign-in's own credential copy. A listed harness a ChatGPT sign-in fits through the relay
+/// does not, so a team never hands it the copy; endpoint accounts have no copy at all.
+#[test]
+fn only_the_harness_a_sign_in_was_made_with_runs_on_its_credential_copy() {
+    let chatgpt = native_sign_in(Provider::Chatgpt);
+    let claude = native_sign_in(Provider::Claude);
+    let built = super::registry::Registry::build(&[(
+        "responses-row",
+        &fit_manifest(
+            "responses-row",
+            "jsonl-turn",
+            "openai-responses",
+            &handed("openai-responses"),
+        ),
+    )])
+    .expect("ChatGPT fit row manifest loads");
+    let listed = built.get("responses-row").unwrap();
+    assert!(listed.account_fits(&chatgpt));
+    assert!(!listed.signs_in_natively(&chatgpt));
+    let bundled = super::registry::registry();
+    let (codex, claude_code) = (
+        bundled.get("codex").unwrap(),
+        bundled.get("claude-code").unwrap(),
+    );
+    assert!(codex.signs_in_natively(&chatgpt));
+    assert!(claude_code.signs_in_natively(&claude));
+    assert!(!codex.signs_in_natively(&claude));
+    assert!(!claude_code.signs_in_natively(&chatgpt));
+    for (.., connection) in every_account()
+        .into_iter()
+        .filter(|(.., connection)| connection.endpoint != ModelEndpoint::Native {})
+    {
+        for harness in bundled.all().iter().chain([listed]) {
+            assert!(
+                !harness.signs_in_natively(&connection),
+                "{}",
+                harness.manifest().id
+            );
+        }
+    }
+}
