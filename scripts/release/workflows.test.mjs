@@ -273,7 +273,7 @@ test("the Windows CI job is off until v2.2.1: an if that is always false skips i
 
 const RUST_CACHE = "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0";
 
-test("every GitHub-hosted CI Rust job keeps its build cache with the pinned rust-cache action, saved even when the job fails; the release build, which holds the signing keys, runs no third-party cache action; and no job caches the whole target folder", async () => {
+test("every GitHub-hosted CI Rust job keeps its build cache with the pinned rust-cache action, saved only from master, even when the job fails, so a pull request or batch branch restores master's entry and adds none to the free 10 GB; the release build, which holds the signing keys, runs no third-party cache action; and no job caches the whole target folder", async () => {
   const ci = await workflow("ci.yml");
   const release = await workflow("release.yml");
   for (const [text, job, prefix] of [[ci, "linux", "ci-linux"], [ci, "macos", "ci-macos"], [ci, "windows", "ci-windows"]]) {
@@ -287,6 +287,7 @@ test("every GitHub-hosted CI Rust job keeps its build cache with the pinned rust
       "        with:",
       `          prefix-key: ${prefix}`,
       "          cache-on-failure: true",
+      "          save-if: ${{ github.ref == 'refs/heads/master' }}",
     ].join("\n"), job);
     assert(all.findIndex((step) => step.includes("- name: Install Rust toolchain")) < at, `${job} keys its cache on the installed toolchain`);
   }
