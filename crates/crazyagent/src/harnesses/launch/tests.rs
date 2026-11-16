@@ -1906,3 +1906,37 @@ fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
+
+/// T20 code r1 F2: a listed harness on pipes that reaches its model through the relay its
+/// turn started from the account's saved key holds the engine's lifeline, as one given a
+/// relay token as its key does, so it ends with the engine; a keyless one, with no relay,
+/// holds none. Its request names no key, as a listed hand-over carries the relay's token.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_listed_harness_on_its_own_relay_holds_the_engine_s_lifeline_and_a_keyless_one_none() {
+    use crate::credentials::SecretString;
+    use crate::model_gateway::relay::Relay;
+    use std::os::unix::fs::PermissionsExt;
+    const URL: &str = "http://127.0.0.1:9/v1";
+    for keyed in [true, false] {
+        let mut launch = team_launch("claude-code");
+        let harness = launch.work.parent().unwrap().join("listed-harness");
+        std::fs::write(&harness, "#!/bin/sh\nexec /bin/cat > /dev/null\n").unwrap();
+        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+        launch.request.executable = harness;
+        launch.request.tools = false;
+        launch.request.account = AccountBinding::Url {
+            home: launch.request.account.home().to_path_buf(),
+            base_url: URL.into(),
+            key: None,
+        };
+        let saved = SecretString::new(b"sk-listed-row-saved".to_vec()).unwrap();
+        let relay = keyed.then(|| Relay::start(URL, saved).unwrap());
+        let command = super::command(&launch.request).unwrap();
+        let started = super::Session::start_listed(launch.request, command, relay, &[]);
+        assert!(started.is_ok(), "{:?}", started.as_ref().err());
+        let session = started.unwrap();
+        assert_eq!(session.lifeline.is_some(), keyed, "keyed: {keyed}");
+        assert!(session.stop().is_ok());
+    }
+}
