@@ -140,8 +140,10 @@ const CLAUDE_USER_LINE: &[u8] = b"{\"type\":\"user\"";
 const CLAUDE_PARENT_KEY: &[u8] = b"\"parent_tool_use_id\":";
 /// The model name Claude Code gives the messages it writes itself, such as its API errors.
 const CLAUDE_OWN_MODEL: &str = "<synthetic>";
-/// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
-const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
+/// The `--settings` every research Claude Code gets: hooks off and the account's claude.ai
+/// connectors off, as no Native switch reaches a research run; a keyed run adds its
+/// `apiKeyHelper`.
+const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true,\"disableClaudeAiConnectors\":true}";
 
 /// The most bytes of one research report: the runner takes no longer report from an agent,
 /// and a reader of a stored report reads up to this many.
@@ -2539,8 +2541,9 @@ fn codex_arguments(
 }
 
 /// Adds Claude Code's print-mode arguments and environment for one research
-/// run: no MCP servers, settings sources, hooks or saved sessions, tools on, or
-/// off with the no-tools system prompt and one model turn; the account as
+/// run: no MCP servers, claude.ai connectors, settings sources, hooks or saved
+/// sessions, tools on, or off with the no-tools system prompt and one model
+/// turn; the account as
 /// either a managed config directory or a keyless Anthropic endpoint in bare
 /// mode that never reads the keychain.
 /// Takes the command, the agent home and temp dir, the tools switch, the most

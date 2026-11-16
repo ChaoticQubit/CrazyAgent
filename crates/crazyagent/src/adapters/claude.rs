@@ -69,7 +69,8 @@ pub(crate) const REFRESH_WINDOW: std::time::Duration = std::time::Duration::from
 /// The arguments of the one print turn that renews a managed Claude Code account. Claude
 /// Code refreshes a token inside its refresh window, and waits for the refresh, before the
 /// turn's API call; `auth status` only starts it and exits about two seconds later. The
-/// turn asks Haiku for one word with no tools, MCP servers, settings, hooks or saved session.
+/// turn asks Haiku for one word with no tools, MCP servers, claude.ai connectors, settings,
+/// hooks or saved session.
 #[cfg(unix)]
 pub(crate) const RENEWAL_TURN: [&str; 18] = [
     "--print",
@@ -79,7 +80,7 @@ pub(crate) const RENEWAL_TURN: [&str; 18] = [
     "--setting-sources",
     "",
     "--settings",
-    "{\"disableAllHooks\":true}",
+    "{\"disableAllHooks\":true,\"disableClaudeAiConnectors\":true}",
     "--no-session-persistence",
     "--tools",
     "",
