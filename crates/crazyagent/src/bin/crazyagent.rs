@@ -112,7 +112,7 @@ fn main() -> ExitCode {
         let result = match args.as_slice() {
             [_, folder] => crazyagent::connectors::shim::serve(
                 io::stdin().lock(),
-                io::stdout().lock(),
+                io::stdout(),
                 Path::new(folder),
             )
             .map_err(|e| e.to_string()),

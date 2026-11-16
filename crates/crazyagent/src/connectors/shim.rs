@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// The engine subcommand that runs this server.
@@ -24,12 +26,16 @@ pub const PENDING_MAX: usize = 16;
 /// How long the server waits for the engine's answer to one call: four vendor requests
 /// at curl's longest wait, the most a call that opens a session takes when nothing queues.
 pub(crate) const REPLY_WAIT: Duration = Duration::from_secs(240);
+/// How long the server waits for a call the engine holds for the owner's answer: past the
+/// longest approval wait, 30 minutes, so the owner's answer or its end always comes first.
+pub(crate) const HELD_WAIT: Duration = Duration::from_secs(35 * 60);
 
 pub(crate) const PART_SUFFIX: &str = ".part";
 pub(crate) const CALL_SUFFIX: &str = ".call";
 pub(crate) const TAKEN_SUFFIX: &str = ".taken";
 pub(crate) const ANSWER_PART_SUFFIX: &str = ".reply-part";
 pub(crate) const REPLY_SUFFIX: &str = ".reply";
+pub(crate) const HELD_SUFFIX: &str = ".held";
 
 const POLL: Duration = Duration::from_millis(25);
 const NAME_BYTES_MAX: usize = 256;
@@ -42,6 +48,8 @@ const NOT_ANSWERED: &str = "connector_gateway_unavailable: the engine took the c
 const UNREAD: &str = "connector_gateway_unavailable: the engine's answer could not be read.";
 
 const _: () = assert!(REPLY_WAIT.as_secs() >= 4 * 60);
+const _: () = assert!(HELD_WAIT.as_secs() > 30 * 60);
+const _: () = assert!(HELD_WAIT.as_secs() > REPLY_WAIT.as_secs());
 const _: () = assert!(ASK_BYTES_MAX < ANSWER_BYTES_MAX);
 
 /// What the server asks the engine: the tools this launch may use, or one tool call by
@@ -68,14 +76,17 @@ pub(crate) enum Answer {
 /// Serves the connector tools over stdio until the client closes input. Inputs: the
 /// client's input and output and the absolute launch folder the engine made. Output: an
 /// input or output failure, or a refusal of a launch folder that is not a plain folder.
-pub fn serve(input: impl BufRead, output: impl Write, folder: &Path) -> std::io::Result<()> {
+pub fn serve(input: impl BufRead, output: impl Write + Send, folder: &Path) -> std::io::Result<()> {
     serve_with(input, output, folder, REPLY_WAIT)
 }
 
 /// [`serve`] with the wait for one answer given, so a row does not wait four minutes.
+/// Each tool call is answered on a thread of its own, at most `PENDING_MAX` at once, so a
+/// write the engine holds for the owner never holds up a later call; every other request
+/// is answered in turn, and each reply is one whole line.
 pub(crate) fn serve_with(
     input: impl BufRead,
-    output: impl Write,
+    output: impl Write + Send,
     folder: &Path,
     wait: Duration,
 ) -> std::io::Result<()> {
@@ -86,7 +97,81 @@ pub(crate) fn serve_with(
         ));
     }
     let mailbox = Mailbox::open(&folder.join(MAILBOX))?;
-    rpc(input, output, |request| answer(request, &mailbox, wait))
+    let output = Mutex::new(output);
+    let running = AtomicUsize::new(0);
+    let failed: Mutex<Option<std::io::Error>> = Mutex::new(None);
+    let shared = (&mailbox, &output, &running, &failed);
+    std::thread::scope(|scope| {
+        rpc(input, Shared(&output), move |request| {
+            let (mailbox, output, running, failed) = shared;
+            if !is_call(request) {
+                return answer(request, mailbox, wait);
+            }
+            if running.load(Ordering::SeqCst) >= PENDING_MAX {
+                return busy(request);
+            }
+            running.fetch_add(1, Ordering::SeqCst);
+            let request = request.clone();
+            scope.spawn(move || {
+                let reply = answer(&request, mailbox, wait);
+                if let Some(reply) = reply
+                    && let Err(problem) = send(output, &reply)
+                {
+                    locked(failed).get_or_insert(problem);
+                }
+                running.fetch_sub(1, Ordering::SeqCst);
+            });
+            None
+        })
+    })?;
+    assert_eq!(running.load(Ordering::SeqCst), 0);
+    match failed.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        Some(problem) => Err(problem),
+        None => Ok(()),
+    }
+}
+
+/// The server's output written through its lock one write at a time, so a reply line
+/// from a call answered on its own thread never lands inside another.
+struct Shared<'a, W>(&'a Mutex<W>);
+
+impl<W: Write> Write for Shared<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        locked(self.0).write(bytes)
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        locked(self.0).write_all(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        locked(self.0).flush()
+    }
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn is_call(request: &Value) -> bool {
+    request.get("id").is_some()
+        && request.get("method").and_then(Value::as_str) == Some("tools/call")
+}
+
+fn busy(request: &Value) -> Option<Value> {
+    let id = request.get("id")?.clone();
+    let result = tool_result(BUSY, true);
+    Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+}
+
+/// Writes one reply as one whole line under the output's lock. Inputs: the output and the
+/// reply. Output: the write failure, if any.
+fn send(output: &Mutex<impl Write>, message: &Value) -> std::io::Result<()> {
+    let mut line = serde_json::to_vec(message).map_err(std::io::Error::other)?;
+    line.push(b'\n');
+    let mut output = locked(output);
+    output.write_all(&line)?;
+    output.flush()
 }
 
 fn initialized(params: Option<&Value>) -> Value {
@@ -147,7 +232,8 @@ fn answer(request: &Value, mailbox: &Mailbox, wait: Duration) -> Option<Value> {
 }
 
 /// Hands one ask to the engine and waits for its answer: the ask is written under a part
-/// name and renamed into place, so the engine never reads half of one. An ask still
+/// name and renamed into place, so the engine never reads half of one. While the engine
+/// marks the ask held for the owner, the wait is `HELD_WAIT` from its start. An ask still
 /// waiting at the deadline is withdrawn, so the engine never runs it. Inputs: the
 /// mailbox, the ask and the wait. Output: the answer, or the text the agent reads.
 fn ask(mailbox: &Mailbox, ask: &Ask, wait: Duration) -> Result<Answer, String> {
@@ -171,13 +257,19 @@ fn ask(mailbox: &Mailbox, ask: &Ask, wait: Duration) -> Result<Answer, String> {
         return Err(UNSENT.into());
     }
     let reply = format!("{id}{REPLY_SUFFIX}");
-    let deadline = Instant::now() + wait;
+    let held = format!("{id}{HELD_SUFFIX}");
+    let start = Instant::now();
     loop {
         if let Some(found) = read_answer(mailbox, &reply) {
             let _ = mailbox.remove(&reply);
             return found;
         }
-        if Instant::now() >= deadline {
+        let limit = if mailbox.read(&held).is_ok() {
+            HELD_WAIT.max(wait)
+        } else {
+            wait
+        };
+        if start.elapsed() >= limit {
             break;
         }
         std::thread::sleep(POLL);

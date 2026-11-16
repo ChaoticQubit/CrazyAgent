@@ -97,6 +97,7 @@ pub enum NoticeKind {
     MemoryReview,
     ChangeSetReview,
     ConnectorToolsChanged,
+    ConnectorWrite,
     AgentFinished,
     AgentFailed,
     AgentStopped,
@@ -115,13 +116,14 @@ pub enum NoticeKind {
 }
 
 impl NoticeKind {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Question,
         Self::AccountSignIn,
         Self::ResearchPool,
         Self::MemoryReview,
         Self::ChangeSetReview,
         Self::ConnectorToolsChanged,
+        Self::ConnectorWrite,
         Self::AgentFinished,
         Self::AgentFailed,
         Self::AgentStopped,
@@ -139,7 +141,7 @@ impl NoticeKind {
         Self::TeamAlert,
     ];
 
-    /// The kind's class. Input: the kind. Output: Action for the six kinds the owner must
+    /// The kind's class. Input: the kind. Output: Action for the seven kinds the owner must
     /// act on, Info for the rest.
     pub fn class(self) -> NoticeClass {
         match self {
@@ -148,7 +150,8 @@ impl NoticeKind {
             | Self::ResearchPool
             | Self::MemoryReview
             | Self::ChangeSetReview
-            | Self::ConnectorToolsChanged => NoticeClass::Action,
+            | Self::ConnectorToolsChanged
+            | Self::ConnectorWrite => NoticeClass::Action,
             _ => NoticeClass::Info,
         }
     }
@@ -163,6 +166,7 @@ impl NoticeKind {
             Self::MemoryReview => "memory_review",
             Self::ChangeSetReview => "change_set_review",
             Self::ConnectorToolsChanged => "connector_tools_changed",
+            Self::ConnectorWrite => "connector_write",
             Self::AgentFinished => "agent_finished",
             Self::AgentFailed => "agent_failed",
             Self::AgentStopped => "agent_stopped",
@@ -191,6 +195,7 @@ impl NoticeKind {
             Self::MemoryReview => "Memories to review",
             Self::ChangeSetReview => "Change set to review",
             Self::ConnectorToolsChanged => "Connector tools changed",
+            Self::ConnectorWrite => "Connector write to approve",
             Self::AgentFinished => "Agent finished",
             Self::AgentFailed => "Agent failed",
             Self::AgentStopped => "Agent stopped",
@@ -250,6 +255,10 @@ pub enum NoticeTarget {
     Updates,
     Harnesses,
     Connectors,
+    ConnectorApproval {
+        project_id: ProjectId,
+        id: i64,
+    },
     Home,
 }
 
@@ -263,7 +272,8 @@ impl NoticeTarget {
             | Self::Memories { project_id }
             | Self::ChangeSet { project_id, .. }
             | Self::Agents { project_id }
-            | Self::Conversation { project_id } => Some(project_id),
+            | Self::Conversation { project_id }
+            | Self::ConnectorApproval { project_id, .. } => Some(project_id),
             Self::AccountSignIn { .. }
             | Self::Accounts
             | Self::Usage

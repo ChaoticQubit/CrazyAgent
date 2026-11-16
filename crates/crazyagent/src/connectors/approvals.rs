@@ -2,10 +2,11 @@
 //! owner's Allow or Deny, as one Action notice, by the write setting and the wait setting.
 //! A project's standing allow, under Ask once per project and connector, is kept here too.
 
+use crate::app_plugins::store;
 use crate::connectors::settings::{Wait, WritePolicy};
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -15,6 +16,42 @@ pub const PREVIEW_BYTES_MAX: usize = 480;
 pub const WAITING_PER_LAUNCH_MAX: usize = 4;
 /// The most writes that may wait for the owner at once, across every launch.
 pub const WAITING_MAX: usize = 64;
+/// The refusal for an approval id that names no approval.
+pub const UNKNOWN: &str = "connector_approval_unknown";
+/// The refusal for an answer to an approval already answered or ended.
+pub const CLOSED: &str = "connector_approval_closed";
+/// The refusal for a write while the most writes already wait.
+pub const WAITING_FULL: &str = "connector_writes_waiting_full";
+
+const KEPT_MAX: i64 = 1024;
+const VALUE_CHARS_MAX: usize = 60;
+const MINUTE_MS: i64 = 60 * 1000;
+const WITHHELD: &str = "[withheld]";
+
+const _: () = assert!(WAITING_PER_LAUNCH_MAX <= WAITING_MAX);
+const _: () = assert!((WAITING_MAX as i64) < KEPT_MAX);
+
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connector_approvals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    launch TEXT NOT NULL,
+    project TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    connector TEXT NOT NULL,
+    title TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    preview TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('waiting', 'allowed', 'denied', 'expired')),
+    created_ms INTEGER NOT NULL,
+    expires_ms INTEGER NOT NULL,
+    answered_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS connector_approvals_state ON connector_approvals (state, launch);
+CREATE TABLE IF NOT EXISTS connector_write_allowed (
+    project TEXT NOT NULL,
+    connector TEXT NOT NULL,
+    allowed_ms INTEGER NOT NULL,
+    PRIMARY KEY (project, connector)
+) WITHOUT ROWID;";
 
 /// Where an approval stands: waiting for the owner, or answered by an Allow, a Deny or the
 /// end of its wait.
@@ -25,6 +62,23 @@ pub enum State {
     Allowed,
     Denied,
     Expired,
+}
+
+impl State {
+    const ALL: [Self; 4] = [Self::Waiting, Self::Allowed, Self::Denied, Self::Expired];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Allowed => "allowed",
+            Self::Denied => "denied",
+            Self::Expired => "expired",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|state| state.name() == name)
+    }
 }
 
 /// The owner's answer to one waiting write.
@@ -86,101 +140,404 @@ pub struct Waiting {
     pub tool: String,
 }
 
-fn not_yet() -> EngineError {
-    EngineError("connector_approvals_not_yet".into())
+fn refusal(code: &str) -> EngineError {
+    EngineError(code.into())
+}
+
+fn sqlite(_: rusqlite::Error) -> EngineError {
+    refusal("connectors_unavailable")
+}
+
+fn asked_before(db: &Connection) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type='table' AND name='connector_approvals')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(sqlite)
+}
+
+/// The name a project shows: its own name, or its id when it has none.
+fn shown_name(name: Option<String>, project: &str) -> String {
+    name.filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| project.to_owned())
+}
+
+fn leaks(text: &str, secrets: &[SecretString]) -> bool {
+    secrets
+        .iter()
+        .any(|secret| !secret.expose().is_empty() && text.contains(secret.expose()))
+}
+
+/// One text as a preview shows it: without hidden or control characters, or `[withheld]`
+/// when it holds one of the connector's secret forms before or after that cleaning.
+fn plain(text: &str, secrets: &[SecretString]) -> String {
+    let clean: String = text
+        .chars()
+        .filter(|found| !found.is_control() && !crate::memory::hidden_char(*found))
+        .collect();
+    if leaks(text, secrets) || leaks(&clean, secrets) {
+        return WITHHELD.to_owned();
+    }
+    clean
+}
+
+/// One argument value as a preview shows it: a text quoted and cut to `VALUE_CHARS_MAX`
+/// characters, a list or an object by its size, anything else as written.
+fn short(value: &Value, secrets: &[SecretString]) -> String {
+    match value {
+        Value::String(text) => {
+            let text = plain(text, secrets);
+            let mut kept: String = text.chars().take(VALUE_CHARS_MAX).collect();
+            if kept.len() < text.len() {
+                kept.push('…');
+            }
+            format!("\"{kept}\"")
+        }
+        Value::Array(items) => format!("[{} items]", items.len()),
+        Value::Object(fields) => format!("{{{} fields}}", fields.len()),
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.to_string(),
+    }
+}
+
+fn cut(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let mut end = max;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    assert!(text.len() <= max);
+    text
 }
 
 /// Makes the approval tables. Input: the engine database. Output: Ok, or
 /// `connectors_unavailable`.
-pub fn initialize(_db: &Connection) -> Result<(), EngineError> {
-    Err(not_yet())
+pub fn initialize(db: &Connection) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(sqlite)
 }
 
 /// The preview of one write call. Inputs: the vendor tool, the call's arguments and the
 /// connector's secret forms. Output: the preview, at most `PREVIEW_BYTES_MAX` bytes.
-pub fn preview(_tool: &str, _arguments: &Map<String, Value>, _secrets: &[SecretString]) -> String {
-    String::new()
+pub fn preview(tool: &str, arguments: &Map<String, Value>, secrets: &[SecretString]) -> String {
+    let parts: Vec<String> = arguments
+        .iter()
+        .map(|(key, value)| format!("{}={}", plain(key, secrets), short(value, secrets)))
+        .collect();
+    let named = plain(tool, secrets);
+    let shown = if parts.is_empty() {
+        named
+    } else {
+        format!("{named}: {}", parts.join(", "))
+    };
+    cut(shown, PREVIEW_BYTES_MAX)
 }
 
-/// Records one write that waits for the owner. Inputs: the database, the write, the wait
-/// and the time now. Output: the approval's id, or a refusal.
+/// Records one write that waits for the owner, unless `WAITING_PER_LAUNCH_MAX` of its launch
+/// or `WAITING_MAX` in all already wait, and keeps at most `KEPT_MAX` answered approvals.
+/// Inputs: the database, the write, the wait and the time now. Output: the approval's id,
+/// `connector_writes_waiting_full`, or `connectors_unavailable`.
 pub fn ask(
-    _db: &Connection,
-    _write: &PendingWrite,
-    _wait: Wait,
-    _now_ms: i64,
+    db: &Connection,
+    write: &PendingWrite,
+    wait: Wait,
+    now_ms: i64,
 ) -> Result<i64, EngineError> {
-    Err(not_yet())
+    assert!(write.preview.len() <= PREVIEW_BYTES_MAX);
+    initialize(db)?;
+    let wait_ms = i64::from(wait.minutes()) * MINUTE_MS;
+    let expires_ms = now_ms.saturating_add(wait_ms);
+    let added = db
+        .execute(
+            "INSERT INTO connector_approvals
+                 (launch, project, agent, connector, title, tool, preview, state, created_ms,
+                  expires_ms)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'waiting', ?8, ?9
+             WHERE (SELECT COUNT(*) FROM connector_approvals
+                    WHERE state='waiting' AND launch=?1) < ?10
+               AND (SELECT COUNT(*) FROM connector_approvals WHERE state='waiting') < ?11",
+            params![
+                write.launch,
+                write.project,
+                write.agent,
+                write.connector,
+                write.title,
+                write.tool,
+                write.preview,
+                now_ms,
+                expires_ms,
+                WAITING_PER_LAUNCH_MAX as i64,
+                WAITING_MAX as i64,
+            ],
+        )
+        .map_err(sqlite)?;
+    if added == 0 {
+        return Err(refusal(WAITING_FULL));
+    }
+    assert_eq!(added, 1);
+    let id = db.last_insert_rowid();
+    db.execute(
+        "DELETE FROM connector_approvals WHERE state<>'waiting' AND id NOT IN
+             (SELECT id FROM connector_approvals WHERE state<>'waiting'
+              ORDER BY id DESC LIMIT ?1)",
+        [KEPT_MAX],
+    )
+    .map_err(sqlite)?;
+    Ok(id)
 }
 
-/// Answers one waiting write. Inputs: the database, the id, the answer, the write setting
-/// and the time now. Output: Ok, or a refusal.
+/// Answers one waiting write once; an Allow under Ask once per project and connector also
+/// records that project's standing allow. A wait that ran out by `now_ms` ends as expired
+/// first. Inputs: the database, the id, the answer, the write setting and the time now.
+/// Output: Ok, `connector_approval_unknown`, `connector_approval_closed`, or
+/// `connectors_unavailable`.
 pub fn answer(
-    _db: &Connection,
-    _id: i64,
-    _answer: Answer,
-    _write: WritePolicy,
-    _now_ms: i64,
+    db: &Connection,
+    id: i64,
+    answer: Answer,
+    write: WritePolicy,
+    now_ms: i64,
 ) -> Result<(), EngineError> {
-    Err(not_yet())
+    if !asked_before(db)? {
+        return Err(refusal(UNKNOWN));
+    }
+    let tx = db.unchecked_transaction().map_err(sqlite)?;
+    let row: Option<(String, String, String, i64)> = tx
+        .query_row(
+            "SELECT state, project, connector, expires_ms FROM connector_approvals WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(sqlite)?;
+    let Some((state, project, connector, expires_ms)) = row else {
+        return Err(refusal(UNKNOWN));
+    };
+    if State::parse(&state) != Some(State::Waiting) {
+        return Err(refusal(CLOSED));
+    }
+    if now_ms >= expires_ms {
+        tx.execute(
+            "UPDATE connector_approvals SET state='expired', answered_ms=expires_ms
+             WHERE id=?1 AND state='waiting'",
+            [id],
+        )
+        .map_err(sqlite)?;
+        tx.commit().map_err(sqlite)?;
+        return Err(refusal(CLOSED));
+    }
+    let answered = match answer {
+        Answer::Allow => State::Allowed,
+        Answer::Deny => State::Denied,
+    };
+    let changed = tx
+        .execute(
+            "UPDATE connector_approvals SET state=?2, answered_ms=?3
+             WHERE id=?1 AND state='waiting'",
+            params![id, answered.name(), now_ms],
+        )
+        .map_err(sqlite)?;
+    if changed != 1 {
+        return Err(refusal(CLOSED));
+    }
+    if answer == Answer::Allow && write == WritePolicy::AskOncePerProject {
+        tx.execute(
+            "INSERT OR REPLACE INTO connector_write_allowed (project, connector, allowed_ms)
+             VALUES (?1, ?2, ?3)",
+            params![project, connector, now_ms],
+        )
+        .map_err(sqlite)?;
+    }
+    tx.commit().map_err(sqlite)
 }
 
 /// Where one approval stands. Inputs: the database and the id. Output: its state, or none.
-pub fn state(_db: &Connection, _id: i64) -> Result<Option<State>, EngineError> {
-    Err(not_yet())
+pub fn state(db: &Connection, id: i64) -> Result<Option<State>, EngineError> {
+    if !asked_before(db)? {
+        return Ok(None);
+    }
+    let name: Option<String> = db
+        .query_row(
+            "SELECT state FROM connector_approvals WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sqlite)?;
+    Ok(name.as_deref().and_then(State::parse))
 }
 
 /// One approval as the owner's page shows it. Inputs: the database and the id. Output:
 /// the approval, or none.
-pub fn get(_db: &Connection, _id: i64) -> Result<Option<ApprovalView>, EngineError> {
-    Err(not_yet())
+pub fn get(db: &Connection, id: i64) -> Result<Option<ApprovalView>, EngineError> {
+    if !asked_before(db)? {
+        return Ok(None);
+    }
+    db.query_row(
+        "SELECT a.id, a.project, json_extract(p.body, '$.spec.name'), a.agent, a.connector,
+                a.title, a.tool, a.preview, a.state, a.created_ms, a.expires_ms, a.answered_ms
+         FROM connector_approvals a LEFT JOIN projects p ON p.id = a.project
+         WHERE a.id=?1",
+        [id],
+        |row| {
+            let project: String = row.get(1)?;
+            let state: String = row.get(8)?;
+            Ok(ApprovalView {
+                id: row.get(0)?,
+                project_name: shown_name(row.get(2)?, &project),
+                project,
+                agent: row.get(3)?,
+                connector: row.get(4)?,
+                title: row.get(5)?,
+                tool: row.get(6)?,
+                preview: row.get(7)?,
+                state: State::parse(&state).ok_or(rusqlite::Error::InvalidQuery)?,
+                created_ms: row.get(9)?,
+                expires_ms: row.get(10)?,
+                answered_ms: row.get(11)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(sqlite)
 }
 
-/// Ends the waits that ran out. Inputs: the database and the time now. Output: how many.
-pub fn expire(_db: &Connection, _now_ms: i64) -> Result<usize, EngineError> {
-    Err(not_yet())
+/// Ends the waits that ran out, each at its own end. Inputs: the database and the time now.
+/// Output: how many.
+pub fn expire(db: &Connection, now_ms: i64) -> Result<usize, EngineError> {
+    if !asked_before(db)? {
+        return Ok(0);
+    }
+    db.execute(
+        "UPDATE connector_approvals SET state='expired', answered_ms=expires_ms
+         WHERE state='waiting' AND expires_ms<=?1",
+        [now_ms],
+    )
+    .map_err(sqlite)
 }
 
 /// Ends the given waits. Inputs: the database, the ids and the time now. Output: how many.
-pub fn expire_ids(_db: &Connection, _ids: &[i64], _now_ms: i64) -> Result<usize, EngineError> {
-    Err(not_yet())
+pub fn expire_ids(db: &Connection, ids: &[i64], now_ms: i64) -> Result<usize, EngineError> {
+    if ids.is_empty() || !asked_before(db)? {
+        return Ok(0);
+    }
+    let mut statement = db
+        .prepare(
+            "UPDATE connector_approvals SET state='expired', answered_ms=?2
+             WHERE id=?1 AND state='waiting'",
+        )
+        .map_err(sqlite)?;
+    let mut ended = 0;
+    for id in ids {
+        ended += statement.execute(params![id, now_ms]).map_err(sqlite)?;
+    }
+    assert!(ended <= ids.len());
+    Ok(ended)
 }
 
 /// Ends every wait. Inputs: the database and the time now. Output: how many.
-pub fn expire_waiting(_db: &Connection, _now_ms: i64) -> Result<usize, EngineError> {
-    Err(not_yet())
+pub fn expire_waiting(db: &Connection, now_ms: i64) -> Result<usize, EngineError> {
+    if !asked_before(db)? {
+        return Ok(0);
+    }
+    db.execute(
+        "UPDATE connector_approvals SET state='expired', answered_ms=?1 WHERE state='waiting'",
+        [now_ms],
+    )
+    .map_err(sqlite)
 }
 
 /// Whether a project's owner allowed a connector to write without asking again. Inputs:
 /// the database, the project and the connector. Output: the answer.
 pub fn writes_allowed(
-    _db: &Connection,
-    _project: &str,
-    _connector: &str,
+    db: &Connection,
+    project: &str,
+    connector: &str,
 ) -> Result<bool, EngineError> {
-    Err(not_yet())
+    if !asked_before(db)? {
+        return Ok(false);
+    }
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM connector_write_allowed WHERE project=?1 AND connector=?2)",
+        [project, connector],
+        |row| row.get(0),
+    )
+    .map_err(sqlite)
 }
 
 /// The connectors a project may write with without asking again. Inputs: the database and
 /// the project. Output: them, by name.
-pub fn allowed_writes(_db: &Connection, _project: &str) -> Result<AllowedWrites, EngineError> {
-    Err(not_yet())
+pub fn allowed_writes(db: &Connection, project: &str) -> Result<AllowedWrites, EngineError> {
+    let mut connectors = Vec::new();
+    if asked_before(db)? {
+        connectors = db
+            .prepare(
+                "SELECT connector FROM connector_write_allowed WHERE project=?1
+                 ORDER BY connector LIMIT ?2",
+            )
+            .map_err(sqlite)?
+            .query_map(params![project, store::PLUGINS_MAX as i64], |row| row.get(0))
+            .map_err(sqlite)?
+            .collect::<Result<_, _>>()
+            .map_err(sqlite)?;
+    }
+    assert!(connectors.len() <= store::PLUGINS_MAX);
+    Ok(AllowedWrites {
+        project: project.to_owned(),
+        connectors,
+    })
 }
 
 /// Takes back a project's standing allow for one connector. Inputs: the database, the
 /// project and the connector. Output: whether there was one.
 pub fn revoke_writes(
-    _db: &Connection,
-    _project: &str,
-    _connector: &str,
+    db: &Connection,
+    project: &str,
+    connector: &str,
 ) -> Result<bool, EngineError> {
-    Err(not_yet())
+    if !asked_before(db)? {
+        return Ok(false);
+    }
+    let removed = db
+        .execute(
+            "DELETE FROM connector_write_allowed WHERE project=?1 AND connector=?2",
+            [project, connector],
+        )
+        .map_err(sqlite)?;
+    assert!(removed <= 1);
+    Ok(removed == 1)
 }
 
 /// The waiting approvals for their notices. Inputs: the database and the most to read.
 /// Output: them in id order, or none before any approval was asked.
-pub fn waiting(_db: &Connection, _max: usize) -> Result<Option<Vec<Waiting>>, EngineError> {
-    Err(not_yet())
+pub fn waiting(db: &Connection, max: usize) -> Result<Option<Vec<Waiting>>, EngineError> {
+    if !asked_before(db)? {
+        return Ok(None);
+    }
+    let rows: Vec<Waiting> = db
+        .prepare(
+            "SELECT a.id, a.project, json_extract(p.body, '$.spec.name'), a.title, a.tool
+             FROM connector_approvals a LEFT JOIN projects p ON p.id = a.project
+             WHERE a.state='waiting' ORDER BY a.id LIMIT ?1",
+        )
+        .map_err(sqlite)?
+        .query_map([i64::try_from(max).unwrap_or(i64::MAX)], |row| {
+            let project: String = row.get(1)?;
+            Ok(Waiting {
+                id: row.get(0)?,
+                project_name: shown_name(row.get(2)?, &project),
+                project,
+                title: row.get(3)?,
+                tool: row.get(4)?,
+            })
+        })
+        .map_err(sqlite)?
+        .collect::<Result<_, _>>()
+        .map_err(sqlite)?;
+    assert!(rows.len() <= max);
+    Ok(Some(rows))
 }
 
 #[cfg(all(test, unix))]

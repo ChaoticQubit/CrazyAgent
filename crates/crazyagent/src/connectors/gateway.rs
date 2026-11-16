@@ -5,10 +5,11 @@
 
 use crate::app_plugins::connector::{ConnectorSpec, McpEndpoint, ReadOnly, Scheme};
 use crate::app_plugins::store::{self, Bound};
+use crate::connectors::approvals::{self, PendingWrite, State};
 use crate::connectors::audit::{self, CallKind, CallRow};
 use crate::connectors::grants::{self, GrantedConnector, Role};
 use crate::connectors::mcp_client::{Access, Credential, McpError, McpSession, VendorTool};
-use crate::connectors::settings::{self, ConnectorSettings};
+use crate::connectors::settings::{self, ConnectorSettings, WritePolicy};
 use crate::connectors::shim::{self, Answer, Ask};
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
@@ -39,14 +40,17 @@ pub const LIST_BYTES_MAX: usize = 4 * 1024 * 1024;
 
 /// Every refusal code the gateway and its server give beyond the vendor client's, sorted;
 /// each has a plain sentence.
-pub const GATEWAY_CODES: [&str; 8] = [
+pub const GATEWAY_CODES: [&str; 11] = [
     "connector_busy",
     "connector_gateway_unavailable",
     "connector_not_granted",
     "connector_reply_withheld",
     "connector_tools_changed",
     "connector_tools_too_large",
-    "connector_writes_not_yet",
+    "connector_write_denied",
+    "connector_write_expired",
+    "connector_writes_off",
+    "connector_writes_waiting_full",
     "connectors_unavailable",
 ];
 
@@ -72,6 +76,9 @@ const SECRET_FORM_BYTES_MIN: usize = 8;
 const WORKERS_MAX: usize = 8;
 const TICK: Duration = Duration::from_millis(50);
 const STALE: Duration = Duration::from_secs(10 * 60);
+const HELD_STALE: Duration = Duration::from_secs(shim::HELD_WAIT.as_secs() + STALE.as_secs());
+const PARKED_MAX: usize = 2 * approvals::WAITING_MAX;
+const SETTLING: &str = "approvals";
 const SEPARATOR: &str = "__";
 
 const _: () = assert!(LIST_CONNECTOR_BYTES_MAX <= LIST_BYTES_MAX);
@@ -401,12 +408,36 @@ fn shown_description(title: &str, description: &str) -> String {
     )
 }
 
-fn pin_endpoint(endpoint: &McpEndpoint) -> Endpoint {
-    if endpoint.read_only == ReadOnly::None {
+/// The pin a session's tool list answers to: the normal list for a session at the normal
+/// address, and for a read-only session the vendor's read-only list where it has one.
+fn pin_endpoint(endpoint: &McpEndpoint, access: Access) -> Endpoint {
+    if access == Access::Full || endpoint.read_only == ReadOnly::None {
         Endpoint::Normal
     } else {
         Endpoint::ReadOnly
     }
+}
+
+const READS: &[ToolKind] = &[ToolKind::Read];
+const WRITES: &[ToolKind] = &[ToolKind::Write];
+const BOTH: &[ToolKind] = &[ToolKind::Read, ToolKind::Write];
+
+/// The sessions one connector's tools come from under the write setting, each with the
+/// kinds of tool it shows and runs: reads only while writes are Read-only; otherwise every
+/// tool from the normal address of a connector with no vendor read-only mode, else reads
+/// from the read-only address and writes from the normal one (DEC-168 addendum 14 Q5).
+fn lanes(endpoint: &McpEndpoint, writes_on: bool) -> Vec<(Access, &'static [ToolKind])> {
+    if !writes_on {
+        vec![(Access::ReadOnly, READS)]
+    } else if endpoint.read_only == ReadOnly::None {
+        vec![(Access::Full, BOTH)]
+    } else {
+        vec![(Access::ReadOnly, READS), (Access::Full, WRITES)]
+    }
+}
+
+fn held_key(launch: &str, connector: &str, access: Access) -> (String, String, bool) {
+    (launch.to_owned(), connector.to_owned(), access == Access::Full)
 }
 
 /// The forms of a connector's key a vendor reply may echo: the key, and for a Basic key
@@ -470,7 +501,10 @@ fn keeps_session(code: &str) -> bool {
             | "connector_tool_unknown"
             | "connector_tools_changed"
             | "connector_tools_too_large"
-            | "connector_writes_not_yet"
+            | "connector_write_denied"
+            | "connector_write_expired"
+            | "connector_writes_off"
+            | "connector_writes_waiting_full"
             | "connectors_unavailable"
     )
 }
@@ -487,12 +521,23 @@ fn refused(code: &str) -> Answer {
     }
 }
 
+/// An answer as the bytes its file holds; one past `ANSWER_BYTES_MAX` becomes the
+/// too-large refusal.
+fn encoded(answer: &Answer) -> Vec<u8> {
+    let written = serde_json::to_vec(answer).unwrap_or_default();
+    if written.is_empty() || written.len() as u64 > shim::ANSWER_BYTES_MAX {
+        return serde_json::to_vec(&refused("connector_reply_too_large")).unwrap_or_default();
+    }
+    written
+}
+
 /// One vendor session of one launch: the trusted manifest and key bindings it was opened
-/// with, which pin it answers to, the session, and the tools of its last list by the
-/// name an agent sees, each with the vendor's name and its kind.
+/// with, which address it calls and which pin it answers to, the session, and the tools of
+/// its last list by the name an agent sees, each with the vendor's name and its kind.
 struct Held {
     manifest: String,
     bindings: Vec<Bound>,
+    access: Access,
     endpoint: Endpoint,
     session: McpSession,
     tools: BTreeMap<String, (String, ToolKind)>,
@@ -507,13 +552,39 @@ struct Shown {
     outcome: &'static str,
 }
 
+/// What a call came to: its result now, or waiting for the owner's answer.
+enum Done {
+    Ran(Shown),
+    Waiting,
+}
+
+/// How a write call may run: by the write setting, asking the owner when it says so with
+/// the mailbox and call id to hold the call in, or already allowed by the owner.
+#[derive(Clone, Copy)]
+enum Pass<'a> {
+    Ask { mailbox: &'a Mailbox, call: &'a str },
+    Allowed,
+}
+
+/// One write call held for the owner's answer: its launch, its call id in that launch's
+/// mailbox, the name the agent called, its arguments and its activity row so far.
+struct Parked {
+    launch: Launch,
+    call: String,
+    shown: String,
+    args: Value,
+    row: CallRow,
+}
+
 /// The engine half for one engine root: the vendor sessions of its launches, held
-/// between calls, one lock per connector so its vendor is called one at a time, how long
-/// a call waits for that lock, and the thread that closes sessions no longer needed.
+/// between calls, the write calls held for the owner's answer by approval id, one lock per
+/// connector so its vendor is called one at a time, how long a call waits for that lock,
+/// and the thread that closes sessions no longer needed.
 pub struct Gateway {
     root: PathBuf,
     reach: ProviderReach,
-    held: Mutex<BTreeMap<(String, String), Held>>,
+    held: Mutex<BTreeMap<(String, String, bool), Held>>,
+    parked: Mutex<BTreeMap<i64, Parked>>,
     locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     lock_wait: Duration,
     closer: Mutex<Option<SyncSender<McpSession>>>,
@@ -536,6 +607,7 @@ impl Gateway {
             root: root.to_path_buf(),
             reach,
             held: Mutex::new(BTreeMap::new()),
+            parked: Mutex::new(BTreeMap::new()),
             locks: Mutex::new(BTreeMap::new()),
             lock_wait: CONNECTOR_WAIT,
             closer: Mutex::new(None),
@@ -599,9 +671,10 @@ impl Gateway {
             .clone()
     }
 
-    /// Answers the calls waiting in every launch folder, in this thread; each may take as
-    /// long as its vendor does. Sessions of launches that ended go to the closing thread
-    /// first. Output: how many calls were answered.
+    /// Answers the calls waiting in every launch folder, in this thread, then the held
+    /// writes the owner answered or whose wait or launch ended; each may take as long as its
+    /// vendor does. Sessions of launches that ended go to the closing thread first. Output:
+    /// how many calls were answered.
     pub fn answer_pending(&self) -> usize {
         let Ok(db) = crate::questions::open(&self.root) else {
             return 0;
@@ -610,26 +683,90 @@ impl Gateway {
             return 0;
         };
         self.forget_ended(&found);
-        found
+        let answered: usize = found
             .iter()
             .map(|launch| self.answer_launch(&db, launch))
-            .sum()
+            .sum();
+        answered + self.settle_at(&db, crate::semantic::now_ms())
     }
 
     /// Answers the held writes whose approval was answered, whose wait ran out at `now_ms`
-    /// or whose launch ended. Inputs: the engine database and the time now in milliseconds.
-    /// Output: how many held writes were answered.
-    pub(crate) fn settle_at(&self, _db: &Connection, _now_ms: i64) -> usize {
-        0
+    /// or whose launch ended: an Allow runs the call after every check passes again, a Deny
+    /// or an end answers with its refusal, and a launch that ended gets no answer. Inputs:
+    /// the engine database and the time now in milliseconds. Output: how many were answered.
+    pub(crate) fn settle_at(&self, db: &Connection, now_ms: i64) -> usize {
+        if locked(&self.parked).is_empty() {
+            return 0;
+        }
+        let _ = approvals::expire(db, now_ms);
+        let live: Option<BTreeSet<String>> = launches(db)
+            .ok()
+            .map(|found| found.into_iter().map(|launch| launch.id).collect());
+        let taken: Vec<(i64, Parked, Option<State>, bool)> = {
+            let mut parked = locked(&self.parked);
+            let ids: Vec<i64> = parked.keys().copied().collect();
+            let mut taken = Vec::new();
+            for id in ids {
+                let Ok(state) = approvals::state(db, id) else {
+                    continue;
+                };
+                let launch = &parked[&id].launch.id;
+                let gone = live.as_ref().is_none_or(|live| !live.contains(launch));
+                if gone || state != Some(State::Waiting) {
+                    let entry = parked.remove(&id).expect("a parked id is in the map");
+                    taken.push((id, entry, state, gone));
+                }
+            }
+            taken
+        };
+        let settings = settings::load(db).map_or(ConnectorSettings::DEFAULT, |(saved, _)| saved);
+        let mut answered = 0;
+        for (id, entry, state, gone) in taken {
+            let Parked {
+                launch,
+                call,
+                shown,
+                args,
+                mut row,
+            } = entry;
+            let result = if gone {
+                let _ = approvals::expire_ids(db, &[id], now_ms);
+                Err("connector_write_expired")
+            } else if state == Some(State::Allowed) {
+                let pass = Pass::Allowed;
+                match self.run_call(db, &launch, &settings, &shown, &args, &mut row, pass) {
+                    Ok(Done::Ran(done)) => Ok(done),
+                    Ok(Done::Waiting) => unreachable!("an allowed write is never held again"),
+                    Err(code) => Err(code),
+                }
+            } else if state == Some(State::Denied) {
+                Err("connector_write_denied")
+            } else {
+                Err("connector_write_expired")
+            };
+            let ms = (crate::semantic::now_ms() - row.started_ms).max(0);
+            let answer = self.finish(db, &settings, row, result, ms);
+            if gone {
+                continue;
+            }
+            let Ok(mailbox) = Mailbox::open_for_engine(&mailbox_path(&self.root, &launch.id)) else {
+                continue;
+            };
+            if write_answer(&mailbox, &call, &encoded(&answer)).is_ok() {
+                answered += 1;
+            }
+            let _ = mailbox.remove(&format!("{call}{}", shim::HELD_SUFFIX));
+        }
+        answered
     }
 
     fn forget_ended(&self, live: &[Launch]) {
         let ids: BTreeSet<&str> = live.iter().map(|launch| launch.id.as_str()).collect();
         let ended: Vec<Held> = {
             let mut held = locked(&self.held);
-            let gone: Vec<(String, String)> = held
+            let gone: Vec<(String, String, bool)> = held
                 .keys()
-                .filter(|(launch, _)| !ids.contains(launch.as_str()))
+                .filter(|(launch, _, _)| !ids.contains(launch.as_str()))
                 .cloned()
                 .collect();
             gone.iter().filter_map(|key| held.remove(key)).collect()
@@ -666,15 +803,18 @@ impl Gateway {
             let ask = bytes
                 .as_deref()
                 .and_then(|bytes| serde_json::from_slice::<Ask>(bytes.trim_ascii()).ok());
-            let answer = match ask {
-                Some(ask) => self.answer(db, launch, ask),
-                None => refused("connector_request_invalid"),
+            let pass = Pass::Ask {
+                mailbox: &mailbox,
+                call: &id,
             };
-            let mut written = serde_json::to_vec(&answer).unwrap_or_default();
-            if written.is_empty() || written.len() as u64 > shim::ANSWER_BYTES_MAX {
-                written =
-                    serde_json::to_vec(&refused("connector_reply_too_large")).unwrap_or_default();
-            }
+            let answer = match ask {
+                Some(ask) => self.answer(db, launch, ask, pass),
+                None => Some(refused("connector_request_invalid")),
+            };
+            let Some(answer) = answer else {
+                continue;
+            };
+            let written = encoded(&answer);
             #[cfg(test)]
             locked(&self.kept).push((bytes.clone().unwrap_or_default(), written.clone()));
             if write_answer(&mailbox, &id, &written).is_ok() {
@@ -685,12 +825,13 @@ impl Gateway {
         answered
     }
 
-    fn answer(&self, db: &Connection, launch: &Launch, ask: Ask) -> Answer {
+    fn answer(&self, db: &Connection, launch: &Launch, ask: Ask, pass: Pass<'_>) -> Option<Answer> {
         let settings = settings::load(db).map_or(ConnectorSettings::DEFAULT, |(saved, _)| saved);
         match ask {
-            Ask::List => self.list(db, launch, &settings),
+            Ask::List => Some(self.list(db, launch, &settings)),
             Ask::Call { tool, arguments } => {
-                self.call(db, launch, &settings, &tool, &Value::Object(arguments))
+                let args = Value::Object(arguments);
+                self.call(db, launch, &settings, &tool, &args, pass)
             }
         }
     }
@@ -740,11 +881,12 @@ impl Gateway {
         }
     }
 
-    /// The tools a launch may use now: each granted connector's read tools, listed again
-    /// from its vendor so a changed list is seen; a connector whose list fails, changed
-    /// or does not fit its budget is left out and logged. A connector still locked past
-    /// the wait turns the whole list into `connector_busy`, so the harness shows it and
-    /// can list again instead of running without that connector.
+    /// The tools a launch may use now: each granted connector's read tools, and its write
+    /// tools unless writes are Read-only, listed again from its vendor so a changed list is
+    /// seen; a connector whose list fails, changed or does not fit its budget is left out
+    /// and logged. A connector still locked past the wait turns the whole list into
+    /// `connector_busy`, so the harness shows it and can list again instead of running
+    /// without that connector.
     fn list(&self, db: &Connection, launch: &Launch, settings: &ConnectorSettings) -> Answer {
         let granted = match self.granted_now(db, launch) {
             Ok(granted) => granted,
@@ -788,8 +930,9 @@ impl Gateway {
         connector: &GrantedConnector,
         spec: &ConnectorSpec,
         settings: &ConnectorSettings,
+        access: Access,
     ) -> Result<Held, &'static str> {
-        let key = (launch.id.clone(), connector.name.clone());
+        let key = held_key(&launch.id, &connector.name, access);
         let found = locked(&self.held).remove(&key);
         if let Some(held) = found {
             let same = held.manifest == connector.loaded.manifest.sha256
@@ -809,7 +952,7 @@ impl Gateway {
             &self.root,
             &endpoint,
             &auth,
-            Access::ReadOnly,
+            access,
             settings.size_cap,
             self.reach.clone(),
         )
@@ -817,7 +960,8 @@ impl Gateway {
         Ok(Held {
             manifest: connector.loaded.manifest.sha256.clone(),
             bindings: connector.loaded.bindings.clone(),
-            endpoint: pin_endpoint(&endpoint),
+            access,
+            endpoint: pin_endpoint(&endpoint, access),
             session,
             tools: BTreeMap::new(),
             listed: false,
@@ -826,7 +970,8 @@ impl Gateway {
 
     fn give_back(&self, launch: &Launch, connector: &str, held: Held, keep: bool) {
         if keep {
-            locked(&self.held).insert((launch.id.clone(), connector.to_owned()), held);
+            let key = held_key(&launch.id, connector, held.access);
+            locked(&self.held).insert(key, held);
         } else {
             self.close_later(held.session);
         }
@@ -847,20 +992,32 @@ impl Gateway {
             .ok_or("connectors_unavailable")?;
         let lock = self.lock_for(&connector.name);
         let _one = wait_lock(&lock, self.lock_wait).ok_or("connector_busy")?;
-        let mut held = self.checkout(launch, connector, spec, settings)?;
-        let listed = self.relist(db, connector, spec, &mut held, room);
-        let keep = match &listed {
-            Ok(_) => true,
-            Err(code) => keeps_session(code),
-        };
-        self.give_back(launch, &connector.name, held, keep);
-        listed
+        let writes_on = settings.write != WritePolicy::ReadOnly;
+        let endpoint = self.endpoint_of(&connector.name, spec);
+        let mut entries = Vec::new();
+        let mut size = 0;
+        for (access, shows) in lanes(&endpoint, writes_on) {
+            let mut held = self.checkout(launch, connector, spec, settings, access)?;
+            let budget = room.min(LIST_CONNECTOR_BYTES_MAX) - size;
+            let listed = self.relist(db, connector, spec, &mut held, budget, shows);
+            let keep = match &listed {
+                Ok(_) => true,
+                Err(code) => keeps_session(code),
+            };
+            self.give_back(launch, &connector.name, held, keep);
+            let (more, more_size) = listed?;
+            entries.extend(more);
+            size += more_size;
+            assert!(size <= room.min(LIST_CONNECTOR_BYTES_MAX));
+        }
+        Ok((entries, size))
     }
 
     /// Lists a connector's tools from its vendor, checks the list against its pin and
     /// builds the names an agent sees. A tool whose shown name a harness cannot take, or
-    /// whose name, description or schema holds the connector's key, is left out; a write
-    /// tool is known but not shown. Output: the read tools' entries and their size.
+    /// whose name, description or schema holds the connector's key, is left out; a tool of
+    /// a kind this session does not show is known but not shown. Output: the shown tools'
+    /// entries and their size.
     fn relist(
         &self,
         db: &Connection,
@@ -868,6 +1025,7 @@ impl Gateway {
         spec: &ConnectorSpec,
         held: &mut Held,
         room: usize,
+        shows: &[ToolKind],
     ) -> Result<(Vec<Value>, usize), &'static str> {
         held.listed = false;
         held.tools.clear();
@@ -894,12 +1052,12 @@ impl Gateway {
             }
             let kind = classify(spec, tool);
             held.tools.insert(shown.clone(), (tool.name.clone(), kind));
-            if kind == ToolKind::Read {
+            if shows.contains(&kind) {
                 entries.push(json!({
                     "name": shown,
                     "description": shown_description(&title, &tool.description),
                     "inputSchema": tool.input_schema,
-                    "annotations": {"readOnlyHint": true},
+                    "annotations": {"readOnlyHint": kind == ToolKind::Read},
                 }));
             }
         }
@@ -913,7 +1071,8 @@ impl Gateway {
     }
 
     /// Runs one tool call and logs it: never its arguments or its result, only sizes,
-    /// time and outcome.
+    /// time and outcome. A write held for the owner is logged when it is answered. Output:
+    /// the answer, or none for a held write.
     fn call(
         &self,
         db: &Connection,
@@ -921,11 +1080,32 @@ impl Gateway {
         settings: &ConnectorSettings,
         shown: &str,
         args: &Value,
-    ) -> Answer {
+        pass: Pass<'_>,
+    ) -> Option<Answer> {
         let clock = Instant::now();
         let mut row = Self::row(launch, "", crate::semantic::now_ms());
         row.bytes_in = args.to_string().len() as i64;
-        let answer = match self.run_call(db, launch, settings, shown, args, &mut row) {
+        let result = match self.run_call(db, launch, settings, shown, args, &mut row, pass) {
+            Ok(Done::Waiting) => return None,
+            Ok(Done::Ran(done)) => Ok(done),
+            Err(code) => Err(code),
+        };
+        let ms = clock.elapsed().as_millis().min(i64::MAX as u128) as i64;
+        Some(self.finish(db, settings, row, result, ms))
+    }
+
+    /// Ends one call: its answer, and its activity row with the outcome, the answer's size
+    /// and how long it took. Inputs: the database, the settings, the row so far, the result
+    /// and the time taken. Output: the answer.
+    fn finish(
+        &self,
+        db: &Connection,
+        settings: &ConnectorSettings,
+        mut row: CallRow,
+        result: Result<Shown, &'static str>,
+        ms: i64,
+    ) -> Answer {
+        let answer = match result {
             Ok(done) => {
                 row.outcome = done.outcome.into();
                 Answer::Result {
@@ -941,11 +1121,15 @@ impl Gateway {
         if let Answer::Result { text, .. } = &answer {
             row.bytes_out = text.len() as i64;
         }
-        row.ms = clock.elapsed().as_millis().min(i64::MAX as u128) as i64;
+        row.ms = ms;
         self.log(db, settings, &row);
         answer
     }
 
+    /// Finds the tool among the connector's sessions for the write setting and runs it: a
+    /// read at once, a write when the owner allowed it or a standing allow covers it, else
+    /// held for the owner. Under Read-only a write is refused without calling the vendor.
+    #[allow(clippy::too_many_arguments)]
     fn run_call(
         &self,
         db: &Connection,
@@ -954,7 +1138,8 @@ impl Gateway {
         shown: &str,
         args: &Value,
         row: &mut CallRow,
-    ) -> Result<Shown, &'static str> {
+        pass: Pass<'_>,
+    ) -> Result<Done, &'static str> {
         let in_launch = launch.snapshot.connectors.iter().find(|name| {
             shown
                 .strip_prefix(name.as_str())
@@ -978,47 +1163,173 @@ impl Gateway {
             .manifest
             .connector()
             .ok_or("connectors_unavailable")?;
+        let writes_on = settings.write != WritePolicy::ReadOnly;
         let lock = self.lock_for(name);
         let _one = wait_lock(&lock, self.lock_wait).ok_or("connector_busy")?;
-        let mut held = self.checkout(launch, &connector, spec, settings)?;
-        let result = self.call_held(db, &connector, spec, &mut held, shown, args, row);
-        let keep = match &result {
-            Ok(_) => true,
-            Err(code) => keeps_session(code),
-        };
-        self.give_back(launch, name, held, keep);
-        result
+        let endpoint = self.endpoint_of(name, spec);
+        let mut seen_write = false;
+        for (access, shows) in lanes(&endpoint, writes_on) {
+            let mut held = self.checkout(launch, &connector, spec, settings, access)?;
+            if !held.listed {
+                let listed = self.relist(db, &connector, spec, &mut held, LIST_BYTES_MAX, shows);
+                if let Err(code) = listed {
+                    self.give_back(launch, name, held, keeps_session(code));
+                    return Err(code);
+                }
+            }
+            let Some((vendor, kind)) = held.tools.get(shown).cloned() else {
+                self.give_back(launch, name, held, true);
+                continue;
+            };
+            row.tool.clone_from(&vendor);
+            row.kind = match kind {
+                ToolKind::Read => CallKind::Read,
+                ToolKind::Write => CallKind::Write,
+            };
+            if !shows.contains(&kind) {
+                seen_write |= kind == ToolKind::Write;
+                self.give_back(launch, name, held, true);
+                continue;
+            }
+            if kind == ToolKind::Write {
+                let allowed = match pass {
+                    Pass::Allowed => Ok(true),
+                    Pass::Ask { .. } => self.allowed_without_asking(db, launch, name, settings),
+                };
+                let ask = match (allowed, pass) {
+                    (Ok(true), _) => None,
+                    (Ok(false), Pass::Ask { mailbox, call }) => Some((mailbox, call)),
+                    (Ok(false), Pass::Allowed) => unreachable!("an allowed write needs no ask"),
+                    (Err(code), _) => {
+                        self.give_back(launch, name, held, true);
+                        return Err(code);
+                    }
+                };
+                if let Some((mailbox, call)) = ask {
+                    let forms = secret_forms(&self.root, spec, &held.bindings);
+                    let fields = args.as_object().cloned().unwrap_or_default();
+                    self.give_back(launch, name, held, true);
+                    let write = PendingWrite {
+                        launch: launch.id.clone(),
+                        project: launch.snapshot.project.clone(),
+                        agent: launch.snapshot.agent.clone(),
+                        connector: name.clone(),
+                        title: title_of(&connector),
+                        tool: vendor.clone(),
+                        preview: approvals::preview(&vendor, &fields, &forms?),
+                    };
+                    let parked = Parked {
+                        launch: launch.clone(),
+                        call: call.to_owned(),
+                        shown: shown.to_owned(),
+                        args: args.clone(),
+                        row: row.clone(),
+                    };
+                    return self.park(db, settings, &write, parked, mailbox);
+                }
+            }
+            let result = self.send_call(&connector, spec, &mut held, &vendor, args, row);
+            let keep = match &result {
+                Ok(_) => true,
+                Err(code) => keeps_session(code),
+            };
+            self.give_back(launch, name, held, keep);
+            return result.map(Done::Ran);
+        }
+        if !writes_on && (seen_write || self.known_write(launch, name, shown, row)) {
+            return Err("connector_writes_off");
+        }
+        Err("connector_tool_unknown")
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn call_held(
+    /// Whether a write of this launch's project runs without asking: under Ask once per
+    /// project and connector, when the owner already allowed that connector there.
+    fn allowed_without_asking(
         &self,
         db: &Connection,
+        launch: &Launch,
+        connector: &str,
+        settings: &ConnectorSettings,
+    ) -> Result<bool, &'static str> {
+        if settings.write != WritePolicy::AskOncePerProject {
+            return Ok(false);
+        }
+        approvals::writes_allowed(db, &launch.snapshot.project, connector)
+            .map_err(|_| "connectors_unavailable")
+    }
+
+    /// Whether a tool this launch listed earlier from the connector's normal address is a
+    /// write, while that session is still held, so a call to it after writes turned
+    /// Read-only is told so without calling that address; its row then names the tool.
+    fn known_write(
+        &self,
+        launch: &Launch,
+        connector: &str,
+        shown: &str,
+        row: &mut CallRow,
+    ) -> bool {
+        let key = held_key(&launch.id, connector, Access::Full);
+        let held = locked(&self.held);
+        let Some((vendor, kind)) = held.get(&key).and_then(|held| held.tools.get(shown)) else {
+            return false;
+        };
+        if *kind != ToolKind::Write {
+            return false;
+        }
+        row.tool.clone_from(vendor);
+        row.kind = CallKind::Write;
+        true
+    }
+
+    /// Holds one write for the owner: records its approval, marks the call held in its
+    /// launch's mailbox and keeps it until the owner answers or its wait or launch ends.
+    /// One lock covers all three, so a settle never meets a call held only in part.
+    /// Inputs: the database, the settings, the write, the held call and the mailbox.
+    /// Output: held, or the refusal when too many writes wait or the mark cannot be made.
+    fn park(
+        &self,
+        db: &Connection,
+        settings: &ConnectorSettings,
+        write: &PendingWrite,
+        parked: Parked,
+        mailbox: &Mailbox,
+    ) -> Result<Done, &'static str> {
+        let mut held = locked(&self.parked);
+        if held.len() >= PARKED_MAX {
+            return Err("connector_writes_waiting_full");
+        }
+        let now = crate::semantic::now_ms();
+        let id = approvals::ask(db, write, settings.wait, now).map_err(|problem| {
+            if problem.0 == approvals::WAITING_FULL {
+                "connector_writes_waiting_full"
+            } else {
+                "connectors_unavailable"
+            }
+        })?;
+        let mark = format!("{}{}", parked.call, shim::HELD_SUFFIX);
+        if mailbox.create(&mark).is_err() {
+            let _ = approvals::expire_ids(db, &[id], now);
+            return Err("connectors_unavailable");
+        }
+        held.insert(id, parked);
+        assert!(held.len() <= PARKED_MAX);
+        Ok(Done::Waiting)
+    }
+
+    /// Calls one vendor tool on a session and passes on its text with the third-party line
+    /// first, unless the reply echoes the connector's key. Output: what the agent is shown,
+    /// or the refusal.
+    fn send_call(
+        &self,
         connector: &GrantedConnector,
         spec: &ConnectorSpec,
         held: &mut Held,
-        shown: &str,
+        vendor: &str,
         args: &Value,
         row: &mut CallRow,
     ) -> Result<Shown, &'static str> {
-        if !held.listed {
-            self.relist(db, connector, spec, held, LIST_BYTES_MAX)?;
-        }
-        let (vendor, kind) = held
-            .tools
-            .get(shown)
-            .cloned()
-            .ok_or("connector_tool_unknown")?;
-        row.tool.clone_from(&vendor);
-        row.kind = match kind {
-            ToolKind::Read => CallKind::Read,
-            ToolKind::Write => CallKind::Write,
-        };
-        if kind == ToolKind::Write {
-            return Err("connector_writes_not_yet");
-        }
         let line = third_party_line(&title_of(connector));
-        let called = held.session.call(&vendor, args);
+        let called = held.session.call(vendor, args);
         row.sent = !matches!(&called, Err(problem) if NOT_SENT.contains(&problem.code()));
         let (text, error, outcome) = match called {
             Ok(result) => {
@@ -1044,20 +1355,34 @@ impl Gateway {
     }
 }
 
-/// Removes answers and claims left in a mailbox for `STALE`, so a server that never
-/// read its answer leaves nothing behind for long.
+/// Removes answers and claims left in a mailbox for `STALE`, and held marks left past
+/// any approval's wait, so a server that never read its answer leaves nothing behind for
+/// long.
 fn sweep(mailbox: &Mailbox) {
     let now = SystemTime::now();
-    for suffix in [
-        shim::REPLY_SUFFIX,
-        shim::TAKEN_SUFFIX,
-        shim::ANSWER_PART_SUFFIX,
+    for (suffix, stale) in [
+        (shim::REPLY_SUFFIX, STALE),
+        (shim::TAKEN_SUFFIX, STALE),
+        (shim::ANSWER_PART_SUFFIX, STALE),
+        (shim::HELD_SUFFIX, HELD_STALE),
     ] {
         for (modified, id) in mailbox.entries(suffix) {
-            if now.duration_since(modified).is_ok_and(|age| age >= STALE) {
+            if now.duration_since(modified).is_ok_and(|age| age >= stale) {
                 let _ = mailbox.remove(&format!("{id}{suffix}"));
             }
         }
+    }
+}
+
+/// Removes every held mark in one launch's mailbox, for a gateway that starts holding no
+/// write, so no connector server waits for an answer that never comes. Inputs: the engine
+/// root and the launch id.
+fn drop_held(root: &Path, launch: &str) {
+    let Ok(mailbox) = Mailbox::open_for_engine(&mailbox_path(root, launch)) else {
+        return;
+    };
+    for (_, id) in mailbox.entries(shim::HELD_SUFFIX) {
+        let _ = mailbox.remove(&format!("{id}{}", shim::HELD_SUFFIX));
     }
 }
 
@@ -1108,14 +1433,35 @@ impl Drop for Busy {
     }
 }
 
-/// Runs the gateway until told to stop: every `TICK` it looks for launches with waiting
-/// calls and answers each in a thread of its own, at most `WORKERS_MAX` at once and one
-/// per launch. A call waits at most `CONNECTOR_WAIT` for its connector and sessions close
-/// on their own thread, so a slow vendor holds up only its own calls. A round whose launch
-/// read fails is skipped and closes nothing. Inputs: the engine root and the stop flag.
+/// Takes one place among the busy workers for an id, unless `WORKERS_MAX` are busy or
+/// that id already is. Inputs: the busy set and the id. Output: the place, or none.
+fn take_busy(busy: &Arc<Mutex<BTreeSet<String>>>, id: &str) -> Option<Busy> {
+    let mut taken = locked(busy);
+    if taken.len() >= WORKERS_MAX || !taken.insert(id.to_owned()) {
+        return None;
+    }
+    Some(Busy {
+        taken: busy.clone(),
+        id: id.to_owned(),
+    })
+}
+
+/// Runs the gateway until told to stop. It starts holding no write, so it ends every
+/// approval still waiting and every held mark. Then every `TICK` it looks for launches with
+/// waiting calls and answers each in a thread of its own, and settles the held writes in
+/// one more, at most `WORKERS_MAX` at once and one per launch. A call waits at most
+/// `CONNECTOR_WAIT` for its connector and sessions close on their own thread, so a slow
+/// vendor holds up only its own calls. A round whose launch read fails is skipped and
+/// closes nothing. Inputs: the engine root and the stop flag.
 pub fn serve(root: &Path, stop: &AtomicBool) {
     let gateway = Arc::new(Gateway::new(root));
     let busy: Arc<Mutex<BTreeSet<String>>> = Arc::default();
+    if let Ok(db) = crate::questions::open(root) {
+        let _ = approvals::expire_waiting(&db, crate::semantic::now_ms());
+        for launch in launches(&db).unwrap_or_default() {
+            drop_held(root, &launch.id);
+        }
+    }
     while !stop.load(Ordering::SeqCst) {
         let found = crate::questions::open(root)
             .ok()
@@ -1125,19 +1471,25 @@ pub fn serve(root: &Path, stop: &AtomicBool) {
             continue;
         };
         gateway.forget_ended(&found);
+        if !locked(&gateway.parked).is_empty()
+            && let Some(guard) = take_busy(&busy, SETTLING)
+        {
+            let worker = gateway.clone();
+            let _ = std::thread::Builder::new()
+                .name("connector-approvals".into())
+                .spawn(move || {
+                    let _guard = guard;
+                    if let Ok(db) = crate::questions::open(&worker.root) {
+                        worker.settle_at(&db, crate::semantic::now_ms());
+                    }
+                });
+        }
         for launch in found {
             if !waiting(root, &launch.id) {
                 continue;
             }
-            let guard = {
-                let mut taken = locked(&busy);
-                if taken.len() >= WORKERS_MAX || !taken.insert(launch.id.clone()) {
-                    continue;
-                }
-                Busy {
-                    taken: busy.clone(),
-                    id: launch.id.clone(),
-                }
+            let Some(guard) = take_busy(&busy, &launch.id) else {
+                continue;
             };
             let worker = gateway.clone();
             let _ = std::thread::Builder::new()
