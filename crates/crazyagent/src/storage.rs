@@ -1985,7 +1985,8 @@ pub(crate) fn create_project(
 
 /// Records a new project as [`create_project`] does, at the project's own folder: a project
 /// removed from the dashboard whose recorded folder is exactly this one comes back under its
-/// id, and any other return to this folder ends. Every refusal comes before any write.
+/// id, and any other return to this folder ends. Any other id a removal holds or leftover rows
+/// keep is refused, so no create path gives one out. Every refusal comes before any write.
 /// Inputs: the transaction, the id, the spec and the folder text. Output: as `create_project`.
 pub(crate) fn create_project_at(
     tx: &Transaction<'_>,
@@ -2011,7 +2012,10 @@ pub(crate) fn create_project_at(
         }
         None => false,
     };
-    if !returns && crate::project_setup::removed::held(tx, project_id)? {
+    if !returns
+        && (crate::project_setup::removed::held(tx, project_id)?
+            || crate::project_setup::removed::left(tx, project_id)?)
+    {
         return Ok(Outcome::Rejected {
             code: "project_id_removed".into(),
         });

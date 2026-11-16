@@ -272,11 +272,13 @@ pub(crate) fn free_id(
     Ok(Err("onboarding_project_ids_used"))
 }
 
-/// Whether a table with a `project` column still has a row of this id, in any case, so a
-/// removal made after the backfill by a build without the removal record never gives its
-/// id out. The onboarding table is left out: starting onboarding replaces or refuses its
-/// row itself. An id a live project has in any case answers false, its rows being that
-/// project's. Inputs: the connection and the id. Output: the answer; nothing is written.
+/// Whether a table with a `project` column still has a row of this id, so a removal made
+/// after the backfill by a build without the removal record never gives its id out. Each
+/// table is read by the exact id first, through its index where it has one; every row is
+/// read case-insensitively only where a row under another case can exist ([`other_case`]).
+/// The onboarding table is left out: starting onboarding replaces or refuses its row itself.
+/// An id a live project has in any case answers false, its rows being that project's.
+/// Inputs: the connection and the id. Output: the answer; nothing is written.
 pub(crate) fn left(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
     let live: bool = connection
         .query_row(
@@ -288,20 +290,69 @@ pub(crate) fn left(connection: &Connection, project: &ProjectId) -> Result<bool,
     if live {
         return Ok(false);
     }
-    for table in keyed_tables(connection)? {
-        if table == "onboarding" {
-            continue;
+    let tables: Vec<String> = keyed_tables(connection)?
+        .into_iter()
+        .filter(|table| table != "onboarding")
+        .collect();
+    let found = |test: &str| -> Result<bool, EngineError> {
+        for table in &tables {
+            let hit: bool = connection
+                .query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM \"{table}\" WHERE {test})"),
+                    [project.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(error)?;
+            if hit {
+                return Ok(true);
+            }
         }
-        let found: bool = connection
-            .query_row(
-                &format!(
-                    "SELECT EXISTS(SELECT 1 FROM \"{table}\" WHERE lower(project)=lower(?1))"
-                ),
-                [project.as_str()],
-                |row| row.get(0),
-            )
-            .map_err(error)?;
-        if found {
+        Ok(false)
+    };
+    if found("project=?1")? {
+        return Ok(true);
+    }
+    if !other_case(connection, project)? {
+        return Ok(false);
+    }
+    found("lower(project)=lower(?1)")
+}
+
+/// Whether a row under another case of this id can exist: the id has capitals, or a live or
+/// removed project's id has. Only CreateProject takes an id with capitals, and every row of a
+/// project carries its id as given, so with neither the exact read in [`left`] is complete.
+/// Inputs: the connection and the id. Output: the answer.
+fn other_case(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    if project.as_str() != project.as_str().to_ascii_lowercase() {
+        return Ok(true);
+    }
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id COLLATE BINARY <> lower(id))
+                OR EXISTS(SELECT 1 FROM projects_removed
+                          WHERE project COLLATE BINARY <> lower(project))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// Whether a live project's own folder is exactly this folder text, as a removal records it
+/// and [`returning`] compares it, so adding a project's own folder never makes a second
+/// project in it, whether onboarding, New Project or Create demo made the first (rv-code4
+/// r2 F1). Inputs: the connection and the folder text. Output: the answer; it reads one
+/// setup per live project.
+pub(crate) fn live_at(connection: &Connection, folder: &str) -> Result<bool, EngineError> {
+    let mut statement = connection
+        .prepare("SELECT s.body FROM project_setups s JOIN projects p ON p.id=s.project")
+        .map_err(error)?;
+    let bodies = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(error)?;
+    for body in bodies {
+        let stored: super::StoredSetup =
+            serde_json::from_str(&body.map_err(error)?).map_err(error)?;
+        if stored.project_folder().to_str() == Some(folder) {
             return Ok(true);
         }
     }

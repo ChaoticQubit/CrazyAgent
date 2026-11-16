@@ -532,6 +532,9 @@ pub(crate) fn start(
         tx.execute("DELETE FROM onboarding WHERE project=?1", [known.as_str()])
             .map_err(error)?;
     }
+    if crate::project_setup::removed::live_at(tx, repo_text)? {
+        return Ok((rejected("project_exists"), None));
+    }
     let project_id = match crate::project_setup::removed::returning(tx, repo_text)? {
         Some(returning) => returning,
         None => match crate::project_setup::removed::free_id(tx, &repo)? {
