@@ -1963,11 +1963,24 @@ impl ProjectSandbox {
     /// clear of [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid` for any
     /// other folder or a second one.
     pub fn allow_connector_launch(
-        self,
+        mut self,
         engine: &Path,
         folder: &Path,
     ) -> Result<Self, SandboxError> {
-        let _ = (engine, folder);
+        if self.connector_launch.is_some() {
+            return Err(invalid("the sandbox already has a connector launch folder"));
+        }
+        let launches = engine.join(crate::connectors::gateway::LAUNCHES_FOLDER);
+        if !clean_absolute(engine)
+            || canonical(engine)? != engine
+            || folder.parent() != Some(launches.as_path())
+        {
+            return Err(invalid(
+                "a connector launch folder must sit directly in the engine's launches folder",
+            ));
+        }
+        granted_root(folder, &owner_home()?, &self.secret_paths())?;
+        self.connector_launch = Some(folder.to_path_buf());
         Ok(self)
     }
 
