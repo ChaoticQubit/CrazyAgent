@@ -1425,7 +1425,7 @@ fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refus
 /// or group past a sticky store, or as leading into a temp folder: the file as found and
 /// real first, then each link and `..` folder on its way, as it runs by its path
 /// ([`Places::hop_refusal`], B1). Inputs: the places and the file. Output: the check.
-fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
+pub(crate) fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
     if !executable_file(candidate) {
         return None;
     }

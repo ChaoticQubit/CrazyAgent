@@ -558,9 +558,10 @@ pub(crate) fn start_words(resolved: &crate::tools::Resolved) -> Vec<std::ffi::Os
 
 /// The harness the engine starts for a pinned file, only after the tool resolver's entry
 /// checks ([`crate::tools::resolve_entry`]). A version-manager shim starts the real install
-/// its name resolves to, else the shim itself while agents and other users cannot change
-/// it. Inputs: the harness file and the places. Output: the tool, or the resolver's owner
-/// line for why it cannot run.
+/// its name resolves to, else the shim itself while the resolver would run its file, every
+/// link on its way included ([`crate::tools::check_place`]), and no other user can change it.
+/// Inputs: the harness file and the places. Output: the tool, or the resolver's owner line
+/// for why it cannot run.
 pub(crate) fn launch_tool(
     executable: &Path,
     places: &crate::tools::Places,
@@ -577,7 +578,7 @@ pub(crate) fn launch_tool(
         Ok(found) => Ok(found),
         Err(_)
             if executable.is_absolute()
-                && !places.agent_writable(executable)
+                && crate::tools::check_place(places, executable) == Some(Ok(()))
                 && crate::service::changeable_by_others(executable).is_none() =>
         {
             Ok(as_given(executable))
