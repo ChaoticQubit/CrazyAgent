@@ -23,7 +23,8 @@ pub(crate) enum Command {
     Remove(CredentialRef),
     List(Option<CredentialRef>, usize),
     Get(CredentialRef),
-    KeyReplaced(CredentialRef),
+    /// A new key replaced an account's key: the account and its key reference.
+    KeyReplaced(CredentialRef, CredentialRef),
     Held,
 }
 
@@ -269,13 +270,23 @@ pub(super) fn execute(
                 &tx, admission, connection, details,
             )?)))
         }
-        Command::KeyReplaced(id) => {
+        Command::KeyReplaced(id, credential) => {
             let tx = db
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(error)?;
             check_owner_admission(&tx, admission)?;
-            let (connection, details) =
-                find(&tx, config, &id)?.ok_or_else(|| error("account_not_found"))?;
+            let Some((connection, details)) = find(&tx, config, &id)? else {
+                super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential.as_str())?;
+                tx.commit().map_err(error)?;
+                #[cfg(unix)]
+                settle_removed(
+                    db,
+                    config.settings.model_access.as_ref(),
+                    super::trash::ACCOUNT_KEY,
+                    credential.as_str(),
+                );
+                return Err(error("account_not_found"));
+            };
             if !matches!(connection.auth, ModelAuthentication::ApiKey { .. }) {
                 return Err(error("account_key_not_allowed"));
             }
@@ -382,8 +393,19 @@ pub(super) fn execute(
             }
             tx.commit().map_err(error)?;
             #[cfg(unix)]
-            if let Some((kind, name)) = left {
-                settle_removed(db, config.settings.model_access.as_ref(), kind, name);
+            {
+                let catalog = config.settings.model_access.as_ref();
+                if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
+                    settle_removed(
+                        db,
+                        catalog,
+                        super::trash::ACCOUNT_KEY,
+                        credential_ref.as_str(),
+                    );
+                }
+                if let Some((kind, name)) = left {
+                    settle_removed(db, catalog, kind, name);
+                }
             }
             Ok(ResultValue::Removed(Box::new(connection)))
         }
@@ -406,11 +428,32 @@ fn account_files(auth: &ModelAuthentication) -> Option<(&'static str, &str)> {
     }
 }
 
-/// Deletes a removed account's files straight after its removal commits; what cannot go
-/// now stays noted for the next start. Inputs: the connection, the catalog left after the
-/// removal, the kind and the reference.
+/// Names the API keys a settings change leaves no connection naming: each key reference an
+/// API key connection held before the change that no API key connection holds after it.
+/// Inputs: the catalogs before and after. Output: those references, each once.
 #[cfg(unix)]
-fn settle_removed(
+pub(super) fn dropped_keys(
+    before: Option<&crate::config::ModelAccess>,
+    after: Option<&crate::config::ModelAccess>,
+) -> std::collections::BTreeSet<CredentialRef> {
+    let keys = |catalog: Option<&crate::config::ModelAccess>| {
+        catalog
+            .into_iter()
+            .flat_map(|access| &access.connections)
+            .filter_map(|connection| match &connection.auth {
+                ModelAuthentication::ApiKey { credential_ref } => Some(credential_ref.clone()),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    keys(before).difference(&keys(after)).cloned().collect()
+}
+
+/// Deletes a removed account's files, or a dropped connection's, straight after the change
+/// commits; what cannot go now stays noted for the next start. Inputs: the connection, the
+/// catalog left after the change, the kind and the reference.
+#[cfg(unix)]
+pub(super) fn settle_removed(
     db: &Connection,
     catalog: Option<&crate::config::ModelAccess>,
     kind: &str,
