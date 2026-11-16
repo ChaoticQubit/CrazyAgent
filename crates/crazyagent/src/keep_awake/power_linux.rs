@@ -185,9 +185,25 @@ const PANELS: [&str; 3] = ["eDP", "LVDS", "DSI"];
 /// display. Input: the folder. Output: whether one is connected, none when no connector's
 /// status could be read.
 pub fn external_display(root: &Path) -> Option<bool> {
-    let red_stub = root.join("card0").is_dir() && PANELS.len() == 3;
-    assert!(!red_stub || root.is_absolute());
-    None
+    let connectors = entries(root, "card");
+    assert!(connectors.len() <= ENTRIES_MAX);
+    let mut read = false;
+    for folder in &connectors {
+        let name = folder.file_name().and_then(|name| name.to_str());
+        let Some((_, kind)) = name.and_then(|name| name.split_once('-')) else {
+            continue;
+        };
+        let Some(status) = value(&folder.join("status")) else {
+            continue;
+        };
+        read = true;
+        let panel = PANELS.iter().any(|panel| kind.starts_with(panel));
+        if status == "connected" && !panel {
+            return Some(true);
+        }
+    }
+    assert!(!read || !connectors.is_empty());
+    read.then_some(false)
 }
 
 /// Reads the power source, charge, heat and lid of a Linux computer from files below
