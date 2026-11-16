@@ -1119,3 +1119,144 @@ fn dropping_an_earlier_copy_leaves_a_later_copy_or_another_file_at_the_same_name
 
 #[cfg(target_os = "macos")]
 mod renewal_tests;
+
+/// Builds the copy of the account record the home holds now, as a handoff does. Inputs:
+/// the harness and the managed home. Output: the copy, or the refusal code.
+fn copy_of(harness: agent_copy::Harness, home: &Path) -> Result<Vec<u8>, String> {
+    agent_copy::account_record(harness, &std::fs::File::open(home).unwrap(), home)
+        .map(|mut record| std::mem::take(&mut record.copy))
+        .map_err(|problem| problem.0)
+}
+
+/// SECRET-PARSE-COPIES: the agent's Codex copy is written once into a buffer of its exact
+/// size and keeps the bytes the old copy had, for a record whose access token is written
+/// with an escape and whose other fields are not plain strings.
+#[test]
+fn a_codex_copy_is_one_exact_buffer_with_the_bytes_it_had() {
+    let case = UseCase::new();
+    let home = case.home();
+    let expires = now() + 3 * 86_400;
+    let access = token(expires);
+    for at in ["2026-10-26T00:00:00Z", "2026-10-26T00:00:00.5Z"] {
+        let record = json!({
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": token(expires),
+                "access_token": access,
+                "refresh_token": "unit-refresh-secret",
+                "account_id": 7
+            },
+            "last_refresh": {"at": at, "by": "unit \"quoted\""},
+            "unit_extra": "unit-extra-secret"
+        })
+        .to_string()
+        .replacen(&access, &access.replacen('.', "\\u002e", 1), 1);
+        private_file(&home.join("auth.json"), record.as_bytes());
+        let copy = copy_of(agent_copy::Harness::Codex, &home).unwrap();
+        let old = serde_json::to_vec(&json!({
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": id_claims(expires),
+                "access_token": access,
+                "refresh_token": "",
+                "account_id": 7
+            },
+            "last_refresh": {"at": at, "by": "unit \"quoted\""}
+        }))
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(copy.clone()).unwrap(),
+            String::from_utf8(old).unwrap()
+        );
+        assert_eq!(copy.capacity(), copy.len(), "{at}");
+    }
+}
+
+/// SECRET-PARSE-COPIES: a Codex record keeps each refusal it had: an API-key sign-in is
+/// named as one whatever stands in place of the tokens table, and a key that is not text
+/// does not stop a record whose tokens are good.
+#[test]
+fn a_codex_record_keeps_its_refusal_codes() {
+    let case = UseCase::new();
+    let home = case.home();
+    let expires = now() + 3 * 86_400;
+    let tokens = json!({"id_token": token(expires), "access_token": token(expires)});
+    let keyed = "native_profile_codex_api_key";
+    let unreadable = "native_profile_codex_token_unreadable";
+    let access = token(expires);
+    let bad_id = format!(r#"{{"tokens": {{"id_token": 5, "access_token": "{access}"}}}}"#);
+    let odd_key = format!(r#"{{"OPENAI_API_KEY": 5, "tokens": {tokens}}}"#);
+    for (record, code) in [
+        (r#"{"OPENAI_API_KEY": "sk-unit"}"#, keyed),
+        (r#"{"OPENAI_API_KEY": "sk-unit", "tokens": 5}"#, keyed),
+        (r#"{"OPENAI_API_KEY": "sk-unit", "tokens": null}"#, keyed),
+        (r#"{"OPENAI_API_KEY": "", "tokens": null}"#, unreadable),
+        (r#"{"OPENAI_API_KEY": 5, "tokens": "x"}"#, unreadable),
+        ("[1]", unreadable),
+        (r#"{"tokens": {"id_token": "a.b.c"}}"#, unreadable),
+        (bad_id.as_str(), unreadable),
+        (odd_key.as_str(), "made"),
+    ] {
+        private_file(&home.join("auth.json"), record.as_bytes());
+        let made = copy_of(agent_copy::Harness::Codex, &home).map(|_| "made".to_owned());
+        assert_eq!(made.unwrap_or_else(|code| code), code, "{record}");
+    }
+}
+
+/// SECRET-PARSE-COPIES: a Codex record that names a key twice is refused, where the old
+/// reader took the last one (fail closed, leader 09:30).
+#[test]
+fn a_codex_record_with_a_duplicate_key_is_refused() {
+    let case = UseCase::new();
+    let home = case.home();
+    let expires = now() + 3 * 86_400;
+    let tokens = json!({"id_token": token(expires), "access_token": token(expires)});
+    let record = format!(r#"{{"tokens": {tokens}, "tokens": {tokens}}}"#);
+    private_file(&home.join("auth.json"), record.as_bytes());
+    assert_eq!(
+        copy_of(agent_copy::Harness::Codex, &home).err().as_deref(),
+        Some("native_profile_codex_token_unreadable")
+    );
+}
+
+/// SECRET-PARSE-COPIES: the agent's Claude Code copy is written once into a buffer of its
+/// exact size and keeps the bytes the old copy had, for an access token written with
+/// escapes, a refresh token that is not text, scopes kept as written and a plan that is
+/// text or null.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_claude_copy_is_one_exact_buffer_with_the_bytes_it_had() {
+    let expires = (now() + 8 * 3600) * 1000;
+    let access = "sk-ant-oat01-\"unit\\";
+    for plan in [json!("max"), json!("maxx"), Value::Null] {
+        let case = UseCase::with_harness("claude-code");
+        let home = case.home();
+        let record = json!({
+            "claudeAiOauth": {
+                "accessToken": access,
+                "refreshToken": 0,
+                "expiresAt": expires,
+                "scopes": ["user:inference", "User:Profile "],
+                "subscriptionType": plan
+            },
+            "mcpOAuth": {"unit-server": {"accessToken": "mcp-unit-secret"}}
+        });
+        let (_keychain, _service) = claude_keychain(&home, &record);
+        let copy = copy_of(agent_copy::Harness::Claude, &home).unwrap();
+        let old = serde_json::to_vec(&json!({
+            "claudeAiOauth": {
+                "accessToken": access,
+                "refreshToken": null,
+                "expiresAt": expires,
+                "scopes": ["user:inference", "User:Profile "],
+                "subscriptionType": plan
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(copy.clone()).unwrap(),
+            String::from_utf8(old).unwrap()
+        );
+        assert_eq!(copy.capacity(), copy.len(), "{plan}");
+    }
+}
