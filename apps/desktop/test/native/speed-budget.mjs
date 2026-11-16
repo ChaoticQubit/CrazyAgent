@@ -261,10 +261,11 @@ export function schedule(kept) {
 }
 
 /** Runs every scheduled launch (`schedule`), each only once the Mac is quiet and kept only when
- * the Mac stayed quiet through it; a run it got busy through runs again, and `TAINTED_MAX` in a
- * row refuse. A launch that fails is recorded with its error, counted for its side and not run
- * again, and the schedule goes on, so the medians come from the good runs; once a side can no
- * longer reach `KEPT_MIN` good runs the schedule ends, as no verdict could come. Inputs: kept
+ * the Mac stayed quiet through it; a run it got busy through, failed or not, runs again, and
+ * `TAINTED_MAX` in a row refuse. A launch that fails on a quiet Mac is recorded with its error,
+ * counted for its side and not run again, and the schedule goes on, so the medians come from the
+ * good runs; once a side can no longer reach `KEPT_MIN` good runs the schedule ends, as no
+ * verdict could come. Every record keeps the Mac reading after its run. Inputs: kept
  * runs per side, `{ quietBefore, launch, quietAfter }` (null or the busy reasons; `{ run,
  * sample }` for a side and whether it is a warm-up; `{ quiet, reasons }`) and the progress it
  * fills: `{ samples, failed, runs }`. Output: null, or the refusal's reasons. */
@@ -281,8 +282,10 @@ export async function runSchedule(kept, { quietBefore, launch, quietAfter }, pro
       try {
         done = await launch(side, warm);
       } catch (error) {
+        const after = quietAfter();
+        runs.push({ side, warm, failed: failureText(error), quiet_after: after.quiet, reasons: after.reasons });
+        if (!after.quiet) continue;
         failed[side] += 1;
-        runs.push({ side, warm, failed: failureText(error) });
         break;
       }
       const after = quietAfter();
