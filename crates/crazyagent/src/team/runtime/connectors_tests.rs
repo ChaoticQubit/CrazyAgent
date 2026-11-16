@@ -141,6 +141,12 @@ fn an_only_network_project_gets_connectors_and_its_remotes_are_unchanged() {
         )
         .unwrap();
         let runtime = connector_runtime(&fixture);
+        for id in [1, 2] {
+            assert_eq!(
+                fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+                id
+            );
+        }
         let account = managed_account(&runtime);
         let project = ProjectId::new(PROJECT).unwrap();
         let has_entry = |id: i64| {
