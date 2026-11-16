@@ -18,10 +18,12 @@ import { registerTrust } from "./trust.js";
 
 /**
  * What the built-in extension tells the owner when the engine refused its session as
- * taken: something else in this IDE used the IDE's access first (CA-SEC-004).
+ * taken (CA-SEC-004): the IDE's access was used twice, by another extension, by a second
+ * window starting at the same moment, or by this one again after the engine could not
+ * remove the access file, so it names all three (rv-ds241 CA-SEC-004b N1).
  */
 export const SESSION_TAKEN =
-  "CrazyAgent ended this IDE's connection because another extension in it used the IDE's access first. Close the IDE and open it again from CrazyAgent. If it happens again, an extension you approved for this project may not be safe.";
+  "CrazyAgent ended this IDE's connection because its access was used twice: by another extension in it, by a second window of it opening at the same moment, or after CrazyAgent could not remove its access file. Close the IDE and open it again from CrazyAgent. If it happens again with one window, an extension you approved for this project may not be safe.";
 
 /**
  * One CrazyAgent IDE feature. It registers its views, commands and event handlers with

@@ -53,7 +53,7 @@ const memories_js_1 = require("./sidebar/memories.js");
 const scm_js_1 = require("./scm.js");
 const terminal_js_1 = require("./terminal.js");
 const trust_js_1 = require("./trust.js");
-exports.SESSION_TAKEN = "CrazyAgent ended this IDE's connection because another extension in it used the IDE's access first. Close the IDE and open it again from CrazyAgent. If it happens again, an extension you approved for this project may not be safe.";
+exports.SESSION_TAKEN = "CrazyAgent ended this IDE's connection because its access was used twice: by another extension in it, by a second window of it opening at the same moment, or after CrazyAgent could not remove its access file. Close the IDE and open it again from CrazyAgent. If it happens again with one window, an extension you approved for this project may not be safe.";
 const features = [
     base_content_js_1.registerBaseContent,
     scm_js_1.registerChanges,
