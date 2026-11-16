@@ -280,7 +280,8 @@ fn a_markdown_history_gives_each_prompt_and_each_reply_as_one_message() {
 /// DEC-180 Task 25a, plan row 25 bounds: records past the bound are not read, in path order,
 /// and the import says it was cut; so does a search past its folder entries and a read past
 /// the bytes in all. A record past its bytes or its messages is read up to the bound and
-/// says it was clipped, and a line past its bound is passed over while the next is read.
+/// says it was clipped; a line past its bound is passed over, the next is still read, and
+/// the record says it was clipped.
 #[test]
 fn bounds_on_records_bytes_and_messages_cut_the_import_and_say_so() {
     let home = Home::new();
@@ -373,7 +374,7 @@ fn bounds_on_records_bytes_and_messages_cut_the_import_and_say_so() {
         said(&passed),
         [vec![(Speaker::Agent, "before"), (Speaker::Agent, "after")]]
     );
-    assert!(!passed.conversations[0].clipped);
+    assert!(passed.conversations[0].clipped);
 }
 
 /// DEC-180 Task 25a, plan row 25: a record that cannot be opened, holds nothing readable,
