@@ -1,3 +1,4 @@
+use super::drivers::acp::Acp;
 use super::drivers::{self, Piped};
 use super::interactive::KEY_FILE;
 use super::leftovers::{Follower, LINEAGE_VARIABLE, LineageToken, Unstopped};
@@ -579,7 +580,9 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     let default = match drivers::piped(&request.harness) {
         Ok(Piped::Codex) => CODEX_DEFAULT_BASE_URL,
         Ok(Piped::Claude) => CLAUDE_DEFAULT_BASE_URL,
-        Err(_) => return Err(failure("launch_key_relay_unsupported")),
+        Ok(Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn) | Err(_) => {
+            return Err(failure("launch_key_relay_unsupported"));
+        }
     };
     let upstream = request.account.base_url().unwrap_or(default).to_owned();
     let secret = SecretString::new(key.reveal().as_bytes().to_vec())
@@ -646,7 +649,26 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     let (arguments, environment) = match drivers::piped(&request.harness)? {
         Piped::Codex => codex_invocation(request, installed, key_file.as_deref())?,
         Piped::Claude => claude_invocation(request, installed, key_file.as_deref()),
+        Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
+            return Err(failure("launch_harness_unsupported"));
+        }
     };
+    sandboxed(request, installed, &arguments, &environment)
+}
+
+/// Wraps a harness command line in the launch's sandbox, with the agent's own environment:
+/// its home, temporary folder, tool path, plain locale, the model proxy and git identity of
+/// an installed context, and the harness's own variables. Inputs: the checked request, the
+/// installed context, if any, the harness arguments and variables. Output: the command with
+/// piped standard streams in the working folder, or `launch_sandbox_unavailable` off macOS
+/// and `launch_environment_refused` when the environment cannot be built.
+fn sandboxed(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    arguments: &[OsString],
+    environment: &[(&'static str, OsString)],
+) -> Result<Command, LaunchError> {
+    let home = request.account.home();
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
     }
@@ -704,7 +726,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     .map_err(|_| failure("launch_environment_refused"))?;
     command
         .args(script)
-        .args(&arguments)
+        .args(arguments)
         .current_dir(&request.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1111,6 +1133,9 @@ enum Driver {
         interrupt: Option<String>,
         late: u64,
     },
+    Acp {
+        protocol: Box<Acp>,
+    },
 }
 
 impl Driver {
@@ -1166,6 +1191,16 @@ impl Driver {
                     Vec::new(),
                 ))
             }
+            Piped::Acp => {
+                let (protocol, start) = Acp::new(&request.working_dir, request.tools, None)?;
+                let driver = Self::Acp {
+                    protocol: Box::new(protocol),
+                };
+                Ok((driver, vec![start]))
+            }
+            Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
+                Err(failure("launch_harness_unsupported"))
+            }
         }
     }
 
@@ -1210,6 +1245,7 @@ impl Driver {
                     .map(Some)
                     .map_err(|_| failure("launch_busy"))
             }
+            Self::Acp { protocol } => protocol.prompt(text),
         }
     }
 
@@ -1249,6 +1285,7 @@ impl Driver {
                 *interrupt = Some(id);
                 Ok(Some(bytes))
             }
+            Self::Acp { protocol } => protocol.cancel(),
         }
     }
 
@@ -1425,6 +1462,11 @@ impl Driver {
                         }
                     }
                 }
+            }
+            Self::Acp { protocol } => {
+                let (decoded, answers) = protocol.receive(line)?;
+                events.extend(decoded);
+                writes.extend(answers);
             }
         }
         Ok((events, writes))
@@ -2025,6 +2067,9 @@ fn tail(output: File, probe: File, sender: SyncSender<Line>) {
         }
     }
 }
+
+mod turn_session;
+pub use turn_session::TurnSession;
 
 #[cfg(test)]
 mod tests;

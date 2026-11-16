@@ -2,6 +2,9 @@ use super::launch::{LaunchError, failure};
 use super::manifest::RecordKind;
 use super::registry::registry;
 
+pub mod json_files;
+pub mod json_rewrite;
+pub mod jsonl_append;
 pub mod markdown_history;
 pub mod screen;
 pub mod sqlite_poll;
