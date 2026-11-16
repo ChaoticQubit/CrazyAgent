@@ -279,6 +279,14 @@ impl Guard {
         if self.signals {
             args.push(GUARD_SIGNALS.into());
         }
+        if let Some(held) = &self.held {
+            for (flag, paths) in [(GUARD_HELD, &held.entries), (GUARD_HELD_TREE, &held.trees)] {
+                for path in paths {
+                    args.push(flag.into());
+                    args.push(path.into());
+                }
+            }
+        }
         args
     }
 
@@ -299,7 +307,7 @@ impl Guard {
             reach: Some(reach).filter(|_| !self.loopback.is_empty()),
             git: self.git.clone(),
             signals: self.signals,
-            held: None,
+            held: self.held.clone(),
         }
     }
 }
@@ -583,7 +591,8 @@ fn supervisor_probe(args: &[OsString]) -> Option<Result<HelperRequest, String>> 
 
 /// Reads one call-supervisor flag into a guard. Inputs: the guard, the flag and the
 /// arguments after it. Output: whether the flag was one of them, or the reason its value
-/// is refused; an own git place is one only after `--guard-git`, which comes once.
+/// is refused; an own git place is one only after `--guard-git`, which comes once, and a
+/// held place is an absolute path.
 fn guard_flag(
     guard: &mut Guard,
     flag: &OsStr,
@@ -602,6 +611,8 @@ fn guard_flag(
             guard.git = Some(GitOwn::default());
             return Ok(true);
         }
+        Some(GUARD_HELD) => Some(&mut guard.held.get_or_insert_with(Held::default).entries),
+        Some(GUARD_HELD_TREE) => Some(&mut guard.held.get_or_insert_with(Held::default).trees),
         Some(OWN_TREE) => guard.git.as_mut().map(|git| &mut git.trees),
         Some(OWN_KIDS) => guard.git.as_mut().map(|git| &mut git.kids),
         Some(OWN_GIT) => guard.git.as_mut().map(|git| &mut git.exact),
@@ -640,6 +651,10 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     let own = |git: &GitOwn| git.trees.len() + git.kids.len() + git.exact.len();
     if guard.git.as_ref().map_or(0, own) > GRANTS_MAX {
         return Err("too many own git places".into());
+    }
+    let held = |held: &Held| held.entries.len() + held.trees.len();
+    if guard.held.as_ref().map_or(0, held) > GRANTS_MAX {
+        return Err("too many held places".into());
     }
     Ok(())
 }
@@ -1541,14 +1556,26 @@ impl LinuxSandbox {
 
     /// The policy with the guards this launch's supervision carries, none without one,
     /// checked as the helper checks it ([`guard_fits`]). A nested launch never carries the
-    /// signal guard. Input: the policy. Output: the policy, or `Invalid` for more own git
-    /// folders than the helper takes.
-    fn with_guard(&self, policy: LandlockPolicy) -> Result<LandlockPolicy, SandboxError> {
+    /// signal guard. Inputs: the policy and the guarded entries, each held whole with all
+    /// below it (DEC-185 S2a). Output: the policy, or `Invalid` for more own git folders or
+    /// held places than the helper takes.
+    fn with_guard(
+        &self,
+        policy: LandlockPolicy,
+        held: &[PathBuf],
+    ) -> Result<LandlockPolicy, SandboxError> {
         let Some(supervision) = self.supervision else {
             return Ok(policy);
         };
+        let held = Held {
+            entries: Vec::new(),
+            trees: held.to_vec(),
+        };
         let guarded = LandlockPolicy {
-            guard: guard(&self.sandbox, supervision),
+            guard: Guard {
+                held: Some(held).filter(|held| !held.trees.is_empty()),
+                ..guard(&self.sandbox, supervision)
+            },
             ..policy
         };
         assert!(!guarded.nested || !guarded.guard.signals);
@@ -2084,21 +2111,28 @@ impl Sandbox for LinuxSandbox {
         if confined && matches!(self.backend, LinuxBackend::Bubblewrap { .. }) {
             return Err(SandboxError::Unavailable(CONFINED_NEEDS_LANDLOCK.into()));
         }
-        if !grants.guarded.is_empty() {
+        let unheld = !grants.guarded.is_empty() && self.supervision.is_none();
+        if self.sandbox.clone.is_some() || unheld {
             return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
         }
         let mut command = match &self.backend {
             LinuxBackend::Landlock { helper } => {
-                let policy = self.with_guard(landlock_policy(&grants, &self.sandbox))?;
+                let policy =
+                    self.with_guard(landlock_policy(&grants, &self.sandbox), &grants.guarded)?;
+                assert!(holds_all(&policy, &grants.guarded));
                 let mut command = Command::new(helper);
                 command.args(policy.args());
                 command
             }
             LinuxBackend::Nested { bwrap, helper } => {
-                let policy = self.with_guard(LandlockPolicy {
-                    nested: true,
-                    ..landlock_policy(&grants, &self.sandbox)
-                })?;
+                let policy = self.with_guard(
+                    LandlockPolicy {
+                        nested: true,
+                        ..landlock_policy(&grants, &self.sandbox)
+                    },
+                    &grants.guarded,
+                )?;
+                assert!(holds_all(&policy, &grants.guarded));
                 let (bridged, routes) = match &self.routed {
                     Some(routed) => (routed.bridged.clone(), routed.any.clone()),
                     None => (self.sandbox.bridged_ports().unwrap_or_default(), Vec::new()),
@@ -2136,8 +2170,8 @@ impl Sandbox for LinuxSandbox {
 /// What a launch's Landlock rules grant: folders read, folders written whole, git folders
 /// written with [`git_folder_rights`], and `guarded`, the entries Landlock cannot keep
 /// read-only under those grants (protected paths in a git grant, [`ADMIN_HELD`], the
-/// worktree's `.git` link and a clone's whole git folder), which the call supervisor and the
-/// nested binds must hold before a confined launch starts (DEC-185 S1, S2).
+/// worktree's `.git` link and a clone's whole git folder), which the call supervisor must
+/// hold before a confined launch starts, the nested binds a second layer (DEC-185 S1, S2).
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
@@ -2303,12 +2337,21 @@ fn guard(sandbox: &ProjectSandbox, supervision: Supervision) -> Guard {
     held
 }
 
+/// Tells whether a launch policy's supervisor holds every guarded entry, the rule that lets
+/// a confined launch past the tripwire (DEC-185 S2). Inputs: the policy and the guarded
+/// entries. Output: true when there are none, or each is a held tree.
+fn holds_all(policy: &LandlockPolicy, guarded: &[PathBuf]) -> bool {
+    let held = policy.guard.held.as_ref();
+    guarded.is_empty() || held.is_some_and(|held| held.trees == guarded)
+}
+
 /// The folders an agent may make a `.git` entry in, as the macOS boundary's nested git
-/// rule allows them: the top of each working tree it works in, and each folder directly
-/// inside the engine's worktree folders (when it adds worktrees) or inside a setup folder.
-/// Input: the policy. Output: the agent's own git folders.
+/// rule allows them: the top of each working tree it works in, each folder directly inside
+/// the engine's worktree folders (when it adds worktrees) or inside a setup folder, and for
+/// a linked worktree the project's `.git` its admin folder sits in, where Landlock lets it
+/// write the admin folder alone (DEC-185 S2). Input: the policy. Output: the agent's own
+/// git folders.
 fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
-    assert!(sandbox.checkout.is_none());
     assert!(sandbox.clone.is_none());
     let (working, _) = sandbox.git_deny_roots();
     let mut kids = Vec::new();
@@ -2320,10 +2363,18 @@ fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
     if let Some(setup) = &sandbox.setup {
         kids.push(setup.folder.clone());
     }
+    let common = sandbox.checkout.as_ref().and_then(|checkout| {
+        let plain = |folder: &&Path| folder.file_name() == Some(OsStr::new(".git"));
+        checkout
+            .admin
+            .ancestors()
+            .find(plain)
+            .map(Path::to_path_buf)
+    });
     let own = GitOwn {
         trees: working.into_iter().map(Path::to_path_buf).collect(),
         kids,
-        exact: Vec::new(),
+        exact: common.into_iter().collect(),
     };
     assert!(!own.trees.is_empty());
     own
