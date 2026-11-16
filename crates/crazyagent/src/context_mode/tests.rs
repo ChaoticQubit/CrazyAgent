@@ -922,3 +922,50 @@ fn the_install_steps_take_the_owners_stored_strict_choice_on_linux() {
     assert_eq!(os::boundary_settings(&case.root), Ok(wanted));
     assert_eq!(SandboxSettings::default().linux_strict, LinuxStrict::Off);
 }
+
+/// WIN-CM-STRICT-ROW (rv-code4 WIN-CONTEXT-MODE fold): the node check and npm's install
+/// step hand the stored strict choice to their boundary. With the call supervisor off a Linux
+/// launch never holds fully (`linux_holds_fully`), so strict on refuses both where strict
+/// off builds them; a step that passed Off in place of the stored choice builds under both.
+/// Off Linux strict changes nothing.
+#[test]
+fn the_node_check_and_npm_refuse_under_stored_strict_when_linux_cannot_hold_fully() {
+    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
+    use crate::sandbox_settings::SandboxSettings;
+    let case = case("/usr/bin/false");
+    let connection = rusqlite::Connection::open(case.root.join("engine.db")).unwrap();
+    crate::sandbox_settings::initialize(&connection).unwrap();
+    let prefix = format!("context-mode@{VERSION}");
+    let built = |strict: LinuxStrict| {
+        let settings = SandboxSettings {
+            linux_supervisor: LinuxSupervisor::Off,
+            linux_strict: strict,
+            ..SandboxSettings::default()
+        };
+        crate::sandbox_settings::save(&connection, &settings).unwrap();
+        let staged = staging_folder(&case.npm(), &prefix).unwrap();
+        let work = staging_folder(&case.npm(), &format!("{prefix}-work")).unwrap();
+        let scratch = staging_folder(&case.npm(), NODE_CHECK).unwrap();
+        (
+            node_command(&case.root, &scratch, &case.bin).map(|_| ()),
+            npm_command(&case.root, &staged, &work, &case.bin, VERSION).map(|_| ()),
+        )
+    };
+    let off = built(LinuxStrict::Off);
+    let on = built(LinuxStrict::On);
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            off,
+            (Ok(()), Ok(())),
+            "strict off builds both with the supervisor off, on a host with a boundary as rcli_host/master_tests.rs needs"
+        );
+        let refused = Err(InstallError("context_mode_sandbox_unavailable"));
+        assert_eq!(
+            on,
+            (refused, refused),
+            "strict on refuses the node check and npm alike"
+        );
+    } else {
+        assert_eq!(on, off, "off Linux strict changes nothing");
+    }
+}
