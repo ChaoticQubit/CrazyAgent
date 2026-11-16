@@ -3149,6 +3149,16 @@ impl TeamRuntime {
         let now = now_ms();
         let ids: Vec<i64> = self.workers.keys().copied().collect();
         self.workers.clear();
+        let launched: Vec<i64> = self
+            .connector_launches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect();
+        for id in launched.into_iter().filter(|id| !kept.contains(id)) {
+            self.end_connector_launch(id);
+        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
