@@ -9275,6 +9275,17 @@ impl TeamRuntime {
             .map(|relay| Secret::new(relay.token().to_owned()))
             .transpose()
             .map_err(|e| with_code(key_relay_sentence(&e.0), Some(&e.0)))?;
+        let handover = match (&kind, &account.reach) {
+            (Some(crate::coord::settings::HarnessKind::Listed(_)), TeamReach::Endpoint { .. }) => {
+                listed_handover(
+                    &(self.access)().unwrap_or_default(),
+                    launch,
+                    &account.connection,
+                    relay.as_deref(),
+                )?
+            }
+            _ => None,
+        };
         let (home, remote, model) = match &account.reach {
             TeamReach::Endpoint {
                 base_url, model, ..
@@ -9713,7 +9724,10 @@ impl TeamRuntime {
                     base_url: relay_url.unwrap_or_else(|| base_url.clone()),
                     key: relay_token,
                 },
-                context: Box::new(context),
+                context: Box::new(match handover {
+                    Some(handover) => context.with_handover(handover),
+                    None => context,
+                }),
             },
             TeamReach::Managed { .. } => Mode::PerTurn { home },
         };
@@ -14021,6 +14035,47 @@ fn listed_home(own: &Path, launch: &str, account: &CredentialRef) -> Result<Path
     })?;
     assert!(home.starts_with(own) && home != own);
     Ok(home)
+}
+
+/// The account hand-over a team agent of a listed harness starts with (T19b 19b-2): the
+/// stored connection's wire format picks the manifest's `accounts` entry, filled with the
+/// relay of a keyed account or the address and local placeholder of a keyless one, for a
+/// piped and a terminal-only harness alike. Inputs: the live access, the launch harness, the
+/// account and its relay. Output: the hand-over, none for a harness with no entry for the
+/// format, or the owner line with the refusal code.
+fn listed_handover(
+    access: &ModelAccess,
+    launch: &str,
+    account: &CredentialRef,
+    relay: Option<&crate::model_gateway::relay::Relay>,
+) -> Result<Option<crate::harnesses::accounts::Handover>, String> {
+    let harness = crate::harnesses::registry::registry()
+        .get(launch)
+        .ok_or("harness has no launch adapter")?;
+    let connection = access
+        .connections
+        .iter()
+        .find(|connection| &connection.id == account)
+        .ok_or_else(|| {
+            with_code(
+                "the agent's account is no longer in its pool",
+                Some("team_account_left_pool"),
+            )
+        })?;
+    if !crate::harnesses::accounts::hands_over(harness, connection.protocol.as_str()) {
+        return Ok(None);
+    }
+    let handover =
+        crate::harnesses::accounts::handover(harness, connection, relay).map_err(|error| {
+            with_code(
+                "the account could not be handed to the agent's harness",
+                Some(&error.0),
+            )
+        })?;
+    assert!(crate::model_gateway::relay::is_placeholder(
+        handover.token()
+    ));
+    Ok(Some(handover))
 }
 
 /// The most bytes of a worktree's `.gitignore` read to see whether it ignores the graph.

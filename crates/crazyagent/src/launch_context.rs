@@ -175,8 +175,9 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 /// whether a Claude Code lead runs its own agent team, the engine executable and mailbox
 /// of a team agent's message relay, the loopback port of the model proxy a team agent
 /// under the None network reaches its model through (S4b), the display its terminal draws
-/// with (N-D9, DEC-141) and whether its team tools section tells it to merge
-/// `crazyagent/main` ("Catch up with main", OS-8).
+/// with (N-D9, DEC-141), whether its team tools section tells it to merge
+/// `crazyagent/main` ("Catch up with main", OS-8) and the account hand-over a listed
+/// harness is started with (T19b 19b-2).
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
@@ -191,6 +192,7 @@ pub struct AgentContext {
     freeze_record: Option<PathBuf>,
     terminal_display: TerminalDisplay,
     catch_up_main: bool,
+    handover: Option<crate::harnesses::accounts::Handover>,
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
@@ -206,8 +208,9 @@ struct Process {
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
 /// transcript, whether its generated plugin holds hooks, the Claude Code tool names the
 /// owner switched off, whether the lead runs its own agent team, the model proxy port its
-/// variables name, and the lock that keeps a second launch out of that home. Dropping it deletes every file holding a secret and the
-/// copied skills and hooks, unless `keep` left them to a pane that still runs.
+/// variables name, the account hand-over a listed harness's launch sets, and the lock that
+/// keeps a second launch out of that home. Dropping it deletes every file holding a secret
+/// and the copied skills and hooks, unless `keep` left them to a pane that still runs.
 #[derive(Debug)]
 pub struct Installed {
     arguments: Vec<OsString>,
@@ -223,6 +226,7 @@ pub struct Installed {
     terminal_display: TerminalDisplay,
     environment: Vec<(OsString, OsString)>,
     engine_servers: Vec<EngineServer>,
+    handover: Option<crate::harnesses::accounts::Handover>,
     _lock: File,
 }
 
@@ -310,6 +314,7 @@ pub fn for_project(
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main,
+        handover: None,
     })
 }
 
@@ -747,14 +752,16 @@ impl AgentContext {
     /// holds the stored connection made with the relay it started (T19b 19b-2); the launch
     /// sets its variables through the one exception to the agent variable guard. Input: the
     /// hand-over. Output: the context.
-    pub fn with_handover(self, _handover: crate::harnesses::accounts::Handover) -> Self {
+    pub fn with_handover(mut self, handover: crate::harnesses::accounts::Handover) -> Self {
+        self.handover = Some(handover);
+        assert!(self.handover.is_some());
         self
     }
 
     /// The account hand-over this context gives its launch. Output: the hand-over, or none
     /// for a native harness or a launch given none.
     pub fn handover(&self) -> Option<&crate::harnesses::accounts::Handover> {
-        None
+        self.handover.as_ref()
     }
 
     /// Adds a live master's own instructions to what its harness reads at launch, so they
@@ -1087,7 +1094,8 @@ impl AgentContext {
     /// MCP server is given. Codex and Claude Code are written as their drivers read them;
     /// any other harness the registry lists, with no piped driver or the ACP, jsonl-turn or
     /// text-turn one, as its manifest asks ([`Self::install_listed`]); the rcli and
-    /// jsonl-rpc drivers and an unknown harness get `launch_harness_unsupported`. On macOS
+    /// jsonl-rpc drivers and an unknown harness get `launch_harness_unsupported`, and Codex
+    /// or Claude Code given an account hand-over `launch_account_handover_mismatch`. On macOS
     /// the files hold the agent's own `getconf`
     /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
     /// and the harness arguments, or `launch_home_busy` while another launch uses the home.
@@ -1111,6 +1119,9 @@ impl AgentContext {
                 return self.install_listed(listed.manifest(), home, tools);
             }
         };
+        if self.handover.is_some() {
+            return Err(failure("launch_account_handover_mismatch"));
+        }
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
         let state = home.join(STATE);
@@ -1133,6 +1144,7 @@ impl AgentContext {
             terminal_display: self.terminal_display,
             environment: Vec::new(),
             engine_servers: Vec::new(),
+            handover: None,
             _lock: lock,
         };
         remove(&state);
@@ -1352,9 +1364,10 @@ impl AgentContext {
     /// Writes this context into one private home for one launch of a listed harness, as its
     /// manifest asks: the MCP servers and the instruction text ([`Self::listed_instructions`],
     /// with a team agent's owner text) into the files its `mcp` and `instructions` blocks
-    /// name, and the environment its `home` block sets, on the guard.
-    /// Inputs: the manifest, the private home ([`crate::harnesses::home::prepare`]) and the
-    /// tools switch; with tools off the MCP file holds no server, a server with any tool the
+    /// name, and the environment its `home` block sets and the context's account hand-over,
+    /// on the guard. Inputs: the manifest, the private home
+    /// ([`crate::harnesses::home::prepare`]) and the tools switch; with tools off the MCP
+    /// file holds no server, a server with any tool the
     /// owner switched off is left out whole, as the file cannot switch off one tool, and an
     /// ACP harness's file leaves out the engine's own servers, which its session opens with.
     /// Output: the guard that deletes those files, `launch_manifest_invalid` for blocks that
@@ -1403,6 +1416,7 @@ impl AgentContext {
                 .iter()
                 .filter_map(engine_server)
                 .collect(),
+            handover: self.handover.clone(),
             _lock: lock,
         };
         let acp = manifest.piped == Some(crate::harnesses::manifest::DriverKind::Acp);
@@ -1500,6 +1514,13 @@ impl Installed {
         &self.engine_servers
     }
 
+    /// The account hand-over a listed harness's launch sets through the one exception to
+    /// the agent variable guard (T19b 19b-2), from the context it was installed from.
+    /// Output: the hand-over, or none for Codex, Claude Code and a launch given none.
+    pub fn handover(&self) -> Option<&crate::harnesses::accounts::Handover> {
+        self.handover.as_ref()
+    }
+
     /// Tells whether a headless Claude run of this launch keeps its transcript, as the
     /// project's "Keep transcripts for headless runs" setting says.
     pub fn keeps_transcript(&self) -> bool {
@@ -1584,6 +1605,7 @@ impl Installed {
             terminal_display: TerminalDisplay::Classic,
             environment: Vec::new(),
             engine_servers: Vec::new(),
+            handover: None,
             _lock: lock,
         })
     }
@@ -2576,6 +2598,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         terminal_display: TerminalDisplay::Classic,
         environment: Vec::new(),
         engine_servers: Vec::new(),
+        handover: None,
         _lock: lock,
     })
 }

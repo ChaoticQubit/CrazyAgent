@@ -63,6 +63,7 @@ fn context() -> AgentContext {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     }
 }
 
