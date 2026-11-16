@@ -1,6 +1,7 @@
 use crate::connectors::gateway::GatewayLaunch;
 use crate::connectors::settings::NativeConnectors;
 use crate::connectors::shim;
+use crate::coord::settings::HarnessKind;
 use crate::engine::EngineError;
 use crate::plugins::{LaunchServer, ServerSpec};
 use std::path::Path;
@@ -55,6 +56,22 @@ pub fn native_switch(harness: &str, native: NativeConnectors) -> NativeSwitch {
     }
 }
 
+/// What the Connectors page says one harness reaches through the gateway (DEC-141 parity):
+/// each harness row names its harness and its state. RCLI runs only as a CrazyAgent master,
+/// whose bundled host starts the gateway as its one MCP server (Task 14), so its row says
+/// master. Input: the harness kind. Output: the row's words.
+pub fn reach(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::ClaudeCode => "Claude Code: yes",
+        HarnessKind::Codex => "Codex: yes",
+        HarnessKind::Rcli => "RCLI: yes (master)",
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "launch_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "launch_reach_tests.rs"]
+mod reach_tests;
