@@ -763,9 +763,9 @@ impl OwnerRuntimeHandle {
         }
         let result = match self.record_master_start(&prepared).await {
             Ok(()) if prepared.session.selection.backend == MasterBackend::Rcli => {
-                let result = self.launch_rcli_master_turn(&prepared, turn_id).await;
-                keep_listed_if_uncertain(listed, &result);
-                return result;
+                return self
+                    .launch_rcli_master_turn(&prepared, turn_id, listed)
+                    .await;
             }
             Ok(()) => self.launch_master_turn(&prepared, turn_id).await,
             Err(error) => Err(error),
@@ -1466,7 +1466,7 @@ fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
 /// Keeps a headless master turn on the hidden folders list after it returns when its close
 /// or retirement was uncertain, since its processes may still run, until the engine starts
 /// again (SA-VID14 r1); the RCLI test is the wider one. Inputs: the guard and the result.
-fn keep_listed_if_uncertain<T>(
+pub(super) fn keep_listed_if_uncertain<T>(
     listed: crate::sandbox::hidden_paths::HiddenRun,
     result: &Result<T, EngineError>,
 ) {
