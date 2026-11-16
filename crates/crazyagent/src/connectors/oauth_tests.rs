@@ -1670,6 +1670,240 @@ fn removing_a_connector_resolves_its_sign_in_notice() {
     );
 }
 
+/// What the probes of 11-15 found for one Group O connector (PROBES-connectors.md): its MCP
+/// address and read-only address, its MCP host and OAuth host, the scopes it asks to read
+/// and to write, and whether its server promises the issuer in every answer.
+struct Probed {
+    name: &'static str,
+    url: &'static str,
+    read_only: Option<&'static str>,
+    host: &'static str,
+    oauth_host: &'static str,
+    scopes_read: &'static [&'static str],
+    scopes_write: &'static [&'static str],
+    iss: bool,
+}
+
+const GROUP_O: [Probed; 3] = [
+    Probed {
+        name: "linear",
+        url: "https://mcp.linear.app/mcp",
+        read_only: Some("https://mcp.linear.app/mcp/readonly"),
+        host: "mcp.linear.app",
+        oauth_host: "mcp.linear.app",
+        scopes_read: &["read"],
+        scopes_write: &["write"],
+        iss: true,
+    },
+    Probed {
+        name: "notion",
+        url: "https://mcp.notion.com/mcp",
+        read_only: None,
+        host: "mcp.notion.com",
+        oauth_host: "mcp.notion.com",
+        scopes_read: &[],
+        scopes_write: &[],
+        iss: true,
+    },
+    Probed {
+        name: "atlassian",
+        url: "https://mcp.atlassian.com/v2/mcp",
+        read_only: None,
+        host: "mcp.atlassian.com",
+        oauth_host: "auth.atlassian.com",
+        scopes_read: &[],
+        scopes_write: &[],
+        iss: false,
+    },
+];
+
+/// A bundled connector's manifest as it ships. Input: its name. Output: the manifest.
+fn shipped(name: &str) -> crate::app_plugins::manifest::Manifest {
+    let text = crate::app_plugins::store::bundled()
+        .iter()
+        .find(|(bundled, _)| *bundled == name)
+        .map(|(_, text)| *text);
+    assert!(text.is_some(), "{name} ships with the app");
+    crate::app_plugins::manifest::parse(text.unwrap())
+        .unwrap_or_else(|problem| panic!("{name}: {problem:?}"))
+}
+
+/// A shipped connector declared at a loopback stand-in of its vendor: only the addresses
+/// and the OAuth hosts are swapped, a read-only address kept under the resource.
+fn at_stand_in(spec: &ConnectorSpec, stand_in: &Vendor) -> ConnectorSpec {
+    let read_only = match spec.mcp.read_only {
+        ReadOnly::Url(_) => ReadOnly::Url(
+            url::Url::parse(&format!("http://127.0.0.1:{}/mcp/readonly", stand_in.port)).unwrap(),
+        ),
+        _ => ReadOnly::None,
+    };
+    ConnectorSpec {
+        mcp: McpEndpoint {
+            read_only,
+            ..stand_in.endpoint()
+        },
+        oauth: spec.oauth.clone().map(|oauth| OAuthSpec {
+            hosts: vec!["127.0.0.1".to_owned()],
+            ..oauth
+        }),
+        ..spec.clone()
+    }
+}
+
+/// Linear, Notion and Atlassian ship with the addresses, hosts, registration order and
+/// scopes the probes found, and each signs in at a loopback stand-in of its vendor with
+/// only the addresses swapped: by registration when no client document is given, by the
+/// document once one is, and by the owner's own app once it is saved.
+#[test]
+fn every_group_o_connector_signs_in_against_a_loopback_server_with_its_declared_registration_order()
+{
+    for probe in GROUP_O {
+        let name = probe.name;
+        let manifest = shipped(name);
+        let spec = manifest.connector().unwrap().clone();
+        assert_eq!(spec.mcp.url.as_str(), probe.url, "{name}");
+        assert_eq!(spec.mcp.hosts, [probe.host], "{name}");
+        let read_only = match &spec.mcp.read_only {
+            ReadOnly::Url(url) => Some(url.as_str()),
+            _ => None,
+        };
+        assert_eq!(read_only, probe.read_only, "{name}");
+        assert!(spec.oauth.is_some(), "{name} signs in by OAuth");
+        let oauth = spec.oauth.clone().unwrap();
+        assert_eq!(oauth.hosts, [probe.oauth_host], "{name}");
+        assert_eq!(
+            oauth.registration,
+            [Registration::Own, Registration::Cimd, Registration::Dcr],
+            "{name}"
+        );
+        assert_eq!(oauth.scopes_read, probe.scopes_read, "{name}");
+        assert_eq!(oauth.scopes_write, probe.scopes_write, "{name}");
+
+        for way in [Registration::Dcr, Registration::Cimd, Registration::Own] {
+            let stand_in = vendor(Shape {
+                iss: probe.iss,
+                cimd: way == Registration::Cimd,
+                register: Some("{base}/register"),
+                ..shape()
+            });
+            let base = format!("http://127.0.0.1:{}", stand_in.port);
+            let swapped = at_stand_in(&spec, &stand_in);
+            let case = case();
+            if way == Registration::Own {
+                assert_eq!(
+                    set_own_client(&case.db, &case.root, name, CLIENT, None),
+                    Ok(()),
+                    "{name}"
+                );
+            }
+            let given = (way != Registration::Dcr).then(document);
+            let begun = begin_with(
+                &case.root,
+                name,
+                &manifest.sha256,
+                &swapped,
+                &redirect(),
+                false,
+                given.as_ref(),
+                &no_lookup(),
+            );
+            assert!(begun.is_ok(), "{name} by {way:?}: {begun:?}");
+            let pending = begun.unwrap();
+            let asked = query(&pending.authorize_url);
+            let client = match way {
+                Registration::Dcr => DCR_CLIENT,
+                Registration::Cimd => CIMD,
+                Registration::Own => CLIENT,
+            };
+            assert_eq!(asked["client_id"], client, "{name} by {way:?}");
+            let scope = (!probe.scopes_read.is_empty()).then(|| probe.scopes_read.join(" "));
+            assert_eq!(
+                asked.get("scope"),
+                scope.as_ref(),
+                "{name} by {way:?} asks only to read"
+            );
+            assert_eq!(asked["resource"], format!("{base}/mcp"), "{name}");
+            assert_eq!(
+                finish_with(
+                    &case.root,
+                    &pending.state,
+                    CODE,
+                    probe.iss.then_some(base.as_str()),
+                    &no_lookup()
+                ),
+                Ok(()),
+                "{name} by {way:?}"
+            );
+            let got = fresh_with(
+                &case.db,
+                &case.root,
+                name,
+                &manifest.title,
+                &manifest.sha256,
+                &swapped,
+                clock(),
+                &no_lookup(),
+            );
+            assert!(
+                matches!(&got, Ok(Credential::OAuth { issuer, .. }) if *issuer == base),
+                "{name} by {way:?}: {got:?}"
+            );
+        }
+    }
+}
+
+/// A release that edits a bundled connector's file signs the owner out of it once: a
+/// sign-in made under the file shipped before ends at the next credential read with
+/// nothing sent, and one Action item asks the owner to sign in again.
+#[test]
+fn a_bundled_connector_file_edited_by_a_release_ends_its_sign_in_with_one_item() {
+    let manifest = shipped("notion");
+    let stand_in = vendor(Shape {
+        register: Some("{base}/register"),
+        ..shape()
+    });
+    let swapped = at_stand_in(manifest.connector().unwrap(), &stand_in);
+    let mut case = case();
+    let begun = begin_with(
+        &case.root,
+        "notion",
+        "sha256-of-the-notion-file-shipped-before",
+        &swapped,
+        &redirect(),
+        false,
+        None,
+        &no_lookup(),
+    );
+    assert!(begun.is_ok(), "{begun:?}");
+    assert_eq!(
+        finish_with(
+            &case.root,
+            &begun.unwrap().state,
+            CODE,
+            Some(&format!("http://127.0.0.1:{}", stand_in.port)),
+            &no_lookup()
+        ),
+        Ok(())
+    );
+    let seen = stand_in.seen().len();
+    assert_eq!(
+        fresh(&case.db, &case.root, "notion"),
+        Err(OAuthError("connector_sign_in_needed")),
+        "a sign-in made under the old file is not used under the new one"
+    );
+    assert_eq!(stand_in.seen().len(), seen, "nothing is sent");
+    assert!(saved(&case, "connector-token-notion-").is_empty());
+    assert_eq!(
+        notices(&mut case),
+        vec![(
+            NoticeKind::ConnectorSignIn,
+            NoticeClass::Action,
+            "Notion needs you to sign in again.".to_owned(),
+            json!({"page": "connectors"}),
+        )]
+    );
+}
+
 /// Every sign-in code a page can show is listed once, sorted, and has a plain sentence
 /// with no code words in it.
 #[test]

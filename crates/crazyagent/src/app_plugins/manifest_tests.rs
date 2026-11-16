@@ -48,7 +48,8 @@ fn every_bundled_manifest_is_valid_and_named_as_its_entry() {
             "ollama",
             "linear",
             "github",
-            "atlassian"
+            "atlassian",
+            "notion"
         ]
     );
     for (index, (name, text)) in bundled.iter().enumerate() {

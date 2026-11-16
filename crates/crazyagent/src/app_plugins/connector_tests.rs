@@ -616,7 +616,8 @@ mod stored {
                 "ollama",
                 "linear",
                 "github",
-                "atlassian"
+                "atlassian",
+                "notion"
             ]
         );
         let case = case();
@@ -626,6 +627,7 @@ mod stored {
                 "linear",
                 "https://mcp.linear.app/mcp",
                 "mcp.linear.app",
+                json!(["mcp.linear.app"]),
                 true,
                 json!(["api_key"]),
             ),
@@ -633,6 +635,7 @@ mod stored {
                 "github",
                 "https://api.githubcopilot.com/mcp/",
                 "api.githubcopilot.com",
+                json!([]),
                 true,
                 json!(["token"]),
             ),
@@ -640,11 +643,12 @@ mod stored {
                 "atlassian",
                 "https://mcp.atlassian.com/v2/mcp",
                 "mcp.atlassian.com",
+                json!(["auth.atlassian.com"]),
                 false,
                 json!(["api_token", "email"]),
             ),
         ];
-        for (name, url, host, vendor_read_only, secrets) in facts {
+        for (name, url, host, oauth_hosts, vendor_read_only, secrets) in facts {
             let connector = plugin(&listing, name);
             assert_eq!(
                 (connector.origin, &connector.status, connector.enabled),
@@ -656,7 +660,7 @@ mod stored {
             assert_eq!(view["runs"]["kind"], "connector", "{name}");
             assert_eq!(view["runs"]["url"], url, "{name}");
             assert_eq!(view["runs"]["hosts"], json!([host]), "{name}");
-            assert_eq!(view["runs"]["oauth_hosts"], json!([]), "{name}");
+            assert_eq!(view["runs"]["oauth_hosts"], oauth_hosts, "{name}");
             assert_eq!(view["runs"]["vendor_read_only"], vendor_read_only, "{name}");
             let declared: Vec<&str> = connector
                 .secrets
@@ -680,6 +684,25 @@ mod stored {
                 "{name}"
             );
         }
+        let notion = plugin(&listing, "notion");
+        assert_eq!(
+            (notion.origin, &notion.status, notion.enabled),
+            (Origin::Bundled, &PluginStatus::Ready, false),
+            "an OAuth-only connector needs no key"
+        );
+        let view = serde_json::to_value(notion).unwrap();
+        assert_eq!(view["runs"]["url"], "https://mcp.notion.com/mcp");
+        assert_eq!(view["runs"]["hosts"], json!(["mcp.notion.com"]));
+        assert_eq!(view["runs"]["oauth_hosts"], json!(["mcp.notion.com"]));
+        assert_eq!(view["runs"]["vendor_read_only"], false);
+        assert!(notion.secrets.is_empty());
+        store::set_enabled(&case.db, &case.root, "notion", true).unwrap();
+        let ready = store::ready(&case.db, &case.root, "notion");
+        assert!(ready.is_ok(), "{:?}", ready.err());
+        assert_eq!(
+            store::remove(&case.db, &case.root, "notion").unwrap_err().0,
+            "app_plugin_bundled"
+        );
         assert!(!case.root.join(crate::app_plugins::FOLDER).exists());
     }
 
