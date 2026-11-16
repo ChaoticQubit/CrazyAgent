@@ -42,10 +42,6 @@ pub(crate) const SH_STARTUP: [&str; 5] = [
 /// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
 /// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
 pub(crate) const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
-/// The entries of a cargo home cargo runs code from: its config under both names, whose
-/// `build.rustc-wrapper`, linkers, runners and aliases name programs, and `bin`, whose
-/// `cargo-<name>` programs cargo runs for subcommands (AGENT-HOME-CONFIG).
-const CARGO_CODE: [&str; 3] = ["config.toml", "config", "bin"];
 /// The most passes a launch makes over one folder of an agent home it keeps only part of,
 /// each removing what the last left: a second finds what a listing skipped as entries went,
 /// and only a process still adding entries outlasts them all, which refuses the launch.
@@ -1336,15 +1332,17 @@ pub(crate) fn remove_shell_startup(home: &Path, engine_root: &Path) -> Result<()
 }
 
 /// Removes from an rcli master's account profile, a home no turn resets by allowlist, its
-/// shell startup files ([`remove_shell_startup`]) and what its cargo home holds that cargo
-/// runs code from, since the master's `CARGO_HOME` is that home's `.cargo`
-/// (AGENT-HOME-CONFIG). Only a home the engine made, strictly below its data root, loses
-/// them. Inputs: the home and the engine's data root, both canonical, and the owner's tool
-/// homes. Output: unit, or `agent_home_unwritable` when one stays, refusing the turn.
+/// shell startup files ([`remove_shell_startup`]) and all its cargo home holds but what
+/// [`CARGO_KEPT`] names, since the master's `CARGO_HOME` is that home's `.cargo`, then links
+/// its `registry` and `git` to the owner's read-only caches as in every agent home
+/// (AGENT-HOME-CONFIG, rv-code4 and rv-sec3 r1 F1). Only a home the engine made, strictly
+/// below its data root, is changed. Inputs: the home and the engine's data root, both
+/// canonical, and the owner's tool homes. Output: unit, or `agent_home_unwritable` when an
+/// entry stays or a link will not be made, refusing the turn.
 pub(crate) fn remove_home_code(
     home: &Path,
     engine_root: &Path,
-    _homes: &crate::sandbox::toolchains::ToolHomes,
+    homes: &crate::sandbox::toolchains::ToolHomes,
 ) -> Result<(), AgentHomeError> {
     remove_shell_startup(home, engine_root)?;
     if home == engine_root || !home.starts_with(engine_root) {
@@ -1353,14 +1351,39 @@ pub(crate) fn remove_home_code(
     let cargo = home.join(".cargo");
     match fs::symlink_metadata(&cargo) {
         Ok(found) if found.is_dir() => {
-            for name in CARGO_CODE {
-                remove_entry(&cargo.join(name))?;
-            }
+            let mut held = Vec::new();
+            keep_only(&cargo, CARGO_KEPT, &mut held)?;
+            crate::team::cleanup::clear_acls(held.iter().map(PathBuf::as_path));
         }
         Ok(_) => remove_entry(&cargo)?,
         Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(failure("agent_home_unwritable")),
     }
+    link_owner_crates(home, homes)
+}
+
+/// Links the `registry` and `git` of an rcli master's cargo home to the owner's read-only
+/// caches, as every agent home has them, making the cargo home when it is gone
+/// ([`crate::sandbox::toolchains::prepare_cargo_home`]). Inputs: the home and the owner's
+/// tool homes. Output: unit, or `agent_home_unwritable` when a link will not be made.
+#[cfg(unix)]
+fn link_owner_crates(
+    home: &Path,
+    homes: &crate::sandbox::toolchains::ToolHomes,
+) -> Result<(), AgentHomeError> {
+    crate::sandbox::toolchains::prepare_cargo_home(home, homes)
+        .map(drop)
+        .map_err(|_| failure("agent_home_unwritable"))
+}
+
+/// Makes no links outside Unix, where no master sandbox runs and every master turn is
+/// refused as `master_sandbox_unavailable`. Takes the home and the tool homes, unused.
+/// Returns unit.
+#[cfg(not(unix))]
+fn link_owner_crates(
+    _home: &Path,
+    _homes: &crate::sandbox::toolchains::ToolHomes,
+) -> Result<(), AgentHomeError> {
     Ok(())
 }
 
