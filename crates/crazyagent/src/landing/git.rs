@@ -397,6 +397,7 @@ const WORK_TREE_PROFILE: &str = "(version 1)\n\
 pub(super) enum Writes {
     Objects,
     WorkTree,
+    Index,
 }
 
 impl Repo {
@@ -546,7 +547,7 @@ impl Repo {
             .and_then(|path| std::fs::canonicalize(path).ok())
             .unwrap_or_else(|| PathBuf::from("/dev/null"));
         let target = match writes {
-            Writes::Objects => common.join("objects"),
+            Writes::Objects | Writes::Index => common.join("objects"),
             Writes::WorkTree => work.clone(),
         };
         let mut confinement = Vec::new();
@@ -635,7 +636,9 @@ impl Repo {
             confinement
         };
         let (confinement, index_steps) = match writes {
-            Writes::Objects => (wrapped(&[common.join("objects"), step.clone()]), Vec::new()),
+            Writes::Objects | Writes::Index => {
+                (wrapped(&[common.join("objects"), step.clone()]), Vec::new())
+            }
             Writes::WorkTree => (wrapped(&[work]), wrapped(&[step.clone()])),
         };
         Ok(Self {
@@ -664,7 +667,7 @@ impl Repo {
         if self.index.is_some() {
             return Ok(self.clone());
         }
-        self.confined(Writes::Objects)
+        self.confined(Writes::Index)
     }
 
     fn check_version(&self) -> Result<(), EngineError> {
