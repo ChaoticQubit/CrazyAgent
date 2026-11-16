@@ -3253,6 +3253,459 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     assert_eq!(kept_draft().as_deref(), Some("Tidepool"));
 }
 
+/// Pool Main as the engine lists it, with one Claude account.
+fn main_pool() -> PoolSummary {
+    PoolSummary {
+        id: CredentialRef::new("pool-a").unwrap(),
+        name: "Main".into(),
+        summary: "1 Claude".into(),
+        members: vec![member("a-claude", MemberKind::Claude)],
+        project_count: 0,
+        provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+    }
+}
+
+/// Takes every request the shell queued. Takes the shell. Returns them, oldest first.
+fn drain(shell: &mut Shell) -> Vec<Request> {
+    std::iter::from_fn(|| shell.ctx.next_request()).collect()
+}
+
+/// The intake queries among queued requests. Takes the requests. Returns the queries in
+/// order.
+fn intake_asks(sent: &[Request]) -> Vec<IntakeQuery> {
+    sent.iter()
+        .filter_map(|request| match request {
+            Request::Intake(job) => Some(job.query()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The New Project job start among queued requests. Takes the requests. Returns the start's
+/// id, the project it makes and the query, or none when no such start was queued.
+fn setup_start(sent: &[Request]) -> Option<(RequestId, ProjectId, IntakeQuery)> {
+    sent.iter().find_map(|request| {
+        let Request::Intake(job) = request else {
+            return None;
+        };
+        let query = job.query();
+        let IntakeQuery::JobStart {
+            id,
+            subject: JobSubject::Setup { project_id, .. },
+            ..
+        } = &query
+        else {
+            return None;
+        };
+        Some((id.clone(), project_id.clone(), query.clone()))
+    })
+}
+
+/// The engine's New Project job for Tidepool as a read shows it. Takes its id, its project
+/// and its state. Returns the view.
+fn tidepool_job(id: &RequestId, project: &ProjectId, state: JobState) -> JobView {
+    JobView {
+        id: id.clone(),
+        kind: JobKind::Setup,
+        project_id: Some(project.clone()),
+        source: "Tidepool".into(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+        stopping: false,
+        state,
+    }
+}
+
+/// One intake reply from the owner worker. Takes the query it answers and the result.
+/// Returns the arrival.
+fn intake_reply(
+    query: IntakeQuery,
+    result: Result<crate::tui::client::intake::IntakeView, String>,
+) -> Arrival {
+    owner_arrival(OwnerEvent::Intake(Box::new(
+        crate::tui::client::intake::IntakeEvent { query, result },
+    )))
+}
+
+/// A status read that finds this job. Takes the job, or none for no job. Returns the arrival.
+fn job_status(job: Option<JobView>) -> Arrival {
+    intake_reply(
+        IntakeQuery::JobStatus,
+        Ok(crate::tui::client::intake::IntakeView::Job(job)),
+    )
+}
+
+/// The building New Project job a start reply carries. Takes the id and the project.
+/// Returns the view.
+fn building(id: &RequestId, project: &ProjectId) -> JobView {
+    tidepool_job(id, project, JobState::Building { done: 0, total: 0 })
+}
+
+/// How many dismisses of this job the requests hold. Takes the requests and the id.
+/// Returns the count.
+fn dismisses(sent: &[Request], id: &RequestId) -> usize {
+    intake_asks(sent)
+        .iter()
+        .filter(|query| **query == IntakeQuery::JobDismiss { id: id.clone() })
+        .count()
+}
+
+/// Whether the requests assign pool Main to this project. Takes the requests and the
+/// project. Returns true when one such pool edit is queued.
+fn assigns_main(sent: &[Request], project: &ProjectId) -> bool {
+    sent.iter().any(|request| {
+        matches!(
+            request,
+            Request::EditPool {
+                change: crate::tui::seam::PoolChange::Assign {
+                    pool: Some(pool),
+                    project: assigned,
+                },
+            } if pool.as_str() == "pool-a" && assigned == project
+        )
+    })
+}
+
+/// Opens New project, gives it pool Main, names the project `name` and presses Enter on
+/// Review. Takes the name. Returns the shell and the requests that Enter queued.
+fn create_named(name: &str) -> (Shell, Vec<Request>) {
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    shell.arrive(Arrival::Pools(Ok(vec![main_pool()])));
+    drain(&mut shell);
+    for character in name.chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let sent = drain(&mut shell);
+    (shell, sent)
+}
+
+/// DEC-177 step 3b: Create on New project starts the engine's New Project job with the
+/// draft and the picked pool under a fresh id and a new project id, as a move with no
+/// overrides; it is the one intake request Enter sends.
+#[test]
+fn create_starts_the_engines_new_project_job_with_the_draft_and_its_pool() {
+    let (shell, sent) = create_named("Tidepool");
+    let (id, project, query) = setup_start(&sent).expect("Create starts the New Project job");
+    let IntakeQuery::JobStart {
+        subject: JobSubject::Setup { spec, setup, .. },
+        mode,
+        overrides,
+        ..
+    } = query
+    else {
+        panic!("the start is a New Project job");
+    };
+    assert_eq!(spec.name, "Tidepool");
+    assert_eq!(
+        setup.pool.as_ref().map(CredentialRef::as_str),
+        Some("pool-a")
+    );
+    assert_eq!(mode, AddMode::Move);
+    assert!(overrides.is_empty());
+    assert!(project.as_str().starts_with("project-"), "{project:?}");
+    assert!(!id.as_str().is_empty());
+    assert_eq!(intake_asks(&sent).len(), 1, "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+}
+
+/// DEC-177 step 3b: the page follows its job by id in the job the shell keeps. Done assigns
+/// the picked pool, reads the projects and dismisses the job once; the empty read after
+/// that dismiss is not a lost job; the pool's answer opens the project.
+#[test]
+fn a_done_new_project_job_assigns_its_pool_dismisses_it_once_and_opens_the_project() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    assert_eq!(
+        dismisses(&drain(&mut shell), &id),
+        0,
+        "a running job is kept"
+    );
+
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(assigns_main(&sent, &project), "{sent:?}");
+    assert!(
+        sent.iter()
+            .any(|request| matches!(request, Request::Projects)),
+        "{sent:?}"
+    );
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+    assert_eq!(
+        shell.place(),
+        Some(Place::NewProject),
+        "the pool is assigned first"
+    );
+
+    shell.arrive(intake_reply(
+        IntakeQuery::JobDismiss { id: id.clone() },
+        Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
+    ));
+    shell.arrive(job_status(None));
+    let sent = drain(&mut shell);
+    assert_eq!(dismisses(&sent, &id), 0, "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(!shown.contains("could not confirm"), "{shown}");
+
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let Some(Place::Project {
+        id: opened,
+        name,
+        tab,
+    }) = shell.place()
+    else {
+        panic!("the new project opens, got {:?}", shell.place());
+    };
+    assert_eq!(
+        (opened, name.as_str(), tab),
+        (project, "Tidepool", ProjectTab::Overview)
+    );
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
+    assert_eq!(kept_draft(), None);
+    assert!(
+        setup_start(&drain(&mut shell)).is_none(),
+        "nothing starts again"
+    );
+}
+
+/// DEC-177 step 3b, add.3 decision 4: a New Project sent to the background and dropped by
+/// Home still follows its job, assigns its pool, dismisses the job and says it is ready.
+#[test]
+fn a_new_project_job_run_in_the_background_finishes_after_its_page_is_gone() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home), "Run in background");
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
+    drain(&mut shell);
+
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(
+        assigns_main(&sent, &project),
+        "the picked pool is assigned without the page: {sent:?}"
+    );
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+
+    shell.arrive(intake_reply(
+        IntakeQuery::JobDismiss { id: id.clone() },
+        Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
+    ));
+    shell.arrive(job_status(None));
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let sent = drain(&mut shell);
+    assert!(
+        sent.iter()
+            .any(|request| matches!(request, Request::PoolProjects)),
+        "{sent:?}"
+    );
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
+    assert_eq!(shell.place(), Some(Place::Home));
+    assert_eq!(kept_draft(), None, "a made project keeps no draft");
+}
+
+/// DEC-177 step 3b: a New Project job that failed keeps the open wizard's answers with the
+/// engine's sentence; one stopped in the background keeps the draft and says so in New
+/// project's words. Each ended job is dismissed once and assigns no pool.
+#[test]
+fn a_failed_or_stopped_new_project_job_keeps_the_draft_in_new_project_words() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Failed {
+            code: "home_new_project_failed".into(),
+            phase: crate::projects_home::job::Phase::Building,
+        },
+    ))));
+    let sent = drain(&mut shell);
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+    assert!(!assigns_main(&sent, &project), "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Could not create the project."), "{shown}");
+    assert!(
+        shown.contains("The project folder could not be created. Nothing was kept."),
+        "{shown}"
+    );
+
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Cancelled {
+            phase: crate::projects_home::job::Phase::Building,
+        },
+    ))));
+    let sent = drain(&mut shell);
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+    assert!(!assigns_main(&sent, &project), "{sent:?}");
+    let said = shell.ctx.message().expect("the stop is said");
+    assert_eq!(said.lead, "Setting up the project stopped.");
+    assert!(
+        said.rest.starts_with("Tidepool is kept as a draft."),
+        "{}",
+        said.rest
+    );
+    assert_eq!(kept_draft().as_deref(), Some("Tidepool"));
+}
+
+/// DEC-177 step 3b: a start whose reply is lost may have reached the engine, so the page
+/// reads the job before it says anything and never starts a second one. A failed read
+/// keeps it waiting; a read with its job follows that job to its end; a read without it
+/// says the start's own refusal.
+#[test]
+fn a_new_project_start_with_no_answer_follows_the_job_a_read_finds_and_never_starts_twice() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(start, Err("trusted_connection_lost".into())));
+    let asks = intake_asks(&drain(&mut shell));
+    assert!(asks.contains(&IntakeQuery::JobStatus), "{asks:?}");
+    assert!(
+        asks.iter()
+            .all(|query| !matches!(query, IntakeQuery::JobStart { .. })),
+        "{asks:?}"
+    );
+
+    shell.arrive(intake_reply(
+        IntakeQuery::JobStatus,
+        Err("trusted_connection_lost".into()),
+    ));
+    let shown = render(&mut shell, 80, 24);
+    assert!(!shown.contains("Could not create"), "{shown}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+
+    shell.arrive(job_status(Some(building(&id, &project))));
+    let shown = render(&mut shell, 80, 24);
+    assert!(!shown.contains("Could not create"), "{shown}");
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(assigns_main(&sent, &project), "{sent:?}");
+    assert!(setup_start(&sent).is_none(), "{sent:?}");
+
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, _, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(start, Err("project_exists".into())));
+    drain(&mut shell);
+    shell.arrive(job_status(None));
+    let sent = drain(&mut shell);
+    assert!(setup_start(&sent).is_none(), "{sent:?}");
+    assert_eq!(dismisses(&sent, &id), 0, "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Could not create the folder."), "{shown}");
+    assert!(
+        shown.contains("A folder for this project already exists."),
+        "{shown}"
+    );
+}
+
+/// DEC-177 step 3b: a status read concerns every New Project left running, so one page that
+/// follows its job and another whose start found the slot taken both read it: the first
+/// assigns its pool, the second keeps its draft.
+#[test]
+fn every_new_project_left_running_reads_each_job_status() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    go_to(&mut shell, "new project");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    drain(&mut shell);
+    for character in "Harbor".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let (_, _, harbor) = setup_start(&drain(&mut shell)).expect("Harbor starts its job too");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    shell.arrive(intake_reply(harbor, Err("job_busy".into())));
+    drain(&mut shell);
+
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(assigns_main(&sent, &project), "{sent:?}");
+    let said = shell.ctx.message().expect("Harbor's refusal is said");
+    assert!(
+        said.rest.starts_with("Harbor is kept as a draft"),
+        "{}",
+        said.rest
+    );
+    assert_eq!(kept_draft().as_deref(), Some("Harbor"));
+
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
+}
+
 #[test]
 fn leaving_the_wizard_keeps_the_draft_for_next_time() {
     let mut ctx = ctx(80, 24);

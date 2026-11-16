@@ -321,6 +321,13 @@ impl Shell {
         self.refresh();
     }
 
+    /// Reads the engine's intake job again between ticks while the stored one runs, so a
+    /// New Project page that follows its job sees the end soon, as the desktop's one-second
+    /// read does. Input: none. Output: whether it asked.
+    pub fn read_running_job(&mut self) -> bool {
+        false
+    }
+
     /// Keeps the engine's intake job in the store from a status read or a start, says once on
     /// the message line when a running job ended and reads the found folders again so Home
     /// lists the new one, and the projects too after a project move, whose folder changed; a
@@ -1930,6 +1937,32 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// DEC-177 step 3b: between ticks the run loop reads the engine's intake job again only
+    /// while the stored one runs, so a New Project page that follows its job sees its end
+    /// soon; with no job or an ended one it asks nothing.
+    #[test]
+    fn a_running_intake_job_is_read_again_between_ticks_and_no_other_is() {
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+        drain(&mut shell);
+        assert!(!shell.read_running_job(), "no job is stored");
+        assert!(intake_asks(&mut shell).is_empty());
+
+        shell.arrive(status_arrival(Some(shop(JobState::Copying {
+            copied: 3,
+            checked: 0,
+        }))));
+        drain(&mut shell);
+        assert!(shell.read_running_job(), "the stored job runs");
+        let asks = intake_asks(&mut shell);
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert!(asks[0].contains("JobStatus"), "{asks:?}");
+
+        shell.arrive(status_arrival(Some(shop(JobState::Done))));
+        drain(&mut shell);
+        assert!(!shell.read_running_job(), "the stored job ended");
+        assert!(intake_asks(&mut shell).is_empty());
     }
 
     /// DEC-159 S7: the tick reads the engine's intake job, the store keeps the last view
