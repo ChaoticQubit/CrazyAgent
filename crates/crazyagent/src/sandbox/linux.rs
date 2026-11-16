@@ -2074,7 +2074,8 @@ impl Sandbox for LinuxSandbox {
             ));
         }
         let grants = Grants::of(&self.sandbox)?;
-        if !grants.git_write.is_empty() && matches!(self.backend, LinuxBackend::Bubblewrap { .. }) {
+        let confined = self.sandbox.checkout.is_some() || self.sandbox.clone.is_some();
+        if confined && matches!(self.backend, LinuxBackend::Bubblewrap { .. }) {
             return Err(SandboxError::Unavailable(CONFINED_NEEDS_LANDLOCK.into()));
         }
         if !grants.guarded.is_empty() {
@@ -2128,9 +2129,9 @@ impl Sandbox for LinuxSandbox {
 
 /// What a launch's Landlock rules grant: folders read, folders written whole, git folders
 /// written with [`git_folder_rights`], and `guarded`, the entries Landlock cannot keep
-/// read-only under those grants (protected paths in a git grant, [`ADMIN_HELD`] and the
-/// worktree's `.git` link), which the call supervisor and the nested binds must hold before
-/// a confined launch starts (DEC-185 S1).
+/// read-only under those grants (protected paths in a git grant, [`ADMIN_HELD`], the
+/// worktree's `.git` link and a clone's whole git folder), which the call supervisor and the
+/// nested binds must hold before a confined launch starts (DEC-185 S1, S2).
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
@@ -2220,6 +2221,9 @@ impl Grants {
             if write.contains(&checkout.worktree) {
                 guarded.push(checkout.worktree.join(".git"));
             }
+        }
+        if let Some(clone) = sandbox.clone.as_ref() {
+            guarded.push(clone.join(".git"));
         }
         let secrets = sandbox.secret_paths();
         let carved = sandbox.carved_home.as_ref();
