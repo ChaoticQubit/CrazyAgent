@@ -67,11 +67,12 @@ const PROBE_SUPERVISED: &str = "--probe-supervised";
 /// Where AppArmor says whether it keeps unprivileged programs out of user namespaces, as on
 /// Ubuntu 23.10 and newer: `1` when it does ([`restricts`]).
 const APPARMOR_USERNS: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
-/// Why the helper starts no bubblewrap while its environment holds a variable the dynamic
-/// loader reads ([`loader_variable`]): bubblewrap runs in the helper's own AppArmor profile,
-/// which may make user namespaces, so the variable would load a caller's code there
-/// (DEC-179 SBX-3 fold, rv-sa241 MED-1). The engine never sets one.
-pub const LOADER_REFUSED: &str = "a nest refuses the dynamic loader's variables";
+/// Why the helper runs no mode while its environment holds a variable that makes glibc
+/// load code ([`loader_variable`]): every mode, and the bubblewrap a nest starts, runs in
+/// the helper's own AppArmor profile, which may make user namespaces, so the variable would
+/// load a caller's code there (DEC-179 SBX-3 fold, rv-sa241 MED-1, rv-ds241 F2). The engine
+/// never sets one.
+pub const LOADER_REFUSED: &str = "the helper refuses variables that load code";
 /// How long [`host_now`] keeps what it read: a policy view asks on every read, and each
 /// answer starts the helper twice.
 const HOST_AGE_MAX: Duration = Duration::from_secs(60);
@@ -927,11 +928,22 @@ fn die_with_parent(parent: u32) -> Result<(), String> {
 /// filter to itself, moves into a session of its own and then replaces itself with the
 /// harness, or with a guard stays as its parent and ends with its exit code ([`supervise`]);
 /// a nest becomes bubblewrap, which starts a run inside its namespaces ([`nest`]).
-/// Bridge flags may lead a nest and the run or probe inside it ([`Bridge::fits`]).
-/// Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold the policy,
-/// the session or the signal mask, or the process it dies with is gone, 126 when the
-/// harness or bubblewrap cannot start.
+/// Bridge flags may lead a nest and the run or probe inside it ([`Bridge::fits`]). No mode
+/// runs while the environment holds a variable that loads code ([`LOADER_REFUSED`]).
+/// Output: the exit code, 2 for refused arguments or such a variable, 3 when the kernel
+/// cannot hold the policy, the session or the signal mask, or the process it dies with is
+/// gone, 126 when the harness or bubblewrap cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
+    let loader = std::env::vars_os()
+        .map(|(name, _)| name)
+        .find(|name| loader_variable(name));
+    if let Some(name) = loader {
+        eprintln!(
+            "crazyagent-landlock: {LOADER_REFUSED}: {}",
+            name.to_string_lossy()
+        );
+        return ExitCode::from(2);
+    }
     let asked = Bridge::leading(args).and_then(|(bridge, args)| {
         let request = HelperRequest::parse(args)?;
         Bridge::fits(bridge.as_ref(), &request)?;
@@ -1154,8 +1166,8 @@ fn scoped() -> ExitCode {
     }
 }
 
-/// Starts bubblewrap for a nested agent, from outside its namespaces, never while the
-/// environment holds a dynamic loader variable ([`LOADER_REFUSED`]). It opens bubblewrap
+/// Starts bubblewrap for a nested agent, from outside its namespaces, with an environment
+/// [`helper_main`] has already cleared of loader variables. It opens bubblewrap
 /// once ([`trusted_file`]) and starts that open file, so the file it checked is the file
 /// that runs. It takes the session as [`own_session`] does, where a pane's first process
 /// can still be told apart, then blocks every signal: bubblewrap's outer process and its
@@ -1166,16 +1178,6 @@ fn scoped() -> ExitCode {
 /// broker on this network and writes the bridge flags for the helper inside
 /// ([`bridge::open`]), keeping its end of the bridge open until bubblewrap has it.
 fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
-    let loader = std::env::vars_os()
-        .map(|(name, _)| name)
-        .find(|name| loader_variable(name));
-    if let Some(name) = loader {
-        eprintln!(
-            "crazyagent-landlock: {LOADER_REFUSED}: {}",
-            name.to_string_lossy()
-        );
-        return ExitCode::from(3);
-    }
     let Some(program) = trusted_file(bwrap) else {
         eprintln!(
             "crazyagent-landlock: {} is not a bubblewrap to nest under",
@@ -1213,13 +1215,13 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
     ExitCode::from(126)
 }
 
-/// Tells whether the dynamic loader reads a variable of this name as a program starts:
-/// every name that begins `LD_`, in that case, and `GLIBC_TUNABLES`. Input: the name.
-/// Output: true when it does, so a nest refuses to start bubblewrap with it
-/// ([`LOADER_REFUSED`]).
+/// Tells whether glibc loads code through a variable of this name: every name that begins
+/// `LD_`, in that case, `GLIBC_TUNABLES`, and `GCONV_PATH`, which a static glibc still
+/// reads for its gconv modules. Input: the name. Output: true when it does, so the helper
+/// runs no mode with it ([`LOADER_REFUSED`]).
 pub fn loader_variable(name: &OsStr) -> bool {
     let name = name.as_bytes();
-    name.starts_with(b"LD_") || name == b"GLIBC_TUNABLES"
+    name.starts_with(b"LD_") || name == b"GLIBC_TUNABLES" || name == b"GCONV_PATH"
 }
 
 /// Replaces this process with the open `program`, keeping its signal mask and its
