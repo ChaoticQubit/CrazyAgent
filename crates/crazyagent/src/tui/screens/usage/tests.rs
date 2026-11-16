@@ -470,11 +470,11 @@ fn a_passed_manual_reset_is_not_marked_as_the_owners_time() {
 }
 
 /// N-D16 (leader 03:00): an account read over 5 h ago, whose 5-hour window has reset since,
-/// says on that line when it was last read, not that the next reset is unknown; a read 4 h
-/// old keeps the old words, a reset the owner set still shows, and the weekly line is as
-/// before.
+/// says on that line how old the read is, in hours under a day and days after, as the
+/// desktop card does; a read 4 h old keeps the old words, a reset the owner set still shows,
+/// and the weekly line is as before.
 #[test]
-fn a_five_hour_line_read_over_five_hours_ago_says_when_it_was_read() {
+fn a_five_hour_line_read_over_five_hours_ago_says_how_old_the_read_is() {
     let ctx = ctx(100, 40);
     let line = |limits: AccountLimits, label: &str| {
         let shown = UsageReport {
@@ -507,17 +507,21 @@ fn a_five_hour_line_read_over_five_hours_ago_says_when_it_was_read() {
         used_percent: 30.0,
         resets_at_ms: None,
     });
-    let read = ago(NOW - 14 * HOUR, NOW, 0);
     let five_hour = line(stale.clone(), "5-hour");
     assert!(
-        five_hour.ends_with(&format!(
-            "0% used  Last read {read}, so the next reset is not known"
-        )),
+        five_hour.contains("0% used  Last read 14 h ago, so the next reset is not known"),
         "{five_hour}"
     );
     assert!(
-        line(stale.clone(), "Weekly").ends_with("30% used  Next reset not known yet"),
-        "only the 5-hour line names when it was read"
+        line(stale.clone(), "Weekly").contains("30% used  Next reset not known yet"),
+        "only the 5-hour line names how old the read is"
+    );
+    let mut older = stale.clone();
+    older.observed_ms = Some(NOW - 3 * 24 * HOUR - 2 * HOUR);
+    let five_hour = line(older, "5-hour");
+    assert!(
+        five_hour.contains("Last read 3 d ago, so the next reset is not known"),
+        "{five_hour}"
     );
 
     let mut fresh = limits(None);
@@ -527,7 +531,7 @@ fn a_five_hour_line_read_over_five_hours_ago_says_when_it_was_read() {
         resets_at_ms: None,
     });
     assert!(
-        line(fresh, "5-hour").ends_with("12% used  Next reset not known yet"),
+        line(fresh, "5-hour").contains("12% used  Next reset not known yet"),
         "a read under 5 h old keeps the words"
     );
 
@@ -535,7 +539,7 @@ fn a_five_hour_line_read_over_five_hours_ago_says_when_it_was_read() {
     owned.five_hour_reset_override_ms = Some(NOW + 45 * MINUTE);
     let five_hour = line(owned, "5-hour");
     assert!(
-        five_hour.ends_with("Resets in 45 min (your time)"),
+        five_hour.contains("Resets in 45 min (your time)"),
         "{five_hour}"
     );
 }
