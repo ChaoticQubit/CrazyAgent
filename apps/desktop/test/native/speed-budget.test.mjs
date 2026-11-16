@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { KEPT_MIN, REFUSED_EXIT, REQUIRED, clickUntilUsable, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, privateFolder, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
+import { KEPT_MIN, REFUSED_EXIT, REPORT_ONLY, REQUIRED, clickUntilUsable, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, privateFolder, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict, webkitHelpersIn } from "./speed-budget.mjs";
 
 const QUIET = { load1: 0.8, compilers: [], memoryLevel: 80, onAC: true, screenLocked: false, busy: false };
 
@@ -119,7 +119,7 @@ const APP = {
   big: { open_ms: 120, conversation_ms: 80, sessions_ms: 200 },
   switch_cold: { home: 40, metrics: 90 },
   switch_warm: { home: 30, metrics: 60 },
-  memory: { engine_mb: 60.5, app_mb: 120, webkit_mb: [200, 30], webkit_pids: [11, 12] },
+  memory: { engine_mb: 60.5, app_mb: 120, webkit_mb: [200, 30], webkit_pids: [11, 12], webkit_kinds: ["WebContent", "GPU"], idle: { app_mb: 118, webkit_mb: [150, 31] } },
 };
 
 test("a run's records flatten into one value per metric, round trips as their median", () => {
@@ -129,7 +129,32 @@ test("a run's records flatten into one value per metric, round trips as their me
     switch_cold_home_ms: 40, switch_cold_metrics_ms: 90, switch_warm_home_ms: 30, switch_warm_metrics_ms: 60,
     round_trip_desktop_master_state_ms: 2, round_trip_desktop_open_project_ms: 5,
     memory_engine_mb: 60.5, memory_app_mb: 120, memory_webkit_mb: 230,
+    memory_webkit_webcontent_mb: 200, memory_webkit_gpu_mb: 30,
+    memory_app_idle_mb: 118, memory_webkit_idle_mb: 181, memory_webkit_webcontent_idle_mb: 150, memory_webkit_gpu_idle_mb: 31,
   });
+});
+
+test("each WebKit helper is read by its kind, now and after the idle wait, and every such reading is report-only (SPEED-WEBKIT-MEM)", () => {
+  const listing = " 11 /System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent\n"
+    + " 12 com.apple.WebKit.Networking\n 13 com.apple.WebKit.WebContent\n 14 com.apple.WebKit.GPU\n 15 com.apple.WebKit.WebContentX\n 16 /usr/bin/footprint\n";
+  assert.deepEqual(webkitHelpersIn(listing), [
+    { pid: 11, kind: "WebContent" }, { pid: 12, kind: "Networking" }, { pid: 13, kind: "WebContent" }, { pid: 14, kind: "GPU" },
+  ]);
+  const memory = { engine_mb: 12, app_mb: 41, webkit_mb: [140, 6, 25, 30], webkit_pids: [11, 12, 13, 14],
+    webkit_kinds: ["WebContent", "Networking", "WebContent", "GPU"], idle: { app_mb: 40, webkit_mb: [120, 6, 0, 29] } };
+  const metrics = sampleMetrics(ENGINE, { ...APP, memory });
+  assert.equal(metrics.memory_webkit_mb, 201);
+  assert.equal(metrics.memory_webkit_webcontent_mb, 165);
+  assert.equal(metrics.memory_webkit_networking_mb, 6);
+  assert.equal(metrics.memory_webkit_gpu_mb, 30);
+  assert.equal(metrics.memory_webkit_idle_mb, 155);
+  assert.equal(metrics.memory_webkit_webcontent_idle_mb, 120);
+  assert.equal(metrics.memory_app_idle_mb, 40);
+  const read = Object.keys(metrics).filter((name) => name.startsWith("memory_webkit") || name.endsWith("_idle_mb"));
+  assert.equal(read.length, 9);
+  for (const metric of read) assert.ok(REPORT_ONLY.has(metric), metric);
+  assert.throws(() => sampleMetrics(ENGINE, { ...APP, memory: { ...memory, webkit_kinds: ["WebContent"] } }), /kind/);
+  assert.throws(() => sampleMetrics(ENGINE, { ...APP, memory: { ...memory, idle: { app_mb: 40, webkit_mb: [120] } } }), /idle/);
 });
 
 test("a run that timed an onboarding start records it as its own metric, and a seeding run that timed none records nothing (rv-code4 r2 F2)", () => {
