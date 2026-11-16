@@ -414,37 +414,37 @@ async fn redraw(
     Ok(())
 }
 
+/// One owner request a view sends to its host, on a blocking thread, so the view's output
+/// keeps flowing while tmux answers.
 #[cfg(unix)]
-async fn act(
+type Sending = tokio::task::JoinHandle<Result<Option<String>, HostError>>;
+
+/// Starts sending one owner request to the host on a blocking thread: typed and wheel keys
+/// into the view's pane, a prompt, or a resize. Takes the host, the agent, the view's pane
+/// and the request. Returns the send, which answers the prompt's text once the agent took
+/// it as a prompt, none for any other request, or the host's error.
+#[cfg(unix)]
+fn send(
     host: &Arc<dyn Host>,
     agent: &AgentId,
     at: Option<PaneAt>,
     request: TerminalRequest,
-) -> Result<(), HostError> {
+) -> Sending {
     let host = host.clone();
     let agent = agent.clone();
     tokio::task::spawn_blocking(move || match request {
         TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes } => {
-            type_into(host.as_ref(), at.as_ref(), &agent, &bytes)
+            type_into(host.as_ref(), at.as_ref(), &agent, &bytes).map(|()| None)
         }
-        TerminalRequest::Prompt { text } => type_prompt(host.as_ref(), &agent, &text).map(drop),
-        TerminalRequest::Resize { cols, rows } => host.resize(&agent, cols, rows),
+        TerminalRequest::Prompt { text } => {
+            type_prompt(host.as_ref(), &agent, &text).map(|heard| heard.then_some(text))
+        }
+        TerminalRequest::Resize { cols, rows } => host.resize(&agent, cols, rows).map(|()| None),
         TerminalRequest::Attach { .. }
         | TerminalRequest::AttachPane { .. }
         | TerminalRequest::AttachSized { .. }
-        | TerminalRequest::Detach => Ok(()),
+        | TerminalRequest::Detach => Ok(None),
     })
-    .await
-    .unwrap_or_else(|_| Err(HostError("terminal_unavailable".into())))
-}
-
-#[cfg(unix)]
-async fn prompt(host: &Arc<dyn Host>, agent: &AgentId, text: String) -> Result<bool, HostError> {
-    let host = host.clone();
-    let agent = agent.clone();
-    tokio::task::spawn_blocking(move || type_prompt(host.as_ref(), &agent, &text))
-        .await
-        .unwrap_or_else(|_| Err(HostError("terminal_unavailable".into())))
 }
 
 /// The attach handshake, all of it bounded by the attach deadline: checks the peer and the
@@ -744,8 +744,10 @@ impl Viewing for Grant<'_> {
 
 /// Streams one attached view until it ends: the agent's output as it comes, a fresh viewer
 /// once it fell behind, and the owner's requests in order, each sent only while the grant
-/// allows it. Takes the writer, the viewer, the request queue, the host the viewer came from
-/// and the grant. Returns the reason the view ended.
+/// allows it. One send at a time runs beside the output, which keeps flowing while tmux
+/// answers; the next request is read only once that send answered, so the bounded request
+/// queue holds the rest in order. Takes the writer, the viewer, the request queue, the host
+/// the viewer came from and the grant. Returns the reason the view ended.
 #[cfg(unix)]
 async fn pump(
     writer: &mut (impl AsyncWrite + Unpin),
@@ -756,6 +758,7 @@ async fn pump(
 ) -> &'static str {
     let agent = viewer.agent.clone();
     let mut check = tokio::time::interval(GRANT_CHECK);
+    let mut sending: Option<Sending> = None;
     loop {
         tokio::select! {
             chunk = viewer.next() => match chunk {
@@ -776,7 +779,17 @@ async fn pump(
                 },
                 None => break "terminal_ended",
             },
-            request = asked.recv() => match request {
+            sent = async {
+                sending.as_mut().expect("polled only while a send runs").await
+            }, if sending.is_some() => {
+                sending = None;
+                match sent.unwrap_or_else(|_| Err(HostError("terminal_unavailable".into()))) {
+                    Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
+                    Err(_) | Ok(None) => {}
+                    Ok(Some(text)) => viewing.heard(text).await,
+                }
+            },
+            request = asked.recv(), if sending.is_none() => match request {
                 None | Some(TerminalRequest::Detach) => break "terminal_detached",
                 Some(
                     TerminalRequest::Attach { .. }
@@ -790,22 +803,7 @@ async fn pump(
                 }
                 Some(request) => {
                     viewing.typed(&request);
-                    match request {
-                        TerminalRequest::Prompt { text } => {
-                            let typed = prompt(&host, &agent, text.clone()).await;
-                            if typed.as_ref().is_err_and(|error| crate::terminal::ended_code(&error.0)) {
-                                break "terminal_ended";
-                            }
-                            if matches!(typed, Ok(true)) {
-                                viewing.heard(text).await;
-                            }
-                        }
-                        request => {
-                            if act(&host, &agent, viewer.at.clone(), request).await.is_err_and(|error| crate::terminal::ended_code(&error.0)) {
-                                break "terminal_ended";
-                            }
-                        }
-                    }
+                    sending = Some(send(&host, &agent, viewer.at.clone(), request));
                 }
             },
             _ = check.tick() => {
