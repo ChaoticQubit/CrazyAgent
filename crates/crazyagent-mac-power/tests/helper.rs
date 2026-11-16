@@ -3,7 +3,7 @@
 mod support;
 
 use crazyagent_mac_power::floor::{Battery, Pressure};
-use crazyagent_mac_power::helper::{Helper, Readings};
+use crazyagent_mac_power::helper::{Config, Helper, Readings};
 use crazyagent_mac_power::lease::Holder;
 use crazyagent_mac_power::lid::Lid;
 use crazyagent_mac_power::protocol::{FloorView, PinView, Refusal, Reply, Request, View};
@@ -538,4 +538,44 @@ fn an_unreadable_thermal_pressure_level_ends_every_lease() {
         1,
         "an unread battery does not end a hold"
     );
+}
+
+fn refusing_put_back(stand_in: &StandIn) -> Config {
+    let gate = stand_in.path("refuse-put-back");
+    let wrapper = stand_in.path("wrapper");
+    let text = format!(
+        "#!/bin/sh\nif [ \"$*\" = \"-a disablesleep 0\" ] && [ -e '{}' ]; then exit 1; fi\n\
+         exec '{}' \"$@\"\n",
+        gate.display(),
+        stand_in.program().display()
+    );
+    fs::write(&wrapper, text).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    Config {
+        pmset: wrapper,
+        ..stand_in.config()
+    }
+}
+
+#[test]
+fn a_put_back_that_fails_keeps_its_entry_and_is_tried_again_at_the_next_reading() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(refusing_put_back(&stand_in));
+    assert_eq!(
+        hold(&mut helper, holder(&stand_in, 10), NOW_MS),
+        Reply::Held { lease_left_s: 120 }
+    );
+    fs::write(stand_in.path("refuse-put-back"), "").unwrap();
+    helper.expire(NOW_MS + 120_000, CLOSED_ALONE);
+    assert_eq!(stand_in.sleep_disabled(), 1);
+    assert!(stand_in.journal_text().unwrap().contains("sleep_disabled"));
+    assert!(!stand_in.calls().contains(&"sleepnow".to_string()));
+    assert!(!helper.idle(), "a value still to put back keeps the helper up");
+    assert!(helper.wants_readings());
+    fs::remove_file(stand_in.path("refuse-put-back")).unwrap();
+    helper.sense(NOW_MS + 150_000, COOL);
+    assert_eq!(stand_in.sleep_disabled(), 0);
+    assert_eq!(stand_in.journal_text().as_deref(), Some("[]"));
+    assert!(helper.idle());
+    assert!(!helper.wants_readings());
 }
