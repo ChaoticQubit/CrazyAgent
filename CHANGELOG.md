@@ -11,11 +11,11 @@ Status of each version:
 
 ## [Unreleased]
 
-## [2.4.1] - 2026-11-16 04:17 UTC - In progress (not on master)
+## [2.4.1] - 2026-11-16 - Dev build
 
-- Work merged into the 2.4.1 line from 2026-11-13 04:34 UTC to 2026-11-16 04:17 UTC, last merge 31fe8b547. Built on [2.4.0].
 - Version set to 2.4.1 on 2026-11-16 03:51 UTC (36c3c56d2).
-- Not built or released yet.
+- Work merged into the 2.4.1 line from 2026-11-13 04:34 UTC to 2026-11-16 04:17 UTC, last merge 31fe8b547. Built on [2.4.0].
+- No stable tag yet. Latest stable stays [2.3.2].
 
 ### Added
 
