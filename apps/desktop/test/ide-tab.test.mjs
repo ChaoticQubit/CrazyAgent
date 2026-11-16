@@ -396,7 +396,9 @@ test("a dropped IDE stops its server, ordered with any open of the same project"
   assert.match(open, /let \(ticket, turn\) = views\.begin\(&project\);/, "an open takes its ticket and its turn under one lock");
   assert.doesNotMatch(open, /views\.turn\(/, "no second lock where a close could remove the order between them");
   assert.ok(open.indexOf("turn.lock().await") < open.indexOf("ide_open(project"), "the engine opens only in the project's turn");
-  assert.ok(open.indexOf("ide::show(") >= 0 && open.indexOf("ide::show(") < open.indexOf("views.others(&project)") && open.indexOf("views.others(&project)") < open.lastIndexOf("close_ide("), "once this project's IDE shows, every other kept IDE is dropped with its server (DEC-187: the last used only)");
+  assert.ok(open.indexOf("ide::show(") >= 0 && open.indexOf("ide::show(") < open.indexOf("drop_others("), "once this project's IDE shows, every other kept IDE is dropped with its server (DEC-187: the last used only)");
+  const drop = lib.slice(lib.indexOf("async fn drop_others"), lib.indexOf("\n}\n", lib.indexOf("async fn drop_others")));
+  assert.ok(drop.indexOf("views.others(project)") >= 0 && drop.indexOf("views.others(project)") < drop.indexOf("close_ide("), "each in-panel IDE but this one closes with its server");
   const bridge = read("src-tauri/src/bridge/ide.rs");
   assert.match(bridge, /client\.ide_tab_stop\(project\)/);
   const engine = read("../../crates/crazyagent/src/engine/owner/transport/ide_tab.rs");

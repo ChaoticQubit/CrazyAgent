@@ -4612,15 +4612,18 @@ async fn desktop_ide_open(
     let window = webview.window();
     let bounds = bounds.in_window(&window)?;
     let own_window = ide::show(&app, &window, &views, &project, workbench, bounds, ticket)?;
-    for other in views.others(&project) {
-        let _ = close_ide(&app, &state, &views, &other).await;
-    }
-    Ok(ide::Opened { own_window, left })
+    let kept = views.take_left(&project);
+    drop_others(&app, &state, &views, &project).await;
+    Ok(ide::Opened {
+        own_window,
+        left: left.or(kept),
+    })
 }
 
 /// Shows a project's kept IDE over its panel with no engine call, so a tab or page switch back
-/// is instant (DEC-187). Inputs: the project and the panel. Output: whether it was shown, false
-/// when none is kept so the tab opens it, and what the last IDE left running, named once.
+/// is instant (DEC-187), then drops any other in-panel IDE off the reply's path. Inputs: the
+/// project and the panel. Output: whether it was shown, false when none is kept so the tab
+/// opens it, and what the last IDE left running, named once.
 #[tauri::command]
 async fn desktop_ide_show<R: Runtime>(
     webview: Webview<R>,
@@ -4632,7 +4635,18 @@ async fn desktop_ide_show<R: Runtime>(
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
     let bounds = bounds.checked()?.in_window(&webview.window())?;
-    ide::show_kept(&app, &views, &project, bounds)
+    let shown = ide::show_kept(&app, &views, &project, bounds)?;
+    if shown.shown && !views.others(&project).is_empty() {
+        tauri::async_runtime::spawn(async move {
+            if let (Some(state), Some(views)) = (
+                app.try_state::<NativeState>(),
+                app.try_state::<ide::IdeViews>(),
+            ) {
+                drop_others(&app, &state, &views, &project).await;
+            }
+        });
+    }
+    Ok(shown)
 }
 
 /// Loads the last used project's IDE hidden at app start, through the same engine open as the
@@ -4651,7 +4665,9 @@ async fn desktop_ide_preload(
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
     let bounds = bounds.checked()?;
-    let (ticket, turn) = views.begin(&project);
+    let Some((ticket, turn)) = views.begin_preload(&project) else {
+        return Ok(false);
+    };
     let opened = {
         let _turn = turn.lock().await;
         let call = read(&state).await?.ide_open(project.clone())?;
@@ -4696,6 +4712,19 @@ async fn desktop_ide_hide<R: Runtime>(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     ide::hide(&app, &views, &bridge::ide::ide_project(&project_id)?)
+}
+
+/// Drops every other project's in-panel IDE once this project's shows, so only the last used
+/// one stays loaded (DEC-187). Inputs: the app, the engine bridge, the views and the project.
+async fn drop_others<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &NativeState,
+    views: &ide::IdeViews,
+    project: &ProjectId,
+) {
+    for other in views.others(project) {
+        let _ = close_ide(app, state, views, &other).await;
+    }
 }
 
 /// Closes a project's IDE webview and stops its server, in the project's turn: when another
