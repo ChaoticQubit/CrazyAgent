@@ -292,7 +292,7 @@ impl OwnedChild {
             Err(_) => {
                 self.shared.fail("codex_host_wait_failed");
                 if let Ok(mut state) = self.shared.lock() {
-                    state.cleanup_error = Some("codex_host_wait_uncertain");
+                    state.doubt("codex_host_wait_uncertain");
                 }
             }
         }
@@ -319,7 +319,7 @@ impl OwnedChild {
             if self.status.is_none() {
                 self.shared.fail("codex_host_kill_uncertain");
                 if let Ok(mut state) = self.shared.lock() {
-                    state.cleanup_error = Some("codex_host_kill_uncertain");
+                    state.doubt("codex_host_kill_uncertain");
                 }
             }
         }
@@ -424,7 +424,7 @@ impl OwnedChild {
     fn cleanup_uncertain(&self, code: &'static str) {
         self.shared.fail(code);
         if let Ok(mut state) = self.shared.lock() {
-            state.cleanup_error = Some(code);
+            state.doubt(code);
         }
     }
 
@@ -499,6 +499,7 @@ impl OwnedChild {
                     .then_some("codex_host_cleanup_uncertain")
                     .or(left)
             };
+            state.doubted |= state.cleanup_error.is_some();
         }
     }
 }
@@ -626,6 +627,7 @@ mod tests {
                 complete: false,
                 error: None,
                 cleanup_error: None,
+                doubted: false,
             }),
             stop: AtomicBool::new(false),
             close_stdin: AtomicBool::new(false),

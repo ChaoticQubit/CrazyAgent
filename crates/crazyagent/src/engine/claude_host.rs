@@ -504,6 +504,7 @@ pub(in crate::engine) struct ClaudeHost {
     events: mpsc::Receiver<ObservedEvent>,
     status: watch::Receiver<Status>,
     stop: Arc<AtomicBool>,
+    doubt: Arc<AtomicBool>,
     group: Arc<AtomicU32>,
     diagnostic: Arc<std::sync::Mutex<Option<diagnostic::StreamDiagnostic>>>,
     close_time: Duration,
@@ -555,6 +556,7 @@ impl ClaudeHost {
             fault: None,
         });
         let stop = Arc::new(AtomicBool::new(false));
+        let doubt = Arc::new(AtomicBool::new(false));
         let group = Arc::new(AtomicU32::new(0));
         let kept = Arc::new(std::sync::Mutex::new(None));
         let mut host = Self {
@@ -562,6 +564,7 @@ impl ClaudeHost {
             events,
             status,
             stop: Arc::clone(&stop),
+            doubt: Arc::clone(&doubt),
             group: Arc::clone(&group),
             diagnostic: Arc::clone(&kept),
             close_time: limits.cleanup_time
@@ -590,6 +593,7 @@ impl ClaudeHost {
                         output,
                         report,
                         stop,
+                        doubt,
                         group,
                         diagnostic: kept,
                     },
@@ -732,6 +736,14 @@ impl ClaudeHost {
                 .map_err(|_| failure("claude_host_custodian_lost"))?;
         }
     }
+
+    /// Says whether the harness retired with nothing it started left possibly running:
+    /// false before it retires, and after a cleanup in doubt or processes left behind
+    /// whatever turn fault came first, as the fault keeps only the first (SA-VID14-R2 F2).
+    /// Input: the host. Output: the answer.
+    pub(in crate::engine) fn settled(&self) -> bool {
+        self.status.borrow().phase == Phase::Retired && !self.doubt.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(unix)]
@@ -799,6 +811,11 @@ impl ClaudeHost {
 
     /// Never closes: takes the host. Unreachable without a host value.
     pub(in crate::engine) async fn close(&mut self) -> Result<(), EngineError> {
+        match *self {}
+    }
+
+    /// Never settles: takes the host. Unreachable without a host value.
+    pub(in crate::engine) fn settled(&self) -> bool {
         match *self {}
     }
 }

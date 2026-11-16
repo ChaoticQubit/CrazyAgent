@@ -39,6 +39,7 @@ pub(super) struct Channels {
     pub(super) output: mpsc::Sender<ObservedEvent>,
     pub(super) report: watch::Sender<Status>,
     pub(super) stop: Arc<AtomicBool>,
+    pub(super) doubt: Arc<AtomicBool>,
     pub(super) group: Arc<AtomicU32>,
     pub(super) diagnostic: Arc<Mutex<Option<StreamDiagnostic>>>,
 }
@@ -67,6 +68,7 @@ struct Process {
     output: mpsc::Sender<ObservedEvent>,
     report: watch::Sender<Status>,
     stop: Arc<AtomicBool>,
+    doubt: Arc<AtomicBool>,
     pending: Option<PendingInput>,
     status: Option<ExitStatus>,
     fault: Option<Fault>,
@@ -99,6 +101,7 @@ pub(super) fn run(
         output,
         report,
         stop,
+        doubt,
         group,
         diagnostic,
     } = channels;
@@ -196,6 +199,7 @@ pub(super) fn run(
         output,
         report,
         stop,
+        doubt,
         pending: None,
         status: None,
         fault: None,
@@ -243,6 +247,14 @@ impl Process {
         if self.fault.is_none() {
             self.fault = Some(fault);
         }
+    }
+
+    /// Records a fault after which processes the harness started may still run, so the
+    /// host is never settled, whichever fault the turn reports first. Input: the code.
+    /// Output: none.
+    fn fail_in_doubt(&mut self, code: &'static str) {
+        self.doubt.store(true, Ordering::Release);
+        self.fail(Fault::Host(code));
     }
 
     fn drive(&mut self) {
@@ -581,7 +593,7 @@ impl Process {
         if let Some(warden) = self.warden.take()
             && warden.fire(warden::FIRE_TIME).is_err()
         {
-            self.fail(Fault::Host("claude_host_cleanup_uncertain"));
+            self.fail_in_doubt("claude_host_cleanup_uncertain");
         }
     }
 
@@ -634,7 +646,7 @@ impl Process {
                     if open {
                         self.stdout = None;
                         self.stderr = None;
-                        self.fail(Fault::Host("claude_host_cleanup_uncertain"));
+                        self.fail_in_doubt("claude_host_cleanup_uncertain");
                     }
                     if !status.success()
                         && !self.stop.load(Ordering::Acquire)
@@ -649,7 +661,7 @@ impl Process {
             }
             if !uncertain && now >= cleanup_deadline {
                 uncertain = true;
-                self.fail(Fault::Host("claude_host_cleanup_uncertain"));
+                self.fail_in_doubt("claude_host_cleanup_uncertain");
                 self.report.send_replace(Status {
                     phase: Phase::Closing,
                     fault: self.fault,
@@ -673,7 +685,7 @@ impl Process {
         if let Some(lineage) = lineage
             && let Err(unstopped) = lineage.and_then(Lineage::settle)
         {
-            self.fail(Fault::Host(unstopped.code()));
+            self.fail_in_doubt(unstopped.code());
             if let (Unstopped::Left(left), Some(profile)) = (unstopped, self.profile.take()) {
                 let project = self.project.as_str();
                 left.hold(
