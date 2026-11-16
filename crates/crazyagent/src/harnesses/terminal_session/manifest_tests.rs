@@ -259,9 +259,10 @@ fn changed(piece: &str, with: &str, first_screen: bool) -> Standin {
 }
 
 /// DEC-180 Task 16 r2 (T16-1): a stand-in whose arguments name no session picks its own
-/// id. Its run reports none at start, keeps no pane record and offers no resume until its
-/// record shows; the record's file name then names the conversation, and a resume carries
-/// that id.
+/// id. Its run reports none at start and offers no resume until its record shows; the
+/// record's file name then names the conversation, and a resume carries that id. Its pane
+/// keeps no pane record, so an engine that quits ends it rather than leave a pane no later
+/// engine can adopt.
 #[test]
 fn a_stand_in_that_picks_its_own_session_id_is_named_by_its_record_and_resumed_by_it() {
     let standin = changed("    - \"--session\"\n    - \"{session}\"\n", "", true);
@@ -289,7 +290,13 @@ fn a_stand_in_that_picks_its_own_session_id_is_named_by_its_record_and_resumed_b
         record,
     };
     assert_eq!(first.conversation().as_ref(), Some(&conversation));
-    drop(first);
+    first.leave();
+    let agent = AgentId::new("manifest-own-id").unwrap();
+    let until = Instant::now() + TURN_WAIT;
+    while standin.host.alive().unwrap_or_default().contains(&agent) {
+        assert!(Instant::now() < until, "a pane with no record was left running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let mut second = standin.start("manifest-own-id-again", Some(&conversation));
     assert_eq!(ready(&mut second), conversation.id);
     second.send("two").unwrap();
