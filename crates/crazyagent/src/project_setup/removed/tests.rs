@@ -75,20 +75,37 @@ fn an_id_a_removal_holds_is_stepped_over() {
     );
 }
 
+/// rv-code2 RS1-4: a live id belongs to another folder, since a folder's own live project is
+/// answered before any id is picked, so it is stepped over as a held one is.
 #[test]
-fn a_live_candidate_is_refused_as_before() {
+fn a_live_candidate_of_another_folder_is_stepped_over_too() {
     let (_directory, db) = database();
     record(&db, &id("my-app"), Some("/h/my-app"), true).unwrap();
     live(&db, "my-app-2");
     assert_eq!(
         free_id(&db, Path::new("/o/my-app")).unwrap(),
-        Err("project_exists")
+        Ok(id("my-app-3"))
     );
     live(&db, "Your-App");
     assert_eq!(
         free_id(&db, Path::new("/o/your-app")).unwrap(),
-        Err("project_exists"),
+        Ok(id("your-app-2")),
         "a live id differing only by ASCII case is the same id"
+    );
+}
+
+/// rv-code2 RS1-4: a stepped id is an ordinary name, so a folder whose own name it is still
+/// gets a project, the next free `-n` of that name, never a refusal.
+#[test]
+fn a_folder_named_like_a_stepped_id_still_gets_a_project() {
+    let (_directory, db) = database();
+    record(&db, &id("my-app"), Some("/h/my-app"), true).unwrap();
+    let stepped = free_id(&db, Path::new("/o/my-app")).unwrap().unwrap();
+    assert_eq!(stepped, id("my-app-2"));
+    live(&db, stepped.as_str());
+    assert_eq!(
+        free_id(&db, Path::new("/p/my-app-2")).unwrap(),
+        Ok(id("my-app-2-2"))
     );
 }
 
@@ -134,6 +151,64 @@ fn ids_with_rows_that_outlive_their_project_are_backfilled_as_held() {
         recorded,
         "a second start adds nothing"
     );
+}
+
+/// rv-code2 RS1-1: the backfill reads every table once, at the first open of a database, and
+/// every later open skips it, so engine start never scans the project tables again. A row
+/// left after that first open is not read.
+#[test]
+fn the_backfill_runs_once_and_every_later_open_skips_it() {
+    let (_directory, db) = database();
+    db.execute_batch(
+        "INSERT INTO memory_library(id,project,origin,text) VALUES
+            ('m1','old-app','{\"kind\":\"written\"}','Deploys go out on Tuesdays.');",
+    )
+    .unwrap();
+    assert!(matches!(hold_left(&db).unwrap(), Some(n) if n >= 1));
+    assert!(held(&db, &id("old-app")).unwrap(), "the first open holds old-app");
+    db.execute_batch(
+        "INSERT INTO memory_library(id,project,origin,text) VALUES
+            ('m2','late-app','{\"kind\":\"written\"}','Written after the first open.');",
+    )
+    .unwrap();
+    let recorded = count(&db, "SELECT count(*) FROM projects_removed");
+    assert_eq!(hold_left(&db).unwrap(), None, "a later open skips the backfill");
+    assert_eq!(count(&db, "SELECT count(*) FROM projects_removed"), recorded);
+    assert!(!held(&db, &id("late-app")).unwrap());
+    assert_eq!(hold_left(&db).unwrap(), None);
+}
+
+/// rv-sa241 N2: the backfill never fills the record past `REMOVED_MAX`, so leftover ids of an
+/// old database can't leave Remove and Delete everything refused for good.
+#[test]
+fn the_backfill_stops_at_the_record_bound() {
+    let (_directory, db) = database();
+    db.execute(
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{})
+             INSERT INTO projects_removed(project,folder,returns,removed_ms)
+             SELECT 'gone-'||i, NULL, 0, 0 FROM n",
+            REMOVED_MAX - 2
+        ),
+        [],
+    )
+    .unwrap();
+    db.execute_batch(
+        "INSERT INTO memory_library(id,project,origin,text) VALUES
+            ('m1','left-1','{\"kind\":\"written\"}','One.'),
+            ('m2','left-2','{\"kind\":\"written\"}','Two.'),
+            ('m3','left-3','{\"kind\":\"written\"}','Three.'),
+            ('m4','left-4','{\"kind\":\"written\"}','Four.'),
+            ('m5','left-5','{\"kind\":\"written\"}','Five.');",
+    )
+    .unwrap();
+    assert_eq!(hold_left(&db).unwrap(), Some(2));
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM projects_removed"),
+        REMOVED_MAX,
+        "the backfill fills the record up to its bound and no further"
+    );
+    assert_eq!(hold_left(&db).unwrap(), None, "a bound backfill still runs once");
 }
 
 #[test]

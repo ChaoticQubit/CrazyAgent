@@ -218,6 +218,29 @@ async fn new_project_refuses_an_id_a_removal_holds() {
         0,
         "a New Project never gets a removed project's id"
     );
+
+    let demo = ProjectId::new(crate::demo::PROJECT_ID).unwrap();
+    write(
+        &engine,
+        "INSERT INTO projects_removed(project,folder,returns,removed_ms)
+            VALUES ('crazyagent-demo',NULL,0,0);
+         INSERT INTO memory_library(id,project,origin,text)
+            VALUES ('m-demo','crazyagent-demo','{\"kind\":\"written\"}','An old demo note.');",
+    );
+    let named = owner
+        .setup_project(demo, spec("Not the demo"), pooled_setup(vec![]), 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        result(named),
+        rejected("project_id_removed"),
+        "rv-code2 RS1-3: only Create demo makes the demo's id again, never a New Project naming it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects_removed WHERE project='crazyagent-demo'"),
+        1
+    );
+    assert_eq!(notes(&engine, "crazyagent-demo"), 1, "a refused New Project clears nothing");
     drop(owner);
     engine.stop().await;
 }

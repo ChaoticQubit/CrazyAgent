@@ -968,3 +968,75 @@ async fn a_demo_made_again_inherits_nothing_of_the_old_one() {
     drop(owner);
     engine.stop().await;
 }
+
+/// A pool that still lists an earlier demo's id, as one does after that demo was deleted.
+#[cfg(target_os = "macos")]
+const DEMO_POOL_LEFT_OVER: &str = r#"
+[[model_access.pools]]
+id = "pool-old"
+members = ["m-codex"]
+projects = ["crazyagent-demo"]
+roles = ["project_leader"]
+fallback_allowed = false
+"#;
+
+/// The pools the saved settings list a project in. Inputs: the engine root and the project.
+/// Output: the pool ids, in saved order.
+#[cfg(target_os = "macos")]
+fn pools_listing(root: &Path, project: &str) -> Vec<String> {
+    let global: toml::Table =
+        toml::from_str(&fs::read_to_string(root.join("global.toml")).unwrap()).unwrap();
+    global["model_access"]["pools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|pool| {
+            pool["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|listed| listed.as_str() == Some(project))
+        })
+        .map(|pool| pool["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// rv-sa241 LOW-1: a demo made again is in exactly the pool its Create picked as soon as it
+/// is made, before any client assigns a pool, never in a pool that still lists the earlier
+/// demo of the same id.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_demo_made_again_is_in_only_the_pool_it_picked() {
+    use crazyagent::demo::PROJECT_ID;
+    use crazyagent::protocol::CredentialRef;
+    let engine = Engine::with_settings(&format!("{DEMO_POOL}{DEMO_POOL_LEFT_OVER}")).await;
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let home = place.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    sign_in(engine.root.path(), "profile-codex");
+    let mut owner = OwnerController::attach(
+        engine.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    assert_eq!(pools_listing(engine.root.path(), PROJECT_ID), ["pool-old"]);
+    let response = owner
+        .set_projects_home(home.to_str().unwrap().into(), 1)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let response = owner
+        .create_demo(CredentialRef::new("pool-codex").unwrap(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(
+        pools_listing(engine.root.path(), PROJECT_ID),
+        ["pool-codex"],
+        "the earlier demo's pool no longer serves the new demo"
+    );
+    drop(owner);
+    engine.stop().await;
+}

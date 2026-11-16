@@ -81,11 +81,13 @@ fn keyed_tables(connection: &Connection) -> Result<Vec<String>, EngineError> {
 /// Holds, as not returnable, every id that is not a live project and still has a row in a
 /// table with a `project` column, tables this build does not know included, so no removal
 /// made by an earlier or another line's build gives its id out again. Runs at every engine
-/// open. Input: the engine connection. Output: Ok or the database's failure.
-pub(crate) fn hold_left(connection: &Connection) -> Result<(), EngineError> {
+/// open. Input: the engine connection. Output: how many ids it held, or the database's
+/// failure.
+pub(crate) fn hold_left(connection: &Connection) -> Result<Option<usize>, EngineError> {
     let now = now_ms();
+    let mut held = 0;
     for table in keyed_tables(connection)? {
-        connection
+        held += connection
             .execute(
                 &format!(
                     "INSERT OR IGNORE INTO projects_removed(project,folder,returns,removed_ms)
@@ -99,7 +101,7 @@ pub(crate) fn hold_left(connection: &Connection) -> Result<(), EngineError> {
             )
             .map_err(error)?;
     }
-    Ok(())
+    Ok(Some(held))
 }
 
 /// Whether one more removal fits the record. Input: the connection. Output: Ok, or

@@ -1332,11 +1332,7 @@ impl NativeOwner {
         };
         match response {
             Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
-                Some(match operation.result {
-                    OwnerResult::Applied => Ok(()),
-                    OwnerResult::Rejected { code } => Err(bounded_problem(&code)),
-                    _ => Err("change_outcome_unknown".into()),
-                })
+                Some(stray_outcome(operation.result))
             }
             Ok(_) => None,
             Err(error) => {
@@ -2496,6 +2492,17 @@ fn bounded_problem(problem: &str) -> String {
     }
 }
 
+/// What a settled stray change tells the owner, from the engine's result for it: done, its
+/// refusal, or an unknown outcome for a result no stray change can have. Input: the result.
+/// Output: Ok when the change was made, else the plain code.
+fn stray_outcome(result: OwnerResult) -> Result<(), String> {
+    match result {
+        OwnerResult::Applied => Ok(()),
+        OwnerResult::Rejected { code } => Err(bounded_problem(&code)),
+        _ => Err("change_outcome_unknown".into()),
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "dispatch_wiring_tests.rs"]
 mod dispatch_wiring_tests;
@@ -3316,6 +3323,25 @@ mod creation_recovery_tests {
 mod tests {
     use super::*;
     use crate::engine::{Engine, Server};
+
+    /// rv-code2 RS1-2: a StartOnboarding whose answer came late and was settled afterwards
+    /// reads as done when the engine answers the project it started, not as unknown.
+    #[test]
+    fn a_settled_stray_onboarding_start_reads_as_done() {
+        assert_eq!(
+            stray_outcome(OwnerResult::OnboardingStarted {
+                project_id: ProjectId::new("my-app-2").unwrap(),
+            }),
+            Ok(())
+        );
+        assert_eq!(stray_outcome(OwnerResult::Applied), Ok(()));
+        assert_eq!(
+            stray_outcome(OwnerResult::Rejected {
+                code: "project_exists".into()
+            }),
+            Err("project_exists".into())
+        );
+    }
 
     #[test]
     fn a_tui_that_cannot_attach_to_a_stopped_engine_says_so_plainly() {
