@@ -224,12 +224,40 @@ export function lidHelperLine(view: KeepAwakeView): string {
   return line;
 }
 
-/** Why this computer cannot honour one setting, or null when it can. Inputs: the setting
- * and the view. Output: the reason shown on the setting's line, or null. */
+/** Why this computer cannot honour one setting, or null when it can; for Low Power Mode the
+ * engine's own reason. Inputs: the setting and the view. Output: the reason shown on the
+ * setting's line, or null. */
 export function unavailable(id: KeepAwakeSettingId, view: KeepAwakeView): string | null {
   if ((id === "heat_end" || id === "heat_notice" || id === "freeze" || id === "mute") && view.platform === "windows") return "Not available on Windows";
   if (id === "lid_display" && view.platform !== "mac_os") return "Only on macOS";
+  if (id === "low_power") return view.low_power.kind === "not_available" ? view.low_power.reason.slice(0, REASON_MAX) : null;
   return id === "lid" ? lidReason(view) : null;
+}
+
+/** The low power words while the lid helper does not run for this engine, the engine's
+ * `LOW_POWER_NEEDS_HELPER` (QUESTION 39d A). */
+export const LOW_POWER_NEEDS_HELPER = "Needs the lid helper";
+const LOW_POWER_HELD = "On now for this hold";
+const LOW_POWER_LEFT = "Left as you set it for this hold";
+
+/** What the Low Power Mode line says of where it stands for this hold (DEC-167 addendum
+ * 42): on now, or left as the owner set it; null while it is unread or ready, and a reason
+ * it cannot run comes from `unavailable`. Input: the view. Output: the words or null. */
+export function lowPowerNow(view: KeepAwakeView): string | null {
+  const words = view.low_power.kind === "held" ? LOW_POWER_HELD : view.low_power.kind === "owner_changed" ? LOW_POWER_LEFT : null;
+  assert(words === null || unavailable("low_power", view) === null, "the low power words and a reason never show together");
+  return words;
+}
+
+/** The Turn on the Low Power Mode line offers (QUESTION 39d A, 43c): the lid helper's own
+ * Turn on words while low power needs the lid helper and Settings offers one, else null; it
+ * never offers Remove lid helper. Input: the view. Output: the words or null. */
+export function lowPowerTurnOn(view: KeepAwakeView): string | null {
+  const low = view.low_power;
+  if (low.kind !== "not_available" || low.reason !== LOW_POWER_NEEDS_HELPER) return null;
+  const turnOn = lidOffers(view, "settings").turnOn;
+  assert(turnOn === null || view.platform === "mac_os", "a Turn on shows only on macOS");
+  return turnOn;
 }
 
 /** Reads the minutes typed into the custom field. Input: the typed text. Output: a whole
