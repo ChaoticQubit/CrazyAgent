@@ -3,29 +3,33 @@ use super::manifest::{self, DriverKind, PLACEHOLDERS, Refused};
 use super::registry::{Harness, registry};
 
 pub mod acp;
+pub mod jsonl_rpc;
 pub mod jsonl_turn;
 pub mod rules;
 pub mod text_turn;
 
 /// The piped drivers the engine runs: its own adapters for Codex and Claude Code and the
 /// Agent Client Protocol client ([`acp::Acp`]) for any harness whose manifest names `acp`,
-/// which run in a [`super::launch::Session`], and the shared `jsonl-turn` and `text-turn`
-/// drivers, which run one process per turn in a [`super::launch::TurnSession`]. Each other
-/// shared driver kind a manifest names joins this list when its task lands.
+/// which run in a [`super::launch::Session`], the shared `jsonl-turn` and `text-turn`
+/// drivers, which run one process per turn in a [`super::launch::TurnSession`], and the
+/// shared `jsonl-rpc` driver ([`jsonl_rpc::JsonlRpc`]) for one long-lived process with JSON
+/// lines both ways, whose launch arguments land with the launch task. Each other shared
+/// driver kind a manifest names joins this list when its task lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Piped {
     Codex,
     Claude,
     Acp,
     JsonlTurn,
+    JsonlRpc,
     TextTurn,
 }
 
 /// The one dispatch point of piped launches: the driver the engine runs for a driver kind.
 /// Input: the kind a manifest names. Output: the driver, or `launch_harness_unsupported`
 /// for RCLI, which runs only through its master host, and for every kind whose driver has
-/// not landed. An ACP harness gets its driver here, while its launch arguments land with
-/// its own task, so a launch of one is still refused when it is built.
+/// not landed. An ACP or jsonl-rpc harness gets its driver here, while its launch arguments
+/// land with the launch task, so a launch of one is still refused when it is built.
 pub fn of(kind: DriverKind) -> Result<Piped, LaunchError> {
     match kind {
         DriverKind::CodexAppServer => Ok(Piped::Codex),
@@ -33,7 +37,7 @@ pub fn of(kind: DriverKind) -> Result<Piped, LaunchError> {
         DriverKind::Rcli => Err(failure("launch_harness_unsupported")),
         DriverKind::Acp => Ok(Piped::Acp),
         DriverKind::JsonlTurn => Ok(Piped::JsonlTurn),
-        DriverKind::JsonlRpc => Err(failure("launch_harness_unsupported")),
+        DriverKind::JsonlRpc => Ok(Piped::JsonlRpc),
         DriverKind::TextTurn => Ok(Piped::TextTurn),
     }
 }

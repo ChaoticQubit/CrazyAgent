@@ -392,14 +392,27 @@ pub(crate) fn account_providers(launch: &str) -> (&'static str, &'static str) {
 }
 
 /// The line a team start shows when no account of the project's pool can run its harness,
-/// naming the account kind to add in the words of the Add account tiles (DEC-161).
+/// naming the account kind to add in the words of the Add account tiles (DEC-161): for
+/// Codex and Claude Code their sign-in and API key, for a listed harness the engine's
+/// sentence from its manifest (`harnesses::accounts::no_account_line`).
 /// Takes the harness as the plan names it and the launch adapter `launch_harness` gave it.
 /// Returns the plain line.
 pub(crate) fn no_account_line(harness: &str, launch: &str) -> String {
-    let (sign_in, key) = account_providers(launch);
-    format!(
-        "No account in this project's pool can run {harness}. Add a {sign_in} sign-in or an {key} API key to the pool"
-    )
+    use crate::coord::settings::HarnessKind;
+    match HarnessKind::parse(launch) {
+        Some(HarnessKind::Codex | HarnessKind::ClaudeCode) => {
+            let (sign_in, key) = account_providers(launch);
+            format!(
+                "No account in this project's pool can run {harness}. Add a {sign_in} sign-in or an {key} API key to the pool"
+            )
+        }
+        _ => crate::harnesses::registry::registry()
+            .get(launch)
+            .map_or_else(
+                || format!("No account in this project's pool can run {harness}"),
+                crate::harnesses::accounts::no_account_line,
+            ),
+    }
 }
 
 /// What the Coordination rows of a harness kind no sub-agent runs on say instead of a live

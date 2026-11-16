@@ -250,10 +250,13 @@ impl Registry {
                     ),
                 });
             }
-            super::drivers::acp::check(&manifest).map_err(|refused| Refused {
-                code: refused.code,
-                message: format!("{file}: {}", refused.message),
-            })?;
+            super::drivers::acp::check(&manifest)
+                .and_then(|()| super::accounts::check(&manifest))
+                .and_then(|()| crate::skills::import::check(&manifest))
+                .map_err(|refused| Refused {
+                    code: refused.code,
+                    message: format!("{file}: {}", refused.message),
+                })?;
             for known in &harnesses {
                 if let Some(message) = clash(&manifest, &known.manifest) {
                     return Err(Refused {
@@ -280,9 +283,13 @@ impl Registry {
     }
 
     /// Finds a harness. Input: its id or one of its aliases. Output: the harness, or none
-    /// for a name no manifest has.
+    /// for a name no manifest has; a test build also finds the stand-in harnesses
+    /// (`registry_standins.rs`), which no registry lists.
     pub fn get(&self, name: &str) -> Option<&Harness> {
-        self.position(name).map(|index| &self.harnesses[index])
+        let found = self.position(name).map(|index| &self.harnesses[index]);
+        #[cfg(test)]
+        let found = found.or_else(|| standins::get(name));
+        found
     }
 
     /// Every harness, in catalog order. Output: the harnesses.
@@ -317,6 +324,10 @@ pub fn registry() -> &'static Registry {
     });
     &BUILT
 }
+
+#[cfg(test)]
+#[path = "registry_standins.rs"]
+pub(crate) mod standins;
 
 #[cfg(test)]
 #[path = "registry_tests.rs"]

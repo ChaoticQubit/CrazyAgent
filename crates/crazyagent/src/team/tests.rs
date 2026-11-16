@@ -7897,6 +7897,25 @@ fn the_no_account_line_names_the_account_kind_the_harness_needs() {
     );
 }
 
+/// Task 17: a team start on a listed harness whose pool has no account for it gets the
+/// engine's one sentence for that harness, by its product name, instead of stopping the
+/// engine on a harness the Codex and Claude Code words do not cover.
+#[test]
+fn a_listed_harness_with_no_compatible_account_gets_the_engine_sentence() {
+    for id in UNWIRED {
+        let listed = crate::harnesses::registry::registry().get(id).unwrap();
+        let line = no_account_line(id, id);
+        assert_eq!(line, crate::harnesses::accounts::no_account_line(listed));
+        assert!(
+            line.starts_with(&format!(
+                "No account in this project's pool can run {}",
+                listed.manifest().name
+            )),
+            "{line}"
+        );
+    }
+}
+
 /// The 15 catalog harnesses no launch adapter and no master host runs yet, written out so
 /// the rows below hold whatever the registry says.
 const UNWIRED: [&str; 15] = [

@@ -1,3 +1,4 @@
+pub mod accounts;
 pub(crate) mod codex_folder;
 pub mod drivers;
 pub mod finding;
