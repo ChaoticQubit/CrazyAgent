@@ -1,5 +1,7 @@
 use super::TurnSession;
+use crate::adapters::FIELD_BYTES_MAX;
 use crate::harnesses::drivers::jsonl_turn::Config;
+use crate::harnesses::drivers::text_turn;
 use crate::harnesses::launch::{
     AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
 };
@@ -8,6 +10,32 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-jsonl-turn.yaml");
+const TEXT_STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-text-turn.yaml");
+
+const TEXT_HARNESS: &str = r#"#!/bin/sh
+prompt=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --prompt=*) prompt=${1#--prompt=} ;;
+  esac
+  shift
+done
+case "$prompt" in
+  stubborn*) trap '' TERM ;;
+esac
+case "$prompt" in
+  fail)
+    printf '%s\n' 'partial'
+    exit 3
+    ;;
+  wait)
+    printf '%s\n' 'thinking'
+    exec /bin/sleep 30
+    ;;
+  flood | stubborn-flood) exec /usr/bin/yes flood ;;
+esac
+printf '\nYou said: %s\n\n' "$prompt"
+"#;
 
 const HARNESS: &str = r#"#!/bin/sh
 prompt=
@@ -327,4 +355,157 @@ fn a_turn_session_refuses_an_account_key_and_full_access() {
         code(TurnSession::start_with(open, config()).map(drop)),
         "launch_harness_unsupported"
     );
+}
+
+/// Starts a session on the text-turn stand-in script, with tools off, and takes its
+/// `Ready`. Output: the launch folder and the session.
+fn begin_text() -> (tempfile::TempDir, TurnSession) {
+    let (directory, mut request) = launch();
+    std::fs::write(&request.executable, TEXT_HARNESS).unwrap();
+    request.harness = "standin-text-turn".into();
+    let manifest = TEXT_STANDIN.replace(
+        "  resume:\n",
+        "  tools_off:\n    - \"--no-tools\"\n  resume:\n",
+    );
+    let config = text_turn::Config::read(&manifest::parse(manifest.as_bytes()).unwrap()).unwrap();
+    let mut session = TurnSession::start_text(request, config).unwrap();
+    assert_eq!(
+        session.next_event(Duration::ZERO).unwrap(),
+        Some(LaunchEvent::Ready {
+            native_session: None
+        })
+    );
+    (directory, session)
+}
+
+fn turn_error() -> LaunchEvent {
+    LaunchEvent::TurnError {
+        rate_limited: false,
+    }
+}
+
+/// DEC-180 Task 13, macOS only: a text-turn session runs one sandboxed process per turn and
+/// gives its whole output as the reply once the process exits, with no usage, and no
+/// process runs between turns.
+#[test]
+fn a_text_turn_session_gives_the_whole_output_as_the_reply_when_the_turn_ends() {
+    let (_directory, mut session) = begin_text();
+    session.send("hello").unwrap();
+    assert!(session.turn_group().is_some());
+    assert_eq!(code(session.send("again")), "launch_busy");
+
+    let events = finish(&mut session);
+
+    assert_eq!(events, [text("You said: hello"), finished(true)]);
+    assert_eq!(session.turn_group(), None);
+    assert_eq!(session.native_session(), None);
+    assert_eq!(
+        turn(&mut session, "two"),
+        [text("You said: two"), finished(true)]
+    );
+    session.stop().unwrap();
+}
+
+/// DEC-180 Task 13, macOS only: a text turn whose process exits with code 3 ends with a turn
+/// error and no reply, and the next prompt starts a new turn.
+#[test]
+fn a_text_turn_that_exits_with_an_error_code_ends_with_a_turn_error() {
+    let (_directory, mut session) = begin_text();
+
+    let events = turn(&mut session, "fail");
+
+    assert_eq!(events, [turn_error(), finished(false)]);
+    assert_eq!(
+        turn(&mut session, "two"),
+        [text("You said: two"), finished(true)]
+    );
+    session.stop().unwrap();
+}
+
+/// DEC-180 Task 13, macOS only: a text turn whose output never ends is stopped once it
+/// passes the output bound, and ends with what fit, a turn error and an unsuccessful end.
+#[test]
+fn a_text_turn_whose_output_passes_the_bound_is_stopped() {
+    let (_directory, mut session) = begin_text();
+    let started = Instant::now();
+    session.send("flood").unwrap();
+
+    let events = finish_within(&mut session, Duration::from_secs(20));
+
+    assert!(started.elapsed() < Duration::from_secs(20));
+    let kept = kept_before_the_error(&events);
+    assert!(kept.starts_with("flood\nflood") && kept.len() <= text_turn::OUTPUT_BYTES_MAX);
+    assert_eq!(session.turn_group(), None);
+    session.stop().unwrap();
+}
+
+/// rv-ds241 T13-sec F2, macOS only: a text turn whose harness ignores TERM and floods its
+/// output gets KILL once the stop grace after the bound passes, well before the session
+/// deadline; the turn ends with what fit, a turn error and an unsuccessful end, its process
+/// group is gone and the next prompt runs. A first turn runs before the timed one, so the
+/// wait macOS may add to a new program's first start is not timed.
+#[test]
+fn a_text_turn_past_the_bound_that_ignores_term_is_killed_once_the_stop_grace_passes() {
+    let (_directory, mut session) = begin_text();
+    assert_eq!(
+        turn(&mut session, "one"),
+        [text("You said: one"), finished(true)]
+    );
+    let started = Instant::now();
+    session.send("stubborn-flood").unwrap();
+    let group = session.turn_group().unwrap();
+
+    let events = finish_within(&mut session, overdue());
+
+    assert!(started.elapsed() < overdue());
+    let kept = kept_before_the_error(&events);
+    assert!(kept.starts_with("flood\nflood") && kept.len() <= text_turn::OUTPUT_BYTES_MAX);
+    assert_eq!(session.turn_group(), None);
+    assert!(gone(group));
+    assert_eq!(
+        turn(&mut session, "two"),
+        [text("You said: two"), finished(true)]
+    );
+    session.stop().unwrap();
+}
+
+/// The reply a text turn kept before it ended with a turn error and an unsuccessful end:
+/// its text events, each 1 to `FIELD_BYTES_MAX` bytes, joined. Input: the turn's events.
+/// Output: the joined text.
+fn kept_before_the_error(events: &[LaunchEvent]) -> String {
+    assert!(events.len() > 2, "{}", events.len());
+    let (texts, end) = events.split_at(events.len() - 2);
+    assert_eq!(end, [turn_error(), finished(false)]);
+    texts
+        .iter()
+        .map(|event| match event {
+            LaunchEvent::Text { text } => {
+                assert!(
+                    !text.is_empty() && text.len() <= FIELD_BYTES_MAX,
+                    "{}",
+                    text.len()
+                );
+                text.as_str()
+            }
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+/// DEC-180 Task 13, macOS only: an interrupt stops a text turn's process group well before
+/// its 30 second sleep ends, and the turn ends interrupted with no reply.
+#[test]
+fn an_interrupted_text_turn_ends_interrupted() {
+    let (_directory, mut session) = begin_text();
+    session.send("wait").unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let started = Instant::now();
+
+    session.interrupt().unwrap();
+    let events = finish_within(&mut session, Duration::from_secs(20));
+
+    assert_eq!(events, [LaunchEvent::Interrupted, finished(false)]);
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert_eq!(session.turn_group(), None);
+    session.stop().unwrap();
 }
