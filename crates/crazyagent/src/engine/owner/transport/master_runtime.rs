@@ -171,6 +171,13 @@ impl MasterHost {
         }
     }
 
+    fn settled(&self) -> bool {
+        match self {
+            Self::Codex(host) => host.settled(),
+            Self::Claude(host) => host.settled(),
+        }
+    }
+
     fn process_group(&self) -> Option<u32> {
         match self {
             Self::Codex(host) => Some(host.process_group()),
@@ -767,10 +774,12 @@ impl OwnerRuntimeHandle {
                     .launch_rcli_master_turn(&prepared, turn_id, listed)
                     .await;
             }
-            Ok(()) => self.launch_master_turn(&prepared, turn_id).await,
-            Err(error) => Err(error),
+            Ok(()) => self.launch_master_turn(&prepared, turn_id, listed).await,
+            Err(error) => {
+                drop(listed);
+                Err(error)
+            }
         };
-        keep_listed_if_uncertain(listed, &result);
         match result {
             Ok(turn) => Ok(turn),
             Err(error) if error.0 == "master_runtime_profile_not_acquired" => {
@@ -797,6 +806,7 @@ impl OwnerRuntimeHandle {
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
+        listed: crate::sandbox::hidden_paths::HiddenRun,
     ) -> Result<MasterTurnView, EngineError> {
         let harness = match prepared.session.selection.backend {
             MasterBackend::Codex => NativeHarness::Codex,
@@ -904,6 +914,11 @@ impl OwnerRuntimeHandle {
             let _ = active.host.cancel().await;
         }
         let closed = active.host.close().await;
+        if active.host.settled() {
+            drop(listed);
+        } else {
+            std::mem::forget(listed);
+        }
         self.count_master_usage(prepared, Some(home), active.reported)
             .await;
         if let Some(diagnostic) = active.host.diagnostic()
@@ -1463,17 +1478,17 @@ fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
     }
 }
 
-/// Keeps a headless master turn on the hidden folders list after it returns when its close
-/// or retirement was uncertain, since its processes may still run, until the engine starts
-/// again (SA-VID14 r1); the RCLI test is the wider one. Inputs: the guard and the result.
+/// Keeps an RCLI master turn on the hidden folders list after it returns when its
+/// retirement was uncertain or its stop left processes held as leftovers, since they may
+/// still run, until the engine starts again (SA-VID14 r1, r2 F1); a native turn asks its
+/// host whether it settled instead (r2 F2). Inputs: the guard and the result.
 pub(super) fn keep_listed_if_uncertain<T>(
     listed: crate::sandbox::hidden_paths::HiddenRun,
     result: &Result<T, EngineError>,
 ) {
-    if result
-        .as_ref()
-        .is_err_and(super::master_rcli::cleanup_uncertain)
-    {
+    if result.as_ref().is_err_and(|error| {
+        super::master_rcli::cleanup_uncertain(error) || super::master_rcli::left_running(error)
+    }) {
         std::mem::forget(listed);
     }
 }

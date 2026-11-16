@@ -939,7 +939,7 @@ mod tests {
                 &[
                     "RunKind::Master",
                     "listed.hid(master_turn_hides(&prepared))",
-                    "keep_listed_if_uncertain(listed, &",
+                    "if active.host.settled()",
                 ][..],
             ),
         ]);

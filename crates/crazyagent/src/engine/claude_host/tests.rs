@@ -767,6 +767,53 @@ async fn a_claude_master_whose_group_keeps_an_unreaped_process_still_ends_and_re
     processes.assert_gone();
 }
 
+/// SA-VID14-R2 F2: a master its clock ended closes with that turn fault. With its group
+/// emptied it is settled, so its turn leaves the hidden folders list; when its cleanup is
+/// then in doubt it closes with the same first fault yet is not settled, so the turn stays.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_claude_master_is_settled_only_when_its_cleanup_left_no_doubt_whatever_fault_came_first()
+{
+    use crate::engine::master_host_fixture::{
+        HarnessProcesses, MasterFixture, ZOMBIE_HOLDING_HARNESS,
+    };
+
+    let clock = Duration::from_secs(2);
+    let mut fixture = MasterFixture::new("claude");
+    let quiet = "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/cat > /dev/null\n";
+    let mut claude = stand_in_master_under(&mut fixture, quiet, false, Some(clock)).await;
+    tokio::time::sleep(clock + Duration::from_secs(1)).await;
+    let closed = claude.close().await;
+    assert_eq!(
+        closed.map_err(|error| error.0),
+        Err("claude_host_deadline".to_owned())
+    );
+    assert!(claude.settled(), "an emptied group leaves no doubt");
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude =
+        stand_in_master_under(&mut fixture, ZOMBIE_HOLDING_HARNESS, false, Some(clock)).await;
+    let processes = HarnessProcesses::wait(&fixture.project);
+    tokio::time::sleep(clock + Duration::from_secs(1)).await;
+    let closed = claude.close().await;
+    assert_eq!(
+        closed.map_err(|error| error.0),
+        Err("claude_host_deadline".to_owned()),
+        "the clock's fault came first"
+    );
+    assert!(!claude.settled(), "a cleanup in doubt is never settled");
+    let started = std::time::Instant::now();
+    while rustix::process::test_kill_process_group(processes.leader) != Err(rustix::io::Errno::SRCH)
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(12),
+            "the harness group was never emptied"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    processes.assert_gone();
+}
+
 #[tokio::test]
 async fn a_claude_master_whose_harness_it_can_never_reap_still_ends_and_releases_the_lease() {
     use crate::engine::master_host_fixture::{MasterFixture, reap_before_the_host};

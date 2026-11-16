@@ -1680,12 +1680,14 @@ async fn a_headless_master_turn_is_on_the_hidden_folders_list_while_it_runs() {
     case.finish().await;
 }
 
-/// SA-VID14 r1 (rv-sec3 b, rv-sec2 F1): a master turn whose close or retirement was
-/// uncertain stays on the hidden folders list after drive_turn returns, since its processes
-/// may still run; any other ending takes it off. Project ids of its own keep the two kept
-/// guards off every other list.
+/// SA-VID14 r1 (rv-sec3 b, rv-sec2 F1) and r2 F1: a master turn whose close or retirement
+/// was uncertain, or whose RCLI stop left processes held as leftovers, alone or before the
+/// turn's own error, stays on the hidden folders list after drive_turn returns, since its
+/// processes may still run; any other ending takes it off. Project ids of its own keep the
+/// kept guards off every other list.
 #[test]
 fn an_uncertain_master_cleanup_keeps_the_turn_listed_after_it_returns() {
+    use crate::harnesses::leftovers::{LEFT, SANDBOX_UNCHECKED};
     use crate::sandbox::hidden_paths::{RunKind, runs_seeing};
     let saved = [std::path::PathBuf::from("/tmp/sa-vid14-master-left/vault")];
     let ended = |cause: &str| Err(EngineError(cause.into()));
@@ -1704,6 +1706,12 @@ fn an_uncertain_master_cleanup_keeps_the_turn_listed_after_it_returns() {
         (
             "sa-vid14-master-retired",
             ended("master_turn_failed;rcli_master_cleanup_incomplete"),
+            true,
+        ),
+        ("sa-vid14-master-held", ended(LEFT), true),
+        (
+            "sa-vid14-master-held-late",
+            ended(&format!("{SANDBOX_UNCHECKED};rcli_master_turn_deadline")),
             true,
         ),
     ] {

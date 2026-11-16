@@ -36,6 +36,17 @@ pub(super) struct ProcessState {
     pub(super) complete: bool,
     pub(super) error: Option<&'static str>,
     pub(super) cleanup_error: Option<&'static str>,
+    pub(super) doubted: bool,
+}
+
+impl ProcessState {
+    /// Notes a cleanup fault after which processes the harness started may still run; the
+    /// doubt stays though the completion replaces the code (SA-VID14-R2 F2). Input: the
+    /// code. Output: none.
+    pub(super) fn doubt(&mut self, code: &'static str) {
+        self.cleanup_error = Some(code);
+        self.doubted = true;
+    }
 }
 
 pub(super) struct ProcessShared {
@@ -60,7 +71,7 @@ impl ProcessShared {
 
     pub(super) fn accounting_failed(&self) {
         if let Ok(mut state) = self.lock() {
-            state.cleanup_error = Some("codex_host_pipe_accounting");
+            state.doubt("codex_host_pipe_accounting");
         }
         self.fail("codex_host_pipe_accounting");
     }
@@ -132,6 +143,7 @@ impl CodexHostProcess {
                 complete: false,
                 error: None,
                 cleanup_error: None,
+                doubted: false,
             }),
             stop: AtomicBool::new(false),
             close_stdin: AtomicBool::new(false),
@@ -280,6 +292,16 @@ impl CodexHostProcess {
     pub(super) fn request_stop(&self) {
         self.shared.stop.store(true, Ordering::Release);
         self.close_stdin();
+    }
+
+    /// Says whether the harness completed with no cleanup ever in doubt, so nothing it
+    /// started may still run (SA-VID14-R2 F2): false before completion, after a doubt the
+    /// completion's own code replaced, and when the state cannot be read. Input: the
+    /// process. Output: the answer.
+    pub(super) fn settled(&self) -> bool {
+        self.shared
+            .lock()
+            .is_ok_and(|state| state.complete && !state.doubted)
     }
 
     pub(super) fn operation_result(&self) -> Result<(), EngineError> {

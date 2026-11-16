@@ -257,6 +257,10 @@ async fn closing_a_codex_host_kills_its_whole_group_and_releases_the_lease() {
     let closed = process.close().await;
     let elapsed = started.elapsed();
     assert!(closed.is_ok(), "{closed:?} after {elapsed:?}");
+    assert!(
+        process.settled(),
+        "SA-VID14-R2 F2: a clean close is settled"
+    );
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
     assert_eq!(group, Ok(processes.leader));
     processes.assert_gone();
@@ -335,6 +339,10 @@ async fn a_codex_host_whose_group_keeps_an_unreaped_process_still_ends_and_relea
     assert_eq!(
         closed.map_err(|error| error.0),
         Err("codex_host_cleanup_uncertain".to_owned())
+    );
+    assert!(
+        !process.settled(),
+        "SA-VID14-R2 F2: a cleanup in doubt is never settled"
     );
     let started = Instant::now();
     while fixture.sign_in("codex-group-next", 3).is_err() {
