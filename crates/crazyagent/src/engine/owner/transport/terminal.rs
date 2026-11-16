@@ -714,14 +714,12 @@ impl Viewing for Grant<'_> {
         still_granted(self.authority, self.packet, self.admission)
     }
 
-    fn holds(&self) -> impl Future<Output = bool> + Send {
-        async move {
-            granted(self.engine, self.authority, self.packet)
-                .await
-                .ok()
-                .as_ref()
-                == Some(self.admission)
-        }
+    async fn holds(&self) -> bool {
+        granted(self.engine, self.authority, self.packet)
+            .await
+            .ok()
+            .as_ref()
+            == Some(self.admission)
     }
 
     fn typed(&self, request: &TerminalRequest) {
