@@ -804,7 +804,8 @@ fn every_setting_option_round_trips_through_the_owner_protocol() {
         assert_eq!(view.settings, settings);
         assert_eq!(view.platform, crate::paths::Platform::CURRENT);
     }
-    let unknown = r#"{"kind":"KeepAwake","action":{"set":{"settings":{"mode":"sometimes"},"version":0}}}"#;
+    let unknown =
+        r#"{"kind":"KeepAwake","action":{"set":{"settings":{"mode":"sometimes"},"version":0}}}"#;
     assert!(serde_json::from_str::<OwnerMutation>(unknown).is_err());
     let short = OwnerMutation::KeepAwake {
         action: KeepAwakeAction::Start { minutes: 0 },
