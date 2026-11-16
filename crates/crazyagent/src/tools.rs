@@ -4,8 +4,6 @@ pub mod probe;
 mod tests;
 
 use std::ffi::{OsStr, OsString};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 const PLACES_MAX: usize = 160;
@@ -14,6 +12,30 @@ const PATH_BYTES_MAX: usize = 1024;
 const SCRIPT_HEAD_BYTES_MAX: usize = 256;
 const SHEBANG_WORDS_MAX: usize = 8;
 const ENV: &str = "/usr/bin/env";
+const NAME_LAUNCHERS: [&str; 22] = [
+    "env",
+    "nice",
+    "arch",
+    "nohup",
+    "time",
+    "caffeinate",
+    "xcrun",
+    "script",
+    "sandbox-exec",
+    "timeout",
+    "stdbuf",
+    "setsid",
+    "sudo",
+    "doas",
+    "busybox",
+    "coreutils",
+    "toybox",
+    "genv",
+    "gnice",
+    "gnohup",
+    "gtimeout",
+    "gstdbuf",
+];
 pub(crate) const INTERPRETER_DEPTH_MAX: usize = 2;
 const VERSION_ENTRIES_MAX: usize = 64;
 const VERSIONS_PER_MANAGER_MAX: usize = 4;
@@ -1068,7 +1090,8 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         },
         _ => needs(&interpreter_name),
     })?;
-    if interpreter.program == Path::new(ENV) {
+    let real_name = interpreter.program.file_name().and_then(OsStr::to_str);
+    if real_name.is_some_and(launches_by_name) || launches_by_name(&interpreter_name) {
         return Err(refused(program.as_path(), Refusal::FirstLine));
     }
     Ok(Resolved {
@@ -1125,6 +1148,16 @@ fn named_interpreter(
     }
 }
 
+/// Whether a name is one of a launcher that starts the program it is given looked up by name
+/// in its own PATH, such as `env`, `nice`, `arch` or `nohup`, so a first line running it
+/// starts a copy the resolver never judged (rv-sec2 B11 r2 F2). [`entry_at`] asks it of the
+/// interpreter's real file name and of the name the line runs it as, its program word for
+/// `env` or the file name as written, since a multi-call binary such as coreutils or busybox
+/// picks its tool by that name (rv-code4 B18 F1). Input: the name. Output: the answer.
+fn launches_by_name(name: &str) -> bool {
+    NAME_LAUNCHERS.contains(&name)
+}
+
 /// A script's first line: the absolute interpreter, or the program name `env` looks up,
 /// and the arguments before the script.
 struct Shebang {
@@ -1155,21 +1188,20 @@ struct Unreadable;
 /// [`SCRIPT_HEAD_BYTES_MAX`] bytes, ended by a newline or a NUL, its words split on spaces
 /// and tabs: an absolute interpreter with its words, or `/usr/bin/env`, after one `-S` at
 /// most, with the program it names. An interpreter that is `env` anywhere else is refused
-/// here, and one whose real file is `/usr/bin/env` by the resolver ([`entry_at`]).
-/// Input: the real file. Output: the line, none for a file that is not a script, or
-/// [`Unreadable`] for any other first line.
+/// here, and one whose real file launches by name by the resolver ([`entry_at`]). A file
+/// it cannot read, which the system still runs, and a line holding `#`, where the system
+/// ends it, are [`Unreadable`] (rv-sec2 B11 r2 F3, F4). Input: the real file. Output: the
+/// line, none for a file that is not a script, or [`Unreadable`] for any other first line.
 fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     use std::io::Read;
     let mut head = Vec::with_capacity(SCRIPT_HEAD_BYTES_MAX);
-    let Ok(opened) = std::fs::File::open(file) else {
-        return Ok(None);
-    };
+    let opened = std::fs::File::open(file).map_err(|_| Unreadable)?;
     if opened
         .take(SCRIPT_HEAD_BYTES_MAX as u64)
         .read_to_end(&mut head)
         .is_err()
     {
-        return Ok(None);
+        return Err(Unreadable);
     }
     assert!(head.len() <= SCRIPT_HEAD_BYTES_MAX);
     let Some(line) = head.strip_prefix(b"#!") else {
@@ -1180,7 +1212,10 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
         return Err(Unreadable);
     }
     let line = std::str::from_utf8(&line[..end.unwrap_or(line.len())]).map_err(|_| Unreadable)?;
-    if line.chars().any(|c| c.is_control() && c != '\t') {
+    if line
+        .chars()
+        .any(|c| (c.is_control() && c != '\t') || c == '#')
+    {
         return Err(Unreadable);
     }
     let words: Vec<&str> = line
@@ -1210,7 +1245,7 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     let (program, arguments) = rest.split_first().ok_or(Unreadable)?;
     let plain = !program.starts_with('-')
         && !program.contains('=')
-        && !(split && program.contains(['$', '\\', '"', '\'', '#']));
+        && !(split && program.contains(['$', '\\', '"', '\'']));
     if !plain {
         return Err(Unreadable);
     }
@@ -1354,7 +1389,7 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
             "{tool} can't start: {file} is not used because it is in a temp folder or links to one, which agents or other users can change. Install it outside temp folders, then try again."
         ),
         Refusal::FirstLine => format!(
-            "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, or a line that is too long or unreadable). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
+            "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, a launcher such as nice or nohup that looks a program up by name, a # in the line, a line that is too long, or a file CrazyAgent can't read). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
         ),
     }
 }
@@ -1438,20 +1473,19 @@ fn below(base: &Path, relative: &str) -> PathBuf {
         .fold(base.to_path_buf(), |at, part| at.join(part))
 }
 
-fn executable_file(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && runnable(&metadata))
-}
-
-/// Reports whether file metadata grants any execute permission.
-/// Takes the metadata. Returns true when any of the three execute bits is set.
+/// Whether a path is a file the run's user can execute, as the system decides at exec, so a
+/// candidate or interpreter the engine's user cannot start never resolves, and a copy `env`
+/// passes over is never one a walk takes and passes (rv-sec3 B18 F1). Input: the path.
+/// Output: the answer.
 #[cfg(unix)]
-fn runnable(metadata: &std::fs::Metadata) -> bool {
-    metadata.permissions().mode() & 0o111 != 0
+fn executable_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+        && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
 }
 
-/// Reports that a file may be run where the platform has no execute bit.
-/// Takes the metadata, unused. Returns true.
+/// Whether a path is a file, where the platform has no execute permission to test.
+/// Input: the path. Output: the answer.
 #[cfg(not(unix))]
-fn runnable(_metadata: &std::fs::Metadata) -> bool {
-    true
+fn executable_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
 }

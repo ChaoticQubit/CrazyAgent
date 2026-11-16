@@ -17,6 +17,7 @@ pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
 };
 pub(crate) use move_project::holds as project_move_holds;
+pub(crate) use move_project::lands as project_move_lands;
 pub(crate) use move_project::{
     Asked, Finished, Pending, check as project_move_check, finish, forget, pending, plan,
 };
@@ -62,6 +63,12 @@ CREATE TABLE IF NOT EXISTS projects_home_project_move_ended (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
     mode TEXT NOT NULL CHECK(mode IN ('move', 'copy')),
     ended TEXT NOT NULL CHECK(length(ended) BETWEEN 1 AND 64)
+);
+CREATE TABLE IF NOT EXISTS projects_home_project_move_left (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024)
 );
 CREATE TABLE IF NOT EXISTS projects_home_add (
     request TEXT PRIMARY KEY CHECK(length(request) BETWEEN 1 AND 128),
