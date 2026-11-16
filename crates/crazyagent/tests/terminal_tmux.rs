@@ -2223,10 +2223,14 @@ fn stand_in(tmux: &Path, socket: &Path, lead: &AgentId) {
 }
 
 /// PLC (c): the engine pins a native lead's teammates' server to the pid it first answered
-/// with. Once that server and the lead's own ended, stand-in servers another process started
-/// at both sockets are refused for the lead's team panes: by the same host, though it dropped
-/// its teammates' client while nothing listened there, and by a host opened again on the
-/// same engine root, as after an engine restart, since the pin is kept on disk (PC-L1).
+/// with. Once that server and the lead's own ended and both their keepers confirmed it, the
+/// host reads the lead itself as gone, as for any ended lead (gb67): `pane_pid` and a kill
+/// are `terminal_agent_unknown`. A call on its team panes names the end of its pinned
+/// teammates' server, `terminal_teammates_server_ended`, and drops the teammates' client.
+/// Stand-in servers another process then started at both sockets are refused for the lead's
+/// team panes: by the same host, though it dropped that client while nothing listened there,
+/// and by a host opened again on the same engine root, as after an engine restart, since the
+/// pin is kept on disk (PC-L1).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_refused() {
@@ -2252,10 +2256,34 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_r
         assert!(killed.success());
         until_refused(socket);
     }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !host.server_keepers(&leader).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the keepers of the lead's ended servers still run"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let ended = "terminal_teammates_server_ended";
     assert_eq!(
         host.panes(&leader).unwrap_err().0,
-        "terminal_teammates_server_ended",
-        "no server lists the lead's panes while none runs, and the host drops its teammates' client"
+        ended,
+        "the team panes of a lead whose servers ended did not name its teammates' server's end"
+    );
+    assert_eq!(
+        host.input_pane(&leader, "%0", b"x\n").unwrap_err().0,
+        ended,
+        "a call on a team pane of a lead whose servers ended did not name that end"
+    );
+    assert_eq!(
+        host.pane_pid(&leader).unwrap_err().0,
+        "terminal_agent_unknown",
+        "a lead whose servers ended and whose keepers confirmed it was not found gone"
+    );
+    assert_eq!(
+        host.kill(&leader).unwrap_err().0,
+        "terminal_agent_unknown",
+        "the host found a server for a lead whose servers ended"
     );
     for socket in [&lead.socket, &lead.mates] {
         stand_in(&lead.tmux, socket, &leader);

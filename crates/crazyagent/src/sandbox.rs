@@ -1039,7 +1039,8 @@ pub const LINUX_SIGNALS_LINE: &str = "On this Linux, agents can see which progra
 /// What a Linux agent can still see where the kernel scopes its signals but this machine
 /// gives it no process namespace of its own, shown there only, under the access level in
 /// the desktop and the TUI (RV-DS241-86).
-pub const LINUX_PROCESS_LIST_LINE: &str = "On this Linux, agents can see which programs you run and how they were started.";
+pub const LINUX_PROCESS_LIST_LINE: &str =
+    "On this Linux, agents can see which programs you run and how they were started.";
 
 /// What a writable project folder still cannot hold where the call supervisor runs: it
 /// refuses every new `.git` entry but the agent's own, yet an agent may change a git
@@ -1060,7 +1061,8 @@ pub const LINUX_ROOT_LINE: &str = "CrazyAgent runs as root on this Linux, so it 
 /// What a limited network that reaches websites still cannot hold where the call supervisor
 /// keeps ports on this computer to it (DEC-179 T4c): agents look up names over TCP, so port
 /// 53 is open to them on every host.
-pub const LINUX_DNS_ANY_HOST_LINE: &str = "On this Linux, agents can also reach port 53, used to look up names, on every host.";
+pub const LINUX_DNS_ANY_HOST_LINE: &str =
+    "On this Linux, agents can also reach port 53, used to look up names, on every host.";
 
 /// Why agents share the owner's process space where AppArmor keeps unprivileged programs
 /// out of user namespaces (Ubuntu 23.10 and newer) and this machine nests none, shown before
@@ -4161,7 +4163,10 @@ fn spelled_char(character: char) -> String {
     }
     if alternatives.len() == 1 {
         character.to_string()
-    } else if alternatives.iter().all(|alternative| alternative.is_ascii()) {
+    } else if alternatives
+        .iter()
+        .all(|alternative| alternative.is_ascii())
+    {
         format!("[{}]", alternatives.concat())
     } else {
         format!("({})", alternatives.join("|"))
@@ -4211,7 +4216,11 @@ fn spelled_run(run: &[char], before: bool, after: bool, exact: bool) -> String {
             .map(|(start, end, point)| (start, end, point.to_string())),
     );
     let cuts: Vec<usize> = (0..=count)
-        .filter(|&cut| !pieces.iter().any(|(start, end, _)| *start < cut && cut < *end))
+        .filter(|&cut| {
+            !pieces
+                .iter()
+                .any(|(start, end, _)| *start < cut && cut < *end)
+        })
         .collect();
     let mut pattern = String::new();
     for stretch in cuts.windows(2) {
@@ -4693,16 +4702,13 @@ fn make_config_parents(home: &Path, clear: bool) -> Result<(), SandboxError> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     let refused = || invalid("a config folder of the agent home could not be made");
     let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let parent = rustix::fs::open(home, folder, Mode::empty())
-        .map_err(|_| refused())?;
+    let parent = rustix::fs::open(home, folder, Mode::empty()).map_err(|_| refused())?;
     let is_folder = |name: &str| {
         rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)
             .map(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory)
     };
-    let remove = |name: &str| {
-        crate::team::cleanup::remove_home_entry(&parent, name)
-            .map_err(|_| refused())
-    };
+    let remove =
+        |name: &str| crate::team::cleanup::remove_home_entry(&parent, name).map_err(|_| refused());
     for name in CONFIG_PARENTS {
         match is_folder(name) {
             Ok(true) => continue,

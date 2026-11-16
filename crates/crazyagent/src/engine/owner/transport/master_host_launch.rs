@@ -1417,8 +1417,7 @@ mod tests {
         for name in ["config", "cargo"] {
             private_directory(&dotfiles.join(name));
             std::fs::write(dotfiles.join(name).join("kept"), name).unwrap();
-            std::os::unix::fs::symlink(dotfiles.join(name), home.join(format!(".{name}")))
-                .unwrap();
+            std::os::unix::fs::symlink(dotfiles.join(name), home.join(format!(".{name}"))).unwrap();
         }
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
@@ -2269,6 +2268,7 @@ mod tests {
             "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
         );
         let mut expected_claude = BTreeMap::from([
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
             ("CLAUDE_CONFIG_DIR", home.to_str().unwrap()),
             ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.to_str().unwrap()),
             ("HOME", home.to_str().unwrap()),

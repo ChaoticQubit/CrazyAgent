@@ -40,6 +40,265 @@ fn a_home_move_rechecks_agent_work_under_its_hold_before_the_first_write() {
     );
 }
 
+/// rv-sec3 S5b F2: a projects home move carries each moved project's GitHub publish job,
+/// named by the project's folder, to the project's folder in the new home, so a recorded
+/// publish is still found there and nothing is left under the old folder.
+#[test]
+fn a_home_move_carries_each_moved_projects_github_publish_job() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let (home, next, engine) = (base.join("home"), base.join("next"), base.join("engine"));
+    for folder in [&home, &next, &engine] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    let database = engine.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::team::cleanup::initialize(&connection).unwrap();
+    drop(crate::landing::open(&engine).unwrap());
+    crate::projects_home::save(&connection, &home).unwrap();
+    let (origin, target) = (home.join("demo"), next.join("demo"));
+    std::fs::create_dir(&origin).unwrap();
+    let setup = crate::project_setup::StoredSetup {
+        project_id: ProjectId::new("demo").unwrap(),
+        name: "demo".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 16,
+        },
+        documents: vec![],
+        folder: origin.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES ('demo',?1)",
+            params![serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"demo\"]')",
+            params![home.to_str().unwrap(), next.to_str().unwrap()],
+        )
+        .unwrap();
+    let job = crate::github::GitHubPublishJob {
+        project: origin.clone(),
+        plan: crate::github::GitHubPublishPlan {
+            owner: "me".into(),
+            name: "demo".into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+        lines: vec![".env*".into()],
+        written: Vec::new(),
+        step: crate::github::GitHubPublishStep::Drafting,
+        stopped: None,
+        made: None,
+        rules: crate::github::GitHubRule::defaults(),
+    };
+    crate::github::keep_job(&engine, &job);
+    std::fs::rename(&origin, &target).unwrap();
+    assert!(projects_home::settle_pending(&mut connection, &database, None, false).unwrap());
+    assert_eq!(crate::github::kept_job(&engine, &origin), None);
+    assert_eq!(
+        crate::github::kept_job(&engine, &target),
+        Some(crate::github::GitHubPublishJob {
+            project: target.clone(),
+            ..job
+        })
+    );
+}
+
+/// rv-code2 GH5B-1, DEC-178 add.1: Remove from dashboard keeps a project's answer to the
+/// Overview's publish question, as it keeps the project's notes for a re-add of the same
+/// folder, and a Delete everything forgets the answer with the project's records.
+#[test]
+fn delete_everything_forgets_the_publish_question_answer_and_remove_from_dashboard_keeps_it() {
+    let root = tempfile::tempdir().unwrap();
+    let engine = root.path().canonicalize().unwrap();
+    let mut connection = Connection::open(engine.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let (kept, gone) = (
+        ProjectId::new("kept").unwrap(),
+        ProjectId::new("gone").unwrap(),
+    );
+    for project in [&kept, &gone] {
+        let body = serde_json::to_string(&crate::protocol::StoredProject {
+            project_id: project.clone(),
+            spec: crate::protocol::ProjectSpec {
+                name: project.as_str().into(),
+                repositories: vec![],
+            },
+        })
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects(id, body) VALUES (?1, ?2)",
+                params![project.as_str(), body],
+            )
+            .unwrap();
+        crate::github::keep_prompt_answer(
+            &engine,
+            project,
+            crate::github::GitHubPromptAnswer::Never,
+        );
+        assert!(crate::github::kept_prompt_answer(&engine, project));
+    }
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    let tx = connection.transaction().unwrap();
+    let removed = crate::project_setup::execute(
+        &tx,
+        &config,
+        &crate::project_setup::SetupAction::Remove {
+            project_id: kept.clone(),
+        },
+        2,
+    )
+    .unwrap();
+    assert!(matches!(removed, crate::protocol::Outcome::Applied));
+    let deleted = crate::project_setup::record_delete(
+        &tx,
+        &crate::project_setup::SetupAction::Delete {
+            project_id: gone.clone(),
+            name: "gone".into(),
+        },
+        &Ok(Vec::new()),
+        3,
+    )
+    .unwrap();
+    assert!(matches!(deleted, crate::protocol::Outcome::Applied));
+    tx.commit().unwrap();
+    assert!(
+        crate::github::kept_prompt_answer(&engine, &kept),
+        "Remove from dashboard keeps Don't ask again"
+    );
+    assert!(
+        !crate::github::kept_prompt_answer(&engine, &gone),
+        "Delete everything forgets it"
+    );
+}
+
+/// QUESTION-22:50 R, DEC-178 add.1: a Delete everything forgets the project's GitHub publish
+/// job, kept under its folder, so a New project that later lands in the same folder finds
+/// no old publish to show or go on with; Remove from dashboard keeps its job for a re-add
+/// of the same folder.
+#[test]
+fn delete_everything_forgets_the_github_publish_job_and_remove_from_dashboard_keeps_it() {
+    let root = tempfile::tempdir().unwrap();
+    let engine = root.path().canonicalize().unwrap();
+    let home = engine.join("home");
+    let mut connection = Connection::open(engine.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let job = |folder: &Path| crate::github::GitHubPublishJob {
+        project: folder.to_path_buf(),
+        plan: crate::github::GitHubPublishPlan {
+            owner: "me".into(),
+            name: "tool".into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+        lines: vec![".env*".into()],
+        written: Vec::new(),
+        step: crate::github::GitHubPublishStep::Drafting,
+        stopped: None,
+        made: None,
+        rules: crate::github::GitHubRule::defaults(),
+    };
+    for id in ["kept", "gone"] {
+        let folder = home.join(id);
+        std::fs::create_dir_all(&folder).unwrap();
+        let project = ProjectId::new(id).unwrap();
+        let body = serde_json::to_string(&crate::protocol::StoredProject {
+            project_id: project.clone(),
+            spec: crate::protocol::ProjectSpec {
+                name: id.into(),
+                repositories: vec![],
+            },
+        })
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects(id, body) VALUES (?1, ?2)",
+                params![id, body],
+            )
+            .unwrap();
+        let setup = crate::project_setup::StoredSetup {
+            project_id: project,
+            name: id.into(),
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: crate::project_setup::TeamPlan {
+                master: "codex".into(),
+                master_tools: false,
+                sub_harnesses: vec![],
+                min_agents: 1,
+                max_agents: 16,
+            },
+            documents: vec![],
+            folder: folder.to_str().unwrap().into(),
+            created_ms: 1,
+            revision: 1,
+        };
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1, ?2)",
+                params![id, serde_json::to_string(&setup).unwrap()],
+            )
+            .unwrap();
+        crate::github::keep_job(&engine, &job(&folder));
+    }
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    let tx = connection.transaction().unwrap();
+    let removed = crate::project_setup::execute(
+        &tx,
+        &config,
+        &crate::project_setup::SetupAction::Remove {
+            project_id: ProjectId::new("kept").unwrap(),
+        },
+        2,
+    )
+    .unwrap();
+    assert!(matches!(removed, crate::protocol::Outcome::Applied));
+    let deleted = crate::project_setup::record_delete(
+        &tx,
+        &crate::project_setup::SetupAction::Delete {
+            project_id: ProjectId::new("gone").unwrap(),
+            name: "gone".into(),
+        },
+        &Ok(Vec::new()),
+        3,
+    )
+    .unwrap();
+    assert!(matches!(deleted, crate::protocol::Outcome::Applied));
+    tx.commit().unwrap();
+    let (kept, gone) = (home.join("kept"), home.join("gone"));
+    assert_eq!(
+        crate::github::kept_job(&engine, &kept),
+        Some(job(&kept)),
+        "Remove from dashboard keeps the publish job"
+    );
+    assert_eq!(
+        crate::github::kept_job(&engine, &gone),
+        None,
+        "Delete everything forgets it"
+    );
+}
+
 /// A Delete everything moves nothing while an agent of the project runs: past the wait it
 /// refuses `delete_agents_running`, and once the agent stops every move sees the Stop all row
 /// and no running agent of the project. A first failed move refuses `home_trash_failed`, a

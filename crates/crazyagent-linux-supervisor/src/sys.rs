@@ -85,7 +85,8 @@ pub fn sizes_fit() -> io::Result<()> {
     let fits = usize::from(sizes.seccomp_notif) == size_of::<libc::seccomp_notif>()
         && usize::from(sizes.seccomp_notif_resp) == size_of::<libc::seccomp_notif_resp>()
         && usize::from(sizes.seccomp_data) == size_of::<libc::seccomp_data>();
-    fits.then_some(()).ok_or_else(|| io::ErrorKind::Unsupported.into())
+    fits.then_some(())
+        .ok_or_else(|| io::ErrorKind::Unsupported.into())
 }
 
 /// Installs the program on the calling thread with a listener for its trapped calls, and

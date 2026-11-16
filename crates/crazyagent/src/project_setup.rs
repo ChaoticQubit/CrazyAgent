@@ -103,7 +103,7 @@ const KEY_BLOCK_END: &str = "-----end";
 const BASE64_RUN_MIN: usize = 20;
 const WRAPPED_TAIL_MIN: usize = 8;
 const PGPASS_FIELDS_MIN: usize = 5;
-const SECRET_PREFIXES: [&str; 14] = [
+pub(crate) const SECRET_PREFIXES: [&str; 14] = [
     "sk-",
     "sk_",
     "pk_",
@@ -2052,7 +2052,10 @@ pub(crate) fn execute(
             setup,
             kept.as_deref(),
         ),
-        SetupAction::Remove { project_id } => remove(tx, project_id, revision),
+        SetupAction::Remove { project_id } => match removed::room(tx)? {
+            Ok(()) => remove(tx, project_id, revision, true),
+            Err(code) => Ok(rejected(code)),
+        },
         SetupAction::Delete { .. } => Ok(rejected("project_delete_requires_transport")),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
         SetupAction::SetReadPaths {
@@ -2826,19 +2829,24 @@ fn set_agent_policy(
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings (sub-agent nesting and the new folder limit among them), live master
 /// switch, done-quiet choice, owner notifications, wake rules and ended agents are deleted, so a waiting step is never
-/// claimed and a running one stops; its read folders, agent access, agent settings and its
-/// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
-/// per-project switches are cleared too, and so are the memories its agents saved, so a new
-/// project reusing the id never inherits them. The versions of its read folders, agent access, agent settings, project
+/// claimed and a running one stops; its read folders, agent access, agent settings, its
+/// agents' own instructions and their GitHub rule proposals go too. Its project-scoped MCP
+/// servers, skills, secrets and per-project switches are cleared too, and so are the
+/// memories its agents saved, so a new project reusing the id never inherits them. The
+/// removal is recorded with the project's folder (DEC-178 addendum 1): kept, from Remove
+/// from dashboard, keeps the owner's notes, imports and selections and lets that exact folder
+/// bring the project back; not kept, from Delete everything, forgets them and holds the id for
+/// good. The versions of its read folders, agent access, agent settings, project
 /// instructions, team settings and project wake rule move on once more, so a project added
 /// again under the same id refuses a save from a screen read before the removal (V2V-1,
 /// V2SYNC-2); agent ids are never reused, so its agents' instruction versions are dropped
-/// and their wake rule versions need no move. Returns `invalid_project` for an unknown
-/// project.
+/// and their wake rule versions need no move. Takes the transaction, the project, the
+/// revision and whether its notes are kept. Returns `invalid_project` for an unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     revision: u64,
+    kept: bool,
 ) -> Result<Outcome, EngineError> {
     let exists: bool = tx
         .query_row(
@@ -2850,6 +2858,7 @@ fn remove(
     if !exists {
         return Ok(rejected("invalid_project"));
     }
+    let folder = load_setup(tx, project_id)?.map(|stored| stored.project_folder());
     crate::storage::close_master_for_removal(tx, project_id, revision)?;
     for table in REMOVED_WITH_PROJECT {
         tx.execute(
@@ -2864,6 +2873,7 @@ fn remove(
     crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
     crate::sandbox::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
+    crate::github::proposals::forget_project(tx, project_id)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::hidden_paths_item(project_id),
@@ -2903,8 +2913,17 @@ fn remove(
         .map_err(error)?;
     assert_eq!(removed, 1);
     crate::memory::library::forget_orphan_agent_memories(tx)?;
+    if !kept {
+        crate::memory::library::forget_project_memories(tx, project_id)?;
+    }
     crate::memory::forget_project(tx, project_id)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
+    removed::record(
+        tx,
+        project_id,
+        folder.as_deref().and_then(Path::to_str),
+        kept,
+    )?;
     Ok(Outcome::Applied)
 }
 
@@ -2943,10 +2962,12 @@ fn finish_removed_agent_notices(
 }
 
 /// Records a Delete everything once the owner transport finished its disk work: the
-/// project's records go as in Remove from dashboard when every folder reached the Trash, the
-/// caller recording the exact names and folder identities of its engine files in the same
-/// write, and otherwise the refusal is kept with nothing removed. Inputs: the transaction,
-/// the action, the transport's outcome and the revision. Output: the outcome to record.
+/// project's records go as in Remove from dashboard when every folder reached the Trash,
+/// with its answer to the GitHub publish question and its GitHub publish job too, which
+/// Remove keeps (DEC-178 add.1), the caller recording the exact names and folder identities of its engine files in the
+/// same write, and otherwise the refusal is kept with nothing removed. Inputs: the
+/// transaction, the action, the transport's outcome and the revision. Output: the outcome
+/// to record.
 pub(crate) fn record_delete(
     tx: &Transaction<'_>,
     action: &SetupAction,
@@ -2959,7 +2980,21 @@ pub(crate) fn record_delete(
     if let Err(code) = outcome {
         return Ok(rejected(code));
     }
-    remove(tx, project_id, revision)
+    let folder = match load_setup(tx, project_id) {
+        Ok(stored) => stored.map(|stored| stored.project_folder()),
+        Err(error) => {
+            eprintln!("github_publish_forget_failed code={}", error.0);
+            None
+        }
+    };
+    let removed = remove(tx, project_id, revision, false)?;
+    if matches!(removed, Outcome::Applied) {
+        crate::github::forget_prompt(tx, project_id)?;
+        if let Some(folder) = &folder {
+            crate::github::forget_job(tx, folder);
+        }
+    }
+    Ok(removed)
 }
 
 /// The team a New Project gets and the folder it lands in, after the checks
@@ -2970,13 +3005,21 @@ struct Checked {
     folder: PathBuf,
 }
 
+/// Checks a New Project, or Create demo when `demo`, before its folder is built and again
+/// before it is recorded: its pool, that no project or removal holds its id (Create demo
+/// alone makes the demo's id again), its team and the folder it lands in. The leftover row
+/// probe runs once in [`plan_new`] and again where the project is recorded. Inputs: the
+/// transaction, configuration, id, spec, setup and whether the request is Create demo.
+/// Output: the checked plan, or the refusal code.
 fn check_new(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     project_id: &ProjectId,
     spec: &ProjectSpec,
     setup: &ProjectSetup,
+    demo: bool,
 ) -> Result<Result<Checked, String>, EngineError> {
+    assert!(!demo || project_id.as_str() == crate::demo::PROJECT_ID);
     if setup
         .pool
         .as_ref()
@@ -2993,6 +3036,9 @@ fn check_new(
         .map_err(error)?;
     if exists {
         return Ok(Err("project_exists".into()));
+    }
+    if !demo && removed::held(tx, project_id)? {
+        return Ok(Err("project_id_removed".into()));
     }
     let team = match setup.team.clone() {
         Some(team) => team,
@@ -3062,19 +3108,23 @@ pub(crate) fn check_job(
     else {
         return Err(failure("setup_plan_invalid"));
     };
-    let checked = check_new(tx, config, project_id, spec, setup)?;
+    let checked = check_new(tx, config, project_id, spec, setup, false)?;
     Ok(checked.map(|checked| checked.folder))
 }
 
 /// Plans a New Project before the owner transport builds its folder.
-/// Takes the transaction, configuration, database path and the Create action.
-/// Returns the plan with a fresh staging folder name, or the refusal code the
-/// owner sees; nothing on disk changes.
+/// Takes the transaction, configuration, database path, the Create action and whether the
+/// request is Create demo. Returns the plan with a fresh staging folder name, or the
+/// refusal code the owner sees; nothing on disk changes. This is the one place before the
+/// record that probes for leftover rows of the id, before its folder is built or any row is
+/// written; the New Project job has started in memory by then, and fails with the refusal.
+/// Recording the project probes again.
 pub(crate) fn plan_new(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     database: &Path,
     action: &SetupAction,
+    demo: bool,
 ) -> Result<Result<NewProjectPlan, String>, EngineError> {
     action.validate()?;
     let SetupAction::Create {
@@ -3085,10 +3135,13 @@ pub(crate) fn plan_new(
     else {
         return Err(failure("setup_plan_invalid"));
     };
-    let checked = match check_new(tx, config, project_id, spec, setup)? {
+    let checked = match check_new(tx, config, project_id, spec, setup, demo)? {
         Ok(checked) => checked,
         Err(code) => return Ok(Err(code)),
     };
+    if !demo && removed::left(tx, project_id)? {
+        return Ok(Err("project_id_removed".into()));
+    }
     let staging = checked.home.join(format!(
         ".crazyagent-new-{}",
         crate::engine::owner::random_id()?
@@ -3132,15 +3185,17 @@ impl NewProjectPlan {
 
 /// Records a New Project whose folder the owner transport built, with a first agent
 /// policy that records the toolchains the owner has installed (F26).
-/// Takes the transaction, configuration, the Create action and the staged
-/// result. Returns Applied once the rows are written, the brief is in place
-/// and the folder is moved into the home, else the refusal; the checks run
-/// again because other changes may have landed while the folder was built.
+/// Takes the transaction, configuration, the Create action, the staged result and whether
+/// the request is Create demo, which clears what an earlier demo left first. Returns
+/// Applied once the rows are written, the brief is in place and the folder is moved into
+/// the home, else the refusal; the checks run again because other changes may have landed
+/// while the folder was built.
 pub(crate) fn record_new(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     action: &SetupAction,
     staged: &Result<Staged, String>,
+    demo: bool,
 ) -> Result<Outcome, EngineError> {
     let SetupAction::Create {
         project_id,
@@ -3154,12 +3209,15 @@ pub(crate) fn record_new(
         Ok(staged) => staged,
         Err(code) => return Ok(rejected(code)),
     };
-    let checked = match check_new(tx, config, project_id, spec, setup)? {
+    let checked = match check_new(tx, config, project_id, spec, setup, demo)? {
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(&code)),
     };
     if checked.folder != staged.folder {
         return Ok(rejected("home_new_project_failed"));
+    }
+    if demo {
+        removed::clear(tx, project_id)?;
     }
     let outcome = record(
         tx,
@@ -3230,7 +3288,11 @@ pub(crate) fn record(
         revision: FIRST_REVISION,
     };
     let spec = declared(spec, &stored)?;
-    let outcome = crate::storage::create_project(tx, project_id, &spec)?;
+    let own_folder = stored.project_folder();
+    let own_folder = own_folder
+        .to_str()
+        .ok_or_else(|| failure("project_folder_unwritable"))?;
+    let outcome = crate::storage::create_project_at(tx, project_id, &spec, Some(own_folder))?;
     if outcome != Outcome::Applied {
         return Ok(outcome);
     }
@@ -4073,5 +4135,8 @@ fn credential_path(word: &str) -> bool {
 #[cfg(all(test, unix))]
 mod engine_tests;
 pub mod links;
+/// The removal record (DEC-178 addendum 1): which ids removals hold, which folder a
+/// project removed from the dashboard comes back from, and the id a new onboarding gets.
+pub(crate) mod removed;
 #[cfg(all(test, unix))]
 mod tests;

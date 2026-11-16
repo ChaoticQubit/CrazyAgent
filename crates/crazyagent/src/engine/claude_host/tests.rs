@@ -120,10 +120,23 @@ fn claude_launch_sets_only_selected_profile_environment() {
         OsStr::new("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
         Some(directories.home.as_os_str())
     )));
+    assert!(
+        environment.contains(&(
+            OsStr::new("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+            Some(OsStr::new("1"))
+        )),
+        "auto-memory is an instruction load the engine did not choose (DEC-106)"
+    );
     assert!(environment.iter().all(|(key, _)| {
         matches!(
             key.to_str(),
-            Some("HOME" | "CLAUDE_CONFIG_DIR" | "CLAUDE_SECURESTORAGE_CONFIG_DIR" | "TERM")
+            Some(
+                "HOME"
+                    | "CLAUDE_CONFIG_DIR"
+                    | "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+                    | "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+                    | "TERM"
+            )
         )
     }));
 }
@@ -1053,7 +1066,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "--setting-sources",
             "",
             "--settings",
-            "{\"disableAllHooks\":true}",
+            "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}",
             "--disable-slash-commands",
             "--no-session-persistence",
         ]
@@ -1070,6 +1083,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
     assert_eq!(
         environment,
         [
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
             ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1"),
             ("CLAUDE_CONFIG_DIR", home),
             ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home),
@@ -1097,7 +1111,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "--setting-sources",
             "",
             "--settings",
-            "{\"disableAllHooks\":true}",
+            "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}",
             "--disable-slash-commands",
             "--no-session-persistence",
             "--max-turns",
@@ -1495,6 +1509,90 @@ async fn the_retry_choice_reaches_the_running_claude_master() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(fs::read_to_string(&seen).unwrap(), wanted, "{retry:?}");
+        claude.close().await.unwrap();
+    }
+}
+
+/// A stand-in Claude Code that records, as it starts, whether its auto-memory switch
+/// variable is set and the `--settings` value it was given, then waits for its input to end.
+const MEMORY_HARNESS: &str = r#"#!/bin/sh
+settings=
+while [ $# -gt 0 ]; do
+  if [ "$1" = --settings ]; then settings=$2; fi
+  shift
+done
+printf 'memory=%s settings=%s\n' "$(/usr/bin/printenv CLAUDE_CODE_DISABLE_AUTO_MEMORY)" "$settings" > run/memory.txt
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// RV-DS241-205 on the master host (leader 01:51): Claude Code's auto-memory is an
+/// instruction load the engine did not choose (DEC-106), so the running Claude master, tools
+/// on or off, starts with both switches: `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in its
+/// environment and `"autoMemoryEnabled":false` in its `--settings`.
+#[tokio::test]
+async fn a_claude_master_runs_with_auto_memory_off_with_tools_on_or_off() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    for tools_on in [true, false] {
+        let mut fixture = MasterFixture::new("claude");
+        let profile = fixture.lease("claude-memory-seen", 1).unwrap();
+        let home = profile.profile_path().unwrap();
+        let harness = fixture.stand_in("claude", MEMORY_HARNESS);
+        let engine = fixture.root.path().join("crazyagent");
+        let drop = home.join(crate::team::tool::DROP_FILE);
+        let command = if tools_on {
+            tools_launch_command(
+                &harness,
+                &fixture.project,
+                &home,
+                "native-default",
+                None,
+                MasterTools {
+                    engine: &engine,
+                    drop: &drop,
+                    mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+                    off: &[],
+                },
+            )
+        } else {
+            launch_command(&harness, &fixture.project, &home, "native-default", None)
+        }
+        .unwrap();
+        let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+        let mut claude = ClaudeHost::spawn(
+            command,
+            sandbox,
+            profile,
+            home,
+            NativeAction::Launch {
+                session_id: crate::protocol::SessionId::new("claude-memory-session").unwrap(),
+                harness: NativeHarness::Claude,
+                profile_ref: CredentialRef::new("memory-master-profile").unwrap(),
+                worktree_lease: RequestId::new("claude-memory-lease").unwrap(),
+            },
+            fixture.connection.account_ref.clone(),
+            fixture.project_id.clone(),
+            Some(Duration::from_secs(60)),
+            ResourceBudget::unit(),
+            crate::master_frame_limit::FrameSize::default(),
+        )
+        .await
+        .unwrap();
+        let seen = fixture.project.join("run/memory.txt");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fs::read_to_string(&seen).map_or(true, |text| !text.ends_with('\n')) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stand-in never started with tools on {tools_on}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            fs::read_to_string(&seen).unwrap(),
+            "memory=1 settings={\"autoMemoryEnabled\":false,\"disableAllHooks\":true}\n",
+            "tools on {tools_on}"
+        );
         claude.close().await.unwrap();
     }
 }

@@ -302,7 +302,10 @@ fn option_rows(
         .collect();
     for (index, (title, detail)) in options.iter().enumerate() {
         let mark = if index == choice { "> " } else { "  " };
-        lines.push(join([Line::raw(mark), styled(*title, Role::Heading, theme)]));
+        lines.push(join([
+            Line::raw(mark),
+            styled(*title, Role::Heading, theme),
+        ]));
         lines.extend(
             wrap(detail, limit.saturating_sub(4).max(1))
                 .into_iter()
@@ -2256,8 +2259,12 @@ impl AppSetup {
         let note =
             |text: &str| -> Vec<Line<'static>> { if notes { under(text) } else { Vec::new() } };
         let sandbox: [(&str, SandboxWords); 2] = [
-            ("Linux sockets", |settings| sockets_words(settings.linux_sockets)),
-            ("Linux supervisor", |settings| supervisor_words(settings.linux_supervisor)),
+            ("Linux sockets", |settings| {
+                sockets_words(settings.linux_sockets)
+            }),
+            ("Linux supervisor", |settings| {
+                supervisor_words(settings.linux_supervisor)
+            }),
         ];
         for (name, words) in sandbox {
             let (value, detail) = self.sandbox_value(words, ctx);
@@ -2625,28 +2632,40 @@ impl Screen for AppSetup {
             }
             _ => {}
         }
-        if self.fixable().is_some() && self.refused_tool() == Some(RefusedTool::FixButton) {
+        let fix = self.fixable().is_some() && self.refused_tool() == Some(RefusedTool::FixButton);
+        if fix && self.first_run {
             hints.push(hint("p", "Fix"));
         }
         if !self.first_run {
-            hints.push(hint("h", "Change home"));
+            hints.push(hint("h", "Home"));
             if matches!(&self.github, Load::Ready(github) if github.signed_in) {
                 hints.push(hint("g", "Sign out of GitHub"));
             }
-            hints.push(hint("l", "Linux sockets"));
-            hints.push(hint("v", "Linux supervisor"));
-            hints.push(hint("f", "Finished agents"));
+            hints.push(hint("l", "Sockets"));
+            hints.push(hint("v", "Supervisor"));
+            hints.push(hint("f", "Finished"));
             hints.push(hint("q", "Quitting"));
             hints.push(hint("e", "Retry"));
             hints.push(hint("m", "Master steps"));
             hints.push(hint("t", "Master time"));
             hints.push(hint("z", "Master frame"));
             hints.push(hint("u", "Unused"));
+            if fix {
+                hints.push(hint("p", "Fix"));
+            }
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
         }
         hints
+    }
+
+    fn keys(&self, ctx: &Ctx) -> Vec<Hint> {
+        let mut keys = self.hints(ctx);
+        if let Some(at) = keys.iter().position(|item| item.key == "g") {
+            keys.insert(at + 1, hint("G", "GitHub rules"));
+        }
+        keys
     }
 
     fn typing(&self) -> bool {
@@ -2694,6 +2713,12 @@ impl Screen for AppSetup {
             Key::Char('g') if !self.first_run => {
                 self.ask_sign_out(ctx);
                 Flow::Handled
+            }
+            Key::Char('G')
+                if !self.first_run
+                    && matches!(&self.github, Load::Ready(github) if github.signed_in) =>
+            {
+                Flow::Open(Place::GitHubDefaults)
             }
             Key::Char('l') if !self.first_run => {
                 self.ask_sockets(ctx);

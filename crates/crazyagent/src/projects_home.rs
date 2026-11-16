@@ -14,6 +14,7 @@ pub use intake::{
     AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, OldSource, Placed,
     Tally, add_left, copy_tree, folder_size, move_by_copy, sweep_staging, verify_tree,
 };
+pub(crate) use layout::append_lines;
 pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
 };
@@ -1336,6 +1337,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "delete_in_progress" => {
             "This project is already being deleted. Wait for that to finish; nothing else was changed."
+        }
+        "projects_removed_full" => {
+            "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash."
         }
         "delete_not_recorded" => {
             "Nothing was deleted. CrazyAgent couldn't record the delete before starting it. Try again; if it keeps failing, restart CrazyAgent."

@@ -2415,8 +2415,14 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
     let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), data);
     assert_eq!(host.scoped, scoped);
     assert_eq!(host.nested, nesting_bwrap().is_some());
-    assert!(host.supervised, "the call supervisor probe row needs the same of this machine");
-    assert!(!host.root, "the gate runs as its own user, where the supervisor starts");
+    assert!(
+        host.supervised,
+        "the call supervisor probe row needs the same of this machine"
+    );
+    assert!(
+        !host.root,
+        "the gate runs as its own user, where the supervisor starts"
+    );
     let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"), data);
     assert!(!absent.scoped && !absent.nested, "{absent:?}");
     assert!(!absent.supervised, "{absent:?}");
@@ -2425,14 +2431,20 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
 #[test]
 fn a_host_whose_landlock_does_not_hold_reports_the_process_namespace_bubblewrap_gives() {
     let refusing = Path::new("/bin/false");
-    assert!(refusing.is_file(), "the row needs /bin/false as a helper that holds nothing");
+    assert!(
+        refusing.is_file(),
+        "the row needs /bin/false as a helper that holds nothing"
+    );
     let bwrap = BWRAP_PATHS.iter().any(|path| Path::new(path).is_file());
     assert!(bwrap, "Linux test machines need bubblewrap installed");
     let data = tempfile::tempdir().unwrap();
     let host = crazyagent::sandbox::linux::read_host(refusing, Some(data.path()));
     assert!(!host.scoped, "{host:?}");
     assert!(host.nested, "{host:?}");
-    assert!(!host.supervised, "bubblewrap alone runs no call supervisor: {host:?}");
+    assert!(
+        !host.supervised,
+        "bubblewrap alone runs no call supervisor: {host:?}"
+    );
 }
 
 /// The host report blames AppArmor only where its user namespace restriction is on, nothing
@@ -2519,9 +2531,20 @@ fn planted_or_concurrent_probe_folders_never_turn_the_call_supervisor_off() {
     }
     assert!(alone.supervised, "{alone:?}");
     assert!(both.iter().all(|host| host.supervised), "{both:?}");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(!folder.join(".git").exists(), "the plain probe held with the folders planted");
-    assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "every probe folder removed");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !folder.join(".git").exists(),
+        "the plain probe held with the folders planted"
+    );
+    assert_eq!(
+        fs::read_dir(&data).unwrap().count(),
+        0,
+        "every probe folder removed"
+    );
 }
 
 /// This computer's address on its default route, which is never loopback. No input.
@@ -2533,7 +2556,10 @@ fn outward_address() -> std::net::IpAddr {
         .connect("192.0.2.1:9")
         .expect("Linux test machines need a default route");
     let address = socket.local_addr().unwrap().ip();
-    assert!(!address.is_loopback() && !address.is_unspecified(), "{address}");
+    assert!(
+        !address.is_loopback() && !address.is_unspecified(),
+        "{address}"
+    );
     address
 }
 
@@ -3209,7 +3235,10 @@ fn a_supervised_agent_reaches_a_guarded_port_on_this_machine_and_on_no_other_hos
     let open = finished(supervised(&case, &limited, "/usr/bin/python3", &script));
     let open = told(&open);
     assert!(open.contains("here=ok\n"), "{open}");
-    assert!(!open.contains("there=13\n"), "the port limit alone names no host: {open}");
+    assert!(
+        !open.contains("there=13\n"),
+        "the port limit alone names no host: {open}"
+    );
 }
 
 const GIT_ENTRIES: &str = r#"said() {
@@ -3263,7 +3292,10 @@ fn a_supervised_agent_makes_no_git_entry_but_inside_its_own_git_folder() {
     assert!(case.project.join(".git/objects/moved").is_file());
     assert!(sub.join("plain/file").is_file());
     let plain = finished(supervised(&case, &[], "/bin/sh", &["-c", "mkdir sub/.git"]));
-    assert!(plain.status.success(), "the control makes the folder with no guard");
+    assert!(
+        plain.status.success(),
+        "the control makes the folder with no guard"
+    );
 }
 
 const OPENS: &str = "import ctypes, os
@@ -3373,7 +3405,11 @@ fn a_supervised_agent_signals_only_the_programs_it_started() {
         "outside=1\neveryone=1\nown-group=ok\nself=ok\nchild=ok\nowner-outside=1\n\
          owner-self=ok\nended=-15\n"
     );
-    assert_eq!(outside.try_wait().unwrap(), None, "the outside process still runs");
+    assert_eq!(
+        outside.try_wait().unwrap(),
+        None,
+        "the outside process still runs"
+    );
     outside.kill().unwrap();
     outside.wait().unwrap();
 }
@@ -3475,7 +3511,10 @@ fn a_supervised_agent_ends_with_its_harness_code_and_stops_with_its_group() {
     assert_eq!(line, "stopped\n");
     let status = exit_within(&mut child, Duration::from_secs(5));
     assert_eq!(status.and_then(|status| status.code()), Some(9));
-    assert!(ended(&token), "a process the harness started outlived the stop");
+    assert!(
+        ended(&token),
+        "a process the harness started outlived the stop"
+    );
 }
 
 const STORM: &str = "import os, signal

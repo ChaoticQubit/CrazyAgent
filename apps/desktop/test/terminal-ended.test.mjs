@@ -19,3 +19,10 @@ test("a finished run's last screen shows its finished label on top and says the 
   assert.equal(io.endCopy("terminal_agent_unknown"),
     "This agent's terminal isn't running. It may have finished or not started yet.");
 });
+
+test("a team pane whose lead's teammates' server ended says so when its attach is refused", () => {
+  const copy = "The terminal server this lead's teammates ran on ended, so its team panes are closed.";
+  assert.equal(io.endCopy("terminal_teammates_server_ended"), copy);
+  assert.deepEqual(io.terminalEvent({ kind: "rejected", code: "terminal_teammates_server_ended" }),
+    { kind: "ended", copy });
+});

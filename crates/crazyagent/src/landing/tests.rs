@@ -7825,11 +7825,11 @@ fn master_agent(case: &Case) -> Workspace {
 fn a_master_turn_merging_an_open_change_set_passes_only_at_full_access() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy};
     let case = Case::new();
+    let master = master_agent(&case);
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour\n");
     let sub_set = case.turn(TurnOutcome::Succeeded).unwrap();
     let sub_head = case.view(&sub_set).head;
-    let master = master_agent(&case);
     record_worktree_start(
         &case.db,
         &master.repository,
@@ -7958,6 +7958,7 @@ fn merge_in(case: &Case, agent: &Workspace, commit: &str) {
 fn at_full_access_the_master_s_merge_of_a_foreign_commit_or_a_closed_set_is_refused() {
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
+    let master = master_agent(&case);
     case.start();
     case.edit("closed.txt", "closed\n");
     let closed = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -7968,7 +7969,6 @@ fn at_full_access_the_master_s_merge_of_a_foreign_commit_or_a_closed_set_is_refu
     let open = case.turn(TurnOutcome::Succeeded).unwrap();
     let open_head = case.view(&open).head;
     let foreign = case.side_branch();
-    let master = master_agent(&case);
     record_worktree_start(
         &case.db,
         &master.repository,

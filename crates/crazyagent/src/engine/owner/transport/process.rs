@@ -429,9 +429,7 @@ impl OwnerClient {
         {
             (
                 Reply::Current {
-                    version,
-                    outside,
-                    ..
+                    version, outside, ..
                 },
                 Some(text),
             ) => Ok(ProcessText {
@@ -620,9 +618,7 @@ impl OwnerClient {
         {
             (
                 Reply::Current {
-                    version,
-                    outside,
-                    ..
+                    version, outside, ..
                 },
                 Some(text),
             ) => Ok(ProcessText {
@@ -1229,6 +1225,7 @@ async fn handle(
                     project: project.as_ref(),
                     pool: pool.as_ref(),
                     prompt,
+                    agent: "instructions-cleanup",
                 })
             })
             .map(Answer::Proposed)
@@ -1982,12 +1979,7 @@ fn propose(
 /// references these agents do not have; a check whose facts cannot be read finds nothing.
 /// Inputs: the engine root, the project or none, the saved text and the app text when the
 /// run may see it. Output: at most `FINDINGS_MAX` findings, over budget first.
-fn checks(
-    root: &Path,
-    project: Option<&ProjectId>,
-    text: &str,
-    app: Option<&str>,
-) -> Vec<Finding> {
+fn checks(root: &Path, project: Option<&ProjectId>, text: &str, app: Option<&str>) -> Vec<Finding> {
     let mut findings = Vec::new();
     let size = sized(root, project, text);
     if size.bytes > size.claude_bytes_max {

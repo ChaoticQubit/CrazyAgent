@@ -363,7 +363,8 @@ pub fn findings(reply: &str, saved: &str) -> Vec<Finding> {
 }
 
 /// One cleanup to run: the engine's data folder, the two settings files, the installed
-/// harness executables, whose usage it counts as, the pool rule's inputs and the prompt.
+/// harness executables, whose usage it counts as, the pool rule's inputs, the prompt and
+/// the agent name its usage shows under.
 pub struct Request<'a> {
     pub root: &'a Path,
     pub settings: (&'a Path, &'a Path),
@@ -372,6 +373,7 @@ pub struct Request<'a> {
     pub project: Option<&'a ProjectId>,
     pub pool: Option<&'a CredentialRef>,
     pub prompt: &'a str,
+    pub agent: &'a str,
 }
 
 /// The code an Edit with AI run ends with when its pool's model provider can't be reached,
@@ -394,12 +396,12 @@ mod run {
         PROJECT_POOL_MISSING, PROVIDER_UNREACHABLE, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE,
         WALL_TIME,
     };
+    use crate::protocol::ProjectId;
     use crate::research::accounts::{AccountPick, Reach, SettingsResolver};
     use crate::research::runner::{
         ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchLimits,
         ResearchRunner,
     };
-    use crate::protocol::ProjectId;
     use std::os::unix::fs::DirBuilderExt;
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
@@ -619,7 +621,7 @@ mod run {
             let name = run_name(started_ms, number);
             let run = ReadOnlyRun {
                 name: &name,
-                agent: "instructions-cleanup",
+                agent: request.agent,
                 project: request.project,
                 folder: &empty,
                 prompt: request.prompt,

@@ -345,6 +345,7 @@ fn state_frames(home: &std::path::Path) -> Vec<(String, String)> {
     wizard.key(key(KeyCode::Left));
     assert_eq!(wizard.check_team(), Ok(()));
     wizard.done[Step::Team.index()] = true;
+    wizard.publish.on = false;
     wizard.go(Step::Review);
     assert!(matches!(wizard.key(key(KeyCode::Enter)), Reply::Create(_)));
     draw("wiz-creating-80", &wizard);

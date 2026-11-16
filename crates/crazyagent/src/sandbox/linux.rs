@@ -601,9 +601,15 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     }
     let tcp_only = policy.limit_network && !policy.open_sockets;
     if !guard.loopback.is_empty() && !tcp_only {
-        return Err(format!("{GUARD_LOOPBACK} needs {LIMIT_NETWORK} without {OPEN_SOCKETS}"));
+        return Err(format!(
+            "{GUARD_LOOPBACK} needs {LIMIT_NETWORK} without {OPEN_SOCKETS}"
+        ));
     }
-    if !guard.loopback.iter().all(|port| policy.connect.contains(port)) {
+    if !guard
+        .loopback
+        .iter()
+        .all(|port| policy.connect.contains(port))
+    {
         return Err(format!("{GUARD_LOOPBACK} names a port with no {CONNECT}"));
     }
     let own = |git: &GitOwn| git.trees.len() + git.kids.len() + git.exact.len();
@@ -638,7 +644,9 @@ fn nest_request(
     }
     let bwrap = absolute(rest.next())?;
     if !BWRAP_PATHS.iter().any(|path| Path::new(path) == bwrap) {
-        return Err(format!("{NEST} starts only bubblewrap from its fixed places"));
+        return Err(format!(
+            "{NEST} starts only bubblewrap from its fixed places"
+        ));
     }
     let args: Vec<OsString> = rest.collect();
     let fixed = args
@@ -646,7 +654,9 @@ fn nest_request(
         .zip(NEST_ARGS)
         .all(|(arg, fixed)| arg.as_os_str() == OsStr::new(fixed));
     if !fixed || args.len() <= NEST_ARGS.len() {
-        return Err(format!("{NEST} needs bubblewrap's fixed arguments and a command"));
+        return Err(format!(
+            "{NEST} needs bubblewrap's fixed arguments and a command"
+        ));
     }
     let named = args[NEST_ARGS.len()..]
         .iter()
@@ -1641,7 +1651,10 @@ fn passes_within(probe: &mut Command, time_max: Duration) -> bool {
     }
     if child.kill().is_ok() {
         let reaped = child.wait();
-        assert!(reaped.is_ok(), "a killed probe is this process's child to reap");
+        assert!(
+            reaped.is_ok(),
+            "a killed probe is this process's child to reap"
+        );
     }
     false
 }
@@ -3059,7 +3072,10 @@ mod tests {
         let outside = temp.path().join("outside");
         fs::create_dir_all(outside.join(".git")).unwrap();
         symlink(&outside, project.join("linked")).unwrap();
-        assert!(!holds_other_git(&project), "its own .git, and a link is not followed");
+        assert!(
+            !holds_other_git(&project),
+            "its own .git, and a link is not followed"
+        );
         let found = |make: &dyn Fn(&Path), undo: &dyn Fn(&Path)| {
             make(&project);
             let held = holds_other_git(&project);
@@ -3077,7 +3093,10 @@ mod tests {
             fs::write(project.join("vendor/lib/.git"), "gitdir: x").unwrap();
         };
         let unlink = |project: &Path| fs::remove_file(project.join("vendor/lib/.git")).unwrap();
-        assert!(found(&link, &unlink), "a .git file is rewritten without a create");
+        assert!(
+            found(&link, &unlink),
+            "a .git file is rewritten without a create"
+        );
         let pointer = |project: &Path| symlink(&outside, project.join("vendor/.git")).unwrap();
         let unpoint = |project: &Path| fs::remove_file(project.join("vendor/.git")).unwrap();
         assert!(found(&pointer, &unpoint), "a link named .git counts");
@@ -3098,7 +3117,10 @@ mod tests {
         };
         let few = |project: &Path| fs::remove_dir_all(project.join("many")).unwrap();
         assert!(found(&many, &few), "more entries than it reads");
-        assert!(holds_other_git(&temp.path().join("missing")), "no folder to read");
+        assert!(
+            holds_other_git(&temp.path().join("missing")),
+            "no folder to read"
+        );
     }
 
     #[test]
@@ -3127,7 +3149,10 @@ mod tests {
         assert_eq!(said(true, &low), Some(linux_unbridged_line(80)));
         assert!(said(true, &low).unwrap().contains("port 80 is below 1024"));
         assert_eq!(said(false, &low), None, "no nest");
-        assert_eq!(linux_unbridged_notice_on(None, AgentNetwork::None, &low), None);
+        assert_eq!(
+            linux_unbridged_notice_on(None, AgentNetwork::None, &low),
+            None
+        );
         assert_eq!(said(true, &launched(&[Loopback(11434)])), None, "bridged");
         let (_temp, open) = project(SandboxNetwork::Open);
         assert_eq!(said(true, &open), None);
@@ -3335,7 +3360,11 @@ mod tests {
         let file = trusted_file(&plain).unwrap();
         fs::set_permissions(&plain, fs::Permissions::from_mode(0o4755)).unwrap();
         let mode = file.metadata().unwrap().mode();
-        assert_ne!(mode & SET_ID_BITS, 0, "the open file is the one a swap changes");
+        assert_ne!(
+            mode & SET_ID_BITS,
+            0,
+            "the open file is the one a swap changes"
+        );
     }
 
     fn nested_words(network: SandboxNetwork) -> (PathBuf, PathBuf, Vec<OsString>) {
@@ -3357,7 +3386,10 @@ mod tests {
     #[test]
     fn a_loopback_only_nested_agent_starts_with_a_network_of_its_own_and_its_ports_bridged() {
         use bridge::{BRIDGE, BRIDGE_FD, UNSHARE_NET};
-        let loopback = [SandboxRemote::Loopback(11434), SandboxRemote::Loopback(8080)];
+        let loopback = [
+            SandboxRemote::Loopback(11434),
+            SandboxRemote::Loopback(8080),
+        ];
         let (helper, cwd, words) = nested_words(SandboxNetwork::Only(loopback.to_vec()));
         let mut head: Vec<OsString> = [BRIDGE, "8080", BRIDGE, "11434", NEST, "--"]
             .map(OsString::from)
@@ -3371,7 +3403,10 @@ mod tests {
         assert_eq!(words.get(..head.len()), Some(&head[..]), "{words:?}");
         let inside = &words[head.len()..];
         let written = |word: &OsString| word == BRIDGE || word == BRIDGE_FD;
-        assert!(!inside.iter().any(written), "the nest writes them: {words:?}");
+        assert!(
+            !inside.iter().any(written),
+            "the nest writes them: {words:?}"
+        );
         let (bridge, rest) = Bridge::leading(words.clone()).unwrap();
         let asked = Bridge {
             fd: None,
@@ -3578,7 +3613,10 @@ mod tests {
     fn a_guard_keeps_its_ports_on_this_machine_and_leaves_the_others_to_every_host() {
         let policy = guarded();
         let held = policy.guard.supervised(&policy.connect);
-        let reach = held.reach.as_ref().expect("a guarded port is a guarded connect");
+        let reach = held
+            .reach
+            .as_ref()
+            .expect("a guarded port is a guarded connect");
         assert_eq!(reach.any, [443]);
         assert_eq!(reach.loopback, [8080]);
         assert_eq!(held.git, policy.guard.git);
@@ -3717,10 +3755,22 @@ mod tests {
         for folder in &folders {
             assert!(Path::new(folder).starts_with(&data), "{folder}");
         }
-        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "every folder removed");
+        assert_eq!(
+            fs::read_dir(&data).unwrap().count(),
+            0,
+            "every folder removed"
+        );
         assert!(!supervises(&holding, None, &data, true), "never as root");
-        assert_eq!(fs::read_to_string(&seen).unwrap(), told, "as root no probe runs");
-        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "and no folder is made");
+        assert_eq!(
+            fs::read_to_string(&seen).unwrap(),
+            told,
+            "as root no probe runs"
+        );
+        assert_eq!(
+            fs::read_dir(&data).unwrap().count(),
+            0,
+            "and no folder is made"
+        );
     }
 
     /// AppArmor keeps unprivileged programs out of user namespaces only where its setting
@@ -3734,7 +3784,14 @@ mod tests {
         );
         assert!(restricts(Some("1\n")));
         assert!(restricts(Some("1")));
-        for free in [Some("0\n"), Some(""), Some("2\n"), Some("11\n"), Some("1 0"), None] {
+        for free in [
+            Some("0\n"),
+            Some(""),
+            Some("2\n"),
+            Some("11\n"),
+            Some("1 0"),
+            None,
+        ] {
             assert!(!restricts(free), "{free:?}");
         }
     }
@@ -3836,7 +3893,10 @@ mod tests {
         let (_open, open) = project(SandboxNetwork::Open);
         let held = guard(&open, alone);
         assert!(held.loopback.is_empty(), "{held:?}");
-        assert!(held.git.is_some_and(|git| git.trees == [open.project_root()]));
+        assert!(
+            held.git
+                .is_some_and(|git| git.trees == [open.project_root()])
+        );
     }
 
     /// The git folders a supervised agent owns are the ones the macOS boundary leaves it:

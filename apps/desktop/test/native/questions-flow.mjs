@@ -534,7 +534,7 @@ async function main() {
       state.pool = pool;
       const project = await onboard(repo, pool);
       await assignPool(project, pool);
-      await saveSetup(project, { about: ABOUT, research: [], pool, team: { master: "claude-code", master_tools: true, sub_harnesses: [], min_agents: 0, max_agents: 1 } });
+      await saveSetup(project, { about: ABOUT, research: [], pool, team: { master: "claude-code", master_tools: true, sub_harnesses: [], min_agents: 1, max_agents: 1 } });
       state.project = project;
       const team = await value("desktop_team_status", { id: project });
       applied("team_live_master", await value("desktop_team_live_master", { id: project, on: true, version: team.settings_version, generation: generation() }));

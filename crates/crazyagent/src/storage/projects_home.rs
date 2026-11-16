@@ -822,7 +822,8 @@ pub(crate) fn delete_check(
     }))
 }
 
-/// Names what holds a Delete everything back that can change while it waits: a projects
+/// Names what holds a Delete everything back that can change while it waits: a removal record
+/// with no room left (`projects_removed_full`), a projects
 /// home move still pending (`home_move_in_progress`), another registered project using one
 /// of the folders, its own folder or a repository it declares, nested either way
 /// (`delete_shared_folder`, naming that project), or research of the project queued,
@@ -835,6 +836,9 @@ fn delete_blocked(
     projects: &[Registered],
     moved: &[PathBuf],
 ) -> Result<Option<DeleteRefusal>, EngineError> {
+    if let Err(code) = crate::project_setup::removed::room(tx)? {
+        return Ok(Some(DeleteRefusal::plain(code)));
+    }
     if pending_move(tx)?.is_some() {
         return Ok(Some(DeleteRefusal::plain("home_move_in_progress")));
     }
@@ -1701,7 +1705,8 @@ fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcom
 /// Points every set-up project whose folder sat anywhere inside a folder of the
 /// old home that `arrived` accepts at the same place in the new home, keeping an
 /// onboarded project's recorded `.crazyagent/` folder and its onboarding folder,
-/// then every project's repository inside such a folder, where its master works.
+/// carrying its GitHub publish job along, then every project's repository inside such a
+/// folder, where its master works.
 fn rewrite_folders(
     tx: &Transaction<'_>,
     from: &Path,
@@ -1745,6 +1750,7 @@ fn rewrite_folders(
             params![text(&moved)?, project],
         )
         .map_err(error)?;
+        crate::github::carry_publish(tx, &folder, &moved);
     }
     move_repositories(tx, from, to, &arrived)
 }

@@ -25,6 +25,7 @@ const SCREEN_STEPS = 12;
 const REPO = "recovery-flow";
 const ROOT_PREFIX = "cad-rf-";
 const LAUNCHES = "launches.log";
+const ONESHOT = "oneshot";
 const STAND_IN_SIGN = "recovery-flow stand-in";
 const SILENT_TURN_S = 600;
 const STOP_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
@@ -44,6 +45,10 @@ marker="$CLAUDE_CONFIG_DIR/.recovery-flow-signed-in"
 keychain="$CLAUDE_CONFIG_DIR/Library/Keychains/login.keychain-db"
 service="Claude Code-credentials-$(printf %s "$CLAUDE_CONFIG_DIR" | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-8)"
 if [ "$1" != "auth" ]; then
+  case " $* " in
+    *" --input-format "*) ;;
+    *" --print "*) printf '${ONESHOT} -\\n' >> "\${0%/*}/${LAUNCHES}"; echo "${STAND_IN_SIGN}: this claude holds no one-shot print run open" >&2; exit 64 ;;
+  esac
   kind=other
   id=-
   for arg in "$@"; do
@@ -271,16 +276,29 @@ function tmux(binary, socket, env, ...args) {
   return run.status === 0 ? run.stdout : "";
 }
 
-/** Reads every harness turn the stand-in claude held open, in order: its kind (--session-id,
- * --resume or --print) and the session it names. Calls that start no turn are left out.
- * Input: the stand-in's folder. Output: the starts. */
-function launches(bin) {
+/** Reads every claude call the stand-in logged, in order: its kind and the session it names.
+ * Input: the stand-in's folder. Output: the logged calls. */
+function logged(bin) {
   const path = join(bin, LAUNCHES);
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => {
     const [kind, id] = line.split(" ");
     return { kind, id };
-  }).filter((item) => item.kind !== "other");
+  });
+}
+
+/** Reads every harness turn the stand-in claude held open, in order: its kind (--session-id,
+ * --resume or --print) and the session it names. Calls that start no turn and one-shot runs
+ * the stand-in ended at once are left out. Input: the stand-in's folder. Output: the starts. */
+function launches(bin) {
+  return logged(bin).filter((item) => item.kind !== "other" && item.kind !== ONESHOT);
+}
+
+/** Counts the one-shot claude runs (a --print call with no --input-format, such as a mapping
+ * try, a research run or a token renewal) the stand-in ended at once.
+ * Input: the stand-in's folder. Output: the count. */
+function oneshots(bin) {
+  return logged(bin).filter((item) => item.kind === ONESHOT).length;
 }
 
 /** Counts the lines a file holds, none when it is missing. Input: the path. Output: the count. */
@@ -565,7 +583,7 @@ async function main() {
       for (const deadline = Date.now() + SETUP_MS; ; await pause(POLL_MS * 4)) {
         const view = await value("desktop_onboarding", { id: state.project });
         if (!["waiting", "running"].includes(view.graph.kind) && !["waiting", "running"].includes(view.mapping.kind)) break;
-        if (Date.now() > deadline) throw new Refused("onboarding_still_running");
+        if (Date.now() > deadline) throw new Refused("onboarding_still_running", `graph ${view.graph.kind}, mapping ${view.mapping.kind}`);
       }
       await assignPool(state.project, pool);
       const team = { master: "claude-code", master_tools: false, sub_harnesses: [{ harness: "claude-code", agents: 3, tools: true }], min_agents: 1, max_agents: 4 };
@@ -617,6 +635,7 @@ async function main() {
       if (state.groupB !== null && !groupAlive(state.groupB)) throw new Refused("agent_b_died_with_the_app");
       await pause(SETTLE_MS);
       state.before = launches(bin);
+      state.oneshots = oneshots(bin);
       state.crashedMs = Date.now();
       return `engine and bridge killed; team-${a} closed, team-${state.b} running; a third task delegated just before the kill; ${state.before.length} harness starts so far`;
     });
@@ -711,11 +730,14 @@ async function main() {
     await step("9", "Retry tries the resume again; it fails the same way and still starts nothing", async () => {
       const failed = needs(state.failed, "6");
       const before = launches(bin).length;
+      const shots = oneshots(bin);
       await value("desktop_retry_recovery", { agent: failed.agent });
       const { run } = await recoveryRun(failed.agent, (item) => item.state === "failed" || item.state === "resumed");
       if (run.state !== "failed" || run.reason !== RECORD_MISSING) throw new Refused(`retried_resume_${run.state}`, run.reason ?? "none");
       const after = launches(bin);
       if (after.length !== before) throw new Refused("retry_started_a_harness", after.slice(before).map((item) => `${item.kind} ${item.id}`).join(","));
+      const shotsAfter = oneshots(bin);
+      if (shotsAfter !== shots) throw new Refused("retry_started_a_harness", `${shotsAfter - shots} one-shot claude runs`);
       return `retried; ${run.label} failed again: ${run.reason}`;
     });
 
@@ -728,6 +750,8 @@ async function main() {
       if (again.length) throw new Refused("session_started_again", again.map((item) => `${item.kind} ${item.id}`).join(","));
       if (all.some((item) => item.kind === "--resume")) throw new Refused("stand_in_session_resumed");
       if (fresh.length > 1) throw new Refused("more_than_the_waiting_task_started", fresh.map((item) => `${item.kind} ${item.id}`).join(","));
+      const shots = oneshots(bin) - needs(state.oneshots, "3");
+      if (shots !== 0) throw new Refused("more_than_the_waiting_task_started", `${shots} one-shot claude runs after the crash`);
       const doneTwice = engineRows(database, "SELECT kind, action_key, COUNT(*) AS n FROM ledger_actions WHERE outcome = 'done' GROUP BY kind, action_key HAVING COUNT(*) > 1");
       if (doneTwice.length) throw new Refused("ledger_action_done_twice", doneTwice.map((row) => `${row.kind} ${row.action_key} x${row.n}`).join(","));
       let pending = [];
@@ -754,7 +778,7 @@ async function main() {
     console.log(`FAIL setup [${results.at(-1).code}]`);
   } finally {
     writeFileSync(join(evidence, "answers.json"), JSON.stringify(trail, null, 1).replace(/[0-9a-f]{64}/g, (hex) => hex.slice(0, 8)));
-    writeFileSync(join(evidence, LAUNCHES), launches(bin).map((item) => `${item.kind} ${item.id}`).join("\n"));
+    writeFileSync(join(evidence, LAUNCHES), logged(bin).filter((item) => item.kind !== "other").map((item) => `${item.kind} ${item.id}`).join("\n"));
     await stop(bridgeProcess);
     await stop(engine);
   }

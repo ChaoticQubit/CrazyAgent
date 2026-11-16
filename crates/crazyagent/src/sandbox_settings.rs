@@ -73,7 +73,10 @@ pub(crate) fn save(
     connection: &Connection,
     settings: &SandboxSettings,
 ) -> Result<Outcome, EngineError> {
-    let words = [word(settings.linux_sockets)?, word(settings.linux_supervisor)?];
+    let words = [
+        word(settings.linux_sockets)?,
+        word(settings.linux_supervisor)?,
+    ];
     let changed = connection
         .execute(
             "INSERT INTO sandbox_settings(singleton,linux_sockets,linux_supervisor) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET linux_sockets=excluded.linux_sockets, linux_supervisor=excluded.linux_supervisor",
@@ -203,7 +206,10 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let connection = Connection::open(folder.path().join("engine.db")).unwrap();
         initialize(&connection).unwrap();
-        assert_eq!(load(&connection).unwrap().linux_supervisor, LinuxSupervisor::On);
+        assert_eq!(
+            load(&connection).unwrap().linux_supervisor,
+            LinuxSupervisor::On
+        );
         for linux_supervisor in [LinuxSupervisor::Off, LinuxSupervisor::On] {
             let settings = SandboxSettings {
                 linux_sockets: LinuxSockets::TcpPorts,
@@ -260,7 +266,10 @@ mod tests {
     fn a_launch_reads_the_stored_choices_from_the_engine_root_and_fails_closed_without_them() {
         let folder = tempfile::tempdir().unwrap();
         let engine = folder.path().canonicalize().unwrap();
-        assert_eq!(stored(&engine).unwrap_err().0, "sandbox_settings_unavailable");
+        assert_eq!(
+            stored(&engine).unwrap_err().0,
+            "sandbox_settings_unavailable"
+        );
         let connection = Connection::open(engine.join("engine.db")).unwrap();
         initialize(&connection).unwrap();
         let off = SandboxSettings {
@@ -272,7 +281,11 @@ mod tests {
         drop(connection);
         let held = std::fs::read(engine.join("engine.db")).unwrap();
         assert_eq!(stored(&engine).unwrap(), off);
-        assert_eq!(std::fs::read(engine.join("engine.db")).unwrap(), held, "read only");
+        assert_eq!(
+            std::fs::read(engine.join("engine.db")).unwrap(),
+            held,
+            "read only"
+        );
     }
 
     #[test]

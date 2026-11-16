@@ -14,6 +14,7 @@ pub(in crate::tui) mod intake_job;
 pub(in crate::tui) mod new_project;
 mod new_project_input;
 pub(in crate::tui) mod new_project_page;
+pub(in crate::tui) mod new_project_publish;
 pub(in crate::tui) mod new_project_view;
 pub mod onboarding;
 pub(in crate::tui) mod planning_line;
@@ -22,10 +23,12 @@ pub mod profile_form;
 pub(in crate::tui) mod project;
 pub(in crate::tui) mod project_access;
 pub(in crate::tui) mod project_activity;
+pub(in crate::tui) mod project_github;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
 pub(in crate::tui) mod project_plugins;
+pub(in crate::tui) mod project_publish;
 pub(in crate::tui) mod project_team;
 pub(in crate::tui) mod project_time;
 pub(in crate::tui) mod project_view;
@@ -35,6 +38,7 @@ pub(in crate::tui) mod sessions;
 pub mod settings;
 pub mod settings_accounts;
 pub mod settings_add_account;
+pub(in crate::tui) mod settings_github;
 pub mod settings_harnesses;
 pub mod settings_memory;
 pub mod settings_plugins;
@@ -46,9 +50,13 @@ pub(in crate::tui) mod usage;
 pub mod welcome;
 
 #[cfg(all(test, unix))]
+mod github_rules_tests;
+#[cfg(all(test, unix))]
 mod intake_tests;
 #[cfg(all(test, unix))]
 mod new_project_frames;
+#[cfg(all(test, unix))]
+mod new_project_publish_tests;
 #[cfg(all(test, unix))]
 mod new_project_tests;
 #[cfg(all(test, unix))]
@@ -59,6 +67,8 @@ mod project_access_tests;
 mod project_frames;
 #[cfg(all(test, unix))]
 mod project_page_tests;
+#[cfg(all(test, unix))]
+mod project_publish_tests;
 #[cfg(all(test, unix))]
 mod project_tests;
 #[cfg(all(test, unix))]
@@ -236,6 +246,11 @@ pub enum Place {
         name: String,
         project: Option<ProjectId>,
     },
+    GitHubDefaults,
+    ProjectGitHub {
+        id: ProjectId,
+        name: String,
+    },
 }
 
 /// What the shell does after a screen handled a key or an arrival.
@@ -383,7 +398,8 @@ pub trait Screen {
             | Place::Master { id, .. }
             | Place::ProjectProcess { id, .. }
             | Place::ProjectMemory { id, .. }
-            | Place::DeleteAsk { id, .. } => Some(id),
+            | Place::DeleteAsk { id, .. }
+            | Place::ProjectGitHub { id, .. } => Some(id),
             Place::Onboarding { project, .. } => project,
             Place::Home
             | Place::Welcome
@@ -402,7 +418,8 @@ pub trait Screen {
             | Place::AnswerAdd { .. }
             | Place::CloneRepo
             | Place::Usage
-            | Place::Demo => None,
+            | Place::Demo
+            | Place::GitHubDefaults => None,
         }
     }
 }
@@ -467,6 +484,10 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
             name.clone(),
             ctx,
         )),
+        Place::GitHubDefaults => Box::new(settings_github::GitHubDefaults::new()),
+        Place::ProjectGitHub { id, name } => {
+            Box::new(project_github::ProjectGitHub::new(id.clone(), name.clone()))
+        }
     };
     screen
 }

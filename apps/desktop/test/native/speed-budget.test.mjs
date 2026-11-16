@@ -132,6 +132,12 @@ test("a run's records flatten into one value per metric, round trips as their me
   });
 });
 
+test("a run that timed an onboarding start records it as its own metric, and a seeding run that timed none records nothing (rv-code4 r2 F2)", () => {
+  assert.equal(sampleMetrics({ ...ENGINE, onboard_start_ms: 42 }, APP).onboard_start_ms, 42);
+  assert.equal(Object.hasOwn(sampleMetrics({ ...ENGINE, onboard_start_ms: null }, APP), "onboard_start_ms"), false);
+  assert.equal(Object.hasOwn(sampleMetrics(ENGINE, APP), "onboard_start_ms"), false);
+});
+
 test("a launch whose first look already found Home usable has no launch time, but always its webview start and reload", () => {
   const metrics = sampleMetrics(ENGINE, { ...APP, launch: { ...APP.launch, first_look_usable: true } });
   assert.equal(Object.hasOwn(metrics, "launch_ms"), false);

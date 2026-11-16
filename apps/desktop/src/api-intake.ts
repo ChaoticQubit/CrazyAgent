@@ -1,16 +1,21 @@
 import { classifyFailure, namedFailure, nextGeneration, plainError, type Result } from "./api";
 import { formatBytes } from "./screens/new-project/wizard";
 import { failureCopy } from "./api-projects";
+import { githubPublishPrompt, githubPublishPromptSet } from "./engine-client";
+import type { GitHubPromptAnswer } from "./engine-client";
 import {
-  addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
+  addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubOwners, githubPublishApprove, githubPublishContinue, githubPublishDiscard, githubPublishExclude, githubPublishRecheck, githubPublishStart, githubPublishStatus, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
   githubUseCli, icloudCancel, icloudDownload, icloudProgress, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
   fixToolPermissions as startFix, setRefusedTool as saveRefusedTool,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
-  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt, OnboardingView,
+  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob,
+  IntentReceipt, OnboardingView,
   DependencyName, ProjectsHome, RefusedTool, SetupStatus,
 } from "./engine-client";
+import { githubRuleDefaults, githubRuleDefaultsSet, githubRules, githubRuleSet } from "./engine-client";
+import type { GitHubRepoRules } from "./engine-client";
 
 export const FOUND_PROJECTS_MAX = 500;
 export const GITHUB_TOKEN_CHARS_MAX = 255;
@@ -94,6 +99,9 @@ const COPY: Record<string, string> = {
   onboarding_project_mismatch: "Another project already uses this folder's name. Rename the folder first.",
   onboarding_step_invalid: "This project's setup record can't be read. Start setup again.",
   project_exists: "A project with this name already exists. Rename the folder first.",
+  onboarding_project_ids_used: "Every id this folder's name can get, 99 in all, is taken by your projects or ones you removed. Rename the folder first.",
+  project_id_removed: "A project you removed used this name, so it can't be used again. Choose another project name.",
+  projects_removed_full: "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash.",
   github_not_signed_in: "Sign in to GitHub first.",
   github_token_blank: "Paste a GitHub token.",
   github_token_invalid: "GitHub didn't accept this token. Check it and try again.",
@@ -121,6 +129,32 @@ const COPY: Record<string, string> = {
   clone_destination_exists: "Your projects folder already has a folder with this repository's name.",
   github_clone_failed: "Couldn't clone this repository. Nothing was kept. Try again.",
   github_clone_timed_out: "Cloning took too long and was stopped. Nothing was kept. Try again.",
+  github_publish_detached: "The project's git isn't on a branch. Check out a branch, then try again.",
+  github_publish_draft_not_asked: "No agent drafted these lines, so CrazyAgent's standard lines are shown.",
+  github_publish_exclude_invalid: "That file can't be left out. Check again.",
+  github_publish_failed: "Publishing on GitHub failed. Try again.",
+  github_publish_file_invalid: "A file publishing writes (.gitignore, SECURITY.md or the .github folder) is a link or not a plain file. Fix it, then try again.",
+  github_publish_gitignore_invalid: "The project's .gitignore can't be read or changed safely. Fix it, then try again.",
+  github_publish_head_moved: "The project's git changed while it was being published. Try again.",
+  github_publish_hooks_set: "The project's git runs hooks, so CrazyAgent won't commit or push it. Remove the hooks, then try again.",
+  github_publish_ignore_invalid: "These lines can't go into .gitignore. Keep one pattern per line, without control characters.",
+  github_publish_in_progress: "This project already has a publish. Finish or discard it first.",
+  github_publish_not_plain_repo: "The project's .git is a link or a file, not a plain folder, so CrazyAgent won't publish it.",
+  github_publish_not_started: "This project has no publish to go on with. Start it again.",
+  github_publish_on_github: "This project is already on GitHub.",
+  github_publish_other_host: "This project's git already points at another host, so CrazyAgent won't publish it on GitHub.",
+  github_publish_push_failed: "Git couldn't push to GitHub. Try again.",
+  github_publish_push_timed_out: "Pushing to GitHub took too long and was stopped. Try again.",
+  github_publish_running: "This project is being published right now. Wait for it to finish.",
+  github_publish_secret_in_history: "The secret is already in the project's git history, so leaving the file out doesn't remove it. Remove it from the history, then check again.",
+  github_publish_step_invalid: "The publish moved on since this was shown. Look at it again.",
+  github_publish_too_large: "This project is too large to publish from CrazyAgent: over 20,000 files or 200 MB.",
+  github_publish_workflow_scope: "The GitHub sign-in can't push workflow files. Sign in to GitHub again, then try again.",
+  github_repo_name_taken: "That repository name is taken on this GitHub account. Pick another name.",
+  github_repo_create_refused: "GitHub refused to make the repository. Check that this account may create repositories.",
+  github_repo_visibility_mismatch: "GitHub made the repository with a different visibility than asked. Check it on GitHub.",
+  github_repo_description_invalid: "GitHub refused the repository description. Use at most 350 characters on one line.",
+  github_git_missing: "Git isn't installed on this computer.",
   github_outcome_unknown: "We couldn't confirm what GitHub did. Check the list again.",
   github_owner_unavailable: "CrazyAgent's engine isn't running.",
   github_request_bounds: "That request was too large for the engine. Try again.",
@@ -129,6 +163,13 @@ const COPY: Record<string, string> = {
   github_token_frame_invalid: "The token couldn't be sent to the engine safely. Paste it again.",
   github_token_frame_mismatch: "The token couldn't be sent to the engine safely. Paste it again.",
   github_failed: "Something went wrong talking to GitHub. Try again.",
+  github_rules_not_published: "GitHub rules show here for a project CrazyAgent published on GitHub, once its publish is done.",
+  github_rule_invalid: "This rule is a file in the project, so it can't be switched on GitHub.",
+  github_rules_repo_mismatch: "This project is now published to another GitHub repository, so nothing was changed. Check its rules again.",
+  github_repo_unreadable: "GitHub didn't show this repository. Check that it still exists and that your GitHub sign-in can see it.",
+  github_publish_project_unknown: "CrazyAgent can't find this project. Reload and try again.",
+  github_publish_unavailable: "CrazyAgent couldn't read its projects just now. Try again.",
+  github_store_unavailable: "CrazyAgent couldn't find where it keeps its GitHub sign-in. Restart CrazyAgent and try again.",
   setup_busy: "Setup is already running. Wait for it to finish.",
   tool_fix_off: "Fixing permissions from CrazyAgent is turned off in Settings. Run the command shown instead.",
   tool_fix_not_needed: "This tool can run now, so nothing needed fixing.",
@@ -395,6 +436,111 @@ export function gitHubSignOut(): Promise<Result<GitHubStatus>> {
  * Output: the status. */
 export function loadGitHubStatus(): Promise<Result<GitHubStatus>> {
   return wrap(githubStatus);
+}
+
+/** Reads the GitHub accounts a published project's repository can go under, the personal
+ * account first. Output: the accounts and a plain problem, if any. */
+export function loadGitHubOwners(): Promise<Result<GitHubOwners>> {
+  return wrap(githubOwners);
+}
+
+/** Reads where a project's GitHub publish stands. Input: the project id. Output: the job,
+ * null without a publish, or a plain failure. */
+export function loadGitHubPublish(project: string): Promise<Result<GitHubPublishJob | null>> {
+  return wrap(() => githubPublishStatus(project));
+}
+
+/** Approves the .gitignore lines and runs the publish on. Inputs: the project id and the
+ * lines. Output: the job where it stands, or a plain failure. */
+export function approveGitHubPublish(project: string, lines: string[]): Promise<Result<GitHubPublishJob>> {
+  return wrap(() => githubPublishApprove(project, lines));
+}
+
+/** Leaves a file with a secret out and runs the publish on. Inputs: the project id and the
+ * path. Output: the job where it stands, or a plain failure. */
+export function excludeFromGitHubPublish(project: string, path: string): Promise<Result<GitHubPublishJob>> {
+  return wrap(() => githubPublishExclude(project, path));
+}
+
+/** Checks the files for secrets again. Input: the project id. Output: the job where it
+ * stands, or a plain failure. */
+export function recheckGitHubPublish(project: string): Promise<Result<GitHubPublishJob>> {
+  return wrap(() => githubPublishRecheck(project));
+}
+
+/** Runs a stopped publish on. Input: the project id. Output: the job where it stands, or a
+ * plain failure. */
+export function continueGitHubPublish(project: string): Promise<Result<GitHubPublishJob>> {
+  return wrap(() => githubPublishContinue(project));
+}
+
+/** Reads whether the Overview asks to publish the project on GitHub. Input: the project id.
+ * Output: true to ask, or a plain failure. */
+export function loadGitHubPublishPrompt(project: string): Promise<Result<boolean>> {
+  return wrap(() => githubPublishPrompt(project));
+}
+
+/** Keeps Not now or Don't ask again for the project's publish prompt. Inputs: the project id
+ * and the answer. Output: null once kept, or a plain failure. */
+export function answerGitHubPublishPrompt(project: string, answer: GitHubPromptAnswer): Promise<Result<null>> {
+  return wrap(() => githubPublishPromptSet(project, answer));
+}
+
+/** Discards the publish record. Input: the project id. Output: the repository left on
+ * GitHub, null, or a plain failure. */
+export function discardGitHubPublish(project: string): Promise<Result<GitHubPublishLeft | null>> {
+  return wrap(() => githubPublishDiscard(project));
+}
+
+/** Starts publishing a project on GitHub with a plan the New Project publish block built.
+ * Inputs: the project id and the plan. Output: the job at Drafting, or a plain failure. */
+export function startGitHubPublish(project: string, plan: GitHubPublishPlan): Promise<Result<GitHubPublishJob>> {
+  return wrap(() => githubPublishStart(project, plan));
+}
+
+export const DEFAULTS_UNREADABLE = "The saved defaults for new repositories can't be read safely. Use the standard setup to replace them.";
+
+const DEFAULTS_UNREADABLE_CODES = ["github_state_invalid", "github_config_unsafe", "github_config_invalid"];
+
+/** Gives the defaults read its own sentence when the saved file cannot be read safely, since
+ * signing in again would not replace it. Input: the read. Output: the read, with the
+ * defaults sentence on such a failure. */
+export function defaultsRead(read: Result<string[]>): Result<string[]> {
+  return read.kind === "error" && DEFAULTS_UNREADABLE_CODES.includes(read.code) ? { ...read, message: DEFAULTS_UNREADABLE } : read;
+}
+
+export const DEFAULTS_UNSAVED = "Couldn't save the defaults for new repositories. Try again.";
+
+/** Gives a failed defaults save its own sentence: the file could not be written, or what was
+ * saved could not be read back safely. Input: the save's answer. Output: the answer, with the
+ * defaults sentences on a failure they name. */
+export function savedDefaults(read: Result<string[]>): Result<string[]> {
+  return read.kind === "error" && read.code === "github_state_unavailable" ? { ...read, message: DEFAULTS_UNSAVED } : defaultsRead(read);
+}
+
+/** Reads the rules a new repository starts with, DEC-182's while none are saved. Output:
+ * the rules on. */
+export async function loadGitHubRuleDefaults(): Promise<Result<string[]>> {
+  return defaultsRead(await wrap(githubRuleDefaults));
+}
+
+/** Saves the rules a new repository starts with; a publish already started keeps its copy.
+ * Input: the rules on. Output: the rules the engine read back. */
+export async function saveGitHubRuleDefaults(rules: string[]): Promise<Result<string[]>> {
+  return savedDefaults(await wrap(() => githubRuleDefaultsSet(rules)));
+}
+
+/** Reads the live rules of the repository a project was published to; GitHub gets only
+ * reads. Input: the project id. Output: the page. */
+export function loadGitHubRules(project: string): Promise<Result<GitHubRepoRules>> {
+  return wrap(() => githubRules(project));
+}
+
+/** Turns one rule on or off on the repository a project was published to, with the owner's
+ * sign-in. Inputs: the project id, the `owner/name` the page showed, the rule and whether it
+ * is on. Output: the fresh page. */
+export function setGitHubRule(project: string, repo: string, rule: string, on: boolean): Promise<Result<GitHubRepoRules>> {
+  return wrap(() => githubRuleSet(project, repo, rule, on));
 }
 
 /** Reads one page of the signed-in account's repositories.

@@ -10,6 +10,10 @@ use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::OwnerMutation;
 use crate::engine::owner::{OwnerClientKind, OwnerData, OwnerRead, OwnerResponse};
+use crate::github::{
+    GitHubIgnoreDraft, GitHubMethod, GitHubOwner, GitHubOwners, GitHubPublishJob,
+    GitHubPublishPlan, GitHubPublishStep, GitHubRuleOutcome, GitHubStatus,
+};
 use crate::master_session::{
     MasterOwnerAction, MasterSessionPhase, MasterSessionView, MasterTurnView,
 };
@@ -18,7 +22,7 @@ use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, Set
 use crate::projects_home::AddMode;
 use crate::projects_home::job::{JobKind, JobState, JobSubject, JobView};
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, RequestId, SessionId};
-use crate::tui::client::intake::IntakeQuery;
+use crate::tui::client::intake::{IntakeEvent, IntakeQuery, IntakeView};
 use crate::tui::client::process::ProcessQuery;
 use crate::tui::client::questions::QuestionsQuery;
 use crate::tui::client::settings::SettingsJob;
@@ -158,6 +162,9 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         IntakeQuery::JobStatus => "job status",
                         IntakeQuery::JobDismiss { .. } => "job dismiss",
                         IntakeQuery::Found => "found",
+                        IntakeQuery::GitHubPublishStart { .. } => "github publish",
+                        IntakeQuery::GitHubPublishStatus { .. } => "github publish status",
+                        IntakeQuery::GitHubPublishPrompt { .. } => "github publish prompt",
                         _ => "intake",
                     });
                     connection.intake(*job).unwrap();
@@ -712,6 +719,24 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     );
     let mut shell = Shell::with(ctx, screen);
     let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        sent.iter()
+            .filter(|label| **label == "github publish status")
+            .count(),
+        1,
+        "the Overview reads the project's GitHub publish once: {sent:?}"
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|label| **label == "github publish prompt")
+            .count(),
+        1,
+        "a project with no publish asks once whether to offer one: {sent:?}"
+    );
+    let sent: Vec<&str> = sent
+        .into_iter()
+        .filter(|label| !matches!(*label, "github publish status" | "github publish prompt"))
+        .collect();
     assert_eq!(
         sent,
         [
@@ -1508,26 +1533,61 @@ async fn a_delete_whose_agents_never_stop_fails_on_home_with_the_reason() {
     );
 }
 
+/// Gives a projects folder made read-only back its owner write bit when it is dropped, also
+/// when a row panics first, so the temp folder's own drop can still remove what it holds.
+/// Holds the folder.
+#[cfg(target_os = "macos")]
+struct Writable(std::path::PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Writable {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Counts the entries of the owner's own Trash, never listing them. The folder comes from the
+/// account's home in the user database, since a Trash move from the system volume goes there
+/// whatever HOME says. Takes nothing. Returns the count; a Trash that cannot be read stops the
+/// row with what it needs.
+#[cfg(target_os = "macos")]
+fn owner_trash_count() -> usize {
+    let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .unwrap()
+        .expect("the account has a user record");
+    let trash = user.dir.join(".Trash");
+    match std::fs::read_dir(&trash) {
+        Ok(entries) => entries.count(),
+        Err(error) => panic!(
+            "PREREQUISITE: this row counts the entries of {trash:?} to prove it moves nothing there, and reading it failed: {error}; give the terminal Full Disk Access and rerun"
+        ),
+    }
+}
+
 /// DEC-177 add.1: a delete whose folder cannot be moved to the Trash ends failed on Home with
 /// the reason and the project kept; Enter there is Try again, which opens the project's remove
 /// ask and sends no delete. The projects folder is made read-only so nothing reaches the
-/// owner's Trash. Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+/// owner's Trash, its write bit comes back even when the row panics, and the owner's Trash
+/// holds as many entries after the row as before. Runs on macOS only, the one platform that
+/// offers Delete everything (DEC-118).
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delete_whose_trash_move_fails_says_why_on_home_and_enter_reopens_the_remove_ask() {
+    let trash_before = owner_trash_count();
     let mut engine = Engine::start().await;
     let (notes, folder) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
     let home = std::fs::canonicalize(engine.home.path()).unwrap();
     let mut connection = engine.connect();
     let mut shell = project_shell(&notes, "Notes CLI");
     delete_typed(&mut shell, &mut connection, "Notes CLI").await;
+    let writable = Writable(home.clone());
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555)).unwrap();
     delete_entered(&mut shell, &mut connection).await;
     let (ended, _) = job_until(&mut shell, &mut connection, |job| {
         !super::intake_job::running(job)
     })
     .await;
-    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    drop(writable);
     assert_eq!(
         ended.state,
         JobState::Failed {
@@ -1561,6 +1621,11 @@ async fn a_delete_whose_trash_move_fails_says_why_on_home_and_enter_reopens_the_
         "nothing deletes in one click: {sent:?}"
     );
     assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
+    assert_eq!(
+        owner_trash_count(),
+        trash_before,
+        "the failed Trash move put nothing in the owner's own Trash"
+    );
 }
 
 /// DEC-177 add.1: a delete ends done on Home with the project's name and its records gone, and
@@ -1743,6 +1808,7 @@ async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
@@ -3196,6 +3262,15 @@ async fn the_wizard_waits_for_an_engine_slow_to_accept_its_connection() {
     })
     .join()
     .unwrap();
+    let github = sent.iter().filter(|label| **label == "intake").count();
+    assert_eq!(
+        github, 1,
+        "the wizard reads the GitHub sign-in once: {sent:?}"
+    );
+    let sent: Vec<&str> = sent
+        .into_iter()
+        .filter(|label| *label != "intake")
+        .collect();
     assert_eq!(sent, ["pools", "harnesses", "catalog", "catalog"]);
 }
 
@@ -3208,6 +3283,15 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     let screen = open(&Place::NewProject, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let sent = pump(&mut shell, &mut connection).await;
+    let github = sent.iter().filter(|label| **label == "intake").count();
+    assert_eq!(
+        github, 1,
+        "the wizard reads the GitHub sign-in once: {sent:?}"
+    );
+    let sent: Vec<&str> = sent
+        .into_iter()
+        .filter(|label| *label != "intake")
+        .collect();
     assert_eq!(sent, ["pools", "harnesses", "catalog", "catalog"]);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("New project  /  About"), "{shown}");
@@ -3219,6 +3303,7 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     assert!(shell.ctx.next_request().is_none());
     shell.key(Key::ShiftRight);
     let shown = render(&mut shell, 80, 24);
@@ -3303,6 +3388,7 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("New project  /  Review"), "{shown}");
@@ -3352,6 +3438,7 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     shell.key(Key::Esc);
@@ -3385,6 +3472,7 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     shell.key(Key::Esc);
@@ -3400,6 +3488,7 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     shell.key(Key::Esc);
@@ -3568,6 +3657,7 @@ fn create_named(name: &str) -> (Shell, Vec<Request>) {
     for character in name.chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     let sent = drain(&mut shell);
@@ -3725,6 +3815,62 @@ fn a_new_project_job_run_in_the_background_finishes_after_its_page_is_gone() {
     );
     assert_eq!(shell.place(), Some(Place::Home));
     assert_eq!(kept_draft(), None, "a made project keeps no draft");
+}
+
+/// DEC-182 S5a, rv-ds241 Note A on a carried page: a New Project sent to the background with
+/// publishing on starts its GitHub publish once its pool is assigned, and the Start's
+/// refusal is said on Home with its reason.
+#[test]
+fn a_new_project_run_in_the_background_says_its_github_publish_refusal() {
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    shell.arrive(Arrival::Pools(Ok(vec![main_pool()])));
+    drain(&mut shell);
+    github_signed_in(&mut shell);
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let (id, project, start) =
+        setup_start(&drain(&mut shell)).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
+    drain(&mut shell);
+    shell.arrive(intake_reply(
+        start,
+        Ok(IntakeView::Job(Some(building(&id, &project)))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    drain(&mut shell);
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let publish: Vec<IntakeQuery> = intake_asks(&drain(&mut shell))
+        .into_iter()
+        .filter(|query| {
+            matches!(query, IntakeQuery::GitHubPublishStart { project: started, .. } if *started == project)
+        })
+        .collect();
+    assert_eq!(publish.len(), 1, "{publish:?}");
+    shell.arrive(intake_reply(
+        publish[0].clone(),
+        Err("github_not_signed_in".into()),
+    ));
+    let said = shell.ctx.message().expect("the Start's refusal is said");
+    assert_eq!(
+        (said.lead.as_str(), said.rest.as_str()),
+        (
+            "Publishing on GitHub didn't start.",
+            "Sign in with GitHub first."
+        )
+    );
+    assert_eq!(shell.place(), Some(Place::Home));
 }
 
 /// Sends a New Project to the background, drops its page with Home, ends its job done and
@@ -4021,6 +4167,7 @@ fn every_new_project_left_running_reads_each_job_status() {
     for character in "Harbor".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     let (_, _, harbor) = setup_start(&drain(&mut shell)).expect("Harbor starts its job too");
@@ -4249,6 +4396,7 @@ async fn a_project_folder_the_engine_cannot_make_says_why_in_the_wizard() {
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Tidepool"), "{shown}");
@@ -6609,6 +6757,89 @@ async fn shift_arrows_walk_the_project_tabs_across_the_master_view() {
     assert_eq!(shell.place(), Some(tab(ProjectTab::Overview)));
 }
 
+/// Turns the New project publish block off from the About step, so Create goes on without
+/// a GitHub sign-in. Takes the shell with the project name typed. Returns nothing.
+fn publishing_off(shell: &mut Shell) {
+    shell.key(Key::Tab);
+    shell.key(Key::Tab);
+    shell.key(Key::Char(' '));
+    let shown = render(shell, 80, 24);
+    assert!(
+        shown.contains("[ ] Publish this project on GitHub"),
+        "{shown}"
+    );
+}
+
+/// Hands the New project page a GitHub sign-in and then the personal account, as the
+/// engine answers a signed-in owner. Takes the shell. Returns nothing.
+fn github_signed_in(shell: &mut Shell) {
+    shell.arrive(owner_arrival(OwnerEvent::Intake(Box::new(IntakeEvent {
+        query: IntakeQuery::GitHubStatus,
+        result: Ok(IntakeView::GitHub(GitHubStatus {
+            signed_in: true,
+            login: Some("me".into()),
+            method: GitHubMethod::Token,
+            waiting: false,
+            problem: None,
+        })),
+    }))));
+    let asked: Vec<IntakeQuery> = std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::Intake(job) => Some(job.query()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, [IntakeQuery::GitHubOwners]);
+    shell.arrive(owner_arrival(OwnerEvent::Intake(Box::new(IntakeEvent {
+        query: IntakeQuery::GitHubOwners,
+        result: Ok(IntakeView::Owners(GitHubOwners {
+            owners: vec![GitHubOwner {
+                login: "me".into(),
+                personal: true,
+            }],
+            problem: None,
+        })),
+    }))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_made_project_starts_its_github_publish_once_its_pool_is_assigned_and_says_its_reply() {
+    let engine = Engine::start().await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    github_signed_in(&mut shell);
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let mut sent = pump_job(&mut shell, &mut connection).await;
+    sent.extend(pump(&mut shell, &mut connection).await);
+    let at = |label: &str| sent.iter().position(|sent| *sent == label);
+    assert!(
+        at("job start").is_some()
+            && at("job start") < at("edit pool")
+            && at("edit pool") < at("github publish"),
+        "{sent:?}"
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|label| **label == "github publish")
+            .count(),
+        1,
+        "{sent:?}"
+    );
+    let message = shell
+        .ctx
+        .message()
+        .expect("the publish Start's reply is said");
+    assert_eq!(message.lead, "Publishing on GitHub didn't start.");
+    assert_eq!(message.rest, "Sign in with GitHub first.");
+}
 /// While the uncommitted-move banner takes rows above the tabs, the Changes tab offers
 /// Accept on a moved diff only once its last line was painted in the frame the owner
 /// sees, never from the taller view drawn after each key (RVA-1 r1 F2).
@@ -6777,10 +7008,13 @@ mod overview_tabs {
     };
     use crate::protocol::{CredentialRef, ProjectId};
     use crate::roadmap_status::Refresh;
+    use crate::tui::frame::{Hint, footer, hint};
+    use crate::tui::glyphs::UNICODE;
     use crate::tui::screens::new_project_view::{Look, Row};
     use crate::tui::screens::project::{
         OVERVIEW_TAB_LABELS, PoolInfo, ProjectReply, ProjectScreen,
     };
+    use crate::tui::screens::project_publish::PROMPT_LINE;
     use crate::tui::screens::project_view::project_screen;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -7090,6 +7324,55 @@ mod overview_tabs {
         let help = project_screen(&mut page, 100, 40, &Look::plain()).help;
         assert!(help.iter().any(|(_, what)| *what == "Overview tab"));
         assert!(help.iter().any(|(_, what)| *what == "Scroll"));
+    }
+
+    #[test]
+    fn an_80_by_24_overview_keeps_the_publish_question_and_the_keys_it_had_before() {
+        let text: String = (1..=12).map(|line| format!("- Point {line}\n")).collect();
+        let mut overview = overview_with(Tab::QuickInfo, &text);
+        overview.failure = Some(
+            "The agent stopped before it wrote the tabs, so they show what they said the last time they were read. "
+                .repeat(3),
+        );
+        let mut page = page_with_overview(overview);
+        page.pool = Some(PoolInfo {
+            id: CredentialRef::new("pool-main").unwrap(),
+            name: "Main".into(),
+            accounts: 1,
+            assigned: true,
+        });
+        page.github_notice = true;
+        let drawn = project_screen(&mut page, 80, 24, &Look::plain());
+        let shown = drawn
+            .rows
+            .iter()
+            .map(Row::text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(shown.contains("Main  1 account"), "pooled: {shown}");
+        let notice = shown.find(PROMPT_LINE);
+        let strip = shown.find(&marked("Quick info"));
+        assert!(notice.is_some(), "the question shows at 80x24: {shown}");
+        assert!(strip.is_some(), "{shown}");
+        assert!(
+            notice < strip,
+            "the question sits above the tabs, so their rows can't push it off: {shown}"
+        );
+        assert!(
+            shown.contains("G Publish on GitHub"),
+            "the body line names G: {shown}"
+        );
+        let hints: Vec<Hint> = drawn
+            .help
+            .iter()
+            .map(|(key, label)| hint(key, label))
+            .collect();
+        let ctx = super::ctx(80, 24);
+        let bar = footer(80, &hints, 0, &ctx.theme, &UNICODE);
+        let bar: String = bar.spans.iter().map(|span| span.content.as_ref()).collect();
+        for key in ["Enter Open", "o Open folder", "PgUp/PgDn Scroll"] {
+            assert!(bar.contains(key), "{key} stays in the bar: {bar}");
+        }
     }
 
     #[test]
@@ -7415,4 +7698,799 @@ fn a_delete_cut_short_offers_keep_the_project_and_delete_again_on_the_banner() {
     assert_eq!(project, &notes);
     assert_eq!(serde_json::to_value(kind).unwrap(), "project_delete");
     assert_eq!(*id, 9);
+}
+
+fn publish_job(step: GitHubPublishStep) -> GitHubPublishJob {
+    GitHubPublishJob {
+        project: std::path::PathBuf::from("/p"),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: "tool".into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+        lines: Vec::new(),
+        written: Vec::new(),
+        step,
+        stopped: None,
+        made: None,
+        rules: crate::github::GitHubRule::defaults(),
+    }
+}
+
+/// Takes the GitHub publish queries the page queued, oldest first, dropping every other
+/// request. Takes the shell. Returns the queries.
+fn publish_asks(shell: &mut Shell) -> Vec<IntakeQuery> {
+    std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::Intake(job) => Some(job.query()),
+            _ => None,
+        })
+        .filter(|query| {
+            matches!(
+                query,
+                IntakeQuery::GitHubPublishStatus { .. }
+                    | IntakeQuery::GitHubPublishPrompt { .. }
+                    | IntakeQuery::GitHubPublishPromptSet { .. }
+                    | IntakeQuery::GitHubPublishStart { .. }
+                    | IntakeQuery::GitHubStatus
+                    | IntakeQuery::GitHubOwners
+                    | IntakeQuery::GitHubPublishApprove { .. }
+                    | IntakeQuery::GitHubPublishExclude { .. }
+                    | IntakeQuery::GitHubPublishRecheck { .. }
+                    | IntakeQuery::GitHubPublishContinue { .. }
+                    | IntakeQuery::GitHubPublishDiscard { .. }
+            )
+        })
+        .collect()
+}
+
+fn publish_reply(shell: &mut Shell, query: IntakeQuery, result: Result<IntakeView, String>) {
+    shell.arrive(owner_arrival(OwnerEvent::Intake(Box::new(IntakeEvent {
+        query,
+        result,
+    }))));
+}
+
+#[test]
+fn the_overview_reads_the_github_publish_and_its_pane_sends_the_owners_answer() {
+    let mut ctx = ctx(100, 30);
+    let project = ProjectId::new("notes").unwrap();
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status.clone(),
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Lines {
+                lines: vec![".env*".into(), "target/".into()],
+                draft: GitHubIgnoreDraft::Agent,
+            },
+        ))))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("Publish on GitHub"), "{shown}");
+    assert!(shown.contains("[x] target/"), "{shown}");
+    shell.key(Key::Down);
+    shell.key(Key::Char(' '));
+    shell.key(Key::Enter);
+    let approve = IntakeQuery::GitHubPublishApprove {
+        project: project.clone(),
+        lines: vec![".env*".into()],
+    };
+    assert_eq!(publish_asks(&mut shell), [approve.clone()]);
+    shell.key(Key::Enter);
+    assert!(publish_asks(&mut shell).is_empty(), "one answer at a time");
+    publish_reply(
+        &mut shell,
+        approve,
+        Ok(IntakeView::Publish(Box::new(publish_job(
+            GitHubPublishStep::Done {
+                full_name: "me/tool".into(),
+                outcomes: Vec::<GitHubRuleOutcome>::new(),
+            },
+        )))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("Published as me/tool."), "{shown}");
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 100, 30);
+    assert!(!shown.contains("Published as me/tool."), "{shown}");
+    assert!(publish_asks(&mut shell).is_empty());
+}
+
+#[test]
+fn a_project_without_a_publish_shows_no_pane_and_a_refused_answer_is_said() {
+    let project = ProjectId::new("notes").unwrap();
+    let opened = |project: &ProjectId| {
+        let mut context = ctx(100, 30);
+        let screen = open(
+            &Place::Project {
+                id: project.clone(),
+                name: "Notes".into(),
+                tab: ProjectTab::Overview,
+            },
+            &mut context,
+        );
+        Shell::with(context, screen)
+    };
+    let mut shell = opened(&project);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status.clone(),
+        Ok(IntakeView::PublishStatus(None)),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(!shown.contains("Publish on GitHub"), "{shown}");
+    let mut shell = opened(&project);
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status,
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Lines {
+                lines: vec![".env*".into()],
+                draft: GitHubIgnoreDraft::Agent,
+            },
+        ))))),
+    );
+    shell.key(Key::Enter);
+    let approve = IntakeQuery::GitHubPublishApprove {
+        project,
+        lines: vec![".env*".into()],
+    };
+    assert_eq!(publish_asks(&mut shell), [approve.clone()]);
+    publish_reply(&mut shell, approve, Err("github_publish_running".into()));
+    let message = shell.ctx.message().expect("the refusal is said");
+    assert_eq!(message.lead, "The publish answer wasn't taken.");
+    assert_eq!(message.rest, super::intake::copy("github_publish_running"));
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("[x] .env*"), "the pane stays: {shown}");
+}
+
+/// Opens the Overview of project `notes`, named Notes, and answers its publish read with
+/// no publish. Takes nothing. Returns the shell and the project.
+fn unpublished() -> (Shell, ProjectId) {
+    let mut ctx = ctx(100, 30);
+    let project = ProjectId::new("notes").unwrap();
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    (shell, project)
+}
+
+/// Opens the same Overview with the engine saying to offer a publish. Takes nothing.
+/// Returns the shell and the project.
+fn offered() -> (Shell, ProjectId) {
+    let (mut shell, project) = unpublished();
+    let prompt = IntakeQuery::GitHubPublishPrompt {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    (shell, project)
+}
+
+#[test]
+fn a_project_with_no_publish_shows_the_question_on_its_overview_and_keeps_not_now() {
+    let (mut shell, project) = offered();
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+    assert!(shown.contains("G Publish on GitHub"), "{shown}");
+    shell.key(Key::Char('G'));
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("x Don't ask again"), "{shown}");
+    shell.key(Key::Char('n'));
+    let kept = IntakeQuery::GitHubPublishPromptSet {
+        project: project.clone(),
+        answer: crate::github::GitHubPromptAnswer::NotNow,
+    };
+    assert_eq!(publish_asks(&mut shell), [kept.clone()]);
+    shell.key(Key::Char('x'));
+    assert!(publish_asks(&mut shell).is_empty(), "one answer at a time");
+    publish_reply(&mut shell, kept, Ok(IntakeView::PromptKept));
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        !shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+    assert!(!shown.contains("Don't ask again"), "{shown}");
+    shell.key(Key::Char('G'));
+    assert!(!render(&mut shell, 100, 30).contains("Don't ask again"));
+    let (mut quiet, project) = unpublished();
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut quiet), [prompt.clone()]);
+    publish_reply(&mut quiet, prompt, Err("github_store_unavailable".into()));
+    assert!(
+        quiet.ctx.message().is_none(),
+        "a failed question read stays quiet"
+    );
+    let shown = render(&mut quiet, 100, 30);
+    assert!(
+        !shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+}
+
+#[test]
+fn publish_from_the_overview_question_starts_the_publish_the_form_shows_and_says_so() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    shell.key(Key::Esc);
+    assert!(publish_asks(&mut shell).is_empty(), "Esc starts nothing");
+    let shown = render(&mut shell, 100, 30);
+    assert!(!shown.contains("[ Publish ]"), "{shown}");
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "the question stays: {shown}"
+    );
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("[ Publish ]"), "{shown}");
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert!(
+        publish_asks(&mut shell).is_empty(),
+        "the question is gone once a publish starts"
+    );
+    publish_reply(
+        &mut shell,
+        start,
+        Ok(IntakeView::Publish(Box::new(publish_job(
+            GitHubPublishStep::Drafting,
+        )))),
+    );
+    let message = shell.ctx.message().expect("the start is said");
+    assert_eq!(message.lead, super::new_project_publish::PUBLISH_STARTED);
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains("Drafting the .gitignore lines..."),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_refused_publish_from_the_question_says_why_and_asks_again_at_once() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    shell.key(Key::Esc);
+    assert!(
+        matches!(shell.place(), Some(Place::Project { .. })),
+        "Esc closes the form the Start went from, not the page: {:?}",
+        shell.place()
+    );
+    publish_reply(&mut shell, start, Err("github_publish_in_progress".into()));
+    let message = shell.ctx.message().expect("the refusal is said");
+    assert_eq!(
+        message.lead,
+        super::new_project_publish::PUBLISH_NOT_STARTED
+    );
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(
+        publish_asks(&mut shell),
+        [status.clone()],
+        "a refused Start reads the publish again at once"
+    );
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "the question is back: {shown}"
+    );
+}
+
+#[test]
+fn a_refused_publish_from_the_question_keeps_the_form_with_what_was_typed_and_says_why_in_it() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    shell.key(Key::Paste("-2".into()));
+    for _ in 0..3 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let name = format!("{}-2", crate::github::default_repo_name("Notes"));
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: name.clone(),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains("Starting the publish..."),
+        "the form waits on the Start: {shown}"
+    );
+    shell.key(Key::Enter);
+    assert!(publish_asks(&mut shell).is_empty(), "one Start at a time");
+    publish_reply(
+        &mut shell,
+        start.clone(),
+        Err("github_repo_name_taken".into()),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("[ Publish ]"), "the form stays: {shown}");
+    assert!(shown.contains(&name), "the typed name stays: {shown}");
+    assert!(
+        shown.contains("Pick another name."),
+        "the form says why: {shown}"
+    );
+    assert!(
+        !shown.contains("Sending your answer...") && shown.contains("Checking..."),
+        "the read after the refusal sends no answer: {shown}"
+    );
+    assert!(
+        shell.ctx.message().is_none(),
+        "the form says why, so the message line stays quiet"
+    );
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(false)));
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains("[ Publish ]") && shown.contains(&name),
+        "a form the owner opened stays when the engine stops asking: {shown}"
+    );
+    assert!(shown.contains("Pick another name."), "{shown}");
+    shell.key(Key::Enter);
+    assert_eq!(
+        publish_asks(&mut shell),
+        [start],
+        "Publish again sends the kept plan"
+    );
+}
+
+/// RV-DS241 S5b TUI nit 2: the Overview's publish question and a refused publish form, its
+/// three-line reason included, fit an 80x24 window with every key in the bar.
+#[test]
+fn the_publish_question_and_a_refused_form_fit_an_80_by_24_window() {
+    let (mut shell, project) = offered();
+    shell.ctx.width = 80;
+    shell.ctx.height = 24;
+    shell.key(Key::Char('G'));
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+    let bar = shown.lines().last().unwrap_or_default().to_owned();
+    for key in [
+        "Enter Publish",
+        "n Not now",
+        "x Don't ask again",
+        "Esc Close",
+    ] {
+        assert!(bar.contains(key), "{key}: {bar}");
+    }
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    publish_reply(
+        &mut shell,
+        start,
+        Err("github_publish_secret_in_history".into()),
+    );
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    let shown = render(&mut shell, 80, 24);
+    for text in [
+        "Visibility",
+        "Repository",
+        "[ Publish ]",
+        "Publishing on GitHub didn't start.",
+        "then check again.",
+    ] {
+        assert!(shown.contains(text), "{text}: {shown}");
+    }
+    let bar = shown.lines().last().unwrap_or_default().to_owned();
+    for key in ["Enter Publish", "Esc Cancel"] {
+        assert!(bar.contains(key), "{key}: {bar}");
+    }
+}
+
+#[test]
+fn a_refused_publish_whose_read_finds_a_publish_closes_the_form_and_says_why_on_the_message_line() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    publish_reply(&mut shell, start, Err("github_publish_in_progress".into()));
+    let status = IntakeQuery::GitHubPublishStatus { project };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status,
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Drafting,
+        ))))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        !shown.contains("[ Publish ]"),
+        "a publish closes the form: {shown}"
+    );
+    assert_eq!(
+        shell
+            .ctx
+            .message()
+            .map(|message| (message.lead.clone(), message.rest.clone())),
+        Some((
+            super::new_project_publish::PUBLISH_NOT_STARTED.to_owned(),
+            super::intake::copy("github_publish_in_progress"),
+        )),
+        "the reason the form showed is not lost with it"
+    );
+}
+
+#[test]
+fn sign_in_from_the_publish_question_closes_it_so_g_reads_the_sign_in_again() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    shell.arrive(owner_arrival(OwnerEvent::Intake(Box::new(IntakeEvent {
+        query: IntakeQuery::GitHubStatus,
+        result: Ok(IntakeView::GitHub(GitHubStatus {
+            signed_in: false,
+            login: None,
+            method: GitHubMethod::None,
+            waiting: false,
+            problem: None,
+        })),
+    }))));
+    shell.key(Key::Enter);
+    assert_eq!(shell.place(), Some(Place::CloneRepo));
+    shell.key(Key::Esc);
+    assert!(
+        matches!(shell.place(), Some(Place::Project { .. })),
+        "{:?}",
+        shell.place()
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        !shown.contains("Sign in to GitHub to publish this project."),
+        "the question closed for the sign-in: {shown}"
+    );
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert!(publish_asks(&mut shell).contains(&status));
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(
+        publish_asks(&mut shell),
+        [IntakeQuery::GitHubStatus],
+        "Publish reads the sign-in again"
+    );
+}
+
+#[test]
+fn g_on_an_overview_with_its_pool_picker_open_leaves_the_publish_question_closed() {
+    let mut ctx = ctx(100, 30);
+    ctx.store.pools = Load::Ready(vec![main_pool()]);
+    ctx.store.pool_projects = Load::Ready(Vec::new());
+    let project = ProjectId::new("notes").unwrap();
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    shell.key(Key::Enter);
+    let picker = "Agents of this project use its pool's accounts.";
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains(picker), "{shown}");
+    shell.key(Key::Char('G'));
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains(picker), "{shown}");
+    assert!(
+        !shown.contains("Don't ask again"),
+        "G stays with the open picker: {shown}"
+    );
+}
+
+#[test]
+fn a_refused_publish_answer_reads_the_publish_again_and_shows_where_it_stands() {
+    let mut ctx = ctx(100, 30);
+    let project = ProjectId::new("notes").unwrap();
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status.clone(),
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Lines {
+                lines: vec![".env*".into()],
+                draft: GitHubIgnoreDraft::Agent,
+            },
+        ))))),
+    );
+    shell.key(Key::Enter);
+    let approve = IntakeQuery::GitHubPublishApprove {
+        project,
+        lines: vec![".env*".into()],
+    };
+    assert_eq!(publish_asks(&mut shell), [approve.clone()]);
+    publish_reply(&mut shell, approve, Err("github_outcome_unknown".into()));
+    let message = shell.ctx.message().expect("the refusal is said");
+    assert_eq!(message.lead, "The publish answer wasn't taken.");
+    assert_eq!(
+        publish_asks(&mut shell),
+        [status.clone()],
+        "the publish is read again"
+    );
+    publish_reply(
+        &mut shell,
+        status,
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Done {
+                full_name: "me/tool".into(),
+                outcomes: Vec::<GitHubRuleOutcome>::new(),
+            },
+        ))))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("Published as me/tool."), "{shown}");
+    assert!(!shown.contains("[x] .env*"), "{shown}");
+}
+
+#[test]
+fn a_start_whose_reply_was_lost_after_the_engine_ran_it_says_it_may_have_started() {
+    let said = |result: Result<IntakeView, String>| {
+        let message = super::project_page::ProjectPage::publish_start_said("Notes", &result);
+        (message.lead, message.rest)
+    };
+    let maybe = (
+        "Publishing on GitHub may have started.".to_owned(),
+        "The project's Overview shows where it stands.".to_owned(),
+    );
+    assert_eq!(said(Err("github_outcome_unknown".into())), maybe);
+    assert_eq!(said(Err("github_reply_bounds".into())), maybe);
+    assert_eq!(said(Ok(IntakeView::Prompt(true))), maybe);
+    assert_eq!(
+        said(Err("github_publish_running".into())),
+        (
+            super::new_project_publish::PUBLISH_NOT_STARTED.to_owned(),
+            super::intake::copy("github_publish_running"),
+        )
+    );
+}
+
+#[test]
+fn a_start_whose_reply_was_lost_is_waited_for_as_long_as_the_engine_gives_a_start() {
+    assert_eq!(
+        crate::github::START_TIME,
+        std::time::Duration::from_secs(140)
+    );
+    assert!(!super::project_publish::lost_start_over(
+        1_000,
+        1_000 + 139_999
+    ));
+    assert!(super::project_publish::lost_start_over(
+        1_000,
+        1_000 + 140_000
+    ));
+}
+
+/// rv-code2 GSB-1: a Start whose reply was lost may still save its publish after the first
+/// read, so the Overview reads again every `DRAFT_POLL_MS` with no question in between, and
+/// shows the publish once it lands with no remount.
+#[test]
+fn a_start_whose_reply_was_lost_reads_the_publish_again_until_it_shows() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    publish_reply(&mut shell, start, Err("github_outcome_unknown".into()));
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status.clone(),
+        Ok(IntakeView::PublishStatus(None)),
+    );
+    assert!(
+        publish_asks(&mut shell).is_empty(),
+        "no question while the Start may still land"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(
+        super::project_publish::DRAFT_POLL_MS as u64 + 50,
+    ));
+    publish_reply(
+        &mut shell,
+        IntakeQuery::GitHubPublishStatus {
+            project: ProjectId::new("other").unwrap(),
+        },
+        Ok(IntakeView::PublishStatus(None)),
+    );
+    assert_eq!(
+        publish_asks(&mut shell),
+        [status.clone()],
+        "the publish is read again after DRAFT_POLL_MS"
+    );
+    publish_reply(
+        &mut shell,
+        status,
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Drafting,
+        ))))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains("Drafting the .gitignore lines..."),
+        "{shown}"
+    );
 }

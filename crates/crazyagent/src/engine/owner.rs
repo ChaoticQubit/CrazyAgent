@@ -1209,6 +1209,9 @@ pub enum OwnerResult {
     RcliProfileRegistered {
         registration: Box<crate::master_session::RcliProfileRegistrationMetadata>,
     },
+    OnboardingStarted {
+        project_id: ProjectId,
+    },
     Rejected {
         code: String,
     },

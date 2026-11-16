@@ -3190,7 +3190,11 @@ fn home_opens_new_project_for_a_failed_new_project_job_and_starts_nothing() {
     );
     shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::NewProject));
-    assert!(job_asks(&mut shell).is_empty());
+    assert_eq!(
+        job_asks(&mut shell),
+        [IntakeQuery::GitHubStatus],
+        "New project reads only its GitHub sign-in"
+    );
     assert!(
         shell
             .ctx

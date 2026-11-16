@@ -285,7 +285,11 @@ async fn each_linux_call_supervisor_option_is_saved_in_the_engine_and_survives_a
     let mut case = Case::new().await;
     let mut controller = case.controller().await;
     assert_eq!(
-        controller.sandbox_settings().await.unwrap().linux_supervisor,
+        controller
+            .sandbox_settings()
+            .await
+            .unwrap()
+            .linux_supervisor,
         LinuxSupervisor::On
     );
     for (generation, linux_supervisor) in [(1, LinuxSupervisor::Off), (2, LinuxSupervisor::On)] {

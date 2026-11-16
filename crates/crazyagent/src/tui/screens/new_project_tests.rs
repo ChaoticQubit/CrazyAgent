@@ -1050,6 +1050,7 @@ fn create_sends_every_field_and_then_waits_for_the_engine() {
     wizard.go(Step::Documents);
     type_text(&mut wizard, "~/scope.csv");
     wizard.key(key(KeyCode::Enter));
+    wizard.publish.on = false;
     wizard.go(Step::Review);
     let Reply::Create(request) = wizard.key(key(KeyCode::Enter)) else {
         panic!("create expected");
@@ -1113,6 +1114,7 @@ fn review_preselects_own_branch_and_left_and_right_change_the_agent_access() {
     let mut wizard = Wizard::new(pool_choices(&config()), None);
     type_text(&mut wizard, "Tidepool");
     load_catalog(&mut wizard, &["c-codex"]);
+    wizard.publish.on = false;
     wizard.go(Step::Review);
     assert_eq!(wizard.access, AgentAccess::OwnBranch);
     assert_eq!(wizard.focused(), Control::Continue);

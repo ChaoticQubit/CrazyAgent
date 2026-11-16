@@ -6,6 +6,7 @@ use super::settings_accounts::{plain, settings_event};
 use super::settings_harnesses::{control_sentence, control_word};
 use super::{Flow, Place, ProjectTab, Screen, intake, intake_job};
 use crate::engine::owner::random_id;
+use crate::github::GitHubPublishPlan;
 use crate::harnesses::{HarnessEntry, HarnessStatus, TeamUse};
 use crate::pools::{MemberKind, PoolSummary};
 use crate::project_setup::{ProjectSetup, SetupQuery, SetupView};
@@ -57,9 +58,9 @@ pub(in crate::tui) fn carry_background(arrival: &Arrival, ctx: &mut Ctx) {
         }
     }
     let (settled, waiting): (Vec<_>, Vec<_>) = running.into_iter().partition(|page| {
-        page.creation
-            .as_ref()
-            .is_none_or(|creation| creation.stage == Stage::Finished)
+        page.creation.as_ref().is_none_or(|creation| {
+            creation.stage == Stage::Finished && creation.publishing.is_none()
+        })
     });
     RUNNING.with_borrow_mut(|running| running.extend(waiting));
     drop(settled);
@@ -221,6 +222,7 @@ pub(in crate::tui) struct NewProjectPage {
 
 /// One New Project this page started as the engine's job (DEC-177 step 3b): the start's
 /// id, the project it makes, its name, the pool and agent access to set once it is made,
+/// the GitHub publish to start then (DEC-182), the publish Start a carried page waits on,
 /// and where it stands.
 struct Creation {
     id: RequestId,
@@ -228,6 +230,8 @@ struct Creation {
     name: String,
     pool: Option<CredentialRef>,
     access: AgentAccess,
+    publish: Option<GitHubPublishPlan>,
+    publishing: Option<IntakeQuery>,
     stage: Stage,
 }
 
@@ -344,6 +348,17 @@ impl NewProjectPage {
         }
     }
 
+    fn github_arrived(
+        &mut self,
+        query: &IntakeQuery,
+        result: &Result<IntakeView, String>,
+        ctx: &mut Ctx,
+    ) {
+        if let Some(next) = self.wizard.publish.arrived(query, result) {
+            intake::ask(ctx, next);
+        }
+    }
+
     fn redraw(&mut self, ctx: &Ctx) {
         self.wizard.width = ctx.width;
         self.view = wizard_screen(&self.wizard, ctx.width, ctx.height, &look(ctx));
@@ -362,6 +377,7 @@ impl NewProjectPage {
             Reply::Leave => Flow::Back,
             Reply::Background => Flow::Open(Place::Home),
             Reply::CreatePool => Flow::Open(Place::NewPool),
+            Reply::SignInGitHub => Flow::Open(Place::CloneRepo),
             Reply::CheckHarnesses => {
                 self.ask_harnesses(true, ctx);
                 Flow::Handled
@@ -397,6 +413,10 @@ impl NewProjectPage {
                 return;
             }
         };
+        let publish = self
+            .wizard
+            .publish
+            .plan(self.wizard.name.value(), self.wizard.about.value());
         let name = spec.name.clone();
         let pool = setup.pool.clone();
         intake::ask(
@@ -418,6 +438,8 @@ impl NewProjectPage {
             name,
             pool,
             access: self.wizard.access,
+            publish,
+            publishing: None,
             stage: Stage::Starting,
         });
     }
@@ -536,15 +558,26 @@ impl NewProjectPage {
             .expect("only a made project opens its project");
         assert!(matches!(creation.stage, Stage::Made | Stage::Finished));
         let first = creation.stage == Stage::Made;
-        if first {
+        let publish = if first {
             ctx.say(Message::success(
                 &format!("{} is ready.", creation.name),
                 "",
             ));
-        }
+            creation.publish.take()
+        } else {
+            None
+        };
         let saves_access = first && creation.access != AgentAccess::Sandboxed;
         creation.stage = Stage::Finished;
         if self.carried {
+            if let Some(plan) = publish {
+                let start = IntakeQuery::GitHubPublishStart {
+                    project: creation.project_id.clone(),
+                    plan,
+                };
+                creation.publishing = Some(start.clone());
+                intake::ask(ctx, start);
+            }
             if saves_access {
                 creation.stage = Stage::ReadingAccess;
                 ctx.request(Request::Setup(SetupQuery::AgentPolicy {
@@ -559,6 +592,9 @@ impl NewProjectPage {
             ProjectTab::Overview,
             ctx,
         );
+        if let Some(plan) = publish {
+            page.start_publish(plan, ctx);
+        }
         if saves_access {
             page.save_created_access(creation.access, ctx);
         }
@@ -609,13 +645,22 @@ impl NewProjectPage {
 
     /// Carries one arrival for a page the shell closed. Takes the arrival and the context.
     /// Returns true only when the arrival was this page's alone: the reply to its own start,
-    /// the pool edit its assignment waits for, or a reply its access save waits for. A job
-    /// read is every page's, so it returns false for one.
+    /// the pool edit its assignment waits for, a reply its access save waits for, or the
+    /// reply to its GitHub publish Start, which is said. A job read is every page's, so it
+    /// returns false for one.
     fn carry(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> bool {
-        let Some(creation) = &self.creation else {
+        let Some(creation) = self.creation.as_mut() else {
             return false;
         };
         if let Some(event) = intake::event(arrival) {
+            if creation.publishing.as_ref() == Some(&event.query) {
+                creation.publishing = None;
+                ctx.say(ProjectPage::publish_start_said(
+                    &creation.name,
+                    &event.result,
+                ));
+                return true;
+            }
             let own = creation.started_by(event);
             self.intake_arrived(event, ctx);
             if self.creation.is_none() {
@@ -747,6 +792,16 @@ impl Screen for NewProjectPage {
             self.redraw(ctx);
             return Flow::Handled;
         }
+        if let Some(reply) = intake::event(arrival).filter(|reply| {
+            matches!(
+                reply.query,
+                IntakeQuery::GitHubStatus | IntakeQuery::GitHubOwners
+            )
+        }) {
+            self.github_arrived(&reply.query, &reply.result, ctx);
+            self.redraw(ctx);
+            return Flow::Handled;
+        }
         if matches!(arrival, Arrival::Disconnected(_)) {
             self.checking = false;
             return Flow::Handled;
@@ -790,6 +845,7 @@ impl Screen for NewProjectPage {
             self.ask_harnesses(false, ctx);
         }
         self.ask_catalog(ctx);
+        intake::ask(ctx, IntakeQuery::GitHubStatus);
         self.redraw(ctx);
     }
 

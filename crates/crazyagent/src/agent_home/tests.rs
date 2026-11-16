@@ -214,7 +214,10 @@ fn an_instructions_file_with_a_second_hard_link_is_never_read() {
     let app = project.data.join(APP_FILE);
     fs::write(&app, "App rules.\n").unwrap();
     fs::hard_link(&app, root.join("app-alias")).unwrap();
-    assert_eq!(read_app(&project.data).unwrap_err().0, "process_text_unsafe");
+    assert_eq!(
+        read_app(&project.data).unwrap_err().0,
+        "process_text_unsafe"
+    );
 }
 
 #[test]

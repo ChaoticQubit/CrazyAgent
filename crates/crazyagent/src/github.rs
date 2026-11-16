@@ -10,8 +10,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 mod api;
 mod clone;
+mod draft;
 pub(crate) mod http;
+mod job;
+mod plan;
+mod prompt;
+pub mod proposals;
+mod publish;
 mod rules;
+mod settings;
 mod state;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "github/test_server.rs"]
@@ -21,7 +28,25 @@ pub(crate) mod test_server;
 mod tests;
 
 pub use api::Endpoints;
-pub use rules::{GitHubCi, GitHubRepoFacts, GitHubRule, GitHubRuleOutcome, GitHubRuleState};
+pub use job::{
+    GitHubDraft, GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan,
+    GitHubPublishStep,
+};
+pub use plan::{GitHubPlanField, default_description, default_repo_name, plan_problem};
+pub use prompt::{GitHubPromptAnswer, SNOOZE_MS};
+pub(crate) use prompt::{carry_publish, forget_job, forget_prompt};
+#[cfg(test)]
+pub(crate) use prompt::{keep_job, keep_prompt_answer, kept_job, kept_prompt_answer};
+#[cfg(test)]
+pub(crate) use publish::START_GIT_TIME;
+pub(crate) use publish::START_TIME;
+pub use publish::{
+    GitHubCommitted, GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding,
+    GitHubSecretKind, GitHubSecretScan,
+};
+pub use rules::{
+    GitHubCi, GitHubRepoFacts, GitHubRepoRules, GitHubRule, GitHubRuleOutcome, GitHubRuleState,
+};
 
 pub const CLIENT_ID: &str = "Ov23liHICPRkMyS5sNMV";
 pub const SCOPES: &str = "repo read:user read:org workflow";
@@ -632,5 +657,96 @@ impl GitHub {
         self.with_record(full_name, |made| {
             rules::set(&self.endpoints, &token, full_name, rule, on, facts, made)
         })
+    }
+
+    /// Reads how a project's git stands before it is published: whether it is a
+    /// repository, its branch and what its history holds. Needs no sign-in. Input: the
+    /// project folder. Output: the state, or the refusal for a remote, a detached HEAD or
+    /// a `.git` that is not a plain folder.
+    pub fn publish_inspect(&self, project: &Path) -> Result<GitHubLocal, EngineError> {
+        let home = publish::GitHome::new(&self.root)?;
+        publish::inspect(
+            &publish::git()?,
+            home.path(),
+            project,
+            self.endpoints.web_host(),
+        )
+    }
+
+    /// Gets a project ready for its first publish commit: git init on main when it has no
+    /// repository, CrazyAgent's folders hidden from git, the docs and approved .gitignore
+    /// lines added, and the security policy and Dependabot files written where missing.
+    /// Inputs: the project folder, its state and the owner's choices. Output: the paths
+    /// publish wrote.
+    pub fn publish_prepare(
+        &self,
+        project: &Path,
+        local: &GitHubLocal,
+        choices: &GitHubPrepare,
+    ) -> Result<Vec<String>, EngineError> {
+        let home = publish::GitHome::new(&self.root)?;
+        publish::prepare(&publish::git()?, home.path(), project, local, choices)
+    }
+
+    /// Finds the lines a publish would push that hold a secret, by file and line, at
+    /// most 20 a file and 1000 in all, saying when the list was cut there.
+    /// Inputs: the project folder and its history. Output: the scan, or
+    /// `github_publish_not_plain_repo`, `github_publish_too_large` or `github_publish_failed`.
+    pub fn publish_secrets(
+        &self,
+        project: &Path,
+        history: GitHubHistory,
+    ) -> Result<GitHubSecretScan, EngineError> {
+        let home = publish::GitHome::new(&self.root)?;
+        publish::secret_findings(&publish::git()?, home.path(), project, history)
+    }
+
+    /// Makes the publish commit with the identity the owner's own git uses in the
+    /// project, else the GitHub account's noreply address, which needs the sign-in.
+    /// Inputs: the project folder, the owner's home folder, whose git settings name that
+    /// identity, and the paths `publish_prepare` wrote. Output: the commit to push.
+    pub fn publish_commit(
+        &self,
+        project: &Path,
+        owner_home: &Path,
+        written: &[String],
+    ) -> Result<GitHubCommitted, EngineError> {
+        let git = publish::git()?;
+        let home = publish::GitHome::new(&self.root)?;
+        let author = match publish::configured_author(&git, owner_home, project) {
+            Some(author) => author,
+            None => {
+                let token = self.store.get(&self.saved()?.credential)?;
+                let (login, id) = api::identity(&self.endpoints, &token)?;
+                publish::noreply_author(&login, id)
+            }
+        };
+        publish::commit(&git, home.path(), project, written, &author)
+    }
+
+    /// Pushes the publish commit to its new GitHub repository through the store's git
+    /// helper, then points the project at it. Inputs: the project folder, `owner/name`
+    /// and the commit `publish_commit` made. Output: `()`, or the refusal.
+    pub fn publish_push(
+        &self,
+        project: &Path,
+        full_name: &str,
+        committed: &GitHubCommitted,
+    ) -> Result<(), EngineError> {
+        let saved = self.saved()?;
+        let helper = self
+            .store
+            .git_credential_helper(&saved.credential, clone::GIT_USER)?;
+        let git = publish::git()?;
+        let home = publish::GitHome::new(&self.root)?;
+        publish::push(
+            &self.endpoints,
+            &helper,
+            &git,
+            home.path(),
+            project,
+            full_name,
+            committed,
+        )
     }
 }
