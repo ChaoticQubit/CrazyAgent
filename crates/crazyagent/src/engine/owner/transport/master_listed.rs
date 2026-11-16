@@ -561,6 +561,38 @@ fn run_listed(turn: ListedTurn, signals: Signals) -> ListedRun {
 }
 
 impl OwnerRuntimeHandle {
+    /// The entry of a listed harness, checked as a listed master turn checks its program:
+    /// found by the search set at engine start, refused when it does not resolve or is below
+    /// the manifest's `version.minimum`. Input: the exact registry id of a harness the engine
+    /// does not drive itself. Output: the entry, or none for any other name or a refusal.
+    pub(super) fn listed_entry(&self, id: &str) -> Option<PathBuf> {
+        let engine_kind = crate::coord::settings::HarnessKind::ALL
+            .into_iter()
+            .any(|kind| kind.as_str() == id);
+        let harness = crate::harnesses::registry::registry()
+            .get(id)
+            .filter(|harness| harness.id() == id && !engine_kind)?;
+        let search = self.harness_search().ok()?;
+        let root = super::changes::engine_root(&self.authority).ok()?;
+        let updates = self.engine.harness_updates.clone();
+        let work = move || {
+            let entry = crate::harnesses::entry(harness, &search);
+            let roots = crate::harnesses::update::Roots::engine(&root);
+            let installed = crate::landing::open(&root)
+                .ok()
+                .and_then(|db| updates.versions(&db, &entry, &roots, false).installed);
+            let found = entry.executable?;
+            listed_program(harness, Some(found.as_path()), installed.as_deref()).ok()?;
+            Some(found)
+        };
+        #[cfg(unix)]
+        let found = crate::engine::off_worker(work);
+        #[cfg(not(unix))]
+        let found = work();
+        assert!(found.as_deref().is_none_or(std::path::Path::is_absolute));
+        found
+    }
+
     /// Runs one prepared listed master turn and stores how it ended (DEC-180 Task 20): its
     /// reply, cancelled, or the reason it failed, a harness the engine could not be sure it
     /// stopped stored as disconnected. Inputs: the prepared turn and its id. Output: the
