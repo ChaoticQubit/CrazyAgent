@@ -1336,6 +1336,41 @@ fn an_ended_launch_has_no_folder_and_gets_no_answer() {
 }
 
 #[test]
+fn the_engines_gateway_thread_answers_a_launchs_call_and_stops_when_told() {
+    let bench = bench();
+    grant(&bench, "board", true);
+    let launch = launch(&bench);
+    let running = start(&bench.case.root).unwrap();
+    let input = lines(&[request(
+        1,
+        "tools/call",
+        json!({"name": "nothing", "arguments": {}}),
+    )]);
+    let mut output = Vec::new();
+    shim::serve_with(
+        std::io::Cursor::new(input),
+        &mut output,
+        &launch.folder,
+        WAIT,
+    )
+    .unwrap();
+    let replies = parsed(&output);
+    assert_eq!(replies.len(), 1);
+    let (text, error) = shown(&replies[0]);
+    assert!(error, "{text}");
+    assert!(
+        text.starts_with("connector_tool_unknown"),
+        "the gateway thread answered the call: {text}"
+    );
+    let clock = Instant::now();
+    running.stop();
+    assert!(
+        clock.elapsed() < 10 * TICK + Duration::from_secs(1),
+        "the loop ends within a round of being told"
+    );
+}
+
+#[test]
 fn every_gateway_code_has_a_plain_sentence_and_the_list_is_sorted() {
     let mut sorted = GATEWAY_CODES;
     sorted.sort_unstable();

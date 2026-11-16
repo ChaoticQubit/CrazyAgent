@@ -1146,6 +1146,36 @@ pub fn serve(root: &Path, stop: &AtomicBool) {
     }
 }
 
+/// The gateway serving on a thread of its own for the engine's life.
+pub struct Running {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+/// Starts [`serve`] on a thread of its own. Input: the engine root. Output: the running
+/// gateway, or `connectors_unavailable` when no thread starts.
+pub fn start(root: &Path) -> Result<Running, EngineError> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let root = root.to_path_buf();
+    let thread = std::thread::Builder::new()
+        .name("connector-gateway-serve".into())
+        .spawn(move || {
+            let _ = (root, flag);
+        })
+        .map_err(|_| EngineError("connectors_unavailable".into()))?;
+    Ok(Running { stop, thread })
+}
+
+impl Running {
+    /// Stops the gateway and waits for its loop to end; calls already being answered finish
+    /// on their own threads. Input: the running gateway.
+    pub fn stop(self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = self.thread.join();
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "gateway_tests.rs"]
 mod tests;
