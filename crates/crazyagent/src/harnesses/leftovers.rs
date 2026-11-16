@@ -1107,18 +1107,20 @@ enum Following {
     Taken,
 }
 
-/// A Full access headless run's or pane's processes, followed from its start on a thread of
-/// its own, since neither may be polled while it waits (SETSID-L2, BL-PANE-FOLLOW-GAP): the
+/// A Full access or sandboxed headless run's or pane's processes, followed from its start on
+/// a thread of its own, since neither may be polled while it waits (SETSID-L2,
+/// BL-PANE-FOLLOW-GAP, LINUX-KILL-GROUP): the
 /// thread takes the first read, or a pane's own, then the engine's shared table every
 /// [`FOLLOWER_PACE`], so a process a table showed in the run stays known once it leaves the
 /// run's session and loses its parent. One that does both between two tables it took, up to the pace plus the table's age
 /// plus the reads, is never seen, and only its token can still find it at the stop: the
 /// SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
 /// apply a table, so a stop never waits for a read in flight. Holds the leader, the launch's
-/// token, the lineage and the sender whose drop ends the thread.
+/// token, whether the run is sandboxed, the lineage and the sender whose drop ends the thread.
 pub(crate) struct Follower {
     leader: u32,
     token: Option<LineageToken>,
+    sandboxed: bool,
     lineage: Arc<Mutex<Following>>,
     _wake: std::sync::mpsc::Sender<()>,
 }
@@ -1137,6 +1139,7 @@ impl Follower {
         if check == LineageCheck::Unneeded {
             return None;
         }
+        let sandboxed = check == LineageCheck::Sandboxed;
         let lineage = Arc::new(Mutex::new(Following::Reading));
         let (wake, woken) = std::sync::mpsc::channel();
         #[cfg(unix)]
@@ -1144,14 +1147,15 @@ impl Follower {
             let followed = Arc::clone(&lineage);
             let first = token.clone();
             let _ = std::thread::Builder::new()
-                .name("full-access-follow".into())
-                .spawn(move || follow_run(leader, first, &followed, &woken));
+                .name("run-follow".into())
+                .spawn(move || follow_run(leader, first, sandboxed, &followed, &woken));
         }
         #[cfg(not(unix))]
         drop(woken);
         Some(Self {
             leader,
             token,
+            sandboxed,
             lineage,
             _wake: wake,
         })
@@ -1167,6 +1171,7 @@ impl Follower {
         token: Option<LineageToken>,
         first: Result<Lineage, Unstopped>,
     ) -> Self {
+        let sandboxed = first.as_ref().is_ok_and(|lineage| lineage.sandboxed);
         let lineage = Arc::new(Mutex::new(Following::Read(first)));
         let (wake, woken) = std::sync::mpsc::channel();
         #[cfg(unix)]
@@ -1181,6 +1186,7 @@ impl Follower {
         Self {
             leader,
             token,
+            sandboxed,
             lineage,
             _wake: wake,
         }
@@ -1194,7 +1200,9 @@ impl Follower {
         let taken = std::mem::replace(&mut *following(&self.lineage), Following::Taken);
         let mut lineage = match taken {
             Following::Read(read) => read?,
-            Following::Reading | Following::Taken => Lineage::of(self.leader, self.token)?,
+            Following::Reading | Following::Taken => {
+                first_read(self.leader, self.token, self.sandboxed)?
+            }
         };
         lineage.before_stop();
         Ok(lineage)
@@ -1207,18 +1215,35 @@ fn following(lineage: &Mutex<Following>) -> MutexGuard<'_, Following> {
     lineage.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Reads a followed run's lineage from the start: a sandboxed run's
+/// ([`Lineage::of_sandboxed`]) or a Full access one's ([`Lineage::of`]). Inputs: the leader,
+/// the token and whether the run is sandboxed. Output: the lineage, or why it cannot be read.
+fn first_read(
+    leader: u32,
+    token: Option<LineageToken>,
+    sandboxed: bool,
+) -> Result<Lineage, Unstopped> {
+    if sandboxed {
+        Lineage::of_sandboxed(leader, token)
+    } else {
+        Lineage::of(leader, token)
+    }
+}
+
 /// Takes a follower's first read, then the shared table every [`FOLLOWER_PACE`] until its
 /// stop. Each read runs with no lock held, and the lock is taken only to apply it. Ends at
-/// the stop, or once the first read found no lineage. Inputs: the leader, the token, the
-/// lineage's lock and the receiver the stop disconnects. Output: none.
+/// the stop, or once the first read found no lineage. Inputs: the leader, the token, whether
+/// the run is sandboxed, the lineage's lock and the receiver the stop disconnects. Output:
+/// none.
 #[cfg(unix)]
 fn follow_run(
     leader: u32,
     token: Option<LineageToken>,
+    sandboxed: bool,
     lineage: &Mutex<Following>,
     woken: &std::sync::mpsc::Receiver<()>,
 ) {
-    let first = Lineage::of(leader, token);
+    let first = first_read(leader, token, sandboxed);
     {
         let mut slot = following(lineage);
         if !matches!(*slot, Following::Reading) {

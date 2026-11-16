@@ -1635,7 +1635,7 @@ impl LinuxSandbox {
     /// process ([`NEST_ARGS`]), while under the plain Landlock helper such a process leaves
     /// the group a stop kills and outlives the run (LINUX-KILL-GROUP). Output: the answer.
     pub fn ends_every_session(&self) -> bool {
-        true
+        !matches!(self.backend, LinuxBackend::Landlock { .. })
     }
 
     /// The project policy this sandbox holds.

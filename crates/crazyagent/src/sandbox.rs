@@ -3840,6 +3840,10 @@ impl InstalledSandbox {
         if self.unconfined {
             return LineageCheck::FullAccess;
         }
+        #[cfg(target_os = "linux")]
+        if !self.linux.ends_every_session() {
+            return LineageCheck::Sandboxed;
+        }
         LineageCheck::Unneeded
     }
 

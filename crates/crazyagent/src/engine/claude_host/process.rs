@@ -586,7 +586,8 @@ impl Process {
     }
 
     /// Ends the harness and everything it left in its group, then releases the account
-    /// lease. At Full access no warden reaches processes that left the group, so the
+    /// lease. At Full access, and under the plain Linux Landlock helper, no warden reaches
+    /// processes that left the group (LINUX-KILL-GROUP), so the
     /// harness's lineage, followed from its start, is taken before the kill and checked after
     /// it; while some still run, the turn ends with their code and a hold ends them by the
     /// default leftover setting, keeping the lease until none run or the owner signs the

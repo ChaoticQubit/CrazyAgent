@@ -298,7 +298,8 @@ impl OwnedChild {
         }
     }
 
-    /// Stops the harness: closes its input and kills its group and itself. At Full access it
+    /// Stops the harness: closes its input and kills its group and itself. At Full access,
+    /// and under the plain Linux Landlock helper (LINUX-KILL-GROUP), it
     /// first takes the harness's lineage, followed from its start, once, so what left the
     /// group can be checked when the run completes. Takes nothing.
     fn stop(&mut self) {
@@ -448,7 +449,8 @@ impl OwnedChild {
         }
     }
 
-    /// Publishes the run's end and releases the account lease. At Full access, no warden
+    /// Publishes the run's end and releases the account lease. At Full access, and under the
+    /// plain Linux Landlock helper (LINUX-KILL-GROUP), no warden
     /// reaches what left the group, so the lineage taken at the stop, or now when the harness
     /// ended on its own, is checked first; while some of it still runs the run ends with that
     /// code and a hold follows it by its project's leftover setting, listed in the project's
