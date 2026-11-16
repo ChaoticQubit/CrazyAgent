@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub mod audit;
+pub mod callback;
 pub mod gateway;
 pub mod grants;
 pub mod launch;
