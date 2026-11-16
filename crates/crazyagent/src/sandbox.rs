@@ -287,14 +287,19 @@ pub(crate) fn power_helper_denies_for(sockets: &[&str]) -> String {
     text
 }
 
-/// Tells whether a socket grant names the lid helper's socket: either spelling in any letter
-/// case (the system volume ignores case), or a path that resolves to it. Input: the path.
-/// Output: true for the helper's socket.
-fn power_helper_socket(path: &Path) -> bool {
+/// Tells whether a path's text holds the lid helper's socket: either spelling anywhere in
+/// it, in any letter case (the system volume ignores case). It reads no file, so it answers
+/// the same at every call (rv-code 22:41 F1). Input: the path. Output: true when it holds it.
+fn names_power_helper(path: &Path) -> bool {
     let spelled = path.to_string_lossy().to_ascii_lowercase();
-    POWER_HELPER_SPELLINGS
-        .iter()
-        .any(|spelling| Path::new(&spelled) == Path::new(spelling))
+    POWER_HELPER_SPELLINGS.iter().any(|spelling| spelled.contains(spelling))
+}
+
+/// Tells whether a socket grant reaches the lid helper's socket: its text holds the socket
+/// ([`names_power_helper`]), or the path resolves to it now. Input: the path. Output: true
+/// for the helper's socket.
+fn power_helper_socket(path: &Path) -> bool {
+    names_power_helper(path)
         || fs::canonicalize(path).is_ok_and(|resolved| resolved == Path::new(POWER_HELPER_SOCKET))
 }
 
@@ -1221,7 +1226,7 @@ impl ProjectSandbox {
             }
         }
         assert!(self.granted.len() <= policy::GRANT_SOCKETS_MAX);
-        assert!(!self.granted.iter().any(|socket| power_helper_socket(socket)));
+        assert!(!self.granted.iter().any(|socket| names_power_helper(socket)));
         Ok(self)
     }
 
@@ -3037,7 +3042,9 @@ impl ProjectSandbox {
         );
         let helper = power_helper_denies();
         text.push_str(&helper);
-        assert!(text.ends_with(&helper) && text.matches(POWER_HELPER_SOCKET).count() == 1);
+        let line = format!("(path-literal \"{POWER_HELPER_SOCKET}\")");
+        assert!(text.ends_with(&helper));
+        assert_eq!(text.matches(&line).count(), 1);
         text
     }
 
