@@ -12,12 +12,12 @@ function handClock(start) {
 }
 
 /** The System Events key lines in an ide-window source that do not go through realKey: every
- * `keystroke` or `key code`, in any case and any quote, that does not open a realKey call's first
- * argument, with block comments left out. Input: the source. Output: the offending snippets,
- * empty when every key goes through realKey. */
+ * `keystroke`, `key code`, `key down` or `key up`, in any case and any quote, that does not open a
+ * realKey call's first argument, with block comments left out. Input: the source. Output: the
+ * offending snippets, empty when every key goes through realKey. */
 function keysPastRealKey(source) {
   const code = source.replace(/\/\*[\s\S]*?\*\//g, "");
-  return [...code.matchAll(/\b(?:keystroke|key\s+code)\b/gi)]
+  return [...code.matchAll(/\b(?:keystroke|key\s+(?:code|down|up))\b/gi)]
     .filter((key) => !/realKey\(\s*[`"']$/.test(code.slice(Math.max(0, key.index - 40), key.index)))
     .map((key) => code.slice(Math.max(0, key.index - 40), key.index + 20));
 }
