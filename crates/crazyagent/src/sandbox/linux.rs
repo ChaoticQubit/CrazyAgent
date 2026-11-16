@@ -304,7 +304,7 @@ impl Guard {
             loopback: self.loopback.clone(),
         };
         Supervised {
-            reach: Some(reach).filter(|_| !self.loopback.is_empty()),
+            reach: (!self.loopback.is_empty()).then_some(reach),
             git: self.git.clone(),
             signals: self.signals,
             held: self.held.clone(),
