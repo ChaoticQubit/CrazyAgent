@@ -1105,11 +1105,10 @@ async fn offer_restart(
     }
 }
 
-/// Runs `crazyagent service ACTION` for the default engine service. Input: the arguments.
-/// Output: Ok after the action and its report on stdout, or the failing step.
 /// `crazyagent keep-awake restore` (plan Task 14, for an uninstaller): puts back every
 /// setting Keep awake changed that an engine left recorded under the default engine root,
-/// while no engine runs there. Input: the arguments. Output: Ok, or why not in words.
+/// and refuses while an engine holds that journal. Input: the arguments. Output: Ok, or
+/// why not in words.
 fn run_keep_awake(args: &[OsString]) -> Result<(), String> {
     let usage = "usage: crazyagent keep-awake restore";
     let [_, action] = args else {
@@ -1119,17 +1118,13 @@ fn run_keep_awake(args: &[OsString]) -> Result<(), String> {
         return Err(usage.into());
     }
     let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;
-    if crazyagent::service::answering(&layout.socket()) {
-        return Err(
-            "The engine is running and puts these settings back itself. Stop it, then try again."
-                .into(),
-        );
-    }
     crazyagent::keep_awake::restore(layout.root()).map_err(str::to_owned)?;
     println!("Keep awake has nothing left to put back.");
     Ok(())
 }
 
+/// Runs `crazyagent service ACTION` for the default engine service. Input: the arguments.
+/// Output: Ok after the action and its report on stdout, or the failing step.
 fn run_service(args: &[OsString]) -> Result<(), String> {
     let usage = "usage: crazyagent service install|uninstall|status|start|stop|link-cli";
     let [_, action] = args else {

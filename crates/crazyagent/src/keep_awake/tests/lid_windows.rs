@@ -305,7 +305,8 @@ fn a_hold_that_ends_with_the_lid_closed_does_what_the_lid_action_says() {
 fn a_value_the_owner_changed_during_the_hold_stays() {
     let (root, setting, mut line) = line(1, 2);
     assert_eq!(line.step(wanted(), None), LidSupport::Held);
-    setting.plans().actions.insert(PLAN.into(), Actions { ac: 3, dc: 0 });
+    let changed = Actions { ac: 3, dc: 0 };
+    setting.plans().actions.insert(PLAN.into(), changed);
     assert_eq!(line.step(resting(), None), LidSupport::Held);
     assert_eq!(setting.now(), Actions { ac: 3, dc: 2 });
     assert!(entries(root.path()).is_empty());
@@ -451,7 +452,8 @@ fn a_plan_switched_during_a_hold_is_put_back_and_the_new_plan_held() {
 fn a_lid_value_set_again_during_a_hold_is_held_again_and_goes_back_at_the_end() {
     let (root, setting, mut line) = line(1, 2);
     assert_eq!(line.step(wanted(), None), LidSupport::Held);
-    setting.plans().actions.insert(PLAN.into(), Actions { ac: 3, dc: 0 });
+    let changed = Actions { ac: 3, dc: 0 };
+    setting.plans().actions.insert(PLAN.into(), changed);
     assert_eq!(line.step(wanted(), None), LidSupport::Held, "still held");
     assert_eq!(setting.now(), NOTHING);
     assert_eq!(entries(root.path()), [saved(3, 2)]);

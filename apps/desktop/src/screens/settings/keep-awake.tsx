@@ -76,7 +76,7 @@ function LidHelperLine({ view, saving, onLid }: { view: KeepAwakeView; saving: b
 const LID_CRASH_GAP = "If the engine stops by a crash during a hold, the lid stays at Do nothing until the engine starts again.";
 
 /** The lid setting's line on Windows, under the lid-closed hold setting (DEC-167 addendum
- * 26): what a crash during a hold leaves, and Put the lid setting back now. Inputs: the
+ * 32): what a crash during a hold leaves, and Put the lid setting back now. Inputs: the
  * view, a lock flag and the command handler. Output: the line, or null off Windows. */
 function LidSettingLine({ view, saving, onLid }: { view: KeepAwakeView; saving: boolean; onLid: (action: LidAction) => void }) {
   if (view.platform !== "windows") return null;

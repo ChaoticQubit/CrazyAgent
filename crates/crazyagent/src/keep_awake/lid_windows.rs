@@ -89,34 +89,42 @@ struct Saved {
 
 /// The Windows lid line (DEC-167 addendum 32) on the sensor thread: with the closed lid
 /// wanted it records the old lid close action of the active plan in the engine journal,
-/// then sets Do nothing; when the lid is no longer wanted it puts the old value back and,
-/// with the lid closed, does what the lid action says. It is the journal's one writer
-/// while the engine runs.
+/// then sets Do nothing, and holds the plan it set; when the lid is no longer wanted it
+/// puts the old value back and, with the lid closed, does what the lid action says. It is
+/// the journal's one writer while the engine runs. `owed` is the sleep a closed lid still
+/// owes (QUESTION 01:16 Q2).
 pub(crate) struct WindowsLid<S> {
     setting: S,
     root: PathBuf,
     journal: Option<Journal>,
-    holding: bool,
+    held: Option<String>,
+    owed: bool,
 }
 
 impl<S: LidSetting> WindowsLid<S> {
-    /// A lid line that holds nothing yet. Inputs: the lid setting and the engine root
-    /// the journal lives under. Output: the line; the journal opens at the first ask.
+    /// A lid line that holds nothing yet. A lid change an earlier engine left in the
+    /// journal owes a sleep, paid once the engine start's undo put it back (rv-sec3 KA T14
+    /// r1 F3), so the engine builds this line before that undo. Inputs: the lid setting and
+    /// the engine root the journal lives under. Output: the line; its own journal opens at
+    /// the first ask.
     pub(crate) fn new(setting: S, root: PathBuf) -> Self {
         assert!(!root.as_os_str().is_empty());
+        let owed = Journal::open(&root).is_ok_and(|journal| lid_left(&journal));
         Self {
             setting,
             root,
             journal: None,
-            holding: false,
+            held: None,
+            owed,
         }
     }
 
     /// Answers one ask of the keeper. Each ask that does not want the lid puts back what
-    /// the journal holds (QUESTION 22:58 Q4); Put the lid setting back now only brings
-    /// that ask sooner. Inputs: the lid ask and the owner's command. Output: Held when the
-    /// lid is held or can be, `LockedByPolicy`, `SleepNotRestored` while a change is not
-    /// put back or the journal cannot be read, or not available with the reason.
+    /// the journal holds (QUESTION 22:58 Q4) and then pays an owed sleep; Put the lid
+    /// setting back now only brings that ask sooner. A wanted ask reads a held lid again.
+    /// Inputs: the lid ask and the owner's command. Output: Held when the lid is held or
+    /// can be, `LockedByPolicy`, `SleepNotRestored` while a change is not put back or the
+    /// journal cannot be read, or not available with the reason.
     pub(crate) fn step(&mut self, ask: LidAsk, command: Option<LidCommand>) -> LidSupport {
         assert!(ask.rule_on || !ask.wanted);
         assert!(matches!(command, None | Some(LidCommand::PutBack)));
@@ -130,38 +138,62 @@ impl<S: LidSetting> WindowsLid<S> {
             };
         }
         let Some(journal) = self.journal.as_mut() else {
-            assert!(!self.holding, "a hold always has its journal");
+            assert!(self.held.is_none(), "a hold always has its journal");
             return LidSupport::SleepNotRestored;
         };
         if ask.wanted {
-            return if self.holding {
-                LidSupport::Held
-            } else {
-                self.hold()
+            return match self.held.clone() {
+                Some(plan) => self.recheck(&plan),
+                None => self.hold(),
             };
         }
-        let ended = std::mem::take(&mut self.holding);
-        let closed = ended && self.setting.closed() == Some(true);
-        let left = settle(&mut self.setting, journal);
-        if closed {
-            self.sleep_as_set();
+        if self.held.take().is_some() && self.setting.closed() == Some(true) {
+            self.owed = true;
         }
-        if left {
+        if settle(&mut self.setting, journal) {
             return LidSupport::SleepNotRestored;
         }
+        self.pay_owed();
         match self.setting.writable() {
             Ok(()) => LidSupport::Held,
             Err(refusal) => support_of(refusal),
         }
     }
 
+    /// Reads a held lid again at a wanted ask (QUESTION 01:16 Q1): Held while the held
+    /// plan is still the active one at Do nothing; after a plan switch or a value set
+    /// again it puts the old entry back and holds what is there now, in the same ask, so
+    /// the lid stays held. A read that fails ends the hold with the reason, and its entry
+    /// stays for the next put back. Input: the held plan. Output: the lid support.
+    fn recheck(&mut self, plan: &str) -> LidSupport {
+        assert_eq!(self.held.as_deref(), Some(plan));
+        let seen = found(&mut self.setting);
+        if let Ok((active, now)) = &seen
+            && active == plan
+            && *now == NOTHING
+        {
+            return LidSupport::Held;
+        }
+        self.held = None;
+        if let Err(refusal) = seen {
+            return support_of(refusal);
+        }
+        let journal = self.journal.as_mut().expect("a hold has its journal");
+        if settle(&mut self.setting, journal) {
+            return LidSupport::SleepNotRestored;
+        }
+        assert!(!lid_left(journal));
+        self.hold()
+    }
+
     /// Holds the lid: records the active plan's old lid close action, then writes Do
     /// nothing; a plan already at Do nothing is held with nothing recorded, and a write
-    /// that fails is put back at once. Output: the lid support.
+    /// that fails is put back at once. A new hold owes no earlier sleep. Output: the lid
+    /// support.
     fn hold(&mut self) -> LidSupport {
-        assert!(!self.holding);
-        let journal = self.journal.as_mut().expect("the journal opens before a hold");
-        if journal.entries().iter().any(|entry| entry.kind == KIND) {
+        assert!(self.held.is_none());
+        let journal = self.journal.as_mut().expect("the journal opens first");
+        if lid_left(journal) {
             return LidSupport::SleepNotRestored;
         }
         let (plan, old) = match found(&mut self.setting) {
@@ -169,7 +201,8 @@ impl<S: LidSetting> WindowsLid<S> {
             Err(refusal) => return support_of(refusal),
         };
         if old == NOTHING {
-            self.holding = true;
+            self.owed = false;
+            self.held = Some(plan);
             return LidSupport::Held;
         }
         let saved = Saved {
@@ -189,18 +222,39 @@ impl<S: LidSetting> WindowsLid<S> {
             };
         }
         if let Err(refusal) = self.setting.write(&plan, NOTHING) {
-            settle(&mut self.setting, journal);
+            if settle(&mut self.setting, journal) {
+                return LidSupport::SleepNotRestored;
+            }
             return support_of(refusal);
         }
-        assert!(journal.entries().iter().any(|entry| entry.kind == KIND));
-        self.holding = true;
+        assert!(lid_left(journal));
+        self.owed = false;
+        self.held = Some(plan);
         LidSupport::Held
     }
 
-    /// Does what the active plan's lid close action says now, for a hold that ended with
-    /// the lid closed (QUESTION 22:58 Q2): on battery the battery value, else the AC one;
-    /// Do nothing stays awake, Hibernate hibernates, Sleep and Shut down sleep. A failure
-    /// is logged.
+    /// Pays the sleep a closed lid owes once every lid change is put back (QUESTION 01:16
+    /// Q2): with the lid closed it does what the lid action says, with the lid open nothing
+    /// is owed any more, and with the lid unknown it waits for the next ask.
+    fn pay_owed(&mut self) {
+        assert!(self.held.is_none());
+        assert!(!self.journal.as_ref().is_none_or(lid_left));
+        if !self.owed {
+            return;
+        }
+        match self.setting.closed() {
+            Some(true) => {
+                self.owed = false;
+                self.sleep_as_set();
+            }
+            Some(false) => self.owed = false,
+            None => {}
+        }
+    }
+
+    /// Does what the active plan's lid close action says now, for the sleep a closed lid
+    /// owes (QUESTION 22:58 Q2): on battery the battery value, else the AC one; Do nothing
+    /// stays awake, Hibernate hibernates, Sleep and Shut down sleep. A failure is logged.
     fn sleep_as_set(&mut self) {
         let setting = &mut self.setting;
         let actions = match setting.active().and_then(|plan| setting.read(&plan)) {
@@ -251,9 +305,15 @@ fn settle(setting: &mut impl LidSetting, journal: &mut Journal) -> bool {
     if let Err(problem) = &settled {
         eprintln!("keep awake lid journal: {}", super::short(&problem.0));
     }
-    let left = journal.entries().iter().any(|entry| entry.kind == KIND);
+    let left = lid_left(journal);
     assert_eq!(settled.is_err(), left);
     left
+}
+
+/// Whether the journal holds a lid change not put back. Input: the journal. Output: the
+/// answer.
+fn lid_left(journal: &Journal) -> bool {
+    journal.entries().iter().any(|entry| entry.kind == KIND)
 }
 
 /// The lid support of a refusal, with a reason of at most `REASON_CHARS_MAX` characters.
@@ -296,8 +356,10 @@ fn parsed(restore: &str) -> Option<Saved> {
 
 /// Puts back the lid close action one journal entry recorded (QUESTION 22:58 Q5, Q6):
 /// only a value still at Do nothing is written, so a value the owner set during the hold
-/// stays, and a plan that no longer exists counts as put back. Inputs: the lid setting and
-/// the entry. Output: Ok, or why it is not put back, and the entry then stays.
+/// stays, and a plan that no longer exists counts as put back. Values already stored are
+/// applied again, since Windows applies a stored change to the active plan only then
+/// (rv-sec3 KA T14 r1 F4). Inputs: the lid setting and the entry. Output: Ok, or why it is
+/// not put back, and the entry then stays.
 pub(crate) fn undo_with(setting: &mut impl LidSetting, entry: &Entry) -> Result<(), EngineError> {
     assert_eq!(entry.kind, KIND);
     let Some(saved) = parsed(&entry.restore) else {
@@ -318,7 +380,9 @@ pub(crate) fn undo_with(setting: &mut impl LidSetting, entry: &Entry) -> Result<
     assert!(back.ac <= ACTION_MAX);
     assert!(back.dc <= ACTION_MAX);
     if back == now {
-        return Ok(());
+        return setting
+            .apply(&saved.scheme)
+            .map_err(|refusal| not_put_back(&refusal));
     }
     setting
         .write(&saved.scheme, back)
@@ -366,8 +430,8 @@ impl LidSetting for Windows {
         lid::write(scheme(plan)?, values).map_err(refused)
     }
 
-    fn apply(&mut self, _plan: &str) -> Result<(), Refusal> {
-        Err(Refusal::Failed("not built yet".into()))
+    fn apply(&mut self, plan: &str) -> Result<(), Refusal> {
+        lid::apply(scheme(plan)?).map_err(refused)
     }
 
     fn closed(&mut self) -> Option<bool> {

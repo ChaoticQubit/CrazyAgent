@@ -15126,8 +15126,13 @@ pub fn start_for_engine(
         .map_err(|e| format!("team runtime: {e}"))?;
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;
-    let leftover = crate::keep_awake::reconcile(&runtime);
-    let lid = crate::keep_awake::power::platform_lid(&runtime);
+    let journal = crate::keep_awake::journal_lock(&runtime);
+    let lid = crate::keep_awake::power::platform_lid(&runtime, journal.is_some());
+    let leftover = if journal.is_some() {
+        crate::keep_awake::reconcile(&runtime)
+    } else {
+        crate::keep_awake::Leftover::Unreadable
+    };
     let settings = (global.to_path_buf(), project.to_path_buf());
     let (global, project) = settings.clone();
     let access: AccessSource = Box::new(move || {
@@ -15178,7 +15183,8 @@ pub fn start_for_engine(
                 lid,
                 crate::keep_awake::power::platform_power(),
             )
-            .with_leftover(leftover);
+            .with_leftover(leftover)
+            .with_journal(journal);
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
 

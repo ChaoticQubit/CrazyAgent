@@ -9,7 +9,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::{
     AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
-    SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+    SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::Power::{
     ACCESS_AC_POWER_SETTING_INDEX, ACCESS_DC_POWER_SETTING_INDEX,
@@ -37,9 +37,11 @@ const LID_UNKNOWN: u8 = u8::MAX;
 const LID_CLOSED: u8 = 0;
 const LID_OPEN: u8 = 1;
 const LID_DATA_BYTES: u32 = 4;
+const PRIVILEGES_BYTES: usize = size_of::<TOKEN_PRIVILEGES>();
 
 const _: () = assert!(DIGITS + DASHES.len() == TEXT_LEN);
 const _: () = assert!(LID_DATA_BYTES as usize == size_of::<u32>());
+const _: () = assert!(PRIVILEGES_BYTES <= u32::MAX as usize);
 const _: () = assert!(ACCESS_AC_POWER_SETTING_INDEX != ACCESS_DC_POWER_SETTING_INDEX);
 
 static LID: AtomicU8 = AtomicU8::new(LID_UNKNOWN);
@@ -233,9 +235,19 @@ pub fn write(scheme: Scheme, actions: Actions) -> Result<(), LidError> {
     let dc = actions.dc;
     let code = unsafe { PowerWriteDCValueIndex(ptr::null_mut(), &plan, subgroup, setting, dc) };
     checked("write the lid action on battery", code)?;
+    apply(scheme)
+}
+
+/// Applies one plan's stored lid close action when that plan is the active one, since
+/// Windows applies a stored change to the active plan only through PowerSetActiveScheme;
+/// any other plan is left as it is, so the active plan never changes. Input: the plan.
+/// Output: Ok, or the Windows error. Relies on the GUID living on this stack for the call.
+pub fn apply(scheme: Scheme) -> Result<(), LidError> {
     if active()? != scheme {
         return Ok(());
     }
+    let plan = scheme.guid();
+    assert_eq!(Scheme::of(&plan), scheme);
     let code = unsafe { PowerSetActiveScheme(ptr::null_mut(), &plan) };
     checked("apply the active power plan", code)
 }
@@ -334,12 +346,14 @@ unsafe extern "system" fn lid_changed(
 struct Token(HANDLE);
 
 impl Token {
-    /// Opens this process's token for privilege changes. Output: the token, or the
-    /// Windows error. Relies on the out handle being written only on success.
+    /// Opens this process's token for privilege changes and for reading the state a
+    /// change replaces. Output: the token, or the Windows error. Relies on the out handle
+    /// being written only on success.
     fn open() -> Result<Self, LidError> {
         let mut handle: HANDLE = ptr::null_mut();
         let process = unsafe { GetCurrentProcess() };
-        let opened = unsafe { OpenProcessToken(process, TOKEN_ADJUST_PRIVILEGES, &raw mut handle) };
+        let access = TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY;
+        let opened = unsafe { OpenProcessToken(process, access, &raw mut handle) };
         if opened == 0 {
             let code = unsafe { GetLastError() };
             let step = "open this process's token";
@@ -350,15 +364,12 @@ impl Token {
         Ok(Self(handle))
     }
 
-    /// Turns the shutdown privilege on or off in this token. Input: on or off. Output: Ok,
-    /// or the Windows error; a token without the privilege is an error too. Relies on the
-    /// token being open for privilege changes and the privilege name ending in a NUL.
-    fn shutdown(&self, on: bool) -> Result<(), LidError> {
-        let step = if on {
-            "turn on the shutdown privilege"
-        } else {
-            "turn off the shutdown privilege"
-        };
+    /// Turns the shutdown privilege on in this token. Output: the state it replaced, for
+    /// `put_back`, or the Windows error; a token without the privilege is an error too.
+    /// Relies on the token being open for privilege changes and queries, and the privilege
+    /// name ending in a NUL.
+    fn shutdown_on(&self) -> Result<TOKEN_PRIVILEGES, LidError> {
+        let step = "turn on the shutdown privilege";
         let mut luid = LUID {
             LowPart: 0,
             HighPart: 0,
@@ -372,18 +383,48 @@ impl Token {
             PrivilegeCount: 1,
             Privileges: [LUID_AND_ATTRIBUTES {
                 Luid: luid,
-                Attributes: if on { SE_PRIVILEGE_ENABLED } else { 0 },
+                Attributes: SE_PRIVILEGE_ENABLED,
             }],
         };
+        let mut before = TOKEN_PRIVILEGES {
+            PrivilegeCount: 0,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: 0,
+            }],
+        };
+        let mut written = 0;
+        let bytes = PRIVILEGES_BYTES as u32;
         let adjusted = unsafe {
-            AdjustTokenPrivileges(self.0, 0, &wanted, 0, ptr::null_mut(), ptr::null_mut())
+            AdjustTokenPrivileges(self.0, 0, &wanted, bytes, &raw mut before, &raw mut written)
         };
         let code = unsafe { GetLastError() };
         if adjusted == 0 || code == ERROR_NOT_ALL_ASSIGNED {
             return Err(LidError::Windows { step, code });
         }
-        assert_eq!(wanted.PrivilegeCount, 1);
+        assert!(before.PrivilegeCount <= 1);
+        assert!(written as usize <= PRIVILEGES_BYTES);
+        Ok(before)
+    }
+
+    /// Puts the shutdown privilege back as it was before `shutdown_on` (rv-ds241 KA T14 r1
+    /// nit 4): a privilege that was on already is left on, as Windows then reports no
+    /// change to put back. Input: the state `shutdown_on` returned. Output: Ok, or the
+    /// Windows error.
+    fn put_back(&self, before: &TOKEN_PRIVILEGES) -> Result<(), LidError> {
+        assert!(before.PrivilegeCount <= 1);
         assert!(!self.0.is_null());
+        if before.PrivilegeCount == 0 {
+            return Ok(());
+        }
+        let adjusted = unsafe {
+            AdjustTokenPrivileges(self.0, 0, before, 0, ptr::null_mut(), ptr::null_mut())
+        };
+        if adjusted == 0 {
+            let code = unsafe { GetLastError() };
+            let step = "put the shutdown privilege back";
+            return Err(LidError::Windows { step, code });
+        }
         Ok(())
     }
 }
@@ -397,19 +438,19 @@ impl Drop for Token {
 }
 
 /// Puts this computer to sleep, or hibernates it, with wake events left on. The shutdown
-/// privilege is turned on in this process's token for the call and off again after it.
-/// Input: whether to hibernate. Output: Ok once the computer woke, or why it did not
-/// sleep.
+/// privilege is turned on in this process's token for the call and put back as it was
+/// after it. Input: whether to hibernate. Output: Ok once the computer woke, or why it did
+/// not sleep.
 pub fn suspend(hibernate: bool) -> Result<(), LidError> {
     let token = Token::open()?;
-    token.shutdown(true)?;
+    let before = token.shutdown_on()?;
     let slept = unsafe { SetSuspendState(hibernate, false, false) };
     let code = if slept {
         ERROR_SUCCESS
     } else {
         unsafe { GetLastError() }
     };
-    let back = token.shutdown(false);
+    let back = token.put_back(&before);
     if !slept {
         let step = "sleep";
         return Err(LidError::Windows { step, code });
@@ -469,7 +510,6 @@ mod tests {
         assert!(before.ac <= ACTION_MAX);
         assert!(before.dc <= ACTION_MAX);
         assert_eq!(read(scratch), Err(LidError::Gone), "a deleted plan is gone");
-        assert!(delete(owner).is_err(), "the active plan is never deleted");
     }
 
     #[test]

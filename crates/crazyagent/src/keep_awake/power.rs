@@ -104,13 +104,18 @@ pub type LidReader = Box<dyn FnMut(LidAsk, Option<LidCommand>, i64) -> LidSuppor
 
 /// Builds this platform's lid line: the macOS lid helper, the Windows lid close action
 /// with its journal under the engine root, and none on Linux, where the reader's own lid
-/// support stands. Input: the engine root. Output: the lid line, if this platform has one.
-pub fn platform_lid(root: &Path) -> Option<LidReader> {
+/// support stands. The Windows line writes the journal, so it is built only while this
+/// engine holds the journal lock (QUESTION 01:16 Q3). Inputs: the engine root and whether
+/// the lock is held. Output: the lid line, if this platform has one.
+pub fn platform_lid(
+    root: &Path,
+    #[cfg_attr(not(windows), allow(unused_variables))] journaled: bool,
+) -> Option<LidReader> {
     assert!(!root.as_os_str().is_empty());
     #[cfg(target_os = "macos")]
     let lid = Some(super::hold_macos::lid_reader());
     #[cfg(windows)]
-    let lid = Some(super::lid_windows::lid_reader(root));
+    let lid = journaled.then(|| super::lid_windows::lid_reader(root));
     #[cfg(not(any(target_os = "macos", windows)))]
     let lid = None;
     lid

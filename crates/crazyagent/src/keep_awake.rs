@@ -551,32 +551,64 @@ pub(crate) fn reconcile(root: &Path) -> Leftover {
 }
 
 /// What `crazyagent keep-awake restore` says when a recorded change could not be put back.
-pub const RESTORE_LEFT: &str = "Keep awake could not put back every setting it changed. It \
-    tries again when the engine starts.";
+pub const RESTORE_LEFT: &str = "Keep awake could not put back every setting it changed. Run \
+    this again, or set them back by hand; on Windows the lid action is in Power Options.";
 /// What `crazyagent keep-awake restore` says while an engine holds the journal.
 pub const RESTORE_ENGINE_RUNNING: &str = "The engine is running and puts these settings back \
     itself. Stop it, then try again.";
 /// What `crazyagent keep-awake restore` says when its list of changes could not be read.
 pub const RESTORE_UNREADABLE: &str = "Keep awake could not read its list of settings to put \
-    back. It tries again when the engine starts.";
+    back. Check them by hand; on Windows the lid action is in Power Options.";
 
-/// Takes the journal lock for the engine's whole life (QUESTION 01:16 Q3). Input: the
-/// engine root. Output: the lock, or none.
+const LOCK_TRIES: u32 = 50;
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+const _: () = assert!(LOCK_TRIES > 0);
+
+/// Takes the journal lock for the engine's whole life (QUESTION 01:16 Q3), waiting at
+/// most `LOCK_TRIES` times `LOCK_WAIT` for a `crazyagent keep-awake restore` that holds it.
+/// Input: the engine root. Output: the lock, or none, logged, when it was not taken.
 pub(crate) fn journal_lock(root: &Path) -> Option<journal::JournalLock> {
     assert!(!root.as_os_str().is_empty());
+    for _ in 0..LOCK_TRIES {
+        match journal::JournalLock::try_take(root) {
+            Ok(Some(lock)) => return Some(lock),
+            Ok(None) => std::thread::sleep(LOCK_WAIT),
+            Err(problem) => {
+                eprintln!("keep awake journal: {}", short(&problem.0));
+                return None;
+            }
+        }
+    }
+    eprintln!("keep awake journal: another process holds its lock");
     None
 }
 
 /// `crazyagent keep-awake restore` (plan Task 14, for an uninstaller): runs the engine
-/// start's undo now, while no engine runs. Input: the engine root. Output: Ok when nothing
-/// is left to put back, else the owner's sentence for what is left.
+/// start's undo now under the journal lock, and refuses while an engine holds it. A data
+/// folder no engine made has nothing to put back and is not made (rv-ds241 KA T14 r1 nit
+/// 1). Input: the engine root. Output: Ok when nothing is left to put back, else the
+/// owner's sentence.
 pub fn restore(root: &Path) -> Result<(), &'static str> {
     assert!(!root.as_os_str().is_empty());
+    let missing = std::fs::symlink_metadata(root)
+        .is_err_and(|problem| problem.kind() == std::io::ErrorKind::NotFound);
+    if missing {
+        return Ok(());
+    }
+    let lock = match journal::JournalLock::try_take(root) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return Err(RESTORE_ENGINE_RUNNING),
+        Err(problem) => {
+            eprintln!("keep awake journal: {}", short(&problem.0));
+            return Err(RESTORE_UNREADABLE);
+        }
+    };
     let said = match reconcile(root) {
         Leftover::Kinds(kinds) if kinds.is_empty() => Ok(()),
         Leftover::Kinds(_) => Err(RESTORE_LEFT),
         Leftover::Unreadable => Err(RESTORE_UNREADABLE),
     };
+    drop(lock);
     assert!(said.is_ok() || !said.unwrap_err().is_empty());
     said
 }
@@ -645,6 +677,7 @@ pub struct Keeper {
     battery_unread_twice: bool,
     lid_refused: bool,
     leftover: Option<Leftover>,
+    journal: Option<journal::JournalLock>,
 }
 
 impl Keeper {
@@ -708,6 +741,15 @@ impl Keeper {
     pub fn with_leftover(mut self, leftover: Leftover) -> Self {
         assert!(self.leftover.is_none());
         self.leftover = Some(leftover);
+        self
+    }
+
+    /// Keeps the journal lock the engine start took for the keeper's whole life (QUESTION
+    /// 01:16 Q3), so `crazyagent keep-awake restore` refuses while this engine runs. Input:
+    /// the lock, none when it was not taken. Output: the keeper.
+    pub fn with_journal(mut self, lock: Option<journal::JournalLock>) -> Self {
+        assert!(self.journal.is_none());
+        self.journal = lock;
         self
     }
 

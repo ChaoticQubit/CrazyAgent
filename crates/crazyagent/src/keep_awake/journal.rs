@@ -1,12 +1,13 @@
 use crate::engine::EngineError;
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 const FOLDER: &str = "keep-awake";
 const FILE: &str = "journal.json";
 const DRAFT: &str = "journal.json.new";
+const LOCK: &str = "journal.lock";
 
 /// The most entries one journal holds.
 pub const ENTRIES_MAX: usize = 64;
@@ -123,11 +124,29 @@ pub struct JournalLock {
 }
 
 impl JournalLock {
-    /// Takes the lock without waiting. Input: the engine root. Output: the lock, none while
-    /// another holds it, or why the lock file cannot be opened.
+    /// Takes the lock without waiting, creating the journal folder and an owner-only lock
+    /// file that is never replaced, so every holder locks the same file. Input: the engine
+    /// root. Output: the lock, none while another holds it, or why the lock file cannot be
+    /// opened.
     pub fn try_take(root: &Path) -> Result<Option<Self>, EngineError> {
         assert!(!root.as_os_str().is_empty());
-        Ok(None)
+        let folder = root.join(FOLDER);
+        private_folder(&folder)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(folder.join(LOCK)).map_err(unwritable)?;
+        let taken = match file.try_lock() {
+            Ok(()) => Some(Self { _file: file }),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Error(problem)) => return Err(unwritable(problem)),
+        };
+        assert!(folder.starts_with(root));
+        Ok(taken)
     }
 }
 
