@@ -51,45 +51,97 @@ impl Lease {
     }
 }
 
+/// What a lease asks (threat model 15.1): a sleep-off lease from `Hold`, with its display ask
+/// and whether it asks Low Power Mode too, or a power-only lease from `LowPower`, which asks
+/// only Low Power Mode and never keeps sleep off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    SleepOff {
+        lid_display: LidDisplay,
+        low_power: bool,
+    },
+    PowerOnly,
+}
+
+impl Ask {
+    /// Whether this lease keeps sleep off.
+    pub fn sleep_off(self) -> bool {
+        matches!(self, Self::SleepOff { .. })
+    }
+
+    /// Whether this lease asks Low Power Mode.
+    pub fn low_power(self) -> bool {
+        match self {
+            Self::SleepOff { low_power, .. } => low_power,
+            Self::PowerOnly => true,
+        }
+    }
+}
+
 /// The fifth holder's refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Full;
 
-/// Every live lease, keyed by holder, with what its holder asked of the display last.
+/// Every live lease, keyed by holder, with what its holder asked last.
 #[derive(Debug, Default)]
 pub struct Leases {
-    held: BTreeMap<Holder, (Lease, LidDisplay)>,
+    held: BTreeMap<Holder, (Lease, Ask)>,
 }
 
 impl Leases {
-    /// Starts or renews `holder`'s lease and keeps its display ask. Output: `Full` for a new
-    /// holder past `HOLDERS_MAX`.
-    pub fn hold(
-        &mut self,
-        holder: Holder,
-        now_ms: u64,
-        secs: u16,
-        lid_display: LidDisplay,
-    ) -> Result<(), Full> {
+    /// Starts or renews `holder`'s lease and keeps what it asks; a renewal may turn a
+    /// sleep-off lease power-only or back. Output: `Full` for a new holder past `HOLDERS_MAX`.
+    pub fn hold(&mut self, holder: Holder, now_ms: u64, secs: u16, ask: Ask) -> Result<(), Full> {
         assert!(self.held.len() <= HOLDERS_MAX);
         if let Some((lease, asked)) = self.held.get_mut(&holder) {
             lease.extend(now_ms, secs);
-            *asked = lid_display;
+            *asked = ask;
             return Ok(());
         }
         if self.held.len() == HOLDERS_MAX {
             return Err(Full);
         }
-        self.held.insert(holder, (Lease::new(now_ms, secs), lid_display));
+        self.held.insert(holder, (Lease::new(now_ms, secs), ask));
         assert!(self.held.len() <= HOLDERS_MAX);
         Ok(())
     }
 
-    /// Whether any live lease asks for the display to sleep while the lid is closed.
+    /// Whether any live sleep-off lease asks for the display to sleep while the lid is
+    /// closed.
     pub fn asks_display_sleep(&self) -> bool {
-        let asks = self.held.values().any(|(_, asked)| *asked == LidDisplay::Sleep);
+        let sleep = |ask: &Ask| {
+            matches!(
+                ask,
+                Ask::SleepOff {
+                    lid_display: LidDisplay::Sleep,
+                    ..
+                }
+            )
+        };
+        let asks = self.held.values().any(|(_, asked)| sleep(asked));
         assert!(!asks || !self.held.is_empty());
         asks
+    }
+
+    /// Whether any live lease keeps sleep off.
+    pub fn sleep_off(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// Whether any live lease asks Low Power Mode.
+    pub fn asks_low_power(&self) -> bool {
+        false
+    }
+
+    /// Whether `holder` has a live lease that keeps sleep off.
+    pub fn holds_sleep_off(&self, holder: &Holder) -> bool {
+        self.held.contains_key(holder)
+    }
+
+    /// Ends every sleep-off lease and keeps the power-only ones, for a floor (threat model
+    /// 15.3, r9.1 F3).
+    pub fn end_sleep_off(&mut self) {
+        self.held.clear();
     }
 
     /// Whether `holder` has a live lease.

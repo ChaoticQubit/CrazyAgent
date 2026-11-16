@@ -11,9 +11,11 @@ pub const BATTERY_AC: &str = "Now drawing from 'AC Power'\n -InternalBattery-0 (
 charged; 0:00 remaining present: true\n";
 
 /// A stand-in for `/usr/bin/pmset` in a temp folder: a shell program that appends each call's
-/// arguments to `calls`, keeps `SleepDisabled` in a file, prints `-g` and `-g batt` from it,
-/// and copies the journal aside at each `disablesleep` so a row can see its order. Owns the
-/// folder the helper keeps its state in, so every row runs on real files.
+/// arguments to `calls`, keeps `SleepDisabled` and each source's `lowpowermode` in files,
+/// prints `-g`, `-g custom` and `-g batt` from them, and copies the journal aside at each
+/// `disablesleep` so a row can see its order. `-b` writes the battery source, `-c` the AC
+/// source and `-a` both. Owns the folder the helper keeps its state in, so every row runs on
+/// real files.
 pub struct StandIn {
     root: TempDir,
 }
@@ -31,6 +33,8 @@ impl StandIn {
         )
         .unwrap();
         fs::write(stand_in.path("batt"), BATTERY_AC).unwrap();
+        fs::write(stand_in.path("lpm_b"), "0\n").unwrap();
+        fs::write(stand_in.path("lpm_c"), "0\n").unwrap();
         fs::write(stand_in.path("calls"), "").unwrap();
         fs::write(stand_in.path("console"), "").unwrap();
         stand_in.write_program();
@@ -47,9 +51,21 @@ impl StandIn {
              cp \"$D/state/journal.json\" \"$D/journal-when-set-$3\" 2>/dev/null \
              || : > \"$D/journal-when-set-$3-missing\"\n\
              printf '%s\\n' \"$3\" > \"$D/sleep_disabled\"\n\
+             elif [ \"$2\" = \"lowpowermode\" ] && [ ! -e \"$D/no_lpm\" ]; then\n\
+             if [ \"$1\" != \"-c\" ]; then printf '%s\\n' \"$3\" > \"$D/lpm_b\"; fi\n\
+             if [ \"$1\" != \"-b\" ]; then printf '%s\\n' \"$3\" > \"$D/lpm_c\"; fi\n\
              elif [ \"$1\" = \"-g\" ] && [ \"$2\" = \"batt\" ]; then\ncat \"$D/batt\"\n\
+             elif [ \"$1\" = \"-g\" ] && [ \"$2\" = \"custom\" ]; then\n\
+             for S in b c; do\n\
+             if [ \"$S\" = b ]; then echo 'Battery Power:'; else echo 'AC Power:'; fi\n\
+             echo ' Sleep On Power Button 1'\n\
+             [ -e \"$D/no_lpm\" ] || printf ' lowpowermode         %s\\n' \
+             \"$(cat \"$D/lpm_$S\")\"\n\
+             echo ' displaysleep         10'\n\
+             done\n\
              elif [ \"$1\" = \"-g\" ]; then\n\
-             printf ' SleepDisabled\\t\\t%s\\n lowpowermode         0\\n' \"$(cat \"$D/sleep_disabled\")\"\n\
+             printf ' SleepDisabled\\t\\t%s\\n lowpowermode         %s\\n' \
+             \"$(cat \"$D/sleep_disabled\")\" \"$(cat \"$D/lpm_c\")\"\n\
              fi\nexit 0\n"
         );
         fs::write(self.program(), text).unwrap();
@@ -117,6 +133,36 @@ impl StandIn {
     pub fn sleep_disabled(&self) -> u8 {
         let text = fs::read_to_string(self.path("sleep_disabled")).unwrap();
         text.trim().parse().unwrap()
+    }
+
+    /// The battery and AC sources' `lowpowermode` values the stand-in holds now.
+    pub fn low_power(&self) -> (u8, u8) {
+        let value = |name: &str| -> u8 {
+            let text = fs::read_to_string(self.path(name)).unwrap();
+            text.trim().parse().unwrap()
+        };
+        (value("lpm_b"), value("lpm_c"))
+    }
+
+    /// Sets each source's `lowpowermode` as the owner would, behind the helper's back.
+    pub fn set_low_power_by_owner(&self, battery: u8, ac: u8) {
+        assert!(battery <= 1);
+        assert!(ac <= 1);
+        fs::write(self.path("lpm_b"), format!("{battery}\n")).unwrap();
+        fs::write(self.path("lpm_c"), format!("{ac}\n")).unwrap();
+    }
+
+    /// Makes this a Mac without the `lowpowermode` key: `-g custom` prints no such line and a
+    /// write changes nothing.
+    pub fn drop_low_power_key(&self) {
+        fs::write(self.path("no_lpm"), "").unwrap();
+    }
+
+    /// The calls that wrote `lowpowermode`, in order.
+    pub fn low_power_writes(&self) -> Vec<String> {
+        let calls = self.calls();
+        let writes = |call: &String| call.split_whitespace().nth(1) == Some("lowpowermode");
+        calls.into_iter().filter(writes).collect()
     }
 
     /// Replaces the text `-g batt` prints.

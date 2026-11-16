@@ -259,6 +259,7 @@ fn a_term_signal_puts_every_journaled_value_back() {
     let hold = Request::Hold {
         lease_s: 120,
         lid_display: LidDisplay::LeaveOn,
+        low_power: false,
     };
     let held = ask(&mut stream, &hold);
     assert!(held.starts_with("{\"reply\":\"held\""), "{held}");

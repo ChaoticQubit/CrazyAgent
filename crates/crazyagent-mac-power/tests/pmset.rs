@@ -4,7 +4,9 @@ mod support;
 
 use crazyagent_mac_power::floor::{Battery, Floor, Pressure, judge};
 use crazyagent_mac_power::journal::Key;
-use crazyagent_mac_power::pmset::{Pmset, PmsetError, Values, parse_battery, parse_values};
+use crazyagent_mac_power::pmset::{
+    Pmset, PmsetError, Values, parse_battery, parse_custom_low_power, parse_values,
+};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use support::StandIn;
@@ -120,4 +122,58 @@ fn a_pmset_that_fails_or_hangs_is_an_error() {
     let hung = Pmset::new(&hanging).values();
     assert!(matches!(hung, Err(PmsetError::TimedOut)), "{hung:?}");
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+/// `pmset -g custom` text with the battery section first, each source's `lowpowermode` given.
+fn custom(battery: &str, ac: &str) -> String {
+    format!(
+        "Battery Power:\n Sleep On Power Button 1\n lowpowermode         {battery}\n \
+         displaysleep         2\nAC Power:\n Sleep On Power Button 1\n \
+         lowpowermode         {ac}\n displaysleep         10\n"
+    )
+}
+
+#[test]
+fn the_custom_text_gives_low_power_from_the_battery_section_alone() {
+    assert_eq!(
+        parse_custom_low_power(&custom("0", "1")),
+        Some(false),
+        "an AC line never counts (rv-secreview r2 note 2)"
+    );
+    assert_eq!(parse_custom_low_power(&custom("1", "0")), Some(true));
+    let ac_first = "AC Power:\n lowpowermode         1\nBattery Power:\n lowpowermode         0\n";
+    assert_eq!(parse_custom_low_power(ac_first), Some(false));
+    let no_battery = "AC Power:\n lowpowermode         1\n";
+    assert_eq!(parse_custom_low_power(no_battery), None);
+    let without_key =
+        "Battery Power:\n displaysleep         2\nAC Power:\n lowpowermode         1\n";
+    assert_eq!(parse_custom_low_power(without_key), None);
+    let ups = "Battery Power:\n displaysleep         2\nUPS Power:\n lowpowermode         1\n";
+    assert_eq!(parse_custom_low_power(ups), None);
+    assert_eq!(parse_custom_low_power(&custom("2", "1")), None);
+    assert_eq!(parse_custom_low_power(""), None);
+}
+
+#[test]
+fn low_power_writes_the_battery_source_and_sleep_every_source() {
+    let stand_in = StandIn::new(0);
+    let pmset = Pmset::new(stand_in.program());
+    pmset.set(Key::LowPower, true).unwrap();
+    pmset.set(Key::SleepDisabled, true).unwrap();
+    pmset.set(Key::LowPower, false).unwrap();
+    assert_eq!(
+        stand_in.calls(),
+        [
+            "-b lowpowermode 1",
+            "-a disablesleep 1",
+            "-b lowpowermode 0"
+        ],
+        "r9.1 F2: Low Power Mode on the battery source only"
+    );
+    stand_in.set_low_power_by_owner(1, 0);
+    assert_eq!(pmset.battery_low_power().unwrap(), Some(true));
+    stand_in.set_low_power_by_owner(0, 1);
+    assert_eq!(pmset.battery_low_power().unwrap(), Some(false));
+    stand_in.drop_low_power_key();
+    assert_eq!(pmset.battery_low_power().unwrap(), None);
 }

@@ -5,12 +5,12 @@
 use crate::ffi;
 use crate::floor::{self, Battery, Floor, Pressure};
 use crate::journal::{self, Entry, Journal, Key};
-use crate::lease::{HOLDERS_MAX, Holder, Leases};
+use crate::lease::{Ask, HOLDERS_MAX, Holder, Leases};
 use crate::lid::Lid;
 use crate::pin::{self, Pin};
 use crate::pmset::{Pmset, Values};
 use crate::protocol::{
-    FloorView, LEASE_S_MAX, LEASE_S_MIN, LidDisplay, PinView, Refusal, Reply, Request, View,
+    FloorView, LEASE_S_MAX, LEASE_S_MIN, PinView, Refusal, Reply, Request, View,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -119,7 +119,20 @@ impl Helper {
             Request::Hold {
                 lease_s,
                 lid_display,
-            } => self.hold(holder, lease_s, lid_display, now_ms, lid),
+                low_power,
+            } => {
+                let ask = Ask::SleepOff {
+                    lid_display,
+                    low_power,
+                };
+                self.hold(holder, lease_s, ask, now_ms, lid)
+            }
+            Request::LowPower { lease_s } => {
+                assert!(lease_s >= LEASE_S_MIN);
+                Reply::Refused {
+                    reason: Refusal::Malformed,
+                }
+            }
             Request::Release => self.release(holder, lid),
             Request::Read => Reply::State(self.view(holder, now_ms, lid)),
             Request::Forget => self.forget(holder, lid),
@@ -272,7 +285,7 @@ impl Helper {
         &mut self,
         holder: Holder,
         lease_s: u16,
-        lid_display: LidDisplay,
+        ask: Ask,
         now_ms: u64,
         lid: Option<Lid>,
     ) -> Reply {
@@ -300,7 +313,7 @@ impl Helper {
             assert_eq!(self.leases.holds(&holder), renewing);
             return Reply::Refused { reason };
         }
-        let held = self.leases.hold(holder, now_ms, lease_s, lid_display);
+        let held = self.leases.hold(holder, now_ms, lease_s, ask);
         assert!(held.is_ok(), "room for a new holder was checked before pmset ran");
         self.sleep_owed = false;
         self.owed_at_start = false;
@@ -386,6 +399,7 @@ impl Helper {
             lid_closed: lid.map(|lid| lid.closed),
             external_display: lid.map(|lid| lid.external_display),
             low_power: values.low_power,
+            low_power_held: false,
         };
         assert_eq!(view.held, view.holders > 0);
         assert!(view.held || view.lease_left_s == 0);

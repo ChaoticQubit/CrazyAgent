@@ -398,6 +398,7 @@ impl LidLine {
         let request = Request::Hold {
             lease_s: LEASE_S,
             lid_display,
+            low_power: false,
         };
         let support = match self.helper.call(&request) {
             Ok(Reply::Held { lease_left_s }) if lease_left_s > 0 => {

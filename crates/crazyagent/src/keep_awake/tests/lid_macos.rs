@@ -113,7 +113,7 @@ impl HelperLine for StandInHelper {
         self.seen.lock().unwrap().push(Seen::Helper(*request));
         let answers = *self.answers.lock().unwrap();
         match request {
-            Request::Hold { .. } => answers.hold,
+            Request::Hold { .. } | Request::LowPower { .. } => answers.hold,
             Request::Read => answers.read,
             Request::Release => Ok(Reply::Released),
             Request::Forget => answers.forget,
@@ -135,6 +135,7 @@ fn view(pin: PinView, floor: FloorView, journal_ok: bool) -> View {
         lid_closed: Some(false),
         external_display: Some(false),
         low_power: Some(false),
+        low_power_held: false,
     }
 }
 
@@ -237,6 +238,7 @@ impl Rig {
 const HOLD: Request = Request::Hold {
     lease_s: LEASE_S,
     lid_display: LidDisplay::Sleep,
+    low_power: false,
 };
 
 #[test]
@@ -970,6 +972,7 @@ fn every_hold_names_the_display_the_owner_picked() {
     let leave_on = Request::Hold {
         lease_s: LEASE_S,
         lid_display: LidDisplay::LeaveOn,
+        low_power: false,
     };
     assert_eq!(rig.calls(), [HOLD, leave_on], "the owner's pick rides on each Hold (Task 12)");
 }

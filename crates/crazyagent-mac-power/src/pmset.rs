@@ -66,6 +66,13 @@ impl Pmset {
         self.run(&["-g"]).map(|text| parse_values(&text))
     }
 
+    /// Reads the battery source's Low Power Mode: `pmset -g custom` (threat model 15.2).
+    /// Output: the value, none when the battery section has no `lowpowermode` line, or why
+    /// the run did not succeed.
+    pub fn battery_low_power(&self) -> Result<Option<bool>, PmsetError> {
+        self.run(&["-g", "custom"]).map(|text| parse_custom_low_power(&text))
+    }
+
     /// Reads the battery: `pmset -g batt`.
     pub fn battery(&self) -> Result<Battery, PmsetError> {
         self.run(&["-g", "batt"]).map(|text| parse_battery(&text))
@@ -155,6 +162,15 @@ pub fn parse_values(text: &str) -> Values {
         }
     }
     values
+}
+
+/// Parses `pmset -g custom` for the battery source's `lowpowermode`, `0` or `1`. Input: the
+/// text, at most `OUTPUT_BYTES_MAX` bytes. Output: the value, or none when the battery section
+/// is missing or has no readable line.
+pub fn parse_custom_low_power(text: &str) -> Option<bool> {
+    let red_stub = text.len() as u64 <= OUTPUT_BYTES_MAX;
+    assert!(red_stub);
+    None
 }
 
 /// Parses `pmset -g batt`: the power source line and the first internal battery's percent.

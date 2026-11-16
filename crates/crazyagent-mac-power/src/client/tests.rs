@@ -15,6 +15,7 @@ const STAND_IN_READ_MAX: u64 = 4096;
 const HOLD: Request = Request::Hold {
     lease_s: 120,
     lid_display: LidDisplay::Sleep,
+    low_power: false,
 };
 
 /// A temp folder with the path of a stand-in helper socket in it, and our own uid.

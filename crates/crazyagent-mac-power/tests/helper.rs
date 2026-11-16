@@ -46,6 +46,7 @@ fn holder(stand_in: &StandIn, pid: i32) -> Holder {
 const HOLD_LEAVE_ON: Request = Request::Hold {
     lease_s: 120,
     lid_display: LidDisplay::LeaveOn,
+    low_power: false,
 };
 
 fn hold(helper: &mut Helper, who: Holder, now_ms: u64) -> Reply {
@@ -779,6 +780,7 @@ fn ask(
     let request = Request::Hold {
         lease_s: 120,
         lid_display,
+        low_power: false,
     };
     helper.handle(who, request, now_ms, lid)
 }
@@ -941,4 +943,365 @@ fn a_sigterm_before_the_first_reading_sleeps_what_the_start_owes() {
     second.terminate(OPEN);
     assert_eq!(ran(&open, "sleepnow"), 0, "an open lid sleeps nothing");
     assert!(second.idle(), "the mark is cleared either way");
+}
+
+const ON_BATTERY: Readings = Readings {
+    battery: Battery::OnBattery { percent: 30 },
+    ..COOL
+};
+const CLOSED_ON_BATTERY: Readings = Readings {
+    lid: CLOSED_ALONE,
+    ..ON_BATTERY
+};
+const LOW_POWER: Request = Request::LowPower { lease_s: 120 };
+const HOLD_LOW_POWER: Request = Request::Hold {
+    lease_s: 120,
+    lid_display: LidDisplay::LeaveOn,
+    low_power: true,
+};
+
+/// Fails the row when any run wrote Low Power Mode on a source other than the battery
+/// (threat model 15.2, r9.1 F2).
+fn battery_source_only(stand_in: &StandIn) {
+    let writes = stand_in.low_power_writes();
+    assert!(
+        writes.iter().all(|call| call.starts_with("-b ")),
+        "{writes:?}"
+    );
+}
+
+/// Runs `act` and gives its reply with the pmset runs it waited on.
+fn runs_of(stand_in: &StandIn, act: impl FnOnce() -> Reply) -> (Reply, Vec<String>) {
+    let before = stand_in.calls().len();
+    let reply = act();
+    (reply, stand_in.calls()[before..].to_vec())
+}
+
+/// A configuration whose pmset fails `-b lowpowermode 0` while the stand-in's
+/// `refuse-low-power-back` file exists. A refused call is not recorded in the stand-in's
+/// calls.
+fn refusing_low_power(stand_in: &StandIn) -> Config {
+    let refuse = stand_in.path("refuse-low-power-back");
+    let wrapper = stand_in.path("low-power-wrapper");
+    let text = format!(
+        "#!/bin/sh\nif [ \"$*\" = \"-b lowpowermode 0\" ] && [ -e '{}' ]; then exit 1; fi\n\
+         exec '{}' \"$@\"\n",
+        refuse.display(),
+        stand_in.program().display()
+    );
+    fs::write(&wrapper, text).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    Config {
+        pmset: wrapper,
+        ..stand_in.config()
+    }
+}
+
+#[test]
+fn low_power_is_put_back_only_if_still_the_helpers_value() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS, OPEN), HELD);
+    assert_eq!(stand_in.low_power(), (0, 0), "set at a reading, never in the reply");
+    helper.sense(NOW_MS, ON_BATTERY);
+    assert_eq!(stand_in.low_power(), (1, 0));
+    assert!(stand_in.journal_text().unwrap().contains("low_power"));
+    let released = helper.handle(me, Request::Release, NOW_MS + 1_000, OPEN);
+    assert_eq!(released, Reply::Released);
+    assert_eq!(stand_in.low_power(), (1, 0), "put back at the next reading");
+    assert!(helper.wants_readings(), "a value to put back keeps readings due");
+    helper.sense(NOW_MS + 30_000, ON_BATTERY);
+    assert_eq!(stand_in.low_power(), (0, 0));
+    assert_eq!(stand_in.journal_text().as_deref(), Some("[]"));
+    assert!(helper.idle());
+    battery_source_only(&stand_in);
+
+    let owners = StandIn::new(0);
+    owners.set_low_power_by_owner(1, 0);
+    let mut helper = Helper::start(owners.config());
+    let me = holder(&owners, 10);
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS, OPEN), HELD);
+    helper.sense(NOW_MS, ON_BATTERY);
+    let released = helper.handle(me, Request::Release, NOW_MS + 1_000, OPEN);
+    assert_eq!(released, Reply::Released);
+    helper.sense(NOW_MS + 30_000, ON_BATTERY);
+    assert_eq!(owners.low_power(), (1, 0), "a value already on is the owner's (C14)");
+    assert!(owners.low_power_writes().is_empty());
+}
+
+#[test]
+fn a_power_only_lease_never_sets_sleep_disabled() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS, CLOSED_ALONE), HELD);
+    helper.sense(NOW_MS, CLOSED_ON_BATTERY);
+    helper.sense(NOW_MS + 30_000, ON_BATTERY);
+    assert!(stand_in.sleep_writes().is_empty(), "{:?}", stand_in.calls());
+    assert_eq!(stand_in.sleep_disabled(), 0);
+    assert_eq!(ran(&stand_in, "displaysleepnow"), 0, "a power-only lease asks no display");
+    let state = view(&mut helper, me);
+    assert!(!state.held, "no lease keeps sleep off");
+    assert_eq!(state.holders, 1, "and Read still answers under a power-only lease");
+    assert!(state.lease_left_s > 0);
+    assert!(state.low_power_held);
+    assert_eq!(state.low_power, Some(true));
+    battery_source_only(&stand_in);
+}
+
+#[test]
+fn a_hold_turned_power_only_puts_sleep_back_and_sleeps_a_closed_mac() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(helper.handle(me, HOLD_LOW_POWER, NOW_MS, OPEN), HELD);
+    assert_eq!(stand_in.sleep_disabled(), 1);
+    let (reply, runs) = runs_of(&stand_in, || {
+        helper.handle(me, LOW_POWER, NOW_MS + 1_000, CLOSED_ALONE)
+    });
+    assert_eq!(reply, HELD);
+    assert_eq!(
+        runs,
+        ["-a disablesleep 0", "sleepnow"],
+        "r9.1 F1: the hold ended for SleepDisabled inside its reply"
+    );
+    assert!(runs.len() <= REPLY_PMSET_RUNS_MAX);
+    assert_eq!(stand_in.sleep_disabled(), 0);
+    assert!(view(&mut helper, me).low_power_held);
+
+    let shared = StandIn::new(0);
+    let mut helper = Helper::start(shared.config());
+    let (first, second) = (holder(&shared, 10), holder(&shared, 11));
+    assert_eq!(helper.handle(first, HOLD_LOW_POWER, NOW_MS, OPEN), HELD);
+    assert_eq!(hold(&mut helper, second, NOW_MS), HELD);
+    let turned = helper.handle(first, LOW_POWER, NOW_MS + 1_000, CLOSED_ALONE);
+    assert_eq!(turned, HELD);
+    assert_eq!(shared.sleep_disabled(), 1, "another sleep-off lease still lives");
+    assert_eq!(ran(&shared, "sleepnow"), 0);
+}
+
+#[test]
+fn a_reading_with_only_a_power_only_lease_never_sets_sleep_disabled_again() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(helper.handle(me, HOLD_LOW_POWER, NOW_MS, OPEN), HELD);
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS + 1_000, OPEN), HELD);
+    for step in 1..=3_u64 {
+        helper.sense(NOW_MS + step * 30_000, ON_BATTERY);
+    }
+    assert_eq!(
+        stand_in.sleep_writes(),
+        ["-a disablesleep 1", "-a disablesleep 0"],
+        "no reading sets SleepDisabled again for a power-only lease"
+    );
+    assert_eq!(stand_in.low_power().0, 1, "Low Power Mode stays asked");
+}
+
+#[test]
+fn the_battery_floor_keeps_a_power_only_lease() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let (sleeper, saver) = (holder(&stand_in, 10), holder(&stand_in, 11));
+    assert_eq!(hold(&mut helper, sleeper, NOW_MS), HELD);
+    assert_eq!(helper.handle(saver, LOW_POWER, NOW_MS, OPEN), HELD);
+    let three = Readings {
+        battery: Battery::OnBattery { percent: 3 },
+        ..COOL
+    };
+    helper.sense(NOW_MS + 30_000, three);
+    assert_eq!(stand_in.sleep_disabled(), 0, "the floor ends the sleep-off lease");
+    assert_eq!(stand_in.low_power().0, 1, "Low Power Mode is wanted exactly then");
+    let state = view(&mut helper, saver);
+    assert_eq!(state.floor, FloorView::Battery);
+    assert_eq!(state.holders, 1);
+    assert!(state.low_power_held);
+    let renewed = helper.handle(saver, LOW_POWER, NOW_MS + 31_000, OPEN);
+    assert_eq!(renewed, HELD, "r9.1 F3: LowPower is accepted under the floor");
+    assert_eq!(
+        hold(&mut helper, sleeper, NOW_MS + 31_000),
+        Reply::Refused {
+            reason: Refusal::Floor
+        }
+    );
+    battery_source_only(&stand_in);
+}
+
+#[test]
+fn a_power_only_lease_renewed_under_the_heat_floor_keeps_low_power_on() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS, OPEN), HELD);
+    helper.sense(NOW_MS, ON_BATTERY);
+    assert_eq!(stand_in.low_power().0, 1);
+    let hot = Readings {
+        pressure: Pressure::Level(3),
+        ..ON_BATTERY
+    };
+    helper.sense(NOW_MS + 30_000, hot);
+    assert_eq!(stand_in.low_power().0, 1, "end_for_floor keeps a power-only lease");
+    let renewed = helper.handle(me, LOW_POWER, NOW_MS + 100_000, OPEN);
+    assert_eq!(renewed, HELD, "r9.1 F3: renewed under the heat floor");
+    helper.sense(NOW_MS + 150_000, hot);
+    assert_eq!(stand_in.low_power().0, 1, "past the first lease's end");
+    assert_eq!(view(&mut helper, me).floor, FloorView::Heat);
+    assert_eq!(stand_in.low_power_writes(), ["-b lowpowermode 1"]);
+}
+
+#[test]
+fn an_owner_who_turns_low_power_off_mid_hold_keeps_it_off() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS, OPEN), HELD);
+    helper.sense(NOW_MS, ON_BATTERY);
+    assert_eq!(stand_in.low_power().0, 1);
+    stand_in.set_low_power_by_owner(0, 0);
+    helper.sense(NOW_MS + 30_000, ON_BATTERY);
+    helper.sense(NOW_MS + 60_000, ON_BATTERY);
+    assert_eq!(stand_in.low_power().0, 0, "the owner's turn-off is kept (N1)");
+    assert_eq!(stand_in.journal_text().as_deref(), Some("[]"), "the entry is dropped");
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS + 61_000, OPEN), HELD);
+    helper.sense(NOW_MS + 90_000, ON_BATTERY);
+    assert_eq!(stand_in.low_power().0, 0, "a renewal of the same ask sets nothing");
+    let released = helper.handle(me, Request::Release, NOW_MS + 91_000, OPEN);
+    assert_eq!(released, Reply::Released);
+    helper.sense(NOW_MS + 120_000, ON_BATTERY);
+    assert_eq!(
+        stand_in.low_power_writes(),
+        ["-b lowpowermode 1"],
+        "no write of 0 over a value the owner changed"
+    );
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS + 121_000, OPEN), HELD);
+    helper.sense(NOW_MS + 150_000, ON_BATTERY);
+    assert_eq!(stand_in.low_power().0, 1, "a new ask after none asked sets it again");
+}
+
+#[test]
+fn a_mac_without_the_lowpowermode_key_is_never_written() {
+    let stand_in = StandIn::new(0);
+    stand_in.drop_low_power_key();
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(helper.handle(me, HOLD_LOW_POWER, NOW_MS, OPEN), HELD);
+    helper.sense(NOW_MS, ON_BATTERY);
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS + 1_000, OPEN), HELD);
+    helper.sense(NOW_MS + 30_000, ON_BATTERY);
+    let state = view(&mut helper, me);
+    assert_eq!(state.low_power, None, "Read says the key is missing");
+    assert!(state.low_power_held);
+    helper.terminate(OPEN);
+    assert!(stand_in.low_power_writes().is_empty(), "{:?}", stand_in.calls());
+    let journal = stand_in.journal_text().unwrap_or_default();
+    assert!(!journal.contains("low_power"), "{journal}");
+}
+
+#[test]
+fn low_power_changes_run_after_the_reply() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    let steps = [
+        (HOLD_LOW_POWER, CLOSED_ALONE),
+        (LOW_POWER, CLOSED_ALONE),
+        (HOLD_LOW_POWER, OPEN),
+        (Request::Read, OPEN),
+        (Request::Release, CLOSED_ALONE),
+    ];
+    for (step, (request, lid)) in (0_u64..).zip(steps) {
+        let now_ms = NOW_MS + step * 1_000;
+        let (reply, runs) = runs_of(&stand_in, || helper.handle(me, request, now_ms, lid));
+        assert!(!matches!(reply, Reply::Refused { .. }), "{request:?}: {reply:?}");
+        assert!(runs.len() <= REPLY_PMSET_RUNS_MAX, "{request:?} waited on {runs:?}");
+        let writes = runs.iter().filter(|run| run.contains(" lowpowermode ")).count();
+        assert_eq!(writes, 0, "{request:?} changed Low Power Mode in its reply: {runs:?}");
+        helper.sense(now_ms, Readings { lid, ..ON_BATTERY });
+    }
+    assert_eq!(stand_in.low_power().0, 0, "the reading after Release put it back");
+    battery_source_only(&stand_in);
+}
+
+#[test]
+fn a_power_only_request_does_not_clear_the_sleep_a_start_owes() {
+    let stand_in = StandIn::new(0);
+    let me = holder(&stand_in, 10);
+    let mut first = Helper::start(stand_in.config());
+    assert_eq!(hold(&mut first, me, NOW_MS), HELD);
+    drop(first);
+    let mut second = Helper::start(stand_in.config());
+    let asked = second.handle(me, LOW_POWER, NOW_MS + 1_000, CLOSED_ALONE);
+    assert_eq!(asked, HELD);
+    assert_eq!(ran(&stand_in, "sleepnow"), 0, "nothing sleeps inside the reply");
+    second.sense(NOW_MS + 1_000, CLOSED_ON_BATTERY);
+    assert_eq!(ran(&stand_in, "sleepnow"), 1, "the reading serves what the start owes");
+    assert_eq!(stand_in.sleep_disabled(), 0);
+}
+
+#[test]
+fn a_sigterm_puts_low_power_back_before_the_owed_sleep() {
+    let stand_in = StandIn::new(0);
+    let config = refusing_low_power(&stand_in);
+    let me = holder(&stand_in, 10);
+    let mut first = Helper::start(config.clone());
+    assert_eq!(first.handle(me, HOLD_LOW_POWER, NOW_MS, OPEN), HELD);
+    first.sense(NOW_MS, ON_BATTERY);
+    assert_eq!(stand_in.low_power().0, 1);
+    drop(first);
+    fs::write(stand_in.path("refuse-low-power-back"), "").unwrap();
+    let mut second = Helper::start(config);
+    assert_eq!(stand_in.sleep_disabled(), 0, "the start put sleep back and owes the sleep");
+    assert_eq!(stand_in.low_power().0, 1, "its Low Power put-back was refused");
+    fs::remove_file(stand_in.path("refuse-low-power-back")).unwrap();
+    second.terminate(CLOSED_ALONE);
+    let calls = stand_in.calls();
+    let back = calls.iter().rposition(|call| call == "-b lowpowermode 0");
+    let slept = calls.iter().rposition(|call| call == "sleepnow");
+    assert!(back.is_some(), "{calls:?}");
+    assert!(slept.is_some(), "{calls:?}");
+    assert!(back < slept, "39i: Low Power goes back before the owed sleep: {calls:?}");
+    assert_eq!(stand_in.low_power().0, 0);
+    assert!(second.idle());
+    battery_source_only(&stand_in);
+}
+
+#[test]
+fn an_owner_ac_low_power_value_is_kept() {
+    let stand_in = StandIn::new(0);
+    stand_in.set_low_power_by_owner(0, 1);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS, OPEN), HELD);
+    helper.sense(NOW_MS, ON_BATTERY);
+    assert_eq!(stand_in.low_power(), (1, 1));
+    let released = helper.handle(me, Request::Release, NOW_MS + 1_000, OPEN);
+    assert_eq!(released, Reply::Released);
+    helper.sense(NOW_MS + 30_000, ON_BATTERY);
+    assert_eq!(stand_in.low_power(), (0, 1), "r9.1 F2: the owner's AC value is kept");
+    assert_eq!(
+        stand_in.low_power_writes(),
+        ["-b lowpowermode 1", "-b lowpowermode 0"]
+    );
+}
+
+#[test]
+fn forget_with_low_power_set_finishes() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(helper.handle(me, HOLD_LOW_POWER, NOW_MS, OPEN), HELD);
+    helper.sense(NOW_MS, ON_BATTERY);
+    assert_eq!(stand_in.low_power().0, 1);
+    let (reply, runs) = runs_of(&stand_in, || {
+        helper.handle(me, Request::Forget, NOW_MS + 1_000, CLOSED_ALONE)
+    });
+    assert_eq!(reply, Reply::Forgotten, "r9.1 F4: one Forget contract");
+    assert!(runs.len() <= REPLY_PMSET_RUNS_MAX, "{runs:?}");
+    assert_eq!(stand_in.low_power().0, 0);
+    assert_eq!(stand_in.sleep_disabled(), 0);
+    assert_eq!(ran(&stand_in, "sleepnow"), 0, "skipped when a Low Power entry was ours");
+    assert_eq!(stand_in.journal_text().as_deref(), Some("[]"));
+    assert_eq!(stand_in.pin_text(), None);
+    battery_source_only(&stand_in);
 }
