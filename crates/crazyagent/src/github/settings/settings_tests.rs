@@ -749,3 +749,70 @@ fn a_refused_switch_keeps_the_wanted_rules_github_still_holds() {
         ]
     );
 }
+
+/// rv-secreview gh-s7 F1: a switch for a rule CrazyAgent's ruleset holds reads that ruleset
+/// as GitHub has it first and changes only CrazyAgent's own part, so what the owner set on
+/// github.com stays: a rule added there, the approvals asked for, the bypass list and the
+/// branches. An approved GitHub rule proposal runs this same switch.
+#[test]
+fn an_owner_added_rule_survives_an_approve() {
+    let scratch = Scratch::new();
+    let (held, server) = github(hub(false));
+    let account = scratch.account(&server);
+    let (_folder, project) = published(&scratch);
+    account
+        .set_repo_rule(&project, FULL_NAME, GitHubRule::PullRequest, true)
+        .unwrap();
+    let branches = json!(["~DEFAULT_BRANCH", "refs/heads/release"]);
+    {
+        let mut hub = held.lock().unwrap();
+        assert_eq!(hub.rulesets.len(), 1);
+        let (_, body) = hub.rulesets.last_mut().unwrap();
+        assert_eq!(body["name"], "CrazyAgent pull requests");
+        body["rules"][0]["parameters"]["required_approving_review_count"] = json!(2);
+        body["rules"][0]["parameters"]["require_code_owner_review"] = json!(true);
+        body["rules"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "type": "required_signatures" }));
+        body["bypass_actors"] =
+            json!([{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }]);
+        body["conditions"]["ref_name"]["include"] = branches.clone();
+    }
+    let page = account
+        .set_repo_rule(
+            &project,
+            FULL_NAME,
+            GitHubRule::ConversationResolution,
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        entry(&page, GitHubRule::ConversationResolution),
+        Some((true, GitHubRuleState::Applied))
+    );
+    let hub = held.lock().unwrap();
+    assert_eq!(hub.rulesets.len(), 1);
+    let (_, body) = &hub.rulesets[0];
+    let rules = body["rules"].as_array().unwrap();
+    let pull = rules
+        .iter()
+        .find(|rule| rule["type"] == "pull_request")
+        .unwrap();
+    assert_eq!(
+        pull["parameters"]["required_review_thread_resolution"], true,
+        "the switched rule changed"
+    );
+    assert_eq!(pull["parameters"]["required_approving_review_count"], 2);
+    assert_eq!(pull["parameters"]["require_code_owner_review"], true);
+    assert!(
+        rules
+            .iter()
+            .any(|rule| rule["type"] == "required_signatures"),
+        "{body}"
+    );
+    assert_eq!(body["bypass_actors"][0]["actor_id"], 5);
+    assert_eq!(body["conditions"]["ref_name"]["include"], branches);
+    assert_eq!(body["name"], "CrazyAgent pull requests");
+    assert_eq!(body["enforcement"], "active");
+}

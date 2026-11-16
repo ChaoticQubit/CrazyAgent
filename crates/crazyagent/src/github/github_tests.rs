@@ -1378,6 +1378,9 @@ fn the_rulesets_crazyagent_made_are_remembered_for_the_next_pass() {
                     .push((id, body["name"].as_str().unwrap().to_owned()));
                 Answer::json(201, serde_json::json!({ "id": id }))
             }
+            "GET" if seen.path.starts_with(&format!("{list}/")) => {
+                Answer::json(200, serde_json::json!({}))
+            }
             "PUT" if seen.path.starts_with(&format!("{list}/")) => {
                 Answer::json(200, serde_json::json!({}))
             }

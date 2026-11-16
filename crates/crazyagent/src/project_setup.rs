@@ -2826,8 +2826,8 @@ fn set_agent_policy(
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings (sub-agent nesting and the new folder limit among them), live master
 /// switch, done-quiet choice, owner notifications, wake rules and ended agents are deleted, so a waiting step is never
-/// claimed and a running one stops; its read folders, agent access, agent settings and its
-/// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
+/// claimed and a running one stops; its read folders, agent access, agent settings, its
+/// agents' own instructions and their GitHub rule proposals go too. Its project-scoped MCP servers, skills, secrets and
 /// per-project switches are cleared too, and so are the memories its agents saved, so a new
 /// project reusing the id never inherits them. The versions of its read folders, agent access, agent settings, project
 /// instructions, team settings and project wake rule move on once more, so a project added
@@ -2864,6 +2864,7 @@ fn remove(
     crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
     crate::sandbox::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
+    crate::github::proposals::forget_project(tx, project_id)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::hidden_paths_item(project_id),

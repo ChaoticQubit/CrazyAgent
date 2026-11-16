@@ -15,6 +15,7 @@ pub(crate) mod http;
 mod job;
 mod plan;
 mod prompt;
+pub mod proposals;
 mod publish;
 mod rules;
 mod settings;

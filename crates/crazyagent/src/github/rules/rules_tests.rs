@@ -40,6 +40,7 @@ fn github(stand: Stand) -> Server {
         match seen.method.as_str() {
             "GET" if seen.path == rulesets => Answer::json(200, stand.rulesets.clone()),
             "POST" if seen.path == rulesets => Answer::json(201, json!({ "id": 100 + index })),
+            "GET" if seen.path.starts_with(&format!("{rulesets}/")) => Answer::json(200, json!({})),
             "PUT" if seen.path.starts_with(&format!("{rulesets}/")) => {
                 Answer::json(200, json!({ "id": 7 }))
             }
@@ -413,9 +414,11 @@ fn a_second_apply_updates_the_rulesets_crazyagent_recorded_and_posts_none_twice(
         made_calls,
         [
             format!("GET {r}/rulesets"),
+            format!("GET {r}/rulesets/7"),
             format!("PUT {r}/rulesets/7"),
             format!("POST {r}/rulesets"),
             format!("POST {r}/rulesets"),
+            format!("GET {r}/rulesets/8"),
             format!("PUT {r}/rulesets/8"),
             format!("DELETE {r}/rulesets/9"),
             format!("POST {r}/rulesets"),
@@ -486,7 +489,11 @@ fn a_rule_set_later_sends_only_that_rule_and_checks_what_it_needs_first() {
     );
     assert_eq!(
         calls(&server),
-        [format!("GET {r}/rulesets"), format!("PUT {r}/rulesets/7")]
+        [
+            format!("GET {r}/rulesets"),
+            format!("GET {r}/rulesets/7"),
+            format!("PUT {r}/rulesets/7")
+        ]
     );
     assert_eq!(
         body(&server, "PUT", &format!("{r}/rulesets/7"), 0)["rules"][0]["parameters"]["required_review_thread_resolution"],

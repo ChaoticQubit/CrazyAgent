@@ -326,9 +326,10 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             crate::team::tool::RECORD_TOOL,
             crate::team::tool::WITHDRAW_TOOL,
             crate::team::tool::REQUEST_ACCESS_TOOL,
+            crate::team::tool::PROPOSE_RULE_TOOL,
             crate::team::tool::REMEMBER_TOOL
         ],
-        "a console master with tools asks the owner and remembers through the engine, less the tools switched off"
+        "a master with tools asks the owner and remembers through the engine, less the tools left out"
     );
     assert_eq!(std::fs::metadata(&mailbox).unwrap().mode() & 0o7777, 0o700);
     let expected: toml::Table = toml::from_str(&format!(
