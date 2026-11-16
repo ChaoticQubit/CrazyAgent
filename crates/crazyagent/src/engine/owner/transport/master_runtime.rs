@@ -1454,6 +1454,17 @@ fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
     &prepared.hidden_paths
 }
 
+/// Keeps a headless master turn on the hidden folders list after it returns when its close
+/// or retirement was uncertain, since its processes may still run, until the engine starts
+/// again (SA-VID14 r1). Stub: always lets it go. Inputs: the guard and the turn's result.
+fn keep_listed_if_uncertain<T>(
+    listed: crate::sandbox::hidden_paths::HiddenRun,
+    result: &Result<T, EngineError>,
+) {
+    let _ = result;
+    drop(listed);
+}
+
 fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
 }
