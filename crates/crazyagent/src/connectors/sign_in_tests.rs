@@ -103,6 +103,10 @@ fn until(what: &str, check: impl Fn() -> bool) {
     }
 }
 
+fn unwinding(_: &str, _: &str, _: Option<&str>) -> Result<(), OAuthError> {
+    panic!("a redeem that unwinds")
+}
+
 fn failed(code: &str) -> SignInState {
     SignInState::Failed {
         code: code.to_owned(),
@@ -439,6 +443,22 @@ fn a_sign_out_or_own_app_change_is_refused_while_an_answer_is_being_redeemed() {
     assert_eq!(state_of(&root, "board"), SignInState::Waiting);
     release.send(()).unwrap();
     until("signed in", || state_of(&root, "board") == SIGNED_IN);
+    sign_out(&db, &root, "board").unwrap();
+    assert_eq!(state_of(&root, "board"), SignInState::Idle);
+}
+
+/// rv-sa241 r2 addendum 4: a sign-in whose redeem panics ends failed rather than claimed for
+/// good, so the refusal that guards a redeem never keeps the connector from signing out or
+/// signing in again until the engine restarts.
+#[test]
+fn a_sign_in_whose_redeem_panics_ends_failed_and_the_connector_signs_out() {
+    let (_tmp, root) = engine_root();
+    let db = crate::questions::open(&root).unwrap();
+    let (_, redirect) = started(&root, "board", STATE, WAIT, unwinding);
+    let query = format!("state={STATE}&code=c7");
+    assert_eq!(answered(&redirect, &query).0, 200);
+    let refused = failed("connector_oauth_refused");
+    until("failed", || state_of(&root, "board") == refused);
     sign_out(&db, &root, "board").unwrap();
     assert_eq!(state_of(&root, "board"), SignInState::Idle);
 }
