@@ -512,7 +512,11 @@ fn put_the_lid_setting_back_now_is_an_owner_change_on_windows_only() {
 #[test]
 fn keep_awake_restore_runs_the_engine_start_undo_and_says_what_is_left() {
     let folder = tempfile::tempdir().unwrap();
-    assert_eq!(restore(folder.path()), Ok(()), "nothing recorded, nothing left");
+    assert_eq!(
+        restore(folder.path()),
+        Ok(()),
+        "nothing recorded, nothing left"
+    );
     let mut found = journal::Journal::open(folder.path()).unwrap();
     let unknown = journal::Entry {
         kind: "stand_in".into(),
@@ -522,7 +526,11 @@ fn keep_awake_restore_runs_the_engine_start_undo_and_says_what_is_left() {
     drop(found);
     assert_eq!(restore(folder.path()), Err(RESTORE_LEFT));
     let kept = journal::Journal::open(folder.path()).unwrap();
-    assert_eq!(kept.entries(), [unknown], "a change not put back stays recorded");
+    assert_eq!(
+        kept.entries(),
+        [unknown],
+        "a change not put back stays recorded"
+    );
     assert!(!RESTORE_LEFT.contains("stand_in"));
     let file = folder.path().join("keep-awake").join("journal.json");
     std::fs::write(&file, "not a journal").unwrap();

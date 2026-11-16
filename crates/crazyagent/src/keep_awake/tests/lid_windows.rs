@@ -9,21 +9,27 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 const PLAN: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
-const OFF: LidAsk = LidAsk {
-    rule_on: false,
-    wanted: false,
-    sleep_display: false,
-};
-const RESTING: LidAsk = LidAsk {
-    rule_on: true,
-    wanted: false,
-    sleep_display: false,
-};
-const WANTED: LidAsk = LidAsk {
-    rule_on: true,
-    wanted: true,
-    sleep_display: false,
-};
+/// A lid ask with a rule Off and nothing wanted.
+fn off() -> LidAsk {
+    LidAsk::default()
+}
+
+/// A lid ask under a lid rule that does not want the lid now.
+fn resting() -> LidAsk {
+    LidAsk {
+        rule_on: true,
+        ..LidAsk::default()
+    }
+}
+
+/// A lid ask that wants the closed lid held.
+fn wanted() -> LidAsk {
+    LidAsk {
+        rule_on: true,
+        wanted: true,
+        ..LidAsk::default()
+    }
+}
 
 /// What the stand-in power settings hold and what they saw: each write with the journal
 /// entries on disk at that moment, and each sleep, so no row changes this computer.
@@ -132,17 +138,31 @@ const NOTHING: Actions = Actions { ac: 0, dc: 0 };
 #[test]
 fn the_old_lid_action_is_journaled_before_the_write_and_put_back_at_release() {
     let (root, setting, mut line) = line(1, 2);
-    assert_eq!(line.step(RESTING, None), LidSupport::Held, "the lid can be held");
-    assert!(setting.plans().writes.is_empty(), "nothing is changed before it is wanted");
-    assert_eq!(line.step(WANTED, None), LidSupport::Held);
+    assert_eq!(
+        line.step(resting(), None),
+        LidSupport::Held,
+        "the lid can be held"
+    );
+    assert!(
+        setting.plans().writes.is_empty(),
+        "nothing is changed before it is wanted"
+    );
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
     let writes = setting.plans().writes.clone();
     assert_eq!(writes, [(PLAN.to_owned(), NOTHING, vec![saved(1, 2)])]);
     assert_eq!(setting.now(), NOTHING);
-    assert_eq!(line.step(WANTED, None), LidSupport::Held);
-    assert_eq!(setting.plans().writes.len(), 1, "a held lid is written once");
-    assert_eq!(line.step(RESTING, None), LidSupport::Held);
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
+    assert_eq!(
+        setting.plans().writes.len(),
+        1,
+        "a held lid is written once"
+    );
+    assert_eq!(line.step(resting(), None), LidSupport::Held);
     assert_eq!(setting.now(), Actions { ac: 1, dc: 2 });
-    assert!(entries(root.path()).is_empty(), "the entry is forgotten once put back");
+    assert!(
+        entries(root.path()).is_empty(),
+        "the entry is forgotten once put back"
+    );
     assert!(setting.plans().slept.is_empty(), "the lid was open");
 }
 
@@ -150,10 +170,14 @@ fn the_old_lid_action_is_journaled_before_the_write_and_put_back_at_release() {
 fn release_restores_both_ac_and_dc_values() {
     for (ac, dc) in [(2, 3), (1, 0), (0, 1), (3, 3)] {
         let (root, setting, mut line) = line(ac, dc);
-        assert_eq!(line.step(WANTED, None), LidSupport::Held, "{ac} {dc}");
+        assert_eq!(line.step(wanted(), None), LidSupport::Held, "{ac} {dc}");
         assert_eq!(setting.now(), NOTHING, "{ac} {dc}");
         assert_eq!(entries(root.path()), [saved(ac, dc)], "{ac} {dc}");
-        assert_eq!(line.step(OFF, None), LidSupport::Held, "a rule turned Off releases");
+        assert_eq!(
+            line.step(off(), None),
+            LidSupport::Held,
+            "a rule turned Off releases"
+        );
         assert_eq!(setting.now(), Actions { ac, dc }, "{ac} {dc}");
         assert!(entries(root.path()).is_empty(), "{ac} {dc}");
     }
@@ -163,16 +187,23 @@ fn release_restores_both_ac_and_dc_values() {
 fn a_policy_locked_lid_action_reports_locked_by_policy() {
     let (root, setting, mut line) = line(1, 1);
     setting.plans().check = Err(Refusal::Policy);
-    assert_eq!(line.step(RESTING, None), LidSupport::LockedByPolicy);
-    assert_eq!(line.step(WANTED, None), LidSupport::LockedByPolicy);
-    assert!(setting.plans().writes.is_empty(), "a locked lid action is never written");
+    assert_eq!(line.step(resting(), None), LidSupport::LockedByPolicy);
+    assert_eq!(line.step(wanted(), None), LidSupport::LockedByPolicy);
+    assert!(
+        setting.plans().writes.is_empty(),
+        "a locked lid action is never written"
+    );
     assert!(entries(root.path()).is_empty());
     setting.plans().check = Err(Refusal::Denied);
     let needs_admin = LidSupport::NotAvailable {
         reason: NEEDS_ADMIN.into(),
     };
-    assert_eq!(line.step(RESTING, None), needs_admin);
-    assert_eq!(line.step(WANTED, None), needs_admin, "never asks to elevate");
+    assert_eq!(line.step(resting(), None), needs_admin);
+    assert_eq!(
+        line.step(wanted(), None),
+        needs_admin,
+        "never asks to elevate"
+    );
     assert!(setting.plans().writes.is_empty());
     assert_eq!(setting.now(), Actions { ac: 1, dc: 1 });
 }
@@ -180,13 +211,16 @@ fn a_policy_locked_lid_action_reports_locked_by_policy() {
 #[test]
 fn a_lid_action_already_do_nothing_is_held_with_nothing_recorded() {
     let (root, setting, mut line) = line(0, 0);
-    assert_eq!(line.step(WANTED, None), LidSupport::Held);
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
     assert!(setting.plans().writes.is_empty());
     assert!(entries(root.path()).is_empty());
     setting.plans().closed = Some(true);
-    assert_eq!(line.step(RESTING, None), LidSupport::Held);
+    assert_eq!(line.step(resting(), None), LidSupport::Held);
     assert!(setting.plans().writes.is_empty());
-    assert!(setting.plans().slept.is_empty(), "Do nothing stays awake at the end");
+    assert!(
+        setting.plans().slept.is_empty(),
+        "Do nothing stays awake at the end"
+    );
 }
 
 #[test]
@@ -195,8 +229,11 @@ fn a_change_that_cannot_be_recorded_is_never_made() {
     let blocked = folder.path().join("not-a-folder");
     std::fs::write(&blocked, "a file where the engine root should be").unwrap();
     let mut line = WindowsLid::new(setting.clone(), blocked);
-    assert_eq!(line.step(WANTED, None), LidSupport::SleepNotRestored);
-    assert!(setting.plans().writes.is_empty(), "no write without a journal");
+    assert_eq!(line.step(wanted(), None), LidSupport::SleepNotRestored);
+    assert!(
+        setting.plans().writes.is_empty(),
+        "no write without a journal"
+    );
     assert_eq!(setting.now(), Actions { ac: 1, dc: 2 });
 }
 
@@ -207,10 +244,17 @@ fn a_write_that_fails_puts_back_what_was_written_and_holds_no_lid() {
     let refused = LidSupport::NotAvailable {
         reason: format!("{NOT_CHANGED}the power service is busy"),
     };
-    assert_eq!(line.step(WANTED, None), refused);
+    assert_eq!(line.step(wanted(), None), refused);
     assert_eq!(setting.now(), Actions { ac: 1, dc: 2 });
-    assert!(entries(root.path()).is_empty(), "nothing was changed, nothing is left");
-    assert_eq!(setting.plans().writes.len(), 1, "put back finds nothing to write");
+    assert!(
+        entries(root.path()).is_empty(),
+        "nothing was changed, nothing is left"
+    );
+    assert_eq!(
+        setting.plans().writes.len(),
+        1,
+        "put back finds nothing to write"
+    );
 }
 
 #[test]
@@ -228,9 +272,9 @@ fn a_hold_that_ends_with_the_lid_closed_does_what_the_lid_action_says() {
     for (ac, dc, on_ac, closed, slept) in cases {
         let (_root, setting, mut line) = line(ac, dc);
         setting.plans().on_ac = on_ac;
-        assert_eq!(line.step(WANTED, None), LidSupport::Held);
+        assert_eq!(line.step(wanted(), None), LidSupport::Held);
         setting.plans().closed = closed;
-        assert_eq!(line.step(RESTING, None), LidSupport::Held);
+        assert_eq!(line.step(resting(), None), LidSupport::Held);
         let case = format!("{ac} {dc} {on_ac:?} {closed:?}");
         assert_eq!(setting.plans().slept, slept, "{case}");
         assert_eq!(setting.now(), Actions { ac, dc }, "{case}");
@@ -240,9 +284,9 @@ fn a_hold_that_ends_with_the_lid_closed_does_what_the_lid_action_says() {
 #[test]
 fn a_value_the_owner_changed_during_the_hold_stays() {
     let (root, setting, mut line) = line(1, 2);
-    assert_eq!(line.step(WANTED, None), LidSupport::Held);
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
     setting.plans().actions.insert(PLAN.into(), Actions { ac: 3, dc: 0 });
-    assert_eq!(line.step(RESTING, None), LidSupport::Held);
+    assert_eq!(line.step(resting(), None), LidSupport::Held);
     assert_eq!(setting.now(), Actions { ac: 3, dc: 2 });
     assert!(entries(root.path()).is_empty());
 }
@@ -250,18 +294,26 @@ fn a_value_the_owner_changed_during_the_hold_stays() {
 #[test]
 fn a_failed_put_back_is_tried_again_and_reads_sleep_not_restored_until_it_works() {
     let (root, setting, mut line) = line(1, 2);
-    assert_eq!(line.step(WANTED, None), LidSupport::Held);
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
     setting.plans().refusing = Some(Refusal::Failed("the power service is busy".into()));
-    assert_eq!(line.step(RESTING, None), LidSupport::SleepNotRestored);
+    assert_eq!(line.step(resting(), None), LidSupport::SleepNotRestored);
     assert_eq!(entries(root.path()), [saved(1, 2)], "the entry stays");
     let writes = setting.plans().writes.len();
-    assert_eq!(line.step(WANTED, None), LidSupport::SleepNotRestored);
-    assert_eq!(setting.plans().writes.len(), writes, "no new hold over a change left");
+    assert_eq!(line.step(wanted(), None), LidSupport::SleepNotRestored);
+    assert_eq!(
+        setting.plans().writes.len(),
+        writes,
+        "no new hold over a change left"
+    );
     assert_eq!(entries(root.path()), [saved(1, 2)], "and no second entry");
-    assert_eq!(line.step(RESTING, None), LidSupport::SleepNotRestored, "tried again");
+    assert_eq!(
+        line.step(resting(), None),
+        LidSupport::SleepNotRestored,
+        "tried again"
+    );
     assert_eq!(setting.plans().writes.len(), writes + 1);
     setting.plans().refusing = None;
-    assert_eq!(line.step(RESTING, None), LidSupport::Held);
+    assert_eq!(line.step(resting(), None), LidSupport::Held);
     assert_eq!(setting.now(), Actions { ac: 1, dc: 2 });
     assert!(entries(root.path()).is_empty());
 }
@@ -269,14 +321,18 @@ fn a_failed_put_back_is_tried_again_and_reads_sleep_not_restored_until_it_works(
 #[test]
 fn put_the_lid_setting_back_now_waits_for_the_hold_and_runs_at_once_after_it() {
     let (root, setting, mut line) = line(1, 2);
-    assert_eq!(line.step(WANTED, None), LidSupport::Held);
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
     let put_back = Some(LidCommand::PutBack);
-    assert_eq!(line.step(WANTED, put_back), LidSupport::Held, "a held lid stays held");
+    assert_eq!(
+        line.step(wanted(), put_back),
+        LidSupport::Held,
+        "a held lid stays held"
+    );
     assert_eq!(setting.now(), NOTHING);
     setting.plans().refusing = Some(Refusal::Failed("the power service is busy".into()));
-    assert_eq!(line.step(RESTING, None), LidSupport::SleepNotRestored);
+    assert_eq!(line.step(resting(), None), LidSupport::SleepNotRestored);
     setting.plans().refusing = None;
-    assert_eq!(line.step(RESTING, put_back), LidSupport::Held);
+    assert_eq!(line.step(resting(), put_back), LidSupport::Held);
     assert_eq!(setting.now(), Actions { ac: 1, dc: 2 });
     assert!(entries(root.path()).is_empty());
 }
@@ -284,10 +340,13 @@ fn put_the_lid_setting_back_now_waits_for_the_hold_and_runs_at_once_after_it() {
 #[test]
 fn a_plan_that_is_gone_counts_as_put_back() {
     let (root, setting, mut line) = line(1, 2);
-    assert_eq!(line.step(WANTED, None), LidSupport::Held);
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
     setting.plans().actions.clear();
-    assert_eq!(line.step(RESTING, None), LidSupport::Held);
-    assert!(entries(root.path()).is_empty(), "nothing is left to put back");
+    assert_eq!(line.step(resting(), None), LidSupport::Held);
+    assert!(
+        entries(root.path()).is_empty(),
+        "nothing is left to put back"
+    );
 }
 
 #[test]
@@ -296,7 +355,11 @@ fn an_entry_an_earlier_engine_left_is_put_back_by_its_undo() {
     undo_with(&mut setting, &saved(1, 2)).unwrap();
     assert_eq!(setting.now(), Actions { ac: 1, dc: 2 });
     undo_with(&mut setting, &saved(3, 3)).unwrap();
-    assert_eq!(setting.now(), Actions { ac: 1, dc: 2 }, "a value not at Do nothing stays");
+    assert_eq!(
+        setting.now(),
+        Actions { ac: 1, dc: 2 },
+        "a value not at Do nothing stays"
+    );
     let invalid = [
         "not json".to_owned(),
         format!(r#"{{"scheme":"{PLAN}","ac":4,"dc":0}}"#),
@@ -309,11 +372,21 @@ fn an_entry_an_earlier_engine_left_is_put_back_by_its_undo() {
             restore: restore.clone(),
         };
         let refused = undo_with(&mut setting, &entry).unwrap_err();
-        assert!(refused.0.starts_with("keep_awake_lid_entry_invalid"), "{restore}");
+        assert!(
+            refused.0.starts_with("keep_awake_lid_entry_invalid"),
+            "{restore}"
+        );
     }
     setting.plans().actions.clear();
-    assert!(undo_with(&mut setting, &saved(1, 2)).is_ok(), "a plan that is gone is done");
-    assert_eq!(setting.plans().writes.len(), 1, "only the first entry wrote");
+    assert!(
+        undo_with(&mut setting, &saved(1, 2)).is_ok(),
+        "a plan that is gone is done"
+    );
+    assert_eq!(
+        setting.plans().writes.len(),
+        1,
+        "only the first entry wrote"
+    );
 }
 
 #[cfg(windows)]
@@ -383,8 +456,12 @@ mod on_windows {
         lid::write(plan, lid::Actions { ac: 1, dc: 2 }).unwrap();
         let root = tempfile::tempdir().unwrap();
         let mut line = WindowsLid::new(Scratch(plan), root.path().to_path_buf());
-        let held = line.step(WANTED, None);
-        assert_eq!(held, LidSupport::Held, "K0-7: this account may change the lid action");
+        let held = line.step(wanted(), None);
+        assert_eq!(
+            held,
+            LidSupport::Held,
+            "K0-7: this account may change the lid action"
+        );
         assert_eq!(lid::read(plan).unwrap(), lid::Actions { ac: 0, dc: 0 });
         let expected = format!(r#"{{"scheme":"{}","ac":1,"dc":2}}"#, plan.text());
         let recorded = entries(root.path());
@@ -395,7 +472,15 @@ mod on_windows {
         let left = crate::keep_awake::reconcile(root.path());
         assert_eq!(left, Leftover::Kinds(Vec::new()));
         assert_eq!(lid::read(plan).unwrap(), lid::Actions { ac: 1, dc: 2 });
-        assert_eq!(lid::active().unwrap(), owner, "the owner's plan stays active");
-        assert_eq!(lid::read(owner).unwrap(), owner_actions, "and keeps its lid values");
+        assert_eq!(
+            lid::active().unwrap(),
+            owner,
+            "the owner's plan stays active"
+        );
+        assert_eq!(
+            lid::read(owner).unwrap(),
+            owner_actions,
+            "and keeps its lid values"
+        );
     }
 }

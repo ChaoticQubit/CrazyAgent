@@ -519,7 +519,10 @@ fn on_windows_the_settings_page_offers_put_the_lid_setting_back_now() {
     let text = shown(&mut shell);
     assert!(text.contains("Lid setting"), "{text}");
     assert!(text.contains(CRASH_GAP), "{text}");
-    assert!(text.contains("Put the lid setting back now"), "the hint for p: {text}");
+    assert!(
+        text.contains("Put the lid setting back now"),
+        "the hint for p: {text}"
+    );
     assert!(!text.contains("Lid helper"), "{text}");
     let put_back = crate::keep_awake::KeepAwakeAction::PutLidBack;
     assert_eq!(lid_key(&mut shell, 'p'), put_back);
@@ -530,7 +533,11 @@ fn on_windows_the_settings_page_offers_put_the_lid_setting_back_now() {
     shell.key(Key::Char('p'));
     let sent = saves(&mut shell);
     assert_eq!(sent.len(), 1, "{sent:?}");
-    answer(&mut shell, sent[0].clone(), Err("keep_awake_lid_held".into()));
+    answer(
+        &mut shell,
+        sent[0].clone(),
+        Err("keep_awake_lid_held".into()),
+    );
     let text = shown(&mut shell);
     assert!(text.contains("The lid setting was not put back."), "{text}");
     assert!(
@@ -548,7 +555,10 @@ fn off_windows_the_settings_page_has_no_put_the_lid_setting_back_now() {
         let text = shown(&mut shell);
         assert!(!text.contains("Lid setting"), "{platform:?}: {text}");
         assert!(!text.contains(CRASH_GAP), "{platform:?}: {text}");
-        assert!(!text.contains("Put the lid setting back now"), "{platform:?}: {text}");
+        assert!(
+            !text.contains("Put the lid setting back now"),
+            "{platform:?}: {text}"
+        );
         shell.key(Key::Char('p'));
         assert_eq!(saves(&mut shell), Vec::new(), "{platform:?}");
     }

@@ -663,7 +663,10 @@ mod journal {
         assert_eq!(failed, Err(EngineError("stand_in_undo_failed".into())));
         assert_eq!(seen, ["third", "second", "first"]);
         assert_eq!(journal.entries(), [entry(), lid("second")]);
-        assert_eq!(Journal::open(root.path()).unwrap().entries(), [entry(), lid("second")]);
+        assert_eq!(
+            Journal::open(root.path()).unwrap().entries(),
+            [entry(), lid("second")]
+        );
 
         let none = journal.settle("other", |_| panic!("no entry of this kind"));
         assert_eq!(none, Ok(()));
