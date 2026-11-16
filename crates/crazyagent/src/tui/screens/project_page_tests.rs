@@ -4063,6 +4063,7 @@ fn every_new_project_left_running_reads_each_job_status() {
     for character in "Harbor".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     let (_, _, harbor) = setup_start(&drain(&mut shell)).expect("Harbor starts its job too");
