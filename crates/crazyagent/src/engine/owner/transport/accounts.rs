@@ -314,9 +314,6 @@ async fn handle(
         return Err(failure("accounts_key_unexpected"));
     }
     let root = &authority.root;
-    let reproving = authority
-        .reproving
-        .load(std::sync::atomic::Ordering::SeqCst);
     Ok(match action {
         Action::Catalog => Reply::Catalog {
             providers: crate::accounts::catalog(),
@@ -327,7 +324,7 @@ async fn handle(
             else {
                 return Err(unknown());
             };
-            let mut accounts = views(root, reproving, items).await?;
+            let mut accounts = views(authority, items).await?;
             let mut next = next;
             while encode_frame(&Reply::Page {
                 page: AccountPage {
@@ -378,7 +375,7 @@ async fn handle(
                 return Err(unknown());
             };
             Reply::Account {
-                account: views(root, reproving, vec![*added]).await?.remove(0),
+                account: views(authority, vec![*added]).await?.remove(0),
             }
         }
         Action::Rename { id, name } => {
@@ -388,7 +385,7 @@ async fn handle(
                 return Err(unknown());
             };
             Reply::Account {
-                account: views(root, reproving, vec![*listed]).await?.remove(0),
+                account: views(authority, vec![*listed]).await?.remove(0),
             }
         }
         Action::Remove { id } => {
@@ -418,7 +415,7 @@ async fn handle(
                 _ => return Err(unknown()),
             };
             Reply::Account {
-                account: views(root, reproving, vec![*listed]).await?.remove(0),
+                account: views(authority, vec![*listed]).await?.remove(0),
             }
         }
         Action::Check { id } => {
@@ -426,7 +423,7 @@ async fn handle(
             else {
                 return Err(unknown());
             };
-            let (account, models) = check(root, reproving, *listed).await?;
+            let (account, models) = check(authority, *listed).await?;
             Reply::Checked {
                 check: AccountCheck { account, models },
             }
@@ -769,21 +766,18 @@ fn entered_url(listed: &Listed) -> bool {
 }
 
 /// Reads an account's status before any URL probe. A sign-in an earlier engine run proved
-/// reads as signing in while this run's engine-start re-proof still runs, so the Accounts
-/// page keeps reading until it settles (SIGNOUT-AFTER-RESTART). Inputs: the engine root,
-/// the listed account and whether that re-proof runs. Output: the status.
-fn base_status(
-    root: &Root,
-    listed: &Listed,
-    reproving: bool,
-) -> Result<AccountStatus, EngineError> {
+/// reads as signing in while this run's engine-start re-proof still has it to check, so the
+/// Accounts page keeps reading until it settles; one the re-proof skipped or already ended
+/// reads as not signed in (SIGNOUT-AFTER-RESTART). Inputs: the engine root, the listed
+/// account and whether that re-proof still has it to check. Output: the status.
+fn base_status(root: &Root, listed: &Listed, pending: bool) -> Result<AccountStatus, EngineError> {
     Ok(match &listed.connection.auth {
         ModelAuthentication::NativeManaged { .. } | ModelAuthentication::Oauth { .. } => {
             match listed.sign_in {
                 Some(NativeAuthPhase::AuthenticatedObserved) if listed.launchable => {
                     AccountStatus::SignedIn
                 }
-                Some(NativeAuthPhase::AuthenticatedObserved) if reproving && listed.rechecking => {
+                Some(NativeAuthPhase::AuthenticatedObserved) if pending && listed.rechecking => {
                     AccountStatus::SigningIn
                 }
                 Some(
@@ -849,15 +843,13 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
     }
 }
 
-async fn views(
-    root: &Root,
-    reproving: bool,
-    items: Vec<Listed>,
-) -> Result<Vec<AccountView>, EngineError> {
+async fn views(authority: &Authority, items: Vec<Listed>) -> Result<Vec<AccountView>, EngineError> {
+    let root = &authority.root;
     let mut probes: BTreeMap<String, Option<bool>> = BTreeMap::new();
     let mut bases = Vec::with_capacity(items.len());
     for listed in &items {
-        let base = base_status(root, listed, reproving)?;
+        let pending = authority.reproof_pending(&listed.connection.id);
+        let base = base_status(root, listed, pending)?;
         if base != AccountStatus::NotSignedIn
             && entered_url(listed)
             && let Some(url) = http_url(&listed.connection)
@@ -905,11 +897,12 @@ async fn views(
 }
 
 async fn check(
-    root: &Root,
-    reproving: bool,
+    authority: &Authority,
     listed: Listed,
 ) -> Result<(AccountView, Vec<String>), EngineError> {
-    let base = base_status(root, &listed, reproving)?;
+    let root = &authority.root;
+    let pending = authority.reproof_pending(&listed.connection.id);
+    let base = base_status(root, &listed, pending)?;
     let Some(url) = http_url(&listed.connection) else {
         return Ok((view(&listed, base), Vec::new()));
     };

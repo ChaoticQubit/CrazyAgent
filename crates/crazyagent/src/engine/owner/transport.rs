@@ -513,6 +513,7 @@ struct Authority {
     ide_servers: crate::ide::server::Servers,
     ide: Arc<crate::ide::bridge::Grants>,
     reproving: Arc<std::sync::atomic::AtomicBool>,
+    reproof_left: Mutex<Option<std::collections::BTreeSet<CredentialRef>>>,
     icloud: crate::projects_home::icloud::Downloads,
     intake: intake::Intake,
 }
@@ -1376,6 +1377,7 @@ impl OwnerServer {
                 ide_servers,
                 ide,
                 reproving: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                reproof_left: Mutex::new(None),
                 icloud: crate::projects_home::icloud::Downloads::default(),
                 intake: intake::Intake::default(),
             });
