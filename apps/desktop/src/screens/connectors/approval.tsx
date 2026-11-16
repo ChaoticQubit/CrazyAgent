@@ -23,8 +23,9 @@ export interface KeptAnswer {
  * still the loaded one and names the same approval, so Allow and Deny are gone before the
  * re-read lands; else the read. Inputs: the loaded read and the kept answer, if any.
  * Output: the view to show. */
-export function approvalOnPage(view: Loaded<ApprovalView>, _kept: KeptAnswer | null): Loaded<ApprovalView> {
-  return view;
+export function approvalOnPage(view: Loaded<ApprovalView>, kept: KeptAnswer | null): Loaded<ApprovalView> {
+  if (kept === null || kept.over !== view || view.kind !== "ok" || kept.view.id !== view.value.id) return view;
+  return { kind: "ok", value: kept.view };
 }
 
 /** The approval page for one connector write: what asks and what it sends as plain text,
@@ -63,15 +64,19 @@ export function ApprovalPageView({ view, now, busy, failure, actions }: {
 }
 
 /** The approval page the ConnectorWrite notice opens: reads the write, counts its time down
- * each second and reads it again once when the wait ends, answers it once, and reads it
- * again when it was already answered. Input: the approval id from the route. Output: the page. */
+ * each second and reads it again once when the wait ends, answers it once and shows the
+ * answer with no buttons until the re-read lands, and reads it again when it was already
+ * answered. Input: the approval id from the route. Output: the page. */
 export function ConnectorApprovalPage({ id }: { id: number }) {
   const session = useAppSession();
   const [view, reload] = useLoad(() => loadApproval(id), [id]);
   const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
+  const [kept, setKept] = useState<KeptAnswer | null>(null);
   const reread = useRef<number | null>(null);
+  const shownRead = useRef(view);
+  shownRead.current = view;
   const ends = view.kind === "ok" && view.value.state === "waiting" ? view.value.expires_ms : null;
   useEffect(() => {
     if (ends === null) return undefined;
@@ -92,6 +97,7 @@ export function ConnectorApprovalPage({ id }: { id: number }) {
     const result = session.noteResult(await answerApproval(id, allow));
     setBusy(false);
     if (result.kind === "ok") {
+      setKept({ over: shownRead.current, view: result.value });
       session.showToast(allow ? APPROVAL_PAGE.allowed : APPROVAL_PAGE.denied);
       reload();
       return;
@@ -100,5 +106,6 @@ export function ConnectorApprovalPage({ id }: { id: number }) {
     if (result.kind === "error" && result.code === "connector_approval_closed") reload();
   }
 
-  return <ApprovalPageView view={view} now={now} busy={busy} failure={failure} actions={{ onAnswer: (allow) => { void answer(allow); }, onRetry: reload }} />;
+  const onPage = approvalOnPage(view, kept);
+  return <ApprovalPageView view={onPage} now={now} busy={busy || onPage !== view} failure={failure} actions={{ onAnswer: (allow) => { void answer(allow); }, onRetry: reload }} />;
 }
