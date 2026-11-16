@@ -275,6 +275,28 @@ test("the Add MCP server form turns typed text into the engine's spec and refuse
   assert.ok("spec" in serverSpecInput({ kind: "http", command: "", args: "", url: "http://127.0.0.1:8931/mcp" }));
 });
 
+test("the Add MCP server form takes exactly the full command paths the engine takes on this system (#128 code F1)", async () => {
+  const client = await import("../src/engine-client.ts");
+  const keys = await import("../src/ui/keys.ts");
+  const stdio = (command, windows) => serverSpecInput({ kind: "stdio", command, args: "", url: "" }, windows);
+  const npx = "C:\\Program Files\\nodejs\\npx.cmd";
+  const windowsCopy = "Enter the full path to the command, such as C:\\Program Files\\nodejs\\npx.cmd.";
+  const unixCopy = "Enter the full path to the command, starting with /.";
+  assert.deepEqual(stdio(` ${npx} `, true), { spec: { kind: "stdio", command: npx, args: [] } });
+  for (const command of ["/usr/local/bin/npx", "npx.cmd", "\\nodejs\\npx.cmd", "\\\\server\\share\\npx.cmd", "\\\\?\\C:\\nodejs\\npx.cmd",
+    "\\\\.\\pipe\\npx", "C:nodejs\\npx.cmd", "C:/nodejs/npx.cmd", "C:\\nodejs\\npx.cmd:stream", "C:\\nodejs\\..\\npx.cmd", "C:\\nodejs\\npx.cmd.", "C:\\"]) {
+    assert.deepEqual(stdio(command, true), { error: { command: windowsCopy } }, command);
+    assert.equal(client.fullCommandPath(command, true), false, command);
+  }
+  assert.deepEqual(stdio("/usr/local/bin/npx", false), { spec: { kind: "stdio", command: "/usr/local/bin/npx", args: [] } });
+  assert.deepEqual(stdio(npx, false), { error: { command: unixCopy } });
+  assert.equal(client.fullCommandPath(npx, true), true);
+  assert.equal(client.commandPathCopy(true), windowsCopy);
+  assert.equal(client.commandPathCopy(false), unixCopy);
+  assert.equal(keys.isWindows("Win32"), true);
+  assert.equal(keys.isWindows("MacIntel"), false);
+});
+
 test("names, secret names and skill folders are checked with the engine's rules before sending", () => {
   assert.equal(serverNameError("github"), undefined);
   assert.equal(serverNameError("GitHub tools"), "Use 1 to 64 lowercase letters, digits, - or _ for the name.");
