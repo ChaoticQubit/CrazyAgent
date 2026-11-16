@@ -1464,16 +1464,16 @@ fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
 }
 
 /// Keeps a headless master turn on the hidden folders list after it returns when its close
-/// or retirement was uncertain, since its processes may still run, until the engine starts
-/// again (SA-VID14 r1); the RCLI test is the wider one. Inputs: the guard and the result.
+/// or retirement was uncertain, or its RCLI stop left processes held as leftovers, since
+/// they may still run, until the engine starts again (SA-VID14 r1, r2 F1); the RCLI test is
+/// the wider one. Inputs: the guard and the result.
 pub(super) fn keep_listed_if_uncertain<T>(
     listed: crate::sandbox::hidden_paths::HiddenRun,
     result: &Result<T, EngineError>,
 ) {
-    if result
-        .as_ref()
-        .is_err_and(super::master_rcli::cleanup_uncertain)
-    {
+    if result.as_ref().is_err_and(|error| {
+        super::master_rcli::cleanup_uncertain(error) || super::master_rcli::left_running(error)
+    }) {
         std::mem::forget(listed);
     }
 }
