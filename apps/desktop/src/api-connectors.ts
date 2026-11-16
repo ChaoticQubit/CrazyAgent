@@ -294,6 +294,8 @@ export const CONNECTOR_PAGE_REFUSALS: Record<string, string> = {
   app_plugin_secret_not_declared: "This connector doesn't declare that secret.",
   app_plugins_unavailable: "Connectors aren't available in this engine yet.",
   owner_entropy_unavailable: "This computer couldn't make a random value for the request. Nothing changed; try again.",
+  connector_approval_unknown: "That approval is gone.",
+  connector_approval_closed: "This write was already answered or its wait ran out. The page now shows where it stands.",
 };
 
 /** One plain sentence for a refused Connectors request: the engine's sentence for its own
@@ -465,50 +467,51 @@ export const APPROVAL_PAGE = {
 /** The approval page's lines, in order: connector, tool, project, agent, when it asked and
  * what it sends. Input: the approval. Output: the lines. */
 export function approvalLines(view: ApprovalView): string[] {
-  void view;
-  return [];
+  return [
+    `Connector: ${view.title}`,
+    `Tool: ${view.tool}`,
+    `Project: ${view.project_name}`,
+    `Agent: ${view.agent}`,
+    `Asked: ${stampWords(view.created_ms)}`,
+    `What it sends: ${view.preview}`,
+  ];
 }
 
 /** The time a waiting write has left, in whole seconds rounded up and never below 0:00.
  * Inputs: now and the end of the wait, in epoch milliseconds. Output: such as "9:59". */
 export function timeLeft(nowMs: number, expiresMs: number): string {
-  void nowMs;
-  void expiresMs;
-  return "";
+  const seconds = Math.max(0, Math.ceil((expiresMs - nowMs) / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 /** Where an answered write stands: "Allowed <stamp>", "Denied <stamp>" or "Expired".
  * Input: the approval. Output: the line, empty while it waits. */
 export function answeredLine(view: ApprovalView): string {
-  void view;
-  return "";
+  if (view.state === "waiting") return "";
+  if (view.state === "expired") return APPROVAL_PAGE.expired;
+  if (view.answered_ms === null) throw new Error("an allowed or denied write has its answer time");
+  return `${view.state === "allowed" ? "Allowed" : "Denied"} ${stampWords(view.answered_ms)}`;
 }
 
 /** Reads one connector write by the id its notice carries. Input: the id. Output: the approval. */
 export function loadApproval(id: number): Promise<Result<ApprovalView>> {
-  void id;
-  return Promise.resolve({ kind: "not_ready" });
+  return connectorCall<ApprovalView>("desktop_connector_approval", { id });
 }
 
 /** Answers one waiting connector write once. Inputs: the id and whether the owner allows it.
  * Output: the approval after the answer. */
 export function answerApproval(id: number, allow: boolean): Promise<Result<ApprovalView>> {
-  void id;
-  void allow;
-  return Promise.resolve({ kind: "not_ready" });
+  return connectorCall<ApprovalView>("desktop_connector_answer", { id, allow });
 }
 
 /** Reads the connectors a project may write with without asking again. Input: the project.
  * Output: them by name. */
 export function loadAllowedWrites(project: string): Promise<Result<AllowedWrites>> {
-  void project;
-  return Promise.resolve({ kind: "not_ready" });
+  return connectorCall<AllowedWrites>("desktop_connector_writes", { project });
 }
 
 /** Takes back a project's standing allow for one connector. Inputs: the project and the
  * connector. Output: the standing allows left. */
 export function revokeWrites(project: string, connector: string): Promise<Result<AllowedWrites>> {
-  void project;
-  void connector;
-  return Promise.resolve({ kind: "not_ready" });
+  return connectorCall<AllowedWrites>("desktop_connector_revoke_writes", { project, connector });
 }

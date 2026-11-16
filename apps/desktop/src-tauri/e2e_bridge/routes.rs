@@ -3645,6 +3645,60 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { Ok(read(state).await?.connector_reach()) }.await;
             routed(result)
         }
+        "desktop_connector_approval" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: i64,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_approval(id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_answer" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: i64,
+                allow: bool,
+            }
+            let Args { id, allow } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_answer(id, allow)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_writes" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+            }
+            let Args { project } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_writes(project)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_revoke_writes" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+                connector: String,
+            }
+            let Args { project, connector } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .connector_revoke_writes(project, connector)?; call.await }.await;
+            routed(result)
+        }
         "desktop_app_plugins" => {
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugins()?; call.await }.await;
             routed(result)

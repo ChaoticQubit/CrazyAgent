@@ -221,8 +221,10 @@ impl NativeBridge {
     /// Reads one connector write that waits for, or had, the owner's answer, run without the
     /// bridge lock. Input: the approval id from its notice. Output: the approval.
     pub fn connector_approval(&self, id: i64) -> Result<Unlocked<ApprovalView>, BridgeError> {
-        let _ = id;
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client.connector_approval(id).await.map_err(connector_error)
+        }))
     }
 
     /// Answers one waiting connector write once, run without the bridge lock. Inputs: the
@@ -232,15 +234,28 @@ impl NativeBridge {
         id: i64,
         allow: bool,
     ) -> Result<Unlocked<ApprovalView>, BridgeError> {
-        let _ = (id, allow);
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .answer_connector_write(id, allow)
+                .await
+                .map_err(connector_error)
+        }))
     }
 
     /// Reads the connectors a project may write with without asking again, run without the
     /// bridge lock. Input: the project. Output: them by name.
-    pub fn connector_writes(&self, project: String) -> Result<Unlocked<AllowedWrites>, BridgeError> {
-        let _ = project;
-        Err(failure("connector_outcome_unknown"))
+    pub fn connector_writes(
+        &self,
+        project: String,
+    ) -> Result<Unlocked<AllowedWrites>, BridgeError> {
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_writes(project)
+                .await
+                .map_err(connector_error)
+        }))
     }
 
     /// Takes back a project's standing allow for one connector, run without the bridge
@@ -250,8 +265,13 @@ impl NativeBridge {
         project: String,
         connector: String,
     ) -> Result<Unlocked<AllowedWrites>, BridgeError> {
-        let _ = (project, connector);
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .revoke_connector_writes(project, connector)
+                .await
+                .map_err(connector_error)
+        }))
     }
 
     /// What the Connectors page says each harness reaches, one row per harness kind in

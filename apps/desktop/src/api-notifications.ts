@@ -216,8 +216,8 @@ export function routeOf(target: NoticeTarget): { hash: string; anchor: string | 
     case "usage": return { hash: formatRoute({ name: "metrics" }), anchor: null };
     case "updates": return { hash: formatRoute({ name: "settings", tab: "updates" }), anchor: null };
     case "harnesses": return { hash: formatRoute({ name: "settings", tab: "harnesses" }), anchor: null };
-    case "connectors": return { hash: formatRoute({ name: "settings", tab: "plugins" }), anchor: null };
-    case "connector_approval": return { hash: formatRoute({ name: "settings", tab: "plugins" }), anchor: `connector-approval-${target.id}` };
+    case "connectors": return { hash: formatRoute({ name: "settings", tab: "connectors" }), anchor: null };
+    case "connector_approval": return { hash: formatRoute({ name: "connector-approval", id: target.id }), anchor: null };
     case "home": return { hash: formatRoute({ name: "home" }), anchor: null };
   }
 }

@@ -81,6 +81,7 @@ test("An answered or expired write shows where it stands and no buttons", () => 
     assert.ok(!text(markup).includes("Time left"), `${patch.state}: no time left`);
   }
   assert.equal(api.answeredLine(WAITING), "");
+  assert.throws(() => api.answeredLine({ ...WAITING, state: "allowed", answered_ms: null }), /answer time/u, "an answer always has its time");
 });
 
 test("While an answer is on its way both buttons wait, and a failed answer says why", () => {
