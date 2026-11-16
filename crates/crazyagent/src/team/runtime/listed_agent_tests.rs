@@ -56,6 +56,7 @@ fn a_team_agent_of_a_listed_harness_runs_in_its_private_home_inside_the_agent_ho
         false,
     );
 
+    assert!(prepared.is_ok(), "{:?}", prepared.as_ref().err());
     let (_, _, mode) = prepared.unwrap();
     let Mode::Kept { account, .. } = &mode else {
         panic!("an endpoint agent is kept between turns");
@@ -98,6 +99,7 @@ fn a_team_agent_of_a_listed_harness_starts_with_its_accounts_hand_over() {
         false,
     );
 
+    assert!(prepared.is_ok(), "{:?}", prepared.as_ref().err());
     let (_, _, mode) = prepared.unwrap();
     let Mode::Kept { context, .. } = &mode else {
         panic!("an endpoint agent is kept between turns");
