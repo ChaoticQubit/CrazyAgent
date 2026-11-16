@@ -3050,6 +3050,26 @@ fn a_memory_pass_whose_walks_together_pass_its_budget_refuses_though_each_fits_a
     assert_eq!(memories_left(&projects), 1);
 }
 
+/// RESET-WALK-N1 code r1 F1: the removals one home pass makes spend its budget too, so two
+/// unwanted folders whose walks each fit the budget alone refuse together with one folder
+/// left, instead of each removal getting a fresh budget.
+#[cfg(unix)]
+#[test]
+fn a_home_pass_whose_folder_walks_together_pass_its_budget_refuses_though_each_fits_alone() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (home, opened) = walk_folder(&root, "home", 0);
+    for name in ["a", "b"] {
+        walk_folder(&home, name, 2);
+    }
+    let kept = [("kept", Kept::File)];
+
+    let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 5);
+
+    assert_eq!(reset, Err(AgentHomeError("agent_home_unwritable".into())));
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
+}
+
 /// RESET-WALK-N1 guard: a pass spends exactly a unit per name it lists and per name its
 /// walks list, so a budget of exactly those clears a home pass and a memory pass, and the
 /// next pass of each starts from a fresh budget.
