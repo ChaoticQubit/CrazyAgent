@@ -133,7 +133,7 @@ impl HostProcess {
                 Ok(0) => {
                     self.stdout = None;
                     self.reap()?;
-                    return Err(if self.pending.is_empty() {
+                    return Err(if self.pending.is_empty() || self.held() {
                         self.exit_error()
                     } else {
                         error("rcli_master_truncated_event")
@@ -206,7 +206,19 @@ impl HostProcess {
         Ok(())
     }
 
+    /// Tells whether the host was stopped by the Linux call supervisor because it could not
+    /// take back an entry read as a held name ([`crate::sandbox::held_stop`]). Input: the
+    /// process. Output: true for that exit, which outranks what the host left half written.
+    fn held(&self) -> bool {
+        let code = self.status.as_ref().and_then(ExitStatus::code);
+        code.and_then(|code| crate::sandbox::held_stop(std::env::consts::OS, code))
+            .is_some()
+    }
+
     fn exit_error(&self) -> ProtocolError {
+        if self.held() {
+            return error(crate::sandbox::HELD_STOP_CAUSE);
+        }
         error(match self.status.as_ref().and_then(ExitStatus::code) {
             Some(64) => "rcli_master_control_rejected",
             Some(70) => "rcli_master_execution_failed",

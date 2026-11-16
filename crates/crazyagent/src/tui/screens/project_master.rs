@@ -418,11 +418,11 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::WorktreeUncertain) => {
             "its copy of the project could not be checked. Close the master and open it again, then send again."
         }
+        Some(MasterReason::SandboxStopped) => {
+            "the sandbox stopped it because a protected name could not be put back."
+        }
         Some(MasterReason::Cancelled) => "you stopped this turn.",
-        Some(MasterReason::ApprovalRequired)
-        | Some(MasterReason::SandboxStopped)
-        | Some(MasterReason::Unknown)
-        | None => {
+        Some(MasterReason::ApprovalRequired) | Some(MasterReason::Unknown) | None => {
             if turn.phase == MasterTurnPhase::Cancelled {
                 "you stopped this turn."
             } else {

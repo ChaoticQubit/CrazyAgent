@@ -1520,6 +1520,7 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "master_project_scope_conflict"
         | "master_bootstrap_scope_conflict" => MasterReason::ConnectionChanged,
         "master_bootstrap_uncertain" => MasterReason::WorktreeUncertain,
+        crate::sandbox::HELD_STOP_CAUSE => MasterReason::SandboxStopped,
         code if code.starts_with("repository_config_refused:") => {
             MasterReason::RepositoryConfigRefused
         }

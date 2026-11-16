@@ -453,6 +453,11 @@ impl Fault {
         match self {
             Self::Host(code) => failure(code),
             Self::Protocol(error) => protocol_error(error),
+            Self::Exit(Some(code))
+                if crate::sandbox::held_stop(std::env::consts::OS, code).is_some() =>
+            {
+                failure(crate::sandbox::HELD_STOP_CAUSE)
+            }
             Self::Exit(Some(code)) => EngineError(format!("claude_host_native_exit_{code}")),
             Self::Exit(None) => failure("claude_host_native_exit_signal"),
         }

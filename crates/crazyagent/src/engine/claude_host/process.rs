@@ -264,13 +264,19 @@ impl Process {
                     std::thread::sleep(POLL_TIME);
                     continue;
                 }
-                if self.fault.is_none()
+                let code = self.status.and_then(|status| status.code());
+                let held = code
+                    .and_then(|code| crate::sandbox::held_stop(std::env::consts::OS, code))
+                    .is_some();
+                if held {
+                    self.fault = Some(Fault::Exit(code));
+                } else if self.fault.is_none()
                     && !(self.status.is_some_and(|status| status.success())
                         && self.completed_turns > 0
                         && self.protocol.state() == State::Idle
                         && self.frame.is_empty())
                 {
-                    self.fail(Fault::Exit(self.status.and_then(|status| status.code())));
+                    self.fail(Fault::Exit(code));
                 }
                 return;
             }

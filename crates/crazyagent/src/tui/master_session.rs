@@ -3296,7 +3296,8 @@ fn reason_text(reason: &MasterReason) -> &'static str {
             "Its copy of the project could not be checked: close it (F4), open it again (F2, Enter), then send again"
         }
         MasterReason::Cancelled => "Cancelled",
-        MasterReason::SandboxStopped | MasterReason::Unknown => "Something went wrong",
+        MasterReason::SandboxStopped => crate::sandbox::HELD_NOT_PUT_BACK,
+        MasterReason::Unknown => "Something went wrong",
     }
 }
 
