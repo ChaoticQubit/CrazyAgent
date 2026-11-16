@@ -560,8 +560,10 @@ test("a delete an engine stop cut short after 1 of its 2 folders shows on Home a
 });
 
 test("Keep the project on Home clears the project's cut-short banner, and the banner's Keep the project clears Home's row (DEC-177)", { timeout: 300000 }, async () => {
+  const deletes = async (projectId) => (await value(run.bridge, "desktop_recovery_banner", { projectId })).notices.filter((notice) => notice.action_kind === "project_delete").length;
   const first = await made("Kept From Home");
   await restart(() => sql(cutShortMark(first.id, "Kept From Home", 902, 2)));
+  assert.equal(await deletes(first.id), 1, "the project's banner shows the cut-short delete before Keep on Home");
   const fromHome = "Deleting Kept From Home was cut short with 1 of 2 folders in the Trash.";
   await onPage("delete-keep-home", async (page, me) => {
     await openHome(page);
@@ -571,6 +573,7 @@ test("Keep the project on Home clears the project's cut-short banner, and the ba
     await me.capture("delete-job-kept-home");
   });
   assert.equal(sql(`SELECT count(*) FROM ledger_actions WHERE kind='project_delete' AND action_key='${first.id}' AND outcome IS NULL`), "0", "Keep the project on Home ends the banner's mark");
+  assert.equal(await deletes(first.id), 0, "Keep the project on Home clears the project's cut-short banner");
   assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Keep the project forgets the job");
   const second = await made("Kept From Banner");
   await restart(() => sql(cutShortMark(second.id, "Kept From Banner", 903, 2)));
