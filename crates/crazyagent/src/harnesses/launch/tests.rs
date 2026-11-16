@@ -1843,6 +1843,7 @@ fn an_acp_harness_starts_headless_with_its_manifest_arguments_and_its_tools_off_
             "--no-tools".into()
         ])
     );
+}
 
 /// rv-secreview b6 r2 F1: a headless agent on pipes whose harness reaches its model through
 /// an engine key relay ends when that engine dies, a crash included, as a keyed pane does,
