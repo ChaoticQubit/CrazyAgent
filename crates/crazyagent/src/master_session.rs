@@ -828,9 +828,18 @@ pub(crate) fn backend_member(backend: MasterBackend, connection: &ModelConnectio
                 && matches!(connection.endpoint, ModelEndpoint::Native {})
         }
         MasterBackend::Listed(id) => {
-            listed_master(id).is_ok_and(|harness| harness.account_fits(connection))
+            listed_master(id).is_ok_and(|harness| listed_member(harness, connection))
         }
     }
+}
+
+/// Tells whether a listed master harness runs a master on a connection: an account the
+/// harness fits. Inputs: the harness and the connection. Output: the answer.
+fn listed_member(
+    harness: &crate::harnesses::registry::Harness,
+    connection: &ModelConnection,
+) -> bool {
+    harness.account_fits(connection)
 }
 
 #[cfg(test)]
@@ -863,7 +872,9 @@ mod cause_code_tests {
 
 #[cfg(test)]
 mod backend_tests {
-    use super::{MasterBackend, MasterSelection, backend_member, error, listed_master};
+    use super::{
+        MasterBackend, MasterSelection, backend_member, error, listed_master, listed_member,
+    };
     use crate::config::ModelConnection;
     use crate::protocol::CredentialRef;
     use crate::routing::{ResourceBudget, RouteRequest};
@@ -1098,5 +1109,26 @@ mod backend_tests {
         }
         let parsed = MasterBackend::parse("standin-acp");
         assert_eq!(parsed, Some(MasterBackend::Listed("standin-acp")));
+    }
+
+    /// DEC-180 Task 20 (T22 on the layer): a listed master runs only on an endpoint account,
+    /// never on a ChatGPT sign-in, even one its harness takes as an agent through the ChatGPT
+    /// relay, since a master's hand-over takes no sign-in.
+    #[test]
+    fn a_listed_master_harness_never_runs_a_master_on_a_chatgpt_sign_in() {
+        let text = include_str!("../tests/fixtures/harness/standin-acp.yaml");
+        let chat = "  - \"openai-chat\"\naccounts:\n";
+        assert!(text.contains(chat));
+        let responses = "  - \"openai-chat\"\n  - \"openai-responses\"\naccounts:\n  \
+                         openai-responses:\n    env:\n      OPENAI_API_KEY: \"{token}\"\n";
+        let text = text.replace(chat, responses);
+        let built = crate::harnesses::registry::Registry::build(&[("standin-acp", text.as_str())]);
+        assert!(built.is_ok(), "{:?}", built.as_ref().err());
+        let built = built.unwrap();
+        let harness = built.get("standin-acp").unwrap();
+        let signed_in = connection("codex", true);
+        assert!(harness.account_fits(&signed_in));
+        assert!(!listed_member(harness, &signed_in));
+        assert!(listed_member(harness, &connection("rcli", false)));
     }
 }
