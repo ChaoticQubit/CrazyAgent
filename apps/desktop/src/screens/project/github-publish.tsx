@@ -8,7 +8,7 @@ import { PublishFields, useGitHubPublish } from "../new-project/fields";
 import { createWait, emptyPublish, overviewWait, publishOutcome, startPublish, startReplyLost } from "../new-project/publish";
 import { emptyDraft } from "../new-project/wizard";
 import type { ProjectDraft } from "../new-project/wizard";
-import { DRAFT_POLL_MS, ENGINE_STARTING, PROMPT_LINE, PROMPT_NEVER, PROMPT_NOT_NOW, PROMPT_PUBLISH, PUBLISH_NOT_SEEN, discardable, forgetLostStart, leftLine, lostStartOver, lostStartSince, noticeShown, publishView, readKept } from "./publish-job";
+import { DRAFT_POLL_MS, ENGINE_STARTING, PROMPT_LINE, PROMPT_NEVER, PROMPT_NOT_NOW, PROMPT_PUBLISH, PUBLISH_NOT_SEEN, discardable, forgetLostStart, leftLine, lostStartSince, lostStartStep, noteLostStart, noticeShown, publishView, readKept } from "./publish-job";
 
 /** The New Project publish fields for a project made without them, opened by the Overview's
  * Publish: the visibility, account, repository name, description and docs switch, each name
@@ -49,8 +49,9 @@ function PublishForm({ projectId, name, about, onStarted, onCancel }: { projectI
  * reads the job again. With no publish it asks "This project is not on GitHub. Publish it?" when the engine
  * says to, with Publish, Not now and Don't ask again. After a Start whose reply was lost,
  * here or in Create, it reads the publish every two seconds with no question until a
- * publish shows, or says none showed once the Start's budget passed (GSB-1). Inputs: the
- * project's id, name and about. Output: the card, or nothing. */
+ * publish shows, or says none showed once the Start's budget passed and a read found none,
+ * also when opened again (GSB-1, GSB2). Inputs: the project's id, name and about. Output:
+ * the card, or nothing. */
 export function GitHubPublishCard({ projectId, name, about }: { projectId: string; name: string; about: string }) {
   const [read, setRead] = useState<Result<GitHubPublishJob | null> | null>(null);
   const [tick, setTick] = useState(0);
@@ -89,21 +90,16 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
   }, [projectId, noJob, lostSince]);
 
   useEffect(() => {
-    if (lostSince === null) return;
-    if (view.kind !== "none") {
-      forgetLostStart(projectId);
-      setLostSince(null);
-      return;
+    const step = lostStartStep(lostSince, answered, read, readFailed !== null, Date.now());
+    if (step === "idle") return;
+    if (step === "read") {
+      const timer = setTimeout(() => setTick((value) => value + 1), DRAFT_POLL_MS);
+      return () => clearTimeout(timer);
     }
-    if (lostStartOver(lostSince, Date.now())) {
-      forgetLostStart(projectId);
-      setLostSince(null);
-      setProblem(PUBLISH_NOT_SEEN);
-      return;
-    }
-    const timer = setTimeout(() => setTick((value) => value + 1), DRAFT_POLL_MS);
-    return () => clearTimeout(timer);
-  }, [lostSince, view.kind, answered]);
+    forgetLostStart(projectId);
+    setLostSince(null);
+    if (step === "over") setProblem(PUBLISH_NOT_SEEN);
+  }, [projectId, lostSince, answered, read, readFailed]);
 
   useEffect(() => {
     if (view.kind !== "drafting") return;
@@ -142,7 +138,11 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
     if (!made) {
       setProblem(line);
       setTick((value) => value + 1);
-      if (lost) setLostSince(Date.now());
+      if (lost) {
+        const at = Date.now();
+        noteLostStart(projectId, at);
+        setLostSince(at);
+      }
       return;
     }
     setForm(false);
