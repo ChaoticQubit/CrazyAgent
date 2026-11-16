@@ -499,6 +499,17 @@ test("Connectors: Settings, Connectors saves each option through the page, adds 
   };
   await t.test("conn sign_in_with browser", () => signInWith("Browser", "browser"));
   await t.test("conn sign_in_with key", () => signInWith("Key", "key"));
+  await t.test("conn own_app", async () => {
+    const secret = "desk_e2e_synthetic_app_secret";
+    const view = await value(bridge, "desktop_connector_set_own_app", { name: "desk", clientId: "desk-e2e-client", secret });
+    assert.ok(!JSON.stringify(view).includes(secret), "the page read never holds the secret");
+    await until("Desk's own app in the engine", { client_id: "desk-e2e-client", secret_saved: true }, async () => (await listedConnector("desk"))?.oauth?.own_app ?? null);
+    await connectorPage("desk", "Desk", (text) => text.includes("Client id: desk-e2e-client") && text.includes("Client secret: saved"));
+    assert.ok(!(await page.evaluate("document.body.innerText")).includes(secret), "the page never shows the secret");
+    await me.capture("conn-own-app");
+    await value(bridge, "desktop_connector_clear_own_app", { name: "desk" });
+    await until("Desk's own app removed", null, async () => (await listedConnector("desk"))?.oauth?.own_app ?? null);
+  });
   await t.test("conn sign_in_with remove", async () => {
     await value(bridge, "desktop_connector_remove", { name: "desk" });
     await until("Desk gone", null, () => listedConnector("desk"));

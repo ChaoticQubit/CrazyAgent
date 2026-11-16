@@ -6,8 +6,8 @@ use crate::app_plugins::{
 };
 use crate::connectors::sign_in::SignInState;
 use crate::connectors::{
-    ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, OAuthView, SignIn,
-    SignInWith, SizeCap, Wait, WritePolicy,
+    ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, OAuthView, OwnAppView,
+    SignIn, SignInWith, SizeCap, Wait, WritePolicy,
 };
 use crate::engine::owner::ConnectorsSaved;
 use crate::tui::client::OwnerEvent;
@@ -22,6 +22,7 @@ use crate::tui::theme::Role;
 const SHA: &str = "c0ffee";
 const TYPED_KEY: &str = "lin-secret-typed";
 const LINK: &str = "https://vendor.example/authorize?state=s1";
+const APP_SECRET: &str = "gh-app-secret-typed";
 
 fn secret(name: &str, binding: Binding) -> SecretView {
     SecretView {
@@ -1494,4 +1495,184 @@ fn while_one_sign_in_waits_another_connector_says_to_finish_it_first() {
     assert!(read_all(&one(&mut shell)));
     arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
     assert!(shows(&mut shell, "s Sign in") && !shows(&mut shell, first));
+}
+
+fn tall(shell: &mut Shell, text: &str) -> bool {
+    render(shell, 100, 48).iter().any(|row| row.contains(text))
+}
+
+/// The page with GitHub offering both ways under the way given, with the owner's own app
+/// saved, and whether its file still offers one.
+fn own_app_saved(way: SignInWith, allowed: bool) -> ConnectorsView {
+    let mut read = both(way);
+    let oauth = read.connectors[1]
+        .oauth
+        .as_mut()
+        .expect("GitHub offers both");
+    oauth.own_app_allowed = allowed;
+    oauth.own_app = Some(OwnAppView {
+        client_id: "Iv1.app".into(),
+        secret_saved: true,
+    });
+    read
+}
+
+/// Task 10 pages slice B (addendum 30 Q4 A): a connector whose file offers an own app shows
+/// the section with the redirect and any port; `o` opens the form, a client id is needed and
+/// trimmed, the typed secret is masked and leaves only inside the job, an empty secret is a
+/// public app's none, and the page confirms with words that never hold the secret.
+#[test]
+fn o_saves_an_own_app_and_its_secret_leaves_only_inside_the_job() {
+    let mut shell = page(both(SignInWith::Browser));
+    keys(&mut shell, &[Key::Down, Key::Enter]);
+    assert!(tall(&mut shell, "Your own OAuth app"));
+    assert!(tall(
+        &mut shell,
+        "Redirect: http://127.0.0.1/callback (any port)"
+    ));
+    assert!(tall(&mut shell, "No app saved."));
+    assert!(
+        tall(&mut shell, "signs the connector out"),
+        "the help says what saving does"
+    );
+    assert!(tall(&mut shell, "o Use my own app") && !tall(&mut shell, "d Remove my app"));
+    keys(&mut shell, &[Key::Char('o')]);
+    assert!(tall(&mut shell, "Your own OAuth app for GitHub"));
+    assert!(tall(
+        &mut shell,
+        "Redirect: http://127.0.0.1/callback (any port)"
+    ));
+    assert!(tall(&mut shell, "never shown again"));
+    keys(&mut shell, &[Key::Enter]);
+    assert!(
+        requests(&mut shell).is_empty(),
+        "no client id, nothing sent"
+    );
+    assert!(tall(&mut shell, "Enter a client id."));
+    typed(&mut shell, "  Iv1.app  ");
+    keys(&mut shell, &[Key::Tab]);
+    typed(&mut shell, APP_SECRET);
+    for size in [(80, 24), (100, 48)] {
+        let rows = render(&mut shell, size.0, size.1);
+        assert!(!rows.iter().any(|row| row.contains("gh-app")), "{size:?}");
+    }
+    keys(&mut shell, &[Key::Enter]);
+    let job = one(&mut shell);
+    assert_eq!(format!("{job:?}"), "ConnectorSetOwnApp");
+    assert!(
+        matches!(
+            job,
+            ConnectorsJob::SetOwnApp { ref name, ref client_id, secret: Some(_) }
+                if name == "github" && client_id == "Iv1.app"
+        ),
+        "the client id is trimmed and the secret sent"
+    );
+    let saved = own_app_saved(SignInWith::Browser, true);
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(saved)));
+    assert!(said(&shell).contains("GitHub signs in with your own app."));
+    assert!(!said(&shell).contains("gh-app"));
+    assert!(tall(&mut shell, "Client id: Iv1.app") && tall(&mut shell, "Client secret: saved"));
+    assert!(tall(&mut shell, "d Remove my app") && tall(&mut shell, "o Use my own app"));
+    assert!(
+        !render(&mut shell, 100, 48)
+            .iter()
+            .any(|row| row.contains("gh-app"))
+    );
+
+    let mut shell = page(both(SignInWith::Browser));
+    keys(&mut shell, &[Key::Down, Key::Enter, Key::Char('o')]);
+    typed(&mut shell, "Iv1.public");
+    keys(&mut shell, &[Key::Enter]);
+    assert!(
+        matches!(
+            one(&mut shell),
+            ConnectorsJob::SetOwnApp { secret: None, .. }
+        ),
+        "an empty secret is a public app's none"
+    );
+    let finishing = "connector_oauth_sign_in_finishing";
+    arrive(&mut shell, ConnectorsEvent::Page(Err(finishing.into())));
+    assert!(
+        tall(&mut shell, &refusal(finishing)),
+        "the form says to wait"
+    );
+    assert!(
+        tall(&mut shell, "Your own OAuth app for GitHub"),
+        "and stays open"
+    );
+}
+
+/// Task 10 pages slice B: `d` removes a saved own app whichever way the connector signs in,
+/// also where its file no longer offers one, so a stale secret can always go (addendum 30);
+/// such a file sets none up, a connector with none has no section, and a finishing sign-in
+/// says to wait.
+#[test]
+fn d_removes_the_own_app_even_where_the_file_no_longer_offers_one() {
+    let mut shell = page(own_app_saved(SignInWith::Key, false));
+    keys(&mut shell, &[Key::Down, Key::Enter]);
+    assert!(tall(&mut shell, "Client id: Iv1.app") && tall(&mut shell, "d Remove my app"));
+    assert!(!tall(&mut shell, "o Use my own app"));
+    keys(&mut shell, &[Key::Char('o')]);
+    assert!(requests(&mut shell).is_empty());
+    assert!(
+        !tall(&mut shell, "Your own OAuth app for GitHub"),
+        "no form opens"
+    );
+    keys(&mut shell, &[Key::Char('d')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::ClearOwnApp { ref name } if name == "github"
+    ));
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(both(SignInWith::Key))));
+    assert!(said(&shell).contains("GitHub no longer uses your own app."));
+    assert!(!tall(&mut shell, "d Remove my app"));
+
+    let finishing = "connector_oauth_sign_in_finishing";
+    let mut shell = page(own_app_saved(SignInWith::Browser, true));
+    keys(&mut shell, &[Key::Down, Key::Enter, Key::Char('d')]);
+    one(&mut shell);
+    arrive(&mut shell, ConnectorsEvent::Page(Err(finishing.into())));
+    assert!(said(&shell).contains(&refusal(finishing)));
+
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::Enter]);
+    assert!(!tall(&mut shell, "Your own OAuth app"));
+    keys(&mut shell, &[Key::Char('o'), Key::Char('d')]);
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a connector with no own app has none"
+    );
+}
+
+/// Task 10 pages slice B: saving an own app while that connector's sign-in waits goes out,
+/// and the engine's cancel of that sign-in is read and said on the next refresh.
+#[test]
+fn saving_an_own_app_while_its_sign_in_waits_ends_that_sign_in() {
+    let mut shell = page(both(SignInWith::Browser));
+    keys(&mut shell, &[Key::Down, Key::Enter, Key::Char('s')]);
+    one(&mut shell);
+    let url = LINK.to_owned();
+    let started = SignInStarted { url, opened: true };
+    let name = "github".to_owned();
+    arrive(
+        &mut shell,
+        ConnectorsEvent::SignIn {
+            name: name.clone(),
+            result: Ok(started),
+        },
+    );
+    keys(&mut shell, &[Key::Char('o')]);
+    typed(&mut shell, "Iv1.app");
+    keys(&mut shell, &[Key::Enter]);
+    assert!(matches!(one(&mut shell), ConnectorsJob::SetOwnApp { .. }));
+    let saved = own_app_saved(SignInWith::Browser, true);
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(saved)));
+    shell.refresh();
+    assert!(matches!(one(&mut shell), ConnectorsJob::SignInState { .. }));
+    let cancelled = ConnectorsEvent::SignInState {
+        name,
+        result: Ok(SignInState::Cancelled),
+    };
+    arrive(&mut shell, cancelled);
+    assert!(said(&shell).contains("The sign-in was cancelled."));
 }
