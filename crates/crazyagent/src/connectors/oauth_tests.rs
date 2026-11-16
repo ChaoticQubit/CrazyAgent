@@ -1354,6 +1354,61 @@ fn saving_another_own_app_ends_the_sign_in_made_with_the_last_one() {
     );
 }
 
+/// Saving an own app changes how the connector signs in, so a sign-in made by registration
+/// ends too: its tokens are not used with the new app, a sign-in begun by registration is
+/// never redeemed, and one Action item asks the owner to sign in again.
+#[test]
+fn saving_an_own_app_ends_a_sign_in_made_by_registration() {
+    let mut sign = prepared(
+        Shape {
+            register: Some("{base}/register"),
+            ..shape()
+        },
+        &["127.0.0.1"],
+        &[Registration::Own, Registration::Dcr],
+        None,
+    );
+    let pending = begun(&sign, false);
+    assert_eq!(query(&pending.authorize_url)["client_id"], DCR_CLIENT);
+    let waiting = begun(&sign, false);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    let sent = sign.vendor.seen().len();
+    assert_eq!(
+        set_own_client(
+            &sign.case.db,
+            &sign.case.root,
+            "board",
+            CLIENT,
+            Some(SECRET)
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        fresh_at(&sign, clock()),
+        Err(OAuthError("connector_sign_in_needed")),
+        "a registered client's tokens are not used once an own app is saved"
+    );
+    assert_eq!(
+        finished(&sign, &waiting.state, Some(&sign.issuer())),
+        Err(OAuthError("connector_oauth_state_unknown")),
+        "a sign-in begun by registration is never redeemed after the save"
+    );
+    assert_eq!(sign.vendor.seen().len(), sent);
+    assert!(saved(&sign.case, "connector-token-board-").is_empty());
+    assert_eq!(
+        notices(&mut sign.case),
+        vec![(
+            NoticeKind::ConnectorSignIn,
+            NoticeClass::Action,
+            "Board needs you to sign in again.".to_owned(),
+            json!({"page": "connectors"}),
+        )]
+    );
+}
+
 /// The Action items waiting on the owner after one reconcile, as kind, class, text and
 /// the page a click opens.
 fn notices(case: &mut Case) -> Vec<(NoticeKind, NoticeClass, String, serde_json::Value)> {
