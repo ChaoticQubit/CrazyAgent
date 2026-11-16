@@ -278,10 +278,16 @@ impl NativeBridge {
     /// without the bridge lock. Inputs: the connector and the way. Output: the page.
     pub fn connector_set_sign_in_with(
         &self,
-        _name: String,
-        _way: SignInWith,
+        name: String,
+        way: SignInWith,
     ) -> Result<Unlocked<ConnectorsView>, BridgeError> {
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_set_sign_in_with(name, way)
+                .await
+                .map_err(connector_error)
+        }))
     }
 
     /// What the Connectors page says each harness reaches, one row per harness kind in

@@ -3641,6 +3641,20 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state) .await? .connector_grant(project, connector, enabled, who)?; call.await }.await;
             routed(result)
         }
+        "desktop_connector_set_sign_in_with" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+                way: crazyagent::connectors::SignInWith,
+            }
+            let Args { name, way } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_set_sign_in_with(name, way)?; call.await }.await;
+            routed(result)
+        }
         "desktop_connector_reach" => {
             let result: Result<_, BridgeError> = async { Ok(read(state).await?.connector_reach()) }.await;
             routed(result)

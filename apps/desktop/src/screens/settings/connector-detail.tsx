@@ -1,4 +1,4 @@
-import { CONNECTORS_PAGE, connectorState, originLine, reachesLine, type ConnectorView } from "../../api-connectors";
+import { CONNECTORS_PAGE, SIGN_IN_WITH_CHOICES, chosenWay, connectorState, keysShown, originLine, reachesLine, type ConnectorView } from "../../api-connectors";
 import { Button, Notice, StatusBadge, formatRoute } from "../../ui";
 import { secretLine } from "./app-plugins";
 import type { ConnectorActions } from "./connectors";
@@ -6,10 +6,10 @@ import type { ConnectorActions } from "./connectors";
 const BACK = formatRoute({ name: "settings", tab: "connectors" });
 
 /** A connector's own page in Settings, Connectors: the way back, its title, where it came
- * from, its state, every host it reaches, each secret with Set key or Clear key, Review and
- * Remove; a refused file shows only its reason and where to remove it. Inputs: the name
- * the route opened, the connector when listed, a busy flag, the last failure and the
- * actions. Output: the page. */
+ * from, its state, every host it reaches, Sign in with Key or Browser where its file offers
+ * both, each secret with Set key or Clear key while it signs in with a key, Review and
+ * Remove; a refused file shows only its reason and where to remove it. Inputs: the name,
+ * the connector when listed, a busy flag, the last failure and the actions. Output: the page. */
 export function ConnectorDetailView({ name, connector, busy, failure, actions }: {
   name: string;
   connector: ConnectorView | null;
@@ -20,7 +20,8 @@ export function ConnectorDetailView({ name, connector, busy, failure, actions }:
   const back = <a href={BACK}>{CONNECTORS_PAGE.back}</a>;
   if (connector === null) return <div className="pj-stack">{back}<p>{`No connector named ${name}.`}</p></div>;
   const state = connectorState(connector);
-  const keys = connector.sign_in === "key";
+  const keys = keysShown(connector);
+  const way = chosenWay(connector);
   const refused = connector.status.kind === "refused";
   const runs = connector.runs;
   return <div className="pj-stack">
@@ -36,6 +37,14 @@ export function ConnectorDetailView({ name, connector, busy, failure, actions }:
       {refused && <p className="small">{CONNECTORS_PAGE.refusedFile}</p>}
       {runs && <p className="small">{reachesLine(runs.hosts)}</p>}
       {runs && <p className="small">{`Address: ${runs.url}`}</p>}
+      {way !== null && <fieldset className="notice-choices" disabled={busy} data-setting="sign_in_with">
+        <legend>{CONNECTORS_PAGE.signInWith}</legend>
+        {SIGN_IN_WITH_CHOICES.map((option) => <label key={option.choice} className={option.choice === way ? "on" : undefined}>
+          <input type="radio" name="connector-sign-in-with" value={option.choice} checked={option.choice === way} onChange={() => actions.onSignInWith(connector, option.choice)} />
+          {option.label}
+        </label>)}
+      </fieldset>}
+      {way !== null && <p className="small muted">{CONNECTORS_PAGE.signInWithHelp}</p>}
       {keys && connector.secrets.length > 0 && <ul className="pj-rows" aria-label={`Secrets of ${connector.title}`}>{connector.secrets.map((secret) => <li key={secret.name} className="pj-row between">
         <span>{secretLine(secret)}</span>
         {secret.binding.kind === "none"

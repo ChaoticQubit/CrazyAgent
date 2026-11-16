@@ -1,7 +1,9 @@
 use crate::app_plugins::{
     Binding, Origin, PluginStatus, ReadOnlyTrust, RunsView, SecretView, TrustView,
 };
-use crate::connectors::{ConnectorView, NativeConnectors, SignIn, SizeCap, Wait, WritePolicy};
+use crate::connectors::{
+    ConnectorView, NativeConnectors, SignIn, SignInWith, SizeCap, Wait, WritePolicy,
+};
 use crate::tui::screens::settings::app_plugins::{problem_text, safe};
 use crate::tui::screens::settings::connector_activity::problem_words;
 use crate::tui::theme::Role;
@@ -79,6 +81,15 @@ pub(in crate::tui) const STALE: &str =
 /// The line a connector that only signs in with OAuth shows in place of its keys.
 pub(in crate::tui) const OAUTH_NOT_YET: &str =
     "Signs in with OAuth, which this build does not have.";
+/// The label of the way a connector that offers a key and a browser sign-in signs in, the
+/// desktop's words (QUESTION-23:34 Q1).
+pub(in crate::tui) const SIGN_IN_WITH: &str = "Sign in with";
+/// The line under Sign in with, the desktop's words (QUESTION-23:34 Q1).
+pub(in crate::tui) const SIGN_IN_WITH_HELP: &str =
+    "Only the way you choose is used; the other stays saved.";
+/// The line `k` says on a connector that signs in with the browser now (QUESTION-23:34 Q1).
+pub(in crate::tui) const BROWSER_NO_KEY: &str =
+    "This connector signs in with the browser now. Press w to use its key.";
 /// The connector page's way back to the catalog (WORDS r4).
 pub(in crate::tui) const BACK: &str = "All connectors";
 /// The add dialog's title (WORDS r4).
@@ -266,6 +277,46 @@ pub(in crate::tui) fn state(connector: &ConnectorView) -> (&'static str, Role, O
         ),
         PluginStatus::Ready => (READY, Role::Success, None),
     }
+}
+
+/// The way a connector whose file offers a key and a browser sign-in signs in now, or
+/// `None` for a connector with one way, which has nothing to switch. Input: the connector.
+/// Output: the way.
+pub(in crate::tui) fn chosen_way(connector: &ConnectorView) -> Option<SignInWith> {
+    match (&connector.sign_in, &connector.oauth) {
+        (SignIn::Both, Some(oauth)) => Some(oauth.using),
+        _ => None,
+    }
+}
+
+/// Whether a connector's page shows and sets its keys, as on the desktop: one that signs in
+/// with a key, or offers both and signs in with its key now. Input: the connector. Output:
+/// the answer.
+pub(in crate::tui) fn keys_shown(connector: &ConnectorView) -> bool {
+    connector.sign_in == SignIn::Key || chosen_way(connector) == Some(SignInWith::Key)
+}
+
+/// A way's word, the desktop's choice label. Input: the way. Output: "Key" or "Browser".
+pub(in crate::tui) fn way_word(way: SignInWith) -> &'static str {
+    match way {
+        SignInWith::Key => "Key",
+        SignInWith::Browser => "Browser",
+    }
+}
+
+/// The way `w` switches a connector that offers both to. Input: the way now. Output: the
+/// other way.
+pub(in crate::tui) fn other_way(way: SignInWith) -> SignInWith {
+    match way {
+        SignInWith::Key => SignInWith::Browser,
+        SignInWith::Browser => SignInWith::Key,
+    }
+}
+
+/// The line a chosen way is confirmed with, the desktop's `signsInWithLine`. Inputs: the
+/// connector's title and the way. Output: such as "GitHub signs in with Browser.".
+pub(in crate::tui) fn signs_in_with(title: &str, way: SignInWith) -> String {
+    format!("{} signs in with {}.", safe(title), way_word(way))
 }
 
 /// Where one secret's key comes from, never the key. Input: the secret. Output: the line.

@@ -3,9 +3,9 @@ import type { Result } from "../../api";
 import { pickAppPluginFile, problemText, type Problem } from "../../api-app-plugins";
 import {
   CONNECTOR_DEFAULTS, CONNECTORS_PAGE, NATIVE_CHOICES, SIZE_CHOICES, WAIT_CHOICES, WRITE_CHOICES, addConnector, clearConnectorKey, connectorState, keyLine, loadConnectorReach, loadConnectors,
-  originLine, reachesLine, removeConnector, reviewConnector, previewConnector, saveConnectorSettings, setConnectorKey, settingsToSave, trustConnector, trustLines,
-  type ConnectorPreview, type ConnectorView, type ConnectorsView, type ConnectorTrustView, type NativeConnectors, type SettingPicks, type SizeCap,
-  type Wait, type WritePolicy,
+  originLine, reachesLine, removeConnector, reviewConnector, previewConnector, saveConnectorSettings, setConnectorKey, setConnectorSignInWith, settingsToSave, signsInWithLine,
+  trustConnector, trustLines, type ConnectorPreview, type ConnectorView, type ConnectorsView, type ConnectorTrustView, type NativeConnectors, type SettingPicks, type SignInWith,
+  type SizeCap, type Wait, type WritePolicy,
 } from "../../api-connectors";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, SecretField, SettingLine, SettingSection, Skeleton, StatusBadge, TextArea, formatRoute, navigate } from "../../ui";
@@ -44,6 +44,7 @@ export interface ConnectorActions {
   onClearKey: (name: string, secret: string) => void;
   onPickWrite: (write: WritePolicy) => void;
   onPickWait: (wait: Wait) => void;
+  onSignInWith: (connector: ConnectorView, way: SignInWith) => void;
   onPickNative: (native: NativeConnectors) => void;
   onPickSize: (sizeCap: SizeCap) => void;
   onSave: () => void;
@@ -405,6 +406,7 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     onClearKey: (name, secret) => { if (!busy) void changed(() => clearConnectorKey(name, secret), `${secret} no longer has a key.`); },
     onPickWrite: (choice) => { setWrite(choice); setProblem(""); },
     onPickWait: (choice) => { setWait(choice); setProblem(""); },
+    onSignInWith: (shown, way) => { if (!busy) void changed(() => setConnectorSignInWith(shown.name, way), signsInWithLine(shown.title, way)); },
     onPickNative: (choice) => { setNative(choice); setProblem(""); },
     onPickSize: (choice) => { setSizeCap(choice); setProblem(""); },
     onSave: () => { if (!saving && !reading) void save(); },

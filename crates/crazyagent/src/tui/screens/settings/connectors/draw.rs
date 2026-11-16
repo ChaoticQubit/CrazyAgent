@@ -1,9 +1,10 @@
 use super::words::{
     ADD_HELP, ADD_TITLE, CATALOG, CATALOG_ABOUT, HARNESSES, HARNESSES_ABOUT, KEY_HELP,
     LOCKED_LABEL, LOCKED_REASON, LOCKED_VALUE, NATIVE_CHOICES, NATIVE_HELP, NATIVE_LABEL, PURPOSE,
-    REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS, SIZE_CHOICES, SIZE_HELP,
-    SIZE_LABEL, WAIT_CHOICES, WAIT_HELP, WAIT_LABEL, WRITE_CHOICES, WRITE_HELP, WRITE_LABEL,
-    origin_line, reaches_line, refusal, secret_line, state, trust_lines,
+    REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS, SIGN_IN_WITH,
+    SIGN_IN_WITH_HELP, SIZE_CHOICES, SIZE_HELP, SIZE_LABEL, WAIT_CHOICES, WAIT_HELP, WAIT_LABEL,
+    WRITE_CHOICES, WRITE_HELP, WRITE_LABEL, chosen_way, keys_shown, origin_line, reaches_line,
+    refusal, secret_line, state, trust_lines, way_word,
 };
 use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, Row, TITLE, refused};
 use crate::app_plugins::{RunsView, TrustView};
@@ -321,10 +322,20 @@ impl ConnectorsPage {
             let address = format!("Address: {}", safe(url));
             lines.extend(wrap(&address, width).into_iter().map(Line::raw));
         }
+        if let Some(way) = chosen_way(connector) {
+            let chosen = format!("{SIGN_IN_WITH}: {}", way_word(way));
+            lines.extend(wrap(&chosen, width).into_iter().map(Line::raw));
+            lines.extend(muted(SIGN_IN_WITH_HELP, width, ctx));
+        }
         self.failure_lines(&mut lines, width, ctx);
         lines.push(Line::default());
+        let secrets = if keys_shown(connector) {
+            connector.secrets.as_slice()
+        } else {
+            &[]
+        };
         let mut spans = Vec::new();
-        for (at, secret) in connector.secrets.iter().enumerate() {
+        for (at, secret) in secrets.iter().enumerate() {
             let first = if at == 0 { 0 } else { lines.len() };
             spans.push((first, lines.len()));
             let text = Line::raw(secret_line(secret));
