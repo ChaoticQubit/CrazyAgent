@@ -2941,6 +2941,10 @@ mod tests {
         assert_eq!(flag_values(&words, GUARD_HELD), guarded.entries);
         assert_eq!(flag_values(&words, GUARD_HELD_TREE), guarded.trees);
         assert_eq!(flag_values(&words, GUARD_HELD_STORE), guarded.stores);
+        assert!(
+            flag_values(&words, OWN_TREE).contains(&clone),
+            "the clone's own top-level .git is the agent's"
+        );
         let objects = clone.join(".git").join("objects");
         assert_eq!(guarded.stores, vec![objects.clone()]);
         assert!(guarded.entries.contains(&objects.join("ff")));
