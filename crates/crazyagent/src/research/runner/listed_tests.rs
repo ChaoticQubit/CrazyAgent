@@ -199,3 +199,36 @@ fn a_research_job_on_a_listed_acp_harness_at_full_access_ends_at_once_in_plain_w
     assert!(error.contains("Full access"), "{error}");
     assert!(!error.contains('_'), "a plain line, not a code: {error}");
 }
+
+/// T19b 19b-4 (QUESTION-0100 Q6): a run a listed harness can never take ends before it
+/// starts with a plain line that spends no second attempt: Full access, and tools off on a
+/// harness whose manifest says its tools cannot be switched off; tools on, or tools off on a
+/// harness that switches them off, starts.
+#[test]
+fn a_listed_research_run_its_harness_can_never_take_is_refused_in_plain_words_before_it_starts() {
+    const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-acp.yaml");
+    let limited = STANDIN.replace(
+        "sub_agents: \"app\"\n",
+        "sub_agents: \"app\"\ntools_limited: \"Tools cannot be switched off.\"\n",
+    );
+    assert_ne!(limited, STANDIN);
+    let parse = |text: &str| crate::harnesses::manifest::parse(text.as_bytes()).unwrap();
+    let (standin, limited) = (parse(STANDIN), parse(&limited));
+
+    let off = listed_refusal(&limited, AgentAccess::Sandboxed, false);
+
+    assert_eq!(off, Some(LISTED_TOOLS_OFF));
+    assert_eq!(listed_refusal(&limited, AgentAccess::Sandboxed, true), None);
+    assert_eq!(
+        listed_refusal(&standin, AgentAccess::OwnBranch, false),
+        None
+    );
+    assert_eq!(
+        listed_refusal(&standin, AgentAccess::Full, true),
+        Some(LISTED_FULL_ACCESS)
+    );
+    for line in [LISTED_TOOLS_OFF, LISTED_FULL_ACCESS] {
+        assert!(owner_refusal(line), "{line}");
+        assert!(!line.contains('_'), "{line}");
+    }
+}

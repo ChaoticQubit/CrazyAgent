@@ -192,6 +192,24 @@ pub fn listed_research_words(id: &str, research: bool) -> Option<&'static str> {
 /// of, so the job ends at once and spends no second attempt.
 const LISTED_FULL_ACCESS: &str = "This harness gets its account inside the sandbox, so its research can't run at Full access. Pick another access level for this project, or run research on Codex or Claude Code.";
 
+/// The line a research job on a listed harness ends with when it runs with tools off and the
+/// harness's manifest says its tools cannot be switched off (T19b 19b-4, QUESTION-0100 Q6).
+const LISTED_TOOLS_OFF: &str = "This harness can't switch its tools off, so this research job can't run on it. Turn tools on for the job, or run it on Codex or Claude Code.";
+
+/// The plain line a research job on a listed harness ends with before it starts, for a run
+/// its harness can never take (T19b 19b-4, QUESTION-0100 Q6): Full access, which has no
+/// sandbox for its account to go over through, or tools off on a harness whose tools cannot
+/// be switched off. Inputs: the manifest, the access level and the tools switch. Output: the
+/// line, none for a run it can take.
+fn listed_refusal(
+    manifest: &crate::harnesses::manifest::Manifest,
+    access: AgentAccess,
+    tools: bool,
+) -> Option<&'static str> {
+    let _ = (manifest, access, tools);
+    None
+}
+
 /// The line a read-only run on a listed harness ends with (T19b 19b-4, QUESTION-0100 Q5):
 /// project mapping, roadmap status checks and the Overview run on Codex or Claude Code only.
 const LISTED_READ_ONLY: &str = "This harness runs research jobs only. Project mapping, roadmap status checks and the Overview run on Codex or Claude Code.";
