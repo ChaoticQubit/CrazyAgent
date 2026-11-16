@@ -247,11 +247,9 @@ pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>,
             let home = request.account.home();
             let bytes = key.reveal().as_bytes();
             if crate::launch_context::listed_home(&request.harness) {
-                super::render::put_key(home, bytes)
-                    .map(|path| KeyFile::listed(path, bytes))
+                super::render::put_key(home, bytes).map(|path| KeyFile::listed(path, bytes))
             } else {
-                interactive::write_key(home, key)
-                    .map(|path| KeyFile::new(path, bytes))
+                interactive::write_key(home, key).map(|path| KeyFile::new(path, bytes))
             }
         })
         .transpose()
