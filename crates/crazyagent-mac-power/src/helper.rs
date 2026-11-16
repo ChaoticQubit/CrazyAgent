@@ -222,7 +222,9 @@ impl Helper {
     /// non-system console user. Ends every lease and puts sleep back first. The pin stays, on
     /// disk and in memory, while the journal cannot be read (opened again here, so a journal
     /// the owner removed no longer blocks it) or a value is still not put back, so the engine
-    /// keeps reporting it instead of unregistering. Output: the reply.
+    /// keeps reporting it instead of unregistering. A pin file that cannot be removed is a
+    /// third refusal: the in-memory pin is dropped only once the file is gone, and the reply
+    /// is `journal_unreadable` with `Read` still saying `journal_ok`. Output: the reply.
     fn forget(&mut self, holder: Holder, lid: Option<Lid>) -> Reply {
         let allowed = match self.pin {
             Pin::Uid(uid) => uid == holder.euid,
@@ -250,10 +252,12 @@ impl Helper {
                 reason: Refusal::Pmset,
             };
         }
-        self.pin = Pin::None;
         let folder = journal::checked_folder(&self.config.folder, self.config.owner_uid);
         match folder.and_then(|folder| pin::forget(&folder)) {
-            Ok(()) => Reply::Forgotten,
+            Ok(()) => {
+                self.pin = Pin::None;
+                Reply::Forgotten
+            }
             Err(error) => {
                 ffi::log(&format!("pin file not removed: {error:?}"));
                 Reply::Refused {
