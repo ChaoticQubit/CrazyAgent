@@ -702,6 +702,7 @@ enum Ending {
 fn watch(key: u64, mut lineage: Lineage) {
     let begun = Instant::now();
     let mut termed: Option<Instant> = None;
+    let mut checked = false;
     while let Some(state) = state_of(key) {
         let signal = match (state, termed) {
             (HoldState::Ending, None) => Some(Ending::Term),
@@ -712,7 +713,7 @@ fn watch(key: u64, mut lineage: Lineage) {
         if signal == Some(Ending::Term) && read.is_some() {
             termed = Some(Instant::now());
         }
-        let checked = read == Some(true);
+        checked = read == Some(true);
         assert_eq!(checked, !lineage.unchecked);
         if lineage.known.is_empty() && (checked || begun.elapsed() >= UNCHECKED_HOLD_MAX) {
             break;
@@ -725,6 +726,13 @@ fn watch(key: u64, mut lineage: Lineage) {
             HOLD_POLL
         });
     }
+    end_hold(key, checked);
+}
+
+/// Ends one hold once its watcher stops: removes it and drops what it keeps. Inputs: the
+/// hold's key and whether its last pass was checked. Output: none.
+fn end_hold(key: u64, checked: bool) {
+    let _ = checked;
     let ended = held().remove(&key);
     drop(ended);
 }
@@ -3027,6 +3035,124 @@ pub(crate) mod tests {
             .or_else(|| payload.downcast_ref::<String>().cloned());
         assert_eq!(text.as_deref(), Some("a listed run belongs to a project"));
         assert!(after.is_empty(), "a refused listed hold kept its listing");
+    }
+
+    /// SA-VID14-KEEP-SLOTS r1 F1: a kept run whose process handed off to a child its parent
+    /// left, as a daemon does, stays on the hidden folders list while that child runs: before
+    /// a listed hold ends with nothing known, its watcher scans for the launch's token once
+    /// more and finds the child, and frees the run's place once the child ends too.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_kept_run_whose_process_handed_off_to_an_orphan_stays_on_the_hidden_folders_list() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let project = "keep-slots-handed-off";
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        let ids = |names: &str| -> Vec<String> {
+            names
+                .split(", ")
+                .filter_map(|one| one.split(' ').next())
+                .map(str::to_owned)
+                .collect()
+        };
+        let folder = tempfile::tempdir().unwrap();
+        let ours = LineageToken::new().unwrap();
+        let mut leftover = session_sleeper(false);
+        let pid = i32::try_from(leftover.id()).unwrap();
+        let (_, orphan) = detached(folder.path(), "orphan.pid", &ours, ("UNUSED", "x"));
+        let mut lineage = Lineage::of_sandboxed(leftover.id(), Some(ours)).unwrap();
+        lineage.scanned = true;
+        let known: Vec<i32> = lineage.known.iter().map(|process| process.pid).collect();
+        let listed = starting(RunKind::Research, project).expect("the list has room");
+        listed.hid(&[]);
+        Leftovers(Box::new(lineage)).hold_listed(
+            None,
+            (),
+            listed,
+            by_in(project),
+            LeftoverMode::Keep,
+        );
+        end_pid(pid);
+        let _ = leftover.wait();
+        let named = within(HOLD_POLL * 3, || {
+            held_in(project)
+                .iter()
+                .any(|hold| ids(&hold.names) == [orphan.to_string()])
+        });
+        let while_orphan_runs = runs_seeing(project, &saved);
+        let orphan_ran = runs(orphan);
+        end_pid(orphan);
+        let freed = within(LEFTOVER_GRACE, || runs_seeing(project, &saved).is_empty());
+
+        assert_eq!(
+            known,
+            vec![pid],
+            "the lineage did not start from the leftover alone"
+        );
+        assert!(orphan_ran, "the orphan ended before the check");
+        assert!(
+            named,
+            "the hold never named the orphan its process handed off to"
+        );
+        assert_eq!(
+            while_orphan_runs,
+            vec![RunKind::Research],
+            "a run whose handed-off process still runs left the hidden folders list"
+        );
+        assert!(
+            freed,
+            "the run stayed on the hidden folders list after the orphan ended"
+        );
+    }
+
+    /// SA-VID14-KEEP-SLOTS r1 F1: a listed hold its watcher ends unchecked under Keep or Ask
+    /// keeps the run on the hidden folders list, since its processes may still run; a
+    /// checked end, and an unchecked end under End, free its place.
+    #[test]
+    fn an_unchecked_end_keeps_a_kept_or_asked_run_on_the_hidden_folders_list() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        let mut after = Vec::new();
+        for (project, state, checked) in [
+            ("keep-slots-unchecked-kept", HoldState::Kept, false),
+            ("keep-slots-unchecked-asked", HoldState::Held, false),
+            ("keep-slots-unchecked-ending", HoldState::Ending, false),
+            ("keep-slots-checked-kept", HoldState::Kept, true),
+        ] {
+            let listed = starting(RunKind::Research, project).expect("the list has room");
+            listed.hid(&[]);
+            let key = NEXT_HELD.fetch_add(1, Ordering::Relaxed);
+            let previous = held().insert(
+                key,
+                Held {
+                    account: None,
+                    report: String::new(),
+                    kept: None,
+                    listed: Some(Box::new(listed)),
+                    by: by_in(project),
+                    names: String::new(),
+                    state,
+                    since_ms: now_ms(),
+                    sandboxed: true,
+                },
+            );
+            assert!(previous.is_none());
+            end_hold(key, checked);
+            after.push((
+                project,
+                held_in(project).len(),
+                runs_seeing(project, &saved),
+            ));
+        }
+
+        assert_eq!(
+            after,
+            vec![
+                ("keep-slots-unchecked-kept", 0, vec![RunKind::Research]),
+                ("keep-slots-unchecked-asked", 0, vec![RunKind::Research]),
+                ("keep-slots-unchecked-ending", 0, vec![]),
+                ("keep-slots-checked-kept", 0, vec![]),
+            ]
+        );
     }
 
     /// Commands a sandboxed run left count against its agent's next start while the owner
