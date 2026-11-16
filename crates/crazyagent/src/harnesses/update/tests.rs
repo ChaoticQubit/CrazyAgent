@@ -2655,6 +2655,17 @@ fn a_versions_row_names_the_sign_in_minimum_of_a_harness_that_signs_in() {
     assert_eq!(installed.sign_in_min.as_deref(), Some("2.1.268"));
 }
 
+/// Task 18: the versions row of every bundled harness carries the floor its manifest names,
+/// so both clients can show "needs X or newer" beside the Update line.
+#[test]
+fn a_versions_row_names_the_manifest_floor_of_every_bundled_harness() {
+    for harness in crate::harnesses::registry::registry().all() {
+        let id = harness.id();
+        let row = Case::new(Machine::new(), entry(id, None), None).versions(false);
+        assert_eq!(row.run_min.as_deref(), harness.minimum_version(), "{id}");
+    }
+}
+
 /// RV-DS241-59: a check or update program is trusted only as the tool resolver trusts one:
 /// npm from a prefix inside a project, which agents write, or from a prefix under a folder
 /// every user can write, two levels up from npm, is refused before anything runs.
