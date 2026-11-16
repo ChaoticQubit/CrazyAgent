@@ -2004,21 +2004,24 @@ impl Session {
 
     /// Writes as much of the input the harness has not taken yet as its pipe has room for
     /// now, never waiting. Output: Ok, also with bytes still kept or with the input a stop
-    /// closed, or `launch_input_closed` once the harness's end of the pipe is gone.
+    /// closed, or `launch_input_closed` once the harness's end of the pipe is gone, the kept
+    /// bytes dropped with it, so that call fails and later event passes do not.
     fn flush_input(&mut self) -> Result<(), LaunchError> {
         let Some(stdin) = self.stdin.as_mut() else {
             return Ok(());
         };
         while !self.pending.is_empty() {
             match stdin.write(&self.pending) {
-                Ok(0) => return Err(failure("launch_input_closed")),
-                Ok(taken) => {
+                Ok(taken) if taken > 0 => {
                     assert!(taken <= self.pending.len());
                     self.pending.drain(..taken);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
-                Err(_) => return Err(failure("launch_input_closed")),
+                Ok(_) | Err(_) => {
+                    self.pending.clear();
+                    return Err(failure("launch_input_closed"));
+                }
             }
         }
         Ok(())
