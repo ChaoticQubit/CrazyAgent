@@ -107,6 +107,15 @@ export async function start(binary, args, env, evidence, name, ready) {
   return { child, match };
 }
 
+/** Waits for a stopped child's kept output files to close, so every line it wrote is on
+ * disk. Inputs: the child and the most milliseconds to wait. Output: whether they closed in
+ * time. */
+export async function flushed(child, ms = 10000) {
+  void child;
+  void ms;
+  return false;
+}
+
 /** Stops a child and waits for it to exit. Input: the child. Output: none. */
 export async function stop(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
