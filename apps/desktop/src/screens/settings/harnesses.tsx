@@ -117,6 +117,18 @@ export function catalogReadAgain(entry: HarnessEntry, versions: HarnessVersions)
   return (entry.status.kind === "cant_run") !== Boolean(versions.needs);
 }
 
+/** What Settings says beside a listed harness that names research (T19b 19b-4, leader 01:01):
+ * it runs research jobs, and which harness kinds run the read-only kinds it cannot. */
+export const LISTED_RESEARCH_WORDS = "Research jobs only. Edit with AI, project mapping, roadmap status checks and the Overview run on Codex or Claude Code.";
+
+/** The research line Settings shows beside one catalog harness: the listed-research words for
+ * a listed harness whose manifest names research. Input: the entry. Output: the words, or null
+ * for any other harness. */
+export function researchLine(entry: HarnessEntry): string | null {
+  void entry;
+  return null;
+}
+
 function statusWord(entry: HarnessEntry): string {
   switch (entry.status.kind) {
     case "ready": return "Ready";

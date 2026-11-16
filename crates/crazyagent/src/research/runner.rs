@@ -175,6 +175,18 @@ impl Default for ResearchLimits {
     }
 }
 
+/// What Settings says beside a listed harness that names research (T19b 19b-4, leader
+/// 01:01): it runs research jobs, and which harness kinds run the read-only kinds it cannot.
+pub const LISTED_RESEARCH_WORDS: &str = "Research jobs only. Edit with AI, project mapping, roadmap status checks and the Overview run on Codex or Claude Code.";
+
+/// The words Settings shows beside one catalog harness about the research it runs: the
+/// listed-research words for a listed harness whose manifest names research. Inputs: the
+/// harness id and whether it names research. Output: the words, none for any other.
+pub fn listed_research_words(id: &str, research: bool) -> Option<&'static str> {
+    let _ = (id, research);
+    None
+}
+
 /// The coding agents research can run on, named by a job's harness id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResearchHarness {
@@ -4621,7 +4633,7 @@ mod tests {
     /// Records `id` as a project of the engine database with `folder` as its folder, so a
     /// research run reads the project's launch context. Inputs: the database, the project
     /// id and its folder.
-    fn register_project(database: &Path, id: &str, folder: &Path) {
+    pub(super) fn register_project(database: &Path, id: &str, folder: &Path) {
         let connection = rusqlite::Connection::open(database).unwrap();
         crate::storage::initialize_authority_schemas(&connection).unwrap();
         let owner = connection.unchecked_transaction().unwrap();
@@ -4814,11 +4826,11 @@ mod tests {
         }
     }
 
-    struct EngineRoot {
+    pub(super) struct EngineRoot {
         _temp: tempfile::TempDir,
-        base: PathBuf,
-        database: PathBuf,
-        state: PathBuf,
+        pub(super) base: PathBuf,
+        pub(super) database: PathBuf,
+        pub(super) state: PathBuf,
     }
 
     fn private_directory_at(path: &Path) {
@@ -4826,7 +4838,7 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
-    fn engine_root() -> EngineRoot {
+    pub(super) fn engine_root() -> EngineRoot {
         let temp = tempfile::Builder::new()
             .prefix("ca-research-lease-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -7297,7 +7309,7 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn repository_git(project: &Path, arguments: &[&str]) {
+    pub(super) fn repository_git(project: &Path, arguments: &[&str]) {
         let status = crate::spawn_gate::status(
             Command::new(GIT)
                 .env_clear()
@@ -7929,6 +7941,9 @@ mod windows_tests {
 #[cfg(all(test, unix))]
 #[path = "runner/keyed_tests.rs"]
 mod keyed_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runner/listed_tests.rs"]
+mod listed_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/live_claude_tests.rs"]
 mod live_claude_tests;
