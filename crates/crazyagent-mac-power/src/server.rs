@@ -10,11 +10,11 @@ use crate::lease::Holder;
 use crate::lid;
 use crate::pmset::Pmset;
 use crate::protocol::{self, Reply};
-use std::io;
+use std::io::{self, Read};
 use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const SOCKET: &str = "/var/run/dev.crazyagent.power.sock";
 pub const LISTENERS: &str = "Listeners";
@@ -25,30 +25,39 @@ pub const WAKE_MS: u64 = 1_000;
 
 const ERROR_PAUSE: Duration = Duration::from_millis(100);
 
-/// A connection whose caller passed the first check.
+/// A connection whose caller passed the first check, with the deadline its request must arrive
+/// by: `READ_WAIT` from accept.
 #[derive(Debug)]
 pub struct Accepted {
     stream: UnixStream,
     token: AuditToken,
     holder: Holder,
+    until: Instant,
 }
 
 impl Accepted {
     /// Takes a connection and checks its caller. Output: the accepted connection, or why the
-    /// caller was refused (the connection then closes with no reply).
+    /// caller was refused (logged with the peer pid when the token was read; the connection
+    /// then closes with no reply).
     pub fn take(stream: UnixStream, policy: &Policy) -> Result<Self, Refused> {
-        bounded(&stream).map_err(|_| Refused::NoToken)?;
-        let token = caller::token_of(&stream)?;
-        let holder = caller::check(&token, policy)?;
+        let until = Instant::now() + READ_WAIT;
+        let token = bounded(&stream)
+            .map_err(|_| Refused::NoToken)
+            .and_then(|()| caller::token_of(&stream))
+            .inspect_err(|refused| ffi::log(&format!("caller refused: {refused:?}")))?;
+        let holder = caller::check(&token, policy)
+            .inspect_err(|refused| log_refused(&token, refused))?;
         Ok(Self {
             stream,
             token,
             holder,
+            until,
         })
     }
 
-    /// Reads the request, checks the caller again, lets the helper answer and writes the reply.
-    /// Output: the reply sent, or why the caller was refused at the second check.
+    /// Reads the request by the deadline, checks the caller again, lets the helper answer and
+    /// writes the reply. Output: the reply sent, or why the caller was refused at the second
+    /// check.
     pub fn serve(
         self,
         policy: &Policy,
@@ -59,12 +68,17 @@ impl Accepted {
             mut stream,
             token,
             holder,
+            until,
         } = self;
-        let reply = match protocol::read_request(&mut stream) {
+        let read = protocol::read_request(&mut Deadline {
+            stream: &stream,
+            until,
+        });
+        let reply = match read {
             Err(reason) => Reply::Refused { reason },
             Ok(request) => {
-                let again = caller::check(&token, policy)?;
-                assert_eq!(again, holder);
+                caller::check(&token, policy)
+                    .inspect_err(|refused| log_refused(&token, refused))?;
                 helper.handle(holder, request, now_ms, lid::read())
             }
         };
@@ -75,8 +89,36 @@ impl Accepted {
     }
 }
 
-/// Makes an accepted connection blocking with read and write timeouts, so one slow caller
-/// holds the helper at most `READ_WAIT` per direction.
+/// Logs a refused caller with the pid its audit token names and the reason, nothing from its
+/// request (threat model section 5).
+fn log_refused(token: &AuditToken, refused: &Refused) {
+    ffi::log(&format!("caller pid {} refused: {refused:?}", token.pid()));
+}
+
+/// Reads an accepted request within one deadline from accept: each read waits at most what is
+/// left of it, and none starts once it passed or SIGTERM arrived, so a caller that trickles
+/// bytes is cut off `READ_WAIT` after accept (threat model section 4).
+struct Deadline<'a> {
+    stream: &'a UnixStream,
+    until: Instant,
+}
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() || ffi::term_requested() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        assert!(left <= READ_WAIT);
+        self.stream.set_read_timeout(Some(left))?;
+        let mut stream = self.stream;
+        stream.read(buffer)
+    }
+}
+
+/// Makes an accepted connection blocking with read and write timeouts. `Deadline` shortens the
+/// read timeout to what is left of `READ_WAIT` from accept; the reply, at most 1024 bytes into
+/// an empty send buffer, is one write bounded by the write timeout.
 fn bounded(stream: &UnixStream) -> io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(READ_WAIT))?;
@@ -136,10 +178,8 @@ fn wake(listener: &UnixListener, policy: &Policy, helper: &mut Helper) -> bool {
             return false;
         }
     };
-    let served = Accepted::take(stream, policy)
-        .and_then(|accepted| accepted.serve(policy, helper, ffi::monotonic_ms()));
-    if let Err(refused) = served {
-        ffi::log(&format!("caller refused: {refused:?}"));
+    if let Ok(accepted) = Accepted::take(stream, policy) {
+        let _logged_if_refused = accepted.serve(policy, helper, ffi::monotonic_ms());
     }
     true
 }

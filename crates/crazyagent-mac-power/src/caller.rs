@@ -38,6 +38,13 @@ pub const PRODUCTION: Policy = Policy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuditToken(pub [u32; 8]);
 
+impl AuditToken {
+    /// The pid the token names: word 5, as libbsm's `audit_token_to_pid` reads it.
+    pub fn pid(&self) -> i32 {
+        self.0[5].cast_signed()
+    }
+}
+
 /// Why a caller was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refused {
@@ -103,10 +110,10 @@ pub fn judge_entitlements(entitlements: Entitlements, policy: &Policy) -> Result
 /// The effective uid, pid and pid version an audit token names: words 1, 5 and 7, as the
 /// libbsm accessors read them.
 fn holder_of(token: &AuditToken) -> Holder {
-    let [_, euid, _, _, _, pid, _, pid_version] = token.0;
+    let [_, euid, _, _, _, _, _, pid_version] = token.0;
     Holder {
         euid,
-        pid: pid.cast_signed(),
+        pid: token.pid(),
         pid_version: pid_version.cast_signed(),
     }
 }
