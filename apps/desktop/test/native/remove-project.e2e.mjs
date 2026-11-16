@@ -19,6 +19,9 @@ const KEEP = "Remove from dashboard (keep files)";
 const DELETE = "Delete everything";
 const CUT_SHORT = "A delete was cut short. Some folders may already be in the Trash.";
 const JOB_MS = 90000;
+/** How long after a delete starts a row may still change its stand-in agents: inside the engine's
+ * 30 s DELETE_STOP_WAIT, with room left for the job's own start, so a slow run fails as timing. */
+const STOP_GUARD_MS = 25000;
 const run = { generation: 10 };
 
 /** Counts the entries of the owner's own Trash, never listing them, so a run can prove it put
@@ -428,9 +431,11 @@ test("a delete waits on Home for the project's agents to stop, refuses another p
   writeFileSync(join(folder, "notes.md"), "kept until the agents stop\n");
   working(id, 81);
   const waiting = `Waiting for 1 agent of ${name} to stop...`;
+  let asked = 0;
   await onPage("delete-stopping", async (page, me) => {
     await openRemove(page, me, id, name);
     await confirmDelete(page, me, name);
+    asked = Date.now();
     await me.waitFor("Home's waiting line", (text) => text.includes(waiting), JOB_MS);
     assert.deepEqual(await rowButtons(page), ["Stop"], "Stop is offered while the agents stop");
     assert.equal(readFileSync(join(folder, "notes.md"), "utf8"), "kept until the agents stop\n", "nothing moves while it waits");
@@ -446,6 +451,8 @@ test("a delete waits on Home for the project's agents to stop, refuses another p
   await onPage("delete-reopened", async (page, me) => {
     await openHome(page);
     await me.waitFor("the running delete in a new window", (text) => text.includes(waiting), JOB_MS);
+    const spent = Date.now() - asked;
+    assert.ok(asked > 0 && spent < STOP_GUARD_MS, `the agents stop ${spent} ms after Delete, past ${STOP_GUARD_MS} ms inside the engine's 30 s agent wait: this run was too slow, not the delete`);
     sql("UPDATE team_agents SET status='stopped' WHERE id=81");
     await me.waitFor("the deleted line", (text) => text.includes(`${name} is deleted. Its files are in the Trash.`), JOB_MS);
     assert.deepEqual(await rowButtons(page), ["Dismiss"]);
@@ -464,11 +471,14 @@ test("Stop on Home while a delete waits for its agents keeps the project and its
   const name = "Stopped Delete";
   const { id, folder } = await made(name);
   working(id, 82);
+  const asked = Date.now();
   await startDelete(id, name);
   const stopped = `Deleting ${name} stopped. Nothing was moved to the Trash.`;
   await onPage("delete-cancelled", async (page, me) => {
     await openHome(page);
     await me.waitFor("Home's waiting line", (text) => text.includes(`Waiting for 1 agent of ${name} to stop...`), JOB_MS);
+    const spent = Date.now() - asked;
+    assert.ok(spent < STOP_GUARD_MS, `Stop comes ${spent} ms after the delete, past ${STOP_GUARD_MS} ms inside the engine's 30 s agent wait: this run was too slow, not the delete`);
     await me.click("Stop", "div.in-row button");
     await me.waitFor("the stopped line", (text) => text.includes(stopped), JOB_MS);
     assert.deepEqual(await rowButtons(page), ["Try again", "Dismiss"]);
