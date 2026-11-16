@@ -749,8 +749,10 @@ impl Servers {
     }
 
     /// Runs one call on the server that holds the panes of an agent's window: for a lead
-    /// whose own server listens, its [`Self::team_mates`] or its own, else as [`Self::on`].
-    /// Takes the agent and the call. Returns the call's result.
+    /// whose own server listens, its [`Self::team_mates`] or its own; for one whose own server
+    /// is gone, `terminal_teammates_server_ended` once its pinned teammates' server ended too
+    /// ([`Self::gone_lead_mates`]); else as [`Self::on`]. Takes the agent and the call.
+    /// Returns the call's result.
     fn on_panes<T>(
         &self,
         agent: &AgentId,
@@ -759,7 +761,23 @@ impl Servers {
         if let Some(own) = self.own(agent)? {
             return call(&self.team_mates(agent)?.unwrap_or(own));
         }
+        self.gone_lead_mates(agent)?;
         self.on(agent, call)
+    }
+
+    /// Names the end of a native lead's teammates' server for a call on its team panes once
+    /// its own server is gone too, as a lead whose servers both ended reads: the teammates'
+    /// server its latest start named, with this engine's keeper read as [`Self::mates`] does,
+    /// no longer runs, and its client is dropped. Only team-pane calls ask, never a call on
+    /// the lead itself, which still finds an ended lead gone (`terminal_agent_unknown`, GB-7
+    /// row 4). Takes an agent with no own server. Returns
+    /// `terminal_teammates_server_ended`, or Ok for an agent that is no such lead, whose
+    /// teammates' server runs, or whose teammates' host cannot be opened.
+    fn gone_lead_mates(&self, agent: &AgentId) -> Result<(), HostError> {
+        match self.team_mates(agent) {
+            Err(problem) if problem.0 == TEAMMATES_SERVER_ENDED => Err(problem),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -911,6 +929,7 @@ impl Host for Servers {
                 None => own.panes(agent),
             };
         }
+        self.gone_lead_mates(agent)?;
         self.on(agent, |server| server.panes(agent))
     }
 
