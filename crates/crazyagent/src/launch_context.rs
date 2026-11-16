@@ -2603,6 +2603,21 @@ pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
     metadata.is_file()
 }
 
+/// Whether a harness runs in a listed private home, `<agent home>/<harness id>/<account>`,
+/// as [`AgentContext::install`] sends it to [`AgentContext::install_listed`]: a manifest
+/// whose piped driver is ACP, jsonl-turn or text-turn, or that has none. Input: the harness
+/// id or alias. Output: the answer, false for a harness the registry does not list.
+pub(crate) fn listed_home(harness: &str) -> bool {
+    use crate::harnesses::manifest::DriverKind;
+    let found = crate::harnesses::registry::registry().get(harness);
+    found.is_some_and(|found| {
+        matches!(
+            found.manifest().piped,
+            Some(DriverKind::Acp | DriverKind::JsonlTurn | DriverKind::TextTurn) | None
+        )
+    })
+}
+
 /// Takes a context-less launch's hold on an agent home: the same per-home lock a full
 /// install takes, installing no files, and for a listed harness's private home only through
 /// its no-follow walk from the agent home ([`lock_listed`]). The guard keeps a second launch

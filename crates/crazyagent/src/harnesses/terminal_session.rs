@@ -193,16 +193,22 @@ pub struct Resume {
 
 /// Writes a routed launch's relay token to the 0600 key file in its account home, the only
 /// place its harness reads it from, so the token is in no argument or variable of any agent
-/// process. Input: the request after [`route`]. Output: the file's guard, none for a
-/// keyless launch, or a plain refusal code.
+/// process; a listed harness's private home only through the no-follow walk from the agent
+/// home ([`super::render::put_key`], T18 LEAD-1). Input: the request after [`route`].
+/// Output: the file's guard, none for a keyless launch, or a plain refusal code.
 pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>, LaunchError> {
     request
         .account
         .key()
         .map(|key| {
             assert!(is_placeholder(key.reveal()));
-            interactive::write_key(request.account.home(), key)
-                .map(|path| KeyFile::new(path, key.reveal().as_bytes()))
+            let home = request.account.home();
+            let written = if crate::launch_context::listed_home(&request.harness) {
+                super::render::put_key(home, key.reveal().as_bytes())
+            } else {
+                interactive::write_key(home, key)
+            };
+            written.map(|path| KeyFile::new(path, key.reveal().as_bytes()))
         })
         .transpose()
 }
