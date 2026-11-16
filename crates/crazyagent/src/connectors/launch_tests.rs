@@ -396,6 +396,14 @@ fn a_launch_in_an_engine_with_no_gateway_gets_no_connector_and_a_served_one_does
         !case.root.join(gateway::LAUNCHES_FOLDER).exists(),
         "and no launch folder is made"
     );
+    assert_eq!(
+        gateway::unserved_line(AGENT_ROLE),
+        "connectors are not available to this agent run: this engine runs no connector gateway"
+    );
+    assert_eq!(
+        gateway::unserved_line(Role::Master),
+        "connectors are not available to this master turn: this engine runs no connector gateway"
+    );
     let running = gateway::start(&case.root).unwrap();
     let launch = gateway::prepare_if_served(&case.db, &case.root, PROJECT, AGENT_ROLE, AGENT)
         .unwrap()
@@ -426,4 +434,24 @@ fn every_engine_launch_readies_its_connectors_through_the_served_gate() {
             "{path} never readies a launch around the gate"
         );
     }
+}
+
+/// The engine starts its gateway before its team, whose first tick can launch a run: a run
+/// launched before the gateway served the root would go without connectors for its whole
+/// life under the served gate.
+#[test]
+fn the_engine_starts_its_gateway_before_its_team() {
+    let boot = include_str!("../bin/crazyagent.rs");
+    let gateway = boot
+        .find("connectors::gateway::start(")
+        .expect("the engine starts a gateway");
+    let team = boot
+        .find("team::runtime::start_for_engine(")
+        .expect("the engine starts a team");
+    assert!(gateway < team, "the gateway serves before the team ticks");
+    assert_eq!(
+        boot.matches("connectors::gateway::start(").count(),
+        1,
+        "one gateway per engine"
+    );
 }

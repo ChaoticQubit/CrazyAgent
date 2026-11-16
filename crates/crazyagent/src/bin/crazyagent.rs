@@ -784,6 +784,17 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             }
             .map_err(|e| e.to_string())?;
             tokio::task::yield_now().await;
+            let connector_gateway = if writable {
+                match crazyagent::connectors::gateway::start(runtime_dir) {
+                    Ok(gateway) => Some(gateway),
+                    Err(problem) => {
+                        eprintln!("connector calls are not answered ({problem})");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let ready = std::env::current_exe()
                 .and_then(std::fs::canonicalize)
                 .map_err(|e| e.to_string())
@@ -906,6 +917,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             let (research, onboarding, team) = match ready {
                 Ok(started) => started,
                 Err(error) => {
+                    if let Some(gateway) = connector_gateway {
+                        let _ = tokio::task::spawn_blocking(move || gateway.stop()).await;
+                    }
                     return match service.shutdown().await {
                         Ok(()) => Err(error),
                         Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
@@ -932,17 +946,6 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     Ok(usage) => Some(usage),
                     Err(problem) => {
                         eprintln!("usage is not counted ({problem})");
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            let connector_gateway = if team.is_some() {
-                match crazyagent::connectors::gateway::start(runtime_dir) {
-                    Ok(gateway) => Some(gateway),
-                    Err(problem) => {
-                        eprintln!("connector calls are not answered ({problem})");
                         None
                     }
                 }
