@@ -1613,7 +1613,7 @@ impl Lead {
         let team = path.join("team");
         let home = crazyagent::team::runtime::agent_home(&team, 1);
         std::fs::create_dir_all(&home).unwrap();
-        let tmp = crazyagent::sandbox::toolchains::make_tmp(&home).unwrap();
+        crazyagent::sandbox::toolchains::make_tmp(&home).unwrap();
         let profile = crazyagent::team::runtime::agent_profile(&team, 1);
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
@@ -1626,7 +1626,6 @@ impl Lead {
             crazyagent::terminal::harness_socket(&path, &AgentId::team(1).unwrap()).unwrap();
         let mates = crazyagent::terminal::renew_teammates_socket(&path, &AgentId::team(1).unwrap())
             .unwrap();
-        crazyagent::sandbox::toolchains::fresh_native_lead_tmp(&tmp).unwrap();
         Self {
             root,
             tmux,

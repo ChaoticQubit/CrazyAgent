@@ -183,7 +183,6 @@ fn a_leads_next_start_puts_a_plain_file_over_earlier_teammates_sockets_nothing_l
     std::fs::create_dir_all(&home).unwrap();
     let tmp = LeadTmp(home);
     let folder = crate::sandbox::toolchains::make_tmp(&tmp.0).unwrap();
-    crate::sandbox::toolchains::fresh_native_lead_tmp(&folder).unwrap();
     let planted = folder.join("teammates-00000000000000ff.sock");
     std::fs::write(&planted, "not a socket").unwrap();
 
@@ -225,10 +224,10 @@ fn a_leads_next_start_puts_a_plain_file_over_earlier_teammates_sockets_nothing_l
 
 /// KA-KEPT-CAP-R2-NOTES Note 2 (rv-secreview kept-cap r2): the plain file that takes a dead
 /// teammates' socket's place is staged in the lead's own temp folder, which no teammate
-/// reads or writes, never in the short temp folder they share. So with no such folder that
-/// is this user's private one (missing, a link to a private folder, open to others) the dead
-/// socket stays, and once the folder is made private the next start retires it and leaves
-/// no staged file in either folder.
+/// reads or writes, never in the short temp folder they share. A link in that folder's place
+/// or a folder open to others is never staged in, so the dead socket stays. A missing one,
+/// which the lead removed as its own TMPDIR, is made private first, so the next start still
+/// retires the socket, and no staged file is left in either folder.
 #[cfg(unix)]
 #[test]
 fn a_dead_teammates_socket_is_retired_only_through_the_leads_own_private_temp_folder() {
@@ -245,17 +244,12 @@ fn a_dead_teammates_socket_is_retired_only_through_the_leads_own_private_temp_fo
     let folder = crate::sandbox::toolchains::make_tmp(&tmp.0).unwrap();
     let own = crate::sandbox::toolchains::native_lead_tmp(&folder);
     assert_eq!(own.parent(), Some(folder.as_path()));
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), &own).unwrap();
     let dead = renew_teammates_socket(root, &lead).unwrap();
     drop(crate::spawn_gate::bind_unix_std(&dead).unwrap());
     assert!(is_socket(&dead));
 
-    renew_teammates_socket(root, &lead).unwrap();
-    assert!(
-        is_socket(&dead),
-        "with no lead's own temp folder the dead socket stays"
-    );
-    let elsewhere = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(elsewhere.path(), &own).unwrap();
     renew_teammates_socket(root, &lead).unwrap();
     assert!(
         is_socket(&dead),
@@ -271,12 +265,15 @@ fn a_dead_teammates_socket_is_retired_only_through_the_leads_own_private_temp_fo
         "a folder open to others is never staged in"
     );
 
-    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::remove_dir(&own).unwrap();
     renew_teammates_socket(root, &lead).unwrap();
     assert!(
         std::fs::symlink_metadata(&dead).is_ok_and(|metadata| metadata.is_file()),
-        "through a private lead's own temp folder the dead socket becomes a plain file"
+        "a missing lead's own temp folder is made, and the dead socket becomes a plain file"
     );
+    let made = std::fs::symlink_metadata(&own).unwrap();
+    assert!(made.is_dir(), "the lead's own temp folder is a real folder");
+    assert_eq!(made.permissions().mode() & 0o077, 0, "it is made private");
     for place in [&folder, &own] {
         let staged: Vec<_> = std::fs::read_dir(place)
             .unwrap()

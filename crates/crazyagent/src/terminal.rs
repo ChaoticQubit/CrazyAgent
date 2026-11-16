@@ -926,8 +926,9 @@ pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<Path
 /// that nothing listens at any more (KA-T17B-R2-F1), so such sockets never pile up toward
 /// the freeze's cap on engine-named sockets. The socket the new start named, one a server
 /// still answers at or that cannot be named, a link and anything not this user's socket
-/// stay. Best effort: a folder that is not this user's private folder, or one with no lead's
-/// own temp folder to stage in that is (KA-KEPT-CAP-R2-NOTES Note 2), is left as it is.
+/// stay. Best effort: a folder that is not this user's private folder, or one whose lead's
+/// own temp folder to stage in is a link or open to others (KA-KEPT-CAP-R2-NOTES Note 2), is
+/// left as it is.
 /// Takes the folder and the new socket's name.
 #[cfg(unix)]
 fn retire_dead_teammates_sockets(folder: &Path, named: &str) {
@@ -992,8 +993,10 @@ fn own_private_folder(opened: &rustix::fd::OwnedFd) -> bool {
 /// Opens, relative to the opened short temp folder and without following a link, the lead's
 /// own temp folder in it ([`crate::sandbox::toolchains::native_lead_tmp`]), which no
 /// teammate reads or writes, as the only place a dead socket's replacement is staged
-/// (KA-KEPT-CAP-R2-NOTES Note 2). Inputs: the opened folder and its path. Output: the lead's
-/// folder, or none when it is missing, a link, or not this user's private folder.
+/// (KA-KEPT-CAP-R2-NOTES Note 2). A missing one is made with mode 0700 first, so a lead that
+/// removed its own temp folder never stops the sweep; the start makes it afresh right after
+/// anyway (`fresh_native_lead_tmp`). Inputs: the opened folder and its path. Output: the
+/// lead's folder, or none when it is a link, or not this user's private folder.
 #[cfg(unix)]
 fn lead_staging_folder(folder: &rustix::fd::OwnedFd, path: &Path) -> Option<rustix::fd::OwnedFd> {
     use rustix::fs::{Mode, OFlags};
@@ -1007,7 +1010,13 @@ fn lead_staging_folder(folder: &rustix::fd::OwnedFd, path: &Path) -> Option<rust
         .file_name()
         .expect("the lead's own temp folder has a name");
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let opened = rustix::fs::openat(folder, leaf, flags, Mode::empty()).ok()?;
+    let opened = match rustix::fs::openat(folder, leaf, flags, Mode::empty()) {
+        Err(rustix::io::Errno::NOENT) => {
+            rustix::fs::mkdirat(folder, leaf, Mode::RWXU).ok()?;
+            rustix::fs::openat(folder, leaf, flags, Mode::empty()).ok()?
+        }
+        opened => opened.ok()?,
+    };
     own_private_folder(&opened).then_some(opened)
 }
 
