@@ -9,17 +9,24 @@ const TREE_ENTRIES_MAX: usize = 8;
 #[cfg(test)]
 thread_local! {
     pub(super) static INTERRUPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static AT_STEP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Stops a staged change at this point when a test chose it, the way a crash would.
-/// No input. Output: `native_profile_interrupted` on the step a test selected through
-/// `INTERRUPT` (counted from 1); Ok on every other step and always outside tests.
+/// Stops a staged change at this point when a test chose it, the way a crash would, or runs
+/// the action the test put in `AT_STEP` there and goes on. No input. Output:
+/// `native_profile_interrupted` on the step a test selected through `INTERRUPT` (counted
+/// from 1) and set no action for; Ok on every other step and always outside tests.
 pub(super) fn step() -> Result<(), EngineError> {
     #[cfg(test)]
     {
         let left = INTERRUPT.get();
         if left == 1 {
             INTERRUPT.set(0);
+            if let Some(action) = AT_STEP.take() {
+                action();
+                return Ok(());
+            }
             return Err(failure("native_profile_interrupted"));
         }
         INTERRUPT.set(left.saturating_sub(1));
