@@ -53,6 +53,7 @@ pub struct Servers {
     pins: Mutex<BTreeMap<AgentId, Arc<ServerPin>>>,
     keepers: Mutex<BTreeMap<AgentId, Child>>,
     mates_keepers: Mutex<BTreeMap<AgentId, Child>>,
+    starts: Mutex<()>,
     renewed: Mutex<Option<SystemTime>>,
     deadline_checks: (u32, u32),
 }
@@ -214,6 +215,7 @@ impl Servers {
             pins: Mutex::new(BTreeMap::new()),
             keepers: Mutex::new(BTreeMap::new()),
             mates_keepers: Mutex::new(BTreeMap::new()),
+            starts: Mutex::new(()),
             renewed: Mutex::new(None),
             deadline_checks: (super::DEADLINE_CHECK_LOOPS, super::DEADLINE_LATE_CHECKS),
         }
@@ -244,7 +246,10 @@ impl Servers {
     /// keeper starts, so a server started after the last renewal pass still ends (QL-L1);
     /// before the first pass, which runs at once as the engine starts, it keeps what it holds.
     /// For a lead on an engine key relay the keeper also holds the engine's lifeline, a pipe
-    /// on its input whose closing, as at the engine's death, stops it (B6b).
+    /// on its input whose closing, as at the engine's death, stops it (B6b). Starts, and the
+    /// ends that take a keeper out of its map, run one at a time under `starts`; the map of
+    /// either kind is held only to read or change it, never while a server binds, so a call
+    /// that reads it never waits on a start (MR-1).
     /// Takes the lead, its socket, which server and whether the lead is relayed. Returns
     /// whether a keeper started now, `terminal_folder_unsafe` for a socket path that is not
     /// this user's socket, or `terminal_unavailable`.
@@ -291,7 +296,10 @@ impl Servers {
         } else {
             &self.keepers
         };
-        let mut keepers = kept.lock().map_err(|_| failure("terminal_unavailable"))?;
+        let _start = self
+            .starts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match crate::spawn_gate::connect_unix_std(socket) {
             Ok(_) => return Ok(false),
             Err(error) if mates && error.kind() != std::io::ErrorKind::NotFound => {
@@ -299,20 +307,23 @@ impl Servers {
             }
             Err(_) => {}
         }
-        if let Some(mut earlier) = keepers.remove(lead)
-            && !end_keeper(&mut earlier)
-            && keeper_runs(&mut earlier)
         {
-            if !mates {
-                keepers.insert(lead.clone(), earlier);
+            let mut keepers = kept.lock().map_err(|_| failure("terminal_unavailable"))?;
+            if let Some(mut earlier) = keepers.remove(lead)
+                && !end_keeper(&mut earlier)
+                && keeper_runs(&mut earlier)
+            {
+                if !mates {
+                    keepers.insert(lead.clone(), earlier);
+                    return Err(failure("terminal_unavailable"));
+                }
+                let _ = earlier.kill();
+                let _ = earlier.wait();
+            }
+            keepers.retain(|_, keeper| keeper_runs(keeper));
+            if keepers.len() >= LEADS_KEPT_MAX {
                 return Err(failure("terminal_unavailable"));
             }
-            let _ = earlier.kill();
-            let _ = earlier.wait();
-        }
-        keepers.retain(|_, keeper| keeper_runs(keeper));
-        if keepers.len() >= LEADS_KEPT_MAX {
-            return Err(failure("terminal_unavailable"));
         }
         let renewed = *self
             .renewed
@@ -355,12 +366,27 @@ impl Servers {
         while crate::spawn_gate::connect_unix_std(socket).is_err() {
             if !keeper_runs(&mut keeper) || Instant::now() >= ready {
                 if !end_keeper(&mut keeper) && keeper_runs(&mut keeper) {
-                    keepers.insert(lead.clone(), keeper);
+                    match kept.lock() {
+                        Ok(mut keepers) => {
+                            keepers.insert(lead.clone(), keeper);
+                        }
+                        Err(_) => {
+                            let _ = keeper.kill();
+                            let _ = keeper.wait();
+                        }
+                    }
                 }
                 return Err(failure("terminal_unavailable"));
             }
             std::thread::sleep(KEEPER_READY_POLL);
         }
+        let Ok(mut keepers) = kept.lock() else {
+            if !end_keeper(&mut keeper) && keeper_runs(&mut keeper) {
+                let _ = keeper.kill();
+                let _ = keeper.wait();
+            }
+            return Err(failure("terminal_unavailable"));
+        };
         keepers.insert(lead.clone(), keeper);
         assert!(keepers.len() <= LEADS_KEPT_MAX);
         Ok(true)
@@ -382,9 +408,14 @@ impl Servers {
 
     /// Ends a native lead's teammates' server through the keeper this engine started it
     /// under, as a start that failed after it does: the keeper's warden kills every process
-    /// in the teammates' sandbox. Takes the lead. Returns whether the keeper confirmed in
-    /// time; false when none is known.
+    /// in the teammates' sandbox. It waits for a start in progress, so no start counts the
+    /// map while this keeper is out of it. Takes the lead. Returns whether the keeper
+    /// confirmed in time; false when none is known.
     fn end_mates_keeper(&self, lead: &AgentId) -> bool {
+        let _start = self
+            .starts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(mut keeper) = self
             .mates_keepers
             .lock()
@@ -915,6 +946,10 @@ impl Host for Servers {
     }
 
     fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {
+        let _start = self
+            .starts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut keeper = self.keepers.lock().ok()?.remove(agent)?;
         let ended = end_keeper(&mut keeper);
         if !ended
