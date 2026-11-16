@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { GATE_SHARE, LIMIT_MS, SAMPLES_MAX, SWITCHES, TARGET_MS, line, rank, report, stampSample } from "./switch-time-kit.mjs";
-import { inPageSwitch, switchExpression } from "./switch-time.mjs";
+import { inPageFramePeriod, inPageSwitch, switchExpression } from "./switch-time.mjs";
 
 const row = (times) => times.map((ms) => ({ ms }));
 const twenty = (fill, ...worst) => [...Array(SWITCHES - worst.length).fill(fill), ...worst];
@@ -76,8 +76,9 @@ const FRAME_MS = 16;
  * one terminal whose marker row is in the page from the start, a link, a clock and frames
  * the test steps by hand. `state` says whether the row is laid out, passes the visibility
  * check and is what a press at its middle hits, and from which frame after the click.
- * Input: the state. Output: the function to run and the handles to step and read it. */
-function page(state) {
+ * Inputs: the state and the in-page function to build, the switch by default. Output: the
+ * function to run and the handles to step and read it. */
+function page(state, inPage = inPageSwitch) {
   const clock = { now: 0, frames: [], tasks: [], timers: [], clicks: 0, frame: 0 };
   const visible = () => state.shownFromFrame !== null && clock.frame >= state.shownFromFrame;
   const row = {
@@ -107,7 +108,7 @@ function page(state) {
     setTimeout: (callback, ms) => clock.timers.push({ callback, ms, cleared: false }) - 1,
     clearTimeout: (id) => { clock.timers[id].cleared = true; },
   };
-  const run = new Function(...Object.keys(env), `return (${inPageSwitch.toString()})`)(...Object.values(env));
+  const run = new Function(...Object.keys(env), `return (${inPage.toString()})`)(...Object.values(env));
   const step = () => {
     clock.frame += 1;
     clock.now += FRAME_MS;
@@ -171,4 +172,28 @@ test("a switch that never shows answers null at its limit, once, and one that ca
   };
   assert.match(refused({ shownFromFrame: 0 })[0].error, /on screen before the click/);
   assert.match(refused({ shownFromFrame: null, link: false })[0].error, /nothing matches a#tab-conversation/);
+});
+
+test("the frame period is the median gap between frames, with the shortest beside it, or null at its limit", () => {
+  const { run, clock, step } = page({ shownFromFrame: null }, inPageFramePeriod);
+  const answers = [];
+  run({ frames: 3, limit_ms: 5000 }, (answer) => answers.push(answer));
+  step();
+  step();
+  clock.now += 40;
+  step();
+  assert.deepEqual(answers, [], "three frames are two gaps: nothing is answered yet");
+  step();
+  assert.deepEqual(answers, [{ period_ms: FRAME_MS + 1, min_ms: FRAME_MS + 1, frames: 3 }], "one slow frame moves neither the median nor the shortest");
+  assert.equal(clock.timers[0].cleared, true);
+  step();
+  assert.equal(answers.length, 1, "it answers once");
+  const stuck = page({ shownFromFrame: null }, inPageFramePeriod);
+  const seen = [];
+  stuck.run({ frames: 30, limit_ms: 5000 }, (answer) => seen.push(answer));
+  stuck.step();
+  stuck.step();
+  stuck.clock.timers[0].callback();
+  stuck.step();
+  assert.deepEqual(seen, [{ period_ms: null, min_ms: null, frames: 1 }], "a window that stopped drawing has no period");
 });
