@@ -26,6 +26,7 @@ import tui_flow
 import tui_project_conversation as conversation
 
 ENTER = b"\r"
+TAB = b"\t"
 ESC = b"\x1b"
 QUIT = b"\x11"
 SHIFT_RIGHT = b"\x1b[1;2C"
@@ -43,7 +44,7 @@ STEPS = (
     ("settings", b"s", ("Settings", "Accounts")),
     ("tab_pools", SHIFT_RIGHT, ("Settings", "Pools")),
     ("home", ESC, ("Home",)),
-    ("open_project", ENTER, ("Home", PROJECT)),
+    ("open_project", TAB + ENTER, ("Home", PROJECT)),
     ("tab_conversation", SHIFT_RIGHT, (PROJECT, "Conversation")),
     ("tab_agents", SHIFT_RIGHT, (PROJECT, "Agents")),
 )

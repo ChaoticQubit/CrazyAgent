@@ -1,4 +1,4 @@
-from tui_speed import STEPS, at, crumb, metrics, usable
+from tui_speed import ENTER, STEPS, TAB, at, crumb, metrics, usable
 
 HOME = (" [◆▪◆▪] CrazyAgent  /  Home" + " " * 60 + "2 agents running \n"
         + "─" * 100 + "\n  Projects  1\n  ▌ Speed Project\n")
@@ -39,6 +39,11 @@ def test_steps_name_one_metric_each_and_launch_comes_first():
     assert names[0] == "launch"
     assert len(set(names)) == len(names)
     assert all(key for name, key, _ in STEPS[1:])
+
+
+def test_open_project_tabs_from_homes_setup_guide_to_the_projects_before_enter():
+    keys = {name: key for name, key, _ in STEPS}
+    assert keys["open_project"] == TAB + ENTER
 
 
 def test_metrics_name_every_step_in_ms():
