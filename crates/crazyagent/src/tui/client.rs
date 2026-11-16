@@ -687,6 +687,20 @@ impl Connection {
                                 break;
                             }
                         }
+                        Job::Intake(job)
+                            if native.is_some()
+                                && matches!(
+                                    job.as_ref(),
+                                    intake::IntakeJob::Query(
+                                        intake::IntakeQuery::GitHubRuleSet { .. }
+                                    )
+                                ) =>
+                        {
+                            let native = native.as_mut().expect("the guard saw the owner");
+                            if !native.rule_lane(*job, &owner_replies) {
+                                break;
+                            }
+                        }
                         Job::Intake(job) => {
                             let event = match native.as_mut() {
                                 Some(native) => {
@@ -1232,6 +1246,7 @@ struct NativeOwner {
     conversation_operation: Option<(RequestId, String)>,
     model_pending: Option<model_access::Submission>,
     model_operation: Option<(RequestId, String)>,
+    rule_lane: Option<std::thread::JoinHandle<()>>,
 }
 
 impl NativeOwner {
@@ -1251,6 +1266,7 @@ impl NativeOwner {
             conversation_operation: None,
             model_pending: None,
             model_operation: None,
+            rule_lane: None,
         }
     }
 

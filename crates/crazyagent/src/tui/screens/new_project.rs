@@ -1,4 +1,5 @@
 use super::new_project_input::TextInput;
+use super::new_project_publish::{GitHub, Publish, PublishReply};
 use super::project_access::next_level;
 #[cfg(all(test, unix))]
 use crate::config::EffectiveConfig;
@@ -102,6 +103,7 @@ pub(in crate::tui) enum Control {
     Min,
     Max,
     Access,
+    Publish,
     Back,
     Continue,
 }
@@ -286,6 +288,7 @@ pub(in crate::tui) enum Reply {
     Background,
     CreatePool,
     CheckHarnesses,
+    SignInGitHub,
     Create(Box<(ProjectSpec, ProjectSetup)>),
 }
 
@@ -353,6 +356,7 @@ pub(in crate::tui) struct Wizard {
     pub note: Option<Note>,
     pub phase: Phase,
     pub access: AgentAccess,
+    pub publish: Publish,
 }
 
 impl Wizard {
@@ -401,6 +405,7 @@ impl Wizard {
             access: Some(AgentAccess::NEW_PROJECT)
                 .filter(|level| level.unavailable().is_none())
                 .unwrap_or_default(),
+            publish: Publish::default(),
         };
         wizard.assert_consistent();
         wizard
@@ -496,7 +501,7 @@ impl Wizard {
     /// Returns at least the Back and Continue buttons.
     pub fn controls(&self) -> Vec<Control> {
         let mut controls = match self.step {
-            Step::About => vec![Control::Name, Control::About],
+            Step::About => vec![Control::Name, Control::About, Control::Publish],
             Step::Stack => vec![Control::Grid, Control::Custom, Control::Platforms],
             Step::Documents if self.documents.is_empty() => vec![Control::Path],
             Step::Documents => vec![Control::Path, Control::Documents],
@@ -546,6 +551,7 @@ impl Wizard {
     pub fn go(&mut self, step: Step) {
         self.step = step;
         self.picker = None;
+        self.publish.panel = None;
         self.filtering = false;
         self.note = None;
         self.focus = 0;
@@ -885,6 +891,9 @@ impl Wizard {
         for step in &Step::ALL[..Step::Review.index()] {
             self.check(*step).map_err(|note| (*step, note))?;
         }
+        if let Some(text) = self.publish.wait(self.name.value(), self.about.value()) {
+            return Err((Step::About, Note::error(Control::Publish, text)));
+        }
         let spec = ProjectSpec {
             name: self.name.value().trim().to_owned(),
             repositories: Vec::new(),
@@ -970,6 +979,14 @@ impl Wizard {
         if self.picker.is_some() {
             return self.picker_key(key);
         }
+        if self.publish.panel.is_some() {
+            let reply = self
+                .publish
+                .panel_key(key, self.name.value(), self.about.value());
+            let reply = self.publish_reply(reply);
+            self.assert_consistent();
+            return reply;
+        }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
@@ -1014,6 +1031,12 @@ impl Wizard {
     pub fn paste(&mut self, text: &str) -> Reply {
         if self.phase != Phase::Editing || self.picker.is_some() {
             return Reply::Ignored;
+        }
+        if self.publish.panel.is_some() {
+            let reply = self
+                .publish
+                .paste(text, self.name.value(), self.about.value());
+            return self.publish_reply(reply);
         }
         if self.filtering {
             self.filter.insert_str(text);
@@ -1157,6 +1180,10 @@ impl Wizard {
             Control::Pools => self.pool_key(key),
             Control::Team => self.team_key(key),
             Control::Access => self.access_key(key),
+            Control::Publish => {
+                let reply = self.publish.row_key(key);
+                self.publish_reply(reply)
+            }
             Control::Back if key.code == KeyCode::Enter => self.back(),
             Control::Continue if key.code == KeyCode::Enter => self.advance(),
             Control::Back | Control::Continue => Reply::Ignored,
@@ -1475,6 +1502,15 @@ impl Wizard {
         Reply::Handled
     }
 
+    fn publish_reply(&mut self, reply: PublishReply) -> Reply {
+        self.typing = self.publish.typing();
+        match reply {
+            PublishReply::Ignored => Reply::Ignored,
+            PublishReply::Handled => Reply::Handled,
+            PublishReply::SignIn => Reply::SignInGitHub,
+        }
+    }
+
     fn access_key(&mut self, key: KeyEvent) -> Reply {
         if self.phase != Phase::Editing {
             return Reply::Ignored;
@@ -1648,6 +1684,12 @@ impl Wizard {
 
     fn assert_consistent(&self) {
         assert!(self.focus < self.controls().len());
+        assert!(
+            self.publish.panel.is_none()
+                || (self.step == Step::About
+                    && self.publish.on
+                    && self.publish.github == GitHub::SignedIn)
+        );
         assert!(self.tech.len() <= TECH_ENTRIES_MAX);
         assert!(self.platform_cursor < PLATFORM_ORDER.len());
         assert!(self.work_cursor <= ResearchKind::ALL.len());

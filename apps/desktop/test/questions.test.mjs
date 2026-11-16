@@ -242,6 +242,7 @@ test("askers read as plain words", () => {
   assert.equal(client.askerLabel("engine:planning"), "Roadmap planning");
   assert.equal(client.askerLabel("engine:research:market_research"), "Research: market research");
   assert.equal(client.askerLabel("engine:landing:cs-1"), "Landing changes");
+  assert.equal(client.askerLabel("engine:github-rule:7"), "GitHub rule proposal 7");
   assert.equal(client.askerLabel("master:session:s-9"), "Master");
   assert.equal(client.askerLabel("terminal:2"), "Asked in the terminal of agent 2");
   assert.equal(client.askerLabel("someone"), "someone");

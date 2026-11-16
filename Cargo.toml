@@ -2,6 +2,7 @@
 members = [
     "crates/crazyagent",
     "crates/crazyagent-linux-supervisor",
+    "crates/crazyagent-macos-fs",
     "crates/crazyagent-win-sandbox",
     "apps/desktop/src-tauri",
 ]

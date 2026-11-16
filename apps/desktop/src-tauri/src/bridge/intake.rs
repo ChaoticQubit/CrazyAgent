@@ -4,7 +4,11 @@ use super::{
 };
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
-use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
+use crazyagent::github::{
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
+    GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
+};
+use crazyagent::github::{GitHubRepoRules, GitHubRule};
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::project_setup::ProjectSetup;
 use crazyagent::projects_home::icloud::Progress;
@@ -13,6 +17,7 @@ use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec, RequestId};
 use crazyagent::setup::{Dependency, RefusedTool, SetupStatus};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -140,7 +145,7 @@ pub const INTAKE_CODES: [&str; 114] = [
     "document_changed_while_copying",
 ];
 
-const GITHUB_CODES: [&str; 35] = [
+const GITHUB_CODES: [&str; 69] = [
     "github_not_signed_in",
     "github_token_invalid",
     "github_token_refused",
@@ -170,12 +175,46 @@ const GITHUB_CODES: [&str; 35] = [
     "projects_home_unset",
     "github_outcome_unknown",
     "github_owner_unavailable",
+    "github_publish_detached",
+    "github_publish_exclude_invalid",
+    "github_publish_failed",
+    "github_publish_file_invalid",
+    "github_publish_gitignore_invalid",
+    "github_publish_head_moved",
+    "github_publish_hooks_set",
+    "github_publish_ignore_invalid",
+    "github_publish_in_progress",
+    "github_publish_not_plain_repo",
+    "github_publish_not_started",
+    "github_publish_on_github",
+    "github_publish_other_host",
+    "github_publish_push_failed",
+    "github_publish_push_timed_out",
+    "github_publish_running",
+    "github_publish_secret_in_history",
+    "github_publish_step_invalid",
+    "github_publish_too_large",
+    "github_publish_workflow_scope",
+    "github_repo_name_taken",
+    "github_repo_create_refused",
+    "github_repo_visibility_mismatch",
+    "github_repo_name_unsupported",
+    "github_repo_description_invalid",
+    "github_git_missing",
     "github_request_bounds",
     "github_reply_bounds",
     "github_request_invalid",
     "github_token_frame_invalid",
     "github_token_frame_mismatch",
     "not_connected",
+    "github_rules_not_published",
+    "github_rule_invalid",
+    "github_rules_repo_mismatch",
+    "github_repo_unreadable",
+    "github_publish_project_unknown",
+    "github_publish_unavailable",
+    "github_store_unavailable",
+    "project_folder_missing",
 ];
 
 const SETUP_CODES: [&str; 48] = [
@@ -826,6 +865,238 @@ impl NativeBridge {
         let client = self.github_client()?;
         Ok(Box::pin(async move {
             bounded(client.github_repos(page).await.map_err(github_failure)?)
+        }))
+    }
+
+    /// Lists the GitHub accounts a published project's repository can go under, the personal
+    /// account first. Output: the accounts and a plain problem, if any.
+    pub fn github_owners(&mut self) -> Result<Unlocked<GitHubOwners>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_owners().await.map_err(github_failure)?)
+        }))
+    }
+
+    /// Reads where a project's GitHub publish stands. Input: the project id. Output: the job, or
+    /// none when the project has no publish.
+    pub fn github_publish_status(
+        &mut self,
+        id: &str,
+    ) -> Result<Unlocked<Option<GitHubPublishJob>>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_publish_status(project)
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Approves a project's .gitignore lines and runs its publish as far as it goes. Inputs: the
+    /// project id and the lines. Output: the job where it stands.
+    pub fn github_publish_approve(
+        &mut self,
+        id: &str,
+        lines: Vec<String>,
+    ) -> Result<Unlocked<GitHubPublishJob>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_publish_approve(project, lines)
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Leaves a file that holds a secret out of a project's publish and runs on. Inputs: the
+    /// project id and the file's path as the check named it. Output: the job.
+    pub fn github_publish_exclude(
+        &mut self,
+        id: &str,
+        path: String,
+    ) -> Result<Unlocked<GitHubPublishJob>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_publish_exclude(project, path)
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Checks a project's files for secrets again after the owner fixed them. Input: the project
+    /// id. Output: the job where it stands.
+    pub fn github_publish_recheck(
+        &mut self,
+        id: &str,
+    ) -> Result<Unlocked<GitHubPublishJob>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_publish_recheck(project)
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Runs a stopped publish on from the step it reached. Input: the project id. Output: the job
+    /// where it stands.
+    pub fn github_publish_continue(
+        &mut self,
+        id: &str,
+    ) -> Result<Unlocked<GitHubPublishJob>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_publish_continue(project)
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Tells whether a project's Overview asks to publish it on GitHub (DEC-182 S5b). Input: the
+    /// project id. Output: true to ask.
+    pub fn github_publish_prompt(&mut self, id: &str) -> Result<Unlocked<bool>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            client
+                .github_publish_prompt(project)
+                .await
+                .map_err(github_failure)
+        }))
+    }
+
+    /// Keeps the owner's answer to a project's publish prompt, Not now or Don't ask again.
+    /// Inputs: the project id and the answer. Output: nothing.
+    pub fn github_publish_prompt_set(
+        &mut self,
+        id: &str,
+        answer: crazyagent::github::GitHubPromptAnswer,
+    ) -> Result<Unlocked<()>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            client
+                .github_publish_prompt_set(project, answer)
+                .await
+                .map_err(github_failure)
+        }))
+    }
+
+    /// Discards a project's publish record; files it wrote and a repository it made stay. Input:
+    /// the project id. Output: the repository GitHub made or may have made, if any.
+    pub fn github_publish_discard(
+        &mut self,
+        id: &str,
+    ) -> Result<Unlocked<Option<GitHubPublishLeft>>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_publish_discard(project)
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Starts publishing a project on GitHub; the engine checks the plan, the sign-in and
+    /// the project's git, then drafts the lines after it answers. Inputs: the project id and
+    /// the plan. Output: the job at Drafting.
+    pub fn github_publish_start(
+        &mut self,
+        id: &str,
+        plan: GitHubPublishPlan,
+    ) -> Result<Unlocked<GitHubPublishJob>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_publish_start(project, plan)
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Reads the rules a new repository starts with, as Settings > GitHub shows them.
+    /// Output: the rules on.
+    pub fn github_rule_defaults(&mut self) -> Result<Unlocked<BTreeSet<GitHubRule>>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_rule_defaults()
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Saves the rules a new repository starts with. Input: the rules on. Output: the rules
+    /// the engine read back.
+    pub fn github_rule_defaults_set(
+        &mut self,
+        rules: BTreeSet<GitHubRule>,
+    ) -> Result<Unlocked<BTreeSet<GitHubRule>>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_rule_defaults_set(rules)
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Reads the live rules of the repository CrazyAgent published a project to, with GET
+    /// calls only. Input: the project id. Output: the page.
+    pub fn github_rules(&mut self, id: &str) -> Result<Unlocked<GitHubRepoRules>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_rules(project).await.map_err(github_failure)?)
+        }))
+    }
+
+    /// Turns one rule on or off on that repository with the owner's sign-in. Inputs: the
+    /// project id, the `owner/name` the page showed, the rule and whether it is on.
+    /// Output: the fresh page.
+    pub fn github_rule_set(
+        &mut self,
+        id: &str,
+        repo: String,
+        rule: GitHubRule,
+        on: bool,
+    ) -> Result<Unlocked<GitHubRepoRules>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_rule_set(project, repo, rule, on)
+                    .await
+                    .map_err(github_failure)?,
+            )
         }))
     }
 

@@ -103,7 +103,7 @@ const KEY_BLOCK_END: &str = "-----end";
 const BASE64_RUN_MIN: usize = 20;
 const WRAPPED_TAIL_MIN: usize = 8;
 const PGPASS_FIELDS_MIN: usize = 5;
-const SECRET_PREFIXES: [&str; 14] = [
+pub(crate) const SECRET_PREFIXES: [&str; 14] = [
     "sk-",
     "sk_",
     "pk_",
@@ -2829,9 +2829,10 @@ fn set_agent_policy(
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings (sub-agent nesting and the new folder limit among them), live master
 /// switch, done-quiet choice, owner notifications, wake rules and ended agents are deleted, so a waiting step is never
-/// claimed and a running one stops; its read folders, agent access, agent settings and its
-/// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
-/// per-project switches are cleared too, and so are the memories its agents saved. The
+/// claimed and a running one stops; its read folders, agent access, agent settings, its
+/// agents' own instructions and their GitHub rule proposals go too. Its project-scoped MCP
+/// servers, skills, secrets and per-project switches are cleared too, and so are the
+/// memories its agents saved, so a new project reusing the id never inherits them. The
 /// removal is recorded with the project's folder (DEC-178 addendum 1): kept, from Remove
 /// from dashboard, keeps the owner's notes, imports and selections and lets that exact folder
 /// bring the project back; not kept, from Delete everything, forgets them and holds the id for
@@ -2872,6 +2873,7 @@ fn remove(
     crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
     crate::sandbox::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
+    crate::github::proposals::forget_project(tx, project_id)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::hidden_paths_item(project_id),
@@ -2960,10 +2962,12 @@ fn finish_removed_agent_notices(
 }
 
 /// Records a Delete everything once the owner transport finished its disk work: the
-/// project's records go as in Remove from dashboard when every folder reached the Trash, the
-/// caller recording the exact names and folder identities of its engine files in the same
-/// write, and otherwise the refusal is kept with nothing removed. Inputs: the transaction,
-/// the action, the transport's outcome and the revision. Output: the outcome to record.
+/// project's records go as in Remove from dashboard when every folder reached the Trash,
+/// with its answer to the GitHub publish question and its GitHub publish job too, which
+/// Remove keeps (DEC-178 add.1), the caller recording the exact names and folder identities of its engine files in the
+/// same write, and otherwise the refusal is kept with nothing removed. Inputs: the
+/// transaction, the action, the transport's outcome and the revision. Output: the outcome
+/// to record.
 pub(crate) fn record_delete(
     tx: &Transaction<'_>,
     action: &SetupAction,
@@ -2976,7 +2980,21 @@ pub(crate) fn record_delete(
     if let Err(code) = outcome {
         return Ok(rejected(code));
     }
-    remove(tx, project_id, revision, false)
+    let folder = match load_setup(tx, project_id) {
+        Ok(stored) => stored.map(|stored| stored.project_folder()),
+        Err(error) => {
+            eprintln!("github_publish_forget_failed code={}", error.0);
+            None
+        }
+    };
+    let removed = remove(tx, project_id, revision, false)?;
+    if matches!(removed, Outcome::Applied) {
+        crate::github::forget_prompt(tx, project_id)?;
+        if let Some(folder) = &folder {
+            crate::github::forget_job(tx, folder);
+        }
+    }
+    Ok(removed)
 }
 
 /// The team a New Project gets and the folder it lands in, after the checks

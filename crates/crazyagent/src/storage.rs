@@ -411,6 +411,11 @@ impl Storage {
                     if let Err(e) = projects_home::delete_settle(&connection, None, false) {
                         eprintln!("project_delete_not_settled cause={}", e.0);
                     }
+                    match crate::github::proposals::start_store(&connection) {
+                        Ok(0) => {}
+                        Ok(ended) => eprintln!("github_rule_proposals_cut_short count={ended}"),
+                        Err(e) => eprintln!("github_rule_proposals_not_settled cause={}", e.0),
+                    }
                     if let Err(e) = projects_home::sweep_home(&connection) {
                         eprintln!("home_staging_not_swept cause={}", e.0);
                     }

@@ -1893,7 +1893,9 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             INSERT INTO team_agent_messages(project,agent,author,kind,text,created_ms)
             VALUES ('setup-pooled',1,'master','message','Start with the header',0);
             INSERT INTO team_message_settings(project,keep_master,kept,progress,results,owner_items,page_size)
-            VALUES ('setup-pooled',0,500,1,'full',1,25);",
+            VALUES ('setup-pooled',0,500,1,'full',1,25);
+            INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,created_ms)
+            VALUES ('setup-pooled','agent:1','wiki_off',1,'Docs live in the repository.','octo-cat/tool','approved',0);",
         )
         .unwrap();
     let questions = crate::questions::open(engine.root.path()).unwrap();
@@ -1944,6 +1946,11 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM questions_log WHERE project='setup-pooled'"),
         0,
         "its questions to the owner go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM github_rule_requests WHERE project='setup-pooled'"),
+        0,
+        "its agents' GitHub rule proposals go with it, so none is applied or told after it"
     );
     assert_eq!(
         engine.rows("SELECT count(*) FROM team_owner_turns WHERE project='setup-pooled'"),
@@ -4227,5 +4234,33 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
         );
     }
     drop(owner);
+    engine.stop().await;
+}
+
+/// DEC-182 S7: an engine start ends every GitHub rule proposal an earlier engine left
+/// approved or being applied as refused and tells each agent once, sending nothing, so the
+/// owner's sign-in never applies a change the owner may have set otherwise since.
+#[tokio::test]
+async fn an_engine_start_ends_a_github_rule_proposal_left_approved_or_applying() {
+    let mut engine = Engine::start().await;
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,created_ms)
+            VALUES ('alpha','agent:1','wiki_off',1,'Docs live in the repository.','octo-cat/tool','approved',0),
+                   ('alpha','agent:2','no_force_push',1,'History stays.','octo-cat/tool','applying',0);",
+        )
+        .unwrap();
+    engine.restart().await;
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM github_rule_requests WHERE status='refused' AND told=1"),
+        2
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT count(*) FROM team_messages WHERE project='alpha' AND author='engine' AND text LIKE '%: refused.'"
+        ),
+        2
+    );
     engine.stop().await;
 }

@@ -20,6 +20,7 @@ import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
 import { MoveHome } from "./move-home";
+import { GitHubRulesSection } from "./github-section";
 import { RemoveDialogView, deleteReady, removeChoices, removeTitle } from "./remove-dialog";
 import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
@@ -43,6 +44,7 @@ const SECTIONS = [
   { id: "access", label: "Agent access" },
   { id: "sandbox", label: "Sandbox" },
   { id: "messages", label: "Messages" },
+  { id: "github", label: "GitHub" },
   { id: "remove", label: "Remove project" },
 ] as const;
 
@@ -831,7 +833,7 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Overview, Pool, Team, Plugins and skills, Agent access, Sandbox, Messages and Remove project. A setup
+/** Project Settings tab: General, Overview, Pool, Team, Plugins and skills, Agent access, Sandbox, Messages, GitHub and Remove project. A setup
  * that belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
@@ -859,6 +861,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {active === "access" && <AccessSection data={data} />}
       {active === "sandbox" && <div className="pj-stack"><SandboxSection data={data} /><HiddenSection data={data} /></div>}
       {active === "messages" && <MessagesSection data={data} />}
+      {active === "github" && <GitHubRulesSection data={data} />}
       {active === "remove" && <div className="pj-stack">
         {setup && <MoveHome data={data} setup={setup} />}
         <RemoveSection data={data} setup={setup} />

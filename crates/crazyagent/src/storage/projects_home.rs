@@ -1705,7 +1705,8 @@ fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcom
 /// Points every set-up project whose folder sat anywhere inside a folder of the
 /// old home that `arrived` accepts at the same place in the new home, keeping an
 /// onboarded project's recorded `.crazyagent/` folder and its onboarding folder,
-/// then every project's repository inside such a folder, where its master works.
+/// carrying its GitHub publish job along, then every project's repository inside such a
+/// folder, where its master works.
 fn rewrite_folders(
     tx: &Transaction<'_>,
     from: &Path,
@@ -1749,6 +1750,7 @@ fn rewrite_folders(
             params![text(&moved)?, project],
         )
         .map_err(error)?;
+        crate::github::carry_publish(tx, &folder, &moved);
     }
     move_repositories(tx, from, to, &arrived)
 }

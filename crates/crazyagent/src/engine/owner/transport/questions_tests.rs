@@ -359,3 +359,47 @@ fn questions_codes_cover_every_refusal() {
     sorted.dedup();
     assert_eq!(sorted, QUESTIONS_CODES);
 }
+
+/// DEC-182 S7: the owner's Approve through the Questions protocol settles at once and the
+/// approved proposal is then applied off the reply: here, with no publish record, it ends
+/// refused with nothing sent and its agent is told once in the team conversation.
+#[cfg(unix)]
+#[test]
+fn an_approved_github_rule_proposal_is_applied_after_the_answer_and_told() {
+    let (_tmp, root, project) = engine();
+    let db = questions::open(&root).unwrap();
+    assert_eq!(crate::github::proposals::start_store(&db).unwrap(), 0);
+    db.execute(
+        "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,created_ms)
+         VALUES (?1,'agent:4','wiki_off',1,'Docs live in the repository.','octo-cat/tool',0)",
+        [PROJECT],
+    )
+    .unwrap();
+    let id = db.last_insert_rowid();
+    let source = crate::questions::EngineSource::GitHubRule(id.to_string());
+    let question = questions::raise(&db, &project, &source, &asked("Approve it?")).unwrap();
+    let body = json!({"questions": {"kind": "answer", "id": question, "version": 0, "picks": [0]}});
+    assert_eq!(settled(send(&root, body)), Settlement::Settled);
+    let ended = || -> (String, i64) {
+        db.query_row(
+            "SELECT status, told FROM github_rule_requests WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    };
+    let started = std::time::Instant::now();
+    while ended().1 == 0 && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(ended(), ("refused".to_owned(), 1), "the tell committed");
+    let told: Vec<String> = db
+        .prepare("SELECT text FROM team_messages WHERE project=?1 AND author='engine'")
+        .unwrap()
+        .query_map([PROJECT], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].ends_with(": refused."), "{}", told[0]);
+}

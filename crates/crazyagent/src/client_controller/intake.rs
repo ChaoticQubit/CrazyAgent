@@ -1,11 +1,16 @@
 use super::*;
 use crate::engine::owner::AccountSecret;
-use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
+use crate::github::{
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
+    GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
+};
+use crate::github::{GitHubRepoRules, GitHubRule};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::icloud::{DOWNLOAD_TIME_MAX, Progress};
 use crate::projects_home::job::{JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const ICLOUD_PROGRESS_EVERY: Duration = Duration::from_secs(1);
@@ -156,6 +161,105 @@ impl OwnerController {
         self.owner_client()?.github_repos(page).await
     }
 
+    /// Lists the GitHub accounts a published project's repository can go under.
+    /// Takes nothing.
+    /// Returns the accounts, the personal one first, and a plain problem, if any.
+    pub async fn github_owners(&mut self) -> Result<GitHubOwners, EngineError> {
+        self.owner_client()?.github_owners().await
+    }
+
+    /// Starts publishing a project on GitHub; the engine checks the plan, the sign-in and the git.
+    /// Takes the project id and the plan the New Project publish block built.
+    /// Returns the job at its .gitignore lines.
+    pub async fn github_publish_start(
+        &mut self,
+        project: ProjectId,
+        plan: GitHubPublishPlan,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.owner_client()?
+            .github_publish_start(project, plan)
+            .await
+    }
+
+    /// Reads where a project's GitHub publish stands. Takes the project.
+    /// Returns the job, or none when the project has no publish.
+    pub async fn github_publish_status(
+        &mut self,
+        project: ProjectId,
+    ) -> Result<Option<GitHubPublishJob>, EngineError> {
+        self.owner_client()?.github_publish_status(project).await
+    }
+
+    /// Approves a project's .gitignore lines and runs its publish as far as it goes.
+    /// Takes the project and the lines. Returns the job where it stands.
+    pub async fn github_publish_approve(
+        &mut self,
+        project: ProjectId,
+        lines: Vec<String>,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.owner_client()?
+            .github_publish_approve(project, lines)
+            .await
+    }
+
+    /// Leaves a file that looks like it holds a secret out of a project's publish and runs on.
+    /// Takes the project and the file's path. Returns the job where it stands.
+    pub async fn github_publish_exclude(
+        &mut self,
+        project: ProjectId,
+        path: String,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.owner_client()?
+            .github_publish_exclude(project, path)
+            .await
+    }
+
+    /// Checks a project's files for secrets again. Takes the project.
+    /// Returns the job where it stands.
+    pub async fn github_publish_recheck(
+        &mut self,
+        project: ProjectId,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.owner_client()?.github_publish_recheck(project).await
+    }
+
+    /// Runs a stopped publish on from the step it reached. Takes the project.
+    /// Returns the job where it stands.
+    pub async fn github_publish_continue(
+        &mut self,
+        project: ProjectId,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.owner_client()?.github_publish_continue(project).await
+    }
+
+    /// Says whether the Overview asks to publish a project that has no GitHub publish: it
+    /// names no git remote and the owner said neither Not now in the last seven days nor
+    /// Don't ask again. Takes the project. Returns the answer.
+    pub async fn github_publish_prompt(&mut self, project: ProjectId) -> Result<bool, EngineError> {
+        self.owner_client()?.github_publish_prompt(project).await
+    }
+
+    /// Keeps the owner's Not now or Don't ask again for a project's publish question.
+    /// Takes the project and the answer. Returns nothing.
+    pub async fn github_publish_prompt_set(
+        &mut self,
+        project: ProjectId,
+        answer: crate::github::GitHubPromptAnswer,
+    ) -> Result<(), EngineError> {
+        self.owner_client()?
+            .github_publish_prompt_set(project, answer)
+            .await
+    }
+
+    /// Forgets a project's publish before its push. Takes the project.
+    /// Returns the repository GitHub made or may have made, if any.
+    pub async fn github_publish_discard(
+        &mut self,
+        project: ProjectId,
+    ) -> Result<Option<GitHubPublishLeft>, EngineError> {
+        self.owner_client()?.github_publish_discard(project).await
+    }
+
     /// Clones a GitHub repository into the projects home, where it then shows as Found.
     /// Takes the repository as owner/name.
     /// Returns the receipt with the new folder.
@@ -229,5 +333,44 @@ impl OwnerController {
             }
         }
         Err(EngineError("icloud_outcome_unknown".into()))
+    }
+
+    /// Reads the rules a new GitHub repository starts with. Takes nothing.
+    /// Returns the rules on, DEC-182's standard setup while the owner saved none.
+    pub async fn github_rule_defaults(&mut self) -> Result<BTreeSet<GitHubRule>, EngineError> {
+        self.owner_client()?.github_rule_defaults().await
+    }
+
+    /// Saves the rules a new GitHub repository starts with. Takes the rules on.
+    /// Returns the rules the engine read back.
+    pub async fn github_rule_defaults_set(
+        &mut self,
+        rules: BTreeSet<GitHubRule>,
+    ) -> Result<BTreeSet<GitHubRule>, EngineError> {
+        self.owner_client()?.github_rule_defaults_set(rules).await
+    }
+
+    /// Reads the live rules of the repository a project was published to; sends nothing
+    /// that changes it. Takes the project. Returns the page.
+    pub async fn github_rules(
+        &mut self,
+        project: ProjectId,
+    ) -> Result<GitHubRepoRules, EngineError> {
+        self.owner_client()?.github_rules(project).await
+    }
+
+    /// Turns one rule on or off on the repository a project was published to, with the
+    /// owner's sign-in. Takes the project, the `owner/name` the page showed, the rule and
+    /// whether it is on. Returns the page read again after the change.
+    pub async fn github_rule_set(
+        &mut self,
+        project: ProjectId,
+        repo: String,
+        rule: GitHubRule,
+        on: bool,
+    ) -> Result<GitHubRepoRules, EngineError> {
+        self.owner_client()?
+            .github_rule_set(project, repo, rule, on)
+            .await
     }
 }

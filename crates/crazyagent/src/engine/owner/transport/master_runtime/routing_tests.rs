@@ -2610,8 +2610,13 @@ async fn a_console_master_turn_with_tools_is_told_its_memory_tools() {
         );
         assert_eq!(
             tools_off,
-            off.map(str::to_owned).into_iter().collect::<Vec<_>>(),
+            crate::team::tool::console_off(off.map(str::to_owned).into_iter().collect()),
             "{account}"
+        );
+        assert!(
+            tools_off
+                .iter()
+                .any(|tool| tool == crate::team::tool::PROPOSE_RULE_TOOL)
         );
     }
 }
