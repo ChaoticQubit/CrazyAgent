@@ -64,6 +64,16 @@ fn listening(socket: &Path) -> bool {
         .is_ok_and(|metadata| metadata.file_type().is_socket() && metadata.uid() == user())
 }
 
+/// Whether a connect to a socket is refused, as at the file an ended server leaves behind.
+/// Any other failure, such as no descriptor left, counts as not refused. Takes the socket
+/// path. Returns the answer.
+fn refused(socket: &Path) -> bool {
+    matches!(
+        crate::spawn_gate::connect_unix_std(socket),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+    )
+}
+
 /// The installed Seatbelt profile of a team agent, which its own server and every engine
 /// client on it run inside. Takes the engine root and the agent. Returns the profile path,
 /// or `terminal_own_server_unavailable` when it is not this user's plain file.
@@ -347,19 +357,34 @@ impl Servers {
     }
 
     /// The lead's own server when one listens for it now, else none; a name that is not a
-    /// team agent has none. Takes the agent. Returns the server host or the failure to open
-    /// one.
+    /// team agent has none. A socket file whose connect is refused counts as none only once
+    /// the keeper this engine started for that server has exited, as after its warden ended
+    /// the server: a keeper outlives its server, while on macOS a live server whose accept
+    /// queue is full refuses a connect too. With no keeper held or one still running the
+    /// server stays the lead's own, so a call on it fails rather than finding the lead gone.
+    /// Takes the agent. Returns the server host or the failure to open one.
     fn own(&self, agent: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
         let Ok(socket) = harness_socket(&self.root, agent) else {
             return Ok(None);
         };
-        if !listening(&socket) {
+        if !listening(&socket) || (self.keeper_exited(agent) && refused(&socket)) {
             if let Ok(mut leads) = self.leads.lock() {
                 leads.remove(agent);
             }
             return Ok(None);
         }
         self.server(agent, &socket).map(Some)
+    }
+
+    /// Whether the keeper this engine started for a lead's own server has exited, whether
+    /// or not it ended cleanly. Takes the lead. Returns false when no keeper is held for it,
+    /// it still runs, or its state cannot be read.
+    fn keeper_exited(&self, lead: &AgentId) -> bool {
+        self.keepers.lock().is_ok_and(|mut keepers| {
+            keepers
+                .get_mut(lead)
+                .is_some_and(|keeper| matches!(keeper.try_wait(), Ok(Some(_))))
+        })
     }
 
     /// The client host for one lead's own server, opened once and kept while it listens.
