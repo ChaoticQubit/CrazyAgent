@@ -1010,7 +1010,7 @@ async fn a_key_whose_last_connection_leaves_the_settings_goes_with_its_generated
 async fn catalog_connection(busy: &Busy, id: &CredentialRef) -> crate::config::ModelConnection {
     let state = owner_read(
         busy,
-        &format!("connection-{id}"),
+        &format!("connection-{}", id.as_str()),
         OwnerRead::ModelAccessRecord {
             collection: ModelAccessCollection::Connections,
             id: id.clone(),
@@ -1022,7 +1022,7 @@ async fn catalog_connection(busy: &Busy, id: &CredentialRef) -> crate::config::M
         ..
     } = state.data
     else {
-        panic!("the settings hold the connection {id}");
+        panic!("the settings hold the connection {}", id.as_str());
     };
     connection
 }
