@@ -1878,7 +1878,7 @@ pub enum StartWait {
 
 /// Waits like [`wait_ready`] for an engine a service manager starts. Past `bound` it keeps
 /// waiting, up to [`START_TIMEOUT`], while the manager still runs the process it was first
-/// seen running, and it fails at once when that process stops or another one takes its
+/// seen running before `bound`, and it fails at once when that process stops or another one takes its
 /// place. Inputs: the layout, the service, the bound and the log length before the start.
 /// Output: Ok once the engine answers, or an error naming the engine log.
 pub async fn wait_started(
@@ -1919,7 +1919,7 @@ pub async fn wait_start(
             let status = service.status()?;
             let running = status.pid.filter(|_| status.running);
             match (seen, running) {
-                (None, pid) => seen = pid,
+                (None, pid) => seen = pid.filter(|_| started.elapsed() < bound),
                 (Some(first), Some(pid)) if pid == first => {}
                 (Some(_), _) => {
                     return Err(failure(format!(
