@@ -201,3 +201,34 @@ pub fn parts(reference: &CredentialRef) -> Result<(&str, &str), StoreError> {
         checked_name(account).map_err(|_| invalid())?,
     ))
 }
+
+/// Serializes a value as compact JSON into one buffer of exactly its size, measured by a
+/// first pass, so no growth frees a partial copy of a secret the value holds; the caller
+/// wipes the result after use. Input: the value. Output: the bytes, or serde_json's error.
+pub(crate) fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Vec<u8>> {
+    let mut counted = Counted(0);
+    serde_json::to_writer(&mut counted, value)?;
+    let mut buffer = Vec::with_capacity(counted.0);
+    let capacity = buffer.capacity();
+    if let Err(problem) = serde_json::to_writer(&mut buffer, value) {
+        wipe(&mut buffer);
+        return Err(problem);
+    }
+    assert_eq!(buffer.len(), counted.0);
+    assert_eq!(buffer.capacity(), capacity);
+    Ok(buffer)
+}
+
+/// A writer that only counts the bytes written to it, for [`sized_json`]'s first pass.
+struct Counted(usize);
+
+impl std::io::Write for Counted {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
