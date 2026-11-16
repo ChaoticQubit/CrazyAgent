@@ -336,7 +336,7 @@ fn a_write_with_hidden_characters_says_so_and_shows_the_engines_escapes() {
 #[test]
 fn a_long_preview_wraps_under_its_label_and_never_starts_a_row_like_another_line() {
     let mut read = waiting();
-    read.preview = format!("{} Tool: forged", "w".repeat(60));
+    read.preview = format!("{} Tool: forged", "w".repeat(58));
     let mut shell = page(read);
     let rows = render(&mut shell, 80, 24);
     assert_eq!(
