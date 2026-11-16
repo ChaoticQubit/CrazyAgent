@@ -23,11 +23,11 @@ mod tests;
 pub use hold::{Held, Hold, HoldError, REASON, platform_hold};
 pub use settings::{
     BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeSettings, LidDisplay,
-    LidRule, Mode,
+    LidRule, LowPower, Mode,
 };
 pub use state::{
     Decision, EndReason, Heat, Inputs, LidSupport, PowerSource, Reason, Sensors, Want, decide,
-    heat_notice, lid_status,
+    heat_notice, lid_status, low_power_wanted,
 };
 
 use crate::engine::EngineError;
@@ -831,6 +831,7 @@ impl Keeper {
             rule_on: view.settings.lid != LidRule::Off,
             wanted,
             sleep_display: wanted && view.settings.lid_display == LidDisplay::Sleep,
+            low_power: false,
         };
         assert!(self.lid_ask.rule_on || !self.lid_ask.wanted);
         assert!(self.lid_ask.wanted || !self.lid_ask.sleep_display);

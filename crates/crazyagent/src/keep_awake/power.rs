@@ -55,13 +55,15 @@ impl PowerReading {
 pub type Reader = Box<dyn FnMut() -> PowerReading + Send>;
 
 /// What the keeper tells the lid line with each ask: whether the lid rule is on, whether
-/// the decision holds the closed lid, which only a rule that is on allows, and whether the
-/// display sleeps once per close while it does, which only a wanted ask carries (Task 12).
+/// the decision holds the closed lid, which only a rule that is on allows, whether the
+/// display sleeps once per close while it does, which only a wanted ask carries (Task 12),
+/// and whether the running hold asks for low power mode, with or without the lid (Task 16).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LidAsk {
     pub rule_on: bool,
     pub wanted: bool,
     pub sleep_display: bool,
+    pub low_power: bool,
 }
 
 /// An owner command for the lid helper (QUESTION 36a): Turn on lid-closed hold, or Remove

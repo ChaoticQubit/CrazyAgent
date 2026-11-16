@@ -519,6 +519,7 @@ impl LidLine {
             rule_on: true,
             wanted: false,
             sleep_display: false,
+            low_power: false,
         };
         let refused = self.platform.refusal();
         let support = self.step(ask, now_ms);

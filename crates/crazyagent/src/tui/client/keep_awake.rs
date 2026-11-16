@@ -35,6 +35,7 @@ impl Picks {
             heat_notice: self.heat_notice.unwrap_or(stored.heat_notice),
             lid_display: self.lid_display.unwrap_or(stored.lid_display),
             display_awake: self.display_awake.unwrap_or(stored.display_awake),
+            low_power: stored.low_power,
         };
         assert!(*self != Self::default() || sent == stored);
         sent

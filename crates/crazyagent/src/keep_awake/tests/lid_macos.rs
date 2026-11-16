@@ -22,16 +22,19 @@ const OFF: LidAsk = LidAsk {
     rule_on: false,
     wanted: false,
     sleep_display: false,
+    low_power: false,
 };
 const RESTING: LidAsk = LidAsk {
     rule_on: true,
     wanted: false,
     sleep_display: false,
+    low_power: false,
 };
 const WANTED: LidAsk = LidAsk {
     rule_on: true,
     wanted: true,
     sleep_display: true,
+    low_power: false,
 };
 const READING_MS: i64 = 30 * SECOND_MS;
 

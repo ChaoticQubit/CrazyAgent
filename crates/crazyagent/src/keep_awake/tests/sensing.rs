@@ -418,11 +418,13 @@ fn a_changed_lid_ask_reaches_the_lid_line_at_once_and_an_unchanged_one_waits() {
         rule_on: true,
         wanted: false,
         sleep_display: false,
+        low_power: false,
     };
     let wanted = LidAsk {
         rule_on: true,
         wanted: true,
         sleep_display: true,
+        low_power: false,
     };
     let count = || asks.lock().unwrap().len();
 
@@ -473,6 +475,7 @@ fn the_keeper_hands_the_lid_line_what_the_lid_wants_and_leaves_the_lid_to_it() {
         rule_on: false,
         wanted: false,
         sleep_display: false,
+        low_power: false,
     };
 
     keeper.tick(&connection, now_ms).unwrap();
@@ -483,6 +486,7 @@ fn the_keeper_hands_the_lid_line_what_the_lid_wants_and_leaves_the_lid_to_it() {
         rule_on: true,
         wanted: true,
         sleep_display: true,
+        low_power: false,
     };
     let view = step_until(&mut keeper, &connection, &mut now_ms, |view| {
         view.state.want == IDLE_AND_LID && last() == Some(wanted)
@@ -524,6 +528,7 @@ fn the_keeper_asks_the_lid_line_to_sleep_the_display_only_as_the_setting_says() 
         rule_on: true,
         wanted: true,
         sleep_display: true,
+        low_power: false,
     };
     step_until(&mut keeper, &connection, &mut now_ms, |_| last() == Some(sleeping));
 
@@ -590,6 +595,7 @@ fn a_lid_command_reaches_the_lid_line_once_and_at_once() {
         rule_on: true,
         wanted: false,
         sleep_display: false,
+        low_power: false,
     };
     assert_eq!(sensing.step(NOW_MS, resting), None);
     sensing.order(LidCommand::Remove);
@@ -702,6 +708,7 @@ fn stop_hands_the_lid_line_a_last_not_wanted_ask_before_it_returns() {
         rule_on: true,
         wanted: true,
         sleep_display: true,
+        low_power: false,
     };
     until_stepped(&mut keeper, &connection, &mut now_ms, || last() == Some(wanted));
 
@@ -710,8 +717,75 @@ fn stop_hands_the_lid_line_a_last_not_wanted_ask_before_it_returns() {
         rule_on: true,
         wanted: false,
         sleep_display: false,
+        low_power: false,
     };
     assert_eq!(last(), Some(let_go), "the lid line heard the last ask before stop returned");
+}
+
+#[test]
+fn the_keeper_asks_for_low_power_while_a_hold_runs_on_battery_below_forty() {
+    let (_folder, connection) = engine();
+    let fake = Fake::new(on_battery(Some(30)));
+    let (lid, asks, _) = heard_lid(LidSupport::Held);
+    let hold = Box::new(NoLid::default());
+    let mut keeper = Keeper::with_hold(hold).with_sensors(fake.reader(), Some(lid));
+    let mut now_ms = NOW_MS;
+    let last = || asks.lock().unwrap().last().map(|(ask, _, _)| *ask);
+    let power_only = LidAsk {
+        rule_on: true,
+        wanted: false,
+        sleep_display: false,
+        low_power: true,
+    };
+    agent(&connection, "working");
+    step_until(&mut keeper, &connection, &mut now_ms, |view| {
+        view.state.want == IDLE && last() == Some(power_only)
+    });
+
+    fake.set(on_battery(Some(45)));
+    steps(&mut keeper, &connection, &mut now_ms, 65);
+    assert_eq!(last(), Some(power_only), "asked once, it stays asked on battery");
+
+    fake.set(on_ac());
+    let lid_only = LidAsk {
+        rule_on: true,
+        wanted: true,
+        sleep_display: true,
+        low_power: false,
+    };
+    step_until(&mut keeper, &connection, &mut now_ms, |_| last() == Some(lid_only));
+    let heard = asks.lock().unwrap().clone();
+    assert!(heard.iter().any(|(ask, _, _)| ask.low_power), "the battery hold asked it");
+}
+
+#[test]
+fn stop_lets_go_of_a_low_power_ask_that_holds_no_lid() {
+    let (_folder, connection) = engine();
+    let fake = Fake::new(on_battery(Some(30)));
+    let (lid, asks, _) = heard_lid(LidSupport::Held);
+    let hold = NoLid::default();
+    let mut keeper = Keeper::with_hold(Box::new(hold)).with_sensors(fake.reader(), Some(lid));
+    let mut now_ms = NOW_MS;
+    agent(&connection, "working");
+    let last = || asks.lock().unwrap().last().map(|(ask, _, _)| *ask);
+    let power_only = LidAsk {
+        rule_on: true,
+        wanted: false,
+        sleep_display: false,
+        low_power: true,
+    };
+    until_stepped(&mut keeper, &connection, &mut now_ms, || last() == Some(power_only));
+
+    keeper.stop();
+    let let_go = LidAsk {
+        low_power: false,
+        ..power_only
+    };
+    assert_eq!(
+        last(),
+        Some(let_go),
+        "a lease that asks only low power is let go before stop returns"
+    );
 }
 
 #[test]

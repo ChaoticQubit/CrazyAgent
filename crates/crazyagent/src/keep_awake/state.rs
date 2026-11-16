@@ -1,4 +1,6 @@
-use super::settings::{DisplayAwake, HeatEnd, HeatNotice, KeepAwakeSettings, LidRule, Mode};
+use super::settings::{
+    DisplayAwake, HeatEnd, HeatNotice, KeepAwakeSettings, LidRule, LowPower, Mode,
+};
 use serde::{Deserialize, Serialize};
 
 /// Where the computer's power comes from, as the platform reader last saw it.
@@ -272,6 +274,19 @@ pub fn lid_status(settings: &KeepAwakeSettings, sensors: &Sensors) -> LidSupport
         return LidSupport::IdleOnlyOnBattery;
     }
     LidSupport::Held
+}
+
+/// Tells whether a hold asks for the platform's low power mode (QUESTION 39e). Inputs: the
+/// settings, the readings, whether a hold runs, and the option the last ask of this hold was
+/// made under, none when it did not ask. Output: whether to ask.
+pub fn low_power_wanted(
+    settings: &KeepAwakeSettings,
+    sensors: &Sensors,
+    holding: bool,
+    asked_under: Option<LowPower>,
+) -> bool {
+    let red_stub = (settings.low_power, sensors.power, holding, asked_under);
+    red_stub.2 && false
 }
 
 /// Tells whether the heat notice is due: the setting is on and the heat is serious or
