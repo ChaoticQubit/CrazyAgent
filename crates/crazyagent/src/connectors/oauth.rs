@@ -33,7 +33,10 @@ pub(crate) use sign::step_up_with;
 
 /// Every sign-in refusal code this client adds beside the connector address codes of
 /// `mcp_client::MCP_CODES`, sorted.
-pub const OAUTH_CODES: [&str; 15] = [
+pub const OAUTH_CODES: [&str; 18] = [
+    "connector_oauth_callback_expired",
+    "connector_oauth_callback_flooded",
+    "connector_oauth_callback_unavailable",
     "connector_oauth_client_invalid",
     "connector_oauth_code_invalid",
     "connector_oauth_issuer_mismatch",
@@ -311,6 +314,24 @@ pub(crate) fn wanting(
         .map_err(unavailable)?;
     assert!(rows.len() <= max);
     Ok(Some(rows))
+}
+
+/// The scopes a connector's server last asked for that its sign-in lacked, while the
+/// connector waits for the owner to sign in again for want of them. Inputs: the engine
+/// database and the connector. Output: the scopes as the server named them, none, or
+/// `connectors_unavailable`.
+pub(crate) fn wanted(db: &Connection, name: &str) -> Result<Option<String>, EngineError> {
+    use rusqlite::OptionalExtension;
+    db.execute_batch(SCHEMA).map_err(unavailable)?;
+    let wanted: Option<Option<String>> = db
+        .query_row(
+            "SELECT wanted FROM connector_sign_ins WHERE connector=?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    Ok(wanted.flatten())
 }
 
 /// This computer's clock as Unix milliseconds, 0 before 1970.

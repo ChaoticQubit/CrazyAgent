@@ -205,6 +205,18 @@ const PLAIN: &[(&str, &str)] = &[
         "the vendor answered with an error.",
     ),
     (
+        "connector_oauth_callback_expired",
+        "the browser did not come back within 5 minutes; sign in again.",
+    ),
+    (
+        "connector_oauth_callback_flooded",
+        "the sign-in got too many wrong answers on this computer, so it stopped; sign in again.",
+    ),
+    (
+        "connector_oauth_callback_unavailable",
+        "the engine could not open its sign-in address on this computer; try again.",
+    ),
+    (
         "connector_oauth_client_invalid",
         "the sign-in app's id or secret is not usable; save it again.",
     ),

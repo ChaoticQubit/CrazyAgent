@@ -3,8 +3,7 @@ use crate::connectors::callback::{CALLBACK_PATH, DONE_PAGE, FAILED_PAGE, REFUSED
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpStream};
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 const WAIT: Duration = Duration::from_secs(30);
