@@ -367,7 +367,7 @@ pub(crate) fn store_secret(
     _reference: &str,
     mut secret: Vec<u8>,
 ) -> Result<(), EngineError> {
-    secret.fill(0);
+    crate::credentials::wipe(&mut secret);
     Err(error("plugin_secret_store_unavailable"))
 }
 
@@ -413,7 +413,7 @@ pub(crate) fn store_secret(
             .sync_all()
             .map_err(|_| error("plugin_secret_store_unavailable"))
     })();
-    secret.fill(0);
+    crate::credentials::wipe(&mut secret);
     stored
 }
 
@@ -463,7 +463,7 @@ pub(crate) fn read_secret(root: &Path, reference: &str) -> Result<Vec<u8>, Engin
         .is_err()
         || bytes.len() > SECRET_BYTES_MAX
     {
-        bytes.fill(0);
+        crate::credentials::wipe(&mut bytes);
         return Err(error("plugin_secret_store_unavailable"));
     }
     Ok(bytes)

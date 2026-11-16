@@ -80,7 +80,7 @@ impl SecretString {
             || bytes.len() > bytes_max
             || bytes.iter().any(|byte| !(0x21..=0x7e).contains(byte))
         {
-            bytes.fill(0);
+            wipe(&mut bytes);
             return Err(StoreError::code("credential_secret_invalid"));
         }
         Ok(Self(bytes))
@@ -95,8 +95,15 @@ impl SecretString {
 
 impl Drop for SecretString {
     fn drop(&mut self) {
-        self.0.fill(0);
+        wipe(&mut self.0);
     }
+}
+
+/// Overwrites a secret buffer with zeros through `zeroize`, whose volatile writes the
+/// compiler may not drop as dead stores before the buffer is freed. Every secret buffer is
+/// wiped here. Input: the buffer, of bytes or of wider units. Output: none; its length stays.
+pub fn wipe<Unit: zeroize::DefaultIsZeroes>(buffer: &mut [Unit]) {
+    zeroize::Zeroize::zeroize(buffer);
 }
 
 impl fmt::Debug for SecretString {

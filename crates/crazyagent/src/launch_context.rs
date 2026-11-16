@@ -2877,7 +2877,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), LaunchError> {
 fn write_secret(path: &Path, text: String) -> Result<(), LaunchError> {
     let mut bytes = text.into_bytes();
     let written = write_private(path, &bytes);
-    bytes.fill(0);
+    crate::credentials::wipe(&mut bytes);
     written
 }
 

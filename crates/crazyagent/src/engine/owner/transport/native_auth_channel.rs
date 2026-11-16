@@ -490,7 +490,7 @@ impl Drop for NativeAuthCustodyLaunch {
             slot.attached = true;
             slot.live.store(false, Ordering::SeqCst);
         }
-        self.token.fill(0);
+        crate::credentials::wipe(&mut self.token);
     }
 }
 
@@ -2284,9 +2284,9 @@ impl NativeAuthCustodyChannel {
         let mut packet = [0; 37];
         packet[..4].copy_from_slice(b"CAN1");
         packet[5..].copy_from_slice(&token);
-        token.fill(0);
+        crate::credentials::wipe(&mut token);
         stream.write_all(&packet).await.map_err(io_error)?;
-        packet.fill(0);
+        crate::credentials::wipe(&mut packet);
         let frame = encode_frame(&Attach {
             protocol_version: PROTOCOL_VERSION,
             kind: AttachKind::Attach,

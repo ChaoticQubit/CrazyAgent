@@ -353,7 +353,9 @@ pub struct EffectivePlugins {
 pub struct SecretValue(Vec<u8>);
 
 impl SecretValue {
-    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+    /// Holds bytes read for one launch as a secret, taking the buffer without a copy.
+    /// Input: the secret bytes. Output: the value, wiped when it is dropped.
+    pub fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 
@@ -366,7 +368,7 @@ impl SecretValue {
 
 impl Drop for SecretValue {
     fn drop(&mut self) {
-        self.0.fill(0);
+        crate::credentials::wipe(&mut self.0);
     }
 }
 
