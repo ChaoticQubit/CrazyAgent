@@ -3471,9 +3471,10 @@ impl TeamRuntime {
 
     /// Lists a project's idle sub-agents in a kept session that the Delivery setting leaves
     /// no channel of their own ([`crate::coord::delivery::no_channel`]): a tools-off Codex
-    /// agent under Native only has no bridge and is never typed into, so `wake_for_messages`
-    /// brings it its messages as a task of their own, as it does an asleep agent's (PA-11).
-    /// Takes the project. Returns their ids, or a database failure.
+    /// agent under Native only has no bridge and is never typed into, nor is a listed-harness
+    /// agent, tools on or off, so `wake_for_messages` brings it its messages as a task of
+    /// their own, as it does an asleep agent's (PA-11, T19). Takes the project. Returns their
+    /// ids, or a database failure.
     fn unreached(&self, project: &ProjectId) -> Result<BTreeSet<i64>, EngineError> {
         let mut found = BTreeSet::new();
         for (id, worker) in &self.workers {
@@ -3496,11 +3497,15 @@ impl TeamRuntime {
                 found.insert(*id);
             }
         }
-        assert!(
-            found
-                .iter()
-                .all(|id| self.workers[id].role == AgentRole::Sub && !self.workers[id].tools)
-        );
+        assert!(found.iter().all(|id| {
+            let worker = &self.workers[id];
+            worker.role == AgentRole::Sub
+                && (!worker.tools
+                    || matches!(
+                        crate::coord::settings::HarnessKind::from_harness(&worker.harness),
+                        Some(crate::coord::settings::HarnessKind::Listed(_))
+                    ))
+        }));
         Ok(found)
     }
 

@@ -273,7 +273,10 @@ fn program(text: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-fn relative(text: &str) -> bool {
+/// Whether a path is written relative to a folder: no backslash, and no empty, `.` or `..`
+/// part, so it never starts with `/` and never climbs out. Input: the path as written.
+/// Output: the answer.
+pub(crate) fn relative(text: &str) -> bool {
     !text.contains('\\')
         && text
             .split('/')

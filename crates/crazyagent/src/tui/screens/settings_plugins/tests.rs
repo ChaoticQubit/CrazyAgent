@@ -1203,6 +1203,7 @@ fn found(name: &str, from: ImportFrom, state: ImportState) -> ImportCandidate {
     let folder = match from {
         ImportFrom::Claude => format!("/Users/mira/.claude/skills/{name}"),
         ImportFrom::Codex => format!("/Users/mira/.codex/skills/{name}"),
+        ImportFrom::Listed { folder, .. } => format!("/Users/mira/{folder}/{name}"),
     };
     ImportCandidate {
         from,

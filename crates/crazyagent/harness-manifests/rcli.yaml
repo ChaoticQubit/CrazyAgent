@@ -11,7 +11,8 @@ account_kinds:
   - "open_ai_compatible_url"
   - "local"
 account_protocols:
-  - "*"
+  - "openai*"
+  - "anthropic-messages"
 tools_limited: "runs without tools"
 cannot_start: "runs only as a CrazyAgent master"
 roles:

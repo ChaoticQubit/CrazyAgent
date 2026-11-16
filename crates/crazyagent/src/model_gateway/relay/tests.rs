@@ -267,6 +267,92 @@ fn both_headers_from_a_key_helper_forward_only_the_real_x_api_key() {
     assert_eq!(header(&seen[0], "authorization"), None);
 }
 
+/// Task 17 (DEC-180 addendum 2, answer 3): a harness on a Gemini API key account presents
+/// the placeholder in `x-goog-api-key`, as Google's SDK does; the provider gets the real
+/// key in that same header, once, beside no other key header, and a wrong token there is
+/// refused before the provider is reached.
+#[test]
+fn a_gemini_placeholder_in_x_goog_api_key_is_replaced_by_the_real_key_in_the_same_header() {
+    let provider = Provider::json();
+    let relay = Relay::start(&provider.origin(), key()).unwrap();
+    let target = "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse";
+    let request = format!(
+        "POST {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nx-goog-api-key: {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}",
+        relay.token()
+    );
+    let (status, _, _) = send(relay.port(), request.as_bytes());
+    assert_eq!(status, 200);
+    let seen = provider.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].target, target);
+    let keys: Vec<&str> = seen[0]
+        .headers
+        .iter()
+        .filter(|(name, _)| name == "x-goog-api-key")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert_eq!(keys, [KEY]);
+    assert_eq!(header(&seen[0], "x-api-key"), None);
+    assert_eq!(header(&seen[0], "authorization"), None);
+    assert!(
+        seen[0]
+            .headers
+            .iter()
+            .all(|(_, value)| !value.contains(relay.token()))
+    );
+    let other = format!("{TOKEN_PREFIX}{}", "0".repeat(64));
+    for wrong in [other.as_str(), KEY] {
+        let request = format!(
+            "GET /v1beta/models HTTP/1.1\r\nHost: 127.0.0.1\r\nx-goog-api-key: {wrong}\r\n\r\n"
+        );
+        assert_eq!(send(relay.port(), request.as_bytes()).0, 401, "{wrong}");
+    }
+    assert_eq!(provider.seen().len(), 1);
+}
+
+/// Task 17: when a harness sends the placeholder in `x-goog-api-key` beside the header the
+/// relay keys the request by, the placeholder in `x-goog-api-key` is dropped, never
+/// forwarded to the provider next to the real key; `x-api-key` and Bearer keep their order.
+#[test]
+fn a_placeholder_in_x_goog_api_key_beside_another_key_header_is_never_forwarded() {
+    let provider = Provider::json();
+    let relay = Relay::start(&provider.origin(), key()).unwrap();
+    for (auth, kept, value) in [
+        (
+            format!(
+                "X-Api-Key: {token}\r\nx-goog-api-key: {token}",
+                token = relay.token()
+            ),
+            "x-api-key",
+            KEY.to_owned(),
+        ),
+        (
+            format!(
+                "Authorization: Bearer {token}\r\nx-goog-api-key: {token}",
+                token = relay.token()
+            ),
+            "authorization",
+            format!("Bearer {KEY}"),
+        ),
+    ] {
+        assert_eq!(
+            send(relay.port(), &post("/v1/messages", &auth, "{}")).0,
+            200,
+            "{auth}"
+        );
+        let seen = provider.seen();
+        let last = seen.last().unwrap();
+        assert_eq!(header(last, kept), Some(value.as_str()), "{auth}");
+        assert_eq!(header(last, "x-goog-api-key"), None, "{auth}");
+        assert!(
+            last.headers
+                .iter()
+                .all(|(_, value)| !value.contains(relay.token()))
+        );
+    }
+    assert_eq!(provider.seen().len(), 2);
+}
+
 #[test]
 fn wrong_or_missing_token_is_refused_without_reaching_the_provider() {
     let provider = Provider::json();

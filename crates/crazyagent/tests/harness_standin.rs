@@ -61,7 +61,12 @@ fn lines(items: &[&str]) -> String {
 fn every_stand_in_manifest_loads_together_each_with_its_own_program() {
     let texts: Vec<(String, String)> = KINDS
         .iter()
-        .map(|kind| (format!("standin-{kind}"), harness_standin::manifest_text(kind)))
+        .map(|kind| {
+            (
+                format!("standin-{kind}"),
+                harness_standin::manifest_text(kind),
+            )
+        })
         .collect();
     let files: Vec<(&str, &str)> = texts
         .iter()
@@ -120,8 +125,7 @@ fn a_filled_piped_argv_from_the_manifest_runs_the_stand_in_as_written() {
             home.as_str(),
             "--model",
             "m-1",
-            "--prompt",
-            "hi there",
+            "--prompt=hi there",
             "--resume",
             "s-2",
         ]
@@ -245,7 +249,10 @@ fn acp_answers_its_setup_and_a_prompt_echoing_each_request_id() {
 #[test]
 fn acp_asks_permission_mid_turn_and_a_cancelled_turn_ends_as_cancelled() {
     let standin = Standin::new("acp");
-    standin.put("turn-1.out", lines(&[TOOL, PERMISSION, "@standin wait", TOOL_DONE]));
+    standin.put(
+        "turn-1.out",
+        lines(&[TOOL, PERMISSION, "@standin wait", TOOL_DONE]),
+    );
     standin.put("turn-2.out", lines(&[CHUNK, "@standin wait", NEVER]));
     let mut live = standin.start(&standin.at_home(&[]));
     live.send(TOOL_PROMPT);
@@ -366,15 +373,10 @@ fn sqlite_poll_writes_rows_a_read_only_reader_sees_in_order() {
     let ended = standin.run(&standin.at_home(&["--session", "s-9"]), b"hello\nagain\n");
     assert_eq!(ended.status.code(), Some(0));
     let database = standin.state().join("records").join("s-9.db");
-    assert!(
-        database.is_file(),
-        "the sqlite-poll record was not written"
-    );
-    let connection = rusqlite::Connection::open_with_flags(
-        database,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
+    assert!(database.is_file(), "the sqlite-poll record was not written");
+    let connection =
+        rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
     let mut statement = connection
         .prepare("SELECT role, text FROM message ORDER BY id")
         .unwrap();
