@@ -456,10 +456,11 @@ impl ProjectPage {
     /// a read opens the pane on a publish the owner can act on or follow and keeps an open
     /// pane on where the publish stands, finished or not, an answer shows where the publish
     /// now stands, a discard says what it left on GitHub, and a refused answer says why and
-    /// reads the publish again with the pane kept. With no publish it asks whether to offer
-    /// one, shows the Overview's question when the engine says to and drops it once Not now
-    /// or Don't ask again is kept. A failed read stays quiet. Takes the reply and the
-    /// context. Returns nothing.
+    /// reads the publish again with the pane kept. A read that finds a publish closes the
+    /// Overview's question or form and says why the form's last Start was refused. With no
+    /// publish it asks whether to offer one, shows the question when the engine says to and
+    /// drops it once Not now or Don't ask again is kept. A failed read stays quiet. Takes the
+    /// reply and the context. Returns nothing.
     fn publish_answered(&mut self, event: &IntakeEvent, ctx: &mut Ctx) {
         let read = matches!(
             event.query,
@@ -476,7 +477,9 @@ impl ProjectPage {
                     .map(PublishPane::new);
                 if job.is_some() {
                     self.screen.github_notice = false;
-                    self.ask_pane = None;
+                    if let Some(said) = self.ask_pane.take().and_then(AskPane::into_refusal) {
+                        ctx.say(said);
+                    }
                 } else {
                     self.ask_prompt(ctx);
                 }
@@ -1409,7 +1412,7 @@ impl ProjectPage {
                 result => Self::publish_start_said(&self.screen.name, result),
             };
             match self.ask_pane.as_mut().filter(|pane| !pane.asking()) {
-                Some(form) => form.refused(format!("{} {}", said.lead, said.rest)),
+                Some(form) => form.refused(said),
                 None => ctx.say(said),
             }
             if !started {

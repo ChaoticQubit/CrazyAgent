@@ -9,6 +9,7 @@ use crate::github::{
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::intake::{IntakeEvent, IntakeQuery};
+use crate::tui::frame::Message;
 use crate::tui::keys::Key;
 use std::collections::BTreeSet;
 
@@ -27,6 +28,7 @@ const BLOCKED: &str = "These files look like they hold secrets, so nothing was p
 const MORE: &str = "There are more. Check again after these.";
 const DISCARD_ASK: &str = "Discard this publish? CrazyAgent forgets it so you can start again. Files it wrote in the project stay, and a repository it made stays on GitHub.";
 const REFUSAL_CHARS_MAX: usize = 300;
+const START_REFUSAL_LINES_MAX: usize = 5;
 pub(in crate::tui) const PROMPT_LINE: &str = "This project is not on GitHub. Publish it?";
 pub(in crate::tui) const PROMPT_KEY: (&str, &str) = ("G", "Publish on GitHub");
 const CHECKING: &str = "Checking your GitHub sign-in...";
@@ -61,7 +63,7 @@ pub(in crate::tui) struct AskText {
 pub(in crate::tui) struct AskPane {
     form: Option<Publish>,
     reading: Option<IntakeQuery>,
-    refusal: Option<String>,
+    refusal: Option<Message>,
 }
 
 impl AskPane {
@@ -78,9 +80,15 @@ impl AskPane {
     }
 
     /// Keeps the form with what the owner chose and shows why the engine refused its Start,
-    /// until the next Start. Takes the sentence. Returns nothing.
-    pub fn refused(&mut self, why: String) {
-        self.refusal = Some(why);
+    /// until the next Start. Takes what the message line would have said. Returns nothing.
+    pub fn refused(&mut self, said: Message) {
+        self.refusal = Some(said);
+    }
+
+    /// Gives up the pane for the reason its last Start was refused, so the page can still
+    /// say it once a publish read closes the form. Takes the pane. Returns the reason, if any.
+    pub fn into_refusal(self) -> Option<Message> {
+        self.refusal
     }
 
     /// Handles a key: on the question Enter opens the form and reads the GitHub sign-in,
@@ -197,11 +205,12 @@ impl AskPane {
                 ),
             },
         };
-        if let Some(why) = self.refusal.as_ref().filter(|_| self.form.is_some()) {
+        if let Some(said) = self.refusal.as_ref().filter(|_| self.form.is_some()) {
             body.push(Row::default());
             body.extend(
-                wrap_words(why, 64)
+                wrap_words(&format!("{} {}", said.lead, said.rest), 64)
                     .into_iter()
+                    .take(START_REFUSAL_LINES_MAX)
                     .map(|line| Row::of(line, look.error)),
             );
         }
