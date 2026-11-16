@@ -502,6 +502,7 @@ test("Stop on Home while a delete waits for its agents keeps the project and its
     await me.click("Dismiss", "div.in-row button");
     await me.waitFor("the row gone", (text) => !text.includes(stopped), JOB_MS);
   });
+  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Dismiss forgets the stopped delete");
   assert.equal(await listed(id), true, "a stopped delete keeps the project");
   assert.ok(existsSync(join(folder, ".crazyagent")), "its folder stays where it is");
   sql("UPDATE team_agents SET status='stopped' WHERE id=82");
@@ -521,6 +522,7 @@ test("a delete whose agents do not stop within the wait fails on Home with the r
     await me.click("Dismiss", "div.in-row button");
     await me.waitFor("the row gone", (text) => !text.includes(failed), JOB_MS);
   });
+  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Dismiss forgets the failed delete");
   assert.equal(await listed(id), true, "a failed delete keeps the project");
   assert.ok(existsSync(join(folder, ".crazyagent")), "its folder stays where it is");
   sql("UPDATE team_agents SET status='stopped' WHERE id=83");
