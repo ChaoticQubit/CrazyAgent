@@ -201,6 +201,18 @@ const ENGINE_SETTINGS: [&str; 22] = [
     "advice.graftFileDeprecated=false",
 ];
 
+/// The git arguments that list every include entry of every config file git reads, with
+/// the file each came from, NUL-separated: `include.path` and `includeIf.<condition>.path`,
+/// whatever the condition says now. Git answers 1 with nothing printed when there is none.
+#[cfg(unix)]
+const INCLUDE_KEYS: [&str; 5] = [
+    "config",
+    "--show-origin",
+    "-z",
+    "--get-regexp",
+    "^include(if\\..+)?\\.path$",
+];
+
 pub(super) fn failure(code: &str) -> EngineError {
     EngineError(code.into())
 }
@@ -383,13 +395,11 @@ pub(super) enum Writes {
 }
 
 impl Repo {
-    /// Opens a repository for engine git calls, lists the filter drivers to blank and,
-    /// for a work tree, finds the ignore file the owner's git applies there. The git folder is
-    /// always the owner checkout's own `.git` or a linked worktree's folder directly in its
-    /// `.git/worktrees`, never an agent's own clone, whose config is the agent's (CC-N1).
-    /// Inputs: the owner checkout root, the git folder and the work tree, none for object
-    /// and ref work only. Output: the repository, or `changes_git_unsupported` for a git
-    /// older than 2.40 or a filter name a `-c` cannot carry.
+    /// Opens a repository for engine git calls: lists the filter drivers to blank, finds the
+    /// ignore file for a work tree, and refuses a config hook or an include placed in the
+    /// checkout or work tree (rv-sec2 N1). The git folder is the owner checkout's `.git` or a
+    /// linked worktree's, never an agent's clone (CC-N1). Inputs: the checkout root, the git
+    /// folder and the work tree, if any. Output: the repository or a `changes_git_*` refusal.
     #[cfg(unix)]
     pub(super) fn open(
         repository: &Path,
@@ -421,6 +431,23 @@ impl Repo {
         if crate::research::runner::listed_hook(keys).is_some() {
             eprintln!("landing_config_hook_refused");
             return Err(failure("changes_git_hooks"));
+        }
+        let folders = std::iter::once(repository)
+            .chain(work_tree)
+            .map(crate::sandbox::canonical)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| failure("changes_git_failed"))?;
+        let includes = repo.exec(&INCLUDE_KEYS, None, &[], LISTING_BYTES_MAX)?;
+        let listed = includes.code == 0 || (includes.code == 1 && includes.stdout.is_empty());
+        if includes.overflow || !listed {
+            return Err(failure("changes_git_failed"));
+        }
+        let outside =
+            crate::ide::bridge::remote_git::includes_placed_outside(&includes.stdout, &folders)
+                .ok_or_else(|| failure("changes_git_failed"))?;
+        if !outside {
+            eprintln!("landing_config_include_refused");
+            return Err(failure("changes_git_include"));
         }
         repo.overrides = crate::research::runner::filter_overrides(keys)
             .map_err(|_| failure("changes_git_unsupported"))?;
