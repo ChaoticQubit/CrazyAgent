@@ -622,7 +622,7 @@ test("A project's Connectors section has one row per name: the owner's refused f
   assert.deepEqual(api.projectRows(broken).rows.filter((row) => row.name === "broken").map((row) => row.word), ["Refused"], "a refused file of its own name keeps its switch, so it can be turned off");
 });
 
-const both = (using) => connector("board", "Board", { kind: using === "key" ? "needs_key" : "ready" }, {
+const both = (using) => connector("board", "Board", { kind: using === "key" ? "needs_key" : "needs_sign_in" }, {
   origin: "user", sign_in: "both", secrets: [{ name: "api_key", binding: { kind: "none" } }],
   oauth: { signed_in: false, own_app_allowed: true, own_app: null, redirect: "http://127.0.0.1/callback", using },
 });

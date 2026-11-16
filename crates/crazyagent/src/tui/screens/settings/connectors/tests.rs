@@ -203,6 +203,9 @@ fn with_secret(binding: Binding, at: usize) -> ConnectorsView {
 fn both(way: SignInWith) -> ConnectorsView {
     let mut read = view();
     read.connectors[1].sign_in = SignIn::Both;
+    if way == SignInWith::Browser {
+        read.connectors[1].status = PluginStatus::NeedsSignIn;
+    }
     read.connectors[1].oauth = Some(OAuthView {
         signed_in: false,
         own_app_allowed: true,
