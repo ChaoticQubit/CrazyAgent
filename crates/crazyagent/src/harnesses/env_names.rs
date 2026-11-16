@@ -76,6 +76,33 @@ const STARTS: [&str; 25] = [
 /// and still cannot set a name of the family.
 const INNER_STARTS: [&str; 1] = ["PIP_"];
 
+/// Names that pick the owner's own compiler, its flags, its header and library paths and
+/// the developer tools: the owner may give an account one as a toolchain choice, and the
+/// launch guard lets it through, but no manifest may set one in `accounts.<format>.env` or
+/// `home.env`, nor claim one with a `home.env_prefixes` entry (leader 01:34).
+const OWNER_TOOLCHAIN: [&str; 8] = [
+    "DEVELOPER_DIR",
+    "CC",
+    "CXX",
+    "CFLAGS",
+    "LDFLAGS",
+    "CPATH",
+    "LIBRARY_PATH",
+    "PKG_CONFIG_PATH",
+];
+
+/// The words a manifest variable naming one of [`OWNER_TOOLCHAIN`] is refused with, after
+/// its setting and name: an account entry's and a home block's refusal end the same way, so
+/// the owner reads one reason.
+pub(super) const PICKS: &str =
+    "picks the owner's compiler or build tools, so only the owner sets it.";
+
+/// The words a `home.env_prefixes` entry covering one of [`OWNER_TOOLCHAIN`] is refused
+/// with, after its setting: they name the owner's toolchain, not the engine, as the reason
+/// the prefix cannot be claimed.
+pub(super) const COVERS_TOOLCHAIN: &str =
+    "this prefix covers names that pick the owner's compiler or build tools.";
+
 /// Whether a manifest may not set a variable of this name in `accounts.<format>.env`, or in
 /// `home.env` unless it is an XDG_ folder there: the engine sets it on a launch, or it decides
 /// which shell setup runs, which code a runtime loads or which server an install trusts.
@@ -102,6 +129,23 @@ pub(super) fn claims(prefix: &str) -> bool {
             .iter()
             .any(|start| start.starts_with(stem) || prefix.starts_with(start))
         || INNER_STARTS.iter().any(|start| prefix.starts_with(start))
+}
+
+/// Whether a name is one of the owner's toolchain names ([`OWNER_TOOLCHAIN`]), which a
+/// manifest may not set. Compared upper-cased, as [`owned`] is. Input: the name. Output:
+/// the answer.
+pub(super) fn owner_toolchain(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    OWNER_TOOLCHAIN.contains(&upper.as_str())
+}
+
+/// Whether a `home.env_prefixes` entry would cover one of the owner's toolchain names: the
+/// name starts with the prefix's stem, as [`claims`] reads an owned name. Input: a prefix
+/// of capital letters, digits and `_` that ends with `_`. Output: the answer.
+pub(super) fn claims_owner_toolchain(prefix: &str) -> bool {
+    assert!(prefix.len() > 1 && prefix.ends_with('_'));
+    let stem = &prefix[..prefix.len() - 1];
+    OWNER_TOOLCHAIN.iter().any(|name| name.starts_with(stem))
 }
 
 #[cfg(test)]

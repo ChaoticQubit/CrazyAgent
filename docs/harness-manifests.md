@@ -267,7 +267,7 @@ One shared rule covers the `home.env` names, the `home.env_prefixes` starts and 
 
 Whole names:
 
-`PATH`, `HOME`, `SHELL`, `TMPDIR`, `TMPPREFIX`, `USER`, `LOGNAME`, `TERM`, `LANG`, `TZ`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `ENV`, `ZDOTDIR`, `PROMPT_COMMAND`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `ELECTRON_RUN_AS_NODE`, `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, `GOFLAGS`, `GOPROXY`, `GOSUMDB`, `GONOSUMDB`, `GOINSECURE`, `GOPRIVATE`, `GONOPROXY`, `GOTOOLCHAIN`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`.
+`PATH`, `HOME`, `SHELL`, `TMPDIR`, `TMPPREFIX`, `SDKROOT`, `USER`, `LOGNAME`, `TERM`, `LANG`, `TZ`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `ENV`, `ZDOTDIR`, `PROMPT_COMMAND`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `ELECTRON_RUN_AS_NODE`, `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, `GOFLAGS`, `GOPROXY`, `GOSUMDB`, `GONOSUMDB`, `GOINSECURE`, `GOPRIVATE`, `GONOPROXY`, `GOTOOLCHAIN`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`.
 
 Every name that starts with:
 
@@ -277,7 +277,9 @@ Every name that starts with:
 - A prefix is refused when it would cover an owned name in either direction: an owned name or family starts with the prefix's stem, or the prefix starts with an owned family. So `GIT_`, `NPM_` and `PYTHON_` are refused, and so is `NODE_` or `XDG_`.
 - `PIP_` lies inside `PI_`, a prefix a harness may keep. `PI_` stays allowed, and a prefix that starts with `PIP_` is refused. A `PIP_` name is refused wherever a name is set.
 
-This rule runs when the manifest is read. It is not the launch guard: the engine sets its own git, home, TLS and shell temp settings after the harness's variables, so a manifest value never replaces one.
+The owner's toolchain names are `DEVELOPER_DIR`, `CC`, `CXX`, `CFLAGS`, `LDFLAGS`, `CPATH`, `LIBRARY_PATH` and `PKG_CONFIG_PATH`. They pick the compiler, its flags, its header and library paths and the developer tools, which is the owner's choice for an account. The engine does not set them and the launch guard lets them through. No manifest may set one in `home.env` or `accounts.<format>.env`, and no `home.env_prefixes` entry may cover one, so `CC_`, `CFLAGS_`, `LIBRARY_`, `PKG_` and `DEVELOPER_` are refused. Each refusal says the name picks the owner's compiler or build tools.
+
+This rule runs when the manifest is read. It is not the launch guard: the engine sets its own git, home, TLS and shell temp settings after the harness's variables, so a manifest value never replaces one. The macOS SDK in `SDKROOT` is set before them, which is why that name is owned.
 
 ## The accounts block
 

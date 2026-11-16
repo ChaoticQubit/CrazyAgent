@@ -169,6 +169,10 @@ fn check_env(env: &Value, path: &str) -> Result<(), Refused> {
                 format!("{path}: {name} is not a variable an account entry may set."),
             );
         }
+        if super::env_names::owner_toolchain(name) {
+            let picks = super::env_names::PICKS;
+            return refuse(manifest::VALUE, format!("{path}: {name} {picks}"));
+        }
         let Value::Str(text) = value else {
             return refuse(
                 manifest::TYPE,
@@ -201,7 +205,8 @@ fn check_env(env: &Value, path: &str) -> Result<(), Refused> {
 /// manifest lists, and its `env` sets plain variables, none the shared env-name rule owns
 /// (search path, home, temp folder, shell, locale, the XDG folders, proxy, git, TLS, the
 /// package managers, package indexes and toolchains, the native harness homes, the
-/// code-loading runtimes and the engine's own), to text that holds no placeholder but
+/// code-loading runtimes and the engine's own) nor the owner's toolchain names (the
+/// compiler, its flags and paths, the developer tools), to text that holds no placeholder but
 /// `{relay_url}`, `{token}` and `{model}`. That rule runs at load time and is not the launch
 /// guard: `sandbox::agent_env` sets the engine's pins (git, home, TLS and the zsh temp
 /// prefix) after the harness's own variables, so an entry never replaces one. A harness on a
