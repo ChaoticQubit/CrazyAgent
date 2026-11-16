@@ -199,7 +199,8 @@ fn a_quiet_step_reports_its_exit_without_reading_its_output() {
 
 /// WIN-CONTEXT-MODE: an install checked against both pins runs as `node.exe` beside npx
 /// with the absolute cli.bundle.mjs, from an agent launch too; a changed program never runs
-/// and the launch says the files did not match, never npx.
+/// and the launch says the files did not match, never npx. npm is taken away first, so the
+/// new install this asks for is refused before any `node.exe` starts.
 #[test]
 fn a_checked_install_runs_with_node_exe_and_a_changed_program_never_runs() {
     let case = case();
@@ -223,8 +224,29 @@ fn a_checked_install_runs_with_node_exe_and_a_changed_program_never_runs() {
         Err("context_mode_program_mismatch")
     );
     assert_eq!(shared(&folder, &node, VERSION), None);
+    fs::remove_file(npm_cli(&case.bin)).unwrap();
     assert_eq!(
         for_launch(&case.root, npx_in(&case)),
         Err(ContextModeOff::Mismatch)
     );
+}
+
+/// WIN-CONTEXT-MODE: every spec other than the pinned launch through an npx the resolver
+/// finds runs as approved on Windows: another version or server, a bare `npx` and a `node`.
+#[test]
+fn any_other_server_launches_as_approved_on_windows() {
+    let case = case();
+    let npx = case.bin.join("npx.cmd").to_str().unwrap().to_owned();
+    let stdio = |command: &str, package: &str| ServerSpec::Stdio {
+        command: command.into(),
+        args: vec!["-y".into(), package.into()],
+    };
+    for other in [
+        stdio(&npx, "context-mode@latest"),
+        stdio(&npx, "other-server@1.0.0"),
+        stdio("npx", "context-mode@1.0.169"),
+        stdio(r"C:\Program Files\nodejs\node.exe", "context-mode@1.0.169"),
+    ] {
+        assert_eq!(for_launch(&case.root, other.clone()), Ok(other));
+    }
 }

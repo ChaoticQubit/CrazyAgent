@@ -876,7 +876,18 @@ fn an_agent_launch_runs_the_checked_shared_install_or_no_context_mode_never_npx(
     );
     assert!(!registered(&case.folder()));
     assert!(!case.npm().join(PROFILE).exists(), "npm never started");
-    for other in [npx("context-mode@latest"), npx("other-server@1.0.0")] {
+    for other in [
+        npx("context-mode@latest"),
+        npx("other-server@1.0.0"),
+        ServerSpec::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), format!("context-mode@{VERSION}")],
+        },
+        ServerSpec::Stdio {
+            command: "/opt/homebrew/bin/node".into(),
+            args: vec!["-y".into(), format!("context-mode@{VERSION}")],
+        },
+    ] {
         assert_eq!(for_launch(&case.root, other.clone()), Ok(other));
     }
 }
