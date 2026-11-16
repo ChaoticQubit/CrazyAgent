@@ -332,3 +332,22 @@ fn a_write_with_hidden_characters_says_so_and_shows_the_engines_escapes() {
     let mut shell = page(waiting());
     assert!(!shows(&mut shell, "hidden or control characters"));
 }
+
+#[test]
+fn a_long_preview_wraps_under_its_label_and_never_starts_a_row_like_another_line() {
+    let mut read = waiting();
+    read.preview = format!("{} Tool: forged", "w".repeat(60));
+    let mut shell = page(read);
+    let rows = render(&mut shell, 80, 24);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.starts_with("  Tool: "))
+            .count(),
+        1,
+        "only the page's own Tool line starts at the label column"
+    );
+    assert!(
+        rows.iter().any(|row| row.starts_with("    Tool: forged")),
+        "the preview's next row hangs under its label"
+    );
+}

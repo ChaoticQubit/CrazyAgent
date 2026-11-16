@@ -468,3 +468,38 @@ fn allowed_writes_say_when_they_are_read_and_when_the_read_failed() {
         "r reads the page again first"
     );
 }
+
+#[test]
+fn a_change_that_lands_under_ask_once_reads_the_allowed_writes_and_another_policy_forgets_them() {
+    let mut shell = page(view(vec![grant("linear", true, Who::Both)]));
+    keys(&mut shell, &[Key::Char(' ')]);
+    assert!(granted(&one(&mut shell), "linear", false, Who::Both));
+    let mut once = view(vec![grant("linear", false, Who::Both)]);
+    once.settings.write = WritePolicy::AskOncePerProject;
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(once.clone())));
+    assert!(
+        reads_writes(&one(&mut shell)),
+        "the block's read goes out once the page shows it"
+    );
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Writes(Ok(allowed(PROJECT, &["linear"]))),
+    );
+    assert!(shows(&mut shell, "Allowed writes"));
+    keys(&mut shell, &[Key::Char('r')]);
+    assert!(reads_project(&one(&mut shell)));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Page(Ok(view(vec![grant("linear", false, Who::Both)]))),
+    );
+    assert!(requests(&mut shell).is_empty());
+    assert!(!shows(&mut shell, "Allowed writes"));
+    keys(&mut shell, &[Key::Char('r')]);
+    assert!(reads_project(&one(&mut shell)));
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(once)));
+    assert!(reads_writes(&one(&mut shell)));
+    assert!(
+        shows(&mut shell, "Reading allowed writes"),
+        "a list read under the last policy is not shown again"
+    );
+}
