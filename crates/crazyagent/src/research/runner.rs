@@ -1126,23 +1126,23 @@ impl ResearchRunner {
         sandbox = allow_harness(sandbox, &program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
-        let (sandbox, _listed) = self.keep_held(job, || -> Result<_, RunError> {
+        let (sandbox, listed) = self.keep_held(job, || -> Result<_, RunError> {
             let _setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
             ensure_repository(&root, &tmp)?;
             add_worktree(&sandbox, &profile, &worktree)?;
             let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
+            let listed = crate::sandbox::hidden_paths::starting(
+                crate::sandbox::hidden_paths::RunKind::Research,
+                project.as_str(),
+            )
+            .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?;
             let hidden = jobs
                 .hidden_paths(&project)
                 .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
+            listed.hid(if unconfined { &[] } else { &hidden });
             if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&root, &hidden) {
                 return Err(RunError::Invalid(code.into()));
             }
-            let listed = crate::sandbox::hidden_paths::running(
-                crate::sandbox::hidden_paths::RunKind::Research,
-                project.as_str(),
-                &hidden,
-            )
-            .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?;
             for folder in &hidden {
                 sandbox = sandbox.hide(folder)?;
             }
@@ -1206,6 +1206,7 @@ impl ResearchRunner {
                         credential.retain();
                     }
                     std::mem::forget(lease);
+                    std::mem::forget(listed);
                     return Err(RunError::Uncertain(leftovers::UNCERTAIN));
                 }
                 Err(Unstopped::Left(left)) => {
@@ -1217,7 +1218,12 @@ impl ResearchRunner {
                         who: format!("research job {}", job.id),
                     };
                     let mode = jobs.leftover_mode(&job.project);
-                    left.hold(account, lease, by, mode);
+                    if mode == leftovers::LeftoverMode::End {
+                        left.hold(account, (lease, listed), by, mode);
+                    } else {
+                        std::mem::forget(listed);
+                        left.hold(account, lease, by, mode);
+                    }
                     return Err(RunError::Uncertain(code));
                 }
             }
@@ -1350,6 +1356,7 @@ impl ResearchRunner {
                 credential.retain();
             }
             std::mem::forget(lease);
+            std::mem::forget(listed);
             return Err(RunError::Uncertain(code));
         }
         drop(credential);
@@ -1827,22 +1834,25 @@ impl ResearchRunner {
             sandbox = sandbox.allow_read(parent)?;
         }
         sandbox = allow_harness(sandbox, &program)?;
+        let listed = match (run.kind, run.project) {
+            (Some(kind), Some(project)) => Some(
+                crate::sandbox::hidden_paths::starting(kind, project.as_str())
+                    .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?,
+            ),
+            _ => None,
+        };
         let hidden = match run.project {
             Some(project) => ResearchJobs::open(&self.database)?
                 .hidden_paths(project)
                 .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?,
             None => Vec::new(),
         };
+        if let Some(listed) = &listed {
+            listed.hid(&hidden);
+        }
         if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &hidden) {
             return Err(RunError::Invalid(code.into()));
         }
-        let _listed = match (run.kind, run.project) {
-            (Some(kind), Some(project)) => Some(
-                crate::sandbox::hidden_paths::running(kind, project.as_str(), &hidden)
-                    .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?,
-            ),
-            _ => None,
-        };
         for sub in hidden.iter().filter(|path| path.starts_with(&folder)) {
             sandbox = sandbox.hide(sub)?;
         }
@@ -1954,6 +1964,7 @@ impl ResearchRunner {
                 credential.retain();
             }
             std::mem::forget(lease);
+            std::mem::forget(listed);
             return Err(RunError::Uncertain(code));
         }
         drop(credential);

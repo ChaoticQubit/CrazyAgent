@@ -247,17 +247,25 @@ impl Registry {
 
 static RUNS: Mutex<Registry> = Mutex::new(Registry::new());
 
-/// Held by one engine run for its whole life, from the start that hid its folders until it
-/// ends; dropping it, on a return, an error or a panic, takes the run off the list.
+/// Held by one engine run for its whole life, from before it reads its hidden folders until
+/// it ends; dropping it, on a return, an error or a panic, takes the run off the list.
 #[must_use = "the run is listed only while this is held"]
 #[derive(Debug)]
 pub struct HiddenRun(u64);
 
 impl HiddenRun {
-    /// Records the folders this run's sandbox hides, once it has read them (SA-VID14 r1
-    /// F2). Stub: records nothing yet. Input: the folders.
+    /// Records, once, the folders this run's sandbox hides after it has read them, so from
+    /// then on only a folder saved hidden later names it (SA-VID14 r1). Input: the folders,
+    /// at most [`HIDDEN_PATHS_MAX`], none for a run that is not confined.
     pub fn hid(&self, hidden: &[PathBuf]) {
-        let _ = (self, hidden);
+        assert!(hidden.len() <= HIDDEN_PATHS_MAX);
+        let digests = hidden.iter().map(|folder| digest(folder)).collect();
+        let mut runs = RUNS.lock().unwrap_or_else(PoisonError::into_inner);
+        let run = runs.runs.get_mut(&self.0);
+        assert!(run.as_ref().is_some_and(|run| run.hidden.is_none()));
+        if let Some(run) = run {
+            run.hidden = Some(digests);
+        }
     }
 }
 
@@ -269,27 +277,10 @@ impl Drop for HiddenRun {
     }
 }
 
-/// Puts one engine run on the list at its start, keeping only digests of its project and of
-/// the folders it hid, and its kind. Inputs: the kind, the project id and the saved folders
-/// it hid. Output: the guard to hold until it ends, or none when the list is full.
-pub fn running(kind: RunKind, project: &str, hidden: &[PathBuf]) -> Option<HiddenRun> {
-    assert!(hidden.len() <= HIDDEN_PATHS_MAX);
-    let entry = Running {
-        project: digest(Path::new(project)),
-        hidden: Some(hidden.iter().map(|folder| digest(folder)).collect()),
-        kind,
-    };
-    let key = RUNS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .add(entry)?;
-    Some(HiddenRun(key))
-}
-
 /// Puts one engine run on the list as it starts, before it reads the project's saved hidden
-/// folders, so a hide saved meanwhile never misses it (SA-VID14 r1 F2): until
-/// [`HiddenRun::hid`] records what it hid, it counts as hiding nothing. Inputs: the kind and
-/// the project id. Output: the guard to hold until it ends, or none when the list is full.
+/// folders, keeping only a digest of its project and its kind, so a hide saved meanwhile
+/// never misses it: until [`HiddenRun::hid`] records what it hid, it hides nothing. Inputs:
+/// the kind and the project id. Output: the guard to hold until it ends, or none when full.
 pub fn starting(kind: RunKind, project: &str) -> Option<HiddenRun> {
     let entry = Running {
         project: digest(Path::new(project)),
@@ -922,8 +913,8 @@ mod tests {
 
     /// SA-VID14-R2-N2: every source file that loads a project's saved hidden folders was
     /// checked against the run list. Those that start an engine run hold its guard for each
-    /// kind; the rest are team agents (SA-VID14-A) or reads that feed no sandbox. A new
-    /// loader fails here until it is put in one of the two.
+    /// kind; the rest are team agents (SA-VID14-A), the master turn bundle whose guard sits in
+    /// master_runtime.rs, or reads that feed no sandbox. A new loader fails until classified.
     #[test]
     fn every_loader_of_saved_hidden_folders_holds_the_guard_or_is_classified() {
         let guarded: BTreeMap<&str, &[&str]> = BTreeMap::from([

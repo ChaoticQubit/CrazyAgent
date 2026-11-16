@@ -602,17 +602,17 @@ fn graph_step(
         Ok(graphify) => graphify,
         Err(line) => return Step::failed(&line),
     };
+    let Some(listed) = crate::sandbox::hidden_paths::starting(
+        crate::sandbox::hidden_paths::RunKind::CodeGraph,
+        &claimed.project,
+    ) else {
+        return Step::failed("project hidden folders unreadable");
+    };
     let hidden = match crate::sandbox::hidden_paths::load(database, &claimed.project) {
         Ok(hidden) => hidden,
         Err(_) => return Step::failed("project hidden folders unreadable"),
     };
-    let Some(_listed) = crate::sandbox::hidden_paths::running(
-        crate::sandbox::hidden_paths::RunKind::CodeGraph,
-        &claimed.project,
-        &hidden,
-    ) else {
-        return Step::failed("project hidden folders unreadable");
-    };
+    listed.hid(&hidden);
     #[cfg(unix)]
     let tip = if work.main_graphs {
         main_tip(database, &claimed.project, &claimed.repo)
@@ -640,7 +640,10 @@ fn graph_step(
         Ok(GraphEnding::TimedOut) => Step::failed(GRAPH_TIMED_OUT),
         #[cfg(unix)]
         Ok(GraphEnding::Stopped) => Step::WAITING,
-        Err(RunError::Uncertain(_)) => Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
+        Err(RunError::Uncertain(_)) => {
+            std::mem::forget(listed);
+            Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN)
+        }
         Err(error) => not_started(Kind::Graph, &error),
     }
 }
@@ -700,9 +703,17 @@ fn refresh_step(
         let Some(tip) = main_tip(database, project, repo) else {
             continue;
         };
+        let Some(listed) = crate::sandbox::hidden_paths::starting(
+            crate::sandbox::hidden_paths::RunKind::CodeGraph,
+            project,
+        ) else {
+            refresh.failed.insert(project.clone(), Instant::now());
+            return true;
+        };
         let Ok(hidden) = crate::sandbox::hidden_paths::load(database, project) else {
             continue;
         };
+        listed.hid(&hidden);
         let published = main_graph::latest(repo);
         if !main_graph::due(
             published.as_ref(),
@@ -715,7 +726,7 @@ fn refresh_step(
         if held(database, repo) {
             continue;
         }
-        match refresh_build(work, database, project, repo, tip, &hidden, halted) {
+        match refresh_build(work, database, project, listed, repo, tip, &hidden, halted) {
             Refreshed::Published => {
                 refresh.failed.remove(project);
             }
@@ -902,26 +913,22 @@ enum Refreshed {
 /// build's run folder and profile unless its processes may still run. The build stops as
 /// soon as an onboarding step waits or a project move holds the folder ([`gives_way`]), and
 /// a build a move holds by its end is not published. Takes the work, the worker's database,
-/// the project, its folder, the tip read before the build, the project's hidden folders
-/// and `halted`. Returns how the refresh ended.
+/// the project, its run's hidden folders guard, kept when the build's processes may still
+/// run, its folder, the tip read before the build, its hidden folders and `halted`. Returns
+/// how the refresh ended.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn refresh_build(
     work: &Work,
     database: &Connection,
     project: &str,
+    listed: crate::sandbox::hidden_paths::HiddenRun,
     repo: &Path,
     tip: String,
     hidden: &[PathBuf],
     halted: &dyn Fn() -> bool,
 ) -> Refreshed {
     let Ok(graphify) = (work.graphify)() else {
-        return Refreshed::Failed;
-    };
-    let Some(_listed) = crate::sandbox::hidden_paths::running(
-        crate::sandbox::hidden_paths::RunKind::CodeGraph,
-        project,
-        hidden,
-    ) else {
         return Refreshed::Failed;
     };
     let name = refresh_name(project, now_ms());
@@ -934,7 +941,9 @@ fn refresh_build(
         work.limits.graph_time,
         &gives_way(database, repo, halted),
     );
-    if !matches!(ending, Err(RunError::Uncertain(_))) {
+    if matches!(ending, Err(RunError::Uncertain(_))) {
+        std::mem::forget(listed);
+    } else {
         forget_run(work.runner.state(), &name);
     }
     match ending {

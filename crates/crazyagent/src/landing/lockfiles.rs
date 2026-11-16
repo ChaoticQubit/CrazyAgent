@@ -626,14 +626,14 @@ fn confined(
     };
     let project = record.project.as_str();
     let policy = crate::sandbox::policy::load(db, project).map_err(|_| "agent_access_unread")?;
-    let hidden =
-        crate::sandbox::hidden_paths::load(db, project).map_err(|_| "hidden_paths_unread")?;
-    let listed = crate::sandbox::hidden_paths::running(
+    let listed = crate::sandbox::hidden_paths::starting(
         crate::sandbox::hidden_paths::RunKind::Lockfiles,
         project,
-        &hidden,
     )
     .ok_or("hidden_paths_unread")?;
+    let hidden =
+        crate::sandbox::hidden_paths::load(db, project).map_err(|_| "hidden_paths_unread")?;
+    listed.hid(&hidden);
     let homes = ToolHomes::owner().map_err(|_| "tool_homes_unread")?;
     let tmp = toolchains::make_tmp(&scratch.home).map_err(|_| "tmp_unmade")?;
     toolchains::prepare_cargo_home(&scratch.home, &homes).map_err(|_| "cargo_home_unmade")?;
