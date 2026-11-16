@@ -39,6 +39,14 @@ const TEAMMATES_PIN_PENDING: &str = "pending";
 /// reads it: every time a system clock gives fits (FBTMUX-P1-R1-L1).
 #[cfg(unix)]
 const SERVERS_DEADLINE_DIGITS_MAX: usize = 19;
+/// The most entries of a native lead's short temp folder one start reads as it retires the
+/// dead teammates' sockets of earlier starts: as many as the freeze scans there.
+#[cfg(unix)]
+const TEAMMATES_SWEEP_SCAN_MAX: usize = 1 << 20;
+/// The most earlier teammates' sockets one start asks whether anything still listens at,
+/// as many as one freeze asks in all (KA-T17B-R2-F1).
+#[cfg(unix)]
+const TEAMMATES_SWEEP_ASKS_MAX: usize = 1024;
 const HARNESS_SOCKET_BYTES_MAX: usize = 104;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
@@ -882,8 +890,10 @@ pub fn teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, H
 /// served is reused: a teammate still running from an earlier start cannot bind a listener
 /// where the lead's tmux clients now connect. The pin record is marked pending for the new
 /// name in the same step, so one that later goes missing or names another socket is refused
-/// (PLCC-L1). Takes the engine root and the lead, whose profiles folder must exist. Returns
-/// the new path, or a plain code.
+/// (PLCC-L1). Once both records name the new socket, each socket of an earlier start that
+/// nothing listens at is retired: a plain file takes its place in one rename (KA-T17B-R2-F1).
+/// Takes the engine root and the lead, whose profiles folder must exist. Returns the new
+/// path, or a plain code.
 #[cfg(unix)]
 pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
     let id = lead
@@ -904,7 +914,95 @@ pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<Path
         &crate::team::runtime::agent_teammates_server_pid(&engine_root.join("team"), id),
         &pending,
     )?;
-    lead_temp_socket(engine_root, lead, &name)
+    let socket = lead_temp_socket(engine_root, lead, &name)?;
+    let folder = socket
+        .parent()
+        .expect("a lead's socket path names its folder");
+    retire_dead_teammates_sockets(folder, &name);
+    Ok(socket)
+}
+
+/// Retires in a native lead's short temp folder each teammates' socket of an earlier start
+/// that nothing listens at any more (KA-T17B-R2-F1), so such sockets never pile up toward
+/// the freeze's cap on engine-named sockets. The socket the new start named, one a server
+/// still answers at or that cannot be named, a link and anything not this user's socket
+/// stay. Best effort: a folder that is not this user's private folder is left as it is.
+/// Takes the folder and the new socket's name.
+#[cfg(unix)]
+fn retire_dead_teammates_sockets(folder: &Path, named: &str) {
+    use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags};
+    assert!(teammates_name_valid(named));
+    let own = rustix::process::getuid().as_raw();
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(opened) = rustix::fs::openat(CWD, folder, flags, Mode::empty()) else {
+        return;
+    };
+    let private = rustix::fs::fstat(&opened).is_ok_and(|stat| {
+        FileType::from_raw_mode(stat.st_mode) == FileType::Directory
+            && stat.st_uid == own
+            && stat.st_mode & 0o077 == 0
+    });
+    if !private {
+        return;
+    }
+    let Ok(entries) = Dir::read_from(&opened) else {
+        return;
+    };
+    let mut asked = 0_usize;
+    for entry in entries.take(TEAMMATES_SWEEP_SCAN_MAX) {
+        let Ok(entry) = entry else {
+            break;
+        };
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if name == named || !teammates_name_valid(name) {
+            continue;
+        }
+        let socket =
+            rustix::fs::statat(&opened, name, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|stat| {
+                FileType::from_raw_mode(stat.st_mode) == FileType::Socket && stat.st_uid == own
+            });
+        if !socket {
+            continue;
+        }
+        if asked == TEAMMATES_SWEEP_ASKS_MAX {
+            break;
+        }
+        asked += 1;
+        if matches!(tmux::listener(&folder.join(name)), Ok(None)) {
+            occupy_dead_socket(&opened, name);
+        }
+    }
+    assert!(asked <= TEAMMATES_SWEEP_ASKS_MAX);
+}
+
+/// Puts an empty plain file of this user's in place of a dead teammates' socket in one
+/// rename (QUESTION-04:15 B), so the path stays taken with no gap: a teammate still running
+/// under an earlier start's profile can never bind a listener there, and the freeze, which
+/// counts only sockets, no longer counts it. Best effort: a staged file the rename does not
+/// take is removed. Takes the opened folder and the socket's name.
+#[cfg(unix)]
+fn occupy_dead_socket(folder: &rustix::fd::OwnedFd, name: &str) {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    const STAGING_NONCE_BYTES: usize = 16;
+    assert!(teammates_name_valid(name));
+    let mut nonce = [0_u8; STAGING_NONCE_BYTES];
+    if getrandom::fill(&mut nonce).is_err() {
+        return;
+    }
+    let digits: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let staging = format!("{name}.{digits}.tmp");
+    assert!(!teammates_name_valid(&staging));
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(staged) = rustix::fs::openat(folder, staging.as_str(), flags, Mode::RUSR | Mode::WUSR)
+    else {
+        return;
+    };
+    drop(staged);
+    if rustix::fs::renameat(folder, staging.as_str(), folder, name).is_err() {
+        let _ = rustix::fs::unlinkat(folder, staging.as_str(), AtFlags::empty());
+    }
 }
 
 /// Writes one engine record in the profiles folder no agent writes, in place of any earlier
