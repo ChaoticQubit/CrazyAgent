@@ -19,6 +19,7 @@ const LINEAR_KEY = "lin_api_e2e_synthetic_0000";
 const BOARD_KEY = "board_e2e_synthetic_key_0000";
 const BOARD = "schema: 1\nkind: connector\nname: board\ntitle: Board\nversion: 1\nmcp:\n  url: https://mcp.board.invalid/mcp\n  hosts: [mcp.board.invalid]\nkey:\n  secret: api_key\n  header: Authorization\n  scheme: Bearer\n";
 const SCHEMES = ["light", "dark"];
+const APPROVAL_SCHEMA = readFileSync(new URL("../../../../crates/crazyagent/src/connectors/approvals.rs", import.meta.url), "utf8").match(/const SCHEMA: &str = "([^"]*)";/u)?.[1] ?? null;
 
 /** Polls a read until it equals what is wanted, failing with the last value after one step's
  * time. Inputs: what is awaited, the wanted value and the read. Output: none. */
@@ -42,6 +43,27 @@ function seedCalls(runtime, now) {
       (launch, connector, tool, kind, sent, project, agent, started_ms, ms, bytes_in, bytes_out, outcome)
       VALUES ('e2e-launch', 'board', 'list_issues', 'read', 1, 'e2e-project', 'Agent 1', ?, 340, 120, 2048, 'ok')`);
     for (const days of AGES) insert.run(now - days * DAY);
+  } finally {
+    db.close();
+  }
+}
+
+/** Puts one waiting Linear write in the engine database the way the gateway's ask stores it,
+ * making the approval tables from the engine's own schema first, as no harness runs here.
+ * Inputs: the engine root and the write's project, tool, preview, arguments and wait in
+ * milliseconds. Output: its id. */
+function askWrite(runtime, { project, tool, preview, args, waitMs }) {
+  assert.ok(APPROVAL_SCHEMA, "the approval schema is read from the engine's approvals.rs");
+  const db = new DatabaseSync(join(runtime, "engine.db"));
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec(APPROVAL_SCHEMA);
+    const now = Date.now();
+    const added = db.prepare(`INSERT INTO connector_approvals
+      (launch, project, agent, connector, title, tool, preview, arguments, hidden, state, created_ms, expires_ms)
+      VALUES ('e2e-launch', ?, 'Agent 1', 'linear', 'Linear', ?, ?, ?, 0, 'waiting', ?, ?)`).run(project, tool, preview, args, now, now + waitMs);
+    assert.equal(added.changes, 1);
+    return Number(added.lastInsertRowid);
   } finally {
     db.close();
   }
@@ -249,6 +271,87 @@ test("Connectors: turning Linear on for a project shows On and the engine grant 
   assert.ok(!(await me.seen()).includes(LINEAR_KEY), "the key never reaches the page");
 }));
 
+test("Connectors: a waiting write's page shows what it sends and its time left, Allow and Deny are saved, a run-out wait shows Expired, and an Allow under Ask once lists Linear in the project's Allowed writes until Revoke", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-approve-", async ({ bridge, me, open, runtime, page, home }) => {
+  const repo = join(home, "approval-repo");
+  mkdirSync(repo, { mode: 0o700 });
+  const receipt = await value(bridge, "desktop_create_project", { spec: { name: "Approval project", repositories: [repo] }, generation: 3 });
+  assert.equal(receipt.outcome, "applied", `the project is made: ${JSON.stringify(receipt)}`);
+  const project = receipt.project_id;
+  const seeded = await value(bridge, "desktop_connectors", { project: null });
+  await value(bridge, "desktop_connector_settings_set", { settings: { ...seeded.settings, write: "ask_once_per_project" }, version: seeded.version });
+  const ask = (tool, waitMs) => askWrite(runtime, { project, tool, preview: `${tool} title=Ship it`, args: JSON.stringify({ title: "Ship it" }, null, 2), waitMs });
+  const approvalPage = async (id, what, check) => {
+    await open(`#/connectors/approval/${id}`, what, (text) => text.includes("Connector write") && check(text));
+    return me.seen();
+  };
+  const stateOf = async (id) => (await value(bridge, "desktop_connector_approval", { id })).state;
+  const allowed = async () => (await value(bridge, "desktop_connector_writes", { project })).connectors;
+  const answerButtons = () => page.evaluate("[...document.querySelectorAll('button')].map((button) => button.textContent.trim()).filter((words) => words === 'Allow' || words === 'Deny')");
+  const section = () => open(`#/projects/${encodeURIComponent(project)}/settings?section=connectors`, "the project's Connectors section",
+    (text) => text.includes("Each is off until you turn it on here.") && text.includes("Allowed writes"));
+  const writeRow = () => page.evaluate(`document.querySelector('li[data-write="linear"]')?.innerText.replace(/\\s+/g, " ").trim() ?? null`);
+
+  await t.test("conn approval allow", async () => {
+    const id = ask("create_issue", 600_000);
+    const shown = await approvalPage(id, "the waiting write", (text) => text.includes("Time left: "));
+    for (const words of ["An agent wants a connector to change something. Nothing is sent until you allow it.", "Connector: Linear", "Tool: create_issue",
+      "Project: Approval project", "Agent: Agent 1", "Asked: ", "What it sends: create_issue title=Ship it"]) assert.ok(shown.includes(words), `the page shows ${words}`);
+    assert.match(shown, /Time left: (10:00|9:[0-5]\d)/u);
+    assert.deepEqual(await answerButtons(), ["Allow", "Deny"]);
+    assert.equal(await page.evaluate("document.querySelector('details')?.open ?? null"), false, "All arguments starts closed");
+    assert.equal(await page.evaluate("document.querySelectorAll('ul[aria-label=\"Connector write\"] a, details a').length"), 0, "nothing an agent sent is a link");
+    await me.capture("conn-approval-waiting");
+    await me.click("Allow");
+    await until("the Allow in the engine", "allowed", () => stateOf(id));
+    await me.waitFor("the allowed write", (text) => text.includes("Write allowed.") && /Allowed [A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}/u.test(text));
+    assert.deepEqual(await answerButtons(), [], "an answered write has no buttons");
+    assert.deepEqual(await allowed(), ["linear"], "an Allow under Ask once lets Linear write in this project without asking again");
+    await me.capture("conn-approval-allowed");
+  });
+
+  await t.test("conn approval deny", async () => {
+    const id = ask("delete_issue", 600_000);
+    await approvalPage(id, "the second waiting write", (text) => text.includes("Tool: delete_issue") && text.includes("Time left: "));
+    await me.click("Deny");
+    await until("the Deny in the engine", "denied", () => stateOf(id));
+    await me.waitFor("the denied write", (text) => text.includes("Write denied.") && /Denied [A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}/u.test(text));
+    assert.deepEqual(await answerButtons(), []);
+    assert.deepEqual(await allowed(), ["linear"], "a Deny takes nothing back");
+    await me.capture("conn-approval-denied");
+  });
+
+  await t.test("conn approval expired", async () => {
+    const id = ask("update_issue", 8000);
+    await approvalPage(id, "the short wait", (text) => text.includes("Tool: update_issue") && /Time left: 0:0[1-8]/u.test(text));
+    await me.waitFor("the run-out wait", (text) => text.includes("Expired") && !text.includes("Time left"), 15000);
+    assert.deepEqual(await answerButtons(), [], "a run-out wait has no buttons");
+    await me.capture("conn-approval-expired");
+  });
+
+  await t.test("conn allowed writes revoke", async () => {
+    await section();
+    await me.waitFor("Linear allowed", (text) => text.includes("Connectors that may change things in this project without asking again."));
+    assert.equal(await writeRow(), "Linear Revoke", "Linear's row has its title and Revoke");
+    await me.capture("conn-allowed-writes");
+    await me.click("Revoke writes for Linear");
+    await until("the revoke in the engine", [], allowed);
+    await me.waitFor("the revoke", (text) => text.includes("Linear asks again before its next write.") && text.includes("No connector may change things here without asking."));
+    await section();
+    await me.waitFor("none read back", (text) => text.includes("No connector may change things here without asking."));
+    await me.capture("conn-allowed-writes-none");
+  });
+
+  for (const shown of SCHEMES) {
+    await t.test(`conn approval page ${shown}`, async () => {
+      await scheme(page, shown);
+      const id = ask("create_issue", 600_000);
+      await approvalPage(id, `the approval page ${shown}`, (text) => text.includes("Time left: "));
+      await me.capture(`conn-approval-${shown}`);
+    });
+  }
+  await scheme(page, "light");
+}));
+
 test("Connectors: Settings, Connectors saves each option through the page, adds a connector through its trust screen, sets and clears its key and removes it", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-page-", async ({ bridge, me, open, runtime, page, evidence }) => {
   const read = () => value(bridge, "desktop_connectors", { project: null });
   const listedConnector = async (name) => (await read()).connectors.find((connector) => connector.name === name) ?? null;
@@ -272,23 +375,28 @@ test("Connectors: Settings, Connectors saves each option through the page, adds 
     assert.equal(await page.evaluate("document.querySelector('[data-setting=\"Tool list check and third-party label\"] input, [data-setting=\"Tool list check and third-party label\"] button') !== null"), false, "the locked line has no control");
   });
 
-  const choose = async (setting, field, input, label, wanted) => {
+  const choose = async (setting, input, label, wanted) => {
+    const before = (await read()).settings;
+    assert.notEqual(before[setting], wanted, `${label} is a change`);
     await connectorsPage();
     await me.click(label, `fieldset[data-setting="${setting}"] label`);
     await me.click("Save changes");
-    await until(`the engine holds ${label}`, { [field]: wanted, ...kept }, async () => {
-      const settings = (await read()).settings;
-      return { [field]: settings[field], write: settings.write, wait: settings.wait, keep_log: settings.keep_log };
-    });
+    await until(`the engine holds ${label} and every other setting as it was`, { ...before, [setting]: wanted }, async () => (await read()).settings);
     await connectorsPage();
     assert.equal(await checkedOf(input), wanted, `the page reads ${label} back from the engine`);
-    await me.capture(`conn-${field}-${wanted}`);
+    await me.capture(`conn-${setting}-${wanted}`);
   };
-  await t.test("conn native on", () => choose("native", "native", "connector-native", "On", "on"));
-  await t.test("conn native off", () => choose("native", "native", "connector-native", "Off", "off"));
-  await t.test("conn size_cap 64 KiB", () => choose("size_cap", "size_cap", "connector-size-cap", "64 KiB", "kib64"));
-  await t.test("conn size_cap 1 MiB", () => choose("size_cap", "size_cap", "connector-size-cap", "1 MiB", "mib1"));
-  await t.test("conn size_cap 256 KiB", () => choose("size_cap", "size_cap", "connector-size-cap", "256 KiB", "kib256"));
+  await t.test("conn write ask once", () => choose("write", "connector-write", "Ask once per project and connector", "ask_once_per_project"));
+  await t.test("conn write read only", () => choose("write", "connector-write", "Read-only", "read_only"));
+  await t.test("conn write ask every time", () => choose("write", "connector-write", "Ask every time", "ask_every_time"));
+  await t.test("conn wait 2 min", () => choose("wait", "connector-wait", "2 min", "minutes2"));
+  await t.test("conn wait 10 min", () => choose("wait", "connector-wait", "10 min", "minutes10"));
+  await t.test("conn wait 30 min", () => choose("wait", "connector-wait", "30 min", "minutes30"));
+  await t.test("conn native on", () => choose("native", "connector-native", "On", "on"));
+  await t.test("conn native off", () => choose("native", "connector-native", "Off", "off"));
+  await t.test("conn size_cap 64 KiB", () => choose("size_cap", "connector-size-cap", "64 KiB", "kib64"));
+  await t.test("conn size_cap 1 MiB", () => choose("size_cap", "connector-size-cap", "1 MiB", "mib1"));
+  await t.test("conn size_cap 256 KiB", () => choose("size_cap", "connector-size-cap", "256 KiB", "kib256"));
 
   await t.test("conn add file and trust", async () => {
     await connectorsPage();
