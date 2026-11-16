@@ -70,16 +70,33 @@ pub fn check(token: &AuditToken, policy: &Policy) -> Result<Holder, Refused> {
     if policy.runtime_required && signing.flags & RUNTIME_FLAG == 0 {
         return Err(Refused::NoRuntime);
     }
-    let mut entitlements = signing.entitlements;
-    assert!(entitlements.len() <= ENTITLEMENTS_MAX);
-    entitlements.sort();
-    let allowed = |name: &String| policy.entitlements_allowed.contains(&name.as_str());
-    if let Some(name) = entitlements.into_iter().find(|name| !allowed(name)) {
-        return Err(Refused::Entitlement(name));
-    }
+    judge_entitlements(Entitlements::Names(signing.entitlements), policy)?;
     let holder = holder_of(token);
     assert!(holder.pid > 0);
     Ok(holder)
+}
+
+/// A caller's entitlements as its signing information gives them: the names of a standard
+/// dictionary, or a blob in another form whose names cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Entitlements {
+    Names(Vec<String>),
+    OtherForm,
+}
+
+/// Checks a caller's entitlements against `policy`'s allow list. Output: the first name, in
+/// sorted order, that the list does not hold.
+pub fn judge_entitlements(entitlements: Entitlements, policy: &Policy) -> Result<(), Refused> {
+    let Entitlements::Names(mut names) = entitlements else {
+        return Ok(());
+    };
+    assert!(names.len() <= ENTITLEMENTS_MAX);
+    names.sort();
+    let allowed = |name: &String| policy.entitlements_allowed.contains(&name.as_str());
+    match names.into_iter().find(|name| !allowed(name)) {
+        Some(name) => Err(Refused::Entitlement(name)),
+        None => Ok(()),
+    }
 }
 
 /// The effective uid, pid and pid version an audit token names: words 1, 5 and 7, as the

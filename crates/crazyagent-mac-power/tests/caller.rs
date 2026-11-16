@@ -2,9 +2,11 @@
 
 mod support;
 
-use crazyagent_mac_power::caller::{PRODUCTION, Policy, REQUIREMENT, Refused};
+use crazyagent_mac_power::caller::{
+    Entitlements, PRODUCTION, Policy, REQUIREMENT, Refused, judge_entitlements,
+};
 use crazyagent_mac_power::helper::{Config, Helper};
-use crazyagent_mac_power::protocol::{Reply, Request, encode_request};
+use crazyagent_mac_power::protocol::{Refusal, Reply, Request, encode_request};
 use crazyagent_mac_power::server::{self, Accepted};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
@@ -271,4 +273,113 @@ fn a_term_signal_puts_every_journaled_value_back() {
         ["-a disablesleep 1", "-a disablesleep 0"]
     );
     assert_eq!(stand_in.journal_text().as_deref(), Some("[]"));
+}
+
+const ANY_VALID_RUNTIME: Policy = Policy {
+    requirement: "always",
+    runtime_required: true,
+    entitlements_allowed: &[],
+};
+const TRICKLE_BYTES: usize = 8;
+const TRICKLE_GAP: Duration = Duration::from_millis(400);
+const CUT_OFF_MAX: Duration = Duration::from_millis(2_500);
+
+#[test]
+fn entitlements_in_another_form_than_a_dictionary_are_refused() {
+    assert_eq!(
+        judge_entitlements(Entitlements::Names(Vec::new()), &PRODUCTION),
+        Ok(())
+    );
+    assert_eq!(
+        judge_entitlements(Entitlements::OtherForm, &PRODUCTION),
+        Err(Refused::SigningInformation)
+    );
+    let allowed = Policy {
+        entitlements_allowed: &["com.apple.security.cs.allow-jit"],
+        ..PRODUCTION
+    };
+    assert_eq!(
+        judge_entitlements(Entitlements::OtherForm, &allowed),
+        Err(Refused::SigningInformation),
+        "an allow list cannot read a form it cannot name"
+    );
+    let names = vec![
+        "com.apple.security.get-task-allow".to_string(),
+        "com.apple.security.cs.allow-jit".to_string(),
+    ];
+    assert_eq!(
+        judge_entitlements(Entitlements::Names(names), &allowed),
+        Err(Refused::Entitlement(
+            "com.apple.security.get-task-allow".to_string()
+        ))
+    );
+}
+
+#[test]
+fn a_caller_that_trickles_its_request_is_cut_off_two_seconds_after_accept() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let path = stand_in.path("power.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let mut client = UnixStream::connect(&path).unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    let accepted = Accepted::take(stream, &ANY_VALID_CODE);
+    assert!(accepted.is_ok(), "{accepted:?}");
+    let trickle = std::thread::spawn(move || {
+        for _ in 0..TRICKLE_BYTES {
+            if client.write_all(b" ").is_err() {
+                break;
+            }
+            std::thread::sleep(TRICKLE_GAP);
+        }
+        client
+    });
+    let started = Instant::now();
+    let served = accepted
+        .unwrap()
+        .serve(&ANY_VALID_CODE, &mut helper, NOW_MS);
+    let took = started.elapsed();
+    let expected = Reply::Refused {
+        reason: Refusal::Malformed,
+    };
+    assert_eq!(served, Ok(expected));
+    assert!(took < CUT_OFF_MAX, "one deadline from accept, not one per read: {took:?}");
+    drop(trickle.join().unwrap());
+}
+
+fn runtime_copy(folder: &Path) -> PathBuf {
+    let copy = folder.join("runtime-copy");
+    fs::copy(env::current_exe().unwrap(), &copy).unwrap();
+    let status = Command::new("/usr/bin/codesign")
+        .args(["-f", "-s", "-", "-o", "runtime"])
+        .arg(&copy)
+        .status()
+        .unwrap();
+    assert!(status.success(), "codesign {status}");
+    copy
+}
+
+#[test]
+fn a_policy_that_requires_the_hardened_runtime_refuses_a_caller_without_it() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("power.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let plain = signed_copy(folder.path(), None);
+    let mut first = child(&plain, "connect_and_read_role", "read", &path)
+        .spawn()
+        .unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    let refused = Accepted::take(stream, &ANY_VALID_RUNTIME);
+    assert_eq!(refused.err(), Some(Refused::NoRuntime));
+    wait_exit(&mut first);
+
+    let hardened = runtime_copy(folder.path());
+    let mut second = child(&hardened, "connect_and_read_role", "read", &path)
+        .spawn()
+        .unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    let accepted = Accepted::take(stream, &ANY_VALID_RUNTIME);
+    assert!(accepted.is_ok(), "a runtime-signed copy carries 0x10000: {accepted:?}");
+    drop(accepted);
+    wait_exit(&mut second);
 }

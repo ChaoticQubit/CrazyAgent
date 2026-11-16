@@ -540,13 +540,19 @@ fn an_unreadable_thermal_pressure_level_ends_every_lease() {
     );
 }
 
-fn refusing_put_back(stand_in: &StandIn) -> Config {
-    let gate = stand_in.path("refuse-put-back");
+/// A configuration whose pmset fails `-a disablesleep 0` while the stand-in's `refuse-put-back`
+/// file exists, and fails `-g` while its `refuse-read` file exists. A refused call is not
+/// recorded in the stand-in's calls.
+fn refusing(stand_in: &StandIn) -> Config {
+    let put_back = stand_in.path("refuse-put-back");
+    let read = stand_in.path("refuse-read");
     let wrapper = stand_in.path("wrapper");
     let text = format!(
         "#!/bin/sh\nif [ \"$*\" = \"-a disablesleep 0\" ] && [ -e '{}' ]; then exit 1; fi\n\
+         if [ \"$*\" = \"-g\" ] && [ -e '{}' ]; then exit 1; fi\n\
          exec '{}' \"$@\"\n",
-        gate.display(),
+        put_back.display(),
+        read.display(),
         stand_in.program().display()
     );
     fs::write(&wrapper, text).unwrap();
@@ -560,7 +566,7 @@ fn refusing_put_back(stand_in: &StandIn) -> Config {
 #[test]
 fn a_put_back_that_fails_keeps_its_entry_and_is_tried_again_at_the_next_reading() {
     let stand_in = StandIn::new(0);
-    let mut helper = Helper::start(refusing_put_back(&stand_in));
+    let mut helper = Helper::start(refusing(&stand_in));
     assert_eq!(
         hold(&mut helper, holder(&stand_in, 10), NOW_MS),
         Reply::Held { lease_left_s: 120 }
@@ -581,4 +587,148 @@ fn a_put_back_that_fails_keeps_its_entry_and_is_tried_again_at_the_next_reading(
     assert_eq!(stand_in.journal_text().as_deref(), Some("[]"));
     assert!(helper.idle());
     assert!(!helper.wants_readings());
+}
+
+#[test]
+fn forget_after_a_failed_put_back_is_refused_and_keeps_the_pin_and_the_entry() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(refusing(&stand_in));
+    let me = holder(&stand_in, 10);
+    let mine = format!("{}\n", stand_in.my_uid());
+    assert_eq!(
+        hold(&mut helper, me, NOW_MS),
+        Reply::Held { lease_left_s: 120 }
+    );
+    fs::write(stand_in.path("refuse-put-back"), "").unwrap();
+    let refused = helper.handle(me, Request::Forget, NOW_MS + 1_000, OPEN);
+    assert_eq!(
+        refused,
+        Reply::Refused {
+            reason: Refusal::Pmset
+        }
+    );
+    assert_eq!(stand_in.pin_text().as_deref(), Some(mine.as_str()));
+    assert!(stand_in.journal_text().unwrap().contains("sleep_disabled"));
+    assert_eq!(stand_in.sleep_disabled(), 1);
+    let state = view(&mut helper, me);
+    assert_eq!(state.pin, PinView::You, "the pin stays in memory too");
+    assert!(!state.held, "the leases still end");
+    assert!(!helper.idle(), "the value still to put back keeps the helper up");
+    fs::remove_file(stand_in.path("refuse-put-back")).unwrap();
+    assert_eq!(
+        helper.handle(me, Request::Forget, NOW_MS + 2_000, OPEN),
+        Reply::Forgotten
+    );
+    assert_eq!(stand_in.pin_text(), None);
+    assert_eq!(stand_in.sleep_disabled(), 0);
+    assert_eq!(stand_in.journal_text().as_deref(), Some("[]"));
+}
+
+#[test]
+fn forget_with_an_unreadable_journal_is_refused_until_the_journal_is_gone() {
+    let stand_in = StandIn::new(0);
+    drop(Helper::start(stand_in.config()));
+    let mine = format!("{}\n", stand_in.my_uid());
+    let file = stand_in.folder().join("journal.json");
+    fs::write(&file, "not json").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(
+        helper.handle(me, Request::Forget, NOW_MS, OPEN),
+        Reply::Refused {
+            reason: Refusal::JournalUnreadable
+        }
+    );
+    assert_eq!(stand_in.pin_text().as_deref(), Some(mine.as_str()));
+    assert_eq!(view(&mut helper, me).pin, PinView::You);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "not json");
+    assert!(stand_in.sleep_writes().is_empty());
+    fs::remove_file(&file).unwrap();
+    assert_eq!(
+        helper.handle(me, Request::Forget, NOW_MS + 1_000, OPEN),
+        Reply::Forgotten
+    );
+    assert_eq!(stand_in.pin_text(), None);
+    assert!(
+        view(&mut helper, me).journal_ok,
+        "Forget opens the journal again"
+    );
+}
+
+#[test]
+fn a_renewal_that_cannot_read_pmset_keeps_its_lease_until_it_runs_out_and_then_sleeps_the_mac() {
+    let first = StandIn::new(0);
+    let mut helper = Helper::start(refusing(&first));
+    fs::write(first.path("refuse-read"), "").unwrap();
+    let me = holder(&first, 10);
+    let refused = helper.handle(me, Request::Hold { lease_s: 120 }, NOW_MS, CLOSED_ALONE);
+    assert_eq!(
+        refused,
+        Reply::Refused {
+            reason: Refusal::Pmset
+        }
+    );
+    assert!(first.sleep_writes().is_empty(), "a first hold that fails changes nothing");
+    assert!(!first.calls().contains(&"sleepnow".to_string()));
+    assert!(helper.idle());
+
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(refusing(&stand_in));
+    let me = holder(&stand_in, 10);
+    assert_eq!(
+        hold(&mut helper, me, NOW_MS),
+        Reply::Held { lease_left_s: 120 }
+    );
+    fs::write(stand_in.path("refuse-read"), "").unwrap();
+    let renewal = helper.handle(
+        me,
+        Request::Hold { lease_s: 120 },
+        NOW_MS + 30_000,
+        CLOSED_ALONE,
+    );
+    assert_eq!(
+        renewal,
+        Reply::Refused {
+            reason: Refusal::Pmset
+        }
+    );
+    assert_eq!(
+        stand_in.sleep_disabled(),
+        1,
+        "one unread pmset -g does not end the hold"
+    );
+    assert!(!helper.idle());
+    helper.expire(NOW_MS + 119_999, CLOSED_ALONE);
+    assert_eq!(stand_in.sleep_disabled(), 1);
+    helper.expire(NOW_MS + 120_000, CLOSED_ALONE);
+    assert_eq!(stand_in.sleep_disabled(), 0, "the lease was not renewed");
+    assert_eq!(
+        stand_in.calls().last().map(String::as_str),
+        Some("sleepnow")
+    );
+}
+
+#[test]
+fn a_put_back_tried_again_after_a_hold_ended_sleeps_the_mac_when_the_lid_is_closed_alone() {
+    for (lid, sleeps) in [(CLOSED_ALONE, true), (OPEN, false)] {
+        let stand_in = StandIn::new(0);
+        let mut helper = Helper::start(refusing(&stand_in));
+        assert_eq!(
+            hold(&mut helper, holder(&stand_in, 10), NOW_MS),
+            Reply::Held { lease_left_s: 120 }
+        );
+        fs::write(stand_in.path("refuse-put-back"), "").unwrap();
+        helper.expire(NOW_MS + 120_000, CLOSED_ALONE);
+        assert_eq!(stand_in.sleep_disabled(), 1);
+        assert!(!stand_in.calls().contains(&"sleepnow".to_string()));
+        fs::remove_file(stand_in.path("refuse-put-back")).unwrap();
+        helper.sense(NOW_MS + 150_000, Readings { lid, ..COOL });
+        assert_eq!(stand_in.sleep_disabled(), 0);
+        let slept = stand_in.calls().last().map(String::as_str) == Some("sleepnow");
+        assert_eq!(slept, sleeps, "{lid:?}");
+        helper.sense(NOW_MS + 180_000, Readings { lid, ..COOL });
+        let sleepnows = stand_in.calls().iter().filter(|call| *call == "sleepnow").count();
+        assert_eq!(sleepnows, usize::from(sleeps), "sleep is owed once");
+    }
 }

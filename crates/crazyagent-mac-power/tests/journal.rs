@@ -63,6 +63,11 @@ fn a_folder_with_another_owner_or_mode_or_a_link_is_refused_not_repaired() {
         matches!(through_link, Err(StoreError::Folder(_))),
         "{through_link:?}"
     );
+    let same_folder = Journal::open(&folder, stand_in.my_uid());
+    assert!(
+        same_folder.is_ok(),
+        "the real folder, ours at 0700, is usable: {same_folder:?}"
+    );
 }
 
 #[test]
