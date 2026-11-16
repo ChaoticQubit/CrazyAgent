@@ -1469,7 +1469,8 @@ fn keep_only(
     assert!(home.is_absolute());
     unpin_at(rustix::fs::CWD, home);
     let folder = open_real_folder(home).map_err(|_| failure("agent_home_unwritable"))?;
-    keep_in(folder.as_fd(), home, kept, held, 0)
+    let budget = crate::team::cleanup::HOME_WALK_NAMES;
+    keep_in(folder.as_fd(), home, kept, held, 0, budget)
 }
 
 /// Removes from one open real folder of an agent home, at `at`, every entry `kept` does not
@@ -1481,8 +1482,11 @@ fn keep_only(
 /// it keeps are added to `held`, whose ACLs the caller clears in one step (sec r1 F2). The
 /// folder is listed as it goes, in passes until one removes nothing and leaves each kept
 /// folder it walked under its name; a listing that stops clears the folder's ACL by its path
-/// and tries once more (code r2 F3). Inputs: the folder, its path, what stays in it, the
-/// entries held so far and how many lists deep it is. Output: as [`keep_only`].
+/// and tries once more (code r2 F3). Each pass spends one budget, a unit per name it lists
+/// and the walks of the names it removes, so a process adding names here cannot stretch a
+/// pass past it (RESET-WALK-N1). Inputs: the folder, its path, what stays in it, the
+/// entries held so far, how many lists deep it is and the budget of each pass. Output: as
+/// [`keep_only`].
 #[cfg(unix)]
 fn keep_in(
     folder: std::os::fd::BorrowedFd<'_>,
@@ -1490,6 +1494,7 @@ fn keep_in(
     kept: &[(&str, Kept)],
     held: &mut Vec<PathBuf>,
     depth: usize,
+    budget: usize,
 ) -> Result<(), AgentHomeError> {
     use rustix::fs::{AtFlags, FileType};
     use std::os::fd::AsFd;
@@ -1497,12 +1502,13 @@ fn keep_in(
     assert!(depth <= KEPT_DEPTH_MAX);
     assert!(depth > 0 || !kept.is_empty());
     let unwritable = |_| failure("agent_home_unwritable");
-    let remove = |name: &std::ffi::CStr| {
-        crate::team::cleanup::remove_home_entry(folder, name)
+    let remove = |name: &std::ffi::CStr, left: &mut usize| {
+        crate::team::cleanup::remove_home_within(folder, name, left)
             .map_err(|_| failure("agent_home_unwritable"))
     };
     let before = held.len();
     for _ in 0..HOME_PASSES_MAX {
+        let mut left = budget;
         held.truncate(before);
         held.push(at.to_path_buf());
         let mut removed = false;
@@ -1543,11 +1549,11 @@ fn keep_in(
                     unpin_at(folder, name);
                     let opened = crate::team::cleanup::open_home_folder(folder, name);
                     let Some(inside) = opened.map_err(unwritable)? else {
-                        remove(name)?;
+                        remove(name, &mut left)?;
                         removed = true;
                         continue;
                     };
-                    clear_memory(inside.as_fd(), &path)?;
+                    clear_memory(inside.as_fd(), &path, budget)?;
                     if !same_entry(folder, name, &inside) {
                         removed = true;
                         continue;
@@ -1560,18 +1566,18 @@ fn keep_in(
                     unpin_at(folder, name);
                     let opened = crate::team::cleanup::open_home_folder(folder, name);
                     let Some(inside) = opened.map_err(unwritable)? else {
-                        remove(name)?;
+                        remove(name, &mut left)?;
                         removed = true;
                         continue;
                     };
-                    keep_in(inside.as_fd(), &path, inner, held, depth + 1)?;
+                    keep_in(inside.as_fd(), &path, inner, held, depth + 1, budget)?;
                     removed |= !same_entry(folder, name, &inside);
                     continue;
                 }
                 _ => {
                     #[cfg(all(test, unix))]
                     before_home_step(&path);
-                    remove(name)?;
+                    remove(name, &mut left)?;
                     removed = true;
                     continue;
                 }
@@ -1589,19 +1595,25 @@ fn keep_in(
 /// `projects` folder of an agent home, at `at`, and each link directly in it, never following
 /// a link (B20): a project folder is opened relative to the `projects` handle and its entry
 /// removed relative to its own, so one swapped for a link meanwhile goes as that link and what
-/// the link names stays. It lists in passes, as [`keep_in`] does. Inputs: the folder and its
-/// path. Output: unit, or `agent_home_unwritable` when a folder will not open or list, one
-/// entry stays or the folder still changes after [`HOME_PASSES_MAX`] passes.
+/// the link names stays. It lists in passes, each spending one budget, as [`keep_in`] does.
+/// Inputs: the folder, its path and the budget of each pass. Output: unit, or
+/// `agent_home_unwritable` when a folder will not open or list, one entry stays or the
+/// folder still changes after [`HOME_PASSES_MAX`] passes.
 #[cfg(unix)]
-fn clear_memory(folder: std::os::fd::BorrowedFd<'_>, at: &Path) -> Result<(), AgentHomeError> {
+fn clear_memory(
+    folder: std::os::fd::BorrowedFd<'_>,
+    at: &Path,
+    budget: usize,
+) -> Result<(), AgentHomeError> {
     use rustix::fs::{AtFlags, FileType};
     use std::os::fd::AsFd;
     let unwritable = |_| failure("agent_home_unwritable");
-    let remove = |name: &std::ffi::CStr| {
-        crate::team::cleanup::remove_home_entry(folder, name)
+    let remove = |name: &std::ffi::CStr, left: &mut usize| {
+        crate::team::cleanup::remove_home_within(folder, name, left)
             .map_err(|_| failure("agent_home_unwritable"))
     };
     for _ in 0..HOME_PASSES_MAX {
+        let mut left = budget;
         let mut removed = false;
         let listed = rustix::fs::Dir::read_from(folder).or_else(|_| {
             crate::team::cleanup::release_acls([at]);
@@ -1620,7 +1632,7 @@ fn clear_memory(folder: std::os::fd::BorrowedFd<'_>, at: &Path) -> Result<(), Ag
             };
             match FileType::from_raw_mode(found.st_mode) {
                 FileType::Symlink => {
-                    remove(name)?;
+                    remove(name, &mut left)?;
                     removed = true;
                     continue;
                 }
@@ -1635,7 +1647,7 @@ fn clear_memory(folder: std::os::fd::BorrowedFd<'_>, at: &Path) -> Result<(), Ag
             unpin_at(folder, name);
             let opened = crate::team::cleanup::open_home_folder(folder, name);
             let Some(project) = opened.map_err(unwritable)? else {
-                remove(name)?;
+                remove(name, &mut left)?;
                 removed = true;
                 continue;
             };
@@ -1643,8 +1655,12 @@ fn clear_memory(folder: std::os::fd::BorrowedFd<'_>, at: &Path) -> Result<(), Ag
                 Err(rustix::io::Errno::NOENT) => {}
                 Err(_) => return Err(failure("agent_home_unwritable")),
                 Ok(_) => {
-                    crate::team::cleanup::remove_home_entry(project.as_fd(), CLAUDE_MEMORY)
-                        .map_err(|_| failure("agent_home_unwritable"))?;
+                    crate::team::cleanup::remove_home_within(
+                        project.as_fd(),
+                        CLAUDE_MEMORY,
+                        &mut left,
+                    )
+                    .map_err(|_| failure("agent_home_unwritable"))?;
                     removed = true;
                 }
             }

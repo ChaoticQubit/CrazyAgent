@@ -1015,6 +1015,12 @@ const HOME_ADDED_CHUNKS_MAX: usize = 8;
 #[cfg(unix)]
 const HOME_WALK_CHUNKS_MAX: usize = 4096;
 
+/// The names one walk's listings may return before it refuses, [`HOME_WALK_CHUNKS_MAX`]
+/// listings' worth (RESET-WALK-F1): what each [`remove_home_entry`] gets, and what one pass
+/// of an agent home's reset shares across every name it lists and removes (RESET-WALK-N1).
+#[cfg(unix)]
+pub(crate) const HOME_WALK_NAMES: usize = HOME_NAMES_CHUNK * HOME_WALK_CHUNKS_MAX;
+
 /// Removes the entry `name` of an open agent home folder with all it holds, each step
 /// relative to an open folder handle and none following a link, so a folder a process an
 /// agent left swaps for a link meanwhile goes as that link, what the link names stays, and
@@ -1032,9 +1038,24 @@ pub(crate) fn remove_home_entry<P: rustix::path::Arg>(
     parent: impl std::os::fd::AsFd,
     name: P,
 ) -> Result<(), EngineError> {
+    let mut left = HOME_WALK_NAMES;
+    remove_home_within(parent, name, &mut left)
+}
+
+/// Removes the entry `name` of an open agent home folder as [`remove_home_entry`] does, its
+/// walk spending from `left`, the names a caller's listings and walks may still return, so
+/// a caller that removes many names bounds them all with one budget (RESET-WALK-N1).
+/// Inputs: the parent handle, the name and the names left. Output: as
+/// [`remove_home_entry`].
+#[cfg(unix)]
+pub(crate) fn remove_home_within<P: rustix::path::Arg>(
+    parent: impl std::os::fd::AsFd,
+    name: P,
+    left: &mut usize,
+) -> Result<(), EngineError> {
     let name = name.into_c_str().map_err(|_| folder_failed())?;
-    let mut left = HOME_NAMES_CHUNK * HOME_WALK_CHUNKS_MAX;
-    remove_home_below(parent.as_fd(), &name, 0, &mut left)
+    let mut fresh = *left;
+    remove_home_below(parent.as_fd(), &name, 0, &mut fresh)
 }
 
 /// Removes one entry as [`remove_home_entry`] does, `depth` folders below the entry it was
