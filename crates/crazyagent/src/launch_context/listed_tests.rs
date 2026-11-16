@@ -2,6 +2,9 @@ use super::*;
 use crate::harnesses::manifest::parse;
 use crate::plugins::SecretValue;
 
+#[path = "listed_walk_tests.rs"]
+mod walk_tests;
+
 const SMALL: &str = "schema: 1\nkind: harness\nid: \"sample\"\nname: \"Sample\"\nbinaries:\n  - \"sample\"\nheadless: \"sample --json\"\nmodel_selection: true\naccount_kinds:\n  - \"api_key\"\n";
 
 const BLOCKS: &str = "home:\n  env_prefixes:\n    - \"SAMPLE_\"\n  env:\n    SAMPLE_CONFIG: \"{home}/agent\"\n    SAMPLE_UPDATES: \"off\"\n  set_home: true\nmcp:\n  render: \"json-mcp-servers\"\n  path: \"{home}/agent/mcp.json\"\ninstructions:\n  render: \"file\"\n  path: \"{home}/agent/AGENTS.md\"\n";
@@ -12,11 +15,24 @@ fn manifest(blocks: &str) -> crate::harnesses::manifest::Manifest {
     parse(format!("{SMALL}{blocks}").as_bytes()).unwrap()
 }
 
-fn private_home() -> (tempfile::TempDir, PathBuf) {
+/// A listed launch's private home as T18 lays it out, `<agent home>/<harness id>/account-1`,
+/// each folder 0700. Input: the harness id. Output: the agent home's guard and the private
+/// home.
+fn harness_home(id: &str) -> (tempfile::TempDir, PathBuf) {
     let folder = tempfile::tempdir().unwrap();
-    let home = folder.path().canonicalize().unwrap();
-    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+    let base = folder.path().canonicalize().unwrap();
+    let home = base.join(id).join("account-1");
+    fs::create_dir_all(&home).unwrap();
+    for path in [base.clone(), base.join(id), home.clone()] {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     (folder, home)
+}
+
+/// The private home [`harness_home`] lays out for the sample manifest's harness.
+/// Output: the agent home's guard and the private home.
+fn private_home() -> (tempfile::TempDir, PathBuf) {
+    harness_home("sample")
 }
 
 fn context() -> AgentContext {
@@ -221,9 +237,7 @@ fn a_team_agent_launch_of_a_listed_harness_is_refused_and_writes_nothing() {
 /// runs through a link planted in the home is left alone, and so is what the link names.
 #[test]
 fn an_adopted_listed_launch_removes_only_its_own_files_inside_the_home() {
-    let folder = tempfile::tempdir().unwrap();
-    let home = folder.path().canonicalize().unwrap().join("home");
-    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let (_folder, home) = private_home();
     let outside = tempfile::tempdir().unwrap();
     let kept = outside.path().join("mcp.json");
     fs::write(&kept, "kept").unwrap();
@@ -241,6 +255,7 @@ fn an_adopted_listed_launch_removes_only_its_own_files_inside_the_home() {
             "agent".to_owned(),
             "linked/mcp.json".to_owned(),
         ],
+        listed: true,
     };
 
     let adopted = Installed::adopt(&files);
@@ -344,7 +359,7 @@ fn an_owner_server_under_the_team_server_name_never_reaches_an_acp_session() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_acp_launch_in_a_project_starts_with_its_manifest_arguments_and_home_variables() {
-    let (_folder, home) = private_home();
+    let (_folder, home) = harness_home("standin-acp");
     let work = tempfile::tempdir().unwrap();
     let work = work.path().canonicalize().unwrap();
     let profiles = tempfile::tempdir().unwrap();
@@ -440,7 +455,7 @@ fn an_acp_harness_renders_only_the_owners_servers_and_takes_the_team_server_in_i
 #[cfg(target_os = "macos")]
 #[test]
 fn a_started_acp_agent_opens_its_session_with_the_engines_team_server_and_no_owner_secret() {
-    let (_folder, home) = private_home();
+    let (_folder, home) = harness_home("standin-acp");
     let base = tempfile::Builder::new()
         .prefix("ca-acp-team-")
         .tempdir_in(fs::canonicalize("/tmp").unwrap())
