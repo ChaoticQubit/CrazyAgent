@@ -107,6 +107,7 @@ fn sqlite(_: rusqlite::Error) -> EngineError {
 fn forget_grants(db: &Connection, name: &str) -> Result<(), EngineError> {
     crate::connectors::grants::forget_connector(db, name)
         .and_then(|()| crate::connectors::gateway::pins::forget_connector(db, name))
+        .and_then(|()| crate::connectors::oauth::forget(db, name))
         .map_err(|_| error("app_plugins_unavailable"))
 }
 
