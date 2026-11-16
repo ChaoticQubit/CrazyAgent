@@ -29805,6 +29805,18 @@ fn an_agent_refused_for_skills_left_in_its_codex_home_says_what_happened() {
     );
 }
 
+/// RESET-WALK-CODE: a launch refused because resetting the agent's home ran past its walk
+/// budget says so in words, with its code kept, and asks for another try, since a refused
+/// pass already removed what it reached.
+#[test]
+fn an_agent_refused_for_a_home_reset_past_its_walk_budget_says_what_happened() {
+    assert_eq!(
+        start_problem(&LaunchError("cleanup_walk_too_long".into(), None)),
+        "The agent could not start: its home folder held too many files to reset at once, or \
+         something kept adding files to it. Try again. (cleanup_walk_too_long)"
+    );
+}
+
 /// SA vid 12: an agent is not started while a hold still lists commands a sandboxed run of
 /// it left that the owner has not ended, since they write where the agent does and its next
 /// run would run what they leave in its home. The refusal says what to do, with its code

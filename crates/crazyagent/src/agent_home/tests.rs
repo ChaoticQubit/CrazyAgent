@@ -3016,7 +3016,8 @@ fn memories_left(projects: &Path) -> usize {
 /// RESET-WALK-N1: one pass of a home reset spends one walk budget, a unit per name it lists,
 /// so a pass over more unwanted names than its budget refuses with a name left, though no
 /// name alone needs any walk, and a process adding names at the home root cannot stretch
-/// one pass past it.
+/// one pass past it. The refusal is `cleanup_walk_too_long`, which reaches the owner
+/// (RESET-WALK-CODE).
 #[cfg(unix)]
 #[test]
 fn a_home_pass_listing_more_names_than_its_walk_budget_refuses_with_one_left() {
@@ -3027,14 +3028,15 @@ fn a_home_pass_listing_more_names_than_its_walk_budget_refuses_with_one_left() {
 
     let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 3);
 
-    assert_eq!(reset, Err(AgentHomeError("agent_home_unwritable".into())));
+    assert_eq!(reset, Err(AgentHomeError("cleanup_walk_too_long".into())));
     assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
 }
 
 /// RESET-WALK-N1: one pass of [`clear_memory`] spends one walk budget across the projects
 /// it lists and the auto-memory walks it makes, so two memory walks that each fit the
 /// budget alone refuse together with one memory left, instead of each walk getting a
-/// fresh budget.
+/// fresh budget. The walk's own refusal reaches the caller as `cleanup_walk_too_long`
+/// (RESET-WALK-CODE).
 #[cfg(unix)]
 #[test]
 fn a_memory_pass_whose_walks_together_pass_its_budget_refuses_though_each_fits_alone() {
@@ -3044,7 +3046,7 @@ fn a_memory_pass_whose_walks_together_pass_its_budget_refuses_though_each_fits_a
 
     let cleared = clear_memory(opened.as_fd(), &projects, 5);
 
-    assert_eq!(cleared, Err(AgentHomeError("agent_home_unwritable".into())));
+    assert_eq!(cleared, Err(AgentHomeError("cleanup_walk_too_long".into())));
     assert_eq!(memories_left(&projects), 1);
 }
 
