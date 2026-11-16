@@ -612,12 +612,32 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
 /// the agent; `launch_chatgpt_unsupported` for an own adapter, a harness that does not list
 /// `openai-responses` or a request not bound to a sign-in.
 pub fn route_chatgpt(
-    request: LaunchRequest,
+    mut request: LaunchRequest,
     harness: &super::registry::Harness,
     source: std::sync::Arc<crate::model_gateway::relay::chatgpt::ChatGptSource>,
 ) -> Result<(LaunchRequest, Relay), LaunchError> {
-    let _ = (request, harness, source);
-    Err(failure("launch_chatgpt_unsupported"))
+    let home = match &request.account {
+        AccountBinding::Subscription { home }
+            if harness.takes_chatgpt_sign_in() && harness.named(&request.harness) =>
+        {
+            home.clone()
+        }
+        _ => return Err(failure("launch_chatgpt_unsupported")),
+    };
+    let relay = Relay::start_chatgpt(source).map_err(|error| LaunchError(error.0, None))?;
+    request.account = AccountBinding::Url {
+        home,
+        base_url: relay.base_url(),
+        key: Some(Secret::new(relay.token().to_owned())?),
+    };
+    assert!(relay.is_chatgpt());
+    assert!(
+        request
+            .account
+            .key()
+            .is_some_and(|key| is_placeholder(key.reveal()))
+    );
+    Ok((request, relay))
 }
 
 /// Builds the exact command a launch would spawn, without spawning it.

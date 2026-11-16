@@ -4,10 +4,13 @@ use super::registry::Harness;
 use crate::app_plugins::yaml::Value;
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::engine::EngineError;
-use crate::model_gateway::relay::{LOCAL_PLACEHOLDER, Relay, is_placeholder};
+use crate::model_gateway::relay::{LOCAL_PLACEHOLDER, Relay, is_placeholder, is_relay_token};
 
 /// The most environment variables one `accounts` entry may set.
 pub const ENV_MAX: usize = 16;
+/// The wire format a ChatGPT sign-in is handed over in, through the ChatGPT relay.
+pub const CHATGPT_SIGN_IN_FORMAT: &str = "openai-responses";
+const MODEL_BYTES_MAX: usize = 256;
 const NAME_BYTES_MAX: usize = 64;
 const VALUE_BYTES_MAX: usize = 1024;
 const HANDED: [&str; 3] = ["relay_url", "token", "model"];
@@ -85,7 +88,7 @@ fn refuse<T>(code: &'static str, message: String) -> Result<T, Refused> {
 
 /// Whether the engine drives the harness with one of its own adapters (Codex, Claude Code,
 /// RCLI), which hand accounts over themselves. Input: the manifest. Output: the answer.
-fn own_adapter(manifest: &Manifest) -> bool {
+pub(super) fn own_adapter(manifest: &Manifest) -> bool {
     matches!(
         manifest.piped,
         Some(DriverKind::CodexAppServer | DriverKind::ClaudeStreamJson | DriverKind::Rcli)
@@ -281,11 +284,12 @@ pub fn check(manifest: &Manifest) -> Result<(), Refused> {
 /// engine key relay started for it, so the harness gets the relay's loopback URL and its
 /// placeholder token; a keyless one as its own address and the local placeholder. The values
 /// are filled into the environment the manifest's `accounts` entry for the account's wire
-/// format names. No saved key is read here. Inputs: the harness, the stored connection and
-/// the relay of a keyed account. Output: the hand-over; `account_not_compatible` for an
-/// account the harness cannot run, `account_key_relay_missing` for a keyed account without
-/// its relay, `account_relay_unexpected` for a keyless one with a relay, or
-/// `account_handover_missing` for a harness the engine's own adapters drive.
+/// format names. No saved key is read here, and a ChatGPT sign-in goes over only through
+/// [`chatgpt_handover`]. Inputs: the harness, the stored connection and the relay of a keyed
+/// account. Output: the hand-over; `account_not_compatible` for an account the harness
+/// cannot run here, `account_key_relay_missing` for a keyed account without its key relay,
+/// `account_relay_unexpected` for a keyless one with a relay, or `account_handover_missing`
+/// for a harness the engine's own adapters drive.
 pub fn handover(
     harness: &Harness,
     connection: &ModelConnection,
@@ -298,10 +302,10 @@ pub fn handover(
         return Err(failure("account_not_compatible"));
     };
     let (base_url, token) = match (&connection.auth, relay) {
-        (ModelAuthentication::ApiKey { .. }, Some(relay)) => {
+        (ModelAuthentication::ApiKey { .. }, Some(relay)) if !relay.is_chatgpt() => {
             (relay.base_url(), relay.token().to_owned())
         }
-        (ModelAuthentication::ApiKey { .. }, None) => {
+        (ModelAuthentication::ApiKey { .. }, _) => {
             return Err(failure("account_key_relay_missing"));
         }
         (ModelAuthentication::None {}, None) => (
@@ -313,12 +317,30 @@ pub fn handover(
         }
         _ => return Err(failure("account_not_compatible")),
     };
+    filled(
+        harness,
+        connection.protocol.as_str(),
+        base_url,
+        token,
+        connection.model.id.clone(),
+    )
+}
+
+/// Fills a harness's `accounts` entry for one wire format with what it is handed.
+/// Inputs: the harness, the wire format, the address, the placeholder and the model.
+/// Output: the hand-over, or `account_handover_missing` when the manifest has no entry.
+fn filled(
+    harness: &Harness,
+    format: &str,
+    base_url: String,
+    token: String,
+    model: String,
+) -> Result<Handover, EngineError> {
     let entry = harness
         .manifest()
         .block("accounts")
-        .and_then(|accounts| accounts.get(connection.protocol.as_str()))
+        .and_then(|accounts| accounts.get(format))
         .ok_or_else(|| failure("account_handover_missing"))?;
-    let model = connection.model.id.clone();
     let values = [
         ("relay_url", base_url.as_str()),
         ("token", token.as_str()),
@@ -358,21 +380,42 @@ pub fn chatgpt_handover(
     relay: &Relay,
     model: &str,
 ) -> Result<Handover, EngineError> {
-    let _ = (harness, connection, relay, model);
-    Err(failure("account_not_compatible"))
+    if !super::registry::is_chatgpt_sign_in(connection) || !harness.takes_chatgpt_sign_in() {
+        return Err(failure("account_not_compatible"));
+    }
+    if !relay.is_chatgpt() {
+        return Err(failure("account_chatgpt_relay_missing"));
+    }
+    if model.trim().is_empty() {
+        return Err(failure("account_model_missing"));
+    }
+    if model.len() > MODEL_BYTES_MAX || !model.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(failure("account_model_invalid"));
+    }
+    let handed = filled(
+        harness,
+        CHATGPT_SIGN_IN_FORMAT,
+        relay.base_url(),
+        relay.token().to_owned(),
+        model.to_owned(),
+    )?;
+    assert!(is_relay_token(handed.token()));
+    Ok(handed)
 }
 
 /// Whether accounts made by one Add account choice fit a harness, by the same rule as
-/// `Harness::account_fits`: a sign-in only the harness it was made with, when that harness
-/// lists subscription accounts; an endpoint account any harness that speaks its wire format.
+/// `Harness::account_fits`: a sign-in the harness it was made with, when that harness lists
+/// subscription accounts, and a ChatGPT sign-in also a harness that takes it through the
+/// ChatGPT relay; an endpoint account any harness that speaks its wire format.
 /// Inputs: the harness and the harness and wire format the choice stores. Output: the answer.
 fn choice_fits(harness: &Harness, made_with: &str, protocol: &str) -> bool {
     if protocol == "native" {
-        harness
+        (harness
             .manifest()
             .account_kinds
             .contains(&AccountKind::Subscription)
-            && harness.named(made_with)
+            && harness.named(made_with))
+            || (super::registry::made_with_codex(made_with) && harness.takes_chatgpt_sign_in())
     } else {
         harness.speaks(protocol)
     }

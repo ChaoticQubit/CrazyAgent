@@ -143,22 +143,38 @@ impl Harness {
             })
     }
 
+    /// Whether a ChatGPT sign-in reaches it through the engine's ChatGPT relay (DEC-180
+    /// addendum 2, answer 2): it is not one of the engine's own adapters, which keep their
+    /// own sign-in paths, and it lists the `openai-responses` wire format by that name.
+    /// Output: the answer.
+    pub fn takes_chatgpt_sign_in(&self) -> bool {
+        !super::accounts::own_adapter(&self.manifest)
+            && self
+                .manifest
+                .account_protocols
+                .iter()
+                .any(|listed| listed == super::accounts::CHATGPT_SIGN_IN_FORMAT)
+    }
+
     /// Whether it can run on one account (DEC-141 PA-4), the one rule every master, team
-    /// agent and research job uses: a sign-in fits only the harness it was made with, and
-    /// only one that lists subscription accounts; an endpoint account, with a key or
-    /// without, fits every harness that speaks its wire format, whatever harness it was
-    /// stored with. Input: the stored connection. Output: the answer.
+    /// agent and research job uses: a sign-in fits the harness it was made with, when that
+    /// harness lists subscription accounts, and a ChatGPT sign-in also fits a harness that
+    /// [takes it](Self::takes_chatgpt_sign_in) through the ChatGPT relay; an endpoint
+    /// account, with a key or without, fits every harness that speaks its wire format,
+    /// whatever harness it was stored with. Input: the stored connection. Output: the answer.
     pub fn account_fits(&self, connection: &crate::config::ModelConnection) -> bool {
         use crate::config::{ModelAuthentication, ModelEndpoint};
         let protocol = connection.protocol.as_str();
         match (&connection.endpoint, &connection.auth) {
             (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { .. }) => {
                 protocol == "native"
-                    && self
+                    && ((self
                         .manifest
                         .account_kinds
                         .contains(&AccountKind::Subscription)
-                    && self.named(connection.harness.as_str())
+                        && self.named(connection.harness.as_str()))
+                        || (made_with_codex(connection.harness.as_str())
+                            && self.takes_chatgpt_sign_in()))
             }
             (
                 ModelEndpoint::Http { .. },
@@ -307,6 +323,28 @@ fn clash(new: &Manifest, known: &Manifest) -> Option<String> {
         .iter()
         .find(|binary| known.binaries.contains(binary))
         .map(|binary| format!("the program {binary} is already listed by {}.", known.id))
+}
+
+/// Whether a stored connection is a ChatGPT sign-in: made with Codex, in the native wire
+/// format, on the engine's managed profile. Input: the connection. Output: the answer.
+pub fn is_chatgpt_sign_in(connection: &crate::config::ModelConnection) -> bool {
+    use crate::config::{ModelAuthentication, ModelEndpoint};
+    matches!(
+        (&connection.endpoint, &connection.auth),
+        (
+            ModelEndpoint::Native {},
+            ModelAuthentication::NativeManaged { .. }
+        )
+    ) && connection.protocol.as_str() == "native"
+        && made_with_codex(connection.harness.as_str())
+}
+
+/// Whether a harness name stored on a sign-in names Codex, the harness a ChatGPT sign-in is
+/// made with. Input: the stored name. Output: the answer.
+pub(super) fn made_with_codex(name: &str) -> bool {
+    registry()
+        .get("codex")
+        .is_some_and(|codex| codex.named(name))
 }
 
 /// The registry of the manifests built into the app, read once. A bundled manifest that
