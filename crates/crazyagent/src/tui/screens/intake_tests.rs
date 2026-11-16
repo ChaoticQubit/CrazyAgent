@@ -3053,6 +3053,16 @@ fn job_asks(shell: &mut Shell) -> Vec<IntakeQuery> {
         .collect()
 }
 
+/// The intake requests queued so far, leaving out only the two reads Home asks each time it
+/// is shown: its projects folder and the found folders. Takes the shell. Returns every other
+/// intake request, so any write sent past those reads stays in the result.
+fn past_home_reads(shell: &mut Shell) -> Vec<IntakeQuery> {
+    job_asks(shell)
+        .into_iter()
+        .filter(|query| !matches!(query, IntakeQuery::Home | IntakeQuery::Found))
+        .collect()
+}
+
 fn job_read(shell: &mut Shell, job: Option<JobView>) {
     shell.arrive(intake(IntakeQuery::JobStatus, Ok(IntakeView::Job(job))));
     job_asks(shell);
@@ -3264,8 +3274,8 @@ fn home_starts_a_failed_project_move_again_by_its_project_and_says_a_refusal_in_
 
 /// DEC-177: answering a project move's soft refusal asks that question with Keep it here in
 /// place of Use where it is, since the project is set up already. Keep it here and Esc go
-/// Home and send nothing; Move anyway starts the move of that project again with the new
-/// override and says so.
+/// Home and send nothing past the reads Home asks when shown; Move anyway starts
+/// the move of that project again with the new override and says so.
 #[test]
 fn answering_a_project_move_s_soft_refusal_moves_that_project_or_keeps_it_where_it_is() {
     let user = tempfile::tempdir().unwrap();
@@ -3316,14 +3326,17 @@ fn answering_a_project_move_s_soft_refusal_moves_that_project_or_keeps_it_where_
     shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::Home));
     assert!(
-        job_asks(&mut shell).is_empty(),
-        "Keep it here sends nothing"
+        past_home_reads(&mut shell).is_empty(),
+        "Keep it here sends nothing past Home's own reads"
     );
 
     let mut shell = answer();
     shell.key(Key::Esc);
     assert_eq!(shell.place(), Some(Place::Home));
-    assert!(job_asks(&mut shell).is_empty(), "Esc sends nothing");
+    assert!(
+        past_home_reads(&mut shell).is_empty(),
+        "Esc sends nothing past Home's own reads"
+    );
 
     let mut shell = answer();
     shell.key(Key::Right);
@@ -3441,9 +3454,12 @@ fn finish_delete_on_home_opens_the_project_s_remove_ask_and_d_keeps_the_project(
     );
 }
 
-/// Opens the notes project's Settings, opens its remove ask, answers the page's read of what
-/// removing would do with a delete it allows, then picks Delete everything and types the exact
-/// name and Enter. Takes nothing. Returns the shell and every request the Enter queued.
+/// Opens the notes project's Settings, answers the page's opening read of its setup as a
+/// project with no stored setup, so the page asks nothing more, opens its remove ask, answers
+/// the page's read of what removing would do with a delete it allows, then picks Delete
+/// everything and types the exact name and Enter. The page sends one setup read at a time, so
+/// the remove read follows the opening read's answer. Takes nothing. Returns the shell and
+/// every request the Enter queued.
 fn delete_everything_on_notes() -> (Shell, Vec<Request>) {
     let mut ctx = ctx(120, 30);
     ctx.store.projects = Load::Ready(Vec::new());
@@ -3455,6 +3471,15 @@ fn delete_everything_on_notes() -> (Shell, Vec<Request>) {
     };
     let screen = open(&place, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
+    while shell.ctx.next_request().is_some() {}
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: SetupQuery::Setup {
+                project: notes.clone(),
+            },
+            result: Ok(crate::project_setup::SetupView::Setup(None)),
+        },
+    )))));
     shell.key(Key::Char('x'));
     let removal = SetupQuery::Removal {
         project: notes.clone(),
