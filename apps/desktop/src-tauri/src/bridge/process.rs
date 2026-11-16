@@ -103,7 +103,10 @@ impl NativeBridge {
     /// Reads one harness's own instructions file by the harness's id, run without the bridge
     /// lock; the engine takes the path from the harness's manifest and nothing is saved.
     /// Input: the harness id. Output: the text for the app-wide editor.
-    pub fn read_instruction_source(&self, harness: String) -> Result<Unlocked<String>, BridgeError> {
+    pub fn read_instruction_source(
+        &self,
+        harness: String,
+    ) -> Result<Unlocked<String>, BridgeError> {
         let client = self.process_client()?;
         Ok(Box::pin(async move {
             client
