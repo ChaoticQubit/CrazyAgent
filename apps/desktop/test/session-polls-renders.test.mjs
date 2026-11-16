@@ -43,3 +43,25 @@ test("the root session's found-folder and intake polls render the app's tree onl
     assert.equal(reads(seen.same.asked, command) - reads(seen.started.asked, command), ROUNDS, `${command} is read once a round`);
   }
 });
+
+test("off Home the found-folder and idle intake polls wait 30 s, Home reads the folders every 3 s, and the window taking the focus back reads both at once", { timeout: 60_000 }, async () => {
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(sessionPage);
+    const away = await evaluate(`Fixture.start(${JSON.stringify(FOLDERS)}, null, false)`);
+    const focused = await evaluate("Fixture.focus()");
+    const home = await evaluate("Fixture.show(true)");
+    const left = await evaluate("Fixture.show(false)");
+    return { away, focused, home, left };
+  });
+  const found = "desktop_found_projects";
+  const job = "desktop_intake_status";
+  const more = (after, before, command) => reads(after.asked, command) - reads(before.asked, command);
+  assert.deepEqual(seen.away.paces, [30_000, 30_000], "off Home both polls wait 30 s");
+  assert.equal(more(seen.focused, seen.away, found), 1, "the focus reads the found folders at once");
+  assert.equal(more(seen.focused, seen.away, job), 1, "the focus reads the intake job at once");
+  assert.deepEqual(seen.focused.paces, [30_000, 30_000], "and each poll is armed once again");
+  assert.equal(more(seen.home, seen.focused, found), 1, "showing Home reads the found folders at once");
+  assert.equal(more(seen.home, seen.focused, job), 0);
+  assert.deepEqual(seen.home.paces, [3_000, 30_000], "on Home the found folders are read every 3 s, the idle job every 30 s");
+  assert.deepEqual(seen.left.paces, [30_000, 30_000], "leaving Home slows the found folders again");
+});

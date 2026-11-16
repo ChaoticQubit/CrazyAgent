@@ -728,7 +728,6 @@ impl AgentContext {
             if let ServerSpec::Stdio { command, .. } = &server.spec {
                 paths.push(PathBuf::from(command));
             }
-            #[cfg(unix)]
             paths.extend(
                 crate::context_mode::shared_install(&server.spec)
                     .map(|install| install.join("node_modules")),
@@ -1692,9 +1691,6 @@ fn context_mode_off_line(off: crate::plugins::ContextModeOff) -> &'static str {
         ContextModeOff::NodeTooOld => {
             "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n"
         }
-        ContextModeOff::Unsupported => {
-            "- context-mode is off for this launch: CrazyAgent cannot run it on this platform yet. Use the shell instead.\n"
-        }
         ContextModeOff::NpxNotFound => {
             "- context-mode is off for this launch: CrazyAgent did not find the npx it runs on this computer, so it did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n"
         }
@@ -2330,7 +2326,8 @@ fn plain_file(file: &File) -> bool {
 /// launches that find the same entry one clears it and makes the lock and the other is
 /// refused, never removing the lock the first made. Input: the home. Output: the home's
 /// locked folder, `launch_context_unsafe` for a home that does not open or an entry that
-/// stays, or `launch_home_busy` while another launch clears the name.
+/// stays, `cleanup_walk_too_long` for an entry whose removal ran past its walk budget
+/// (RESET-WALK-CODE), or `launch_home_busy` while another launch clears the name.
 #[cfg(unix)]
 fn clear_lock_name(home: &Path) -> Result<LockedHome, LaunchError> {
     use rustix::fs::{AtFlags, FileType};
@@ -2352,8 +2349,12 @@ fn clear_lock_name(home: &Path) -> Result<LockedHome, LaunchError> {
         found => found.map_err(|_| failure("launch_context_unsafe"))?,
     };
     if FileType::from_raw_mode(found.st_mode) != FileType::RegularFile {
-        crate::team::cleanup::remove_home_entry(&folder.0, LOCK)
-            .map_err(|_| failure("launch_context_unsafe"))?;
+        crate::team::cleanup::remove_home_entry(&folder.0, LOCK).map_err(|problem| {
+            failure(crate::team::cleanup::home_code(
+                &problem,
+                "launch_context_unsafe",
+            ))
+        })?;
     } else if lock_kept(&found) {
         let _ = restore_lock_mode(&folder.0);
     }
@@ -2864,20 +2865,29 @@ fn write_private(_path: &Path, _bytes: &[u8]) -> Result<(), LaunchError> {
 #[cfg(unix)]
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), LaunchError> {
     let mut file = create(path)?;
-    file.write_all(bytes)
+    let written = file
+        .set_permissions(std::fs::Permissions::from_mode(0o600))
+        .and_then(|()| file.write_all(bytes))
         .and_then(|()| file.sync_all())
-        .map_err(|_| failure("launch_context_unwritable"))?;
-    assert_eq!(
-        file.metadata().map(|m| m.permissions().mode() & 0o777).ok(),
-        Some(0o600)
-    );
-    Ok(())
+        .and_then(|()| file.metadata());
+    let refusal = match written {
+        Ok(metadata)
+            if metadata.mode() & 0o777 == 0o600 && metadata.len() == bytes.len() as u64 =>
+        {
+            return Ok(());
+        }
+        Ok(_) => "launch_context_unsafe",
+        Err(_) => "launch_context_unwritable",
+    };
+    drop(file);
+    let _ = std::fs::remove_file(path);
+    Err(failure(refusal))
 }
 
 fn write_secret(path: &Path, text: String) -> Result<(), LaunchError> {
     let mut bytes = text.into_bytes();
     let written = write_private(path, &bytes);
-    bytes.fill(0);
+    crate::credentials::wipe(&mut bytes);
     written
 }
 

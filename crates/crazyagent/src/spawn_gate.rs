@@ -21,6 +21,31 @@ pub(crate) fn spawned() -> usize {
     SPAWNED.get()
 }
 
+/// Test helper: names the folder a row run by [`row_alone`] works and reports in.
+#[cfg(all(test, unix))]
+pub(crate) const ROW_FOLDER: &str = "CRAZYAGENT_TEST_ROW_FOLDER";
+
+/// Test helper: runs one ignored row of this test binary in its own process, so a
+/// per-process setting, such as a umask or a file size limit, reaches no other row.
+/// Inputs: the row's full name, a shell line run before it (`:` for none) and the folder
+/// named to it in [`ROW_FOLDER`]. Output: the row's exit status.
+#[cfg(all(test, unix))]
+pub(crate) fn row_alone(row: &str, prelude: &str, folder: &std::path::Path) -> ExitStatus {
+    status(
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "{prelude}; exec \"$0\" --exact {row} --ignored --test-threads 1"
+            ))
+            .arg(std::env::current_exe().unwrap())
+            .env(ROW_FOLDER, folder)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap()
+}
+
 struct Entered(#[allow(dead_code)] MutexGuard<'static, ()>);
 
 impl Drop for Entered {

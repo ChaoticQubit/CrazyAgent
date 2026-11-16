@@ -1,3 +1,4 @@
+use super::Piece::{Hex, Plain};
 use super::{SECRET_BYTES_MAX, SecretString, Store, StoreError, checked_name, parts, reference};
 use crate::protocol::CredentialRef;
 use std::io::{Read, Write};
@@ -103,14 +104,20 @@ impl Store for Keychain {
         let service = self.owned(service)?;
         let account = checked_name(account)?;
         let found = reference(service, account)?;
-        let mut line = format!(
-            "add-generic-password -U -s \"{service}\" -a \"{account}\" -X {} \"{}\"\n",
-            hex(secret.expose().as_bytes()),
-            self.keychain_text()
-        )
-        .into_bytes();
+        let mut line = super::sized(&[
+            Plain("add-generic-password -U -s \""),
+            Plain(service),
+            Plain("\" -a \""),
+            Plain(account),
+            Plain("\" -X "),
+            Hex(secret.expose().as_bytes()),
+            Plain(" \""),
+            Plain(self.keychain_text()),
+            Plain("\"\n"),
+        ])
+        .ok_or_else(|| StoreError::code("credential_secret_invalid"))?;
         let ran = run(&["-i".as_ref()], Some(&line), None);
-        line.fill(0);
+        crate::credentials::wipe(&mut line);
         if ran?.code != Some(0) {
             return Err(unavailable());
         }
@@ -142,7 +149,7 @@ impl Store for Keychain {
             Some(ITEM_MISSING) => Err(StoreError::code("credential_missing")),
             _ => Err(unavailable()),
         };
-        ran.stdout.fill(0);
+        crate::credentials::wipe(&mut ran.stdout);
         found
     }
 
@@ -221,11 +228,6 @@ fn store_home(namespace: &str) -> Result<PathBuf, StoreError> {
     )
 }
 
-fn hex(bytes: &[u8]) -> String {
-    assert!(bytes.len() <= SECRET_BYTES_MAX);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn run(
     args: &[&std::ffi::OsStr],
     input: Option<&[u8]>,
@@ -281,7 +283,7 @@ fn run(
     };
     let (read, mut stdout) = reader.join().map_err(|_| unavailable())?;
     if read.is_err() || stdout.len() > OUTPUT_BYTES_MAX {
-        stdout.fill(0);
+        crate::credentials::wipe(&mut stdout);
         return Err(unavailable());
     }
     Ok(Ran {

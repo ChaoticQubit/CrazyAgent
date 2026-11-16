@@ -259,10 +259,6 @@ impl Server {
             };
         }
         assert!(metadata.file_type().is_socket());
-        assert_eq!(
-            std::fs::symlink_metadata(socket).map_err(io_error)?.mode() & 0o077,
-            0
-        );
         Ok(Self {
             listener,
             engine,

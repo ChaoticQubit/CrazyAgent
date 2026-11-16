@@ -1015,6 +1015,12 @@ const HOME_ADDED_CHUNKS_MAX: usize = 8;
 #[cfg(unix)]
 const HOME_WALK_CHUNKS_MAX: usize = 4096;
 
+/// The names one walk's listings may return before it refuses, [`HOME_WALK_CHUNKS_MAX`]
+/// listings' worth (RESET-WALK-F1): what each [`remove_home_entry`] gets, and what one pass
+/// of an agent home's reset shares across every name it lists and removes (RESET-WALK-N1).
+#[cfg(unix)]
+pub(crate) const HOME_WALK_NAMES: usize = HOME_NAMES_CHUNK * HOME_WALK_CHUNKS_MAX;
+
 /// Removes the entry `name` of an open agent home folder with all it holds, each step
 /// relative to an open folder handle and none following a link, so a folder a process an
 /// agent left swaps for a link meanwhile goes as that link, what the link names stays, and
@@ -1032,9 +1038,23 @@ pub(crate) fn remove_home_entry<P: rustix::path::Arg>(
     parent: impl std::os::fd::AsFd,
     name: P,
 ) -> Result<(), EngineError> {
+    let mut left = HOME_WALK_NAMES;
+    remove_home_within(parent, name, &mut left)
+}
+
+/// Removes the entry `name` of an open agent home folder as [`remove_home_entry`] does, its
+/// walk spending from `left`, the names a caller's listings and walks may still return, so
+/// a caller that removes many names bounds them all with one budget (RESET-WALK-N1).
+/// Inputs: the parent handle, the name and the names left. Output: as
+/// [`remove_home_entry`].
+#[cfg(unix)]
+pub(crate) fn remove_home_within<P: rustix::path::Arg>(
+    parent: impl std::os::fd::AsFd,
+    name: P,
+    left: &mut usize,
+) -> Result<(), EngineError> {
     let name = name.into_c_str().map_err(|_| folder_failed())?;
-    let mut left = HOME_NAMES_CHUNK * HOME_WALK_CHUNKS_MAX;
-    remove_home_below(parent.as_fd(), &name, 0, &mut left)
+    remove_home_below(parent.as_fd(), &name, 0, left)
 }
 
 /// Removes one entry as [`remove_home_entry`] does, `depth` folders below the entry it was
@@ -1271,10 +1291,35 @@ fn folder_failed() -> EngineError {
 }
 
 /// The code a removal of an agent home entry reports once its walk's listings returned more
-/// names than [`HOME_WALK_CHUNKS_MAX`] listings hold (RESET-WALK-F1).
+/// names than its budget holds (RESET-WALK-F1), which the callers that reset an agent's home
+/// pass on to the owner ([`home_code`], RESET-WALK-CODE).
+pub(crate) const WALK_TOO_LONG: &str = "cleanup_walk_too_long";
+
+/// Whether an io error a caller made from a home removal's code with [`home_code`] carries
+/// [`WALK_TOO_LONG`], as `prepare_cargo_home` makes one (RESET-WALK-CODE). Input: the error.
+/// Output: true for the walk code; an error from the system never matches, as its text names
+/// its OS error.
+pub(crate) fn walk_too_long_io(error: &std::io::Error) -> bool {
+    error.to_string() == WALK_TOO_LONG
+}
+
+/// The error [`WALK_TOO_LONG`] names. Output: the error.
 #[cfg(unix)]
 fn walk_too_long() -> EngineError {
-    EngineError("cleanup_walk_too_long".into())
+    EngineError(WALK_TOO_LONG.into())
+}
+
+/// The code a caller of [`remove_home_entry`] or [`remove_home_within`] reports for an error
+/// of it: [`WALK_TOO_LONG`] as it is, so the owner learns the walk ran past its budget and
+/// that another try gets further (RESET-WALK-CODE), and the caller's own code for any other.
+/// Inputs: the error and the caller's code. Output: the code.
+#[cfg(unix)]
+pub(crate) fn home_code(problem: &EngineError, otherwise: &'static str) -> &'static str {
+    if problem.0 == WALK_TOO_LONG {
+        WALK_TOO_LONG
+    } else {
+        otherwise
+    }
 }
 
 /// Deletes a folder. When a plain delete stops, it is walked clearing flags as `flags`
