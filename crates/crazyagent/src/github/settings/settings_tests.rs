@@ -661,3 +661,43 @@ fn pull_requests_turned_off_and_on_again_keep_the_conversation_rule_the_owner_wa
         true
     );
 }
+
+#[test]
+fn a_refused_switch_keeps_the_wanted_rules_github_still_holds() {
+    let scratch = Scratch::new();
+    let mut refusing = hub(true);
+    refusing.alerts = true;
+    refusing
+        .refuse
+        .push(("DELETE", format!("{REPO}/vulnerability-alerts")));
+    let (_hub, server) = github(refusing);
+    let account = scratch.account(&server);
+    let (_folder, project) = published(&scratch);
+    let page = account
+        .set_repo_rule(&project, GitHubRule::DependabotAlerts, false)
+        .unwrap();
+    assert_eq!(
+        entry(&page, GitHubRule::DependabotAlerts),
+        Some((
+            true,
+            GitHubRuleState::Refused {
+                status: 403,
+                message: PLAN.into(),
+            }
+        ))
+    );
+    let page = account
+        .set_repo_rule(&project, GitHubRule::DependabotSecurityUpdates, true)
+        .unwrap();
+    assert_eq!(
+        entry(&page, GitHubRule::DependabotSecurityUpdates),
+        Some((true, GitHubRuleState::Applied))
+    );
+    assert_eq!(
+        writes(&server),
+        [
+            format!("DELETE {REPO}/vulnerability-alerts"),
+            format!("PUT {REPO}/automated-security-fixes"),
+        ]
+    );
+}
