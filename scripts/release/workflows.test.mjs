@@ -383,7 +383,7 @@ test("the_macos_bundle_carries_the_signed_power_helper_and_its_daemon_plist", as
   assert(order.every((at) => at >= 0), `all five steps exist: ${order}`);
   assert.deepEqual([...order].sort((a, b) => a - b), order, "built, staged, signed and bundled, checked, then packed into the CLI archive");
   const [binaries, , bundle, check] = order.map((at) => build[at]);
-  assert.match(binaries, /\n {10}if \[ "\$PLATFORM" = macos \]; then\n {12}cargo build --release --locked --target "\$TARGET" -p crazyagent-mac-power --bin crazyagent-power-helper\n {10}fi\n/);
+  assert.match(binaries, /\n {10}if \[ "\$PLATFORM" = macos \]; then\n {12}cargo build --release --locked --target "\$TARGET" -p crazyagent-mac-power --bin crazyagent-power-helper\n {10}fi(?:\n|$)/);
   const presign = bundle.indexOf('\n          if [ "$PLATFORM" = macos ] && [ "$status" = signed ]; then\n            node scripts/release/signing.mjs presign --target "$TARGET" --tauri-dir apps/desktop/src-tauri --keychain "$keychain"\n          fi\n');
   assert(presign > 0, "a signed macOS build signs the engine and the helper itself");
   assert(presign > bundle.indexOf("security find-identity -p codesigning"), "after the job keychain holds the identity");
