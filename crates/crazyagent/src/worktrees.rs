@@ -2695,11 +2695,10 @@ pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
 }
 
 /// Settles every stored lease at an engine start. A Ready or RecoveryRequired lease that
-/// still verifies, or whose check ran out of time on a slow start, becomes
-/// RecoveryRequired, to be checked again before any use; a Reserved lease, and one whose
-/// check failed otherwise, becomes Uncertain. Each failed check is logged. Inputs: the
-/// connection, outside any transaction, and the lease check. Output: success, or
-/// `lease_capacity` or the storage failure.
+/// verifies, or whose check ran out of time on a slow start, becomes RecoveryRequired and
+/// is checked again before any use; a Reserved lease, or one whose check failed otherwise,
+/// becomes Uncertain. Each failed check is logged. Inputs: the connection, outside any
+/// transaction, and the lease check. Output: success, `lease_capacity` or the storage error.
 #[cfg(unix)]
 fn reconcile_with(
     connection: &Connection,
@@ -3791,15 +3790,28 @@ mod tests {
         }
     }
 
-    /// Stores one lease at `state` with both worktree identities pinned in a fresh lease
-    /// table, then runs one engine start's reconcile with a lease check that gives `answers`
-    /// in turn, the last one again once they run out. Inputs: the state and the answers.
-    /// Output: the state stored after the start and how many checks ran.
+    /// Runs [`restarted_at`] for a lease of `/repository`, a folder that does not exist, so
+    /// its volume never reads as renumbered. Inputs: the state and the answers. Output: the
+    /// state stored after the start and how many checks ran.
     fn restarted(state: LeaseState, answers: &[Result<(), &str>]) -> (LeaseState, usize) {
+        restarted_at("/repository", state, answers)
+    }
+
+    /// Stores one lease of `repository` at `state` with both worktree identities pinned in a
+    /// fresh lease table, then runs one engine start's reconcile with a lease check that
+    /// gives `answers` in turn, the last one again once they run out. Inputs: the
+    /// repository, the state and the answers. Output: the state stored and the check count.
+    fn restarted_at(
+        repository: &str,
+        state: LeaseState,
+        answers: &[Result<(), &str>],
+    ) -> (LeaseState, usize) {
         assert!(!answers.is_empty());
         let connection = Connection::open_in_memory().unwrap();
         initialize(&connection).unwrap();
         let mut record = reserved_record();
+        record.lease.repository = repository.into();
+        record.admission.repository = repository.into();
         record.lease.state = state;
         record.directory = Some(Identity {
             device: 1,
@@ -3884,6 +3896,21 @@ mod tests {
                 "{rule}"
             );
         }
+        let volume = tempfile::tempdir().unwrap();
+        let moved = std::fs::canonicalize(volume.path()).unwrap();
+        assert_ne!(
+            identity(&moved, true).unwrap().device,
+            reserved_record().admission.root.device
+        );
+        assert_eq!(
+            restarted_at(
+                moved.to_str().unwrap(),
+                LeaseState::Uncertain,
+                &[Err("git_deadline")]
+            ),
+            (LeaseState::Uncertain, 1),
+            "an Uncertain lease checked after a renumber stays Uncertain when its check times out"
+        );
         for state in [LeaseState::Reserved, LeaseState::Uncertain] {
             assert_eq!(
                 restarted(state.clone(), &[Err("git_deadline")]),
