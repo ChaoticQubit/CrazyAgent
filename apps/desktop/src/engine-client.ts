@@ -904,7 +904,7 @@ export interface RoleSkills {
 
 /** How every agent terminal of a project draws, whatever harness runs in it (DEC-141): Classic
  * on the normal screen, so the app's view scrolls with the wheel and a plain drag selects, or
- * Fullscreen, the harness's own view, which takes the mouse. */
+ * Fullscreen, the harness's own view, which takes the mouse, the default. */
 export type TerminalDisplay = "classic" | "fullscreen";
 
 /** Whether the first turn of each task of a team agent carries the Task-start reminder: the
