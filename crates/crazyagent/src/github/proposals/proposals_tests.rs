@@ -670,3 +670,79 @@ fn the_proposer_hears_who_gets_the_outcome() {
     assert!(!said.contains("You get one message"), "{said}");
     assert!(!said.contains(REPO), "{said}");
 }
+
+/// RV gh-s7 F1: a proposal is recorded with its question in one transaction, so a store
+/// failure after the question is logged leaves neither the proposal nor the question,
+/// and the agent may propose that rule again at once.
+#[test]
+fn a_proposal_whose_question_cannot_be_kept_leaves_no_row_and_no_question() {
+    let case = Case::new();
+    case.done(REPO);
+    assert_eq!(start_store(&case.db).unwrap(), 0);
+    case.db
+        .execute_batch(
+            "CREATE TRIGGER keep_fails BEFORE UPDATE OF question ON github_rule_requests
+             BEGIN SELECT RAISE(ABORT, 'keep fails'); END;",
+        )
+        .unwrap();
+    let refused = case.propose(&Asker::Agent(4), GitHubRule::WikiOff, true);
+    assert_eq!(
+        refused,
+        Err("github_rule_requests_unavailable".to_owned()),
+        "{refused:?}"
+    );
+    assert!(case.statuses().is_empty(), "{:?}", case.statuses());
+    assert!(case.questions().is_empty());
+    case.db.execute_batch("DROP TRIGGER keep_fails;").unwrap();
+    case.asked(&Asker::Agent(4), GitHubRule::WikiOff, true);
+    assert_eq!(case.statuses(), ["pending"]);
+    assert_eq!(case.questions().len(), 1);
+}
+
+/// RV gh-s7 F1: a start ends a pending proposal whose question is no longer pending, or
+/// was never kept, as refused and tells its agent once, so it holds no slot and never
+/// blocks that agent and rule; a pending proposal whose question still waits is left.
+#[test]
+fn a_start_refuses_and_tells_a_pending_proposal_whose_question_is_gone() {
+    let case = Case::new();
+    case.done(REPO);
+    let waiting = case.asked(&Asker::Agent(4), GitHubRule::WikiOff, true);
+    let gone = case.asked(&Asker::Agent(5), GitHubRule::NoForcePush, true);
+    case.db
+        .execute(
+            "DELETE FROM questions_log WHERE id=?1",
+            [i64::try_from(gone).unwrap()],
+        )
+        .unwrap();
+    case.db
+        .execute(
+            "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,created_ms)
+             VALUES (?1,'agent:6','tag_protection',1,'Tags stay.',?2,0)",
+            [PROJECT, REPO],
+        )
+        .unwrap();
+    assert_eq!(case.statuses(), ["pending", "pending", "pending"]);
+    let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
+    assert_eq!(start(&tx).unwrap(), 2);
+    tx.commit().unwrap();
+    assert_eq!(case.statuses(), ["pending", "refused", "refused"]);
+    let told = case.told();
+    assert_eq!(told.len(), 2, "{told:?}");
+    assert!(
+        told.iter().all(|text| text.ends_with(": refused.")),
+        "{told:?}"
+    );
+    for text in &told {
+        plain_for_the_agent(text);
+    }
+    assert!(
+        case.questions()
+            .iter()
+            .any(|question| question.id == waiting)
+    );
+    case.asked(&Asker::Agent(5), GitHubRule::NoForcePush, true);
+    let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
+    assert_eq!(start(&tx).unwrap(), 0);
+    tx.commit().unwrap();
+    assert_eq!(case.told().len(), 2);
+}
