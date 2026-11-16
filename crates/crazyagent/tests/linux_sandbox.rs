@@ -3382,6 +3382,88 @@ with open('/dev/stderr', 'w') as err:
     err.write('piped\\n')
 ";
 
+const CASE_SPELLINGS: &str = "import os, sys
+def said(name, work):
+    try:
+        work()
+        print(name + '=made')
+    except OSError as error:
+        print(name + '=' + str(error.errno))
+kelvin = 'config.wor\\u212atree'
+os.mkdir('plain/prepared')
+said('kelvin-rename', lambda: os.rename('plain/prepared', 'plain/' + kelvin))
+said('kelvin-create', lambda: os.close(os.open('plain/' + kelvin, os.O_CREAT | os.O_WRONLY)))
+said('kelvin-folder', lambda: os.mkdir('plain/' + kelvin))
+said('ascii', lambda: os.mkdir('plain/notes'))
+said('accent-held-there', lambda: os.mkdir('full/caf\\u00e9'))
+said('accent-elsewhere', lambda: os.mkdir('other/caf\\u00e9'))
+if len(sys.argv) > 1:
+    before = os.stat('folding').st_mtime_ns
+    os.mkdir('folding-prepared')
+    said('folding-rename', lambda: os.rename('folding-prepared', 'folding/' + kelvin))
+    print('folding-touched=' + str(os.stat('folding').st_mtime_ns != before))
+    print('folding-held=' + str(os.path.exists('folding/config.worktree')))
+";
+
+/// Under the held guard a new name outside ASCII is refused before anything is made where
+/// a held name of its folder is not there yet, so a case-folding folder never reads it as
+/// that name; ASCII names and names beside held names that exist are made. On a folder
+/// with case folding on (`chattr +F`, ext4 or f2fs made with it) the refused rename
+/// leaves the folder untouched (rv-sec3 F1).
+#[test]
+fn a_supervised_agent_makes_no_name_outside_ascii_where_a_held_name_is_not_there_yet() {
+    let case = case();
+    for folder in ["plain", "full", "other", "folding"] {
+        fs::create_dir(case.project.join(folder)).unwrap();
+    }
+    fs::write(
+        case.project.join("full").join("HEAD"),
+        "ref: refs/heads/main\n",
+    )
+    .unwrap();
+    let folding = crazyagent::spawn_gate::status(
+        Command::new("chattr")
+            .arg("+F")
+            .arg(case.project.join("folding"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .is_ok_and(|status| status.success());
+    if !folding {
+        eprintln!("case folding is not on for this filesystem: the folding leg is skipped");
+    }
+    let held = |folder: &str| case.project.join(folder).join("config.worktree");
+    let head = case.project.join("full").join("HEAD");
+    let guard = [
+        "--guard-held",
+        held("plain").to_str().unwrap(),
+        "--guard-held",
+        head.to_str().unwrap(),
+        "--guard-held",
+        held("folding").to_str().unwrap(),
+    ];
+    let mut script = vec!["-I", "-u", "-c", CASE_SPELLINGS];
+    if folding {
+        script.push("folding");
+    }
+    let output = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    let report = told(&output);
+    assert!(
+        report.starts_with(
+            "kelvin-rename=13\nkelvin-create=13\nkelvin-folder=13\nascii=made\n\
+             accent-held-there=made\naccent-elsewhere=made\n"
+        ),
+        "{report}"
+    );
+    assert!(!held("plain").exists());
+    if folding {
+        assert!(
+            report.ends_with("folding-rename=13\nfolding-touched=False\nfolding-held=False\n"),
+            "{report}"
+        );
+    }
+}
+
 /// A call made for the agent behaves as the agent's own: `openat2`, whose flags lie in
 /// memory, is answered as missing so tools fall back to `openat`; a new file and folder
 /// take the agent's file mode mask; `/proc/self` names the agent, not the supervisor, so
