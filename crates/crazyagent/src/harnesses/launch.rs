@@ -798,7 +798,8 @@ fn acp_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> {
 
 /// Wraps a harness command line in the launch's sandbox, with the agent's own environment:
 /// its home, temporary folder, tool path, plain locale, the model proxy and git identity of
-/// an installed context, the harness's own variables, those a listed harness's home block
+/// an installed context, whose tool home, if any, holds the temporary folder, own `git` and
+/// cargo home in place of the binding's home (rv-code4 T19b F2), the harness's own variables, those a listed harness's home block
 /// sets and those of its account hand-over (T19b 19b-2), whose placeholder goes through the
 /// one exception to the variable guard, as a listed master's does. Inputs: the checked
 /// request, the installed context, if any, the harness arguments and variables. Output: the
@@ -897,21 +898,22 @@ fn confined<'a>(
     handed: Option<crate::sandbox::Handed<'_>>,
 ) -> Result<Command, LaunchError> {
     let home = request.account.home();
+    let tool_home = installed.and_then(Installed::tool_home).unwrap_or(home);
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
     }
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
     let path = toolchains::with_agent_git(
-        home,
+        tool_home,
         if request.tools {
             toolchains::agent_path(&homes, TOOLS_ON_PATH)
         } else {
             TOOLS_OFF_PATH.to_owned()
         },
     );
-    let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
+    let tmp = toolchains::existing_tmp(tool_home).unwrap_or_else(|| home.to_path_buf());
     let tools = if request.tools {
-        toolchains::agent_env(home, &homes)
+        toolchains::agent_env(tool_home, &homes)
     } else {
         Vec::new()
     };

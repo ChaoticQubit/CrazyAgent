@@ -176,8 +176,9 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 /// of a team agent's message relay, the loopback port of the model proxy a team agent
 /// under the None network reaches its model through (S4b), the display its terminal draws
 /// with (N-D9, DEC-141), whether its team tools section tells it to merge
-/// `crazyagent/main` ("Catch up with main", OS-8) and the account hand-over a listed
-/// harness is started with (T19b 19b-2).
+/// `crazyagent/main` ("Catch up with main", OS-8), the account hand-over a listed harness
+/// is started with (T19b 19b-2) and the agent home a listed team agent's toolchain folders
+/// are in (rv-code4 T19b F2).
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
@@ -193,6 +194,7 @@ pub struct AgentContext {
     terminal_display: TerminalDisplay,
     catch_up_main: bool,
     handover: Option<crate::harnesses::accounts::Handover>,
+    tool_home: Option<PathBuf>,
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
@@ -208,7 +210,8 @@ struct Process {
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
 /// transcript, whether its generated plugin holds hooks, the Claude Code tool names the
 /// owner switched off, whether the lead runs its own agent team, the model proxy port its
-/// variables name, the account hand-over a listed harness's launch sets, and the lock that
+/// variables name, the account hand-over a listed harness's launch sets, the agent home its
+/// toolchain variables come from when that is not its own home, and the lock that
 /// keeps a second launch out of that home. Dropping it deletes every file holding a secret
 /// and the copied skills and hooks, unless `keep` left them to a pane that still runs.
 #[derive(Debug)]
@@ -227,6 +230,7 @@ pub struct Installed {
     environment: Vec<(OsString, OsString)>,
     engine_servers: Vec<EngineServer>,
     handover: Option<crate::harnesses::accounts::Handover>,
+    tool_home: Option<PathBuf>,
     _lock: File,
 }
 
@@ -315,6 +319,7 @@ pub fn for_project(
         terminal_display: TerminalDisplay::Classic,
         catch_up_main,
         handover: None,
+        tool_home: None,
     })
 }
 
@@ -764,6 +769,16 @@ impl AgentContext {
         self.handover.as_ref()
     }
 
+    /// Gives one launch of a listed team agent the agent home its sandbox was built from, so
+    /// its temp folder, its own `git` and its cargo home are the ones the team runtime made
+    /// there, while HOME stays its private home inside it (rv-code4 T19b F2). Input: the
+    /// agent home. Output: the context.
+    pub fn with_tool_home(mut self, home: &Path) -> Self {
+        assert!(home.is_absolute());
+        self.tool_home = Some(home.to_path_buf());
+        self
+    }
+
     /// Adds a live master's own instructions to what its harness reads at launch, so they
     /// reach it as system context and never as a typed message. Input: at most
     /// `LIVE_INSTRUCTIONS_BYTES_MAX` bytes the engine built. Output: the context.
@@ -1145,6 +1160,7 @@ impl AgentContext {
             environment: Vec::new(),
             engine_servers: Vec::new(),
             handover: None,
+            tool_home: None,
             _lock: lock,
         };
         remove(&state);
@@ -1370,15 +1386,23 @@ impl AgentContext {
     /// file holds no server, a server with any tool the
     /// owner switched off is left out whole, as the file cannot switch off one tool, and an
     /// ACP harness's file leaves out the engine's own servers, which its session opens with.
-    /// Output: the guard that deletes those files, `launch_manifest_invalid` for blocks that
-    /// do not read, `launch_listed_hooks_unsupported` for a tools-on team agent whose project
-    /// turned hooks on, or `launch_home_busy`.
+    /// Output: the guard that deletes those files, `launch_context_unsafe` for a tool home
+    /// ([`Self::with_tool_home`]) the private home is not inside, `launch_manifest_invalid`
+    /// for blocks that do not read, `launch_listed_hooks_unsupported` for a tools-on team
+    /// agent whose project turned hooks on, or `launch_home_busy`.
     pub fn install_listed(
         &self,
         manifest: &crate::harnesses::manifest::Manifest,
         home: &Path,
         tools: bool,
     ) -> Result<Installed, LaunchError> {
+        if self
+            .tool_home
+            .as_ref()
+            .is_some_and(|tools| !home.starts_with(tools) || home == tools)
+        {
+            return Err(failure("launch_context_unsafe"));
+        }
         let instructions = self.listed_instructions(tools)?;
         let invalid = |_: crate::harnesses::manifest::Refused| failure("launch_manifest_invalid");
         let renders = crate::harnesses::render::read(manifest).map_err(invalid)?;
@@ -1417,6 +1441,7 @@ impl AgentContext {
                 .filter_map(engine_server)
                 .collect(),
             handover: self.handover.clone(),
+            tool_home: self.tool_home.clone(),
             _lock: lock,
         };
         let acp = manifest.piped == Some(crate::harnesses::manifest::DriverKind::Acp);
@@ -1521,6 +1546,13 @@ impl Installed {
         self.handover.as_ref()
     }
 
+    /// The agent home a listed team agent's temp folder, own `git` and cargo home are in
+    /// (rv-code4 T19b F2), from the context it was installed from. Output: the folder, or
+    /// none for Codex, Claude Code and a launch whose toolchain folders are in its own home.
+    pub fn tool_home(&self) -> Option<&Path> {
+        self.tool_home.as_deref()
+    }
+
     /// Tells whether a headless Claude run of this launch keeps its transcript, as the
     /// project's "Keep transcripts for headless runs" setting says.
     pub fn keeps_transcript(&self) -> bool {
@@ -1606,6 +1638,7 @@ impl Installed {
             environment: Vec::new(),
             engine_servers: Vec::new(),
             handover: None,
+            tool_home: None,
             _lock: lock,
         })
     }
@@ -2599,6 +2632,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         environment: Vec::new(),
         engine_servers: Vec::new(),
         handover: None,
+        tool_home: None,
         _lock: lock,
     })
 }

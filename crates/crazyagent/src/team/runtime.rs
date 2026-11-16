@@ -9709,20 +9709,26 @@ impl TeamRuntime {
         };
         let listed = matches!(kind, Some(crate::coord::settings::HarnessKind::Listed(_)));
         let mode = match &account.reach {
-            TeamReach::Endpoint { base_url, .. } => Mode::Kept {
-                account: AccountBinding::Url {
-                    home: match listed {
-                        true => listed_home(&home, launch, &account.connection)?,
-                        false => home,
+            TeamReach::Endpoint { base_url, .. } => {
+                let (binding, context) = match listed {
+                    true => (
+                        listed_home(&home, launch, &account.connection)?,
+                        context.with_tool_home(&home),
+                    ),
+                    false => (home, context),
+                };
+                Mode::Kept {
+                    account: AccountBinding::Url {
+                        home: binding,
+                        base_url: relay_url.unwrap_or_else(|| base_url.clone()),
+                        key: relay_token,
                     },
-                    base_url: relay_url.unwrap_or_else(|| base_url.clone()),
-                    key: relay_token,
-                },
-                context: Box::new(match handover {
-                    Some(handover) => context.with_handover(handover),
-                    None => context,
-                }),
-            },
+                    context: Box::new(match handover {
+                        Some(handover) => context.with_handover(handover),
+                        None => context,
+                    }),
+                }
+            }
             TeamReach::Managed { .. } => Mode::PerTurn { home },
         };
         made.keep();

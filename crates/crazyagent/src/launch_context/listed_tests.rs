@@ -64,6 +64,7 @@ fn context() -> AgentContext {
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
         handover: None,
+        tool_home: None,
     }
 }
 
@@ -894,6 +895,37 @@ fn a_native_install_given_a_hand_over_is_refused() {
         );
     }
     assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+}
+
+/// rv-code4 T19b F2 guard row: a listed install whose context names a tool home its private
+/// home is not inside is refused before it writes a file, so a launch never takes its temp
+/// folder, `git` or cargo home from a folder its sandbox was not built from; the agent home
+/// around the private home is kept on the guard.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_listed_install_keeps_only_a_tool_home_its_private_home_is_inside() {
+    let (folder, home) = harness_home("standin-acp");
+    let base = folder.path().canonicalize().unwrap();
+    let elsewhere = base.join("elsewhere");
+    for tool_home in [elsewhere.as_path(), home.as_path()] {
+        let refused = context()
+            .with_tool_home(tool_home)
+            .install("standin-acp", &home, false);
+
+        assert_eq!(
+            refused.err().map(|problem| problem.0),
+            Some("launch_context_unsafe".to_owned()),
+            "{tool_home:?}"
+        );
+    }
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+
+    let installed = context()
+        .with_tool_home(&base)
+        .install("standin-acp", &home, false);
+
+    assert!(installed.is_ok(), "{:?}", installed.as_ref().err());
+    assert_eq!(installed.unwrap().tool_home(), Some(base.as_path()));
 }
 
 /// T19b 19b-2 guard row: a keyless hand-over given to a launch bound to a relay token at the
