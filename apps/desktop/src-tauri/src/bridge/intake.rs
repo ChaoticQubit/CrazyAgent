@@ -23,7 +23,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 110] = [
+pub const INTAKE_CODES: [&str; 114] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -134,6 +134,10 @@ pub const INTAKE_CODES: [&str; 110] = [
     "project_documents_too_large",
     "project_folder_unwritable",
     "project_folder_unavailable",
+    "document_not_found",
+    "document_not_a_regular_file",
+    "document_unreadable",
+    "document_changed_while_copying",
 ];
 
 const GITHUB_CODES: [&str; 35] = [

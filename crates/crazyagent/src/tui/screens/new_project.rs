@@ -1861,11 +1861,17 @@ fn allowed(path: &Path) -> bool {
 
 fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) {
     match code {
-        "project_folder_exists" | "project_exists" | "home_destination_exists" => (
+        "project_folder_exists" | "project_exists" => (
             "Could not create the folder.",
             "A folder for this project already exists. Press Enter, then create the project again."
                 .into(),
             Step::Review,
+        ),
+        "home_destination_exists" => (
+            "Could not create the project.",
+            "Your projects folder already has a folder with this name. Choose another project name."
+                .into(),
+            Step::About,
         ),
         "pool_missing" => (
             "Could not create the project.",

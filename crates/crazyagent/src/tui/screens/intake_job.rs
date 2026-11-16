@@ -158,7 +158,8 @@ fn setup_line(job: &JobView, name: &str) -> String {
     match &job.state {
         JobState::Building { done, total } if *total > 0 => {
             assert!(done <= total, "copied {done} past {total}");
-            format!("Setting up {name}: copying documents {done} of {total}")
+            let noun = if *total == 1 { "document" } else { "documents" };
+            format!("Setting up {name}: {done} of {total} {noun} copied")
         }
         JobState::Done => format!("{name} is set up in your projects folder."),
         JobState::Cancelled { .. } => {

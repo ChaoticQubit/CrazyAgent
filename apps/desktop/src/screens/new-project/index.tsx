@@ -26,7 +26,7 @@ import type { ProjectDraft, StepId } from "./wizard";
 import "../project/projects.css";
 
 let kept: { draft: ProjectDraft; step: StepId } | null = null;
-let startedSetup: { id: string; draft: ProjectDraft } | null = null;
+let startedSetup: { id: string; project: string; draft: ProjectDraft } | null = null;
 
 /** Forgets the kept New Project draft and the job it started, whose follow-ups then never run.
  * Input: none. Output: none. */
@@ -56,23 +56,36 @@ export async function setupStart(spec: ProjectSpec, setup: ProjectSetup, start =
   return { kind: "refused", note: `${KEPT_LINE} ${await refusalLine(result.code, newProjectCopy(result), read)}` };
 }
 
-/** What New Project opened again keeps of the job it started before the owner left it. Inputs:
- * the job read, the started job and the project ids the session lists. Output: the job id to
- * follow, or null, and whether the answers stay. */
+/** What New Project opened again keeps of the job it started before the owner left it
+ * (DEC-177 add.2 Q1 A): it follows one still building and keeps the answers of one that failed
+ * or stopped; a project the job made keeps no answers, read from the job ended done or, once
+ * the job left Home, from the projects listing it (rv-code bgjobs-3b F3). Inputs: the job read,
+ * the started job and the project ids the session lists. Output: the job id to follow, or null,
+ * and whether the answers stay. */
 export function reopened(job: IntakeJob | null, started: { id: string; project: string }, projects: readonly string[]): { follow: string | null; keep: boolean } {
-  void job; void started; void projects;
-  return { follow: null, keep: true };
+  const now = setupFollow(job, started.id);
+  switch (now.kind) {
+    case "running":
+      return { follow: started.id, keep: true };
+    case "done":
+      return { follow: null, keep: false };
+    case "ended":
+      return { follow: null, keep: true };
+    case "lost":
+      return { follow: null, keep: !projects.includes(started.project) };
+  }
 }
 
 /** Reads the New Project job this page started before the owner left it, as the page opens
- * again: it follows one still building, starts fresh after one that ended done, its follow-ups
- * skipped, and else lets go with the answers kept, Home saying how it ended (DEC-177 add.2 Q1
- * A). Input: Home's read of the engine's job. Output: the job id to follow, or null. */
-function resumeSetup(job: IntakeJob | null): string | null {
+ * again, by `reopened`: it follows one still building, else lets go, dropping the answers of a
+ * project already made, its follow-ups skipped, Home saying how it ended. Inputs: Home's read
+ * of the engine's job and the project ids the session lists. Output: the job id to follow, or
+ * null. */
+function resumeSetup(job: IntakeJob | null, projects: readonly string[]): string | null {
   if (startedSetup === null) return null;
-  const now = setupFollow(job, startedSetup.id);
-  if (now.kind === "running") return startedSetup.id;
-  if (now.kind === "done") kept = null;
+  const now = reopened(job, startedSetup, projects);
+  if (now.follow !== null) return now.follow;
+  if (!now.keep) kept = null;
   startedSetup = null;
   return null;
 }
@@ -82,7 +95,8 @@ function resumeSetup(job: IntakeJob | null): string | null {
  * Output: the page; answers are kept if the owner leaves and comes back. */
 export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: string; navigate?: (path: string) => void }) {
   const session = useContext(SessionContext);
-  const [following, setFollowing] = useState<string | null>(() => resumeSetup(session?.intake ?? null));
+  const [following, setFollowing] = useState<string | null>(() => resumeSetup(session?.intake ?? null,
+    session?.projects.kind === "ok" ? session.projects.value.map((row) => row.id) : []));
   const initialStep = STEPS.some((item) => item.id === routeStep) ? routeStep as StepId : kept?.step ?? "basics";
   const [draft, setDraftState] = useState<ProjectDraft>(() => kept?.draft ?? emptyDraft());
   const [step, setStepState] = useState<StepId>(initialStep);
@@ -211,7 +225,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
       setCreateError(result.note);
       return;
     }
-    startedSetup = { id: result.job.id, draft };
+    startedSetup = { id: result.job.id, project: result.job.project_id ?? "", draft };
     session?.refreshIntake(result.job);
     setFollowing(result.job.id);
   }
@@ -226,6 +240,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
    * (DEC-177 add.2 Q1 A): its pool, then its agent access, then the project opens and the job
    * leaves Home. Inputs: the new project's id, the job's id and the answers it started with. */
   async function finish(id: string, job: string, draft: ProjectDraft) {
+    kept = null;
     setFinishing(true);
     const request = buildRequest(draft);
     const chosen = poolValue?.find((choice) => choice.pool.id === draft.pool) ?? null;
