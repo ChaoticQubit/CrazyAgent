@@ -1021,10 +1021,12 @@ const HOME_WALK_CHUNKS_MAX: usize = 4096;
 /// a folder moved away is emptied where it went (RV-DS241-137, sec F1 ds137-lock-linux). A
 /// step that stops on a flag, mode or ACL an agent set clears it and tries once more
 /// ([`open_home_folder`], [`unlink_home_entry`]), so a reset never stops on one (code r1
-/// F2, r2 F3), and no count of entries stops it (code r1 F1 ds137-reset-walk). Inputs: the
-/// parent handle and the name, one plain name. Output: Ok once nothing has the name, or
+/// F2, r2 F3), and no folder's size stops it (code r1 F1 ds137-reset-walk). Inputs: the
+/// parent handle and the name, one plain name. Output: Ok once nothing has the name,
 /// `cleanup_folder_failed`, also past [`HOME_DEPTH_MAX`] folders deep or for a folder that
-/// keeps gaining entries while it is emptied ([`empty_home_folder`]).
+/// keeps gaining entries while it is emptied ([`empty_home_folder`]), or
+/// `cleanup_walk_too_long` once the walk's listings return more than
+/// [`HOME_WALK_CHUNKS_MAX`] listings' worth of names (RESET-WALK-F1).
 #[cfg(unix)]
 pub(crate) fn remove_home_entry<P: rustix::path::Arg>(
     parent: impl std::os::fd::AsFd,
@@ -1112,8 +1114,9 @@ pub(crate) fn open_home_folder(
 /// until a listing comes back empty, so no folder's size stops it (code r1 F1
 /// ds137-reset-walk). Removing more than the count plus [`HOME_ADDED_CHUNKS_MAX`] listings'
 /// worth means a process is still adding entries, and the removal stops. Inputs: the folder,
-/// its depth and the names its walk's listings may still return. Output: Ok once a listing
-/// finds it empty, or `cleanup_folder_failed`.
+/// its depth and the names its walk's listings may still return, which each listing spends.
+/// Output: Ok once a listing finds it empty, `cleanup_folder_failed`, or
+/// `cleanup_walk_too_long` for a listing returning more names than are left.
 #[cfg(unix)]
 fn empty_home_folder(
     folder: &std::os::fd::OwnedFd,
@@ -1135,6 +1138,7 @@ fn empty_home_folder(
         if removed > allowed {
             return Err(folder_failed());
         }
+        *left = left.checked_sub(names.len()).ok_or_else(walk_too_long)?;
         for name in &names {
             remove_home_below(folder.as_fd(), name, depth + 1, left)?;
         }
@@ -1264,6 +1268,13 @@ fn plain_name(name: &std::ffi::CStr) -> bool {
 #[cfg(unix)]
 fn folder_failed() -> EngineError {
     EngineError("cleanup_folder_failed".into())
+}
+
+/// The code a removal of an agent home entry reports once its walk's listings returned more
+/// names than [`HOME_WALK_CHUNKS_MAX`] listings hold (RESET-WALK-F1).
+#[cfg(unix)]
+fn walk_too_long() -> EngineError {
+    EngineError("cleanup_walk_too_long".into())
 }
 
 /// Deletes a folder. When a plain delete stops, it is walked clearing flags as `flags`
