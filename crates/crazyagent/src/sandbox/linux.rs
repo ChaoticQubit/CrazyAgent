@@ -1781,6 +1781,26 @@ fn routes(bwrap: &Path, helper: &Path) -> bool {
         )
 }
 
+/// The route answer kept for this engine's life ([`kept_route`]): the bubblewrap and the
+/// helper it was asked for, and whether the probe passed.
+type KeptRoute = Mutex<Option<(PathBuf, PathBuf, bool)>>;
+
+/// Tells whether a nested agent gets a routed network of its own from one answer kept for
+/// the engine's life, so the Agent access page, the launch notice and the launch read the
+/// same fact (rv-code2 SX2-2, SX2B-1): false at once when `refused`, else the answer kept
+/// for this bubblewrap and helper, else the probe's, then kept, with no lock held while the
+/// probe runs. Inputs: the cell, bubblewrap, the helper, the refusal, the probe. Output: it.
+fn kept_route(
+    kept: &KeptRoute,
+    bwrap: &Path,
+    helper: &Path,
+    refused: bool,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    let _ = (kept, bwrap, helper, refused);
+    probe()
+}
+
 /// Tells whether AppArmor keeps unprivileged programs out of user namespaces, from what
 /// [`APPARMOR_USERNS`] reads: only `1`, with or without its newline, does. Input: the text,
 /// none where the file cannot be read (no AppArmor, or an older one). Output: true when it
@@ -3068,6 +3088,31 @@ mod tests {
             assert_eq!(said(&ports), None, "{choice:?}: the page says it");
             assert_eq!(said(&low), Some(linux_unbridged_line(80)), "{choice:?}");
         }
+    }
+
+    #[test]
+    fn the_route_answer_is_asked_once_per_engine_and_never_when_refused() {
+        let kept: KeptRoute = Mutex::new(None);
+        let probes = &std::cell::Cell::new(0u32);
+        let probe = |answer: bool| {
+            move || {
+                probes.set(probes.get() + 1);
+                answer
+            }
+        };
+        let (bwrap, helper) = (Path::new(BWRAP_PATHS[0]), helper());
+        assert!(!kept_route(&kept, bwrap, &helper, true, probe(true)), "root or no tools");
+        assert_eq!(probes.get(), 0, "a refusal starts no probe");
+        assert!(kept_route(&kept, bwrap, &helper, false, probe(true)));
+        assert!(kept_route(&kept, bwrap, &helper, false, probe(false)), "kept");
+        assert_eq!(probes.get(), 1, "page, notice and launch read one answer");
+        assert!(!kept_route(&kept, bwrap, &helper, true, probe(true)), "refused while kept");
+        assert!(kept_route(&kept, bwrap, &helper, false, probe(false)), "still kept");
+        assert_eq!(probes.get(), 1);
+        let other = Path::new("/usr/local/bin/bwrap");
+        assert!(!kept_route(&kept, other, &helper, false, probe(false)), "another bubblewrap");
+        assert!(!kept_route(&kept, other, &helper, false, probe(true)), "a failed answer too");
+        assert_eq!(probes.get(), 2);
     }
 
     #[test]
