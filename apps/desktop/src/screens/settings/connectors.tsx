@@ -56,17 +56,23 @@ function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
+/** One catalog row: the title, which opens the connector's page unless its file is
+ * refused (a refused file shadowed by a built-in one would open the built-in page), where
+ * it came from, its state with its line, the description and every host. Input: the
+ * connector. Output: the row. */
 function CatalogRow({ connector }: { connector: ConnectorView }) {
   const state = connectorState(connector);
-  return <li className="pj-task" data-connector={connector.name}>
+  const refused = connector.status.kind === "refused";
+  return <li className="pj-task" data-connector={connector.name} data-origin={connector.origin}>
     <div className="pj-row between">
       <div className="pj-stack-s">
-        <a href={formatRoute({ name: "settings", tab: "connectors", connector: connector.name })}>{connector.title}</a>
+        {refused ? <strong>{connector.title}</strong> : <a href={formatRoute({ name: "settings", tab: "connectors", connector: connector.name })}>{connector.title}</a>}
         <span className="muted small">{originLine(connector)}</span>
       </div>
       <StatusBadge word={state.word} tone={state.tone} />
     </div>
     {state.detail && <p className="small">{state.detail}</p>}
+    {refused && <p className="small">{CONNECTORS_PAGE.refusedFile}</p>}
     {connector.description && <p className="secondary">{connector.description}</p>}
     {connector.runs && <p className="small">{reachesLine(connector.runs.hosts)}</p>}
   </li>;
@@ -229,7 +235,7 @@ export function ConnectorsSettingsView({ view, reach, open, dialog, native, size
         actions={<Button variant="primary" disabled={busy} onClick={actions.onAdd}>{CONNECTORS_PAGE.add}</Button>}>
         <div className="set-body">
           {dialog.kind === "none" && failure && <Notice tone="danger" alert>{failure}</Notice>}
-          <ul className="pj-rows" aria-label={CONNECTORS_PAGE.catalog}>{page.connectors.map((connector) => <CatalogRow key={connector.name} connector={connector} />)}</ul>
+          <ul className="pj-rows" aria-label={CONNECTORS_PAGE.catalog}>{page.connectors.map((connector) => <CatalogRow key={`${connector.origin}:${connector.name}`} connector={connector} />)}</ul>
           {page.more && <p className="muted small">{`Showing the first ${page.connectors.length} connectors.`}</p>}
         </div>
       </SettingSection>
@@ -308,7 +314,7 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
   async function remove() {
     if (dialog.kind !== "remove") return;
     const { connector: name, title } = dialog;
-    if (await changed(() => removeConnector(name), `${title} was removed.`) && connector === name) navigate({ name: "settings", tab: "connectors" });
+    if (await changed(() => removeConnector(name), `${title} was removed.`) && connector === name) navigate({ name: "settings", tab: "connectors" }, true);
   }
 
   async function confirm() {
@@ -367,7 +373,11 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     onReview: (name) => { if (!busy) void review(name); },
     onRemove: (shown) => { setFailure(""); setDialog({ kind: "remove", connector: shown.name, title: shown.title }); },
     onConfirmRemove: () => { if (!busy) void remove(); },
-    onSetKey: (shown, secret) => { setFailure(""); setDialog({ kind: "key", connector: shown.name, title: shown.title, hosts: shown.runs.hosts, secret }); },
+    onSetKey: (shown, secret) => {
+      assert(shown.runs !== null, "only a connector with an address offers Set key");
+      setFailure("");
+      setDialog({ kind: "key", connector: shown.name, title: shown.title, hosts: shown.runs.hosts, secret });
+    },
     onSaveKey: () => { if (!busy) void saveKey(); },
     onClearKey: (name, secret) => { if (!busy) void changed(() => clearConnectorKey(name, secret), `${secret} no longer has a key.`); },
     onPickNative: (choice) => { setNative(choice); setProblem(""); },

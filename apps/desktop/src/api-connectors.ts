@@ -1,5 +1,6 @@
 import { call, knownError, namedFailure, type Result } from "./api";
 import { problemText, type Origin, type PluginStatus, type Preview, type Problem, type SecretView } from "./api-app-plugins";
+import { displayText } from "./screens/conversation";
 import type { Tone } from "./ui";
 
 export type WritePolicy = "ask_every_time" | "ask_once_per_project" | "read_only";
@@ -149,6 +150,7 @@ export const CONNECTORS_PAGE = {
   add: "Add connector",
   back: "All connectors",
   oauthNotYet: "Signs in with OAuth, which this build does not have.",
+  refusedFile: "Fix its file, or remove it on the App plugins page.",
   settings: "Connector settings",
   native: "Harness-native connectors",
   nativeHelp: "Connectors from the harness's own account (claude.ai connectors in Claude Code, ChatGPT apps in Codex). The engine neither filters nor logs them.",
@@ -203,9 +205,11 @@ export function connectorState(connector: ConnectorView): { word: string; tone: 
   return { word, tone: "ok", detail: null };
 }
 
-/** Where a connector comes from and its version, one line. Input: the connector. Output: the line. */
+/** Where a connector comes from and its version, one line; a refused file has no version
+ * to name. Input: the connector. Output: the line. */
 export function originLine(connector: { name: string; version: string; origin: Origin }): string {
-  return `${connector.name}, version ${connector.version}. ${connector.origin === "bundled" ? "Built in" : "Added by you"}.`;
+  const version = connector.version === "" ? "" : `, version ${connector.version}`;
+  return `${connector.name}${version}. ${connector.origin === "bundled" ? "Built in" : "Added by you"}.`;
 }
 
 /** Every host a connector reaches, one line. Input: the hosts. Output: the line. */
@@ -295,9 +299,21 @@ export function connectorProblem(refusal: { code: string; cause?: string; messag
   return refusal.message ?? namedFailure(knownError(refusal.code), refusal.code, refusal.cause);
 }
 
+/** An engine answer as the Connectors pages may show it: every string in it, at any depth,
+ * goes through `displayText`, so a manifest's or vendor's hidden characters show as
+ * escapes. Names, ids and hashes are plain ASCII and come back as sent. Input: the answer.
+ * Output: the same shape. */
+function shown<T>(value: T): T {
+  if (typeof value === "string") return displayText(value) as T;
+  if (Array.isArray(value)) return value.map(shown) as T;
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, shown(item)])) as T;
+}
+
 async function connectorCall<T>(command: string, args: Record<string, unknown>): Promise<Result<T>> {
   const result = await call<T>(command, args);
-  return result.kind === "error" ? { ...result, message: connectorProblem(result) } : result;
+  if (result.kind === "error") return { ...result, message: connectorProblem(result) };
+  return result.kind === "ok" ? { kind: "ok", value: shown(result.value) } : result;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

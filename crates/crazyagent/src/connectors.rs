@@ -200,9 +200,10 @@ pub(crate) fn project_known(db: &Connection, project: &str) -> Result<bool, Engi
     .map_err(|_| EngineError("connectors_unavailable".into()))
 }
 
-/// Reads the Connectors page. Inputs: the engine database and root, and the project whose
-/// switches to include. Output: the page, `connector_project_unknown`, or the store's
-/// refusal when the plugins folder cannot be read.
+/// Reads the Connectors page, with each refused file whose kind reads as connector listed
+/// under its file name with its reason. Inputs: the engine database and root, and the
+/// project whose switches to include. Output: the page, `connector_project_unknown`, or
+/// the store's refusal when the plugins folder cannot be read.
 pub fn view(
     db: &Connection,
     root: &Path,
@@ -218,14 +219,18 @@ pub fn view(
         .plugins
         .into_iter()
         .filter(|plugin| plugin.kind == PluginKind::Connector)
-        .filter_map(|plugin| {
-            Some(ConnectorView {
+        .map(|plugin| {
+            assert!(
+                plugin.runs.is_some() || matches!(plugin.status, PluginStatus::Refused { .. }),
+                "only a refused file has no address"
+            );
+            ConnectorView {
                 sign_in: if plugin.secrets.is_empty() {
                     SignIn::NotYet
                 } else {
                     SignIn::Key
                 },
-                runs: Some(plugin.runs?),
+                runs: plugin.runs,
                 name: plugin.name,
                 title: plugin.title,
                 version: plugin.version,
@@ -234,7 +239,7 @@ pub fn view(
                 status: plugin.status,
                 secrets: plugin.secrets,
                 sha256: plugin.sha256,
-            })
+            }
         })
         .collect();
     assert!(connectors.len() <= store::PLUGINS_MAX);

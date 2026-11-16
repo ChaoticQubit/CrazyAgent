@@ -272,6 +272,19 @@ pub(super) fn problem(code: &'static str, field: &str) -> Problem {
     Problem::new(code, None, Some(field))
 }
 
+/// The kind a manifest's text declares, read with no other field checked, so a file
+/// refused for a later field is still listed on its own kind's page. Input: the manifest
+/// text. Output: the kind, or none when the text is not the YAML subset or `kind` is not a
+/// known word.
+pub fn declared_kind(text: &str) -> Option<PluginKind> {
+    let value = yaml::parse(text).ok()?;
+    match Fields::new(&value, "").ok()?.optional("kind") {
+        Some(Value::Str(kind)) if kind == "embedding" => Some(PluginKind::Embedding),
+        Some(Value::Str(kind)) if kind == CONNECTOR => Some(PluginKind::Connector),
+        _ => None,
+    }
+}
+
 /// Reads and checks one plugin manifest: the strict YAML subset, then every field. No
 /// part of it runs. Input: the manifest text. Output: the manifest, or the first problem
 /// with its line (YAML) or field path.
