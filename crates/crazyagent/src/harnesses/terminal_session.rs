@@ -172,17 +172,35 @@ pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>,
 }
 
 /// Says whether an agent's app works on nothing in its pane: it drew nothing for
-/// `APP_QUIET` and no question or permission prompt is on its screen. With `prompted` the
-/// screen must also show the app's own input prompt (see `idle_prompt`), so a still dialog
-/// the question rule does not know does not count. A host that cannot tell and a failed
-/// look say no. Takes the host, the pane name and whether the prompt is needed. Returns
-/// the answer.
+/// `APP_QUIET`, no question or permission prompt is on its screen and no process of its
+/// pane is stopped (see `unstopped`). With `prompted` the screen must also show the app's
+/// own input prompt (see `idle_prompt`), so a still dialog the question rule does not know
+/// does not count. A host that cannot tell and a failed look say no. Takes the host, the
+/// pane name and whether the prompt is needed. Returns the answer.
 fn waits(host: &dyn Host, agent: &AgentId, prompted: bool) -> bool {
     use crate::team::events::{idle_prompt, question};
     matches!(host.quiet(agent), Ok(Some(quiet)) if quiet >= APP_QUIET)
         && host
             .screen(agent)
             .is_ok_and(|screen| question(&screen).is_none() && (!prompted || idle_prompt(&screen)))
+        && unstopped(host, agent)
+}
+
+/// Says whether no process of an agent's pane is stopped. An agent can write to its own
+/// terminal and signal what runs in its sandbox, so it can draw its app's input prompt and
+/// stop the app under it, which then draws nothing (RV-DS241-190 sec F1). Takes the host
+/// and the pane name. Returns the answer; a host that names no first process and a process
+/// table that cannot be read say no.
+#[cfg(unix)]
+fn unstopped(host: &dyn Host, agent: &AgentId) -> bool {
+    matches!(host.pane_pid(agent), Ok(Some(pid)) if !crate::team::caller::stopped_under(pid))
+}
+
+/// Says no where no process table is read; no agent pane runs there (DEC-094). Inputs:
+/// unused. Output: false.
+#[cfg(not(unix))]
+fn unstopped(_host: &dyn Host, _agent: &AgentId) -> bool {
+    false
 }
 
 fn host_failure(error: HostError) -> LaunchError {
