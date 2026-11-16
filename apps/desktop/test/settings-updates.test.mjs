@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { CHECK_INTERVAL_MS, reduceUpdate, progressLabel, progressPercent, updateMessage, shouldAnnounce, createUpdateStore } = await import("../src/screens/settings/updates-state.ts");
+const { CHECK_INTERVAL_MS, reduceUpdate, progressLabel, progressPercent, updateMessage, shouldAnnounce, createUpdateStore, engineAfterLine } = await import("../src/screens/settings/updates-state.ts");
 const { UpdatesView } = await import("../src/screens/settings/updates.tsx");
 const { parseRoute, formatRoute } = await import("../src/ui/router.ts");
 
@@ -52,7 +52,20 @@ test("installing needs a found release and the owner's click, and reports each s
   assert.equal(progressLabel({ kind: "verifying" }), "Checking the signature...");
   assert.equal(progressLabel({ kind: "stopping_engine" }), "Stopping the engine. Your agents pick up where they were after the restart.");
   assert.equal(progressLabel({ kind: "installing" }), "Installing...");
-  assert.deepEqual(reduceUpdate(half, { kind: "install_done", engineStarted: true }), { kind: "installed", update: found, engineStarted: true });
+  assert.deepEqual(reduceUpdate(half, { kind: "install_done", engine: "ready" }), { kind: "installed", update: found, engine: "ready" });
+});
+
+test("after an update the screen waits for the engine with its time, then says where it stands (UPDATE-ENGINE-WAIT)", () => {
+  const installing = run([{ kind: "check_done", update: found, at: 1 }, { kind: "install_started" }]);
+  assert.equal(progressLabel({ kind: "starting_engine", waited_s: 65, answering: false }), "Starting the engine on the new version (1:05). Updating your data can take a few minutes.");
+  assert.equal(progressLabel({ kind: "starting_engine", waited_s: 160, answering: true }), "The engine is opening your projects (2:40)...");
+  assert.equal(progressPercent({ kind: "starting_engine", waited_s: 5, answering: false }), null);
+  for (const engine of ["ready", "starting", "failed"]) {
+    assert.deepEqual(reduceUpdate(installing, { kind: "install_done", engine }), { kind: "installed", update: found, engine });
+  }
+  assert.equal(engineAfterLine("ready"), null);
+  assert.equal(engineAfterLine("starting"), "The engine is still starting on the new version. Restart now; CrazyAgent connects once it answers.");
+  assert.equal(engineAfterLine("failed"), "The engine didn't start. Restart now to try again; the engine log says why.");
 });
 
 test("a failed download or bad signature shows the error, changes nothing and offers the same release again", () => {
@@ -74,7 +87,7 @@ test("checks and channel switches never interrupt an install in progress or fini
   for (const event of [{ kind: "check_started" }, { kind: "check_done", update: null, at: 2 }, { kind: "check_failed", code: "update_check_failed" }, { kind: "channel_changed" }]) {
     assert.equal(reduceUpdate(installing, event), installing);
   }
-  const installed = reduceUpdate(installing, { kind: "install_done", engineStarted: false });
+  const installed = reduceUpdate(installing, { kind: "install_done", engine: "failed" });
   assert.equal(reduceUpdate(installed, { kind: "check_started" }), installed);
   assert.equal(reduceUpdate(installed, { kind: "progress", progress: { kind: "installing" } }), installed);
   assert.deepEqual(run([{ kind: "check_done", update: found, at: 1 }, { kind: "channel_changed" }]), idle);
@@ -130,9 +143,13 @@ test("the Updates page offers Download and install only for a found release, wit
   assert.match(installing, /<progress[^>]*value="50"/);
   assert.match(installing, /Downloading 5 MB of 10 MB \(50%\)/);
   assert.doesNotMatch(installing, /Check now/);
-  const installed = render({ phase: { kind: "installed", update: found, engineStarted: false } });
+  const installed = render({ phase: { kind: "installed", update: found, engine: "starting" } });
   assert.match(installed, /Restart now/);
-  assert.match(installed, /engine starts again when CrazyAgent restarts/);
+  assert.match(installed, /The engine is still starting on the new version\. Restart now; CrazyAgent connects once it answers\./);
+  assert.doesNotMatch(render({ phase: { kind: "installed", update: found, engine: "ready" } }), /The engine (is still starting|didn)/);
+  const starting = render({ phase: { kind: "installing", update: found, step: { kind: "starting_engine", waited_s: 65, answering: false } } });
+  assert.match(starting, /Starting the engine on the new version \(1:05\)/);
+  assert.doesNotMatch(starting, /<progress[^>]*value=/);
   const failed = render({ phase: { kind: "failed", update: found, message: updateMessage("update_signature_invalid") } });
   assert.match(failed, /role="alert"/);
   assert.match(failed, /Try again/);
@@ -164,7 +181,7 @@ test("Version and channel names the engine's version beside the app's and offers
   const installing = { kind: "installing", update: found, step: { kind: "stopping_engine" } };
   assert.match(render(outdated), /<button[^>]*class="btn"[^>]*>(?:(?!<\/button>).)*Restart engine<\/button>/);
   assert.doesNotMatch(render(outdated), /disabled=""[^>]*>(?:(?!<\/button>).)*Restart engine/);
-  for (const phase of [installing, { kind: "installed", update: found, engineStarted: true }]) {
+  for (const phase of [installing, { kind: "installed", update: found, engine: "ready" }]) {
     assert.match(render({ ...outdated, phase }), /disabled=""[^>]*>(?:(?!<\/button>).)*Restart engine<\/button>/, `${phase.kind} holds Restart engine off`);
   }
 

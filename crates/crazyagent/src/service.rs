@@ -1867,9 +1867,18 @@ pub async fn wait_ready(
     }
 }
 
+/// How a start wait that did not fail ended: the engine answered, or the wait reached
+/// [`START_TIMEOUT`] while the service manager still ran the process it was first seen
+/// running, so the engine is still starting rather than stopped or relaunched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartWait {
+    Answered,
+    StillStarting,
+}
+
 /// Waits like [`wait_ready`] for an engine a service manager starts. Past `bound` it keeps
 /// waiting, up to [`START_TIMEOUT`], while the manager still runs the process it was first
-/// seen running, and it fails at once when that process stops or another one takes its
+/// seen running before `bound`, and it fails at once when that process stops or another one takes its
 /// place. Inputs: the layout, the service, the bound and the log length before the start.
 /// Output: Ok once the engine answers, or an error naming the engine log.
 pub async fn wait_started(
@@ -1878,20 +1887,39 @@ pub async fn wait_started(
     bound: Duration,
     since: u64,
 ) -> Result<(), ServiceError> {
+    match wait_start(layout, service, bound, since).await? {
+        StartWait::Answered => Ok(()),
+        StartWait::StillStarting => Err(unanswered(layout, START_TIMEOUT)),
+    }
+}
+
+/// Waits like [`wait_started`], but a wait that reaches [`START_TIMEOUT`] looks at the
+/// service manager once more and, when it still runs the process first seen running, ends
+/// as [`StartWait::StillStarting`] instead of failing. Inputs: the layout, the service, the
+/// bound and the log length before the start. Output: how the wait ended, or an error
+/// naming the engine log when the engine stopped, was relaunched or never ran.
+pub async fn wait_start(
+    layout: &Layout,
+    service: &Service,
+    bound: Duration,
+    since: u64,
+) -> Result<StartWait, ServiceError> {
     assert!(bound <= START_TIMEOUT);
     let started = Instant::now();
+    let limit = |seen: Option<u32>| if seen.is_some() { START_TIMEOUT } else { bound };
     let mut seen: Option<u32> = None;
     let mut looked: Option<Instant> = None;
     loop {
         if answered(layout, since, PROBE_TIMEOUT.min(bound.max(POLL))).await {
-            return Ok(());
+            return Ok(StartWait::Answered);
         }
-        if looked.is_none_or(|at| at.elapsed() >= LIVENESS_EVERY) {
+        let due = started.elapsed() >= limit(seen);
+        if due || looked.is_none_or(|at| at.elapsed() >= LIVENESS_EVERY) {
             looked = Some(Instant::now());
             let status = service.status()?;
             let running = status.pid.filter(|_| status.running);
             match (seen, running) {
-                (None, pid) => seen = pid,
+                (None, pid) => seen = pid.filter(|_| started.elapsed() < bound),
                 (Some(first), Some(pid)) if pid == first => {}
                 (Some(_), _) => {
                     return Err(failure(format!(
@@ -1902,9 +1930,11 @@ pub async fn wait_started(
                 }
             }
         }
-        let limit = if seen.is_some() { START_TIMEOUT } else { bound };
-        if started.elapsed() >= limit {
-            return Err(unanswered(layout, limit));
+        if started.elapsed() >= limit(seen) {
+            return match seen {
+                Some(_) => Ok(StartWait::StillStarting),
+                None => Err(unanswered(layout, bound)),
+            };
         }
         tokio::time::sleep(POLL).await;
     }

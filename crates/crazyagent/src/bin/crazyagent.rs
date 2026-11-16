@@ -1126,10 +1126,10 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?
-            .block_on(crazyagent::service::wait_ready(
+            .block_on(crazyagent::service::wait_started(
                 layout,
+                &service,
                 crazyagent::service::READY_TIMEOUT,
-                None,
                 since,
             ))
             .map_err(|e| e.to_string())

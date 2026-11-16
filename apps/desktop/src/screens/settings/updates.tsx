@@ -4,7 +4,7 @@ import { checkForUpdate, installUpdate, linkCommandLineTool, loadUpdateSettings,
 import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
 import { Button, Icon, LoadError, NotReady, Segmented, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
-import { blocking, CHECK_INTERVAL_MS, progressLabel, progressPercent, shouldAnnounce, updateMessage, updateStore, type UpdatePhase } from "./updates-state";
+import { blocking, CHECK_INTERVAL_MS, engineAfterLine, progressLabel, progressPercent, shouldAnnounce, updateMessage, updateStore, type UpdatePhase } from "./updates-state";
 import "../project/projects.css";
 import "../intake/intake.css";
 
@@ -64,12 +64,14 @@ function UpdateStatus({ phase, onCheck, onInstall, onRestart }: {
         <p className="pj-secondary" role="status">{progressLabel(phase.step)}</p>
       </>;
     }
-    case "installed":
+    case "installed": {
+      const engineLine = engineAfterLine(phase.engine);
       return <>
         <p>CrazyAgent {displayText(phase.update.version)} is installed. Restart to finish.</p>
-        {!phase.engineStarted && <p className="pj-secondary">The engine starts again when CrazyAgent restarts.</p>}
+        {engineLine !== null && <p className="pj-secondary">{engineLine}</p>}
         <span><Button variant="primary" icon="refresh-cw" onClick={onRestart}>Restart now</Button></span>
       </>;
+    }
     case "failed":
       return <>
         <p className="pj-error" role="alert">{phase.message}</p>
@@ -237,7 +239,7 @@ export function UpdatesSettings() {
   const install = async () => {
     updateStore.dispatch({ kind: "install_started" });
     const result = await installUpdate((progress) => updateStore.dispatch({ kind: "progress", progress }));
-    if (result.kind === "ok") updateStore.dispatch({ kind: "install_done", engineStarted: result.value.engine_started });
+    if (result.kind === "ok") updateStore.dispatch({ kind: "install_done", engine: result.value.engine });
     else updateStore.dispatch({ kind: "install_failed", code: result.kind === "error" ? result.code : "unknown" });
   };
 
