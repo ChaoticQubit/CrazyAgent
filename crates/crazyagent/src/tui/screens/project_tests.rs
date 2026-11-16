@@ -2167,17 +2167,18 @@ fn remove_preselects_the_dashboard_choice_and_deletes_only_after_the_exact_name(
         Ok(SetupView::Removal(Box::new(removal(true)))),
     );
     let shown = text(&project_screen(&mut screen, 90, 30, &Look::plain()).rows);
-    for words in [
-        "Remove from dashboard (keep files)",
-        "Delete everything",
-        "Builder 2",
-        "Tester 3",
-        "1 change set",
-    ] {
+    for words in ["Remove from dashboard (keep files)", "Delete everything"] {
         assert!(shown.contains(words), "{words:?} missing: {shown}");
     }
     assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
     assert_eq!(screen.remove_choice, RemoveChoice::Everything);
+    let shown = text(&project_screen(&mut screen, 90, 30, &Look::plain()).rows);
+    for words in ["Builder 2", "Tester 3", "1 change set"] {
+        assert!(
+            shown.contains(words),
+            "{words:?} missing once Delete everything is chosen: {shown}"
+        );
+    }
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
         ProjectReply::Handled,
@@ -2250,6 +2251,97 @@ fn the_remove_ask_says_why_delete_everything_is_not_offered() {
     assert!(!shown.contains("Type the project name"), "{shown}");
     screen.key(key(KeyCode::Down));
     assert_eq!(screen.remove_choice, RemoveChoice::Dashboard);
+}
+
+/// DEC-178 addendum 1 at the smallest terminal: with Remove from dashboard chosen the ask
+/// shows both choices' words in the owner's text and its buttons; with Delete everything
+/// chosen it folds the words and shows the folders, what would be lost and the name box, cut
+/// to the rows left, so the buttons stay on screen for a project with many folders and losses.
+#[test]
+fn the_remove_ask_fits_80_by_24_with_the_owners_words_and_a_long_preview() {
+    const REMOVE_WORDS: &str = "Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk, with every file in it.";
+    const DELETE_WORDS: &str = "Stops its agents, moves its folders to the Trash and removes its records, your notes, imports and saved selections for it included. Its token counts stay under Removed projects.";
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    let read = screen.next_query(30).unwrap();
+    let mut preview = removal(true);
+    preview.folders = (1..=5)
+        .map(|n| {
+            format!("/Users/owner/CrazyAgent/gone-app-worktrees/agent-{n}-a-long-branch-name")
+        })
+        .collect();
+    preview.running = (1..=4).map(|n| format!("Builder {n}")).collect();
+    preview.open_change_sets = 3;
+    preview.losses = (5..=9)
+        .map(|id| crate::team::cleanup::AgentLoss {
+            id,
+            label: format!("Tester {id}"),
+            code: "cleanup_commits_unlanded".into(),
+        })
+        .collect();
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(preview))));
+    let look = Look::plain();
+    let wrapped = |words: &str| super::new_project_view::wrap_words(words, 56);
+    let counted = |shown: &str| {
+        shown
+            .lines()
+            .filter(|line| {
+                line.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .windows(3)
+                    .any(|w| w[0] == "and" && w[1].parse::<usize>().is_ok() && w[2] == "more")
+            })
+            .count()
+    };
+
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert_eq!(drawn.rows.len(), 20, "the ask never runs past the screen");
+    let shown = text(&drawn.rows);
+    for line in wrapped(REMOVE_WORDS).iter().chain(wrapped(DELETE_WORDS).iter()) {
+        assert!(shown.contains(line.as_str()), "{line:?} missing: {shown}");
+    }
+    for words in [
+        "(*) Remove from dashboard (keep files)",
+        "( ) Delete everything",
+        "[ Remove project ]",
+        "[> Keep project ]",
+    ] {
+        assert!(shown.contains(words), "{words:?} missing: {shown}");
+    }
+    assert!(
+        !shown.contains("Type the project name"),
+        "the details wait for Delete everything: {shown}"
+    );
+
+    assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+    assert_eq!(screen.remove_choice, RemoveChoice::Everything);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert_eq!(drawn.rows.len(), 20, "the ask never runs past the screen");
+    let shown = text(&drawn.rows);
+    for words in [
+        "( ) Remove from dashboard (keep files)",
+        "(*) Delete everything",
+        "Moves to the Trash",
+        "/Users/owner/CrazyAgent/gone-app-worktrees/agent-1",
+        "Builder 1 is running and will be stopped",
+        "Type the project name",
+        "[ Delete everything ]",
+        "[> Keep project ]",
+    ] {
+        assert!(shown.contains(words), "{words:?} missing: {shown}");
+    }
+    assert_eq!(
+        counted(&shown),
+        2,
+        "the folders and the losses not shown are each counted: {shown}"
+    );
+    assert!(
+        !shown.contains(wrapped(REMOVE_WORDS)[0].as_str())
+            && !shown.contains(wrapped(DELETE_WORDS)[0].as_str()),
+        "the choices' words fold while Delete everything is chosen: {shown}"
+    );
 }
 
 #[test]
