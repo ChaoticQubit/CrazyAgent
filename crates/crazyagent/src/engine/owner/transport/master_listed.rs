@@ -618,7 +618,7 @@ impl OwnerRuntimeHandle {
             let found = entry.executable.clone()?;
             let db = crate::landing::open(&root).ok()?;
             let space = finding::AgentSpace::read(&root, &db).ok()?;
-            finding::outside_agent_space(&found, &space).ok()?;
+            finding::out_of_reach(&found, &space).ok()?;
             let roots = crate::harnesses::update::Roots::engine(&root);
             let installed = updates.versions(&db, &entry, &roots, false).installed;
             listed_program(harness, Some(found.as_path()), installed.as_deref()).ok()?;

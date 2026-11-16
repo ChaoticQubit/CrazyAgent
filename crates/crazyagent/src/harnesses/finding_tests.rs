@@ -149,6 +149,34 @@ fn a_chosen_file_in_a_folder_other_users_can_change_is_refused() {
     );
 }
 
+/// T19B-SPACE-F1 (rv-sec2 FINDINGS 04:08 F1): a listed harness's gate and a chosen file's
+/// check refuse by one placement rule, so a file in a folder other users can change is
+/// refused by both with the same code, as a file in agent space is, and an owner's file
+/// passes both.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_listed_harness_gate_refuses_by_the_same_placement_rule_as_a_chosen_file() {
+    let case = Case::new();
+    let space = finding::AgentSpace::open(&case.engine).unwrap();
+    let shared = case.root.join("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    let open = case.file("shared/codex", 0o755);
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let agent = case.file("engine/team/agents/agent-7/home/codex", 0o755);
+    let owned = case.file("tools/codex", 0o755);
+    let gate = |path: &Path| finding::out_of_reach(path, &space).map_err(|error| error.0);
+
+    assert_eq!(
+        case.check("codex", &open),
+        Err(finding::PATH_CHANGEABLE.into())
+    );
+    assert_eq!(gate(&open), Err(finding::PATH_CHANGEABLE.into()));
+    assert_eq!(case.check("codex", &agent), Err(PATH_AGENT_SPACE.into()));
+    assert_eq!(gate(&agent), Err(PATH_AGENT_SPACE.into()));
+    assert_eq!(case.check("codex", &owned), Ok(owned.clone()));
+    assert_eq!(gate(&owned), Ok(()));
+}
+
 #[test]
 fn the_chosen_file_is_stored_read_and_cleared_per_harness() {
     let case = Case::new();

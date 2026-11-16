@@ -329,7 +329,7 @@ pub(crate) async fn listed_install(
     let checked = tokio::task::spawn_blocking(move || {
         let db = open(&root).ok()?;
         let space = finding::AgentSpace::read(&root, &db).ok()?;
-        finding::outside_agent_space(&executable, &space).ok()?;
+        finding::out_of_reach(&executable, &space).ok()?;
         let installed = updates
             .versions(&db, &entry, &Roots::engine(&root), false)
             .installed;

@@ -810,6 +810,54 @@ async fn a_listed_harness_in_a_folder_agents_can_write_is_not_answered_or_taken(
     .await;
 }
 
+/// T19B-SPACE-F1 (rv-sec2 FINDINGS 04:08 F1): a listed harness's file the search finds in a
+/// folder other users can change is neither answered by the engine's lookup nor taken for a
+/// listed master turn, as a native's file there is refused (`harness_path_changeable`); the
+/// same harness in an owner folder is still taken.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_listed_harness_in_a_folder_other_users_can_change_is_not_answered_or_taken() {
+    use crate::engine::owner::transport::harness_catalog::listed_install;
+    registry_case(|host, tools| async move {
+        let shared = tools.join("shared-listed");
+        let owner = tools.join("owner-listed");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::create_dir(&owner).unwrap();
+        let open = physical_file(&shared, "gemini", b"#!/bin/sh\nexit 0\n");
+        let kept = physical_file(&owner, "gemini", b"#!/bin/sh\nexit 0\n");
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let in_shared = on(&std::env::join_paths([shared.clone()]).unwrap());
+        let in_owner = on(&std::env::join_paths([owner.clone()]).unwrap());
+        let harness = crate::harnesses::registry::registry()
+            .get("gemini-cli")
+            .unwrap();
+        let found = crate::harnesses::entry(harness, &in_shared).executable;
+        let root = crate::engine::owner::transport::changes::engine_root(&host.authority).unwrap();
+        let taken =
+            listed_install(&host.engine, root.clone(), in_shared.clone(), "gemini-cli").await;
+        let owned = listed_install(&host.engine, root, in_owner, "gemini-cli").await;
+        host.set_harness_search(in_shared).unwrap();
+        let answered = host.harness_lookup()("gemini-cli");
+
+        assert_eq!(
+            found,
+            Some(open),
+            "the search finds the file in the open folder"
+        );
+        assert_eq!(
+            answered, None,
+            "the lookup never answers a file other users can change"
+        );
+        assert_eq!(taken.0, None, "a listed master turn never takes it");
+        assert_eq!(
+            owned.0,
+            Some(kept),
+            "the same harness in an owner folder is taken"
+        );
+    })
+    .await;
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn check_again_replaces_a_pin_whose_file_is_gone_but_never_one_that_changed_or_is_unsafe() {
