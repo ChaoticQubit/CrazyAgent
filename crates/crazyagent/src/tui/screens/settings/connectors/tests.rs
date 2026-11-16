@@ -726,3 +726,30 @@ fn hidden_characters_in_a_title_or_description_show_as_escapes_on_the_catalog_ro
     assert!(shows(&mut shell, "Settings  /  Connectors  /  Lin\\u200bear"));
     assert!(shows(&mut shell, "Issues\\u202e in Linear."));
 }
+
+#[test]
+fn an_oauth_only_connector_reads_unavailable_with_the_oauth_line_once_and_review_comes_first() {
+    let oauth = "Signs in with OAuth, which this build does not have.";
+    let mut read = view();
+    for at in [1, 2] {
+        read.connectors[at].sign_in = SignIn::NotYet;
+        read.connectors[at].secrets.clear();
+    }
+    let mut shell = page(read);
+    let tall = render(&mut shell, 80, 48);
+    let word = |title: &str, word: &str| {
+        tall.iter()
+            .any(|row| row.contains(title) && row.trim_end().ends_with(word))
+    };
+    assert!(word("GitHub", "Unavailable"), "{tall:#?}");
+    assert!(word("Board", "Needs review"), "review comes before Unavailable");
+    assert_eq!(tall.join("\n").matches(oauth).count(), 1, "{tall:#?}");
+    keys(&mut shell, &[Key::Down, Key::Enter]);
+    assert!(shows(&mut shell, "Settings  /  Connectors  /  GitHub"));
+    assert_eq!(render(&mut shell, 80, 24).join("\n").matches(oauth).count(), 1);
+    assert!(!shows(&mut shell, "k Set key"));
+    keys(&mut shell, &[Key::Esc, Key::Down, Key::Enter]);
+    assert!(shows(&mut shell, "Settings  /  Connectors  /  Board"));
+    assert!(shows(&mut shell, "Review this connector before a project can use it."));
+    assert!(!shows(&mut shell, oauth), "a connector under review shows the review line only");
+}

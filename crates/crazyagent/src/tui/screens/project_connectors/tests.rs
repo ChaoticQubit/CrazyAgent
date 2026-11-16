@@ -294,3 +294,23 @@ fn one_row_per_name_so_built_in_linear_hides_the_owner_s_refused_file_of_its_nam
     keys(&mut shell, &[Key::End, Key::Up, Key::Char(' ')]);
     assert!(granted(&one(&mut shell), "broken", false, Who::Both));
 }
+
+#[test]
+fn an_oauth_only_connector_is_named_under_not_ready_yet_and_an_on_one_keeps_its_switch() {
+    let mut read = view(Vec::new());
+    read.connectors[1].sign_in = SignIn::NotYet;
+    read.connectors[1].secrets.clear();
+    let mut shell = page(read.clone());
+    assert!(shows(
+        &mut shell,
+        "Not ready yet: GitHub, Board. Set them up in Settings, Connectors."
+    ));
+    let rows = render(&mut shell, 80, 24);
+    let github = rows.iter().filter(|row| row.contains("GitHub")).count();
+    assert_eq!(github, 1, "no switch, only the not-ready name: {rows:#?}");
+    read.grants = vec![grant("github", true, Who::Both)];
+    let mut shell = page(read);
+    assert!(shows(&mut shell, "Unavailable  On"), "an On one can still be turned off");
+    keys(&mut shell, &[Key::Down, Key::Char(' ')]);
+    assert!(granted(&one(&mut shell), "github", false, Who::Both));
+}
