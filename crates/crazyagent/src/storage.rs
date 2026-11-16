@@ -3790,6 +3790,73 @@ mod owner_actor_tests {
         );
     }
 
+    /// A new project, the demo included, clears every connector row its id still has, so a
+    /// switch, a write approval or a standing write allow left by an earlier project of that
+    /// id never reaches it, while another id keeps its rows (rv-sec2 removed-projects F1).
+    /// Input: a fresh engine database. Output: none.
+    #[test]
+    fn a_new_project_clears_every_connector_row_its_id_had() {
+        let (_root, path, _cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let started = owner_start(&mut db).unwrap();
+        owner_stop(&mut db, &started.host).unwrap();
+        let demo = crate::demo::PROJECT_ID;
+        crate::connectors::grants::of_project(&db, demo).unwrap();
+        crate::connectors::approvals::initialize(&db).unwrap();
+        for project in [demo, "other"] {
+            db.execute(
+                "INSERT INTO connector_grants (project, connector, enabled, who, changed_ms)
+                 VALUES (?1, 'linear', 1, 'both', 1)",
+                [project],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO connector_approvals
+                   (launch, project, agent, connector, title, tool, preview, arguments, hidden,
+                    state, created_ms, expires_ms)
+                 VALUES ('launch-a', ?1, 'Agent 1', 'linear', 'Linear', 'create_issue',
+                         'create_issue', '{}', 0, 'waiting', 1, 600001)",
+                [project],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO connector_write_allowed (project, connector, allowed_ms)
+                 VALUES (?1, 'linear', 1)",
+                [project],
+            )
+            .unwrap();
+        }
+        let tx = db.transaction().unwrap();
+        let outcome = create_project(
+            &tx,
+            &crate::protocol::ProjectId::new(demo).unwrap(),
+            &crate::protocol::ProjectSpec {
+                name: "Demo".into(),
+                repositories: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, crate::protocol::Outcome::Applied);
+        tx.commit().unwrap();
+        let held = |project: &str| {
+            [
+                "connector_grants",
+                "connector_approvals",
+                "connector_write_allowed",
+            ]
+            .map(|table| {
+                db.query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE project=?1"),
+                    [project],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+            })
+        };
+        assert_eq!(held(demo), [0, 0, 0], "the new project has none of them");
+        assert_eq!(held("other"), [1, 1, 1], "another id keeps its rows");
+    }
+
     /// A project's change sets stay when the project is removed, so their numbers stay too:
     /// sets A and B keep 1 and 2 through the removal, and a set D the project adds once it is
     /// added again under the same id gets 3 (AL17, rv-code M1).
