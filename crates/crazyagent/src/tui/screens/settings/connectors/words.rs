@@ -81,6 +81,8 @@ pub(in crate::tui) const REFUSED_PASTED: &str = "This manifest can't be added";
 pub(in crate::tui) const REFUSED_LISTED: &str = "This connector can't be trusted";
 /// The code a ready trust screen with no connector block is refused under (WORDS r4).
 pub(in crate::tui) const NOT_CONNECTOR: &str = "app_plugin_not_connector";
+/// The line under a refused connector file on its row and its page (WORDS r7).
+pub(in crate::tui) const REFUSED_FILE: &str = "Fix its file, or remove it on the App plugins page.";
 
 const REFUSALS: [(&str, &str); 16] = [
     (
@@ -178,18 +180,22 @@ pub(in crate::tui) fn reaches_line(runs: &RunsView) -> String {
     format!("Reaches {}", hosts(runs).join(", "))
 }
 
-/// A connector's name, version and where it came from, as its row and page show them.
-/// Input: the connector. Output: such as "linear, version 1.0.0. Built in.".
+/// A connector's name, version and where it came from, as its row and page show them; a
+/// refused file read no version, so its line has none (WORDS r7). Input: the connector.
+/// Output: such as "linear, version 1.0.0. Built in." or "broken. Added by you.".
 pub(in crate::tui) fn origin_line(connector: &ConnectorView) -> String {
     let origin = match connector.origin {
         Origin::Bundled => "Built in",
         Origin::User => "Added by you",
     };
-    format!(
-        "{}, version {}. {origin}.",
-        safe(&connector.name),
-        safe(&connector.version)
-    )
+    let name = safe(&connector.name);
+    let line = if connector.version.is_empty() {
+        format!("{name}. {origin}.")
+    } else {
+        format!("{name}, version {}. {origin}.", safe(&connector.version))
+    };
+    assert!(line.starts_with(&name) && line.ends_with('.'));
+    line
 }
 
 /// A connector's one state word with its role and the line under it, checked in the

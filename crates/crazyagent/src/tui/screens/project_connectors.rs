@@ -17,6 +17,7 @@ use crate::tui::theme::Role;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
+use std::collections::HashSet;
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -75,12 +76,18 @@ impl Switch {
 
 /// The switches the page lists and the titles of the rest, the desktop's projectRows:
 /// every ready connector and every one whose switch is On, in the page's order, then an On
-/// switch whose connector is gone. Input: the page. Output: the switches and the others.
+/// switch whose connector is gone. One row per name, the first listed winning, so a
+/// built-in connector hides the owner's refused file it shadows. Input: the page. Output:
+/// the switches and the others.
 fn switches(view: &ConnectorsView) -> (Vec<Switch>, Vec<String>) {
     let grant_of = |name: &str| view.grants.iter().find(|grant| grant.connector == name);
+    let mut seen = HashSet::new();
     let mut listed = Vec::new();
     let mut others = Vec::new();
     for connector in &view.connectors {
+        if !seen.insert(connector.name.as_str()) {
+            continue;
+        }
         let grant = grant_of(&connector.name).cloned();
         let ready = connector.status == PluginStatus::Ready;
         if ready || grant.as_ref().is_some_and(|grant| grant.enabled) {
@@ -95,6 +102,7 @@ fn switches(view: &ConnectorsView) -> (Vec<Switch>, Vec<String>) {
             others.push(safe(&connector.title));
         }
     }
+    assert_eq!(listed.len() + others.len(), seen.len(), "one row or name per name");
     for grant in &view.grants {
         let known = view.connectors.iter().any(|c| c.name == grant.connector);
         if grant.enabled && !known {
@@ -107,7 +115,7 @@ fn switches(view: &ConnectorsView) -> (Vec<Switch>, Vec<String>) {
             });
         }
     }
-    assert!(listed.len() + others.len() >= view.connectors.len());
+    assert!(listed.len() + others.len() <= seen.len() + view.grants.len());
     (listed, others)
 }
 

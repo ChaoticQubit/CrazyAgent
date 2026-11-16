@@ -1,10 +1,11 @@
 use super::words::{
     ADD_HELP, ADD_TITLE, CATALOG, CATALOG_ABOUT, HARNESSES, HARNESSES_ABOUT, KEY_HELP,
     LOCKED_LABEL, LOCKED_REASON, LOCKED_VALUE, NATIVE_CHOICES, NATIVE_HELP, NATIVE_LABEL,
-    OAUTH_NOT_YET, PURPOSE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS, SIZE_CHOICES,
-    SIZE_HELP, SIZE_LABEL, origin_line, reaches_line, refusal, secret_line, state, trust_lines,
+    OAUTH_NOT_YET, PURPOSE, REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS,
+    SIZE_CHOICES, SIZE_HELP, SIZE_LABEL, origin_line, reaches_line, refusal, secret_line, state,
+    trust_lines,
 };
-use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, Row, TITLE};
+use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, Row, TITLE, refused};
 use crate::app_plugins::RunsView;
 use crate::connectors::launch::reach;
 use crate::connectors::{ConnectorView, ConnectorsView, SignIn};
@@ -180,6 +181,12 @@ impl ConnectorsPage {
         let mut lines = vec![list_row(head, width, selected, true, theme, ctx.glyphs)];
         let mut texts = vec![origin_line(connector)];
         texts.extend(line);
+        if refused(connector) {
+            texts.push(REFUSED_FILE.to_owned());
+        }
+        if !connector.description.is_empty() {
+            texts.push(safe(&connector.description));
+        }
         texts.extend(connector.runs.as_ref().map(reaches_line));
         for text in texts {
             lines.extend(under(&text, width, ctx));
@@ -233,6 +240,9 @@ impl ConnectorsPage {
         if let Some(line) = line {
             lines.extend(wrap(&line, width).into_iter().map(|part| styled(part, role, theme)));
         }
+        if refused(connector) {
+            lines.extend(wrap(REFUSED_FILE, width).into_iter().map(Line::raw));
+        }
         if let Some(runs) = &connector.runs {
             lines.extend(wrap(&reaches_line(runs), width).into_iter().map(Line::raw));
         }
@@ -240,7 +250,7 @@ impl ConnectorsPage {
             let address = format!("Address: {}", safe(url));
             lines.extend(wrap(&address, width).into_iter().map(Line::raw));
         }
-        if connector.sign_in == SignIn::NotYet {
+        if connector.sign_in == SignIn::NotYet && !refused(connector) {
             lines.extend(muted(OAUTH_NOT_YET, width, ctx));
         }
         self.failure_lines(&mut lines, width, ctx);

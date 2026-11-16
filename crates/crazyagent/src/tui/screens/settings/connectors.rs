@@ -73,6 +73,12 @@ struct KeyForm {
     key: TextField,
 }
 
+/// Whether a listed connector is a refused file, which has no page, no hosts and nothing
+/// to review, key or remove here (WORDS r7). Input: the connector. Output: the answer.
+fn refused(connector: &ConnectorView) -> bool {
+    matches!(connector.status, PluginStatus::Refused { .. })
+}
+
 enum Open {
     None,
     Add(Box<AddForm>),
@@ -225,7 +231,9 @@ impl ConnectorsPage {
             self.ask(job, Pending::Settings, ctx);
             return;
         }
-        if let Row::Connector(at) = self.rows()[self.selected] {
+        if let Row::Connector(at) = self.rows()[self.selected]
+            && !refused(&self.connectors()[at])
+        {
             self.detail = Some(self.connectors()[at].name.clone());
             self.secret = 0;
             self.top = 0;
@@ -247,6 +255,9 @@ impl ConnectorsPage {
         let Some(connector) = self.opened() else {
             return;
         };
+        if refused(connector) {
+            return;
+        }
         if connector.origin == Origin::Bundled {
             ctx.say(Message::error("Not removed.", &refusal("app_plugin_bundled")));
             return;
@@ -261,6 +272,9 @@ impl ConnectorsPage {
         let Some(connector) = self.opened() else {
             return;
         };
+        if refused(connector) {
+            return;
+        }
         if connector.sign_in == SignIn::NotYet {
             ctx.say(Message::warning("No key here.", OAUTH_NOT_YET));
             return;
@@ -639,7 +653,9 @@ impl ConnectorsPage {
             hints.push(hint("Esc", "Discard changes"));
             return hints;
         }
-        if matches!(row, Row::Connector(_)) {
+        if let Row::Connector(at) = row
+            && !refused(&self.connectors()[at])
+        {
             hints.push(hint("Enter", "Open"));
         }
         hints.push(hint("a", words::ADD));
@@ -667,7 +683,7 @@ impl ConnectorsPage {
             if secret.is_some_and(|secret| secret.binding != Binding::None) {
                 hints.push(hint("u", "Clear key"));
             }
-            if connector.origin == Origin::User {
+            if connector.origin == Origin::User && !refused(connector) {
                 hints.push(hint("x", "Remove"));
             }
         }
