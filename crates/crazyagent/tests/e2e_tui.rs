@@ -1004,6 +1004,7 @@ fn live_team_missing() -> ! {
 }
 
 #[test]
+#[ignore = "live: needs a running engine with a live team agent; run it in a live window with CRAZYAGENT_E2E_LIVE_SOCKET and CRAZYAGENT_E2E_LIVE_PROJECT"]
 fn the_tui_types_into_a_live_agent_terminal_from_the_team_tree() {
     let socket = std::env::var_os(LIVE_SOCKET)
         .map(PathBuf::from)
