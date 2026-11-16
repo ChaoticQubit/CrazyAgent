@@ -151,6 +151,12 @@ export function createWait(publish: PublishDraft, projectName: string, about: st
   return Object.keys(errors).length > 0 ? DETAILS_WAIT : null;
 }
 
+/** Says why the Overview's Publish waits, in the Overview's words. Input: the New Project
+ * wait. Output: the sentence, or null when the fields already say why. */
+export function overviewWait(wait: string | null): string | null {
+  return wait;
+}
+
 /** Starts publishing a made project on GitHub with the block's plan. Inputs: the project
  * id, the block, the project name, its about text and the accounts offered. Output: the
  * start's result, or null when publishing is off or the block is not valid. */

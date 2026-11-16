@@ -31,9 +31,9 @@ const REFUSAL_CHARS_MAX: usize = 300;
 const START_REFUSAL_LINES_MAX: usize = 5;
 pub(in crate::tui) const PROMPT_LINE: &str = "This project is not on GitHub. Publish it?";
 pub(in crate::tui) const PROMPT_KEY: (&str, &str) = ("G", "Publish on GitHub");
-const CHECKING: &str = "Checking your GitHub sign-in...";
-const SIGNED_OUT: &str = "Sign in to GitHub to publish this project.";
-const STATUS_FAILED: &str = "CrazyAgent couldn't read your GitHub sign-in.";
+pub(in crate::tui) const CHECKING: &str = "Checking your GitHub sign-in...";
+pub(in crate::tui) const SIGNED_OUT: &str = "Sign in to GitHub to publish this project.";
+pub(in crate::tui) const STATUS_FAILED: &str = "CrazyAgent couldn't read your GitHub sign-in.";
 
 /// What one key in the Overview's publish question or its form asks of the page: nothing
 /// more, close the pane, keep Not now or Don't ask again, send a GitHub read, open the

@@ -515,3 +515,27 @@ fn a_discarded_publish_says_what_it_left_on_github() {
         "GitHub may have made me/tool. Check GitHub and delete it if you don't want it."
     );
 }
+
+/// QUESTION-23:31 R1 (DEC-141): the Overview publish form says the same sign-in words in
+/// both apps, and New project keeps its own sign-in wait in both.
+#[test]
+fn the_overview_publish_form_says_the_desktop_sign_in_words() {
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/desktop/src/screens/new-project/publish.ts"
+    ))
+    .unwrap();
+    let desktop = |name: &str| -> Option<String> {
+        let key = format!("export const {name} = \"");
+        let start = source.find(&key)? + key.len();
+        let rest = &source[start..];
+        Some(rest[..rest.find('"')?].to_owned())
+    };
+    assert_eq!(desktop("SIGN_IN_CHECKING").as_deref(), Some(CHECKING));
+    assert_eq!(desktop("OVERVIEW_SIGNED_OUT").as_deref(), Some(SIGNED_OUT));
+    assert_eq!(desktop("SIGN_IN_UNREAD").as_deref(), Some(STATUS_FAILED));
+    assert_eq!(
+        desktop("SIGN_IN_WAIT").as_deref(),
+        Some(super::new_project_publish::SIGN_IN_WAIT)
+    );
+}

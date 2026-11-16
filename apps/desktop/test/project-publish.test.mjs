@@ -177,3 +177,28 @@ test("the Overview asks to publish a project with no publish through two bridge 
   const overview = read("src/screens/project/overview.tsx");
   assert.match(overview, /<GitHubPublishCard projectId=\{data\.id\} name=\{data\.name\} about=\{setup\?\.about \?\? ""\} \/>/);
 });
+
+test("the Overview form says the TUI's sign-in words, offers Try again after a failed read and keeps New project's waits", async () => {
+  const publish = await import("../src/screens/new-project/publish.ts");
+  const tui = read("../../crates/crazyagent/src/tui/screens/project_publish.rs");
+  const tuiLine = (name) => tui.match(new RegExp(`const ${name}: &str = "([^"]+)";`))?.[1];
+  assert.equal(publish.SIGN_IN_CHECKING, tuiLine("CHECKING"));
+  assert.equal(publish.OVERVIEW_SIGNED_OUT, tuiLine("SIGNED_OUT"));
+  assert.equal(publish.SIGN_IN_UNREAD, tuiLine("STATUS_FAILED"));
+  assert.equal(publish.SIGN_IN_WAIT, "Sign in to GitHub, or turn publishing off.", "New project keeps its own wait");
+  assert.equal(publish.OVERVIEW_DETAILS_WAIT, "Fix the GitHub details above first.");
+  assert.equal(publish.overviewWait(publish.CHECKING_WAIT), null, "the fields already say the sign-in is being read");
+  assert.equal(publish.overviewWait(publish.SIGN_IN_WAIT), null, "the fields already say to sign in");
+  assert.equal(publish.overviewWait(publish.DETAILS_WAIT), publish.OVERVIEW_DETAILS_WAIT);
+  assert.equal(publish.overviewWait(null), null);
+  const fields = read("src/screens/new-project/fields.tsx");
+  assert.match(fields, /place === "overview" \? OVERVIEW_SIGNED_OUT : SIGN_IN_WAIT/);
+  assert.match(fields, /\{SIGN_IN_CHECKING\}/);
+  assert.match(fields, /\{SIGN_IN_UNREAD\}/);
+  assert.match(fields, /onClick=\{\(\) => reloadStatus\(\)\}>Try again</);
+  const card = read("src/screens/project/github-publish.tsx");
+  assert.match(card, /<PublishFields [^>]*place="overview"/);
+  assert.match(card, /const why = overviewWait\(wait\);/);
+  const page = read("src/screens/new-project/index.tsx");
+  assert.doesNotMatch(page, /place="overview"/, "New project keeps its words");
+});
