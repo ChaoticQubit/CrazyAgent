@@ -2208,9 +2208,10 @@ fn a_refused_tool_keeps_every_app_settings_hint_on_the_bar_from_80_by_24_to_240_
 }
 
 /// Signed-in app settings show every key once at 80x24 in at most three bar rows, a
-/// refused tool's `p Fix` too, so `u Unused` and `Esc Back` stay on the last row; the
-/// whole bar is one row again at 240 columns. The keys are named here, not read from the
-/// wide bar, so a bar that grows past one row at 240 still fails this row.
+/// refused tool's `p Fix` too and with questions waiting, so `u Unused` and `Esc Back`
+/// stay on the last row beside the badge; with no question waiting the whole bar is one
+/// row again at 240 columns. The keys are named here, not read from the wide bar, so a
+/// bar that grows past one row at 240 still fails this row.
 #[test]
 fn signed_in_app_settings_show_every_key_at_80_by_24_with_or_without_a_fix() {
     let keys = [
@@ -2241,16 +2242,24 @@ fn signed_in_app_settings_show_every_key_at_80_by_24_with_or_without_a_fix() {
         if fix {
             wanted.push("p Fix".to_owned());
         }
-        let rows = render(&mut shell, 240, 80);
-        let wide = crate::tui::screens::settings_accounts::tests::bar_rows(&rows);
-        assert_eq!(wide.len(), 1, "fix {fix}: {wide:?}");
-        for (width, height) in [(80, 24), (100, 24), (240, 80)] {
-            let rows = render(&mut shell, width, height);
-            crate::tui::screens::settings_accounts::tests::every_hint_once(
-                &rows,
-                &wanted,
-                &format!("fix {fix} {width}x{height}"),
-            );
+        for waiting in [0, 12] {
+            shell.ctx.store.questions = Load::Ready(vec![(
+                crate::protocol::ProjectId::new("alpha").unwrap(),
+                waiting,
+            )]);
+            if waiting == 0 {
+                let rows = render(&mut shell, 240, 80);
+                let wide = crate::tui::screens::settings_accounts::tests::bar_rows(&rows);
+                assert_eq!(wide.len(), 1, "fix {fix}: {wide:?}");
+            }
+            for (width, height) in [(80, 24), (100, 24), (240, 80)] {
+                let rows = render(&mut shell, width, height);
+                crate::tui::screens::settings_accounts::tests::every_hint_once(
+                    &rows,
+                    &wanted,
+                    &format!("fix {fix}, {waiting} waiting, {width}x{height}"),
+                );
+            }
         }
     }
 }
