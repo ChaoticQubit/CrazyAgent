@@ -18,7 +18,6 @@ const SETTINGS = { write: "ask_every_time", wait: "minutes10", native: "off", si
 const LINEAR_KEY = "lin_api_e2e_synthetic_0000";
 const BOARD_KEY = "board_e2e_synthetic_key_0000";
 const BOARD = "schema: 1\nkind: connector\nname: board\ntitle: Board\nversion: 1\nmcp:\n  url: https://mcp.board.invalid/mcp\n  hosts: [mcp.board.invalid]\nkey:\n  secret: api_key\n  header: Authorization\n  scheme: Bearer\n";
-const DESK = "schema: 1\nkind: connector\nname: desk\ntitle: Desk\nversion: 1\nmcp:\n  url: https://mcp.desk.invalid/mcp\n  hosts: [mcp.desk.invalid]\nkey:\n  secret: api_key\n  header: Authorization\n  scheme: Bearer\noauth:\n  hosts: [auth.desk.invalid]\n  registration: [own, dcr]\n  scopes_read: [read]\n  scopes_write: [write]\n";
 const SCHEMES = ["light", "dark"];
 
 /** Polls a read until it equals what is wanted, failing with the last value after one step's
@@ -68,22 +67,6 @@ function grantRow(runtime, project, connector) {
     db.exec("PRAGMA busy_timeout = 5000");
     const row = db.prepare("SELECT enabled, who FROM connector_grants WHERE project = ? AND connector = ?").get(project, connector);
     return row ? { enabled: row.enabled, who: row.who } : null;
-  } catch (error) {
-    if (/no such table/u.test(error.message)) return null;
-    throw error;
-  } finally {
-    db.close();
-  }
-}
-
-/** The way the engine holds for a connector that signs in with a key or the browser, or
- * null when the owner never chose one or the table is not made yet. Inputs: the engine root
- * and the connector. Output: key, browser or null. */
-function wayRow(runtime, connector) {
-  const db = new DatabaseSync(join(runtime, "engine.db"), { readOnly: true });
-  try {
-    db.exec("PRAGMA busy_timeout = 5000");
-    return db.prepare("SELECT way FROM connector_sign_in_with WHERE connector = ?").get(connector)?.way ?? null;
   } catch (error) {
     if (/no such table/u.test(error.message)) return null;
     throw error;
@@ -366,35 +349,6 @@ test("Connectors: Settings, Connectors saves each option through the page, adds 
     await me.click("Clear key for api_key of Board");
     await until("the key cleared", { kind: "none" }, async () => (await listedConnector("board"))?.secrets[0].binding ?? null);
     await me.waitFor("Not set", (text) => text.includes("api_key: Not set"));
-  });
-
-  await t.test("conn sign_in_with add", async () => {
-    const preview = await value(bridge, "desktop_connector_preview", { yaml: DESK });
-    assert.equal(preview.kind, "ready", "Desk's file can be trusted");
-    await value(bridge, "desktop_connector_add", { yaml: DESK, sha256: preview.trust.sha256, replace: false });
-    await until("Desk in the engine", { sign_in: "both", using: "key" }, async () => {
-      const desk = await listedConnector("desk");
-      return desk && { sign_in: desk.sign_in, using: desk.oauth?.using ?? null };
-    });
-    assert.equal(wayRow(runtime, "desk"), null, "Key is the default until the owner chooses");
-  });
-  const signInWith = async (label, way) => {
-    await connectorPage("desk", "Desk", (text) => text.includes("Sign in with"));
-    await me.click(label, 'fieldset[data-setting="sign_in_with"] label');
-    await until(`the engine holds ${way}`, way, () => wayRow(runtime, "desk"));
-    await until(`the page read holds ${way}`, way, async () => (await listedConnector("desk"))?.oauth?.using ?? null);
-    await connectorPage("desk", "Desk", (text) => text.includes("Sign in with"));
-    assert.equal(await checkedOf("connector-sign-in-with"), way, `the page reads ${label} back from the engine`);
-    const keyed = await page.evaluate("document.querySelector('[aria-label=\"Set key for api_key of Desk\"]') !== null");
-    assert.equal(keyed, way === "key", `Desk's keys show only under Key, now ${label}`);
-    await me.capture(`conn-sign-in-with-${way}`);
-  };
-  await t.test("conn sign_in_with browser", () => signInWith("Browser", "browser"));
-  await t.test("conn sign_in_with key", () => signInWith("Key", "key"));
-  await t.test("conn sign_in_with remove", async () => {
-    await value(bridge, "desktop_connector_remove", { name: "desk" });
-    await until("Desk gone", null, () => listedConnector("desk"));
-    assert.equal(wayRow(runtime, "desk"), null, "the choice is forgotten with the connector");
   });
 
   await t.test("conn remove", async () => {

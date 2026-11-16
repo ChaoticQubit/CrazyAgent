@@ -3,7 +3,7 @@ use super::settings::problem;
 use super::*;
 use crate::app_plugins::Preview;
 use crate::connectors::audit::ActivityView;
-use crate::connectors::{ConnectorSettings, ConnectorsView, SignInWith, Who};
+use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
 use crate::engine::EngineError;
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
 use std::path::PathBuf;
@@ -58,10 +58,6 @@ pub(in crate::tui) enum ConnectorsJob {
         enabled: bool,
         who: Who,
     },
-    SetSignInWith {
-        name: String,
-        way: SignInWith,
-    },
 }
 
 impl std::fmt::Debug for ConnectorsJob {
@@ -110,8 +106,7 @@ fn failed(job: &ConnectorsJob, code: String) -> ConnectorsEvent {
         | ConnectorsJob::Remove { .. }
         | ConnectorsJob::SetKey { .. }
         | ConnectorsJob::ClearKey { .. }
-        | ConnectorsJob::Grant { .. }
-        | ConnectorsJob::SetSignInWith { .. } => ConnectorsEvent::Page(Err(code)),
+        | ConnectorsJob::Grant { .. } => ConnectorsEvent::Page(Err(code)),
     }
 }
 
@@ -131,7 +126,6 @@ pub(in crate::tui) fn job_name(job: &ConnectorsJob) -> &'static str {
         ConnectorsJob::SetKey { .. } => "ConnectorSetKey",
         ConnectorsJob::ClearKey { .. } => "ConnectorClearKey",
         ConnectorsJob::Grant { .. } => "ConnectorGrant",
-        ConnectorsJob::SetSignInWith { .. } => "ConnectorSetSignInWith",
     }
 }
 
@@ -232,9 +226,6 @@ async fn page(
             controller
                 .connector_grant(project, connector, enabled, who)
                 .await
-        }
-        ConnectorsJob::SetSignInWith { name, way } => {
-            controller.connector_set_sign_in_with(name, way).await
         }
         ConnectorsJob::Activity { .. }
         | ConnectorsJob::SaveSettings { .. }
