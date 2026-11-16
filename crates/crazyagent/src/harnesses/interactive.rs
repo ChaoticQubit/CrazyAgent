@@ -51,11 +51,12 @@ exit "$c"
 "#;
 /// Starts a listed harness inside its sandbox with the value its account hand-over gives
 /// under the names the hand-over lists, which the terminal host's variable guard keeps out
-/// of a pane's own variables. Arguments: the value, the names joined by spaces, then the
+/// of a pane's own variables. Arguments: `file` and the key file holding a keyed account's
+/// relay token, or `word` and the keyless placeholder, the names joined by spaces, then the
 /// harness's own command, which replaces the shell.
-const HANDED_SCRIPT: &str = r#"k=$1
-for n in $2; do export "$n=$k"; done
-shift 2
+const HANDED_SCRIPT: &str = r#"case $1 in file) k=$(/bin/cat -- "$2") || exit 1;; *) k=$2;; esac
+for n in $3; do export "$n=$k"; done
+shift 3
 exec "$@"
 "#;
 /// The variable that hands [`CODEX_BRIDGE_SCRIPT`] the absolute interpreter of a Codex that
@@ -343,8 +344,8 @@ pub fn command(
 
 /// Builds what the terminal host runs for one interactive agent as [`command`] does, from
 /// given terminal settings instead of the catalog's, such as a stand-in's, which give its
-/// arguments and record. A key, tools off, Full access, a project context unless
-/// [`takes_context`] holds and an account hand-over for another binding are refused.
+/// arguments and record. A key without its account hand-over, tools off, Full access, a
+/// project context unless [`takes_context`] holds and a hand-over for another binding are refused.
 /// Inputs: as for `command`, and the settings. Output: the command, or a refusal code.
 pub fn command_with(
     request: &LaunchRequest,
@@ -410,7 +411,7 @@ pub fn command_with(
         .unwrap_or_default();
     let transcript = match (settings, reader) {
         (Some(settings), _) => {
-            if request.account.key().is_some() {
+            if request.account.key().is_some() && handover.is_none() {
                 return Err(failure("launch_key_relay_unsupported"));
             }
             if !request.tools {
@@ -542,14 +543,19 @@ pub fn command_with(
     if let Some(handover) = handover.filter(|_| !handed.is_empty()) {
         assert_eq!(argv[0], SANDBOX_EXEC);
         let placeholder = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
-        assert_eq!(handover.token(), placeholder);
+        let (from, value) = match key_file.as_deref() {
+            Some(file) => ("file", file),
+            None => ("word", handover.token()),
+        };
+        assert!(from == "file" || value == placeholder);
         let names = handed.join(" ");
         let bridge = [
             "/bin/sh",
             "-c",
             HANDED_SCRIPT,
             "handed",
-            handover.token(),
+            from,
+            value,
             names.as_str(),
         ];
         argv.splice(3..3, bridge.map(str::to_owned));

@@ -123,15 +123,17 @@ fn a_listed_pane_is_handed_its_keyless_account_and_refuses_one_for_another_addre
 }
 
 /// DEC-180 T20 M8 (a): a live master's pane on a terminal-only listed harness on a keyed
-/// account is handed the engine relay's loopback address and its token as its piped launch
-/// is, the token only under the name its manifest lists, and the saved key is in no
-/// argument, variable or file of the pane's home. Without a hand-over a key is refused.
+/// account is handed the engine relay's loopback address, and its bridge reads the relay's
+/// token from the key file into the name its manifest lists; the token is in no argument or
+/// pane variable, the saved key in none and in no file of the pane's home. Without a
+/// hand-over a key is refused.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
     use crate::credentials::SecretString;
     use crate::harnesses::launch::Secret;
     use crate::model_gateway::relay::Relay;
+    use std::ffi::OsStr;
     let (_folder, home) = harness_home("standin-jsonl-append");
     let scratch = tempfile::tempdir().unwrap();
     let work = scratch.path().canonicalize().unwrap();
@@ -168,13 +170,26 @@ fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
     let built = built.unwrap();
     let address = built.env.iter().find(|pair| pair.0 == "OPENAI_BASE_URL");
     assert_eq!(address.map(|pair| &pair.1), Some(&relay.base_url()));
-    let holding: Vec<&str> = built
-        .env
-        .iter()
-        .filter(|pair| pair.1.contains(relay.token()))
-        .map(|pair| pair.0.as_str())
-        .collect();
-    assert_eq!(holding, ["OPENAI_API_KEY"]);
+    for (name, value) in &built.env {
+        assert!(!value.contains(relay.token()), "{name}");
+        let (name, value) = (OsStr::new(name), OsStr::new(value));
+        let allowed = crate::sandbox::agent_variable_allowed(name, value);
+        assert!(allowed, "{name:?}");
+    }
+    let at = built.argv.iter().position(|word| word == "-c").unwrap();
+    let bridge = &built.argv[at + 1..at + 6];
+    let file = key_file.to_str().unwrap();
+    assert_eq!(bridge[2..], ["file", file, "OPENAI_API_KEY"]);
+    let shown = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .args(bridge)
+        .args(["/usr/bin/printenv", "OPENAI_API_KEY"])
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(shown.status.success(), "{shown:?}");
+    let printed = String::from_utf8_lossy(&shown.stdout);
+    assert_eq!(printed.trim(), relay.token());
     let values = built.env.iter().flat_map(|(name, value)| [name, value]);
     for part in built.argv.iter().chain(values) {
         assert!(!part.contains(SAVED_KEY), "{part}");
@@ -315,7 +330,8 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
     }
     let at = built.argv.iter().position(|word| word == "-c").unwrap();
     assert_eq!(built.argv[at - 1], "/bin/sh");
-    let bridge = &built.argv[at + 1..at + 5];
+    let bridge = &built.argv[at + 1..at + 6];
+    assert_eq!(bridge[2..], ["word", LOCAL_PLACEHOLDER, "OPENAI_API_KEY"]);
     let shown = std::process::Command::new("/bin/sh")
         .arg("-c")
         .args(bridge)
