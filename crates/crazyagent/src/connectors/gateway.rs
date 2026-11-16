@@ -1208,15 +1208,25 @@ fn serve_with(
     }
 }
 
+/// The engine roots, each resolved, whose gateway [`start`] runs in this process.
+static SERVING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// The most gateways one process serves at once: an engine runs one, tests a few.
+const SERVING_MAX: usize = 64;
+
 /// The gateway serving on a thread of its own for the engine's life.
 pub struct Running {
     stop: Arc<AtomicBool>,
     thread: std::thread::JoinHandle<()>,
+    served: PathBuf,
 }
 
-/// Starts [`serve`] on a thread of its own. Input: the engine root. Output: the running
-/// gateway, or `connectors_unavailable` when no thread starts.
+/// Starts [`serve`] on a thread of its own and marks its root served. Input: the engine
+/// root. Output: the running gateway, or `connectors_unavailable` when the root does not
+/// resolve or no thread starts.
 pub fn start(root: &Path) -> Result<Running, EngineError> {
+    let served =
+        std::fs::canonicalize(root).map_err(|_| EngineError("connectors_unavailable".into()))?;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     let root = root.to_path_buf();
@@ -1224,20 +1234,41 @@ pub fn start(root: &Path) -> Result<Running, EngineError> {
         .name("connector-gateway-serve".into())
         .spawn(move || serve(&root, &flag))
         .map_err(|_| EngineError("connectors_unavailable".into()))?;
-    Ok(Running { stop, thread })
+    let mut serving = locked(&SERVING);
+    assert!(
+        serving.len() < SERVING_MAX,
+        "more gateways than one process serves"
+    );
+    serving.push(served.clone());
+    drop(serving);
+    Ok(Running {
+        stop,
+        thread,
+        served,
+    })
 }
 
 /// Whether a gateway [`start`] began serves `root` in this process now, under any spelling
 /// that resolves to it, so a master turn is handed a connector server only when a call of it
 /// can be answered. Input: the engine root. Output: the answer.
-pub fn serving(_root: &Path) -> bool {
-    false
+pub fn serving(root: &Path) -> bool {
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    locked(&SERVING).contains(&root)
 }
 
 impl Running {
     /// Stops the gateway and waits for its loop to end; calls already being answered finish
     /// on their own threads. Input: the running gateway.
     pub fn stop(self) {
+        let mut serving = locked(&SERVING);
+        let at = serving
+            .iter()
+            .position(|root| *root == self.served)
+            .expect("a running gateway's root is served");
+        serving.swap_remove(at);
+        drop(serving);
         self.stop.store(true, Ordering::SeqCst);
         wake();
         let _ = self.thread.join();
