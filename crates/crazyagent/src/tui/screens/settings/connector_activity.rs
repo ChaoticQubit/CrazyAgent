@@ -76,7 +76,7 @@ pub(in crate::tui) fn size_words(bytes_in: i64, bytes_out: i64) -> String {
 
 /// The plain words for a refusal code: the engine's connector sentence with its first
 /// letter raised when it has one, else the app's own. Input: the code. Output: the words.
-fn problem_words(code: &str) -> String {
+pub(in crate::tui) fn problem_words(code: &str) -> String {
     match crate::connectors::plain_problem(code) {
         Some(sentence) => {
             let mut letters = sentence.chars();
@@ -99,7 +99,7 @@ enum Row {
 
 /// The choice next to `now` in `options`, wrapping at both ends; the first one when `now`
 /// is not offered. Inputs: the options, the current choice and the direction. Output: it.
-fn turn<T: Clone + PartialEq>(options: &[T], now: &T, forward: bool) -> T {
+pub(in crate::tui) fn turn<T: Clone + PartialEq>(options: &[T], now: &T, forward: bool) -> T {
     assert!(!options.is_empty());
     let count = options.len();
     let Some(at) = options.iter().position(|choice| choice == now) else {
@@ -276,6 +276,7 @@ impl ConnectorActivityPage {
                 }
                 self.read(ctx);
             }
+            ConnectorsEvent::Page(_) | ConnectorsEvent::Preview { .. } => {}
         }
     }
 

@@ -103,16 +103,19 @@ fn arrive(shell: &mut Shell, event: ConnectorsEvent) {
     )))));
 }
 
-fn all() -> ConnectorsJob {
-    ConnectorsJob::Activity {
-        connector: None,
-        project: None,
-    }
+fn all(job: &ConnectorsJob) -> bool {
+    matches!(
+        job,
+        ConnectorsJob::Activity {
+            connector: None,
+            project: None,
+        }
+    )
 }
 
 fn page(read: ActivityView) -> Shell {
     let mut shell = shell_at(ready(80, 24), Place::ConnectorActivity);
-    assert_eq!(one(&mut shell), all());
+    assert!(all(&one(&mut shell)));
     arrive(&mut shell, ConnectorsEvent::Activity(Ok(read)));
     shell
 }
@@ -165,13 +168,13 @@ fn a_filter_change_reads_again_at_once_and_a_keep_pick_waits_for_enter() {
     let mut shell = page(view());
     key(&mut shell, Key::Down);
     key(&mut shell, Key::Right);
-    assert_eq!(
+    assert!(matches!(
         one(&mut shell),
         ConnectorsJob::Activity {
-            connector: Some("board".into()),
+            connector: Some(ref connector),
             project: None,
-        }
-    );
+        } if connector == "board"
+    ));
     let mut board = view();
     board.calls.truncate(2);
     board.connector = Some("board".into());
@@ -180,13 +183,13 @@ fn a_filter_change_reads_again_at_once_and_a_keep_pick_waits_for_enter() {
     assert!(shows(&mut shell, "Calls  2"));
     key(&mut shell, Key::Down);
     key(&mut shell, Key::Left);
-    assert_eq!(
+    assert!(matches!(
         one(&mut shell),
         ConnectorsJob::Activity {
-            connector: Some("board".into()),
-            project: Some("alpha".into()),
-        }
-    );
+            connector: Some(ref connector),
+            project: Some(ref project),
+        } if connector == "board" && project == "alpha"
+    ));
 
     let mut both = view();
     both.connector = Some("board".into());
@@ -202,27 +205,29 @@ fn a_filter_change_reads_again_at_once_and_a_keep_pick_waits_for_enter() {
     assert!(shows(&mut shell, "[90 days]"));
     assert!(shows(&mut shell, "Enter Save changes"));
     key(&mut shell, Key::Enter);
-    assert_eq!(
+    assert!(matches!(
         one(&mut shell),
         ConnectorsJob::SaveSettings {
-            settings: ConnectorSettings {
-                keep_log: KeepLog::Days90,
-                ..ConnectorSettings::DEFAULT
-            },
+            settings,
             version: 3,
+        } if settings == ConnectorSettings {
+            keep_log: KeepLog::Days90,
+            ..ConnectorSettings::DEFAULT
         }
-    );
+    ));
     arrive(
         &mut shell,
         ConnectorsEvent::Saved(Ok(ConnectorsSaved::Stale(4))),
     );
     assert!(said(&shell).contains("The connector settings changed elsewhere."));
-    assert_eq!(
-        one(&mut shell),
-        ConnectorsJob::Activity {
-            connector: Some("board".into()),
-            project: Some("alpha".into()),
-        },
+    assert!(
+        matches!(
+            one(&mut shell),
+            ConnectorsJob::Activity {
+                connector: Some(ref connector),
+                project: Some(ref project),
+            } if connector == "board" && project == "alpha"
+        ),
         "a stale save reads the page again"
     );
 }
@@ -263,7 +268,7 @@ fn esc_drops_an_unsaved_keep_pick_and_a_good_save_says_so() {
         ConnectorsEvent::Saved(Ok(ConnectorsSaved::Saved(Box::new(page_after)))),
     );
     assert!(said(&shell).contains("Connector settings saved."));
-    assert_eq!(one(&mut shell), all(), "a save reads the page again");
+    assert!(all(&one(&mut shell)), "a save reads the page again");
 }
 
 #[test]
@@ -297,7 +302,7 @@ fn an_empty_log_and_a_filter_with_no_match_say_so_and_a_failed_first_read_offers
     assert!(shows(&mut shell, "Showing the newest calls."));
 
     let mut shell = shell_at(ready(80, 24), Place::ConnectorActivity);
-    assert_eq!(one(&mut shell), all());
+    assert!(all(&one(&mut shell)));
     arrive(
         &mut shell,
         ConnectorsEvent::Activity(Err("connectors_unavailable".into())),
@@ -305,7 +310,7 @@ fn an_empty_log_and_a_filter_with_no_match_say_so_and_a_failed_first_read_offers
     assert!(shows(&mut shell, "Couldn't load the connector activity."));
     assert!(shows(&mut shell, "r Try again"));
     key(&mut shell, Key::Char('r'));
-    assert_eq!(one(&mut shell), all());
+    assert!(all(&one(&mut shell)));
     let mut none = view();
     none.calls.clear();
     none.connector = Some("board".into());

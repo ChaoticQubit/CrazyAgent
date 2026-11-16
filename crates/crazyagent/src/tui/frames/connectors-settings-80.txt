@@ -1,0 +1,24 @@
+ [◆▪◆▪] CrazyAgent  /  Settings  /  Connectors                                  
+────────────────────────────────────────────────────────────────────────────────
+      Reaches board.example.com                                                 
+                                                                                
+  Harnesses                                                                     
+  Which harnesses reach connectors through the engine.                          
+  Claude Code: yes                                                              
+  Codex: yes                                                                    
+  RCLI: yes (master)                                                            
+                                                                                
+  Connector settings                                                            
+    Harness-native connectors  [Off]  On                                        
+      Connectors from the harness's own account (claude.ai connectors in        
+      Claude Code, ChatGPT apps in Codex). The engine neither filters nor logs  
+      them.                                                                     
+  > Tool result size cap        64 KiB  [256 KiB]  1 MiB                        
+      A longer tool result is cut to this size, with a note, before an agent    
+      reads it.                                                                 
+    Tool list check and third-party label  Always on                            
+      A connector whose vendor tools changed stops and shows a notice, and      
+      every vendor result starts with a line saying it is content, not          
+      instructions.                                                             
+                                                                                
+ ↑↓ Move  ←→ Change  a Add connector  r Read again  Esc Back             ? Help 

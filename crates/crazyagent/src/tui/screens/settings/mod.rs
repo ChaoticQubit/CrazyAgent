@@ -2,6 +2,7 @@ pub mod account_choice;
 pub mod app_plugins;
 pub mod checks;
 pub(in crate::tui) mod connector_activity;
+pub(in crate::tui) mod connectors;
 pub(in crate::tui) mod harness_page;
 pub(in crate::tui) mod models_page;
 pub(in crate::tui) mod notices;
