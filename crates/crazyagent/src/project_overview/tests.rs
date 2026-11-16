@@ -2046,8 +2046,9 @@ fn an_overview_from_an_engine_without_the_wait_flag_reads_as_no_wait() {
 
 /// SPEED-IDLE-POLLS: a read says how long until a waiting run is due, as a span so the
 /// app compares no two clocks: zero for a first read and after Refresh, the quiet period's
-/// rest after a landing, none while a run writes or none waits, and none in an older
-/// engine's reply, so the app waits that long instead of reading every few seconds.
+/// rest after a landing, the retry's after a wait for an account, none while a run writes
+/// or none waits, and none in an older engine's reply, so the app waits that long instead
+/// of reading every few seconds.
 #[test]
 fn a_read_says_how_long_until_a_waiting_run_is_due_and_nothing_while_one_writes_or_none_waits() {
     let (mut db, project, folder) = case();
@@ -2080,6 +2081,12 @@ fn a_read_says_how_long_until_a_waiting_run_is_due_and_nothing_while_one_writes_
     assert_eq!(fields.remove("due_in_ms"), Some(0.into()));
     let older: Overview = serde_json::from_value(wire).unwrap();
     assert_eq!(older.due_in_ms, None);
+
+    assert_eq!(tick(&db, &mut runs, 10_001).unwrap(), 1);
+    let (_, waiting) = runs.claims.pop().unwrap();
+    let retry = 10_002 + 60_000;
+    assert!(wait_for_account(&db, &project, waiting, NO_ACCOUNT, retry).unwrap());
+    assert_eq!(due(10_002), Some(60_000), "due at its retry");
 }
 
 /// A writing run whose loopback provider refuses connections fails at once with the plain
