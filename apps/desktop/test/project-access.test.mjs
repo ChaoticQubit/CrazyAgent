@@ -155,7 +155,7 @@ test("agent access saves at the version the page read, and a stale save reads th
   assert.match(shared, /fresh\.kind === "ok" \? \{ note: ACCESS_STALE, fresh: fresh\.value \}/);
   assert.ok(shared.indexOf("savedStale(result)") >= 0 && shared.indexOf("savedStale(result)") < shared.indexOf("failureCopy(result)"), "before the plain refusal copy");
   const save = page.slice(page.indexOf("  async function save() {\n    if (!view) return;"));
-  assert.match(save, /saveAccess\(data\.id, view, policyOf\(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants\)\)/);
+  assert.match(save, /saveAccess\(data\.id, view, policyOf\(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants, homeCaches\)\)/);
   assert.match(save, /if \(saved\.fresh\) seed\(saved\.fresh\);\n    setNote\(saved\.note\);/);
   const rows = readFileSync(new URL("../src/screens/team/setup-rows.tsx", import.meta.url), "utf8");
   assert.match(rows, /saveAccess\(projectId, view, policyOf\(view, access, view\.network, view\.toolchains\.map\(\(row\) => row\.allowed\), view\.ide_git_hooks, view\.ide_agent_files\)\)/,
@@ -223,7 +223,7 @@ test("the Tool caches in agent homes choice is saved with the policy, the saved 
   for (const choice of access.HOME_CACHES_CHOICES) assert.ok(tui.includes(`"${choice.help}"`), `${choice.label} reads the same in the TUI`);
   const markup = renderToStaticMarkup(createElement(access.HomeCachesChoices, { name: "t", value: "keep", onChange: () => {} }));
   for (const choice of access.HOME_CACHES_CHOICES) assert.ok(markup.includes(choice.label) && markup.includes(choice.help), choice.label);
-  assert.match(markup, /value="keep" checked=""/);
+  assert.match(markup, /<input(?=[^>]*\bvalue="keep")(?=[^>]*\bchecked="")[^>]*>/);
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.ok(page.includes(`setHomeCaches(next.home_caches ?? "clear_when_raised")`));
   assert.ok(page.includes(`homeCaches !== (view.home_caches ?? "clear_when_raised")`));
