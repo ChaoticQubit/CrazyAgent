@@ -228,14 +228,12 @@ fn outside(url: &Url) {
 }
 
 /// One project's loaded IDE webview: its label, the workbench URL it loaded, the panel it was
-/// last placed on, what the engine said the last IDE left running until a show hands it out,
-/// and the task telling the engine every minute that the IDE is still in use, so its server
-/// lives as long as the webview (DEC-187).
+/// last placed on, none since its own window sized it, and the task telling the engine every
+/// minute that the IDE is still in use, so its server lives as long as the webview (DEC-187).
 struct Loaded {
     label: String,
     url: Url,
-    at: Bounds,
-    left: Option<String>,
+    at: Option<Bounds>,
     beat: JoinHandle<()>,
 }
 
@@ -281,6 +279,7 @@ struct Held {
     asks: u64,
     engine: HashMap<String, Order>,
     out: HashMap<String, Out>,
+    left: HashMap<String, String>,
 }
 
 /// One project's IDE webview while it sits in a window of its own: the window's label.
@@ -312,6 +311,29 @@ pub struct Closing {
 }
 
 impl Held {
+    /// Hands out the project's ticket for one open and the turn it holds while the engine runs
+    /// it. Input: the project. Output: the ticket and the turn.
+    fn begin(&mut self, project: &ProjectId) -> (u64, Arc<tokio::sync::Mutex<()>>) {
+        self.asks += 1;
+        let ticket = self.asks;
+        self.opening.insert(project.as_str().to_owned(), ticket);
+        let order = self
+            .engine
+            .entry(project.as_str().to_owned())
+            .or_insert_with(|| Order {
+                turn: Arc::default(),
+                begun: ticket,
+            });
+        order.begun = ticket;
+        (ticket, Arc::clone(&order.turn))
+    }
+
+    /// Whether any IDE is loaded, shown or opening, so a preload has nothing to do. Output:
+    /// true then.
+    fn busy(&self) -> bool {
+        !self.loaded.is_empty() || self.shown.is_some() || !self.opening.is_empty()
+    }
+
     /// Takes an open's ticket when it is still the project's newest and no hide or close
     /// came since. Inputs: the project and the ticket. Output: true when it may show.
     fn admit(&mut self, project: &ProjectId, ticket: u64) -> bool {
@@ -353,7 +375,7 @@ impl Held {
         }
         self.loaded.get(project.as_str()).map(|loaded| Kept {
             label: loaded.label.clone(),
-            resize: loaded.at != panel,
+            resize: loaded.at != Some(panel),
         })
     }
 
@@ -368,29 +390,43 @@ impl Held {
             .collect()
     }
 
-    /// Decides a preload's ticket: superseded when the project's newest open is not this one,
-    /// refused when any IDE is loaded, shown or opening, else admitted. A refused or admitted
-    /// preload's open is used up. Inputs: the project and the preload's ticket. Output: the
-    /// decision.
+    /// Decides a preload's ticket: superseded when the project's newest open is not this one
+    /// or its IDE is loaded already, whose server stays, refused when another IDE is loaded,
+    /// shown or opening, else admitted. The preload's open is used up. Inputs: the project and
+    /// the preload's ticket. Output: the decision.
     fn preload_admit(&mut self, project: &ProjectId, ticket: u64) -> Preload {
         if self.opening.get(project.as_str()) != Some(&ticket) {
             return Preload::Superseded;
         }
         self.opening.remove(project.as_str());
-        let busy = !self.loaded.is_empty() || self.shown.is_some() || !self.opening.is_empty();
-        if busy {
+        if self.loaded.contains_key(project.as_str()) {
+            Preload::Superseded
+        } else if self.busy() {
             Preload::Refused
         } else {
             Preload::Admitted
         }
     }
 
+    /// Notes a project's IDE moving into its own window, which sizes it to the whole window, so
+    /// the next show over the panel places it again. Inputs: the project and the window's label.
+    fn went_out(&mut self, project: &ProjectId, window: String) {
+        if let Some(loaded) = self.loaded.get_mut(project.as_str()) {
+            loaded.at = None;
+        }
+        self.out.insert(project.as_str().to_owned(), Out { window });
+    }
+
+    /// Keeps what the engine said the project's last IDE left running, which it names to one
+    /// open only, until a show or an open hands it out. Inputs: the project and the note.
+    fn keep_left(&mut self, project: &ProjectId, note: String) {
+        self.left.insert(project.as_str().to_owned(), note);
+    }
+
     /// Hands out what the project's last IDE left running, once. Input: the project. Output:
     /// the note, or none.
     fn take_left(&mut self, project: &ProjectId) -> Option<String> {
-        self.loaded
-            .get_mut(project.as_str())
-            .and_then(|loaded| loaded.left.take())
+        self.left.remove(project.as_str())
     }
 }
 
@@ -417,19 +453,24 @@ impl IdeViews {
     /// the turn it holds while the engine opens the project's server, so a stop from a page
     /// close runs wholly before or wholly after it.
     pub fn begin(&self, project: &ProjectId) -> (u64, Arc<tokio::sync::Mutex<()>>) {
+        self.lock().begin(project)
+    }
+
+    /// Starts a preload's open as [`IdeViews::begin`] does, only while no IDE is loaded, shown
+    /// or opening, checked under the same lock, so a preload never asks the engine for a server
+    /// it would then stop. Input: the project. Output: the ticket and the turn, or none.
+    pub fn begin_preload(&self, project: &ProjectId) -> Option<(u64, Arc<tokio::sync::Mutex<()>>)> {
         let mut held = self.lock();
-        held.asks += 1;
-        let ticket = held.asks;
-        held.opening.insert(project.as_str().to_owned(), ticket);
-        let order = held
-            .engine
-            .entry(project.as_str().to_owned())
-            .or_insert_with(|| Order {
-                turn: Arc::default(),
-                begun: ticket,
-            });
-        order.begun = ticket;
-        (ticket, Arc::clone(&order.turn))
+        if held.busy() {
+            return None;
+        }
+        Some(held.begin(project))
+    }
+
+    /// Hands out a note on what the project's last IDE left running that a preload kept, once.
+    /// Input: the project. Output: the note, or none.
+    pub fn take_left(&self, project: &ProjectId) -> Option<String> {
+        self.lock().take_left(project)
     }
 
     /// Whether this project's IDE webview is loaded, shown or hidden. Input: the project.
@@ -608,7 +649,7 @@ pub fn show(
             webview.set_bounds(bounds.rect()).map_err(failed)?;
             webview.show().map_err(failed)?;
             if let Some(loaded) = held.loaded.get_mut(project.as_str()) {
-                loaded.at = bounds;
+                loaded.at = Some(bounds);
             }
             webview
         }
@@ -634,8 +675,7 @@ pub fn show(
                 Loaded {
                     label,
                     url: workbench.url,
-                    at: bounds,
-                    left: None,
+                    at: Some(bounds),
                     beat: beat(app.clone(), project.clone()),
                 },
             );
@@ -706,7 +746,7 @@ pub fn show_kept<R: Runtime>(
     if kept.resize {
         webview.set_bounds(bounds.rect()).map_err(failed)?;
         if let Some(loaded) = held.loaded.get_mut(project.as_str()) {
-            loaded.at = bounds;
+            loaded.at = Some(bounds);
         }
     }
     webview.show().map_err(failed)?;
@@ -740,6 +780,9 @@ pub fn preload(
     left: Option<String>,
 ) -> Result<Preload, BridgeError> {
     let mut held = views.lock();
+    if let Some(note) = left {
+        held.keep_left(project, note);
+    }
     let decision = held.preload_admit(project, ticket);
     if decision != Preload::Admitted {
         return Ok(decision);
@@ -759,8 +802,7 @@ pub fn preload(
         Loaded {
             label,
             url: workbench.url,
-            at: bounds,
-            left,
+            at: Some(bounds),
             beat: beat(app.clone(), project.clone()),
         },
     );
@@ -833,8 +875,7 @@ pub fn move_out(
     if was_shown {
         held.shown = None;
     }
-    held.out
-        .insert(project.as_str().to_owned(), Out { window: label });
+    held.went_out(project, label);
     if let Err(error) = settle(app, &window, &webview, project) {
         held.out.remove(project.as_str());
         if was_shown {
@@ -1058,12 +1099,12 @@ pub fn place<R: Runtime>(
     let Some(loaded) = held.loaded.get_mut(project.as_str()) else {
         return Ok(());
     };
-    if loaded.at == bounds {
+    if loaded.at == Some(bounds) {
         return Ok(());
     }
     if let Some(webview) = app.get_webview(&loaded.label) {
         webview.set_bounds(bounds.rect()).map_err(failed)?;
-        loaded.at = bounds;
+        loaded.at = Some(bounds);
     }
     Ok(())
 }
@@ -1464,8 +1505,7 @@ mod tests {
         Loaded {
             label: label.to_owned(),
             url: Url::parse(url).unwrap(),
-            at,
-            left: None,
+            at: Some(at),
             beat: tauri::async_runtime::spawn(async {}),
         }
     }
@@ -1604,16 +1644,121 @@ mod tests {
     }
 
     #[test]
-    fn a_left_note_kept_by_a_preload_is_handed_out_once() {
+    fn a_preload_while_an_ide_is_loaded_neither_opens_nor_closes_it() {
+        let alpha = ProjectId::new("alpha").unwrap();
+        let beta = ProjectId::new("beta").unwrap();
+
+        let views = IdeViews::default();
+        views.lock().loaded.insert(
+            "alpha".to_owned(),
+            kept_view("ide-616c706861-1", "http://127.0.0.1:41000/", PANEL),
+        );
+        assert!(
+            views.begin_preload(&alpha).is_none(),
+            "a page reload preloads the project whose IDE is kept: nothing opens"
+        );
+        assert!(
+            views.begin_preload(&beta).is_none(),
+            "nor another project while one is kept"
+        );
+        assert!(
+            views.lock().opening.is_empty() && views.lock().engine.is_empty(),
+            "no ticket and no turn were taken"
+        );
+        let (late, _) = views.begin(&alpha);
+        assert_eq!(
+            views.lock().preload_admit(&alpha, late),
+            Preload::Superseded,
+            "a preload that finds its own project loaded never stops that server"
+        );
+        assert!(views.lock().loaded.contains_key("alpha"));
+
+        let views = IdeViews::default();
+        let (owner, _) = views.begin(&beta);
+        assert!(
+            views.begin_preload(&alpha).is_none(),
+            "an open in flight wins before any engine call"
+        );
+        assert!(views.lock().admit(&beta, owner));
+
+        let views = IdeViews::default();
+        assert!(
+            views.begin_preload(&alpha).is_some(),
+            "with nothing loaded or opening the preload begins"
+        );
+    }
+
+    #[test]
+    fn an_ide_back_from_its_own_window_is_placed_on_its_panel_again() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        views.lock().loaded.insert(
+            "alpha".to_owned(),
+            kept_view("ide-616c706861-1", "http://127.0.0.1:41000/", PANEL),
+        );
+        assert!(!views.lock().kept(&alpha, PANEL).unwrap().resize);
+        views
+            .lock()
+            .went_out(&alpha, "ide-window-616c706861".to_owned());
+        assert!(
+            views.lock().kept(&alpha, PANEL).is_none(),
+            "in its own window it is not shown over the panel"
+        );
+        views.lock().out.remove("alpha");
+        assert!(
+            views.lock().kept(&alpha, PANEL).unwrap().resize,
+            "its own window gave it the whole frame, so the panel is placed again (#144 F1)"
+        );
+    }
+
+    #[test]
+    fn an_ide_back_from_its_own_window_leaves_one_other_in_panel_ide_to_drop() {
         let views = IdeViews::default();
         let alpha = ProjectId::new("alpha").unwrap();
         let beta = ProjectId::new("beta").unwrap();
-        let mut view = kept_view("ide-616c706861-1", "http://127.0.0.1:41000/", PANEL);
-        view.left = Some("node".to_owned());
-        views.lock().loaded.insert("alpha".to_owned(), view);
-        assert_eq!(views.lock().take_left(&alpha).as_deref(), Some("node"));
-        assert_eq!(views.lock().take_left(&alpha), None, "named once");
-        assert_eq!(views.lock().take_left(&beta), None);
+        {
+            let mut held = views.lock();
+            held.loaded.insert(
+                "alpha".to_owned(),
+                kept_view("ide-616c706861-1", "http://127.0.0.1:41000/", PANEL),
+            );
+            held.loaded.insert(
+                "beta".to_owned(),
+                kept_view("ide-62657461-1", "http://127.0.0.1:41001/", PANEL),
+            );
+            held.out
+                .insert("alpha".to_owned(), own_window("ide-window-616c706861"));
+        }
+        assert!(
+            views.others(&beta).is_empty(),
+            "an IDE in its own window is left alone"
+        );
+        views.lock().out.remove("alpha");
+        let names: Vec<String> = views
+            .others(&alpha)
+            .iter()
+            .map(|project| project.as_str().to_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["beta"],
+            "back home, showing it drops the other in-panel IDE (#144 F3)"
+        );
+    }
+
+    #[test]
+    fn a_left_note_a_preload_kept_or_gave_up_on_is_handed_out_once() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        let beta = ProjectId::new("beta").unwrap();
+        views.lock().keep_left(&alpha, "node".to_owned());
+        assert_eq!(views.take_left(&beta), None, "only its own project's");
+        assert_eq!(
+            views.take_left(&alpha).as_deref(),
+            Some("node"),
+            "the engine named it once, to the preload, so the next show names it (#144 F4)"
+        );
+        assert_eq!(views.take_left(&alpha), None, "and only once");
     }
 
     #[test]
@@ -1698,8 +1843,7 @@ mod tests {
         drop(Loaded {
             label: "ide-616c706861-1".to_owned(),
             url: Url::parse("http://127.0.0.1:41000/").unwrap(),
-            at: PANEL,
-            left: None,
+            at: Some(PANEL),
             beat,
         });
         std::thread::sleep(Duration::from_millis(50));
