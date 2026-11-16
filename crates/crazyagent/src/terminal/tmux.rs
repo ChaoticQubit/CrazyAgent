@@ -182,6 +182,8 @@ struct Control {
     input: Mutex<Option<ChildStdin>>,
     state: Arc<Mutex<State>>,
     capture: &'static str,
+    #[cfg(test)]
+    listed: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Default)]
@@ -641,6 +643,8 @@ impl Tmux {
             input: Mutex::new(Some(input)),
             state,
             capture: CAPTURE_TRIMMED,
+            #[cfg(test)]
+            listed: std::sync::atomic::AtomicUsize::new(0),
         };
         if std::thread::Builder::new()
             .name("terminal-tmux".into())
@@ -993,6 +997,11 @@ impl Control {
     }
 
     fn run(&self, line: &str) -> Answer {
+        #[cfg(test)]
+        if line.starts_with("list-panes") {
+            self.listed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let (reply, answer) = sync_channel(1);
         self.send(line, Pending::Reply(reply))?;
         self.wait(&answer)
@@ -1695,6 +1704,7 @@ fn viewer(
         history: scrollback(earlier, rows),
         screen: render(screen, cols, rows, cursor, modes),
         chunks: receiver,
+        at: None,
     })
 }
 
