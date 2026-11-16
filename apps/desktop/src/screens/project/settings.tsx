@@ -514,6 +514,10 @@ export function hiddenSeers(status: TeamStatus | null): TeamAgent[] {
   return status === null ? [] : status.agents.filter((agent) => agent.sees_hidden === true);
 }
 
+/** How often the hidden folders section reads the folders again while an engine run is
+ * listed, so a run that ended leaves the page (SA-VID14-R2-N2), the TUI's refresh. */
+export const HIDDEN_RUNS_POLL_MS = 3000;
+
 const RUN_WORDS: Record<HiddenRunKind, string> = {
   research: "research job",
   overview: "overview run",
@@ -542,6 +546,7 @@ export function seersLine(agents: TeamAgent[]): string {
 
 function HiddenSection({ data }: { data: ProjectData }) {
   const [saved, setSaved] = useState<HiddenPaths | null>(null);
+  const [latest, setLatest] = useState<HiddenPaths | null>(null);
   const [paths, setPaths] = useState<string[]>([]);
   const [typed, setTyped] = useState("");
   const [note, setNote] = useState("");
@@ -554,7 +559,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
     let live = true;
     void loadHiddenPaths(data.id).then((result) => {
       if (!live) return;
-      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value.paths); }
+      if (result.kind === "ok") { setSaved(result.value); setLatest(result.value); setPaths(result.value.paths); }
       else setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
     });
     void loadAgentPolicy(data.id).then((result) => {
@@ -563,6 +568,18 @@ function HiddenSection({ data }: { data: ProjectData }) {
     });
     return () => { live = false; };
   }, [data.id]);
+
+  const listed = (latest?.runs ?? []).length > 0;
+  useEffect(() => {
+    if (!listed) return;
+    let live = true;
+    const timer = setInterval(() => {
+      void loadHiddenPaths(data.id).then((result) => {
+        if (live && result.kind === "ok") setLatest(result.value);
+      });
+    }, HIDDEN_RUNS_POLL_MS);
+    return () => { live = false; clearInterval(timer); };
+  }, [data.id, listed]);
 
   function add() {
     const next = addHiddenPath(paths, typed);
@@ -576,6 +593,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
     const fresh = await loadHiddenPaths(data.id);
     if (fresh.kind !== "ok") return false;
     setSaved(fresh.value);
+    setLatest(fresh.value);
     setPaths(fresh.value.paths);
     return true;
   }
@@ -621,7 +639,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
       <p>{seersLine(seers)}</p>
       <Button pending={restarting} pendingLabel="Restarting..." disabled={restarting} onClick={() => void restart()}>Restart them</Button>
     </div>}
-    {!fullAccess && hiddenRunsLine(saved) !== null && <p className="pj-note warn" role="status">{hiddenRunsLine(saved)}</p>}
+    {!fullAccess && hiddenRunsLine(latest) !== null && <p className="pj-note warn" role="status">{hiddenRunsLine(latest)}</p>}
     {saved === null && !note && <p className="pj-muted" role="status">Loading...</p>}
     {saved !== null && <ul className="pj-paths" aria-label="Hidden folders">
       {paths.length === 0 && <li className="pj-muted">No hidden folders.</li>}

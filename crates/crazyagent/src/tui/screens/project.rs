@@ -901,7 +901,10 @@ impl ProjectScreen {
             && due(self.read_paths_read_ms)
         {
             SetupQuery::ReadPaths { project }
-        } else if self.hidden_paths.is_none()
+        } else if self
+            .hidden_paths
+            .as_ref()
+            .is_none_or(|saved| !saved.runs.is_empty())
             && self.tab == Tab::Settings
             && due(self.hidden_paths_read_ms)
         {

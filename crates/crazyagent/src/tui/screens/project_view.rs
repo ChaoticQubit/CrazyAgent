@@ -2660,7 +2660,8 @@ fn runs_lines(screen: &ProjectScreen, width: usize, look: &Look) -> Vec<Row> {
     let runs = screen
         .hidden_paths
         .as_ref()
-        .map_or(&[][..], |saved| saved.runs.as_slice());
+        .map(|saved| saved.runs.as_slice())
+        .unwrap_or_default();
     if runs.is_empty() {
         return Vec::new();
     }
