@@ -382,6 +382,85 @@ async fn removing_a_project_forgets_its_search_index_rows() {
     engine.stop().await;
 }
 
+/// A project removed and set up again under the same id has no connector switch, no write
+/// approval and no standing write allow from before, whether it was removed from the
+/// dashboard or by Delete everything (DEC-178 addendum 1, leader 22:47).
+#[tokio::test]
+async fn a_returned_project_has_no_grant_approval_or_allow() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, _) = project(&mut owner).await;
+    {
+        let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+        crate::connectors::grants::of_project(&db, PROJECT).unwrap();
+        crate::connectors::approvals::initialize(&db).unwrap();
+    }
+    write_db(
+        &engine,
+        "INSERT INTO connector_grants (project, connector, enabled, who, changed_ms)
+           VALUES ('setup-pooled','linear',1,'both',1);
+         INSERT INTO connector_approvals
+           (launch, project, agent, connector, title, tool, preview, arguments, hidden, state,
+            created_ms, expires_ms)
+           VALUES ('launch-a','setup-pooled','Agent 1','linear','Linear','create_issue',
+                   'create_issue','{}',0,'waiting',1,600001),
+                  ('launch-a','setup-pooled','Agent 1','linear','Linear','create_issue',
+                   'create_issue','',0,'allowed',1,600001);
+         INSERT INTO connector_write_allowed (project, connector, allowed_ms)
+           VALUES ('setup-pooled','linear',1);",
+    );
+    let held = |engine: &Engine| {
+        [
+            "connector_grants",
+            "connector_approvals",
+            "connector_write_allowed",
+        ]
+        .map(|table| {
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            ))
+        })
+    };
+    assert_eq!(
+        held(&engine),
+        [1, 2, 1],
+        "a switch, two approvals and an allow"
+    );
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        held(&engine),
+        [0, 0, 0],
+        "removing the project forgets all of them"
+    );
+    let back = owner
+        .setup_project(project.clone(), spec(NAME), pooled_setup(vec![]), 3)
+        .await
+        .unwrap();
+    assert_eq!(result(back), OwnerResult::Applied);
+    assert_eq!(
+        held(&engine),
+        [0, 0, 0],
+        "the returned project has none of them"
+    );
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    assert!(
+        crate::connectors::grants::of_project(&db, PROJECT)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!crate::connectors::approvals::writes_allowed(&db, PROJECT, "linear").unwrap());
+    assert!(
+        crate::connectors::approvals::allowed_writes(&db, PROJECT)
+            .unwrap()
+            .connectors
+            .is_empty()
+    );
+    drop(db);
+    drop(owner);
+    engine.stop().await;
+}
+
 /// The removal preview names the project and its folder once, changes nothing, and offers
 /// Delete everything inside the home on the platform that offers it (DEC-118).
 #[tokio::test]

@@ -91,8 +91,8 @@ async function scheme(page, wanted) {
 
 /** The files of this run that hold a key: every file under the run root and the evidence
  * folder, the engine database, its logs and the page captures included, leaving out only the
- * engine's key folders, the one place a key may be. Both processes' error streams must be
- * there. Inputs: the run root, the engine root, the evidence folder and the key. Output: the
+ * engine's key folders, the one place a key may be, read after both processes stopped and
+ * calls.json was written. Both processes' error streams must be there. Inputs: the run root, the engine root, the evidence folder and the key. Output: the
  * paths that hold it. */
 function holdingKey(root, runtime, evidence, key) {
   for (const name of ["engine.err", "bridge.err"]) assert.ok(existsSync(join(evidence, name)), `${name} is written, so it is read`);
@@ -112,11 +112,12 @@ function holdingKey(root, runtime, evidence, key) {
 }
 
 /** Starts the real engine and the bridge on a fresh root with an owner profile and projects
- * folder, serves the built app to a browser page, runs the steps and stops everything.
- * Inputs: the test context, the folder prefix and the steps, given the bridge, the owner on
- * the page, a route opener, the run root, the engine root, the page, the test HOME and the
- * evidence folder. Output: none. */
-async function onEngine(t, prefix, steps) {
+ * folder, serves the built app to a browser page, runs the steps, stops everything, and then
+ * checks that no file of the run outside the key folders holds any key the steps entered.
+ * Inputs: the test context, the folder prefix, the steps, given the bridge, the owner on the
+ * page, a route opener, the engine root, the page, the test HOME and the evidence folder,
+ * and the keys. Output: none. */
+async function onEngine(t, prefix, steps, keys = []) {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
@@ -158,7 +159,7 @@ async function onEngine(t, prefix, steps) {
           await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/?visit=${visits}${hash}` });
           await me.waitFor(what, check);
         };
-        await steps({ bridge, me, open, root, runtime, page, home, evidence });
+        await steps({ bridge, me, open, runtime, page, home, evidence });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -175,6 +176,7 @@ async function onEngine(t, prefix, steps) {
     await stop(bridgeProcess);
     await stop(engine);
   }
+  for (const key of keys) assert.deepEqual(holdingKey(root, runtime, evidence, key), [], "no file of the run outside the engine's key folders holds the key");
   if (!process.env.E2E_EVIDENCE) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 
@@ -205,7 +207,7 @@ test("Connectors: each Activity log keeps option is saved through the page, read
   await t.test("conn keep_log 90 days", () => keep("days30", "90 days", { keep: "days90", ages: [3, 10, 45], held: 3 }));
 }));
 
-test("Connectors: turning Linear on for a project shows On and the engine grant row exists, and each Who choice and Off are saved", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-grant-", async ({ bridge, me, open, root, runtime, page, home, evidence }) => {
+test("Connectors: turning Linear on for a project shows On and the engine grant row exists, and each Who choice and Off are saved", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-grant-", async ({ bridge, me, open, runtime, page, home }) => {
   await value(bridge, "desktop_connector_set_key", { name: "linear", secret: "api_key", key: LINEAR_KEY });
   const repo = join(home, "connector-repo");
   mkdirSync(repo, { mode: 0o700 });
@@ -262,11 +264,9 @@ test("Connectors: turning Linear on for a project shows On and the engine grant 
   }
   await scheme(page, "light");
   assert.ok(!(await me.seen()).includes(LINEAR_KEY), "the key never reaches the page");
-  await pause(POLL_MS);
-  assert.deepEqual(holdingKey(root, runtime, evidence, LINEAR_KEY), [], "no file of the run outside the engine's key folders holds the key");
-}));
+}, [LINEAR_KEY]));
 
-test("Connectors: Settings, Connectors saves each option through the page, adds a connector through its trust screen, sets and clears its key and removes it", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-page-", async ({ bridge, me, open, root, runtime, page, evidence }) => {
+test("Connectors: Settings, Connectors saves each option through the page, adds a connector through its trust screen, sets and clears its key and removes it", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-page-", async ({ bridge, me, open, runtime, page }) => {
   const read = () => value(bridge, "desktop_connectors", { project: null });
   const listedConnector = async (name) => (await read()).connectors.find((connector) => connector.name === name) ?? null;
   const connectorsPage = () => open("#/settings/connectors", "Settings, Connectors", (text) => text.includes("Catalog") && text.includes("Connector settings"));
@@ -368,6 +368,4 @@ test("Connectors: Settings, Connectors saves each option through the page, adds 
     });
   }
   await scheme(page, "light");
-  await pause(POLL_MS);
-  assert.deepEqual(holdingKey(root, runtime, evidence, BOARD_KEY), [], "no file of the run outside the engine's key folders holds the key");
-}));
+}, [BOARD_KEY]));

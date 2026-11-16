@@ -6,6 +6,7 @@ import {
   type Listing, type PluginView, type Preview, type Problem, type RunsView, type SecretView, type TrustView,
 } from "../../api-app-plugins";
 import { useAppSession, useLoad, type Loaded } from "../../state";
+import { displayText } from "../conversation";
 import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, RadioCard, SecretField, SettingSection, Skeleton, StatusBadge, Switch, TextArea } from "../../ui";
 import "../project/projects.css";
 
@@ -72,7 +73,7 @@ function PluginRow({ plugin, busy, actions }: { plugin: PluginView; busy: boolea
     <div className="pj-row between">
       <div className="pj-stack-s">
         <strong>{plugin.title}</strong>
-        <span className="muted small">{`${plugin.name}, version ${plugin.version}. ${origin}.`}</span>
+        <span className="muted small">{`${displayText(plugin.name)}, version ${plugin.version}. ${origin}.`}</span>
       </div>
       <StatusBadge word={state.word} tone={state.tone} />
     </div>
