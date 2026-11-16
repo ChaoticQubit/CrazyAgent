@@ -10,6 +10,9 @@ pub(in crate::tui) const PUBLISH_LINE: &str =
     "Standard secure setup; agents can propose changes later.";
 pub(in crate::tui) const PUBLISH_DOCS: &str = "Also publish the docs folder (plans, research)";
 pub(in crate::tui) const SIGN_IN_WAIT: &str = "Sign in to GitHub, or turn publishing off.";
+pub(in crate::tui) const CHECKING_WAIT: &str =
+    "Checking your GitHub sign-in. Create waits for it, or turn publishing off.";
+pub(in crate::tui) const PUBLISH_STARTED: &str = "Publishing on GitHub has started.";
 const NAME_BYTES_MAX: usize = 100;
 const DESCRIPTION_BYTES_MAX: usize = 350 * 4;
 
@@ -186,6 +189,20 @@ impl Publish {
                 PanelRow::Description,
                 "Use at most 350 characters on one line.",
             )),
+        }
+    }
+
+    /// Says why Create waits on the publish block: GitHub still being checked, no sign-in, or
+    /// the first row a publish Start would refuse. Takes the project name and the about text.
+    /// Returns the plain sentence, or none while publishing is off or the block is valid.
+    pub fn wait(&self, project: &str, about: &str) -> Option<&'static str> {
+        if !self.on {
+            return None;
+        }
+        match self.github {
+            GitHub::Checking => Some(CHECKING_WAIT),
+            GitHub::SignedOut | GitHub::Failed(_) => Some(SIGN_IN_WAIT),
+            GitHub::SignedIn => self.problem(project, about).map(|(_, text)| text),
         }
     }
 

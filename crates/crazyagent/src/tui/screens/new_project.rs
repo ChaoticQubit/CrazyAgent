@@ -891,6 +891,9 @@ impl Wizard {
         for step in &Step::ALL[..Step::Review.index()] {
             self.check(*step).map_err(|note| (*step, note))?;
         }
+        if let Some(text) = self.publish.wait(self.name.value(), self.about.value()) {
+            return Err((Step::About, Note::error(Control::Publish, text)));
+        }
         let spec = ProjectSpec {
             name: self.name.value().trim().to_owned(),
             repositories: Vec::new(),

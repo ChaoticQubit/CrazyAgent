@@ -141,16 +141,27 @@ export function ResearchSwitches({ prefix, catalog, value, onChange, found = {},
 
 const NO_OWNERS: Result<GitHubOwners> = { kind: "ok", value: { owners: [], problem: null } };
 
-/** The New Project publish block: the GitHub toggle with its one line, then, while it is on,
- * the sign-in when CrazyAgent has none, or the visibility, account, repository name,
- * description and docs switch, each name and description following Basics until edited.
- * Inputs: an id prefix, the draft and its change handler. Output: the block. */
-export function PublishFields({ prefix, draft, onChange }: { prefix: string; draft: ProjectDraft; onChange: (draft: ProjectDraft) => void }) {
-  const publish = draft.publish ?? emptyPublish();
+/** Reads the GitHub sign-in and, once signed in, the accounts a new repository can go under,
+ * for the publish block and the Create project wait. Input: none. Output: the sign-in read
+ * with its reload, the accounts read, whether CrazyAgent is signed in and the accounts offered. */
+export function useGitHubPublish() {
   const [status, reloadStatus] = useLoad(loadGitHubStatus, [], "github-status");
   const signedIn = status.kind === "ok" && status.value.signed_in;
   const [owners] = useLoad(() => signedIn ? loadGitHubOwners() : Promise.resolve(NO_OWNERS), [signedIn]);
   const offered = owners.kind === "ok" ? owners.value.owners : [];
+  return { status, reloadStatus, owners, signedIn, offered };
+}
+
+/** The GitHub reads one New Project page shares between its publish block and Create. */
+export type GitHubPublishReads = ReturnType<typeof useGitHubPublish>;
+
+/** The New Project publish block: the GitHub toggle with its one line, then, while it is on,
+ * the sign-in when CrazyAgent has none, or the visibility, account, repository name,
+ * description and docs switch, each name and description following Basics until edited.
+ * Inputs: an id prefix, the draft, its change handler and the page's GitHub reads. Output: the block. */
+export function PublishFields({ prefix, draft, onChange, github }: { prefix: string; draft: ProjectDraft; onChange: (draft: ProjectDraft) => void; github: GitHubPublishReads }) {
+  const publish = draft.publish ?? emptyPublish();
+  const { status, reloadStatus, owners, signedIn, offered } = github;
   const shown = publishShown(publish, draft.name, draft.about, offered);
   const errors = publishErrors(publish, draft.name, draft.about, offered, signedIn);
   const set = (changes: Partial<PublishDraft>) => onChange({ ...draft, publish: { ...publish, ...changes } });

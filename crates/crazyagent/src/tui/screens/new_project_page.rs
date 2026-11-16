@@ -1,6 +1,6 @@
 use super::intake::{ask, event};
 use super::new_project::{HarnessChoice, HarnessState, Phase, PoolChoice, Reply, Wizard};
-use super::new_project_publish::GitHub;
+use super::new_project_publish::{GitHub, PUBLISH_STARTED};
 use super::new_project_view::{Look, Row, Screen as View, wizard_screen};
 use super::project::plain_problem;
 use super::project_page::ProjectPage;
@@ -8,7 +8,7 @@ use super::settings_accounts::{plain, settings_event};
 use super::settings_harnesses::{control_sentence, control_word};
 use super::{Flow, Place, ProjectTab, Screen};
 use crate::engine::owner::{OwnerResponse, OwnerResult, random_id};
-use crate::github::GitHubOwners;
+use crate::github::{GitHubOwners, GitHubPublishPlan};
 use crate::harnesses::{HarnessEntry, HarnessStatus, TeamUse};
 use crate::pools::{MemberKind, PoolSummary};
 use crate::project_setup::{ProjectSetup, SetupQuery, SetupView};
@@ -223,6 +223,7 @@ struct Creation {
     submission: CreationSubmission,
     pool: Option<CredentialRef>,
     access: AgentAccess,
+    publish: Option<GitHubPublishPlan>,
     recovered: bool,
     delivery: MutationDelivery,
     again: bool,
@@ -446,6 +447,10 @@ impl NewProjectPage {
             return;
         };
         let pool = setup.pool.clone();
+        let publish = self
+            .wizard
+            .publish
+            .plan(self.wizard.name.value(), self.wizard.about.value());
         let submission = CreationSubmission {
             identity,
             generation: ctx.next_generation(),
@@ -459,6 +464,7 @@ impl NewProjectPage {
             submission,
             pool,
             access: self.wizard.access,
+            publish,
             recovered: false,
             delivery: MutationDelivery::Submit,
             again: false,
@@ -533,10 +539,24 @@ impl NewProjectPage {
             .expect("only a finished creation opens its project");
         assert!(!creation.assigning);
         if !creation.finished {
+            let publish = creation.publish.take();
             ctx.say(Message::success(
                 &format!("{} is ready.", creation.submission.spec.name),
-                "",
+                if publish.is_some() {
+                    PUBLISH_STARTED
+                } else {
+                    ""
+                },
             ));
+            if let Some(plan) = publish {
+                ask(
+                    ctx,
+                    IntakeQuery::GitHubPublishStart {
+                        project: creation.submission.project_id.clone(),
+                        plan,
+                    },
+                );
+            }
         }
         let saves_access = !creation.finished && creation.access != AgentAccess::Sandboxed;
         creation.finished = true;

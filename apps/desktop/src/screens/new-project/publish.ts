@@ -1,4 +1,5 @@
 import type { Result } from "../../api";
+import { startGitHubPublish } from "../../api-intake";
 import type { GitHubOwner, GitHubPublishJob, GitHubPublishPlan } from "../../engine-client";
 
 export const PUBLISH_TOGGLE = "Publish this project on GitHub";
@@ -140,12 +141,15 @@ export function publishPlan(publish: PublishDraft, projectName: string, about: s
  * offered and whether CrazyAgent is signed in to GitHub. Output: the sentence, or null
  * while publishing is off or the block is valid. */
 export function createWait(publish: PublishDraft, projectName: string, about: string, owners: GitHubOwner[], signedIn: boolean): string | null {
-  return null;
+  const errors = publishErrors(publish, projectName, about, owners, signedIn);
+  if (errors.sign_in) return errors.sign_in;
+  return Object.keys(errors).length > 0 ? DETAILS_WAIT : null;
 }
 
 /** Starts publishing a made project on GitHub with the block's plan. Inputs: the project
  * id, the block, the project name, its about text and the accounts offered. Output: the
  * start's result, or null when publishing is off or the block is not valid. */
 export function startPublish(projectId: string, publish: PublishDraft, projectName: string, about: string, owners: GitHubOwner[]): Promise<Result<GitHubPublishJob>> | null {
-  return null;
+  const plan = publishPlan(publish, projectName, about, owners);
+  return plan ? startGitHubPublish(projectId, plan) : null;
 }
