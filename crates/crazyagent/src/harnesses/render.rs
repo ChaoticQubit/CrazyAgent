@@ -238,20 +238,18 @@ pub fn write<'a>(
 
 /// Writes one file below the private home: its folders through
 /// [`super::home::listed_folder`] from the agent home, any entry at its name removed, then
-/// the file made new, 0600, never through a link. The text is zeroed once written, as it
-/// may hold MCP secrets. Inputs: the home, the path below it and the text. Output: the
-/// file's path, or the refusal.
+/// the file made new, 0600, never through a link. The text may hold MCP secrets, so it is
+/// zeroed on every path, a panic included. Inputs: the home, the path below it and the
+/// text. Output: the file's path, or the refusal.
 #[cfg(unix)]
 fn put(home: &Path, path: &str, text: String) -> Result<PathBuf, LaunchError> {
+    let bytes = crate::plugins::SecretValue::new(text.into_bytes());
     assert!(plain(path));
     let (folders, name) = match path.rsplit_once('/') {
         Some((folders, name)) => (folders.split('/').collect::<Vec<_>>(), name),
         None => (Vec::new(), path),
     };
-    let mut bytes = text.into_bytes();
-    let written = put_in(home, &folders, name, &bytes);
-    bytes.fill(0);
-    written?;
+    put_in(home, &folders, name, bytes.expose())?;
     Ok(home.join(path))
 }
 
@@ -263,7 +261,6 @@ fn put(home: &Path, path: &str, text: String) -> Result<PathBuf, LaunchError> {
 fn put_in(home: &Path, folders: &[&str], name: &str, bytes: &[u8]) -> Result<(), LaunchError> {
     use rustix::fs::{AtFlags, Mode, OFlags};
     use std::io::Write;
-    use std::os::unix::fs::MetadataExt;
     let folder = super::home::listed_folder(home, None, folders, super::home::Walk::Make)?;
     match rustix::fs::unlinkat(&folder, name, AtFlags::empty()) {
         Ok(()) | Err(rustix::io::Errno::NOENT) => {}
@@ -277,11 +274,22 @@ fn put_in(home: &Path, folders: &[&str], name: &str, bytes: &[u8]) -> Result<(),
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
         .map_err(unwritable)?;
-    let metadata = file.metadata().map_err(unwritable)?;
-    if metadata.mode() & 0o077 != 0 {
+    whole(&file, bytes.len())
+}
+
+/// Checks a file a launch just wrote and synced: owner-only, holding exactly the bytes
+/// written. A second writer in the home, such as a kept agent of an account the owner
+/// freed, can grow or cut it first, so that refuses the launch (HARNESS-SEC-R2). Inputs:
+/// the open file and the count of bytes written. Output: done, or the refusal.
+#[cfg(unix)]
+fn whole(file: &std::fs::File, len: usize) -> Result<(), LaunchError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file
+        .metadata()
+        .map_err(|_| failure("launch_context_unwritable"))?;
+    if metadata.mode() & 0o077 != 0 || metadata.len() != len as u64 {
         return Err(failure("launch_account_home_unsafe"));
     }
-    assert_eq!(metadata.len(), bytes.len() as u64);
     Ok(())
 }
 

@@ -303,3 +303,46 @@ fn a_template_value_is_quoted_for_its_format() {
         Some("launch_template_value_missing".to_owned())
     );
 }
+
+/// HARNESS-SEC-R2: a file a launch wrote that a second writer in the home grew or cut
+/// before the check, such as a kept agent of an account the owner freed, refuses the launch
+/// with `launch_account_home_unsafe`; it never panics the launch thread.
+#[test]
+fn a_file_a_second_writer_grew_or_cut_before_the_check_refuses_the_launch() {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let (_home, home) = private_home();
+    let path = home.join("mcp.json");
+    let mut options = std::fs::OpenOptions::new();
+    let mut file = options
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    file.write_all(b"ours").unwrap();
+    let checked = |len| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            whole(&file, len).err().map(|problem| problem.0)
+        }))
+    };
+    let before = checked(4);
+
+    let mut other = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    other.write_all(b" and theirs").unwrap();
+    let grown = checked(4);
+    other.set_len(1).unwrap();
+    let cut = checked(4);
+
+    let refused = Some("launch_account_home_unsafe".to_owned());
+    assert_eq!(before.ok(), Some(None));
+    assert_eq!(
+        grown.ok(),
+        Some(refused.clone()),
+        "a grown file refuses, never panics"
+    );
+    assert_eq!(cut.ok(), Some(refused), "a cut file refuses, never panics");
+}
