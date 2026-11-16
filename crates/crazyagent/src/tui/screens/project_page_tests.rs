@@ -7757,3 +7757,59 @@ fn a_project_without_a_publish_shows_no_pane_and_a_refused_answer_is_said() {
     let shown = render(&mut shell, 100, 30);
     assert!(shown.contains("[x] .env*"), "the pane stays: {shown}");
 }
+
+#[test]
+fn a_refused_publish_answer_reads_the_publish_again_and_shows_where_it_stands() {
+    let mut ctx = ctx(100, 30);
+    let project = ProjectId::new("notes").unwrap();
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status.clone(),
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Lines {
+                lines: vec![".env*".into()],
+                draft: GitHubIgnoreDraft::Agent,
+            },
+        ))))),
+    );
+    shell.key(Key::Enter);
+    let approve = IntakeQuery::GitHubPublishApprove {
+        project,
+        lines: vec![".env*".into()],
+    };
+    assert_eq!(publish_asks(&mut shell), [approve.clone()]);
+    publish_reply(&mut shell, approve, Err("github_outcome_unknown".into()));
+    let message = shell.ctx.message().expect("the refusal is said");
+    assert_eq!(message.lead, "The publish answer wasn't taken.");
+    assert_eq!(
+        publish_asks(&mut shell),
+        [status.clone()],
+        "the publish is read again"
+    );
+    publish_reply(
+        &mut shell,
+        status,
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Done {
+                full_name: "me/tool".into(),
+                outcomes: Vec::<GitHubRuleOutcome>::new(),
+            },
+        ))))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("Published as me/tool."), "{shown}");
+    assert!(!shown.contains("[x] .env*"), "{shown}");
+}
