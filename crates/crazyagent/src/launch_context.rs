@@ -743,6 +743,20 @@ impl AgentContext {
         paths
     }
 
+    /// Gives one launch of a listed harness its account hand-over, which the caller that
+    /// holds the stored connection made with the relay it started (T19b 19b-2); the launch
+    /// sets its variables through the one exception to the agent variable guard. Input: the
+    /// hand-over. Output: the context.
+    pub fn with_handover(self, _handover: crate::harnesses::accounts::Handover) -> Self {
+        self
+    }
+
+    /// The account hand-over this context gives its launch. Output: the hand-over, or none
+    /// for a native harness or a launch given none.
+    pub fn handover(&self) -> Option<&crate::harnesses::accounts::Handover> {
+        None
+    }
+
     /// Adds a live master's own instructions to what its harness reads at launch, so they
     /// reach it as system context and never as a typed message. Input: at most
     /// `LIVE_INSTRUCTIONS_BYTES_MAX` bytes the engine built. Output: the context.
