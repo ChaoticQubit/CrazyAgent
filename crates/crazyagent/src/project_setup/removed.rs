@@ -275,9 +275,19 @@ pub(crate) fn free_id(
 /// Whether a table with a `project` column still has a row of this id, in any case, so a
 /// removal made after the backfill by a build without the removal record never gives its
 /// id out. The onboarding table is left out: starting onboarding replaces or refuses its
-/// row itself. Inputs: the connection and an id that is not live. Output: the answer;
-/// nothing is written.
-fn left(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+/// row itself. An id a live project has in any case answers false, its rows being that
+/// project's. Inputs: the connection and the id. Output: the answer; nothing is written.
+pub(crate) fn left(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    let live: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE lower(id)=lower(?1))",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if live {
+        return Ok(false);
+    }
     for table in keyed_tables(connection)? {
         if table == "onboarding" {
             continue;

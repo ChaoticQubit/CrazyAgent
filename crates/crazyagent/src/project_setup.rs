@@ -2988,8 +2988,8 @@ struct Checked {
 }
 
 /// Checks a New Project, or Create demo when `demo`, before its folder is built and again
-/// before it is recorded: its pool, that no project or removal holds its id (Create demo
-/// alone makes the demo's id again), its team and the folder it lands in. Inputs: the
+/// before it is recorded: its pool, that no project, removal or leftover row holds its id
+/// (Create demo alone makes the demo's id again), its team and the folder it lands in. Inputs: the
 /// transaction, configuration, id, spec, setup and whether the request is Create demo.
 /// Output: the checked plan, or the refusal code.
 fn check_new(
@@ -3018,7 +3018,7 @@ fn check_new(
     if exists {
         return Ok(Err("project_exists".into()));
     }
-    if !demo && removed::held(tx, project_id)? {
+    if !demo && (removed::held(tx, project_id)? || removed::left(tx, project_id)?) {
         return Ok(Err("project_id_removed".into()));
     }
     let team = match setup.team.clone() {
