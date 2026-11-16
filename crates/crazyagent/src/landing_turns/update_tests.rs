@@ -329,6 +329,84 @@ fn a_merged_update_whose_agent_was_not_handed_the_work_waits_until_asked_again()
     assert!(!waiting.readme().contains("<<<<<<<"));
 }
 
+/// Sets the status of every resolve task pinned in a case's store, as the owner's stop, a
+/// crash or the runtime leaves it. Inputs: the store and the status.
+fn resolve_status(db: &Connection, status: crate::team::TaskStatus) {
+    db.execute(
+        "UPDATE team_tasks SET status=?1 WHERE id IN (SELECT task FROM team_task_pins WHERE resolve=1)",
+        [status.name()],
+    )
+    .unwrap();
+}
+
+/// Counts the queued resolve tasks pinned in a case's store. Input: the store. Output: the
+/// count.
+fn queued_resolves(db: &Connection) -> i64 {
+    db.query_row(
+        "SELECT COUNT(*) FROM team_tasks t JOIN team_task_pins p ON p.task=t.id
+         WHERE p.resolve=1 AND t.status=?1",
+        [crate::team::TaskStatus::Queued.name()],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// LAND-UPDATING-STUCK: a set whose resolve task a stop failed or a crash cancelled stays
+/// Updating with its agent no longer waiting and nothing resolving it, so the owner's Ask
+/// agent to update hands the agent a new resolve task as for a waiting set, and merges
+/// nothing again, where it was refused as stale with no way out.
+#[test]
+fn an_updating_set_whose_resolve_task_ended_unfinished_is_handed_over_again_on_ask() {
+    for ended in [
+        crate::team::TaskStatus::Failed,
+        crate::team::TaskStatus::Cancelled,
+        crate::team::TaskStatus::Done,
+    ] {
+        let case = Case::new(true);
+        assert!(update(&case.db, &case.id).unwrap());
+        let merged = case.set();
+        assert_eq!(
+            (merged.state, merged.waiting),
+            (ChangeState::Updating, false)
+        );
+        resolve_status(&case.db, ended);
+        assert_eq!(queued_resolves(&case.db), 0);
+
+        let asked = update(&case.db, &case.id).map_err(|problem| problem.0);
+
+        assert_eq!(asked, Ok(false), "{ended:?}");
+        let set = case.set();
+        assert_eq!(
+            (set.state, set.waiting, set.head.as_str()),
+            (ChangeState::Updating, false, merged.head.as_str()),
+            "{ended:?}"
+        );
+        assert_eq!(case.agent_head(), merged.head, "{ended:?}");
+        assert_eq!(queued_resolves(&case.db), 1, "{ended:?}");
+    }
+}
+
+/// LAND-UPDATING-STUCK guard: a set whose resolve task is queued, waits for a pool or runs
+/// is still refused as stale, so the owner's Ask never queues a second resolve beside it.
+#[test]
+fn an_updating_set_whose_resolve_task_is_still_under_way_is_refused_as_stale() {
+    for under_way in [
+        crate::team::TaskStatus::Queued,
+        crate::team::TaskStatus::NeedsPool,
+        crate::team::TaskStatus::Running,
+    ] {
+        let case = Case::new(true);
+        assert!(update(&case.db, &case.id).unwrap());
+        resolve_status(&case.db, under_way);
+        let tasks = case.resolve_tasks();
+
+        let asked = update(&case.db, &case.id).map_err(|problem| problem.0);
+
+        assert_eq!(asked, Err("changes_stale".to_owned()), "{under_way:?}");
+        assert_eq!(case.resolve_tasks(), tasks, "{under_way:?}");
+    }
+}
+
 #[test]
 fn change_sets_the_listed_32_leave_out_are_still_found_by_their_id() {
     let case = Case::new(true);
