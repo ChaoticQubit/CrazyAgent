@@ -14,7 +14,7 @@ import { NotReady } from "../project/shared";
 import { AccessLevels, accessLabel, policyOf } from "../project/access";
 import { PoolPicker } from "./pool-picker";
 import { BasicsFields, PublishFields, ResearchSwitches, RoadmapSwitch, useGitHubPublish } from "./fields";
-import { PUBLISH_STARTED, createWait, emptyPublish, startPublish } from "./publish";
+import { createWait, emptyPublish, publishOutcome, startPublish } from "./publish";
 import { TeamEditor } from "./team-editor";
 import {
   STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, draftAccess, emptyDraft, levelUnavailable, poolName, preselectPool,
@@ -129,7 +129,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const index = STEPS.findIndex((item) => item.id === step);
   const showBasicsErrors = visited.has("documents") || visited.has("work") || visited.has("pool") || visited.has("team") || draft.name !== "";
   const teamOk = draft.team !== null && teamValid(draft.team, harnessValue);
-  const publishWait = createWait(draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered, github.signedIn);
+  const publishWait = createWait(draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered, github.signedIn, github.checking);
   const canCreate = catalog?.kind === "ok" && Object.keys(basics).length === 0 && !publishWait && teamOk && !creating;
 
   async function create() {
@@ -178,7 +178,8 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
       }
     }
     const publishing = startPublish(id, draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered);
-    if (publishing) message = `${message} ${PUBLISH_STARTED}`;
+    const outcome = publishOutcome(publishing ? await publishing : null);
+    if (outcome) message = `${message} ${outcome}`;
     kept = null;
     await session?.refreshProjects();
     flash(message);

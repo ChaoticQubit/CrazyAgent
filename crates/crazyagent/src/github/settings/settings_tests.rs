@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 
 const TOKEN: &str = "gho_settingsstandin0123456789";
 const REPO: &str = "/repos/octo-cat/tool";
+const FULL_NAME: &str = "octo-cat/tool";
 const PLAN: &str = "Upgrade to GitHub Pro or make this repository public to enable this feature.";
 
 struct Scratch {
@@ -468,7 +469,7 @@ fn the_repository_page_opens_only_once_crazyagent_finished_publishing_the_projec
                 .map(|_| ())
                 .map_err(|error| error.0),
             account
-                .set_repo_rule(&project, GitHubRule::WikiOff, false)
+                .set_repo_rule(&project, FULL_NAME, GitHubRule::WikiOff, false)
                 .map(|_| ())
                 .map_err(|error| error.0),
         )
@@ -500,6 +501,44 @@ fn the_repository_page_opens_only_once_crazyagent_finished_publishing_the_projec
 }
 
 #[test]
+fn a_switch_for_another_repository_than_the_publish_made_sends_nothing() {
+    let scratch = Scratch::new();
+    let (_hub, server) = github(hub(false));
+    let account = scratch.account(&server);
+    let (_folder, project) = published(&scratch);
+    let before = server.seen().len();
+    for asked in [
+        "octo-cat/other",
+        "other/tool",
+        "Octo-Cat/tool",
+        "octo-cat/tool ",
+        "",
+    ] {
+        assert_eq!(
+            account
+                .set_repo_rule(&project, asked, GitHubRule::WikiOff, true)
+                .map(|_| ())
+                .map_err(|error| error.0),
+            Err("github_rules_repo_mismatch".to_owned()),
+            "{asked:?}"
+        );
+        assert_eq!(
+            server.seen().len(),
+            before,
+            "{asked:?} {:?}",
+            writes(&server)
+        );
+    }
+    let page = account
+        .set_repo_rule(&project, FULL_NAME, GitHubRule::WikiOff, true)
+        .unwrap();
+    assert_eq!(
+        entry(&page, GitHubRule::WikiOff),
+        Some((true, GitHubRuleState::Applied))
+    );
+}
+
+#[test]
 fn each_switch_on_the_repository_page_sends_its_own_call_both_ways_and_answers_the_fresh_state() {
     let scratch = Scratch::new();
     let (_hub, server) = github(hub(false));
@@ -516,7 +555,9 @@ fn each_switch_on_the_repository_page_sends_its_own_call_both_ways_and_answers_t
     ] {
         for rule in pass {
             let before = writes(&server).len();
-            let page = account.set_repo_rule(&project, rule, on).unwrap();
+            let page = account
+                .set_repo_rule(&project, FULL_NAME, rule, on)
+                .unwrap();
             assert_eq!(
                 entry(&page, rule),
                 Some((on, GitHubRuleState::Applied)),
@@ -564,7 +605,7 @@ fn required_checks_turned_on_require_the_names_the_first_ci_run_reported() {
     );
     assert!(writes(&server).is_empty(), "{:?}", writes(&server));
     let page = account
-        .set_repo_rule(&project, GitHubRule::RequiredChecks, true)
+        .set_repo_rule(&project, FULL_NAME, GitHubRule::RequiredChecks, true)
         .unwrap();
     assert_eq!(
         entry(&page, GitHubRule::RequiredChecks),
@@ -590,7 +631,7 @@ fn a_switch_github_refuses_keeps_githubs_reason_on_its_rule() {
     let account = scratch.account(&server);
     let (_folder, project) = published(&scratch);
     let page = account
-        .set_repo_rule(&project, GitHubRule::CodeqlDefaultSetup, true)
+        .set_repo_rule(&project, FULL_NAME, GitHubRule::CodeqlDefaultSetup, true)
         .unwrap();
     assert_eq!(
         entry(&page, GitHubRule::CodeqlDefaultSetup),
@@ -608,7 +649,7 @@ fn a_switch_github_refuses_keeps_githubs_reason_on_its_rule() {
     );
     assert_eq!(
         account
-            .set_repo_rule(&project, GitHubRule::SecurityPolicy, true)
+            .set_repo_rule(&project, FULL_NAME, GitHubRule::SecurityPolicy, true)
             .map(|_| ())
             .map_err(|error| error.0),
         Err("github_rule_invalid".to_owned())
@@ -630,7 +671,9 @@ fn pull_requests_turned_off_and_on_again_keep_the_conversation_rule_the_owner_wa
         (GitHubRule::ConversationResolution, true),
         (GitHubRule::PullRequest, false),
     ] {
-        account.set_repo_rule(&project, rule, on).unwrap();
+        account
+            .set_repo_rule(&project, FULL_NAME, rule, on)
+            .unwrap();
     }
     let page = account.repo_rules(&project).unwrap();
     assert_eq!(
@@ -647,7 +690,7 @@ fn pull_requests_turned_off_and_on_again_keep_the_conversation_rule_the_owner_wa
     assert!(wanted.contains(&GitHubRule::ConversationResolution));
     assert!(!wanted.contains(&GitHubRule::PullRequest));
     let page = account
-        .set_repo_rule(&project, GitHubRule::PullRequest, true)
+        .set_repo_rule(&project, FULL_NAME, GitHubRule::PullRequest, true)
         .unwrap();
     assert_eq!(
         entry(&page, GitHubRule::ConversationResolution),
@@ -659,5 +702,50 @@ fn pull_requests_turned_off_and_on_again_keep_the_conversation_rule_the_owner_wa
     assert_eq!(
         body["rules"][0]["parameters"]["required_review_thread_resolution"],
         true
+    );
+}
+
+#[test]
+fn a_refused_switch_keeps_the_wanted_rules_github_still_holds() {
+    let scratch = Scratch::new();
+    let mut refusing = hub(true);
+    refusing.alerts = true;
+    refusing
+        .refuse
+        .push(("DELETE", format!("{REPO}/vulnerability-alerts")));
+    let (_hub, server) = github(refusing);
+    let account = scratch.account(&server);
+    let (_folder, project) = published(&scratch);
+    let page = account
+        .set_repo_rule(&project, FULL_NAME, GitHubRule::DependabotAlerts, false)
+        .unwrap();
+    assert_eq!(
+        entry(&page, GitHubRule::DependabotAlerts),
+        Some((
+            true,
+            GitHubRuleState::Refused {
+                status: 403,
+                message: PLAN.into(),
+            }
+        ))
+    );
+    let page = account
+        .set_repo_rule(
+            &project,
+            FULL_NAME,
+            GitHubRule::DependabotSecurityUpdates,
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        entry(&page, GitHubRule::DependabotSecurityUpdates),
+        Some((true, GitHubRuleState::Applied))
+    );
+    assert_eq!(
+        writes(&server),
+        [
+            format!("DELETE {REPO}/vulnerability-alerts"),
+            format!("PUT {REPO}/automated-security-fixes"),
+        ]
     );
 }

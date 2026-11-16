@@ -2572,6 +2572,11 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
                 .push("   i Edit", look.muted),
         ),
         entry(
+            "GitHub",
+            Row::of("Rules of this project's GitHub repository", look.fg)
+                .push("   G Edit", look.muted),
+        ),
+        entry(
             "Roadmap",
             match &screen.jobs {
                 Some(jobs) => planning_value(&planning(jobs), look),

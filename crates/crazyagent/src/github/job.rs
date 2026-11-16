@@ -63,11 +63,13 @@ pub enum GitHubPublishLeft {
     Maybe { full_name: String },
 }
 
-/// Where a publish job stands: waiting for the owner to approve the .gitignore lines or
-/// to deal with a secret, or the last step it finished on the way to the rules.
+/// Where a publish job stands: its .gitignore lines still being drafted, waiting for the
+/// owner to approve them or to deal with a secret, or the last step it finished on the way
+/// to the rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GitHubPublishStep {
+    Drafting,
     Lines {
         lines: Vec<String>,
         #[serde(default = "not_asked")]
@@ -136,6 +138,62 @@ impl Drop for Publishing {
     }
 }
 
+/// A publish Start past its checks, its record saved at Drafting and the project's publish
+/// still held, so the agent draft runs after Start has answered and no other run comes
+/// between (DEC-182). `run` drafts and records the lines; one dropped unrun lets the
+/// publish go with the record at Drafting, which the next Status closes with the baseline.
+pub struct GitHubDraft {
+    root: PathBuf,
+    job: GitHubPublishJob,
+    prompt: String,
+    existing: Option<String>,
+    held: Publishing,
+}
+
+impl GitHubDraft {
+    /// The job as Start recorded it, at Drafting. Input: none. Output: the job.
+    pub fn job(&self) -> &GitHubPublishJob {
+        &self.job
+    }
+
+    /// Asks the project's agent through `ask` for .gitignore lines from the project's names
+    /// only, records the lines the owner is shown first, the baseline then the agent's, or
+    /// the baseline alone with the code `ask` gave, and then lets the publish go.
+    /// Input: `ask`, which takes the prompt and gives the reply or a code. Output: the job
+    /// at its lines, or the record's save failure.
+    pub fn run(
+        self,
+        ask: impl FnOnce(&str) -> Result<String, &'static str>,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        let Self {
+            root,
+            job,
+            prompt,
+            existing,
+            held,
+        } = self;
+        let (agent, by) = match ask(&prompt) {
+            Ok(reply) => (draft::reply_lines(&reply), GitHubIgnoreDraft::Agent),
+            Err(code) => (
+                Vec::new(),
+                GitHubIgnoreDraft::Baseline {
+                    reason: code.to_owned(),
+                },
+            ),
+        };
+        let job = GitHubPublishJob {
+            step: GitHubPublishStep::Lines {
+                lines: draft::merged(&agent, existing.as_deref()),
+                draft: by,
+            },
+            ..job
+        };
+        state::save_job(&root, &job)?;
+        drop(held);
+        Ok(job)
+    }
+}
+
 fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
 }
@@ -185,27 +243,24 @@ fn now() -> Result<u64, EngineError> {
 }
 
 impl GitHub {
-    /// Starts a publish: checks the plan, the sign-in and the project's git, asks the
-    /// project's agent through `ask` for .gitignore lines from the project's names only,
-    /// and records the lines the owner is shown first: the baseline, then the agent's, or
-    /// the baseline alone with the code `ask` gave. Nothing is written into the project.
-    /// A job that made its repository already, or whose create may have made it, is gone
-    /// on with Continue, which knows that repository again, or forgotten with Discard
-    /// instead, and a start over an earlier job keeps the paths it wrote, which the
-    /// commit then takes.
-    /// Inputs: the project folder, the plan and `ask`, which takes the prompt and gives
-    /// the reply or a code. Output: the job at its lines, or
+    /// Starts a publish: checks the plan, the sign-in and the project's git, reads the
+    /// project's .gitignore and names for the draft prompt, and records the job at
+    /// Drafting, still holding the project's publish, so Start answers before the agent
+    /// drafts. Nothing is written into the project. A job that made its repository
+    /// already, or whose create may have made it, is gone on with Continue, which knows
+    /// that repository again, or forgotten with Discard instead, and a start over an
+    /// earlier job keeps the paths it wrote, which the commit then takes.
+    /// Inputs: the project folder and the plan. Output: the draft to run, or
     /// `github_repo_name_invalid`, `github_repo_description_invalid`,
     /// `github_publish_running`, `github_not_signed_in`, `github_publish_in_progress` or the
     /// project's git refusal.
-    pub fn publish_start(
+    pub fn publish_begin(
         &self,
         project: &Path,
         plan: &GitHubPublishPlan,
-        ask: impl FnOnce(&str) -> Result<String, &'static str>,
-    ) -> Result<GitHubPublishJob, EngineError> {
+    ) -> Result<GitHubDraft, EngineError> {
         api::check_new(&new_repo(plan))?;
-        let _held = publishing(&self.root, project)?;
+        let held = publishing(&self.root, project)?;
         self.saved()?;
         let rules = state::load_defaults(&self.root)?;
         let written = match state::load_job(&self.root, project)? {
@@ -225,30 +280,37 @@ impl GitHub {
         self.publish_inspect(project)?;
         let existing = publish::read_gitignore(&project.join(publish::GITIGNORE))?;
         let (listed, cut) = draft::listing(project)?;
-        let (agent, by) = match ask(&draft::prompt(&listed, cut, existing.as_deref())) {
-            Ok(reply) => (draft::reply_lines(&reply), GitHubIgnoreDraft::Agent),
-            Err(code) => (
-                Vec::new(),
-                GitHubIgnoreDraft::Baseline {
-                    reason: code.to_owned(),
-                },
-            ),
-        };
         let job = GitHubPublishJob {
             project: project.to_path_buf(),
             plan: plan.clone(),
             lines: Vec::new(),
             written,
-            step: GitHubPublishStep::Lines {
-                lines: draft::merged(&agent, existing.as_deref()),
-                draft: by,
-            },
+            step: GitHubPublishStep::Drafting,
             stopped: None,
             made: None,
             rules,
         };
         state::save_job(&self.root, &job)?;
-        Ok(job)
+        Ok(GitHubDraft {
+            root: self.root.clone(),
+            prompt: draft::prompt(&listed, cut, existing.as_deref()),
+            existing,
+            job,
+            held,
+        })
+    }
+
+    /// Starts a publish and runs its draft at once, as the engine's own rows do. Inputs:
+    /// the project folder, the plan and `ask`. Output: the job at its lines, or the
+    /// refusal `publish_begin` or the draft gave.
+    #[cfg(test)]
+    pub(super) fn publish_start(
+        &self,
+        project: &Path,
+        plan: &GitHubPublishPlan,
+        ask: impl FnOnce(&str) -> Result<String, &'static str>,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.publish_begin(project, plan)?.run(ask)
     }
 
     /// Takes the .gitignore lines the owner approved, gets the project ready, checks it
@@ -353,7 +415,9 @@ impl GitHub {
         let job = self.job(project)?;
         if matches!(
             job.step,
-            GitHubPublishStep::Lines { .. } | GitHubPublishStep::Blocked { .. }
+            GitHubPublishStep::Drafting
+                | GitHubPublishStep::Lines { .. }
+                | GitHubPublishStep::Blocked { .. }
         ) {
             return Err(failure("github_publish_step_invalid"));
         }
@@ -401,9 +465,39 @@ impl GitHub {
     }
 
     /// Reads a project's publish record, which a run in progress keeps up to date step by
-    /// step. Input: the project folder. Output: the job, or None when the project has none.
+    /// step. A record at Drafting with no draft holding the publish, as after the engine
+    /// stopped mid draft, is closed with the baseline lines and
+    /// `github_publish_draft_stopped`, so the owner can go on. Input: the project folder.
+    /// Output: the job, or None when the project has none.
     pub fn publish_status(&self, project: &Path) -> Result<Option<GitHubPublishJob>, EngineError> {
-        state::load_job(&self.root, project)
+        let job = state::load_job(&self.root, project)?;
+        if !job
+            .as_ref()
+            .is_some_and(|job| job.step == GitHubPublishStep::Drafting)
+        {
+            return Ok(job);
+        }
+        let Ok(_held) = publishing(&self.root, project) else {
+            return Ok(job);
+        };
+        let Some(job) = state::load_job(&self.root, project)? else {
+            return Ok(None);
+        };
+        if job.step != GitHubPublishStep::Drafting {
+            return Ok(Some(job));
+        }
+        let existing = publish::read_gitignore(&project.join(publish::GITIGNORE))?;
+        let job = GitHubPublishJob {
+            step: GitHubPublishStep::Lines {
+                lines: draft::merged(&[], existing.as_deref()),
+                draft: GitHubIgnoreDraft::Baseline {
+                    reason: draft::STOPPED.to_owned(),
+                },
+            },
+            ..job
+        };
+        state::save_job(&self.root, &job)?;
+        Ok(Some(job))
     }
 
     /// Reads the job a step works on. Input: the project folder. Output: the job, or
@@ -471,7 +565,8 @@ impl GitHub {
         let mut rechecked = false;
         loop {
             let next = match &job.step {
-                GitHubPublishStep::Lines { .. }
+                GitHubPublishStep::Drafting
+                | GitHubPublishStep::Lines { .. }
                 | GitHubPublishStep::Blocked { .. }
                 | GitHubPublishStep::Done { .. } => return Ok(()),
                 GitHubPublishStep::Checked => GitHubPublishStep::Committed {

@@ -1,6 +1,6 @@
 use super::intake::{ask, event};
 use super::new_project::{HarnessChoice, HarnessState, Phase, PoolChoice, Reply, Wizard};
-use super::new_project_publish::{GitHub, PUBLISH_STARTED};
+use super::new_project_publish::GitHub;
 use super::new_project_view::{Look, Row, Screen as View, wizard_screen};
 use super::project::plain_problem;
 use super::project_page::ProjectPage;
@@ -538,26 +538,15 @@ impl NewProjectPage {
             .as_mut()
             .expect("only a finished creation opens its project");
         assert!(!creation.assigning);
-        if !creation.finished {
-            let publish = creation.publish.take();
+        let publish = if creation.finished {
+            None
+        } else {
             ctx.say(Message::success(
                 &format!("{} is ready.", creation.submission.spec.name),
-                if publish.is_some() {
-                    PUBLISH_STARTED
-                } else {
-                    ""
-                },
+                "",
             ));
-            if let Some(plan) = publish {
-                ask(
-                    ctx,
-                    IntakeQuery::GitHubPublishStart {
-                        project: creation.submission.project_id.clone(),
-                        plan,
-                    },
-                );
-            }
-        }
+            creation.publish.take()
+        };
         let saves_access = !creation.finished && creation.access != AgentAccess::Sandboxed;
         creation.finished = true;
         let mut page = ProjectPage::new(
@@ -566,6 +555,9 @@ impl NewProjectPage {
             ProjectTab::Overview,
             ctx,
         );
+        if let Some(plan) = publish {
+            page.start_publish(plan, ctx);
+        }
         if saves_access {
             page.save_created_access(creation.access, ctx);
         }

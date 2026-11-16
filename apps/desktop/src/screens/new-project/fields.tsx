@@ -143,13 +143,15 @@ const NO_OWNERS: Result<GitHubOwners> = { kind: "ok", value: { owners: [], probl
 
 /** Reads the GitHub sign-in and, once signed in, the accounts a new repository can go under,
  * for the publish block and the Create project wait. Input: none. Output: the sign-in read
- * with its reload, the accounts read, whether CrazyAgent is signed in and the accounts offered. */
+ * with its reload, the accounts read, whether CrazyAgent is signed in, the accounts offered
+ * and whether those reads are still going. */
 export function useGitHubPublish() {
   const [status, reloadStatus] = useLoad(loadGitHubStatus, [], "github-status");
   const signedIn = status.kind === "ok" && status.value.signed_in;
   const [owners] = useLoad(() => signedIn ? loadGitHubOwners() : Promise.resolve(NO_OWNERS), [signedIn]);
   const offered = owners.kind === "ok" ? owners.value.owners : [];
-  return { status, reloadStatus, owners, signedIn, offered };
+  const checking = status.kind === "loading" || (signedIn && owners.kind === "loading");
+  return { status, reloadStatus, owners, signedIn, offered, checking };
 }
 
 /** The GitHub reads one New Project page shares between its publish block and Create. */

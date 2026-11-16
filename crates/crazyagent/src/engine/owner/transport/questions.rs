@@ -297,8 +297,8 @@ fn apply_later(root: &Path) {
 /// each agent how it ended. A failure is logged by its code alone. Input: the engine root.
 fn apply_proposals(root: &Path) {
     let applied = questions::open(root).and_then(|db| {
-        crate::github::proposals::apply_approved(&db, &mut |folder, rule, on| {
-            crate::github::GitHub::open(root)?.set_repo_rule(folder, rule, on)
+        crate::github::proposals::apply_approved(&db, &mut |folder, repo, rule, on| {
+            crate::github::GitHub::open(root)?.set_repo_rule(folder, repo, rule, on)
         })
     });
     if let Err(problem) = applied {

@@ -1879,6 +1879,86 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_owners()?; call.await }.await;
             routed(result)
         }
+        "desktop_github_publish_status" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+            }
+            let Args { project } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_status(&project)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_github_publish_approve" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+                lines: Vec<String>,
+            }
+            let Args { project, lines } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_approve(&project, lines)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_github_publish_exclude" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+                path: String,
+            }
+            let Args { project, path } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_exclude(&project, path)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_github_publish_recheck" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+            }
+            let Args { project } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_recheck(&project)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_github_publish_continue" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+            }
+            let Args { project } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_continue(&project)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_github_publish_discard" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+            }
+            let Args { project } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_discard(&project)?; call.await }.await;
+            routed(result)
+        }
         "desktop_github_publish_start" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -1925,14 +2005,15 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             #[derive(serde::Deserialize)]
             struct Args {
                 project: String,
+                repo: String,
                 rule: crazyagent::github::GitHubRule,
                 on: bool,
             }
-            let Args { project, rule, on } = match parse(args) {
+            let Args { project, repo, rule, on } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_rule_set(&project, rule, on)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_rule_set(&project, repo, rule, on)?; call.await }.await;
             routed(result)
         }
         "desktop_clone_repo" => {

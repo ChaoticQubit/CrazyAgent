@@ -329,15 +329,20 @@ fn approve_sends_nothing_until_the_apply_which_sends_the_one_recorded_change_onc
     assert_eq!(case.statuses(), ["approved"]);
     assert!(case.told().is_empty(), "{:?}", case.told());
     let mut calls = Vec::new();
-    let mut set = |folder: &Path, rule: GitHubRule, on: bool| {
-        calls.push((folder.to_path_buf(), rule, on));
+    let mut set = |folder: &Path, repo: &str, rule: GitHubRule, on: bool| {
+        calls.push((folder.to_path_buf(), repo.to_owned(), rule, on));
         Ok(page(rule, on, GitHubRuleState::Applied))
     };
     assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 1);
     assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 0);
     assert_eq!(
         calls,
-        [(case.folder.clone(), GitHubRule::PullRequest, true)]
+        [(
+            case.folder.clone(),
+            REPO.to_owned(),
+            GitHubRule::PullRequest,
+            true
+        )]
     );
     assert_eq!(case.statuses(), ["applied"]);
     let told = case.told();
@@ -357,7 +362,7 @@ fn a_change_github_refuses_or_does_not_show_applied_is_told_only_as_refused() {
     let unshown = case.asked(&Asker::Agent(5), GitHubRule::CodeqlDefaultSetup, true);
     assert_eq!(case.answer(refused, vec![0]), Settlement::Settled);
     assert_eq!(case.answer(unshown, vec![0]), Settlement::Settled);
-    let mut set = |_: &Path, rule: GitHubRule, on: bool| {
+    let mut set = |_: &Path, _: &str, rule: GitHubRule, on: bool| {
         Ok(match rule {
             GitHubRule::SecretScanning => page(
                 rule,
@@ -420,8 +425,9 @@ fn the_apply_uses_the_owners_sign_in_on_the_recorded_repository_and_tells_the_ag
     assert_eq!(server.seen().len(), signed_in, "a proposal sends nothing");
     assert_eq!(case.answer(question, vec![0]), Settlement::Settled);
     assert_eq!(server.seen().len(), signed_in, "an answer sends nothing");
-    let mut set =
-        |folder: &Path, rule: GitHubRule, on: bool| account.set_repo_rule(folder, rule, on);
+    let mut set = |folder: &Path, repo: &str, rule: GitHubRule, on: bool| {
+        account.set_repo_rule(folder, repo, rule, on)
+    };
     assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 1);
     let sent: Vec<_> = server.seen().into_iter().skip(signed_in).collect();
     assert!(!sent.is_empty(), "the apply asked GitHub");
@@ -466,7 +472,7 @@ fn decline_a_comment_alone_and_dismiss_send_nothing_and_tell_declined() {
     );
     assert_eq!(case.statuses(), ["declined", "declined", "declined"]);
     let mut calls = 0;
-    let mut set = |_: &Path, rule: GitHubRule, on: bool| {
+    let mut set = |_: &Path, _: &str, rule: GitHubRule, on: bool| {
         calls += 1;
         Ok(page(rule, on, GitHubRuleState::Applied))
     };
@@ -492,7 +498,7 @@ fn a_repository_changed_since_the_ask_is_refused_at_apply_with_nothing_sent() {
     assert_eq!(case.answer(renamed, vec![0]), Settlement::Settled);
     case.done("octo-cat/other");
     let mut calls = 0;
-    let mut set = |_: &Path, rule: GitHubRule, on: bool| {
+    let mut set = |_: &Path, _: &str, rule: GitHubRule, on: bool| {
         calls += 1;
         Ok(page(rule, on, GitHubRuleState::Applied))
     };
@@ -522,7 +528,7 @@ fn a_master_cannot_relay_or_record_an_answer_to_a_proposal() {
     assert_eq!(recorded.unwrap_err().0, "questions_not_found");
     assert_eq!(case.statuses(), ["pending"]);
     let mut calls = 0;
-    let mut set = |_: &Path, rule: GitHubRule, on: bool| {
+    let mut set = |_: &Path, _: &str, rule: GitHubRule, on: bool| {
         calls += 1;
         Ok(page(rule, on, GitHubRuleState::Applied))
     };
@@ -553,7 +559,7 @@ fn a_start_ends_an_approved_or_applying_proposal_refused_and_tells_it_without_se
     tx.commit().unwrap();
     assert_eq!(case.statuses(), ["refused", "refused"]);
     let mut calls = 0;
-    let mut set = |_: &Path, rule: GitHubRule, on: bool| {
+    let mut set = |_: &Path, _: &str, rule: GitHubRule, on: bool| {
         calls += 1;
         Ok(page(rule, on, GitHubRuleState::Applied))
     };
@@ -596,8 +602,9 @@ fn an_outcome_a_full_conversation_cannot_take_is_told_at_the_next_pass() {
             [PROJECT],
         )
         .unwrap();
-    let mut set =
-        |_: &Path, rule: GitHubRule, on: bool| Ok(page(rule, on, GitHubRuleState::Applied));
+    let mut set = |_: &Path, _: &str, rule: GitHubRule, on: bool| {
+        Ok(page(rule, on, GitHubRuleState::Applied))
+    };
     assert_eq!(apply_approved(&case.db, &mut set).unwrap(), 0);
     let told = case.told();
     assert_eq!(told.len(), 1, "{told:?}");

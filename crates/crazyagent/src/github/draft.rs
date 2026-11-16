@@ -8,6 +8,7 @@ mod draft_tests;
 
 pub(super) const BASELINE: [&str; 4] = [".env*", "*.pem", "*.key", ".DS_Store"];
 pub(super) const NOT_ASKED: &str = "github_publish_draft_not_asked";
+pub(super) const STOPPED: &str = "github_publish_draft_stopped";
 const LISTED_MAX: usize = 2000;
 const DEPTH_MAX: usize = 6;
 const DRAFT_LINES_MAX: usize = 200;

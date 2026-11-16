@@ -224,7 +224,7 @@ pub(crate) fn decide(
 /// runs with the owner's sign-in. Output: how many proposals ended, or the store error.
 pub fn apply_approved(
     db: &Connection,
-    set: &mut dyn FnMut(&Path, GitHubRule, bool) -> Result<GitHubRepoRules, EngineError>,
+    set: &mut dyn FnMut(&Path, &str, GitHubRule, bool) -> Result<GitHubRepoRules, EngineError>,
 ) -> Result<usize, EngineError> {
     table(db).map_err(|_| failure(UNAVAILABLE))?;
     let root = crate::sandbox::grants::data_root(db).ok_or_else(|| failure(UNAVAILABLE))?;
@@ -335,7 +335,7 @@ fn applied(
     root: &Path,
     db: &Connection,
     row: &Row,
-    set: &mut dyn FnMut(&Path, GitHubRule, bool) -> Result<GitHubRepoRules, EngineError>,
+    set: &mut dyn FnMut(&Path, &str, GitHubRule, bool) -> Result<GitHubRepoRules, EngineError>,
 ) -> Ended {
     let Ok(folder) = folder(db, &row.project) else {
         return Ended::Refused;
@@ -343,7 +343,7 @@ fn applied(
     if published(root, &folder).ok().flatten().as_deref() != Some(row.repo.as_str()) {
         return Ended::Refused;
     }
-    match set(&folder, row.rule, row.on) {
+    match set(&folder, &row.repo, row.rule, row.on) {
         Ok(page) => {
             let done = page.rules.iter().any(|outcome| {
                 outcome.rule == row.rule

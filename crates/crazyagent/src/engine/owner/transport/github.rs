@@ -64,6 +64,7 @@ pub(super) enum Action {
     },
     RuleSet {
         project: ProjectId,
+        repo: String,
         rule: GitHubRule,
         on: bool,
     },
@@ -73,8 +74,7 @@ impl Action {
     pub(super) fn time(&self) -> Duration {
         match self {
             Self::Clone { .. } => CLONE_TIME,
-            Self::PublishStart { .. }
-            | Self::PublishApprove { .. }
+            Self::PublishApprove { .. }
             | Self::PublishExclude { .. }
             | Self::PublishRecheck { .. }
             | Self::PublishContinue { .. } => PUBLISH_TIME,
@@ -182,8 +182,8 @@ impl OwnerClient {
     }
 
     /// Starts publishing a project on GitHub: the engine checks the plan, the sign-in and
-    /// the project's git and records the .gitignore lines to show first. Inputs: the
-    /// project and the plan. Output: the job at its lines.
+    /// the project's git, answers with the job at Drafting and drafts the .gitignore lines
+    /// to show first after. Inputs: the project and the plan. Output: the job at Drafting.
     pub async fn github_publish_start(
         &self,
         project: ProjectId,
@@ -303,16 +303,25 @@ impl OwnerClient {
     }
 
     /// Turns one rule on or off on the repository a project was published to, with the
-    /// owner's GitHub sign-in. Inputs: the project, the rule and whether it is on.
-    /// Output: the page read again after the change.
+    /// owner's GitHub sign-in. Inputs: the project, the `owner/name` the page showed, the
+    /// rule and whether it is on. Output: the page read again after the change.
     pub async fn github_rule_set(
         &self,
         project: ProjectId,
+        repo: String,
         rule: GitHubRule,
         on: bool,
     ) -> Result<GitHubRepoRules, EngineError> {
         match self
-            .github_exchange(Action::RuleSet { project, rule, on }, None)
+            .github_exchange(
+                Action::RuleSet {
+                    project,
+                    repo,
+                    rule,
+                    on,
+                },
+                None,
+            )
             .await?
         {
             Reply::Rules { rules } => Ok(rules),
@@ -505,22 +514,28 @@ async fn handle(
             },
             Action::PublishStart { project, plan } => {
                 let (settings, codex, claude) = drafting.ok_or_else(unknown)?;
-                let folder = project_folder(&root, &project)?;
-                let job = account.publish_start(&folder, &plan, |prompt| {
-                    let (global, local) = settings
-                        .as_ref()
-                        .ok_or(crate::instruction_cleanup::UNAVAILABLE)?;
-                    crate::instruction_cleanup::run(&crate::instruction_cleanup::Request {
-                        root: &root,
-                        settings: (global, local),
-                        codex: codex.as_deref(),
-                        claude: claude.as_deref(),
-                        project: Some(&project),
-                        pool: None,
-                        prompt,
-                        agent: DRAFT_AGENT,
-                    })
-                })?;
+                let draft = account.publish_begin(&project_folder(&root, &project)?, &plan)?;
+                let job = draft.job().clone();
+                let draft_root = root.clone();
+                let _ = std::thread::Builder::new()
+                    .name("github-draft".into())
+                    .spawn(move || {
+                        let _ = draft.run(|prompt| {
+                            let (global, local) = settings
+                                .as_ref()
+                                .ok_or(crate::instruction_cleanup::UNAVAILABLE)?;
+                            crate::instruction_cleanup::run(&crate::instruction_cleanup::Request {
+                                root: &draft_root,
+                                settings: (global, local),
+                                codex: codex.as_deref(),
+                                claude: claude.as_deref(),
+                                project: Some(&project),
+                                pool: None,
+                                prompt,
+                                agent: DRAFT_AGENT,
+                            })
+                        });
+                    });
                 Reply::Publish { job }
             }
             Action::PublishApprove { project, lines } => Reply::Publish {
@@ -564,8 +579,13 @@ async fn handle(
             Action::Rules { project } => Reply::Rules {
                 rules: account.repo_rules(&project_folder(&root, &project)?)?,
             },
-            Action::RuleSet { project, rule, on } => Reply::Rules {
-                rules: account.set_repo_rule(&project_folder(&root, &project)?, rule, on)?,
+            Action::RuleSet {
+                project,
+                repo,
+                rule,
+                on,
+            } => Reply::Rules {
+                rules: account.set_repo_rule(&project_folder(&root, &project)?, &repo, rule, on)?,
             },
         })
     })

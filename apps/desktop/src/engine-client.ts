@@ -1559,6 +1559,7 @@ export interface GitHubRuleOutcome {
 }
 
 export type GitHubPublishStep =
+  | { step: "drafting" }
   | { step: "lines"; lines: string[]; draft: GitHubIgnoreDraft }
   | { step: "blocked"; scan: { findings: GitHubSecretFinding[]; truncated: boolean } }
   | { step: "checked" }
@@ -1567,6 +1568,9 @@ export type GitHubPublishStep =
   | { step: "created"; committed: GitHubCommitted; full_name: string; private: boolean }
   | { step: "pushed"; full_name: string; private: boolean; workflows: boolean }
   | { step: "done"; full_name: string; outcomes: GitHubRuleOutcome[] };
+
+/** A repository a discarded publish leaves on GitHub: one it made, or one it may have made. */
+export type GitHubPublishLeft = { left: "made" | "maybe"; full_name: string };
 
 export interface GitHubPublishJob {
   project: string;
@@ -1626,9 +1630,45 @@ export function githubOwners(): Promise<GitHubOwners> {
   return invoke<GitHubOwners>("desktop_github_owners");
 }
 
+/** Reads where a project's GitHub publish stands. Input: the project id. Output: the job,
+ * or null when the project has no publish. */
+export function githubPublishStatus(project: string): Promise<GitHubPublishJob | null> {
+  return invoke<GitHubPublishJob | null>("desktop_github_publish_status", { project });
+}
+
+/** Approves a project's .gitignore lines and runs its publish as far as it goes. Inputs:
+ * the project id and the lines. Output: the job where it stands. */
+export function githubPublishApprove(project: string, lines: string[]): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_approve", { project, lines });
+}
+
+/** Leaves a file that holds a secret out of a project's publish and runs on. Inputs: the
+ * project id and the file's path as the check named it. Output: the job where it stands. */
+export function githubPublishExclude(project: string, path: string): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_exclude", { project, path });
+}
+
+/** Checks a project's files for secrets again after the owner fixed them. Input: the
+ * project id. Output: the job where it stands. */
+export function githubPublishRecheck(project: string): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_recheck", { project });
+}
+
+/** Runs a stopped publish on from the step it reached. Input: the project id. Output:
+ * the job where it stands. */
+export function githubPublishContinue(project: string): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_continue", { project });
+}
+
+/** Discards a project's publish record; the files it wrote and a repository it made stay.
+ * Input: the project id. Output: the repository GitHub made or may have made, or null. */
+export function githubPublishDiscard(project: string): Promise<GitHubPublishLeft | null> {
+  return invoke<GitHubPublishLeft | null>("desktop_github_publish_discard", { project });
+}
+
 /** Starts publishing a project on GitHub: the engine checks the plan, the sign-in and the
- * project's git and drafts the .gitignore lines to show first. Inputs: the project id and
- * the plan. Output: the job at its lines. */
+ * project's git, answers, and drafts the .gitignore lines to show first after. Inputs: the
+ * project id and the plan. Output: the job at Drafting. */
 export function githubPublishStart(project: string, plan: GitHubPublishPlan): Promise<GitHubPublishJob> {
   return invoke<GitHubPublishJob>("desktop_github_publish_start", { project, plan });
 }
@@ -1652,9 +1692,10 @@ export function githubRules(project: string): Promise<GitHubRepoRules> {
 }
 
 /** Turns one rule on or off on that repository with the owner's sign-in, then reads it again.
- * Inputs: the project id, the rule and whether it is on. Output: the fresh page. */
-export function githubRuleSet(project: string, rule: string, on: boolean): Promise<GitHubRepoRules> {
-  return invoke<GitHubRepoRules>("desktop_github_rule_set", { project, rule, on });
+ * Inputs: the project id, the `owner/name` the page showed, the rule and whether it is on.
+ * Output: the fresh page. */
+export function githubRuleSet(project: string, repo: string, rule: string, on: boolean): Promise<GitHubRepoRules> {
+  return invoke<GitHubRepoRules>("desktop_github_rule_set", { project, repo, rule, on });
 }
 
 export type DependencyName = "tmux" | "uv" | "graphify" | "node";

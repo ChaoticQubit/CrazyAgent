@@ -1079,7 +1079,10 @@ fn neither_linux_setting_is_saved_while_the_engine_has_not_said_both() {
         shell.arrive(event(AppSetupEvent::Sandbox(Err("busy".into()))));
         shell.key(Key::Down);
         shell.key(Key::Enter);
-        assert!(jobs(&mut shell).is_empty(), "{key}: nothing is sent from defaults");
+        assert!(
+            jobs(&mut shell).is_empty(),
+            "{key}: nothing is sent from defaults"
+        );
         let unknown = format!("The {words} setting is not known yet.");
         assert_eq!(lead(&shell), unknown);
     }
@@ -2445,4 +2448,24 @@ fn below_80x24_no_key_reaches_setup_so_enter_installs_and_approves_nothing() {
             [AppSetupJob::Run { .. }]
         ));
     }
+}
+
+/// DEC-182 S6c: signed in, Setup shows G beside g and opens Settings / GitHub, the rules a
+/// new repository starts with; signed out, the bar has no G and G does nothing.
+#[test]
+fn signed_in_setup_opens_the_github_rules_for_new_repositories_with_g_upper() {
+    let mut shell = settings(240, 80);
+    let rows = render(&mut shell, 240, 80);
+    assert!(bar(&rows).contains("G GitHub rules"), "{}", bar(&rows));
+    shell.key(Key::Char('G'));
+    assert_eq!(shell.place(), Some(Place::GitHubDefaults));
+    let mut shell = settings(240, 80);
+    shell.arrive(event(AppSetupEvent::GitHub(Ok(GitHubStatus {
+        signed_in: false,
+        ..signed_in()
+    }))));
+    let rows = render(&mut shell, 240, 80);
+    assert!(!bar(&rows).contains("G GitHub rules"), "{}", bar(&rows));
+    shell.key(Key::Char('G'));
+    assert_eq!(shell.place(), Some(Place::Setup { first_run: false }));
 }

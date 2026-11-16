@@ -2,13 +2,15 @@ use super::settings::connection_lost;
 use super::*;
 use crate::engine::owner::{AccountSecret, OwnerResult};
 use crate::github::{
-    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan,
-    GitHubRepoPage, GitHubStatus,
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
+    GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
 };
+use crate::github::{GitHubRepoRules, GitHubRule};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::job::{JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, RequestId};
+use std::collections::BTreeSet;
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -47,6 +49,26 @@ pub(in crate::tui) enum IntakeQuery {
         project: ProjectId,
         plan: GitHubPublishPlan,
     },
+    GitHubPublishStatus {
+        project: ProjectId,
+    },
+    GitHubPublishApprove {
+        project: ProjectId,
+        lines: Vec<String>,
+    },
+    GitHubPublishExclude {
+        project: ProjectId,
+        path: String,
+    },
+    GitHubPublishRecheck {
+        project: ProjectId,
+    },
+    GitHubPublishContinue {
+        project: ProjectId,
+    },
+    GitHubPublishDiscard {
+        project: ProjectId,
+    },
     CloneRepo {
         full_name: String,
     },
@@ -62,6 +84,19 @@ pub(in crate::tui) enum IntakeQuery {
     },
     JobDismiss {
         id: RequestId,
+    },
+    GitHubRuleDefaults,
+    GitHubRuleDefaultsSet {
+        rules: BTreeSet<GitHubRule>,
+    },
+    GitHubRules {
+        project: ProjectId,
+    },
+    GitHubRuleSet {
+        project: ProjectId,
+        repo: String,
+        rule: GitHubRule,
+        on: bool,
     },
 }
 
@@ -97,11 +132,15 @@ pub(in crate::tui) enum IntakeView {
     Repos(GitHubRepoPage),
     Owners(GitHubOwners),
     Publish(Box<GitHubPublishJob>),
+    PublishStatus(Option<Box<GitHubPublishJob>>),
+    Discarded(Option<GitHubPublishLeft>),
     Cloned(CloneReceipt),
     Changed(OwnerResult),
     Job(Option<JobView>),
     JobStopped(bool),
     JobDismissed(bool),
+    RuleDefaults(BTreeSet<GitHubRule>),
+    Rules(Box<GitHubRepoRules>),
 }
 
 /// One intake reply for the screens.
@@ -248,6 +287,43 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             )),
+            IntakeQuery::GitHubPublishStatus { project } => IntakeView::PublishStatus(
+                controller
+                    .github_publish_status(project)
+                    .await
+                    .map_err(problem)?
+                    .map(Box::new),
+            ),
+            IntakeQuery::GitHubPublishApprove { project, lines } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_approve(project, lines)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishExclude { project, path } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_exclude(project, path)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishRecheck { project } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_recheck(project)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishContinue { project } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_continue(project)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishDiscard { project } => IntakeView::Discarded(
+                controller
+                    .github_publish_discard(project)
+                    .await
+                    .map_err(problem)?,
+            ),
             IntakeQuery::CloneRepo { full_name } => {
                 IntakeView::Cloned(controller.clone_repo(full_name).await.map_err(problem)?)
             }
@@ -271,6 +347,29 @@ impl NativeOwner {
             IntakeQuery::JobDismiss { id } => {
                 IntakeView::JobDismissed(controller.job_dismiss(id).await.map_err(problem)?)
             }
+            IntakeQuery::GitHubRuleDefaults => {
+                IntakeView::RuleDefaults(controller.github_rule_defaults().await.map_err(problem)?)
+            }
+            IntakeQuery::GitHubRuleDefaultsSet { rules } => IntakeView::RuleDefaults(
+                controller
+                    .github_rule_defaults_set(rules)
+                    .await
+                    .map_err(problem)?,
+            ),
+            IntakeQuery::GitHubRules { project } => IntakeView::Rules(Box::new(
+                controller.github_rules(project).await.map_err(problem)?,
+            )),
+            IntakeQuery::GitHubRuleSet {
+                project,
+                repo,
+                rule,
+                on,
+            } => IntakeView::Rules(Box::new(
+                controller
+                    .github_rule_set(project, repo, rule, on)
+                    .await
+                    .map_err(problem)?,
+            )),
         })
     }
 }
