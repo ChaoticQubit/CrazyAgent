@@ -265,10 +265,13 @@ fn a_codex_master_with_a_connector_names_exactly_that_second_server() {
         .filter(|setting| setting.starts_with("mcp_servers="))
         .collect();
     assert_eq!(servers.len(), 1, "{servers:?}");
+    let tool_wait = crate::connectors::launch::HARNESS_WAIT.as_secs();
+    let startup_wait = crate::connectors::launch::STARTUP_WAIT.as_secs();
     let parsed: toml::Table = toml::from_str(&servers[0]).unwrap();
     let expected: toml::Table = toml::from_str(&format!(
         "[mcp_servers.crazyagent-team]\ncommand = {:?}\nargs = [\"team-mcp\", {:?}, {:?}, \"wake\"]\n\
-         [mcp_servers.ca-connectors]\ncommand = {:?}\nargs = [\"connector-mcp\", {:?}]\n",
+         [mcp_servers.ca-connectors]\ncommand = {:?}\nargs = [\"connector-mcp\", {:?}]\n\
+         tool_timeout_sec = {tool_wait}\nstartup_timeout_sec = {startup_wait}\n",
         engine.to_str().unwrap(),
         drop.to_str().unwrap(),
         mailbox.to_str().unwrap(),
@@ -313,51 +316,76 @@ fn a_codex_master_with_a_connector_names_exactly_that_second_server() {
     };
     let engine_text = engine.to_str().unwrap();
     let folder_text = folder.to_str().unwrap();
+    let waits = format!(
+        ",tool_timeout_sec={tool_wait},startup_timeout_sec={startup_wait}"
+    );
     assert_eq!(
         require_master_tool_policy(
             &with_servers(
                 &command,
-                &entry(engine_text, &["connector-mcp", folder_text], "")
+                &entry(engine_text, &["connector-mcp", folder_text], &waits)
             ),
             Some(with)
         ),
         Ok(()),
         "the setting spelled by hand is the one the engine builds"
     );
+    let short = format!(",tool_timeout_sec=60,startup_timeout_sec={startup_wait}");
+    let text = format!(
+        ",tool_timeout_sec=\"{tool_wait}\",startup_timeout_sec={startup_wait}"
+    );
+    let tool_only = format!(",tool_timeout_sec={tool_wait}");
+    let environment = format!("{waits},env={{A=\"b\"}}");
     for (name, servers) in [
         (
             "another executable",
-            entry("/usr/bin/true", &["connector-mcp", folder_text], ""),
+            entry("/usr/bin/true", &["connector-mcp", folder_text], &waits),
         ),
         (
             "another launch folder",
-            entry(engine_text, &["connector-mcp", other.to_str().unwrap()], ""),
+            entry(
+                engine_text,
+                &["connector-mcp", other.to_str().unwrap()],
+                &waits,
+            ),
         ),
         (
             "an extra argument",
             entry(
                 engine_text,
                 &["connector-mcp", folder_text, "--verbose"],
-                "",
+                &waits,
             ),
         ),
         (
             "another server command",
-            entry(engine_text, &["team-mcp", folder_text], ""),
+            entry(engine_text, &["team-mcp", folder_text], &waits),
         ),
         (
             "an environment",
-            entry(
-                engine_text,
-                &["connector-mcp", folder_text],
-                ",env={A=\"b\"}",
-            ),
+            entry(engine_text, &["connector-mcp", folder_text], &environment),
+        ),
+        (
+            "no wait",
+            entry(engine_text, &["connector-mcp", folder_text], ""),
+        ),
+        (
+            "a shorter tool wait",
+            entry(engine_text, &["connector-mcp", folder_text], &short),
+        ),
+        (
+            "a wait written as text",
+            entry(engine_text, &["connector-mcp", folder_text], &text),
+        ),
+        (
+            "no startup wait",
+            entry(engine_text, &["connector-mcp", folder_text], &tool_only),
         ),
         (
             "a third server",
             format!(
                 "{},owner={{command=\"/usr/bin/true\"}}}}",
-                entry(engine_text, &["connector-mcp", folder_text], "")
+                entry(engine_text, &["connector-mcp", folder_text], &waits)
                     .strip_suffix('}')
                     .unwrap()
             ),

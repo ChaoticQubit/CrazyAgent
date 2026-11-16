@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -89,18 +89,33 @@ async function scheme(page, wanted) {
   assert.equal(await page.evaluate("matchMedia('(prefers-color-scheme: dark)').matches"), wanted === "dark", `the page shows the ${wanted} scheme`);
 }
 
-/** What the engine and the bridge wrote to their logs so far. Input: the evidence folder.
- * Output: the text of every log there is. */
-function logs(evidence) {
-  return ["engine.out", "engine.err", "bridge.out", "bridge.err"].map((name) => join(evidence, name))
-    .filter((path) => existsSync(path)).map((path) => readFileSync(path, "utf8")).join("\n");
+/** The files of this run that hold a key: every file under the run root and the evidence
+ * folder, the engine database, its logs and the page captures included, leaving out only the
+ * engine's key folders, the one place a key may be. Both processes' error streams must be
+ * there. Inputs: the run root, the engine root, the evidence folder and the key. Output: the
+ * paths that hold it. */
+function holdingKey(root, runtime, evidence, key) {
+  for (const name of ["engine.err", "bridge.err"]) assert.ok(existsSync(join(evidence, name)), `${name} is written, so it is read`);
+  const keys = new Set([join(runtime, "plugin-keys"), join(runtime, "account-keys")]);
+  const files = [];
+  const walk = (folder) => {
+    for (const entry of readdirSync(folder, { withFileTypes: true })) {
+      const path = join(folder, entry.name);
+      if (keys.has(path)) continue;
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile()) files.push(path);
+    }
+  };
+  for (const folder of new Set([root, evidence])) walk(folder);
+  assert.ok(files.includes(join(runtime, "engine.db")), "the engine database is read too");
+  return files.filter((path) => readFileSync(path).includes(key));
 }
 
 /** Starts the real engine and the bridge on a fresh root with an owner profile and projects
  * folder, serves the built app to a browser page, runs the steps and stops everything.
  * Inputs: the test context, the folder prefix and the steps, given the bridge, the owner on
- * the page, a route opener, the engine root, the page, the test HOME and the evidence
- * folder. Output: none. */
+ * the page, a route opener, the run root, the engine root, the page, the test HOME and the
+ * evidence folder. Output: none. */
 async function onEngine(t, prefix, steps) {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -143,7 +158,7 @@ async function onEngine(t, prefix, steps) {
           await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/?visit=${visits}${hash}` });
           await me.waitFor(what, check);
         };
-        await steps({ bridge, me, open, runtime, page, home, evidence });
+        await steps({ bridge, me, open, root, runtime, page, home, evidence });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -190,7 +205,7 @@ test("Connectors: each Activity log keeps option is saved through the page, read
   await t.test("conn keep_log 90 days", () => keep("days30", "90 days", { keep: "days90", ages: [3, 10, 45], held: 3 }));
 }));
 
-test("Connectors: turning Linear on for a project shows On and the engine grant row exists, and each Who choice and Off are saved", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-grant-", async ({ bridge, me, open, runtime, page, home }) => {
+test("Connectors: turning Linear on for a project shows On and the engine grant row exists, and each Who choice and Off are saved", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-grant-", async ({ bridge, me, open, root, runtime, page, home, evidence }) => {
   await value(bridge, "desktop_connector_set_key", { name: "linear", secret: "api_key", key: LINEAR_KEY });
   const repo = join(home, "connector-repo");
   mkdirSync(repo, { mode: 0o700 });
@@ -247,9 +262,11 @@ test("Connectors: turning Linear on for a project shows On and the engine grant 
   }
   await scheme(page, "light");
   assert.ok(!(await me.seen()).includes(LINEAR_KEY), "the key never reaches the page");
+  await pause(POLL_MS);
+  assert.deepEqual(holdingKey(root, runtime, evidence, LINEAR_KEY), [], "no file of the run outside the engine's key folders holds the key");
 }));
 
-test("Connectors: Settings, Connectors saves each option through the page, adds a connector through its trust screen, sets and clears its key and removes it", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-page-", async ({ bridge, me, open, runtime, page, evidence }) => {
+test("Connectors: Settings, Connectors saves each option through the page, adds a connector through its trust screen, sets and clears its key and removes it", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-page-", async ({ bridge, me, open, root, runtime, page, evidence }) => {
   const read = () => value(bridge, "desktop_connectors", { project: null });
   const listedConnector = async (name) => (await read()).connectors.find((connector) => connector.name === name) ?? null;
   const connectorsPage = () => open("#/settings/connectors", "Settings, Connectors", (text) => text.includes("Catalog") && text.includes("Connector settings"));
@@ -352,5 +369,5 @@ test("Connectors: Settings, Connectors saves each option through the page, adds 
   }
   await scheme(page, "light");
   await pause(POLL_MS);
-  assert.ok(!logs(evidence).includes(BOARD_KEY), "no engine or bridge log holds the key");
+  assert.deepEqual(holdingKey(root, runtime, evidence, BOARD_KEY), [], "no file of the run outside the engine's key folders holds the key");
 }));
