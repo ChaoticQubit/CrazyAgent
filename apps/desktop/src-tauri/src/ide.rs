@@ -780,7 +780,7 @@ pub fn main_focused(app: &AppHandle) {
 /// Handles the close of a project's own window: the webview goes back to the main window hidden,
 /// and when the project page closed meanwhile the IDE stops as that close would have stopped it.
 /// Inputs: the app and the project. Output: none; a window whose IDE already went home is left.
-async fn window_closed(app: AppHandle, project: ProjectId) {
+async fn window_closed<R: Runtime>(app: AppHandle<R>, project: ProjectId) {
     let views = app.state::<IdeViews>();
     let Ok(true) = bring_home(&app, &views, &project) else {
         return;
@@ -789,7 +789,11 @@ async fn window_closed(app: AppHandle, project: ProjectId) {
     let _ = crate::close_ide(&app, &state, &views, &project).await;
 }
 
-fn bring_home(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<bool, BridgeError> {
+fn bring_home<R: Runtime>(
+    app: &AppHandle<R>,
+    views: &IdeViews,
+    project: &ProjectId,
+) -> Result<bool, BridgeError> {
     let mut held = views.lock();
     let Some(out) = held.out.remove(project.as_str()) else {
         return Ok(false);
@@ -822,7 +826,7 @@ fn bring_home(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<
 /// when the main window has gone. A named project whose page had already closed also gets the
 /// server stop that close skipped. It runs off the main thread, since it is called from there.
 /// Inputs: the app and the project, if any. Output: none.
-pub fn shut_own_windows(app: AppHandle, project: Option<ProjectId>) {
+pub fn shut_own_windows<R: Runtime>(app: AppHandle<R>, project: Option<ProjectId>) {
     tauri::async_runtime::spawn(async move {
         let views = app.state::<IdeViews>();
         if let Some(one) = project.as_ref().filter(|one| views.page_left(one)) {
