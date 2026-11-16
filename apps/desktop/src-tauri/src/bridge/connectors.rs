@@ -2,6 +2,7 @@ use super::*;
 use crazyagent::app_plugins::Preview;
 use crazyagent::connectors::approvals::{AllowedWrites, ApprovalView};
 use crazyagent::connectors::audit::ActivityView;
+use crazyagent::connectors::sign_in::SignInState;
 use crazyagent::connectors::{ConnectorSettings, ConnectorsView, SignInWith, Who};
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{CONNECTORS_CODES, ConnectorsSaved, OwnerClient};
@@ -290,6 +291,64 @@ impl NativeBridge {
         }))
     }
 
+    /// Starts a connector's sign-in through the browser, run without the bridge lock; the
+    /// app opens the address itself and the page never gets it. Input: the connector.
+    /// Output: the address the owner's browser opens.
+    pub fn connector_sign_in(&self, name: String) -> Result<Unlocked<String>, BridgeError> {
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_sign_in(name)
+                .await
+                .map_err(connector_error)
+        }))
+    }
+
+    /// Reads where a connector's sign-in through the browser stands, run without the bridge
+    /// lock. Input: the connector. Output: its state.
+    pub fn connector_sign_in_state(
+        &self,
+        name: String,
+    ) -> Result<Unlocked<SignInState>, BridgeError> {
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_sign_in_state(name)
+                .await
+                .map_err(connector_error)
+        }))
+    }
+
+    /// Cancels a connector's waiting sign-in, run without the bridge lock. Input: the
+    /// connector. Output: where it stands after, still waiting while its answer is redeemed.
+    pub fn cancel_connector_sign_in(
+        &self,
+        name: String,
+    ) -> Result<Unlocked<SignInState>, BridgeError> {
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .cancel_connector_sign_in(name)
+                .await
+                .map_err(connector_error)
+        }))
+    }
+
+    /// Signs a connector out on this computer, run without the bridge lock; the vendor is
+    /// not told. Input: the connector. Output: the page.
+    pub fn connector_sign_out(
+        &self,
+        name: String,
+    ) -> Result<Unlocked<ConnectorsView>, BridgeError> {
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_sign_out(name)
+                .await
+                .map_err(connector_error)
+        }))
+    }
+
     /// What the Connectors page says each harness reaches, one row per harness kind in
     /// settings order, in the engine crate's own words (DEC-141), with no engine call.
     /// Output: the rows.
@@ -437,5 +496,15 @@ mod tests {
             SignInWith::Browser,
             "the window's way words are the engine's"
         );
+        assert_eq!(refused(bridge.connector_sign_in(text())), "not_connected");
+        assert_eq!(
+            refused(bridge.connector_sign_in_state(text())),
+            "not_connected"
+        );
+        assert_eq!(
+            refused(bridge.cancel_connector_sign_in(text())),
+            "not_connected"
+        );
+        assert_eq!(refused(bridge.connector_sign_out(text())), "not_connected");
     }
 }

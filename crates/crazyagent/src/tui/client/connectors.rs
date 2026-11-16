@@ -4,9 +4,11 @@ use super::*;
 use crate::app_plugins::Preview;
 use crate::connectors::approvals::{AllowedWrites, ApprovalView};
 use crate::connectors::audit::ActivityView;
+use crate::connectors::sign_in::SignInState;
 use crate::connectors::{ConnectorSettings, ConnectorsView, SignInWith, Who};
 use crate::engine::EngineError;
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
+use crate::tui::screens::settings_add_account::open_page;
 use std::path::PathBuf;
 
 /// One Connectors request a Settings page, a project's Connectors page or the approval page
@@ -78,6 +80,18 @@ pub(in crate::tui) enum ConnectorsJob {
         name: String,
         way: SignInWith,
     },
+    SignIn {
+        name: String,
+    },
+    SignInState {
+        name: String,
+    },
+    CancelSignIn {
+        name: String,
+    },
+    SignOut {
+        name: String,
+    },
 }
 
 impl std::fmt::Debug for ConnectorsJob {
@@ -89,8 +103,9 @@ impl std::fmt::Debug for ConnectorsJob {
 /// The engine's answer to one Connectors request: the activity view, how a settings save
 /// ended, the Connectors page every page change answers with, a trust screen (`read`
 /// carries the text a typed path held), one write approval as read or answered, or a
-/// project's standing write allows. The last two name the write or the project they answer
-/// for, failed or not, so only the page that asked takes them.
+/// project's standing write allows, a started sign-in or where one stands. Those after the
+/// trust screen name the write, project or connector they answer for, failed or not, so only
+/// the page that asked takes them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ConnectorsEvent {
     Activity(Result<ActivityView, String>),
@@ -108,6 +123,22 @@ pub(in crate::tui) enum ConnectorsEvent {
         project: String,
         result: Result<AllowedWrites, String>,
     },
+    SignIn {
+        name: String,
+        result: Result<SignInStarted, String>,
+    },
+    SignInState {
+        name: String,
+        result: Result<SignInState, String>,
+    },
+}
+
+/// A started sign-in as the TUI shows it: the address the owner's browser opens, shown for
+/// copying and sent nowhere else, and whether this machine's opener took it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct SignInStarted {
+    pub url: String,
+    pub opened: bool,
 }
 
 impl ConnectorsEvent {
@@ -137,7 +168,8 @@ fn failed(job: &ConnectorsJob, code: String) -> ConnectorsEvent {
         | ConnectorsJob::SetKey { .. }
         | ConnectorsJob::ClearKey { .. }
         | ConnectorsJob::Grant { .. }
-        | ConnectorsJob::SetSignInWith { .. } => ConnectorsEvent::Page(Err(code)),
+        | ConnectorsJob::SetSignInWith { .. }
+        | ConnectorsJob::SignOut { .. } => ConnectorsEvent::Page(Err(code)),
         ConnectorsJob::Approval { id } | ConnectorsJob::Answer { id, .. } => {
             ConnectorsEvent::Approval {
                 id: *id,
@@ -147,6 +179,16 @@ fn failed(job: &ConnectorsJob, code: String) -> ConnectorsEvent {
         ConnectorsJob::Writes { project } | ConnectorsJob::Revoke { project, .. } => {
             ConnectorsEvent::Writes {
                 project: project.clone(),
+                result: Err(code),
+            }
+        }
+        ConnectorsJob::SignIn { name } => ConnectorsEvent::SignIn {
+            name: name.clone(),
+            result: Err(code),
+        },
+        ConnectorsJob::SignInState { name } | ConnectorsJob::CancelSignIn { name } => {
+            ConnectorsEvent::SignInState {
+                name: name.clone(),
                 result: Err(code),
             }
         }
@@ -174,7 +216,21 @@ pub(in crate::tui) fn job_name(job: &ConnectorsJob) -> &'static str {
         ConnectorsJob::Writes { .. } => "ConnectorWrites",
         ConnectorsJob::Revoke { .. } => "ConnectorRevokeWrites",
         ConnectorsJob::SetSignInWith { .. } => "ConnectorSetSignInWith",
+        ConnectorsJob::SignIn { .. } => "ConnectorSignIn",
+        ConnectorsJob::SignInState { .. } => "ConnectorSignInState",
+        ConnectorsJob::CancelSignIn { .. } => "ConnectorCancelSignIn",
+        ConnectorsJob::SignOut { .. } => "ConnectorSignOut",
     }
+}
+
+/// Opens a started sign-in's address in the owner's browser off the async threads; the
+/// engine's callback listens on this machine, which the TUI shares. Input: the address.
+/// Output: the address with whether the opener took it.
+async fn opened(url: String) -> SignInStarted {
+    let address = url.clone();
+    let job = move || open_page(&address);
+    let opened = matches!(tokio::task::spawn_blocking(job).await, Ok(Ok(())));
+    SignInStarted { url, opened }
 }
 
 impl NativeOwner {
@@ -266,6 +322,27 @@ impl NativeOwner {
                     .await
                     .map_err(|error| problem(&error, lost)),
             },
+            ConnectorsJob::SignIn { name } => ConnectorsEvent::SignIn {
+                name: name.clone(),
+                result: match controller.connector_sign_in(name).await {
+                    Ok(url) => Ok(opened(url).await),
+                    Err(error) => Err(problem(&error, lost)),
+                },
+            },
+            ConnectorsJob::SignInState { name } => ConnectorsEvent::SignInState {
+                name: name.clone(),
+                result: controller
+                    .connector_sign_in_state(name)
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            },
+            ConnectorsJob::CancelSignIn { name } => ConnectorsEvent::SignInState {
+                name: name.clone(),
+                result: controller
+                    .cancel_connector_sign_in(name)
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            },
             other => ConnectorsEvent::Page(
                 page(controller, other)
                     .await
@@ -309,6 +386,7 @@ async fn page(
         ConnectorsJob::SetSignInWith { name, way } => {
             controller.connector_set_sign_in_with(name, way).await
         }
+        ConnectorsJob::SignOut { name } => controller.connector_sign_out(name).await,
         ConnectorsJob::Activity { .. }
         | ConnectorsJob::SaveSettings { .. }
         | ConnectorsJob::Preview { .. }
@@ -317,7 +395,12 @@ async fn page(
         | ConnectorsJob::Approval { .. }
         | ConnectorsJob::Answer { .. }
         | ConnectorsJob::Writes { .. }
-        | ConnectorsJob::Revoke { .. } => unreachable!("{} has its own answer", job_name(&job)),
+        | ConnectorsJob::Revoke { .. }
+        | ConnectorsJob::SignIn { .. }
+        | ConnectorsJob::SignInState { .. }
+        | ConnectorsJob::CancelSignIn { .. } => {
+            unreachable!("{} has its own answer", job_name(&job))
+        }
     }
 }
 
@@ -385,6 +468,46 @@ mod tests {
                 },
                 "ConnectorRevokeWrites",
                 writes(),
+            ),
+        ];
+        for (job, name, unavailable) in cases {
+            assert_eq!(format!("{job:?}"), name);
+            assert_eq!(ConnectorsEvent::unavailable(&job), unavailable, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_sign_in_job_has_its_own_name_and_unavailable_answer_naming_its_connector() {
+        let gone = || "trusted_connection_unavailable".to_owned();
+        let notion = || "notion".to_owned();
+        let state = || ConnectorsEvent::SignInState {
+            name: notion(),
+            result: Err(gone()),
+        };
+        let started = ConnectorsEvent::SignIn {
+            name: notion(),
+            result: Err(gone()),
+        };
+        let cases = [
+            (
+                ConnectorsJob::SignIn { name: notion() },
+                "ConnectorSignIn",
+                started,
+            ),
+            (
+                ConnectorsJob::SignInState { name: notion() },
+                "ConnectorSignInState",
+                state(),
+            ),
+            (
+                ConnectorsJob::CancelSignIn { name: notion() },
+                "ConnectorCancelSignIn",
+                state(),
+            ),
+            (
+                ConnectorsJob::SignOut { name: notion() },
+                "ConnectorSignOut",
+                ConnectorsEvent::Page(Err(gone())),
             ),
         ];
         for (job, name, unavailable) in cases {

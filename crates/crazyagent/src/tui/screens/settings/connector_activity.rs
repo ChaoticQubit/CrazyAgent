@@ -279,7 +279,9 @@ impl ConnectorActivityPage {
             ConnectorsEvent::Page(_)
             | ConnectorsEvent::Preview { .. }
             | ConnectorsEvent::Approval { .. }
-            | ConnectorsEvent::Writes { .. } => {}
+            | ConnectorsEvent::Writes { .. }
+            | ConnectorsEvent::SignIn { .. }
+            | ConnectorsEvent::SignInState { .. } => {}
         }
     }
 

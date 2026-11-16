@@ -504,6 +504,20 @@ test("Connectors: Settings, Connectors saves each option through the page, adds 
     await until("Desk gone", null, () => listedConnector("desk"));
     assert.equal(wayRow(runtime, "desk"), null, "the choice is forgotten with the connector");
   });
+  await t.test("conn sign_in state", async () => {
+    assert.deepEqual(await value(bridge, "desktop_connector_sign_in_state", { name: "notion" }), { state: "none" }, "no sign-in was started");
+    assert.deepEqual(await value(bridge, "desktop_connector_cancel_sign_in", { name: "notion" }), { state: "none" }, "a cancel with nothing waiting changes nothing");
+    await connectorPage("notion", "Notion", (text) => text.includes("Needs sign-in"));
+    const signIn = await page.evaluate("document.querySelector('[aria-label=\"Sign in to Notion\"]') !== null");
+    assert.ok(signIn, "Notion's page offers Sign in");
+    await me.capture("conn-sign-in-offered");
+  });
+  await t.test("conn sign_out", async () => {
+    const view = await value(bridge, "desktop_connector_sign_out", { name: "notion" });
+    const notion = view.connectors.find((connector) => connector.name === "notion");
+    assert.equal(notion?.status.kind, "needs_sign_in", "signing out a connector that never signed in leaves it needing one");
+    assert.equal(notion?.oauth?.signed_in, false);
+  });
 
   await t.test("conn remove", async () => {
     await me.click("Remove Board");

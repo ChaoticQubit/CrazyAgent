@@ -37,6 +37,7 @@ const GUTTER: u16 = 2;
 const KEY_CHARS_MAX: usize = 1024;
 const PATH_CHARS_MAX: usize = 1024;
 const SETTING_ROWS: usize = 4;
+const SIGN_IN_READS_MAX: usize = 72;
 const NOT_READ: &str = "Couldn't load the connectors.";
 const NOT_SAVED: &str = "The connector settings were not saved.";
 const ABSOLUTE: &str = "Type the full path of a .yaml file, starting with /.";
@@ -482,7 +483,9 @@ impl ConnectorsPage {
             }
             ConnectorsEvent::Activity(_)
             | ConnectorsEvent::Approval { .. }
-            | ConnectorsEvent::Writes { .. } => {}
+            | ConnectorsEvent::Writes { .. }
+            | ConnectorsEvent::SignIn { .. }
+            | ConnectorsEvent::SignInState { .. } => {}
         }
     }
 
