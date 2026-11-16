@@ -112,10 +112,11 @@ pub enum NoticeKind {
     EngineLost,
     HarnessUpdate,
     TeamAlert,
+    ConnectorSignIn,
 }
 
 impl NoticeKind {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Question,
         Self::AccountSignIn,
         Self::ResearchPool,
@@ -137,9 +138,10 @@ impl NoticeKind {
         Self::EngineLost,
         Self::HarnessUpdate,
         Self::TeamAlert,
+        Self::ConnectorSignIn,
     ];
 
-    /// The kind's class. Input: the kind. Output: Action for the six kinds the owner must
+    /// The kind's class. Input: the kind. Output: Action for the seven kinds the owner must
     /// act on, Info for the rest.
     pub fn class(self) -> NoticeClass {
         match self {
@@ -148,7 +150,8 @@ impl NoticeKind {
             | Self::ResearchPool
             | Self::MemoryReview
             | Self::ChangeSetReview
-            | Self::ConnectorToolsChanged => NoticeClass::Action,
+            | Self::ConnectorToolsChanged
+            | Self::ConnectorSignIn => NoticeClass::Action,
             _ => NoticeClass::Info,
         }
     }
@@ -178,6 +181,7 @@ impl NoticeKind {
             Self::EngineLost => "engine_lost",
             Self::HarnessUpdate => "harness_update",
             Self::TeamAlert => "team_alert",
+            Self::ConnectorSignIn => "connector_sign_in",
         }
     }
 
@@ -206,6 +210,7 @@ impl NoticeKind {
             Self::EngineLost => "Engine lost",
             Self::HarnessUpdate => "Harness update",
             Self::TeamAlert => "Team alert",
+            Self::ConnectorSignIn => "Connector sign-in",
         }
     }
 

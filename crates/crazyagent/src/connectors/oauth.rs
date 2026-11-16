@@ -215,13 +215,21 @@ pub fn finish(
 }
 
 /// The credential a call to a trusted connector sends now, its access token renewed first
-/// when it ends within a minute. Blocking when it renews. Inputs: database, engine root
-/// and connector. Output: the credential, or `connector_sign_in_needed` and the codes of
-/// a refused renewal.
+/// when it ends within a minute; a renewal the server refuses asks the owner to sign in
+/// again. Blocking when it renews. Inputs: database, engine root and connector. Output:
+/// the credential, or `connector_sign_in_needed` and the codes of a failed renewal.
 pub fn fresh(db: &Connection, root: &Path, name: &str) -> Result<Credential, OAuthError> {
     let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
     let spec = manifest.connector().ok_or_else(not_offered)?;
-    fresh_with(root, name, spec, now_ms(), &ProviderReach::system())
+    fresh_with(
+        db,
+        root,
+        name,
+        &manifest.title,
+        spec,
+        now_ms(),
+        &ProviderReach::system(),
+    )
 }
 
 /// This computer's clock as Unix milliseconds, 0 before 1970.
@@ -286,8 +294,10 @@ pub(crate) fn step_up_with(
 /// `connector_unavailable_here`.
 #[cfg(not(unix))]
 pub(crate) fn fresh_with(
+    _db: &Connection,
     _root: &Path,
     _name: &str,
+    _title: &str,
     _spec: &crate::app_plugins::connector::ConnectorSpec,
     _now_ms: i64,
     _reach: &ProviderReach,

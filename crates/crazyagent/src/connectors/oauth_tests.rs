@@ -4,6 +4,7 @@ use crate::connectors::mcp_client::tests::{Seen, Vendor, empty, json_reply, no_l
 use crate::connectors::mcp_client::{Access, Credential, McpError, McpSession};
 use crate::connectors::settings::SizeCap;
 use crate::connectors::tests::{Case, add, case};
+use crate::notifications::{NoticeClass, NoticeFilter, NoticeKind, NoticeQuery, PAGE_MAX};
 use crate::protocol::CredentialRef;
 use crate::storage::accounts::PLUGIN_KEYS;
 use base64::Engine;
@@ -58,6 +59,7 @@ struct Shape {
     refresh: &'static str,
     client: &'static str,
     moved: Arc<Mutex<Option<String>>>,
+    renewal: Arc<Mutex<&'static str>>,
 }
 
 fn shape() -> Shape {
@@ -74,6 +76,7 @@ fn shape() -> Shape {
         refresh: REFRESH,
         client: DCR_CLIENT,
         moved: Arc::new(Mutex::new(None)),
+        renewal: Arc::new(Mutex::new("200 OK")),
     }
 }
 
@@ -139,16 +142,21 @@ fn vendor(shape: Shape) -> Vendor {
                 let renewing = url::form_urlencoded::parse(seen.raw.as_bytes())
                     .any(|(key, value)| key == "grant_type" && value == "refresh_token");
                 let suffix = if renewing { "-renewed" } else { "" };
-                json_reply(
-                    "200 OK",
-                    &[("Cache-Control", "no-store")],
-                    &json!({
-                        "access_token": format!("{}{suffix}", shape.access),
-                        "token_type": "Bearer",
-                        "expires_in": 3600,
-                        "refresh_token": format!("{}{suffix}", shape.refresh),
-                    }),
-                )
+                let status = *shape.renewal.lock().unwrap();
+                if renewing && status != "200 OK" {
+                    json_reply(status, &[], &json!({"error": "invalid_grant"}))
+                } else {
+                    json_reply(
+                        "200 OK",
+                        &[("Cache-Control", "no-store")],
+                        &json!({
+                            "access_token": format!("{}{suffix}", shape.access),
+                            "token_type": "Bearer",
+                            "expires_in": 3600,
+                            "refresh_token": format!("{}{suffix}", shape.refresh),
+                        }),
+                    )
+                }
             }
             _ => empty("404 Not Found", &[]),
         };
@@ -751,7 +759,15 @@ fn clock() -> i64 {
 }
 
 fn fresh_at(sign: &Sign, now_ms: i64) -> Result<Credential, OAuthError> {
-    fresh_with(&sign.case.root, "board", &sign.spec, now_ms, &no_lookup())
+    fresh_with(
+        &sign.case.db,
+        &sign.case.root,
+        "board",
+        "Board",
+        &sign.spec,
+        now_ms,
+        &no_lookup(),
+    )
 }
 
 /// The Authorization values the stand-in's MCP address was sent.
@@ -1052,4 +1068,136 @@ fn the_owners_app_is_bound_once_when_two_sign_ins_race() {
         saved(&own.case, "connector-token-board-"),
         vec![ACCESS.to_owned()]
     );
+}
+
+/// The Action items waiting on the owner after one reconcile, as kind, class, text and
+/// the page a click opens.
+fn notices(case: &mut Case) -> Vec<(NoticeKind, NoticeClass, String, serde_json::Value)> {
+    crate::notifications::initialize(&case.db).unwrap();
+    crate::notifications::reconcile::reconcile(
+        &mut case.db,
+        &crate::config::ModelAccess::default(),
+        clock(),
+    )
+    .unwrap();
+    let query = NoticeQuery {
+        filter: NoticeFilter::Pending,
+        project_id: None,
+        kind: None,
+        fold: false,
+        before: None,
+        after: None,
+        limit: PAGE_MAX,
+    };
+    crate::notifications::page(&case.db, &query)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| {
+            let target = serde_json::to_value(&item.target).unwrap();
+            (item.kind, item.class, item.text, target)
+        })
+        .collect()
+}
+
+fn renewals(vendor: &Vendor) -> usize {
+    token_calls(vendor)
+        .iter()
+        .filter(|seen| form(seen).get("grant_type").map(String::as_str) == Some("refresh_token"))
+        .count()
+}
+
+/// A renewal the token endpoint refuses ends the sign-in: one Action item asks the owner
+/// to sign in again however often it is read, later calls ask the endpoint nothing, a
+/// server that is only down raises nothing and keeps the tokens, and a new sign-in
+/// resolves the item.
+#[test]
+fn a_failed_refresh_raises_one_sign_in_notice() {
+    let renewal = Arc::new(Mutex::new("503 Service Unavailable"));
+    let mut sign = signing(
+        Shape {
+            renewal: renewal.clone(),
+            ..shape()
+        },
+        &["127.0.0.1"],
+    );
+    let trusted =
+        crate::app_plugins::store::trusted_connector(&sign.case.db, &sign.case.root, "board")
+            .unwrap()
+            .sha256;
+    let signed_in = |sign: &Sign| {
+        let begun = begin_with(
+            &sign.case.root,
+            "board",
+            &trusted,
+            &sign.spec,
+            &redirect(),
+            false,
+            None,
+            &no_lookup(),
+        );
+        assert!(begun.is_ok(), "{begun:?}");
+        let state = begun.unwrap().state;
+        finish(
+            &sign.case.db,
+            &sign.case.root,
+            &state,
+            CODE,
+            Some(&sign.issuer()),
+        )
+    };
+    assert_eq!(signed_in(&sign), Ok(()));
+    let later = clock() + 2 * 3_600_000;
+
+    assert_eq!(
+        fresh_at(&sign, later),
+        Err(OAuthError("connector_oauth_refused"))
+    );
+    assert!(
+        notices(&mut sign.case).is_empty(),
+        "a server that is down raises nothing"
+    );
+    assert_eq!(
+        saved(&sign.case, "connector-refresh-board-"),
+        vec![REFRESH.to_owned()],
+        "and keeps the tokens"
+    );
+
+    *renewal.lock().unwrap() = "400 Bad Request";
+    for _ in 0..2 {
+        assert_eq!(
+            fresh_at(&sign, later),
+            Err(OAuthError("connector_sign_in_needed"))
+        );
+    }
+    assert_eq!(
+        renewals(&sign.vendor),
+        2,
+        "one renewal while down, one refused, none after"
+    );
+    assert!(
+        saved(&sign.case, "connector-refresh-board-").is_empty(),
+        "a refused refresh token is dropped"
+    );
+    let wanted = vec![(
+        NoticeKind::ConnectorSignIn,
+        NoticeClass::Action,
+        "Board needs you to sign in again.".to_owned(),
+        json!({"page": "connectors"}),
+    )];
+    assert_eq!(notices(&mut sign.case), wanted);
+    assert_eq!(
+        notices(&mut sign.case),
+        wanted,
+        "one item, however often it is read"
+    );
+
+    *renewal.lock().unwrap() = "200 OK";
+    assert_eq!(signed_in(&sign), Ok(()));
+    assert!(
+        notices(&mut sign.case).is_empty(),
+        "a new sign-in resolves it"
+    );
+    let now = fresh_at(&sign, clock());
+    assert!(matches!(now, Ok(Credential::OAuth { .. })), "{now:?}");
 }

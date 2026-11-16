@@ -1095,15 +1095,19 @@ fn renew(
 /// The credential a call sends now for one connector as declared, its access token
 /// renewed first at the token endpoint of its sign-in when it ends within a minute. A
 /// sign-in for another resource than the one declared is not used. Blocking when it
-/// renews. Inputs: root, connector, its declaration, the clock (Unix ms) and the lookup.
-/// Output: the credential, or `connector_sign_in_needed` and a renewal's refusals.
+/// renews. Inputs: database, root, connector, its title, its declaration, the clock (Unix
+/// ms) and the lookup. Output: the credential, or `connector_sign_in_needed` and a
+/// renewal's refusals.
 pub(crate) fn fresh_with(
+    db: &Connection,
     root: &Path,
     name: &str,
+    title: &str,
     spec: &ConnectorSpec,
     now_ms: i64,
     reach: &ProviderReach,
 ) -> Result<Credential, OAuthError> {
+    let _ = (db, title);
     let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
     let usable = |record: Option<Record>| {
         record

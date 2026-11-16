@@ -17,7 +17,8 @@ export type NoticeKind =
   | "agent_finished" | "agent_failed" | "agent_stopped" | "master_off"
   | "change_set_landed" | "change_set_conflict" | "change_set_rolled_back"
   | "account_near_limit" | "account_at_limit" | "pool_failover"
-  | "app_update_ready" | "engine_restarted" | "engine_lost" | "harness_update" | "team_alert";
+  | "app_update_ready" | "engine_restarted" | "engine_lost" | "harness_update" | "team_alert"
+  | "connector_sign_in";
 
 /** Every kind in the engine's order, with its class and the label both clients show
  * (`NoticeKind::label`, checked against the engine source by a test). */
@@ -43,6 +44,7 @@ export const NOTICE_KINDS: readonly { kind: NoticeKind; class: NoticeClass; labe
   { kind: "engine_lost", class: "info", label: "Engine lost" },
   { kind: "harness_update", class: "info", label: "Harness update" },
   { kind: "team_alert", class: "info", label: "Team alert" },
+  { kind: "connector_sign_in", class: "action", label: "Connector sign-in" },
 ];
 
 /** The page a click opens, the engine's `NoticeTarget`: never an address, since item text
