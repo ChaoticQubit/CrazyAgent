@@ -4588,9 +4588,9 @@ fn carved_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
 }
 
 /// The native profiles folder when the home is a listed master session's home,
-/// `<slot key>/home/<session>/<harness>/<account>` in it, in a slot whose home holds no
-/// sign-in's record (DEC-180 Task 20). Inputs: the engine root and the canonical home.
-/// Output: the folder, or none for any other home.
+/// `<listed key of account>/home/<session>/<harness>/<account>` in it, so in that account's
+/// own listed slot, whose home holds no sign-in's record (DEC-180 Task 20). Inputs: the
+/// engine root and the canonical home. Output: the folder, or none for any other home.
 #[cfg(unix)]
 fn listed_master_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
     let profiles = engine.join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER);
@@ -4600,19 +4600,17 @@ fn listed_master_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
         Component::Normal(slot),
         Component::Normal(_),
         Component::Normal(_),
-        Component::Normal(_),
+        Component::Normal(account),
     ] = parts.as_slice()
     else {
         return None;
     };
-    let keyed = key.len() == 64
-        && key
-            .as_encoded_bytes()
-            .iter()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+    let listed = crate::engine::bootstrap::listed_slot_key(account.to_str()?);
     let slot_home = profiles.join(key).join(slot);
-    (keyed && *slot == "home" && crate::harnesses::launch::holds_no_sign_in(&slot_home).is_ok())
-        .then_some(profiles)
+    (*key == listed.as_str()
+        && *slot == "home"
+        && crate::harnesses::launch::holds_no_sign_in(&slot_home).is_ok())
+    .then_some(profiles)
 }
 
 /// Carves no listed master home off Unix, where a listed master session's home is never made
