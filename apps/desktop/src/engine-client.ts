@@ -1514,6 +1514,70 @@ export interface CloneReceipt {
   path: string;
 }
 
+export interface GitHubOwner {
+  login: string;
+  personal: boolean;
+}
+
+export interface GitHubOwners {
+  owners: GitHubOwner[];
+  problem: string | null;
+}
+
+export interface GitHubPublishPlan {
+  owner: string;
+  name: string;
+  description: string;
+  private: boolean;
+  docs: boolean;
+}
+
+export type GitHubIgnoreDraft = { by: "agent" } | { by: "baseline"; reason: string };
+
+export interface GitHubCommitted {
+  branch: string;
+  commit: string;
+  left_out: number;
+}
+
+export interface GitHubSecretFinding {
+  path: string;
+  line: number;
+  kind: "token" | "private_key" | "named_value";
+}
+
+export type GitHubRuleState =
+  | { state: "applied" }
+  | { state: "refused"; status: number; message: string }
+  | { state: "not_applicable"; reason: string }
+  | { state: "waiting"; reason: string };
+
+export interface GitHubRuleOutcome {
+  rule: string;
+  on: boolean;
+  state: GitHubRuleState;
+}
+
+export type GitHubPublishStep =
+  | { step: "lines"; lines: string[]; draft: GitHubIgnoreDraft }
+  | { step: "blocked"; scan: { findings: GitHubSecretFinding[]; truncated: boolean } }
+  | { step: "checked" }
+  | { step: "committed"; committed: GitHubCommitted }
+  | { step: "creating"; committed: GitHubCommitted; sent_at: number }
+  | { step: "created"; committed: GitHubCommitted; full_name: string; private: boolean }
+  | { step: "pushed"; full_name: string; private: boolean; workflows: boolean }
+  | { step: "done"; full_name: string; outcomes: GitHubRuleOutcome[] };
+
+export interface GitHubPublishJob {
+  project: string;
+  plan: GitHubPublishPlan;
+  lines: string[];
+  written: string[];
+  step: GitHubPublishStep;
+  stopped: string | null;
+  made: string | null;
+}
+
 /** Starts "Sign in with GitHub". Output: the code to type at the GitHub page and its
  * address; the engine waits for approval in the background, so poll githubStatus. */
 export function githubSignIn(): Promise<GitHubDeviceCode> {
