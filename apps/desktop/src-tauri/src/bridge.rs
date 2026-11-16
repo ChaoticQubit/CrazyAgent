@@ -280,15 +280,6 @@ pub struct HistoryPage {
     pub revision: String,
 }
 
-/// Names the project a StartOnboarding registers, computed from the folder path the way the
-/// engine does, so the receipt can open the setup review. Input: the folder path sent.
-/// Output: the project id, or None for a path with no folder name.
-pub fn onboarded_project(path: &str) -> Option<String> {
-    crazyagent::onboarding::project_id_for(std::path::Path::new(path))
-        .ok()
-        .map(|id| id.as_str().to_owned())
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingIntent {
     pub kind: &'static str,
@@ -715,9 +706,7 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
-            OwnerMutation::StartOnboarding { path, .. } => {
-                ("start_onboarding", onboarded_project(path), None)
-            }
+            OwnerMutation::StartOnboarding { .. } => ("start_onboarding", None, None),
             OwnerMutation::CancelResearch { project_id, .. } => (
                 "research_cancel",
                 Some(project_id.as_str().to_owned()),

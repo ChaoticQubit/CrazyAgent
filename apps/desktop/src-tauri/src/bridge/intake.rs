@@ -1374,19 +1374,6 @@ mod tests {
     }
 
     #[test]
-    fn a_started_onboarding_names_the_project_the_engine_registers() {
-        assert_eq!(
-            crate::bridge::onboarded_project("/Users/mira/Projects/Plant Shop").as_deref(),
-            Some("plant-shop")
-        );
-        assert_eq!(
-            crate::bridge::onboarded_project("/Users/mira/Projects/---").as_deref(),
-            Some("project")
-        );
-        assert_eq!(crate::bridge::onboarded_project("/"), None);
-    }
-
-    #[test]
     fn pack_ids_are_bounded_plain_names() {
         assert_eq!(
             pack_ids(vec!["context-mode".into(), "i_have_adhd".into()])
