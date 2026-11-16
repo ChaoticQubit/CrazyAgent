@@ -2468,6 +2468,44 @@ fn an_access_answer_is_kept_only_once_its_entry_changed_in_an_earlier_second() {
     );
 }
 
+/// Changes a tool's folder and reads the tool's access answer within one second, at most
+/// three tries, since a slow spawn can carry the listing into the next second: the first try
+/// gives staff `add_file` on the folder's access list, a later one flips its mode, which
+/// keeps that entry. Each read lists the folder alone. Inputs: the tool, its folder, the root.
+#[cfg(target_os = "macos")]
+fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    for attempt in 0..3u32 {
+        early_in_a_second();
+        if attempt == 0 {
+            let status = crate::spawn_gate::status(
+                std::process::Command::new("/bin/chmod")
+                    .arg("+a")
+                    .arg("group:staff allow add_file,delete_child")
+                    .arg(folder),
+            )
+            .unwrap();
+            assert!(status.success());
+        } else {
+            let mode = if attempt == 1 { 0o750 } else { 0o755 };
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        assert_eq!(changeable_by_others(tool), Some(folder.to_path_buf()));
+        let changed = acl::take_listings();
+        assert_eq!(changed.len(), 1, "{changed:?}");
+        let ours: Vec<PathBuf> = changed[0]
+            .iter()
+            .filter(|listed| listed.starts_with(root))
+            .cloned()
+            .collect();
+        assert_eq!(ours, vec![folder.to_path_buf()], "the changed part alone");
+        if now_secs() == changed_secs(folder) {
+            return;
+        }
+    }
+    panic!("no change and its listing shared a second in three tries");
+}
+
 /// RV-DS241-18 r2: one `ls -lde` lists every part of a path the first time, names with a
 /// space or an accent included; a repeat lists none of the parts it read, and an access-list
 /// change moves only the changed part's change time, so that part alone is listed again and
@@ -2507,28 +2545,7 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
         "nothing read is listed again"
     );
 
-    early_in_a_second();
-    let status = crate::spawn_gate::status(
-        std::process::Command::new("/bin/chmod")
-            .arg("+a")
-            .arg("group:staff allow add_file,delete_child")
-            .arg(&folder),
-    )
-    .unwrap();
-    assert!(status.success());
-    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
-    let changed = acl::take_listings();
-    assert_eq!(changed.len(), 1, "{changed:?}");
-    assert_eq!(
-        ours(&changed),
-        vec![folder.clone()],
-        "the changed part alone"
-    );
-    assert_eq!(
-        now_secs(),
-        changed_secs(&folder),
-        "the change and its listing share a second"
-    );
+    changed_and_read_in_one_second(&tool, &folder, temp.path());
     settle(&[&folder]);
     assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
     assert_eq!(
