@@ -701,3 +701,60 @@ fn an_allowed_write_too_late_to_finish_before_its_server_gives_up_is_never_sent(
     assert!(!sent_to(&vendor, "create_issue"));
     assert_eq!(writes(&bench, "connector_write_expired", false), 1);
 }
+
+/// The calls of the launch given that the engine marks as held for the owner, by call id.
+fn held_calls(launch: &GatewayLaunch) -> Vec<String> {
+    let mailbox = crate::team::tool::Mailbox::open(&launch.folder.join(shim::MAILBOX)).unwrap();
+    let held = mailbox.entries(shim::HELD_SUFFIX);
+    held.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Makes the launch read on the database fail, or read again, by renaming the column it
+/// reads, while every approval still reads. Inputs: the database and whether it fails.
+fn launch_read_fails(db: &rusqlite::Connection, fails: bool) {
+    let (from, to) = if fails {
+        ("connectors", "unread")
+    } else {
+        ("unread", "connectors")
+    };
+    let sql = format!("ALTER TABLE connector_launches RENAME {from} TO {to}");
+    db.execute_batch(&sql).unwrap();
+}
+
+/// DEC-168 Task 12, code r1 CT12-1: a settle whose launch read fails settles nothing, so a
+/// held write stays waiting, parked and marked held. Once the read works again, an Allow
+/// runs it once and its server gets the answer.
+#[test]
+fn a_failed_launch_read_settles_nothing_and_the_held_write_runs_after_a_later_allow() {
+    let (vendor, bench, launch) = write_bench();
+    let mut server = Open::start(&launch, WAIT);
+    server.send(&[call(1, "board__create_issue", json!({"title": "Fix login"}))]);
+    let id = until(&bench, "the write never waited", |bench| {
+        waiting_ids(bench).first().copied()
+    });
+    let db = &bench.case.db;
+    let held = held_calls(&launch);
+    assert_eq!(held.len(), 1, "{held:?}");
+    launch_read_fails(db, true);
+    assert_eq!(bench.gateway.settle_at(db, crate::semantic::now_ms()), 0);
+    assert_eq!(approvals::state(db, id).unwrap(), Some(State::Waiting));
+    assert_eq!(locked(&bench.gateway.parked).len(), 1);
+    assert_eq!(held_calls(&launch), held);
+    launch_read_fails(db, false);
+    owner_answers(&bench, id, approvals::Answer::Allow);
+    assert_eq!(bench.gateway.settle_at(db, crate::semantic::now_ms()), 1);
+    let deadline = Instant::now() + WAIT;
+    while server.replies().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the allowed write was never answered"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let replies = server.finish(WAIT);
+    let (text, error) = shown(&replies[0]);
+    assert!(!error, "{text}");
+    assert!(text.ends_with("ran create_issue"), "{text}");
+    assert_eq!(vendor_calls(&vendor).len(), 1);
+    assert_eq!(writes(&bench, "ok", true), 1);
+}
