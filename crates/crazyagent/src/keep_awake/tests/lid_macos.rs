@@ -1153,3 +1153,37 @@ fn a_step_that_asks_no_low_power_adds_no_read() {
     assert_eq!(rig.calls(), [HOLD, HOLD], "no status read without a low power ask");
     assert_eq!(rig.line.low_power(), LowPowerSupport::Unread);
 }
+
+#[test]
+fn a_status_an_ended_ask_or_an_off_helper_left_clears_on_a_step_that_asks_nothing() {
+    for ask in [OFF, WANTED] {
+        let mut rig = Rig::new(mac(15), Some(Status::NotRegistered));
+        rig.line.step(ask, NOW_MS);
+        let needs = low_power_not_available(LOW_POWER_NEEDS_HELPER);
+        assert_eq!(rig.line.low_power(), needs, "{ask:?}");
+        rig.set_status(Some(Status::Enabled));
+        rig.line.step(ask, NOW_MS + READING_MS);
+        let why = "a helper turned on with nothing read yet (advisor 01:52, 39d A)";
+        assert_eq!(rig.line.low_power(), LowPowerSupport::Unread, "{ask:?}: {why}");
+    }
+
+    let mut rig = Rig::enabled();
+    let refused = Reply::Refused {
+        reason: Refusal::Unpinned,
+    };
+    rig.answer(Ok(refused), power_view(Some(false), false));
+    rig.line.step(LOW_POWER_RULE_OFF, NOW_MS);
+    let not_taken = low_power_not_available(LOW_POWER_NOT_TAKEN);
+    assert_eq!(rig.line.low_power(), not_taken);
+    let made = rig.calls().len();
+    rig.line.step(OFF, NOW_MS + READING_MS);
+    assert_eq!(rig.line.low_power(), LowPowerSupport::Ready, "the ask it was about ended");
+    assert_eq!(rig.calls().len(), made, "and the rule Off step called nothing");
+
+    let mut bare = Rig::enabled();
+    bare.answer(Ok(held()), power_view(None, true));
+    bare.line.step(LOW_POWER_RULE_OFF, NOW_MS);
+    bare.line.step(OFF, NOW_MS + READING_MS);
+    let not_here = low_power_not_available(LOW_POWER_NOT_ON_THIS_MAC);
+    assert_eq!(bare.line.low_power(), not_here, "a fact of this Mac outlives the ask");
+}
