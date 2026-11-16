@@ -1174,7 +1174,7 @@ async fn a_project_move_waits_for_its_agents_says_how_many_are_left_and_moves_on
         &format!(
             "INSERT OR IGNORE INTO team_paused_projects(project,since_ms) VALUES ('notes-cli',1);
              INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
-             VALUES (43,'notes-cli','team','codex',1,'{}','working',0,0);",
+             VALUES (43,'notes-cli','sub','codex',1,'{}','working',0,0);",
             copy.to_str().unwrap()
         ),
     );
@@ -1391,7 +1391,7 @@ fn working(engine: &Engine, project: &str, agent: u32) {
         engine,
         &format!(
             "INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
-             VALUES ({agent},'{project}','team','codex',1,'{}','working',0,0);",
+             VALUES ({agent},'{project}','sub','codex',1,'{}','working',0,0);",
             worktree.to_str().unwrap()
         ),
     );
@@ -1822,7 +1822,7 @@ async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
         &format!(
             "INSERT OR IGNORE INTO team_paused_projects(project,since_ms) VALUES ('notes-cli',1);
              INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
-             VALUES (47,'notes-cli','team','codex',1,'{}','working',0,0);",
+             VALUES (47,'notes-cli','sub','codex',1,'{}','working',0,0);",
             copy.to_str().unwrap()
         ),
     );
