@@ -1692,9 +1692,10 @@ export function githubRules(project: string): Promise<GitHubRepoRules> {
 }
 
 /** Turns one rule on or off on that repository with the owner's sign-in, then reads it again.
- * Inputs: the project id, the rule and whether it is on. Output: the fresh page. */
-export function githubRuleSet(project: string, rule: string, on: boolean): Promise<GitHubRepoRules> {
-  return invoke<GitHubRepoRules>("desktop_github_rule_set", { project, rule, on });
+ * Inputs: the project id, the `owner/name` the page showed, the rule and whether it is on.
+ * Output: the fresh page. */
+export function githubRuleSet(project: string, repo: string, rule: string, on: boolean): Promise<GitHubRepoRules> {
+  return invoke<GitHubRepoRules>("desktop_github_rule_set", { project, repo, rule, on });
 }
 
 export type DependencyName = "tmux" | "uv" | "graphify" | "node";

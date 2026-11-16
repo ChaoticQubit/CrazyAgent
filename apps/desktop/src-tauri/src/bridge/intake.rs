@@ -994,10 +994,12 @@ impl NativeBridge {
     }
 
     /// Turns one rule on or off on that repository with the owner's sign-in. Inputs: the
-    /// project id, the rule and whether it is on. Output: the fresh page.
+    /// project id, the `owner/name` the page showed, the rule and whether it is on.
+    /// Output: the fresh page.
     pub fn github_rule_set(
         &mut self,
         id: &str,
+        repo: String,
         rule: GitHubRule,
         on: bool,
     ) -> Result<Unlocked<GitHubRepoRules>, BridgeError> {
@@ -1006,7 +1008,7 @@ impl NativeBridge {
         Ok(Box::pin(async move {
             bounded(
                 client
-                    .github_rule_set(project, rule, on)
+                    .github_rule_set(project, repo, rule, on)
                     .await
                     .map_err(github_failure)?,
             )

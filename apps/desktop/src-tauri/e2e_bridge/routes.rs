@@ -2005,14 +2005,15 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             #[derive(serde::Deserialize)]
             struct Args {
                 project: String,
+                repo: String,
                 rule: crazyagent::github::GitHubRule,
                 on: bool,
             }
-            let Args { project, rule, on } = match parse(args) {
+            let Args { project, repo, rule, on } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_rule_set(&project, rule, on)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_rule_set(&project, repo, rule, on)?; call.await }.await;
             routed(result)
         }
         "desktop_clone_repo" => {

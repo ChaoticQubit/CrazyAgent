@@ -64,6 +64,7 @@ pub(super) enum Action {
     },
     RuleSet {
         project: ProjectId,
+        repo: String,
         rule: GitHubRule,
         on: bool,
     },
@@ -302,16 +303,25 @@ impl OwnerClient {
     }
 
     /// Turns one rule on or off on the repository a project was published to, with the
-    /// owner's GitHub sign-in. Inputs: the project, the rule and whether it is on.
-    /// Output: the page read again after the change.
+    /// owner's GitHub sign-in. Inputs: the project, the `owner/name` the page showed, the
+    /// rule and whether it is on. Output: the page read again after the change.
     pub async fn github_rule_set(
         &self,
         project: ProjectId,
+        repo: String,
         rule: GitHubRule,
         on: bool,
     ) -> Result<GitHubRepoRules, EngineError> {
         match self
-            .github_exchange(Action::RuleSet { project, rule, on }, None)
+            .github_exchange(
+                Action::RuleSet {
+                    project,
+                    repo,
+                    rule,
+                    on,
+                },
+                None,
+            )
             .await?
         {
             Reply::Rules { rules } => Ok(rules),
@@ -569,8 +579,13 @@ async fn handle(
             Action::Rules { project } => Reply::Rules {
                 rules: account.repo_rules(&project_folder(&root, &project)?)?,
             },
-            Action::RuleSet { project, rule, on } => Reply::Rules {
-                rules: account.set_repo_rule(&project_folder(&root, &project)?, rule, on)?,
+            Action::RuleSet {
+                project,
+                repo,
+                rule,
+                on,
+            } => Reply::Rules {
+                rules: account.set_repo_rule(&project_folder(&root, &project)?, &repo, rule, on)?,
             },
         })
     })

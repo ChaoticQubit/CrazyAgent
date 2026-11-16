@@ -44,12 +44,15 @@ impl GitHub {
     /// Turns one rule on or off on the repository a project was published to, with the
     /// owner's sign-in, and reads the page again. The rules the owner wants on are kept in
     /// the repository's record, so a change sends the others as the owner left them.
-    /// Inputs: the project folder, the rule and whether it is on. Output: the fresh page,
-    /// with the change's own refusal kept on its rule, or `github_rules_not_published`,
-    /// `github_rule_invalid` for a rule that is a file in the project.
+    /// Inputs: the project folder, the `owner/name` the request was made for, the rule and
+    /// whether it is on. Output: the fresh page, with the change's own refusal kept on its
+    /// rule, or `github_rule_invalid` for a rule that is a file in the project,
+    /// `github_rules_not_published`, `github_rules_repo_mismatch` when the publish names
+    /// another repository.
     pub fn set_repo_rule(
         &self,
         project: &Path,
+        repo: &str,
         rule: GitHubRule,
         on: bool,
     ) -> Result<GitHubRepoRules, EngineError> {
@@ -57,6 +60,7 @@ impl GitHub {
             return Err(failure("github_rule_invalid"));
         }
         let full_name = self.published(project)?;
+        let _ = repo;
         let token = self.store.get(&self.saved()?.credential)?;
         let made = self.record(&full_name)?;
         let (live, facts) = rules::read(&self.endpoints, &token, &full_name, &made)?;

@@ -156,7 +156,7 @@ test("the four rule calls reach the engine through their own client functions, w
   assert.match(client, /export function githubRuleDefaults\(\): Promise<string\[\]> \{\s*return invoke<string\[\]>\("desktop_github_rule_defaults"\)/);
   assert.match(client, /export function githubRuleDefaultsSet\(rules: string\[\]\): Promise<string\[\]> \{\s*return invoke<string\[\]>\("desktop_github_rule_defaults_set", \{ rules \}\)/);
   assert.match(client, /export function githubRules\(project: string\): Promise<GitHubRepoRules> \{\s*return invoke<GitHubRepoRules>\("desktop_github_rules", \{ project \}\)/);
-  assert.match(client, /export function githubRuleSet\(project: string, rule: string, on: boolean\): Promise<GitHubRepoRules> \{\s*return invoke<GitHubRepoRules>\("desktop_github_rule_set", \{ project, rule, on \}\)/);
+  assert.match(client, /export function githubRuleSet\(project: string, repo: string, rule: string, on: boolean\): Promise<GitHubRepoRules> \{\s*return invoke<GitHubRepoRules>\("desktop_github_rule_set", \{ project, repo, rule, on \}\)/);
   assert.match(client, /export interface GitHubRepoRules \{\s*full_name: string;\s*private: boolean;\s*checks: string\[\];\s*rules: GitHubRuleOutcome\[\];\s*\}/);
   assert.match(client, /export interface GitHubPublishJob \{[^}]*\n  rules\?: string\[\];/);
   const lib = read("src-tauri/src/lib.rs");
@@ -164,7 +164,7 @@ test("the four rule calls reach the engine through their own client functions, w
     ["desktop_github_rule_defaults", [], "BTreeSet<GitHubRule>"],
     ["desktop_github_rule_defaults_set", ["rules: BTreeSet<GitHubRule>"], "BTreeSet<GitHubRule>"],
     ["desktop_github_rules", ["project: String"], "GitHubRepoRules"],
-    ["desktop_github_rule_set", ["project: String", "rule: GitHubRule", "on: bool"], "GitHubRepoRules"],
+    ["desktop_github_rule_set", ["project: String", "repo: String", "rule: GitHubRule", "on: bool"], "GitHubRepoRules"],
   ]) {
     const start = lib.indexOf(`async fn ${command}(`);
     assert.ok(start >= 0, command);
@@ -180,7 +180,7 @@ test("the four rule calls reach the engine through their own client functions, w
   assert.deepEqual(await api.loadGitHubRuleDefaults(), unreachable);
   assert.deepEqual(await api.saveGitHubRuleDefaults([...rules.STANDARD_RULES]), unreachable);
   assert.deepEqual(await api.loadGitHubRules("project-1"), unreachable);
-  assert.deepEqual(await api.setGitHubRule("project-1", "wiki_off", true), unreachable);
+  assert.deepEqual(await api.setGitHubRule("project-1", "me/site", "wiki_off", true), unreachable);
 });
 
 test("every code the rule calls can return has its own sentence and passes the desktop bridge", () => {
@@ -216,7 +216,7 @@ test("Project Settings has a GitHub section that reads on open and writes only f
   assert.ok(effect.includes("loadGitHubRules(data.id)"), "opening the section reads the live rules");
   assert.ok(!effect.includes("setGitHubRule(") && !effect.includes("sendRule("), "opening the section sends no change");
   assert.equal(counted(section, /await sendRule\(/g), 1, "one change call, from the switch handler");
-  assert.equal(counted(section, /\bsend\(project, rule, on\)/g), 1, "sendRule sends the change once");
+  assert.equal(counted(section, /\bsend\(project, repo, rule, on\)/g), 1, "sendRule sends the change once, for the repository shown");
   const github = read("src/screens/settings/github.tsx");
   assert.ok(!github.includes("only to list and clone"), "the sign-in now also publishes and sets rules");
   assert.ok(!github.includes("you push"), "a publish pushes for the owner");
@@ -227,20 +227,22 @@ test("a failed switch keeps its problem and reads the page again, since the chan
   const lost = { kind: "error", code: "github_outcome_unknown", message: api.intakeCopy("github_outcome_unknown") };
   const fresh = { kind: "ok", value: page({ wiki_off: [true, applied] }) };
   const calls = [];
-  const after = await sendRule("project-1", "wiki_off", true,
+  const after = await sendRule("project-1", "me/site", "wiki_off", true,
     async (...args) => { calls.push(["set", ...args]); return lost; },
     async (...args) => { calls.push(["read", ...args]); return fresh; });
   assert.deepEqual(after, { page: fresh, problem: lost.message });
-  assert.deepEqual(calls, [["set", "project-1", "wiki_off", true], ["read", "project-1"]]);
+  assert.deepEqual(calls, [["set", "project-1", "me/site", "wiki_off", true], ["read", "project-1"]]);
   const answered = { kind: "ok", value: page() };
-  assert.deepEqual(await sendRule("project-1", "wiki_off", false, async () => answered, act), { page: answered, problem: "" });
+  assert.deepEqual(await sendRule("project-1", "me/site", "wiki_off", false, async () => answered, act), { page: answered, problem: "" });
   const down = { kind: "error", code: "github_unreachable", message: api.intakeCopy("github_unreachable") };
-  assert.deepEqual(await sendRule("project-1", "wiki_off", false, async () => down, async () => down), { page: down, problem: down.message });
-  assert.deepEqual(await sendRule("project-1", "wiki_off", false, async () => ({ kind: "not_ready" }), async () => answered),
+  assert.deepEqual(await sendRule("project-1", "me/site", "wiki_off", false, async () => down, async () => down), { page: down, problem: down.message });
+  assert.deepEqual(await sendRule("project-1", "me/site", "wiki_off", false, async () => ({ kind: "not_ready" }), async () => answered),
     { page: answered, problem: "Changing GitHub rules isn't in this build." });
   const section = read("src/screens/project/github-section.tsx");
   const change = section.slice(section.indexOf("  async function change("));
-  assert.match(change.slice(0, change.indexOf("\n  }\n")), /await sendRule\(id, rule, on\)/);
+  const handler = change.slice(0, change.indexOf("\n  }\n"));
+  assert.match(handler, /const repo = read\.value\.full_name;/);
+  assert.match(handler, /await sendRule\(id, repo, rule, on\)/);
 });
 
 test("a defaults save that fails says so in its own words and shows the saved set read again", () => {

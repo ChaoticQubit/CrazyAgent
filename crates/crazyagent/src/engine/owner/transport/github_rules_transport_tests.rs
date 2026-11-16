@@ -12,6 +12,7 @@ fn a_rules_read_or_switch_has_time_for_two_reads_and_a_change() {
         },
         crate::engine::owner::transport::github::Action::RuleSet {
             project,
+            repo: "octo-cat/tool".into(),
             rule: GitHubRule::WikiOff,
             on: false,
         },
@@ -70,7 +71,7 @@ async fn rule_defaults_and_repository_rules_run_over_the_owner_socket_by_project
         );
         assert_eq!(
             client
-                .github_rule_set(beta, GitHubRule::WikiOff, false)
+                .github_rule_set(beta, "octo-cat/tool".into(), GitHubRule::WikiOff, false)
                 .await
                 .map(|_| ())
                 .map_err(|error| error.0),
@@ -86,7 +87,7 @@ async fn rule_defaults_and_repository_rules_run_over_the_owner_socket_by_project
         );
         assert_eq!(
             client
-                .github_rule_set(alpha, GitHubRule::WikiOff, false)
+                .github_rule_set(alpha, "octo-cat/tool".into(), GitHubRule::WikiOff, false)
                 .await
                 .map(|_| ())
                 .map_err(|error| error.0),

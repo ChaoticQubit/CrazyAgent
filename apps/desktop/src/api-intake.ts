@@ -502,9 +502,10 @@ export function loadGitHubRules(project: string): Promise<Result<GitHubRepoRules
 }
 
 /** Turns one rule on or off on the repository a project was published to, with the owner's
- * sign-in. Inputs: the project id, the rule and whether it is on. Output: the fresh page. */
-export function setGitHubRule(project: string, rule: string, on: boolean): Promise<Result<GitHubRepoRules>> {
-  return wrap(() => githubRuleSet(project, rule, on));
+ * sign-in. Inputs: the project id, the `owner/name` the page showed, the rule and whether it
+ * is on. Output: the fresh page. */
+export function setGitHubRule(project: string, repo: string, rule: string, on: boolean): Promise<Result<GitHubRepoRules>> {
+  return wrap(() => githubRuleSet(project, repo, rule, on));
 }
 
 /** Reads one page of the signed-in account's repositories.

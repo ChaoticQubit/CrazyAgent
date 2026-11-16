@@ -2662,11 +2662,12 @@ async fn desktop_github_rule_set(
     webview: Webview,
     state: State<'_, NativeState>,
     project: String,
+    repo: String,
     rule: GitHubRule,
     on: bool,
 ) -> Result<GitHubRepoRules, BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.github_rule_set(&project, rule, on)?;
+    let call = lock(&state).await?.github_rule_set(&project, repo, rule, on)?;
     call.await
 }
 
