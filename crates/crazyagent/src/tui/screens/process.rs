@@ -1532,8 +1532,9 @@ impl ProcessPage {
     /// `PATH_BYTES_MAX` bytes, Backspace, Enter to read the file as a preview (a leading `~/`
     /// is the owner's home folder) and Esc to close the field. Ctrl-O asks the engine for the
     /// harness instruction files it offers; Up and Down pick one, and Enter with no path
-    /// typed reads the picked one by its harness id. Inputs: the key and the context.
-    /// Output: handled, so no key reaches the editor meanwhile.
+    /// typed reads the picked one by its harness id. While a request is on its way, Enter
+    /// leaves the field and its path as they are. Inputs: the key and the context. Output:
+    /// handled, so no key reaches the editor meanwhile.
     fn path_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let Some(path) = self.path.as_mut() else {
             return Flow::Ignored;
@@ -1554,7 +1555,7 @@ impl ProcessPage {
                     *picked = (*picked + 1).min(offered.len() - 1);
                     return Flow::Handled;
                 }
-                Key::Enter if typed_none => {
+                Key::Enter if typed_none && self.pending.is_none() => {
                     let harness = offered[*picked].harness.clone();
                     self.path = None;
                     self.sources = None;
@@ -1582,7 +1583,7 @@ impl ProcessPage {
                 self.path = None;
                 self.sources = None;
             }
-            Key::Enter if !path.trim().is_empty() => {
+            Key::Enter if !path.trim().is_empty() && self.pending.is_none() => {
                 let typed = path.trim().to_owned();
                 self.path = None;
                 self.sources = None;
