@@ -4,10 +4,13 @@ mod e2e_support;
 
 use crazyagent::engine::owner::{OwnerData, OwnerRead, OwnerResult};
 use crazyagent::master_session::{MasterReason, MasterTurnPhase, MasterTurnView};
+use crazyagent::memory::library::MemoryScope;
 use crazyagent::protocol::ProjectId;
 use crazyagent::setup::{Dependency, DependencyState, PackState, SetupStatus};
 use crazyagent::terminal::tmux::installed;
-use e2e_support::{ENGINE, Engine, Owner, TMUX, hex, profile, repository, scratch, stop_tmux};
+use e2e_support::{
+    ENGINE, Engine, Owner, TMUX, hex, profile, repository, result, scratch, stop_tmux,
+};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -2768,6 +2771,266 @@ fn harnesses_with_an_unknown_version_sign_in_from_the_tui_as_before() {
         "a ChatGPT sign-in that runs Codex",
         SIGN_IN_TIME,
         ran_the_harness,
+    );
+    drop(pty);
+    engine.stop();
+}
+
+const NOTE: &str = "Deploys go out on Tuesdays.";
+
+/// Makes the project `gone-app` the way New project does, saves the owner's note on it, then
+/// removes it from the dashboard, or with its files when `everything`, as both apps do.
+/// Inputs: the engine, the projects home and the choice. Output: the project's folder.
+async fn noted_then_removed(engine: &Engine, home: &Path, everything: bool) -> PathBuf {
+    let mut owner = Owner::attach(engine).await;
+    assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+    assert_eq!(owner.set_home(home).await, OwnerResult::Applied);
+    assert_eq!(
+        owner.create_project("gone-app", "Gone App").await,
+        OwnerResult::Applied
+    );
+    let project = ProjectId::new("gone-app").unwrap();
+    let generation = owner.next();
+    let noted = owner
+        .controller
+        .add_memory(
+            MemoryScope::Project {
+                project_id: project.clone(),
+            },
+            NOTE.into(),
+            generation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(noted), OwnerResult::Applied);
+    let setup = owner
+        .controller
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .expect("the new project has its setup");
+    let folder = PathBuf::from(setup.folder.trim_end_matches("/.crazyagent"));
+    let generation = owner.next();
+    let removed = if everything {
+        owner
+            .controller
+            .delete_project(project, setup.name, generation)
+            .await
+            .unwrap()
+    } else {
+        owner
+            .controller
+            .remove_project(project, generation)
+            .await
+            .unwrap()
+    };
+    assert_eq!(result(removed), OwnerResult::Applied);
+    owner.controller.detach();
+    folder
+}
+
+/// Reads whether the engine has a project in setup under `id` and whether its approved notes
+/// hold the note. Inputs: the engine and the id. Output: both answers.
+async fn in_setup_with_note(engine: &Engine, id: &str) -> (bool, bool) {
+    let mut owner = Owner::attach(engine).await;
+    let project = ProjectId::new(id).unwrap();
+    let setting_up = owner.controller.onboarding(project.clone()).await.is_ok();
+    let noted = owner
+        .controller
+        .approved_memories(project)
+        .await
+        .is_ok_and(|notes| notes.items.iter().any(|item| item.text == NOTE));
+    owner.controller.detach();
+    (setting_up, noted)
+}
+
+/// Sets up a folder where it is from Home's Existing folder page as the owner does, waits for
+/// its setup page and goes back Home. Inputs: the TUI and the folder. Output: the setup page.
+fn set_up_here(pty: &Pty, folder: &Path) -> String {
+    let name = folder.file_name().unwrap().to_str().unwrap();
+    pty.keys(&["a"]);
+    pty.until("a on Home offers the ways to add a project", |screen| {
+        screen.contains("Existing folder")
+    });
+    pty.keys(&["e"]);
+    pty.until("the Existing folder page asks for the folder", |screen| {
+        screen.contains("Use where it is") && screen.contains("Set up here")
+    });
+    pty.text(folder.to_str().unwrap());
+    pty.until("the typed folder shows", |screen| screen.contains(name));
+    pty.keys(&["Enter"]);
+    pty.until("the setup page offers the pool", |screen| {
+        screen.contains(&format!("Set up {name}"))
+            && screen.contains("local-pool")
+            && screen.contains("Start setup")
+    });
+    pty.keys(&["Enter"]);
+    let setup = pty.until("the setup page of the project the engine gave", |screen| {
+        screen.contains("Build the code graph")
+            && (screen.contains("Map the project") || screen.contains("Mapping failed:"))
+    });
+    assert!(!setup.contains("Couldn't"), "{setup}");
+    pty.keys(&["Escape"]);
+    pty.until("Esc goes back Home", |screen| {
+        screen.contains("Most recent first") || screen.contains("No projects yet.")
+    });
+    setup
+}
+
+/// DEC-178: a project removed from the dashboard comes back with its note when the TUI sets up
+/// its own folder again, and another folder with its name is set up in the TUI as a new
+/// project, `gone-app-2`, with none of the note; the TUI opens each by the id the engine gave.
+#[test]
+fn a_removed_project_comes_back_only_from_its_own_folder_in_the_tui() {
+    let mut engine = Engine::new("ca-e2e-return-");
+    let _provider = unreachable_provider(&engine);
+    engine.launch();
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-return-disk-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let folder = runtime.block_on(noted_then_removed(&engine, &home, false));
+    assert!(
+        folder.join(".crazyagent").is_dir(),
+        "the folder stays on disk"
+    );
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| screen.contains("No projects yet."));
+    set_up_here(&pty, &folder);
+    assert_eq!(
+        runtime.block_on(in_setup_with_note(&engine, "gone-app")),
+        (true, true),
+        "its own folder brings gone-app back with its note"
+    );
+
+    let other = disk.path().join("other").join("gone-app");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("notes.md"), "another folder\n").unwrap();
+    set_up_here(&pty, &other);
+    assert_eq!(
+        runtime.block_on(in_setup_with_note(&engine, "gone-app-2")),
+        (true, false),
+        "another folder with the name is gone-app-2, with none of the note"
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// A fresh APFS disk image mounted for one test, detached when dropped, so a Delete everything
+/// moves its folders to the image's own Trash and never to the owner's.
+#[cfg(target_os = "macos")]
+struct Volume {
+    mount: PathBuf,
+    _image: tempfile::TempDir,
+}
+
+#[cfg(target_os = "macos")]
+impl Volume {
+    /// Creates and mounts a 64 MB APFS image. Input: none. Output: the mounted volume.
+    fn attach() -> Self {
+        let image = scratch("ca-e2e-volume-");
+        let disk = image.path().join("projects.dmg");
+        let mount = image.path().join("mount");
+        std::fs::create_dir(&mount).unwrap();
+        for args in [
+            vec![
+                "create",
+                "-quiet",
+                "-size",
+                "64m",
+                "-fs",
+                "APFS",
+                "-volname",
+                "CAReturnE2E",
+                disk.to_str().unwrap(),
+            ],
+            vec![
+                "attach",
+                "-quiet",
+                "-nobrowse",
+                "-noautoopen",
+                "-mountpoint",
+                mount.to_str().unwrap(),
+                disk.to_str().unwrap(),
+            ],
+        ] {
+            let status =
+                crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args(&args))
+                    .unwrap();
+            assert!(status.success(), "hdiutil {args:?}");
+        }
+        Self {
+            mount: mount.canonicalize().unwrap(),
+            _image: image,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Volume {
+    fn drop(&mut self) {
+        let _ = crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args([
+            "detach",
+            "-quiet",
+            "-force",
+            self.mount.to_str().unwrap(),
+        ]));
+    }
+}
+
+/// DEC-178: after Delete everything the same folder made again is set up in the TUI as a new
+/// project, `gone-app-2`, with none of the note; the deleted id is never given out again.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[test]
+fn after_delete_everything_the_same_folder_is_a_new_project_in_the_tui() {
+    let mut engine = Engine::new("ca-e2e-deleted-");
+    let _provider = unreachable_provider(&engine);
+    engine.launch();
+    let tmux = installed(engine.path()).expect(TMUX);
+    let volume = Volume::attach();
+    let home = volume.mount.join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let folder = runtime.block_on(noted_then_removed(&engine, &home, true));
+    assert!(
+        !folder.exists(),
+        "Delete everything moved the folder to the Trash"
+    );
+    let trash = volume
+        .mount
+        .join(".Trashes")
+        .join(rustix::process::getuid().as_raw().to_string());
+    assert!(
+        std::fs::read_dir(&trash).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("gone-app")),
+        "the folder is in the image's own Trash"
+    );
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("notes.md"), "made again\n").unwrap();
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| screen.contains("No projects yet."));
+    set_up_here(&pty, &folder);
+    assert_eq!(
+        runtime.block_on(in_setup_with_note(&engine, "gone-app-2")),
+        (true, false),
+        "the folder made again is gone-app-2, with none of the note"
+    );
+    assert!(
+        !runtime.block_on(in_setup_with_note(&engine, "gone-app")).0,
+        "the deleted id is never given out again"
     );
     drop(pty);
     engine.stop();
