@@ -746,7 +746,12 @@ fn the_view_shows_the_low_power_support_of_the_last_reading() {
     let changed = step_until(&mut keeper, &connection, &mut now_ms, |view| {
         view.low_power == LowPowerSupport::OwnerChanged
     });
-    assert_eq!(changed.lid_support, LidSupport::Held);
+    assert_eq!(
+        changed.lid_support,
+        LidSupport::IdleOnlyOnBattery,
+        "the default lid rule AC only still holds only idle on battery"
+    );
+    assert_eq!(changed.lid_platform, LidSupport::Held);
     let unavailable = LowPowerSupport::NotAvailable {
         reason: "Not available: power-profiles-daemon is not running".into(),
     };
