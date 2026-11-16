@@ -1,4 +1,5 @@
-use crazyagent::credentials::SecretString;
+use crazyagent::credentials::Piece::{Escaped, Form, Hex, Plain};
+use crazyagent::credentials::{SecretString, sized};
 use crazyagent::model_gateway::relay::Relay;
 use crazyagent::usage::extras::Adapter;
 use crazyagent::usage::poll::poll_balance;
@@ -101,4 +102,38 @@ fn a_relayed_request_frees_no_copy_of_the_key() {
         String::from_utf8_lossy(&reply)
     );
     assert_eq!(freed, 0, "freed blocks still holding the key");
+}
+
+/// SECRET-FORMAT-COPIES: `credentials::sized` writes each piece as the formatting it
+/// replaced did (the `replace` escaping, the form serializer, `{:02x}`), into a buffer of
+/// exactly that size, and refuses a control byte only in an escaped piece.
+#[test]
+fn sized_writes_each_piece_as_the_old_formatting_did() {
+    let text = "a b&c=d%e\"f\\g\u{e9}*-._~";
+    let quoted = text.replace('\\', "\\\\").replace('"', "\\\"");
+    let form = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(text, text)
+        .finish();
+    let bytes: Vec<u8> = (0..=255).collect();
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let written = sized(&[
+        Plain("<"),
+        Escaped(text),
+        Plain("|"),
+        Form(text),
+        Plain("="),
+        Form(text),
+        Plain("|"),
+        Hex(&bytes),
+        Plain(">"),
+    ])
+    .unwrap();
+    assert_eq!(written, format!("<{quoted}|{form}|{hex}>").as_bytes());
+    assert_eq!(written.capacity(), written.len());
+    assert!(sized(&[Plain("kept"), Escaped("line\u{1}break")]).is_none());
+    assert!(sized(&[Escaped("delete\u{7f}")]).is_none());
+    assert_eq!(
+        sized(&[Plain("tab\tkept"), Form("\u{1}")]).unwrap(),
+        b"tab\tkept%01"
+    );
 }

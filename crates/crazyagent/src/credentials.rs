@@ -106,6 +106,73 @@ pub fn wipe<Unit: zeroize::DefaultIsZeroes>(buffer: &mut [Unit]) {
     zeroize::Zeroize::zeroize(buffer);
 }
 
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// One part of a text that holds a secret, as [`sized`] writes it.
+pub enum Piece<'a> {
+    /// Written as it is.
+    Plain(&'a str),
+    /// Written for a double-quoted curl config value: `\` and `"` take a backslash.
+    Escaped(&'a str),
+    /// Written as `application/x-www-form-urlencoded` writes one name or value.
+    Form(&'a str),
+    /// Written as two lowercase hex digits per byte.
+    Hex(&'a [u8]),
+}
+
+/// Writes the pieces into one buffer of exactly their size, so no growth or temporary
+/// frees a copy of a secret; the caller wipes the result after use. Input: the pieces.
+/// Output: the bytes, or none when an `Escaped` piece holds a control byte, found before
+/// anything is written.
+pub fn sized(pieces: &[Piece<'_>]) -> Option<Vec<u8>> {
+    let mut size = 0;
+    for piece in pieces {
+        size += match piece {
+            Piece::Plain(text) => text.len(),
+            Piece::Escaped(text) => {
+                if text.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+                    return None;
+                }
+                let escapes = text.bytes().filter(|byte| matches!(byte, b'\\' | b'"'));
+                text.len() + escapes.count()
+            }
+            Piece::Form(text) => url::form_urlencoded::byte_serialize(text.as_bytes())
+                .map(str::len)
+                .sum(),
+            Piece::Hex(bytes) => bytes.len() * 2,
+        };
+    }
+    let mut buffer = Vec::with_capacity(size);
+    let capacity = buffer.capacity();
+    for piece in pieces {
+        match piece {
+            Piece::Plain(text) => buffer.extend_from_slice(text.as_bytes()),
+            Piece::Escaped(text) => {
+                for byte in text.bytes() {
+                    if matches!(byte, b'\\' | b'"') {
+                        buffer.push(b'\\');
+                    }
+                    buffer.push(byte);
+                }
+            }
+            Piece::Form(text) => {
+                for part in url::form_urlencoded::byte_serialize(text.as_bytes()) {
+                    buffer.extend_from_slice(part.as_bytes());
+                }
+            }
+            Piece::Hex(bytes) => {
+                for byte in *bytes {
+                    buffer.push(HEX_DIGITS[usize::from(byte >> 4)]);
+                    buffer.push(HEX_DIGITS[usize::from(byte & 0x0f)]);
+                }
+            }
+        }
+    }
+    assert_eq!(buffer.len(), size);
+    assert_eq!(buffer.capacity(), capacity);
+    Some(buffer)
+}
+
 impl fmt::Debug for SecretString {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         output.write_str("SecretString([REDACTED])")

@@ -1,3 +1,4 @@
+use crate::credentials::Piece::{Escaped, Plain};
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -803,16 +804,6 @@ fn percent_decoded(bytes: &[u8]) -> Vec<u8> {
     decoded
 }
 
-fn quoted(value: &str) -> Result<String, EngineError> {
-    if value.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
-        return Err(failure("model_relay_request_invalid"));
-    }
-    Ok(format!(
-        "\"{}\"",
-        value.replace('\\', "\\\\").replace('"', "\\\"")
-    ))
-}
-
 /// Builds the curl config for one forwarded request, which goes only to curl's stdin: the
 /// provider URL, method, the harness's headers minus hop-by-hop, encoding and key headers,
 /// the real key in the header form the harness used, and the body file.
@@ -824,32 +815,41 @@ pub(crate) fn upstream_config(
     key: &SecretString,
     body: Option<&Path>,
 ) -> Result<Vec<u8>, EngineError> {
-    let mut config = format!(
-        "url = {}\nrequest = {}\nheader = \"Expect:\"\n",
-        quoted(&format!("{}{}", upstream.origin, incoming.target))?,
-        quoted(&incoming.method)?
-    );
+    let mut pieces = vec![
+        Plain("url = \""),
+        Escaped(&upstream.origin),
+        Escaped(&incoming.target),
+        Plain("\"\nrequest = \""),
+        Escaped(&incoming.method),
+        Plain("\"\nheader = \"Expect:\"\n"),
+    ];
     for (name, value) in &incoming.headers {
         if REQUEST_DROPPED.contains(&name.as_str()) {
             continue;
         }
-        config.push_str(&format!(
-            "header = {}\n",
-            quoted(&format!("{name}: {value}"))?
-        ));
+        pieces.extend([
+            Plain("header = \""),
+            Escaped(name),
+            Plain(": "),
+            Escaped(value),
+            Plain("\"\n"),
+        ]);
     }
-    let key_header = match scheme {
-        KeyHeader::XApiKey => format!("x-api-key: {}", key.expose()),
-        KeyHeader::Bearer => format!("Authorization: Bearer {}", key.expose()),
-    };
-    config.push_str(&format!("header = {}\n", quoted(&key_header)?));
+    pieces.extend([
+        Plain(match scheme {
+            KeyHeader::XApiKey => "header = \"x-api-key: ",
+            KeyHeader::Bearer => "header = \"Authorization: Bearer ",
+        }),
+        Escaped(key.expose()),
+        Plain("\"\n"),
+    ]);
     if let Some(body) = body {
         let body = body
             .to_str()
             .ok_or_else(|| failure("model_relay_request_invalid"))?;
-        config.push_str(&format!("data-binary = {}\n", quoted(&format!("@{body}"))?));
+        pieces.extend([Plain("data-binary = \"@"), Escaped(body), Plain("\"\n")]);
     }
-    Ok(config.into_bytes())
+    crate::credentials::sized(&pieces).ok_or_else(|| failure("model_relay_request_invalid"))
 }
 
 /// Builds the curl command for the provider without running it: no `.curlrc`, no
