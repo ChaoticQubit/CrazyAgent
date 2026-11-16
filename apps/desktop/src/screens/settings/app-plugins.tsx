@@ -6,6 +6,7 @@ import {
   type Listing, type PluginView, type Preview, type Problem, type RunsView, type SecretView, type TrustView,
 } from "../../api-app-plugins";
 import { useAppSession, useLoad, type Loaded } from "../../state";
+import { displayText } from "../conversation";
 import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, RadioCard, SecretField, SettingSection, Skeleton, StatusBadge, Switch, TextArea } from "../../ui";
 import "../project/projects.css";
 
@@ -72,7 +73,7 @@ function PluginRow({ plugin, busy, actions }: { plugin: PluginView; busy: boolea
     <div className="pj-row between">
       <div className="pj-stack-s">
         <strong>{plugin.title}</strong>
-        <span className="muted small">{`${plugin.name}, version ${plugin.version}. ${origin}.`}</span>
+        <span className="muted small">{`${displayText(plugin.name)}, version ${plugin.version}. ${origin}.`}</span>
       </div>
       <StatusBadge word={state.word} tone={state.tone} />
     </div>
@@ -86,7 +87,7 @@ function PluginRow({ plugin, busy, actions }: { plugin: PluginView; busy: boolea
         : <Button size="small" variant="quiet" aria-label={`Unbind ${secret.name} of ${plugin.title}`} disabled={busy} onClick={() => actions.onUnbind(plugin.name, secret.name)}>Unbind</Button>}
     </li>)}</ul>}
     <div className="pj-row">
-      <Switch id={`app-plugin-${plugin.name}`} label={`Use ${plugin.title}`} checked={plugin.enabled} disabledReason={blocked}
+      <Switch id={`app-plugin-${encodeURIComponent(plugin.name)}`} label={`Use ${plugin.title}`} checked={plugin.enabled} disabledReason={blocked}
         onChecked={(on) => { if (!busy) actions.onEnabled(plugin.name, on); }} />
       {plugin.status.kind === "needs_review" && <Button size="small" aria-label={`Review ${plugin.title}`} disabled={busy} onClick={() => actions.onReview(plugin.name)}>Review</Button>}
       {plugin.origin === "user" && <Button size="small" variant="danger-text" aria-label={`Remove ${plugin.title}`} disabled={busy} onClick={() => actions.onRemove(plugin)}>Remove</Button>}

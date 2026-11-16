@@ -4341,6 +4341,26 @@ fn h_on_the_settings_tab_opens_the_project_harness_list() {
     assert!(team.ends_with("   h Harness settings"), "{team}");
 }
 
+#[test]
+fn b_on_the_settings_tab_opens_the_project_connectors_page() {
+    let look = Look::plain();
+    let project = ProjectId::new("connectors").unwrap();
+    let mut screen = loaded(&project);
+    assert_ne!(screen.key(key(KeyCode::Char('b'))), ProjectReply::Connectors);
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('b'))), ProjectReply::Connectors);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let access = text(&drawn.rows)
+        .lines()
+        .find(|line| line.trim_start().starts_with("Access"))
+        .map(|line| line.trim_end().to_owned())
+        .unwrap_or_default();
+    assert!(
+        access.ends_with("   c Agent access   b Connectors"),
+        "{access}"
+    );
+}
+
 /// A document longer than one chunk is opened, another file is opened while its second
 /// chunk is in flight, then the first is opened again: the late chunk never starts the new
 /// preview, which reads from offset 0 and shows the whole document in order.

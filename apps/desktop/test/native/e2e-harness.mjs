@@ -75,14 +75,19 @@ export async function silentProvider() {
   return { server, port: server.address().port };
 }
 
+const KEPT = new WeakMap();
+
 /** Starts a child with its output kept as evidence and waits for its ready line; a child that
  * never gets there is stopped before the failure goes up, so no caller leaks it.
  * Input: the binary, its arguments, environment, evidence folder, name and ready pattern.
  * Output: the child and the ready line's match. */
 export async function start(binary, args, env, evidence, name, ready) {
   const child = spawn(binary, args, { env, stdio: ["pipe", "pipe", "pipe"] });
-  child.stderr.pipe(createWriteStream(join(evidence, `${name}.err`), { mode: 0o600 }));
+  const err = createWriteStream(join(evidence, `${name}.err`), { mode: 0o600 });
+  child.stderr.pipe(err);
   const out = createWriteStream(join(evidence, `${name}.out`), { mode: 0o600 });
+  child.stdout.once("end", () => out.end());
+  KEPT.set(child, Promise.all([err, out].map((file) => new Promise((done) => file.once("close", done)))));
   const match = await new Promise((done, fail) => {
     let seen = "";
     child.once("error", fail);
@@ -105,6 +110,18 @@ export async function start(binary, args, env, evidence, name, ready) {
     throw error;
   });
   return { child, match };
+}
+
+/** Waits for a stopped child's kept output files to close, so every line it wrote is on
+ * disk. Inputs: the child and the most milliseconds to wait. Output: whether they closed in
+ * time. */
+export async function flushed(child, ms = 10000) {
+  const closing = child ? KEPT.get(child) : undefined;
+  if (closing === undefined) return true;
+  let timer;
+  const closed = await Promise.race([closing.then(() => true), new Promise((done) => { timer = setTimeout(() => done(false), ms); })]);
+  clearTimeout(timer);
+  return closed;
 }
 
 /** Stops a child and waits for it to exit. Input: the child. Output: none. */

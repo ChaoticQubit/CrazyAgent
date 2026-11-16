@@ -382,6 +382,136 @@ async fn removing_a_project_forgets_its_search_index_rows() {
     engine.stop().await;
 }
 
+/// Seeds one connector switch, two write approvals and one standing write allow for the
+/// test project, so a removal has rows to forget. Input: the engine. Output: none.
+fn seed_connector_rows(engine: &Engine) {
+    {
+        let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+        crate::connectors::grants::of_project(&db, PROJECT).unwrap();
+        crate::connectors::approvals::initialize(&db).unwrap();
+    }
+    write_db(
+        engine,
+        "INSERT INTO connector_grants (project, connector, enabled, who, changed_ms)
+           VALUES ('setup-pooled','linear',1,'both',1);
+         INSERT INTO connector_approvals
+           (launch, project, agent, connector, title, tool, preview, arguments, hidden, state,
+            created_ms, expires_ms)
+           VALUES ('launch-a','setup-pooled','Agent 1','linear','Linear','create_issue',
+                   'create_issue','{}',0,'waiting',1,600001),
+                  ('launch-a','setup-pooled','Agent 1','linear','Linear','create_issue',
+                   'create_issue','',0,'allowed',1,600001);
+         INSERT INTO connector_write_allowed (project, connector, allowed_ms)
+           VALUES ('setup-pooled','linear',1);",
+    );
+    assert_eq!(
+        connector_rows(engine),
+        [1, 2, 1],
+        "a switch, two approvals and an allow"
+    );
+}
+
+/// Counts the test project's connector switches, write approvals and standing write
+/// allows. Input: the engine. Output: the three counts, in that order.
+fn connector_rows(engine: &Engine) -> [i64; 3] {
+    [
+        "connector_grants",
+        "connector_approvals",
+        "connector_write_allowed",
+    ]
+    .map(|table| {
+        engine.rows(&format!(
+            "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+        ))
+    })
+}
+
+/// Sets the removed test project up again under its id and checks it has no connector
+/// switch, write approval or standing write allow, in the tables and through the reads.
+/// Inputs: the owner client, the engine, the project and the setup generation. Output: none.
+async fn returns_with_no_connector_rows(
+    owner: &mut OwnerController,
+    engine: &Engine,
+    project: &ProjectId,
+    generation: u64,
+) {
+    let back = owner
+        .setup_project(
+            project.clone(),
+            spec(NAME),
+            pooled_setup(vec![]),
+            generation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(back), OwnerResult::Applied);
+    assert_eq!(
+        connector_rows(engine),
+        [0, 0, 0],
+        "the returned project has none of them"
+    );
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    assert!(
+        crate::connectors::grants::of_project(&db, PROJECT)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!crate::connectors::approvals::writes_allowed(&db, PROJECT, "linear").unwrap());
+    assert!(
+        crate::connectors::approvals::allowed_writes(&db, PROJECT)
+            .unwrap()
+            .connectors
+            .is_empty()
+    );
+}
+
+/// A project removed from the dashboard and set up again under the same id has no connector
+/// switch, no write approval and no standing write allow from before (DEC-178 addendum 1,
+/// leader 22:47).
+#[tokio::test]
+async fn a_returned_project_has_no_grant_approval_or_allow() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, _) = project(&mut owner).await;
+    seed_connector_rows(&engine);
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        connector_rows(&engine),
+        [0, 0, 0],
+        "removing the project forgets all of them"
+    );
+    returns_with_no_connector_rows(&mut owner, &engine, &project, 3).await;
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A project removed by Delete everything and set up again under the same id has no
+/// connector switch, write approval or standing write allow from before. Runs on macOS
+/// only, the one platform that offers Delete everything (DEC-118, rv-code2 FX10-2).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_project_returned_after_delete_everything_has_no_grant_approval_or_allow() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    seed_connector_rows(&engine);
+    std::fs::remove_dir_all(&folder).unwrap();
+    let deleted = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(deleted), OwnerResult::Applied);
+    assert_eq!(
+        connector_rows(&engine),
+        [0, 0, 0],
+        "Delete everything forgets all of them"
+    );
+    returns_with_no_connector_rows(&mut owner, &engine, &project, 3).await;
+    drop(owner);
+    engine.stop().await;
+}
+
 /// The removal preview names the project and its folder once, changes nothing, and offers
 /// Delete everything inside the home on the platform that offers it (DEC-118).
 #[tokio::test]

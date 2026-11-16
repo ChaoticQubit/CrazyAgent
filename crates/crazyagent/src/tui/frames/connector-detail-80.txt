@@ -1,0 +1,24 @@
+ [◆▪◆▪] CrazyAgent  /  Settings  /  Connectors  /  Linear                       
+────────────────────────────────────────────────────────────────────────────────
+  Linear                                                           Needs a key  
+  linear, version 1.0.0. Built in.                                              
+  Issues and projects in Linear.                                                
+  Set a key for each secret it needs.                                           
+  Reaches mcp.linear.app                                                        
+  Address: https://mcp.linear.app/mcp                                           
+                                                                                
+  > api_key: Not set                                                            
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ k Set key  r Read again  Esc All connectors                             ? Help 

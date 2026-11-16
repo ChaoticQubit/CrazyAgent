@@ -1,0 +1,24 @@
+ [◆▪◆▪] CrazyAgent  /  Plant shop  /  Connectors                                
+────────────────────────────────────────────────────────────────────────────────
+  Connectors                                                                    
+  Connectors from Settings, Connectors that this project's master and agents    
+  can use. Each is off until you turn it on here.                               
+                                                                                
+  > Linear                                                                  On  
+      Who can use it  Master only                                               
+    GitHub                                                                 Off  
+    gone                                                         Not found  On  
+                                                                                
+  Not ready yet: Board. Set them up in Settings, Connectors.                    
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ↑↓ Move  Space Turn off  r Read again  Esc Back                         ? Help 

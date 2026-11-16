@@ -4629,3 +4629,303 @@ fn connectors_keep_log_90_days() {
     let (keep, days, left) = connector_keep_after(KeepLog::Days30, &["Right"]);
     assert_eq!((keep, days, left), (KeepLog::Days90, vec![3, 10, 45], 3));
 }
+
+/// V3 Connectors Task 5: saves a key for the bundled Linear connector through the owner
+/// protocol, stores `seed` as its switch in a new project when given, opens the project's
+/// Settings tab, presses b for its Connectors page, sends `keys` and waits for `done`.
+/// Inputs: the seed, the keys and the check the page passes after them. Output: the
+/// project's switches as the engine reads them back; panics when the page never shows.
+fn project_connectors_after(
+    seed: Option<crazyagent::connectors::Who>,
+    keys: &[&str],
+    done: impl Fn(&str) -> bool,
+) -> Vec<crazyagent::connectors::Grant> {
+    use crazyagent::engine::owner::AccountSecret;
+    const ID: &str = "e2e-connectors";
+    let engine = Engine::start("ca-e2e-conn-grant-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+        assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+        assert_eq!(owner.create_project(ID, PROJECT).await, OwnerResult::Applied);
+        let key = AccountSecret::new(b"lin_e2e_grant_key".to_vec()).unwrap();
+        owner
+            .controller
+            .connector_set_key("linear".into(), "api_key".into(), key)
+            .await
+            .unwrap();
+        if let Some(who) = seed {
+            owner
+                .controller
+                .connector_grant(ID.into(), "linear".into(), true, who)
+                .await
+                .unwrap();
+        }
+        owner.controller.detach();
+    });
+    let mut engine = engine;
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, PROJECT));
+    setup_checked(&pty);
+    tab_until_enter(&pty, "Open");
+    pick_card(&pty, PROJECT);
+    pty.keys(&["Enter"]);
+    pty.until("the project screen opens with its tabs", |screen| {
+        screen.contains("Tabs") && in_project(screen, PROJECT)
+    });
+    to_tab(&pty, PROJECT, "Settings", &SHIFT_RIGHT);
+    pty.until("the Access row offers the project's connectors", |screen| {
+        screen.contains("b Connectors")
+    });
+    pty.keys(&["b"]);
+    pty.until("b opens the project's Connectors page", |screen| {
+        header_row(screen).contains(&format!("{PROJECT}  /  Connectors"))
+            && screen.contains("Linear")
+    });
+    pty.keys(keys);
+    let screen = pty.until("the page shows the change", done);
+    assert!(!screen.contains("lin_e2e"), "a key never shows:\n{screen}");
+    let grants = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let view = owner.controller.connectors(Some(ID.into())).await.unwrap();
+        owner.controller.detach();
+        view.grants
+    });
+    drop(pty);
+    engine.stop();
+    grants
+}
+
+#[test]
+fn a_project_turns_linear_on_from_its_connectors_page() {
+    use crazyagent::connectors::{Grant, Who};
+    let grants = project_connectors_after(None, &["Space"], |screen| {
+        screen.contains("Who can use it  Master and agents with tools on")
+    });
+    let on = Grant {
+        connector: "linear".into(),
+        enabled: true,
+        who: Who::Both,
+    };
+    assert_eq!(grants, [on]);
+}
+
+#[test]
+fn a_project_turns_linear_off_from_its_connectors_page() {
+    use crazyagent::connectors::Who;
+    let grants = project_connectors_after(Some(Who::Master), &["Space"], |screen| {
+        screen.contains("Linear") && !screen.contains("Who can use it")
+    });
+    assert!(
+        !grants
+            .iter()
+            .any(|grant| grant.connector == "linear" && grant.enabled),
+        "{grants:?}"
+    );
+}
+
+/// V3 Connectors Task 5: who a project's Linear reaches after one Right on its who row.
+/// Inputs: the who stored first and the words the row shows after. Output: the switches.
+fn connector_who_after(
+    seed: crazyagent::connectors::Who,
+    words: &'static str,
+) -> Vec<crazyagent::connectors::Grant> {
+    project_connectors_after(Some(seed), &["Down", "Right"], move |screen| {
+        screen.contains(&format!("Who can use it  {words}"))
+    })
+}
+
+#[test]
+fn connectors_who_master_only() {
+    use crazyagent::connectors::{Grant, Who};
+    let grants = connector_who_after(Who::Both, "Master only");
+    let master = Grant {
+        connector: "linear".into(),
+        enabled: true,
+        who: Who::Master,
+    };
+    assert_eq!(grants, [master]);
+}
+
+#[test]
+fn connectors_who_agents_only() {
+    use crazyagent::connectors::{Grant, Who};
+    let grants = connector_who_after(Who::Master, "Agents only");
+    let agents = Grant {
+        connector: "linear".into(),
+        enabled: true,
+        who: Who::Agents,
+    };
+    assert_eq!(grants, [agents]);
+}
+
+#[test]
+fn connectors_who_master_and_agents() {
+    use crazyagent::connectors::{Grant, Who};
+    let grants = connector_who_after(Who::Agents, "Master and agents with tools on");
+    let both = Grant {
+        connector: "linear".into(),
+        enabled: true,
+        who: Who::Both,
+    };
+    assert_eq!(grants, [both]);
+}
+
+/// V3 Connectors Task 5: stores `seed` as the connector settings through the owner
+/// protocol, opens Settings / Connectors through Go to, sends `keys`, saves with Enter and
+/// reads the settings back. Inputs: the settings stored first and the keys. Output: the
+/// settings the engine holds after the save; panics when the page or the save never shows.
+fn connector_settings_after(
+    seed: crazyagent::connectors::ConnectorSettings,
+    keys: &[&str],
+) -> crazyagent::connectors::ConnectorSettings {
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-conn-settings-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let version = owner.controller.connectors(None).await.unwrap().version;
+        owner
+            .controller
+            .set_connector_settings(seed, version)
+            .await
+            .unwrap();
+        owner.controller.detach();
+    });
+    go_to(&pty, "Settings / Connectors", "Settings / Connectors");
+    pty.until("Settings, Connectors lists the catalog", |screen| {
+        header_row(screen).contains("Settings  /  Connectors") && screen.contains("Catalog")
+    });
+    pty.keys(keys);
+    pty.until("the pick waits for Enter", |screen| {
+        screen.contains("Save changes")
+    });
+    pty.keys(&["Enter"]);
+    pty.until("the save is confirmed", |screen| {
+        screen.contains("Connector settings saved.")
+    });
+    let settings = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let view = owner.controller.connectors(None).await.unwrap();
+        owner.controller.detach();
+        view.settings
+    });
+    drop(pty);
+    engine.stop();
+    settings
+}
+
+#[test]
+fn connectors_native_on() {
+    use crazyagent::connectors::{ConnectorSettings, NativeConnectors};
+    let saved = connector_settings_after(ConnectorSettings::DEFAULT, &["End", "Up", "Right"]);
+    let on = ConnectorSettings {
+        native: NativeConnectors::On,
+        ..ConnectorSettings::DEFAULT
+    };
+    assert_eq!(saved, on);
+}
+
+#[test]
+fn connectors_native_off() {
+    use crazyagent::connectors::{ConnectorSettings, NativeConnectors};
+    let seed = ConnectorSettings {
+        native: NativeConnectors::On,
+        ..ConnectorSettings::DEFAULT
+    };
+    let saved = connector_settings_after(seed, &["End", "Up", "Left"]);
+    assert_eq!(saved, ConnectorSettings::DEFAULT);
+}
+
+#[test]
+fn connectors_size_cap_64_kib() {
+    use crazyagent::connectors::{ConnectorSettings, SizeCap};
+    let saved = connector_settings_after(ConnectorSettings::DEFAULT, &["End", "Left"]);
+    assert_eq!(saved.size_cap, SizeCap::Kib64);
+    assert_eq!(saved.native, ConnectorSettings::DEFAULT.native);
+}
+
+#[test]
+fn connectors_size_cap_256_kib() {
+    use crazyagent::connectors::{ConnectorSettings, SizeCap};
+    let seed = ConnectorSettings {
+        size_cap: SizeCap::Kib64,
+        ..ConnectorSettings::DEFAULT
+    };
+    let saved = connector_settings_after(seed, &["End", "Right"]);
+    assert_eq!(saved, ConnectorSettings::DEFAULT);
+}
+
+#[test]
+fn connectors_size_cap_1_mib() {
+    use crazyagent::connectors::{ConnectorSettings, SizeCap};
+    let saved = connector_settings_after(ConnectorSettings::DEFAULT, &["End", "Right"]);
+    assert_eq!(saved.size_cap, SizeCap::Mib1);
+    assert_eq!(saved.keep_log, ConnectorSettings::DEFAULT.keep_log);
+}
+
+/// V3 Connectors Task 5: a key typed on Linear's page in Settings, Connectors is masked
+/// while typed, never on screen after, and the engine holds it as a key the owner entered.
+#[test]
+fn a_connector_key_typed_on_its_page_is_saved_and_never_shown() {
+    use crazyagent::app_plugins::Binding;
+    const KEY: &str = "lin_e2e_hidden_key";
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-conn-key-");
+    go_to(&pty, "Settings / Connectors", "Settings / Connectors");
+    pty.until("the catalog lists Linear first", |screen| {
+        screen.contains("> Linear")
+    });
+    pty.keys(&["Enter"]);
+    pty.until("Enter opens Linear's page", |screen| {
+        header_row(screen).contains("Connectors  /  Linear") && screen.contains("api_key: Not set")
+    });
+    pty.keys(&["k"]);
+    pty.until("k opens the key form", |screen| {
+        screen.contains("Key for api_key")
+    });
+    pty.text(KEY);
+    std::thread::sleep(KEY_TIME);
+    let typing = pty.screen();
+    assert!(!typing.contains(KEY), "a typed key is masked:\n{typing}");
+    pty.keys(&["Enter"]);
+    let saved = pty.until("the key is saved", |screen| {
+        screen.contains("The key for api_key was saved.")
+            && screen.contains("api_key: Key you entered")
+    });
+    assert!(!saved.contains(KEY), "a saved key never shows:\n{saved}");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let view = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let view = owner.controller.connectors(None).await.unwrap();
+        owner.controller.detach();
+        view
+    });
+    let linear = view
+        .connectors
+        .iter()
+        .find(|connector| connector.name == "linear")
+        .expect("Linear is bundled");
+    assert!(
+        linear
+            .secrets
+            .iter()
+            .any(|secret| secret.name == "api_key" && secret.binding == Binding::Key),
+        "{:?}",
+        linear.secrets
+    );
+    drop(pty);
+    engine.stop();
+}

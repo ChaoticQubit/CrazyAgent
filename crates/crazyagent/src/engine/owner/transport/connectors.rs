@@ -679,10 +679,10 @@ fn connector(root: &Path, name: &str) -> Result<(), EngineError> {
     }
 }
 
-/// One write approval as the owner's screen shows it. Inputs: the engine database and the
-/// approval id. Output: the reply, or `connector_approval_unknown`.
-fn approval(db: &rusqlite::Connection, id: i64) -> Result<Reply, EngineError> {
-    match approvals::get(db, id)? {
+/// One write approval as the owner's screen shows it at `now`. Inputs: the engine database,
+/// the approval id and the time now. Output: the reply, or `connector_approval_unknown`.
+fn approval(db: &rusqlite::Connection, id: i64, now: i64) -> Result<Reply, EngineError> {
+    match approvals::get(db, id, now)? {
         Some(approval) => Ok(Reply::Approval {
             approval: Box::new(approval),
         }),
@@ -777,7 +777,7 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
         Action::Activity { connector, project } => Ok(Reply::Activity {
             view: Box::new(audit::view(&db, connector.as_deref(), project.as_deref())?),
         }),
-        Action::Approval { id } => approval(&db, id),
+        Action::Approval { id } => approval(&db, id, now),
         Action::Answer { id, allow } => {
             let (settings, _) = crate::connectors::settings::load(&db)?;
             let said = if allow {
@@ -786,7 +786,7 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
                 approvals::Answer::Deny
             };
             approvals::answer(&db, id, said, settings.write, now)?;
-            approval(&db, id)
+            approval(&db, id, now)
         }
         Action::Writes { project } => {
             known(&db, &project)?;

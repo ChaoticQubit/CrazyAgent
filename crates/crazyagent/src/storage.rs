@@ -1824,9 +1824,10 @@ fn execute(
     }
 }
 
-/// Records a new project and clears any plugin rows a prior project of the same id left
-/// behind, so a reused id (re-adding a folder with the same name is the normal way to reuse
-/// one) inherits none of the old project's MCP servers, secrets, skills or switches. The
+/// Records a new project and clears any plugin and connector rows a prior project of the
+/// same id left behind, so a reused id (re-adding a folder with the same name is the normal
+/// way to reuse one, and the demo always takes the same id) inherits none of the old
+/// project's MCP servers, secrets, skills, switches, write approvals or write allows. The
 /// clear runs only once the row is confirmed new, so a rejected duplicate leaves a live
 /// project's plugins untouched. The reused id's old skill store folder is removed at once,
 /// not left for the next start's trash sweep, so the new project starts with a clean skill
@@ -1875,6 +1876,8 @@ pub(crate) fn create_project(
     crate::activity::note_created(tx, project_id, &spec.name, created_ms());
     plugins::remove_project(tx, project_id)?;
     crate::memory::forget_project(tx, project_id)?;
+    crate::connectors::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
+    crate::connectors::approvals::forget_project(tx, project_id.as_str())?;
     if let Some(root) = tx.path().map(Path::new).and_then(Path::parent) {
         plugins::remove_skill_project_folder(root, project_id.as_str())?;
     }
@@ -3788,6 +3791,73 @@ mod owner_actor_tests {
             [("old".to_owned(), 4)],
             "the engine leaves the old table as it was"
         );
+    }
+
+    /// A new project, the demo included, clears every connector row its id still has, so a
+    /// switch, a write approval or a standing write allow left by an earlier project of that
+    /// id never reaches it, while another id keeps its rows (rv-sec2 removed-projects F1).
+    /// Input: a fresh engine database. Output: none.
+    #[test]
+    fn a_new_project_clears_every_connector_row_its_id_had() {
+        let (_root, path, _cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let started = owner_start(&mut db).unwrap();
+        owner_stop(&mut db, &started.host).unwrap();
+        let demo = crate::demo::PROJECT_ID;
+        crate::connectors::grants::of_project(&db, demo).unwrap();
+        crate::connectors::approvals::initialize(&db).unwrap();
+        for project in [demo, "other"] {
+            db.execute(
+                "INSERT INTO connector_grants (project, connector, enabled, who, changed_ms)
+                 VALUES (?1, 'linear', 1, 'both', 1)",
+                [project],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO connector_approvals
+                   (launch, project, agent, connector, title, tool, preview, arguments, hidden,
+                    state, created_ms, expires_ms)
+                 VALUES ('launch-a', ?1, 'Agent 1', 'linear', 'Linear', 'create_issue',
+                         'create_issue', '{}', 0, 'waiting', 1, 600001)",
+                [project],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO connector_write_allowed (project, connector, allowed_ms)
+                 VALUES (?1, 'linear', 1)",
+                [project],
+            )
+            .unwrap();
+        }
+        let tx = db.transaction().unwrap();
+        let outcome = create_project(
+            &tx,
+            &crate::protocol::ProjectId::new(demo).unwrap(),
+            &crate::protocol::ProjectSpec {
+                name: "Demo".into(),
+                repositories: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, crate::protocol::Outcome::Applied);
+        tx.commit().unwrap();
+        let held = |project: &str| {
+            [
+                "connector_grants",
+                "connector_approvals",
+                "connector_write_allowed",
+            ]
+            .map(|table| {
+                db.query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE project=?1"),
+                    [project],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+            })
+        };
+        assert_eq!(held(demo), [0, 0, 0], "the new project has none of them");
+        assert_eq!(held("other"), [1, 1, 1], "another id keeps its rows");
     }
 
     /// A project's change sets stay when the project is removed, so their numbers stay too:

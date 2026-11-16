@@ -193,3 +193,66 @@ test("Settings lists Notifications, App plugins and Search under App and opens e
   assert.match(index, /tab === "search" \? <SearchSettings \/>/u);
   assert.match(index, /tab === "plugins" \? <PluginsAndSkills skill=\{skill\} \/>/u, "Plugins and skills stays as it was");
 });
+
+async function bridged(reply, run) {
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke() { return reply; } } };
+  try {
+    await run();
+  } finally {
+    globalThis.window = before;
+  }
+}
+
+test("App plugins: every string a manifest or a file name supplies shows its hidden characters as escapes, and the name an action sends stays as listed", async () => {
+  const sneaky = "Bo‮ard​";
+  const escaped = "Bo\\u202eard\\u200b";
+  const listed = {
+    plugins: [
+      plugin({ name: `stem${sneaky}`, title: `stem${sneaky}`, description: "", origin: "user", runs: null, status: { kind: "refused", problem: { ...PROBLEM, message: sneaky } }, enabled: false }),
+      plugin({ title: sneaky, description: sneaky }),
+    ],
+    more: false,
+  };
+  await bridged(listed, async () => {
+    const result = await api.loadAppPlugins();
+    assert.equal(result.kind, "ok");
+    const [refused, embedding] = result.value.plugins;
+    assert.equal(refused.title, `stem${escaped}`);
+    assert.equal(refused.status.problem.message, escaped);
+    assert.equal(refused.name, `stem${sneaky}`, "Remove sends the file's own name");
+    assert.equal(embedding.title, escaped);
+    assert.equal(embedding.description, escaped);
+    const markup = render({ listing: result });
+    for (const hidden of ["‮", "​"]) assert.ok(!markup.includes(hidden), `the page never shows ${JSON.stringify(hidden)} raw`);
+    assert.ok(markup.includes(`id="app-plugin-stem${encodeURIComponent(sneaky)}"`), "the switch id names the file encoded, in its id and label references");
+    assert.ok(markup.includes(`aria-labelledby="app-plugin-stem${encodeURIComponent(sneaky)}-label"`));
+    assert.ok(text(markup).includes(`stem${escaped}, version 1.`), "the name line shows the escaped name");
+  });
+  const listings = [
+    () => api.addAppPlugin("schema: 1\n", SHA, false), () => api.trustAppPlugin("local", SHA), () => api.setAppPluginEnabled("local", true),
+    () => api.removeAppPlugin("broken"), () => api.bindAppPluginAccount("openai", "api_key", "acct-work"), () => api.setAppPluginKey("openai", "api_key", "k"),
+    () => api.unbindAppPlugin("openai", "api_key"),
+  ];
+  for (const run of listings) {
+    await bridged(listed, async () => {
+      const result = await run();
+      assert.equal(result.kind, "ok");
+      assert.equal(result.value.plugins[1].title, escaped, "every listing an action answers is escaped");
+      assert.equal(result.value.plugins[0].name, `stem${sneaky}`);
+    });
+  }
+  for (const run of [() => api.previewAppPlugin("schema: 1\n"), () => api.reviewAppPlugin("harbor-embed")]) {
+    await bridged({ kind: "ready", trust: trust({ title: sneaky, description: sneaky }) }, async () => {
+      const result = await run();
+      assert.equal(result.kind, "ok");
+      assert.equal(result.value.trust.title, escaped);
+      assert.equal(result.value.trust.description, escaped);
+    });
+  }
+  await bridged(`title: ${sneaky}\n`, async () => {
+    const picked = await api.pickAppPluginFile();
+    assert.equal(picked.kind, "ok");
+    assert.equal(picked.value, `title: ${sneaky}\n`, "the owner's own file goes back as picked");
+  });
+});
