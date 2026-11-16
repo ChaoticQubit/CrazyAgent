@@ -30,6 +30,11 @@ thread_local! {
     /// How many git commands engine git started on this thread, so a landing test can
     /// count what one read costs.
     pub(super) static GIT_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The first argument of each git command engine git started on this thread on a work
+    /// tree with no confinement, so a landing test can tell which steps read an agent's work
+    /// tree with the engine's own rights.
+    pub(super) static UNCONFINED_WORK: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -977,6 +982,13 @@ impl Repo {
         let mut command = self.command(args, env);
         #[cfg(test)]
         GIT_RUNS.with(|runs| runs.set(runs.get() + 1));
+        #[cfg(test)]
+        UNCONFINED_WORK.with(|runs| {
+            if self.confinement.is_empty() && self.work_tree.is_some() {
+                runs.borrow_mut()
+                    .extend(args.first().map(|arg| (*arg).to_owned()));
+            }
+        });
         command.stdin(if input.is_some() {
             Stdio::piped()
         } else {
