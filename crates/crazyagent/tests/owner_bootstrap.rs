@@ -51,19 +51,19 @@ impl Process {
             let mut reader = BufReader::new(out);
             let mut line = String::new();
             if reader.read_line(&mut line).is_ok() {
-                captured.lock().unwrap().extend_from_slice(line.as_bytes());
+                appended(&captured, line.as_bytes());
                 let _ = send.send(line);
             }
             let mut rest = Vec::new();
             reader.take(65536).read_to_end(&mut rest).unwrap();
-            captured.lock().unwrap().extend(rest);
+            appended(&captured, &rest);
         });
         let err = child.stderr.take().unwrap();
         let captured = stderr.clone();
         let err_reader = std::thread::spawn(move || {
             let mut bytes = Vec::new();
             err.take(65536).read_to_end(&mut bytes).unwrap();
-            captured.lock().unwrap().extend(bytes);
+            appended(&captured, &bytes);
         });
         Self {
             child,
@@ -127,6 +127,14 @@ impl Process {
             String::from_utf8_lossy(&self.stderr.lock().unwrap())
         );
     }
+}
+
+/// Adds what an output reader read to its capture. A failed assert may have poisoned the
+/// capture while it held it, as a stderr check can before the reader appends, so a reader
+/// that then panicked would fail Drop's join and abort the binary. Inputs: the capture and
+/// the bytes.
+fn appended(captured: &Mutex<Vec<u8>>, bytes: &[u8]) {
+    captured.lock().unwrap().extend_from_slice(bytes);
 }
 
 impl Drop for Process {
@@ -901,4 +909,27 @@ async fn cli_owner_transport_rejects_wrong_authentication() {
         .await
         .unwrap();
     process.stop("TERM");
+}
+
+/// TEST-DROP-UNWRAP: an output reader still appends to a capture a failed assert poisoned
+/// while it held it, so the reader ends cleanly and Process's Drop, which joins it with
+/// unwrap while that assert unwinds, never panics a second time and aborts the binary.
+#[test]
+fn a_reader_still_appends_to_a_poisoned_capture() {
+    let captured = Mutex::new(b"engine".to_vec());
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = captured.lock().unwrap();
+        panic!("a failed stderr assert while the capture is held");
+    }));
+    assert!(poisoned.is_err());
+    assert!(captured.is_poisoned());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        appended(&captured, b" stopped")
+    }));
+    assert!(result.is_ok(), "the reader does not panic");
+    let text = captured
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert_eq!(text, b"engine stopped");
 }
