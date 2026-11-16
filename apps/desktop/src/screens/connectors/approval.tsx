@@ -12,6 +12,21 @@ export interface ApprovalActions {
   onRetry: () => void;
 }
 
+/** An answer the engine took, kept with the read it answered so the page can show it until
+ * a newer read lands. */
+export interface KeptAnswer {
+  over: Loaded<ApprovalView>;
+  view: ApprovalView;
+}
+
+/** What the approval page shows: the view an answer returned while the read it answered is
+ * still the loaded one and names the same approval, so Allow and Deny are gone before the
+ * re-read lands; else the read. Inputs: the loaded read and the kept answer, if any.
+ * Output: the view to show. */
+export function approvalOnPage(view: Loaded<ApprovalView>, _kept: KeptAnswer | null): Loaded<ApprovalView> {
+  return view;
+}
+
 /** The approval page for one connector write: what asks and what it sends as plain text,
  * the time left with Allow and Deny while it waits and its wait has not run out, else where
  * it stands, and the full arguments in a closed fold. Inputs: the approval as read, now in

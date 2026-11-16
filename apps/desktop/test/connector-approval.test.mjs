@@ -106,6 +106,26 @@ test("While an answer is on its way both buttons wait, and a failed answer says 
   assert.match(failed, /role="alert"[^>]*>.*That approval is gone\./su);
 });
 
+test("An answered write shows its answer and no buttons until the re-read lands, then the re-read", () => {
+  const loaded = { kind: "ok", value: WAITING };
+  const answered = { ...WAITING, state: "allowed", answered_ms: CREATED + 2000 };
+  const kept = { over: loaded, view: answered };
+  const onPage = approval.approvalOnPage(loaded, kept);
+  assert.deepEqual(onPage, { kind: "ok", value: answered });
+  const markup = renderToStaticMarkup(createElement(approval.ApprovalPageView, { view: onPage, now: CREATED + 3000, busy: false, failure: "", actions }));
+  assert.ok(text(markup).includes(`Allowed ${api.stampWords(answered.answered_ms)}`), text(markup));
+  assert.equal(button(markup, "Allow"), null, "no Allow before the re-read");
+  assert.equal(button(markup, "Deny"), null, "no Deny before the re-read");
+  const reread = { kind: "ok", value: { ...answered } };
+  assert.equal(approval.approvalOnPage(reread, kept), reread, "the re-read replaces the kept answer");
+  assert.equal(approval.approvalOnPage(loaded, null), loaded, "no answer, the read shows");
+  assert.equal(approval.approvalOnPage(loaded, { over: loaded, view: { ...answered, id: 8 } }), loaded, "an answer for another approval never shows");
+  const page = source("../src/screens/connectors/approval.tsx");
+  assert.match(page, /setKept\(\{ over: shownRead\.current, view: result\.value \}\);/u, "the answer is kept over the read shown when it returned");
+  assert.match(page, /const onPage = approvalOnPage\(view, kept\);/u);
+  assert.match(page, /<ApprovalPageView view=\{onPage\} now=\{now\} busy=\{busy \|\| onPage !== view\}/u, "both buttons wait until the re-read lands");
+});
+
 test("The page keeps its title while loading, when the engine is not ready and when the read fails", () => {
   for (const view of [{ kind: "loading" }, { kind: "not_ready" }, { kind: "error", code: "connector_approval_unknown", message: "That approval is gone." }]) {
     assert.ok(text(render({}, { view })).startsWith(api.APPROVAL_PAGE.title), view.kind);
