@@ -31,7 +31,7 @@ function attribute(attributes, name) {
  */
 export function count(xml) {
   const result = { tests: 0, failed: [], skipped: 0, seconds: null };
-  for (const [, attributes, body = ""] of xml.matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)) {
+  for (const [, attributes, body = ""] of xml.matchAll(/<testcase\b((?:"[^"]*"|'[^']*'|[^>"'])*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)) {
     result.tests += 1;
     if (/<(?:failure|error)\b/.test(body)) result.failed.push(`${attribute(attributes, "classname")} ${attribute(attributes, "name")}`);
     else if (/<skipped\b/.test(body)) result.skipped += 1;

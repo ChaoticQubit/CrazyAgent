@@ -36,9 +36,23 @@ const NODE = `<?xml version="1.0" encoding="utf-8"?>
 </testsuites>
 `;
 
+const NODE_RAW_GT = `<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testcase name="reads farm-junit-&lt;part> folders" time="0.4" classname="test"/>
+  <testcase name="a build-&lt;version> tag row" time="0.1" classname="test">
+    <failure type="testCodeFailure" message="x"/>
+  </testcase>
+  <testcase name="last row" time="0.1" classname="test"/>
+</testsuites>
+`;
+
 test("one JUnit file counts its test cases, failures (failure or error), skips and the run's seconds, names decoded", () => {
   assert.deepEqual(count(NEXTEST), { tests: 3, failed: ["crazyagent::accounts a_row_<fails>"], skipped: 1, seconds: 812.5 });
   assert.deepEqual(count(NODE), { tests: 2, failed: ["test broken row"], skipped: 0, seconds: null });
+});
+
+test("a raw > inside a quoted attribute, as node's JUnit reporter writes it, neither hides nor merges test cases", () => {
+  assert.deepEqual(count(NODE_RAW_GT), { tests: 3, failed: ["test a build-<version> tag row"], skipped: 0, seconds: null });
 });
 
 test("the summary is one table row per expected part, a part with no JUnit is missing and fails the run", () => {
