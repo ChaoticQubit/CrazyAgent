@@ -15,9 +15,9 @@ use std::path::Path;
 #[cfg(unix)]
 mod sign;
 #[cfg(unix)]
-use sign::finish_trusted;
-#[cfg(unix)]
 pub(crate) use sign::begin_with;
+#[cfg(unix)]
+use sign::finish_trusted;
 #[cfg(all(test, unix))]
 pub(crate) use sign::finish_with;
 
