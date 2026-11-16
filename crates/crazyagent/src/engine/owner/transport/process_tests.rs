@@ -1015,7 +1015,14 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         section_bytes: 0,
     };
     let sub_home = launched_home(&root, sub);
-    prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
+    prepare(
+        &sub_home,
+        Harness::Codex,
+        &given,
+        &text("# Sub rules\n"),
+        crate::agent_home::Caches::default(),
+    )
+    .unwrap();
     record_skills(&root, &sub_home, &["tdd", "code-review"]).unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub)).unwrap(),
@@ -1069,6 +1076,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         Harness::Claude,
         &given,
         &text("# Master rules\n"),
+        crate::agent_home::Caches::default(),
     )
     .unwrap();
     let shown = agent_instructions(&root, &project, None).unwrap();
@@ -1145,7 +1153,14 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
         mode: Mode::Both,
         repeated: crate::agent_home::Repeated::LeaveOut,
     };
-    prepare(&home, Harness::Claude, &launch, &given).unwrap();
+    prepare(
+        &home,
+        Harness::Claude,
+        &launch,
+        &given,
+        crate::agent_home::Caches::default(),
+    )
+    .unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub))
             .unwrap()
@@ -1194,7 +1209,14 @@ fn an_agent_cannot_change_the_skills_its_card_lists() {
         files: Vec::new(),
         section_bytes: 0,
     };
-    prepare(&home, Harness::Codex, &launch, &given).unwrap();
+    prepare(
+        &home,
+        Harness::Codex,
+        &launch,
+        &given,
+        crate::agent_home::Caches::default(),
+    )
+    .unwrap();
     record_skills(&root, &home, &["tdd", "code-review"]).unwrap();
     let installed = vec!["tdd".to_owned(), "code-review".to_owned()];
     assert_eq!(

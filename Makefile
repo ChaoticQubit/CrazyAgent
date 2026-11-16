@@ -41,6 +41,7 @@ test-rust-selected: desktop-dist engine-bins
 	status=0; \
 	cargo test -p crazyagent --locked --offline --no-fail-fast --lib --bins $(foreach test,$(ENGINE_TESTS),--test $(test))$(if $(ENGINE_ROWS_EXCLUDE), -- --exact $(foreach row,$(ENGINE_ROWS_EXCLUDE),--skip $(row))) || status=$$?; \
 	cargo test -p crazyagent-desktop --locked --offline --no-fail-fast --lib --bins $(foreach test,$(DESKTOP_TESTS),--test $(test))$(if $(DESKTOP_ROWS_EXCLUDE), -- --exact $(foreach row,$(DESKTOP_ROWS_EXCLUDE),--skip $(row))) || status=$$?; \
+	cargo test -p crazyagent-linux-supervisor --locked --offline --no-fail-fast || status=$$?; \
 	exit $$status
 
 test-price-script:

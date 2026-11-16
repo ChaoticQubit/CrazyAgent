@@ -6,7 +6,7 @@ use crate::master_step_limit::{MasterStepSettings, StepLimit};
 use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
-use crate::sandbox::LinuxSockets;
+use crate::sandbox::{LinuxSockets, LinuxSupervisor};
 use crate::sandbox_settings::SandboxSettings;
 use crate::setup::{Dependency, DependencyStatus, PackGroup, Version};
 use crate::tui::client::OwnerEvent;
@@ -186,6 +186,7 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
     shell.arrive(event(AppSetupEvent::GitHub(Ok(signed_in()))));
     shell.arrive(event(AppSetupEvent::Sandbox(Ok(SandboxSettings {
         linux_sockets,
+        ..SandboxSettings::default()
     }))));
     shell.arrive(event(AppSetupEvent::Cleanup(
         Ok(CleanupSettings::default()),
@@ -228,6 +229,18 @@ fn chosen(shell: &mut Shell) -> LinuxSockets {
         panic!("one sandbox change required, got {} jobs", sent.len())
     };
     settings.linux_sockets
+}
+
+fn sent(shell: &mut Shell) -> SandboxSettings {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetSandbox { settings, .. }] = sent.as_slice() else {
+        panic!("one sandbox change required, got {} jobs", sent.len())
+    };
+    *settings
+}
+
+fn stored(shell: &mut Shell, settings: SandboxSettings) {
+    shell.arrive(event(AppSetupEvent::Sandbox(Ok(settings))));
 }
 
 fn find<'a>(rows: &'a [String], needle: &str) -> &'a str {
@@ -882,8 +895,8 @@ fn a_long_pack_scrolls_with_the_cursor() {
 
 #[test]
 fn settings_show_the_linux_sockets_setting_and_its_risk() {
-    let mut shell = settings(120, 60);
-    let rows = render(&mut shell, 120, 60);
+    let mut shell = settings(120, 72);
+    let rows = render(&mut shell, 120, 72);
     assert!(find(&rows, "Linux sockets  ").contains("TCP only, names looked up over TCP"));
     find(&rows, "RES_OPTIONS");
     assert!(
@@ -893,7 +906,7 @@ fn settings_show_the_linux_sockets_setting_and_its_risk() {
     );
     assert!(bar(&rows).contains("l Linux sockets"));
     shell.key(Key::Char('l'));
-    let rows = render(&mut shell, 120, 60);
+    let rows = render(&mut shell, 120, 72);
     find(
         &rows,
         "how an agent limited to its model reaches the network",
@@ -973,6 +986,103 @@ fn choosing_tcp_ports_saves_it_and_a_refused_save_says_why() {
     shell.key(Key::Char('l'));
     shell.key(Key::Esc);
     assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
+}
+
+#[test]
+fn settings_show_the_linux_call_supervisor_setting_and_what_each_option_does() {
+    let mut shell = settings(120, 72);
+    let rows = render(&mut shell, 120, 72);
+    assert!(find(&rows, "Linux supervisor ").contains("On (recommended)"));
+    find(&rows, "makes them for them");
+    assert!(bar(&rows).contains("v Linux supervisor"));
+    shell.key(Key::Char('v'));
+    let rows = render(&mut shell, 120, 72);
+    find(&rows, "Linux call supervisor:");
+    for title in ["> On (recommended)", "  Off"] {
+        find(&rows, title);
+    }
+    find(&rows, "open to them on every host");
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the current option saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn turning_the_call_supervisor_off_saves_it_and_keeps_the_sockets_choice() {
+    let mut shell = settings_with(120, 60, LinuxSockets::TcpPorts);
+    shell.key(Key::Char('v'));
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> Off");
+    shell.key(Key::Enter);
+    let off = SandboxSettings {
+        linux_sockets: LinuxSockets::TcpPorts,
+        linux_supervisor: LinuxSupervisor::Off,
+    };
+    assert_eq!(sent(&mut shell), off);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    assert_eq!(lead(&shell), "Linux supervisor: Off.");
+    stored(&mut shell, off);
+    assert!(find(&render(&mut shell, 120, 60), "Linux supervisor ").contains("Off"));
+}
+
+#[test]
+fn changing_sockets_keeps_the_supervisor_off_and_turning_it_on_keeps_the_sockets() {
+    let mut shell = settings(120, 60);
+    let off = SandboxSettings {
+        linux_sockets: LinuxSockets::TcpOnly,
+        linux_supervisor: LinuxSupervisor::Off,
+    };
+    stored(&mut shell, off);
+    shell.key(Key::Char('l'));
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let refused = SandboxSettings {
+        linux_sockets: LinuxSockets::Refuse,
+        ..off
+    };
+    assert_eq!(sent(&mut shell), refused);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    let _read_back = jobs(&mut shell);
+    stored(&mut shell, refused);
+    shell.key(Key::Char('v'));
+    find(&render(&mut shell, 120, 60), "> Off");
+    shell.key(Key::Up);
+    shell.key(Key::Enter);
+    let on = SandboxSettings {
+        linux_supervisor: LinuxSupervisor::On,
+        ..refused
+    };
+    assert_eq!(sent(&mut shell), on);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    assert_eq!(lead(&shell), "Linux supervisor: On (recommended).");
+}
+
+#[test]
+fn neither_linux_setting_is_saved_while_the_engine_has_not_said_both() {
+    let mut shell = Shell::with(ctx(120, 60), Box::new(AppSetup::new(false)));
+    let _asked = jobs(&mut shell);
+    shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
+    let _read = jobs(&mut shell);
+    shell.key(Key::Char('v'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(
+        lead(&shell),
+        "The Linux call supervisor setting is not known yet."
+    );
+    for (key, words) in [('v', "Linux call supervisor"), ('l', "Linux sockets")] {
+        stored(&mut shell, SandboxSettings::default());
+        shell.key(Key::Char(key));
+        shell.arrive(event(AppSetupEvent::Sandbox(Err("busy".into()))));
+        shell.key(Key::Down);
+        shell.key(Key::Enter);
+        assert!(jobs(&mut shell).is_empty(), "{key}: nothing is sent from defaults");
+        let unknown = format!("The {words} setting is not known yet.");
+        assert_eq!(lead(&shell), unknown);
+    }
 }
 
 fn cleanup_chosen(shell: &mut Shell) -> CleanupSettings {
@@ -1666,6 +1776,16 @@ fn the_sockets_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
         let mut shell = settings(width, height);
         shell.key(Key::Char('l'));
         let (first, last) = ("Linux limited-network sockets:", "host.");
+        ask_in_body(&mut shell, width, height, first, last);
+    }
+}
+
+#[test]
+fn the_supervisor_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('v'));
+        let (first, last) = ("Linux call supervisor:", "your programs.");
         ask_in_body(&mut shell, width, height, first, last);
     }
 }

@@ -13,7 +13,7 @@ const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 /// [`sign_in_command`]).
 pub(crate) const SIGN_IN_PATH: &str = "/usr/bin:/bin";
 
-pub use launch::{HandedWord, handed_words};
+pub use launch::{CUSTODIAN_ARGUMENTS_MAX, HandedWord, handed_words};
 pub(crate) use launch::{LaunchWord, handed_command};
 
 /// Starts a token renewal child in the engine with no search path: the harness file itself,

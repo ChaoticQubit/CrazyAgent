@@ -501,7 +501,7 @@ export interface ProjectCatalog {
   document_bytes_max: number;
   project_document_bytes_max: number;
   default_team: TeamPlan;
-  agent_access?: { access: "sandboxed" | "own_branch" | "full"; label: string; unavailable: string | null }[];
+  agent_access?: { access: "sandboxed" | "own_branch" | "full"; label: string; unavailable: string | null; gaps?: string[] }[];
 }
 
 export interface StoredSetup {
@@ -1514,6 +1514,78 @@ export interface CloneReceipt {
   path: string;
 }
 
+export interface GitHubOwner {
+  login: string;
+  personal: boolean;
+}
+
+export interface GitHubOwners {
+  owners: GitHubOwner[];
+  problem: string | null;
+}
+
+export interface GitHubPublishPlan {
+  owner: string;
+  name: string;
+  description: string;
+  private: boolean;
+  docs: boolean;
+}
+
+export type GitHubIgnoreDraft = { by: "agent" } | { by: "baseline"; reason: string };
+
+export interface GitHubCommitted {
+  branch: string;
+  commit: string;
+  left_out: number;
+}
+
+export interface GitHubSecretFinding {
+  path: string;
+  line: number;
+  kind: "token" | "private_key" | "named_value";
+}
+
+export type GitHubRuleState =
+  | { state: "applied" }
+  | { state: "refused"; status: number; message: string }
+  | { state: "not_applicable"; reason: string }
+  | { state: "waiting"; reason: string };
+
+export interface GitHubRuleOutcome {
+  rule: string;
+  on: boolean;
+  state: GitHubRuleState;
+}
+
+export type GitHubPublishStep =
+  | { step: "lines"; lines: string[]; draft: GitHubIgnoreDraft }
+  | { step: "blocked"; scan: { findings: GitHubSecretFinding[]; truncated: boolean } }
+  | { step: "checked" }
+  | { step: "committed"; committed: GitHubCommitted }
+  | { step: "creating"; committed: GitHubCommitted; sent_at: number }
+  | { step: "created"; committed: GitHubCommitted; full_name: string; private: boolean }
+  | { step: "pushed"; full_name: string; private: boolean; workflows: boolean }
+  | { step: "done"; full_name: string; outcomes: GitHubRuleOutcome[] };
+
+export interface GitHubPublishJob {
+  project: string;
+  plan: GitHubPublishPlan;
+  lines: string[];
+  written: string[];
+  step: GitHubPublishStep;
+  stopped: string | null;
+  made: string | null;
+  rules?: string[];
+}
+
+export interface GitHubRepoRules {
+  full_name: string;
+  private: boolean;
+  checks: string[];
+  rules: GitHubRuleOutcome[];
+}
+
 /** Starts "Sign in with GitHub". Output: the code to type at the GitHub page and its
  * address; the engine waits for approval in the background, so poll githubStatus. */
 export function githubSignIn(): Promise<GitHubDeviceCode> {
@@ -1545,6 +1617,44 @@ export function githubRepos(page = 1): Promise<GitHubRepoPage> {
 /** Clones one repository, as "owner/name", into the projects home. Output: where it landed. */
 export function cloneRepo(fullName: string): Promise<CloneReceipt> {
   return invoke<CloneReceipt>("desktop_clone_repo", { fullName });
+}
+
+/** Lists the GitHub accounts a published project's repository can go under, the personal
+ * account first. Output: the accounts and a plain problem, such as organizations that
+ * could not be listed. */
+export function githubOwners(): Promise<GitHubOwners> {
+  return invoke<GitHubOwners>("desktop_github_owners");
+}
+
+/** Starts publishing a project on GitHub: the engine checks the plan, the sign-in and the
+ * project's git and drafts the .gitignore lines to show first. Inputs: the project id and
+ * the plan. Output: the job at its lines. */
+export function githubPublishStart(project: string, plan: GitHubPublishPlan): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_start", { project, plan });
+}
+
+/** Reads the rules a new repository starts with, as Settings > GitHub shows them: DEC-182's
+ * standard setup while none are saved. Output: the rules on, by the engine's names. */
+export function githubRuleDefaults(): Promise<string[]> {
+  return invoke<string[]>("desktop_github_rule_defaults");
+}
+
+/** Saves the rules a new repository starts with. Input: the rules on. Output: the rules the
+ * engine read back after saving. */
+export function githubRuleDefaultsSet(rules: string[]): Promise<string[]> {
+  return invoke<string[]>("desktop_github_rule_defaults_set", { rules });
+}
+
+/** Reads the live rules of the repository CrazyAgent published a project to, with GET calls
+ * only. Input: the project id. Output: the repository, its CI check names and every rule. */
+export function githubRules(project: string): Promise<GitHubRepoRules> {
+  return invoke<GitHubRepoRules>("desktop_github_rules", { project });
+}
+
+/** Turns one rule on or off on that repository with the owner's sign-in, then reads it again.
+ * Inputs: the project id, the rule and whether it is on. Output: the fresh page. */
+export function githubRuleSet(project: string, rule: string, on: boolean): Promise<GitHubRepoRules> {
+  return invoke<GitHubRepoRules>("desktop_github_rule_set", { project, rule, on });
 }
 
 export type DependencyName = "tmux" | "uv" | "graphify" | "node";

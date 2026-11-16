@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { Settings } from "../../src/screens/settings/index.tsx";
 import { UserMenuDialog } from "../../src/screens/user-menu.tsx";
 import { isUserMenuTab } from "../../src/ui/router.ts";
+import { RULE_LABELS } from "../../src/screens/project/publish-job.ts";
 import { mountTab, sceneRead } from "./settings-tab.mjs";
 
 export * from "./settings-tab.mjs";
@@ -18,12 +19,14 @@ const ACCOUNTS = {
 };
 const SIGNED_IN = { signed_in: true, login: "mira", method: "device", waiting: false, problem: null };
 const GITHUB = { in: SIGNED_IN, out: { signed_in: false, login: null, method: "none", waiting: false, problem: null }, cli: { ...SIGNED_IN, method: "cli" }, trouble: { ...SIGNED_IN, problem: "The sign-in expired." } };
+const STANDARD = Object.keys(RULE_LABELS).filter((rule) => rule !== "signed_commits");
+let defaultsSaved = null;
 const OWNER = { name: "Mira", role: "Founder", bio: "Builds things.", preferred_stack: ["Rust"], working_style: { detail: "terse", initiative: "ask_first" } };
 const PROFILES = { ok: { kind: "ok", value: OWNER }, blank: { kind: "ok", value: { ...OWNER, name: "" } }, loading: { kind: "loading" }, not_ready: { kind: "not_ready" }, error: { kind: "error", message: "engine_failed" } };
 
 /** Answers one engine command for a scene. Inputs: the scene and the command. Output: the
  * answer, a failure thrown, or a read that never lands. */
-function answer(scene, command) {
+function answer(scene, command, args) {
   if (command === "desktop_list_accounts") {
     const accounts = sceneRead(scene.accounts ?? "ok", ACCOUNTS, FAILURE, command);
     return accounts instanceof Promise ? accounts : { accounts, next: null };
@@ -31,6 +34,14 @@ function answer(scene, command) {
   if (command === "desktop_pool_summaries") return [];
   if (command === "desktop_github_status") return sceneRead(scene.github ?? "in", GITHUB, FAILURE, command);
   if (command === "desktop_github_sign_out") return sceneRead(scene.signOut ?? "out", GITHUB, FAILURE, command);
+  if (command === "desktop_github_rule_defaults") {
+    if (scene.defaults === "unreadable") throw { code: "github_state_invalid" };
+    return sceneRead(scene.defaults ?? "ok", { ok: defaultsSaved ?? STANDARD }, FAILURE, command);
+  }
+  if (command === "desktop_github_rule_defaults_set") {
+    defaultsSaved = [...args.rules];
+    return defaultsSaved;
+  }
   if (command === "desktop_save_owner_profile") return sceneRead(scene.save ?? "ok", { ok: null }, FAILURE, command);
   if (command === "desktop_remove_account" || command === "desktop_account_catalog") throw FAILURE;
   throw `Command ${command} not found`;
@@ -42,5 +53,11 @@ function answer(scene, command) {
 export async function mount(scene, theme = "light") {
   const session = { profile: PROFILES[scene.profile ?? "ok"], refreshProfile: async () => {} };
   const panel = isUserMenuTab(scene.tab) ? createElement(UserMenuDialog, { tab: scene.tab, onClose: () => {} }) : createElement(Settings, { tab: scene.tab, action: scene.action });
-  await mountTab(panel, (command) => answer(scene, command), theme, session);
+  defaultsSaved = null;
+  await mountTab(panel, (command, args) => answer(scene, command, args), theme, session);
+}
+
+/** The rules the last defaults save sent. Output: the list, or null before any save. */
+export function defaultsSent() {
+  return defaultsSaved;
 }

@@ -13,6 +13,7 @@ mod clone;
 mod draft;
 pub(crate) mod http;
 mod job;
+mod plan;
 pub mod proposals;
 mod publish;
 mod rules;
@@ -29,6 +30,7 @@ pub use api::Endpoints;
 pub use job::{
     GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan, GitHubPublishStep,
 };
+pub use plan::{GitHubPlanField, default_description, default_repo_name, plan_problem};
 pub use publish::{
     GitHubCommitted, GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding,
     GitHubSecretKind, GitHubSecretScan,

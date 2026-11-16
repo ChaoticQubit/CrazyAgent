@@ -2,15 +2,18 @@ import { classifyFailure, namedFailure, nextGeneration, plainError, type Result 
 import { formatBytes } from "./screens/new-project/wizard";
 import { failureCopy } from "./api-projects";
 import {
-  addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
+  addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubOwners, githubPublishStart, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
   githubUseCli, icloudCancel, icloudDownload, icloudProgress, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
   fixToolPermissions as startFix, setRefusedTool as saveRefusedTool,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
-  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt, OnboardingView,
+  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob,
+  IntentReceipt, OnboardingView,
   DependencyName, ProjectsHome, RefusedTool, SetupStatus,
 } from "./engine-client";
+import { githubRuleDefaults, githubRuleDefaultsSet, githubRules, githubRuleSet } from "./engine-client";
+import type { GitHubRepoRules } from "./engine-client";
 
 export const FOUND_PROJECTS_MAX = 500;
 export const GITHUB_TOKEN_CHARS_MAX = 255;
@@ -84,6 +87,7 @@ const COPY: Record<string, string> = {
   onboarding_folder_missing: "This folder isn't there anymore. Choose it again.",
   onboarding_folder_unsafe: "This folder can't be set up. Choose a project's own folder, not your home folder or the app's data.",
   onboarding_instructions_unwritable: "This folder came with a .crazyagent/instructions.md that CrazyAgent can't label as Imported. Make that file and its .crazyagent folder writable, then start again.",
+  onboarding_instructions_unreadable: "This folder came with a .crazyagent/instructions.md that CrazyAgent can't read: it is a link, too large or not plain text. Move or fix that file, then start again.",
   onboarding_layout_incomplete: "Setup didn't finish preparing this project. Try again.",
   onboarding_path_invalid: "This folder can't be set up. Choose it again with Choose folder.",
   onboarding_path_not_canonical: "This folder can't be set up from this path. Choose it again with Choose folder.",
@@ -125,6 +129,12 @@ const COPY: Record<string, string> = {
   github_token_frame_invalid: "The token couldn't be sent to the engine safely. Paste it again.",
   github_token_frame_mismatch: "The token couldn't be sent to the engine safely. Paste it again.",
   github_failed: "Something went wrong talking to GitHub. Try again.",
+  github_rules_not_published: "GitHub rules show here for a project CrazyAgent published on GitHub, once its publish is done.",
+  github_rule_invalid: "This rule is a file in the project, so it can't be switched on GitHub.",
+  github_repo_unreadable: "GitHub didn't show this repository. Check that it still exists and that your GitHub sign-in can see it.",
+  github_publish_project_unknown: "CrazyAgent can't find this project. Reload and try again.",
+  github_publish_unavailable: "CrazyAgent couldn't read its projects just now. Try again.",
+  github_store_unavailable: "CrazyAgent couldn't find where it keeps its GitHub sign-in. Restart CrazyAgent and try again.",
   setup_busy: "Setup is already running. Wait for it to finish.",
   tool_fix_off: "Fixing permissions from CrazyAgent is turned off in Settings. Run the command shown instead.",
   tool_fix_not_needed: "This tool can run now, so nothing needed fixing.",
@@ -377,6 +387,53 @@ export function gitHubSignOut(): Promise<Result<GitHubStatus>> {
  * Output: the status. */
 export function loadGitHubStatus(): Promise<Result<GitHubStatus>> {
   return wrap(githubStatus);
+}
+
+/** Reads the GitHub accounts a published project's repository can go under, the personal
+ * account first. Output: the accounts and a plain problem, if any. */
+export function loadGitHubOwners(): Promise<Result<GitHubOwners>> {
+  return wrap(githubOwners);
+}
+
+/** Starts publishing a project on GitHub with a plan the New Project publish block built.
+ * Inputs: the project id and the plan. Output: the job at its .gitignore lines. */
+export function startGitHubPublish(project: string, plan: GitHubPublishPlan): Promise<Result<GitHubPublishJob>> {
+  return wrap(() => githubPublishStart(project, plan));
+}
+
+export const DEFAULTS_UNREADABLE = "The saved defaults for new repositories can't be read safely. Use the standard setup to replace them.";
+
+const DEFAULTS_UNREADABLE_CODES = ["github_state_invalid", "github_config_unsafe", "github_config_invalid"];
+
+/** Gives the defaults read its own sentence when the saved file cannot be read safely, since
+ * signing in again would not replace it. Input: the read. Output: the read, with the
+ * defaults sentence on such a failure. */
+export function defaultsRead(read: Result<string[]>): Result<string[]> {
+  return read.kind === "error" && DEFAULTS_UNREADABLE_CODES.includes(read.code) ? { ...read, message: DEFAULTS_UNREADABLE } : read;
+}
+
+/** Reads the rules a new repository starts with, DEC-182's while none are saved. Output:
+ * the rules on. */
+export async function loadGitHubRuleDefaults(): Promise<Result<string[]>> {
+  return defaultsRead(await wrap(githubRuleDefaults));
+}
+
+/** Saves the rules a new repository starts with; a publish already started keeps its copy.
+ * Input: the rules on. Output: the rules the engine read back. */
+export async function saveGitHubRuleDefaults(rules: string[]): Promise<Result<string[]>> {
+  return defaultsRead(await wrap(() => githubRuleDefaultsSet(rules)));
+}
+
+/** Reads the live rules of the repository a project was published to; GitHub gets only
+ * reads. Input: the project id. Output: the page. */
+export function loadGitHubRules(project: string): Promise<Result<GitHubRepoRules>> {
+  return wrap(() => githubRules(project));
+}
+
+/** Turns one rule on or off on the repository a project was published to, with the owner's
+ * sign-in. Inputs: the project id, the rule and whether it is on. Output: the fresh page. */
+export function setGitHubRule(project: string, rule: string, on: boolean): Promise<Result<GitHubRepoRules>> {
+  return wrap(() => githubRuleSet(project, rule, on));
 }
 
 /** Reads one page of the signed-in account's repositories.

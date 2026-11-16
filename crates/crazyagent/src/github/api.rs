@@ -25,7 +25,7 @@ const REPO_NAME_SHOWN_MAX: usize = 201;
 const BRANCH_SHOWN_MAX: usize = 255;
 const ORGS_PER_PAGE: usize = 100;
 const ORG_PAGES_MAX: usize = 10;
-const DESCRIPTION_CHARS_MAX: usize = 350;
+pub(super) const DESCRIPTION_CHARS_MAX: usize = 350;
 const NODE_ID_BYTES_MAX: usize = 100;
 const MADE_SKEW_SECONDS: i64 = 300;
 const READ_ORG: [&str; 3] = ["read:org", "write:org", "admin:org"];
@@ -439,7 +439,7 @@ pub fn owners(endpoints: &Endpoints, token: &SecretString) -> Result<GitHubOwner
 /// of at most 39 letters, digits and hyphens not starting with one, and a name the clone
 /// accepts. Inputs: the account and the name. Output: `owner/name`, or
 /// `github_repo_name_invalid`.
-fn repo_name(owner: &str, name: &str) -> Result<String, EngineError> {
+pub(super) fn repo_name(owner: &str, name: &str) -> Result<String, EngineError> {
     let owner_valid = !owner.is_empty()
         && owner.len() <= LOGIN_BYTES_MAX
         && !owner.starts_with('-')
@@ -571,12 +571,17 @@ pub fn create(
 /// `github_repo_description_invalid`.
 pub(super) fn check_new(repo: &GitHubNewRepo) -> Result<String, EngineError> {
     let full_name = repo_name(&repo.owner, &repo.name)?;
-    if repo.description.chars().count() > DESCRIPTION_CHARS_MAX
-        || repo.description.chars().any(char::is_control)
-    {
+    if !description_valid(&repo.description) {
         return Err(failure("github_repo_description_invalid"));
     }
     Ok(full_name)
+}
+
+/// Checks a repository description: at most 350 characters, none of them a control
+/// character. Input: the description. Output: whether GitHub takes it from CrazyAgent.
+pub(super) fn description_valid(description: &str) -> bool {
+    description.chars().count() <= DESCRIPTION_CHARS_MAX
+        && !description.chars().any(char::is_control)
 }
 
 /// Finds the repository an earlier create of this publish made when GitHub answered it

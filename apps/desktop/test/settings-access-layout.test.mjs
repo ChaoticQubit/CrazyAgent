@@ -249,7 +249,7 @@ test("real Tab keys go from Add account to the search, the filters and the first
 test("GitHub's top shows its title and purpose with no action", async () => {
   const seen = await onGitHub({}, top);
   assert.equal(seen?.heading, "GitHub", JSON.stringify(seen));
-  assert.equal(seen.purpose, "GitHub lets you clone your repositories into the projects folder. Agents commit locally; you push.");
+  assert.equal(seen.purpose, "GitHub lets you clone your repositories and publish new projects with a standard secure setup. Agents commit locally and never get your sign-in.");
   assert.deepEqual(seen.actions, []);
 });
 
@@ -262,6 +262,64 @@ test("signed in, GitHub account has one line: who and how left, Sign out right",
   assert.match(line.help, /keeps this sign-in in your Mac's keychain/);
   assert.deepEqual(line.buttons, ["Sign out of GitHub"]);
   assert.ok(line.controlLeft > line.labelRight, JSON.stringify(line));
+});
+
+test("signed in, New repositories has one switch per rule, every one on but signed commits", async () => {
+  const seen = await onGitHub({}, async (page) => ({
+    sections: await read(page),
+    on: await count(page, '.set-group [role="switch"][aria-checked="true"]'),
+    signed: await page.evaluate('document.getElementById("github-default-signed_commits")?.getAttribute("aria-checked") ?? null'),
+    help: await wordsOf(page, ".set-group .set-help"),
+  }));
+  const [account, defaults] = seen.sections;
+  assert.equal(account.heading, "GitHub account");
+  assert.equal(defaults?.heading, "New repositories", JSON.stringify(seen.sections.map((section) => section.heading)));
+  assert.equal(defaults.about, "The rules each project CrazyAgent publishes on GitHub starts with. A publish already started keeps its own copy.");
+  assert.deepEqual(defaults.actions, ["Use the standard setup"]);
+  assert.equal(defaults.rows.length, 25);
+  assert.equal(defaults.rows[0].label, "Squash merge only");
+  assert.equal(defaults.rows[12].label, "Signed commits");
+  assert.equal(defaults.rows[24].label, "Security policy (SECURITY.md)");
+  for (const row of defaults.rows) {
+    assert.equal(row.mark, null, row.label);
+    assert.deepEqual(row.buttons, [row.label]);
+    assert.ok(row.controlLeft > row.labelRight, JSON.stringify(row));
+  }
+  assert.equal(seen.on, 24);
+  assert.equal(seen.signed, "false");
+  assert.match(seen.help, /list, clone and publish your repositories and set their rules\. Agents never get it\./);
+});
+
+test("a default switch saves the whole set and marks the change, and Use the standard setup puts DEC-182's set back", async () => {
+  await onGitHub({}, async (page) => {
+    await press(page, "#github-default-wiki_off");
+    let saved = await page.evaluate("Fixture.defaultsSent()");
+    assert.ok((await sent(page)).includes("desktop_github_rule_defaults_set"));
+    assert.equal(saved?.length, 23, JSON.stringify(saved));
+    assert.ok(!saved.includes("wiki_off") && !saved.includes("signed_commits"));
+    let defaults = (await read(page))[1];
+    assert.equal(defaults.rows[3].mark, "changed");
+    assert.equal(defaults.rows.filter((row) => row.mark).length, 1);
+    await press(page, "#github-default-signed_commits");
+    saved = await page.evaluate("Fixture.defaultsSent()");
+    assert.equal(saved.length, 24);
+    assert.ok(saved.includes("signed_commits") && !saved.includes("wiki_off"));
+    await button(page, "Use the standard setup");
+    saved = await page.evaluate("Fixture.defaultsSent()");
+    assert.equal(saved.length, 24);
+    assert.ok(saved.includes("wiki_off") && !saved.includes("signed_commits"));
+    defaults = (await read(page))[1];
+    assert.ok(defaults.rows.every((row) => row.mark === null), JSON.stringify(defaults.rows.filter((row) => row.mark)));
+  });
+});
+
+test("defaults the engine cannot read safely say so and keep Use the standard setup", async () => {
+  const seen = await onGitHub({ defaults: "unreadable" }, async (page) => ({ sections: await read(page), words: await wordsOf(page, '.set-group [role="alert"]') }));
+  const [, defaults] = seen.sections;
+  assert.equal(defaults?.heading, "New repositories");
+  assert.equal(defaults.rows.length, 0);
+  assert.deepEqual(defaults.actions, ["Use the standard setup"]);
+  assert.equal(seen.words, "The saved defaults for new repositories can't be read safely. Use the standard setup to replace them.");
 });
 
 test("signed in through the GitHub CLI, the help says what Sign out leaves", async () => {

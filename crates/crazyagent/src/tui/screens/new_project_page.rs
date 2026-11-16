@@ -1,4 +1,6 @@
+use super::intake::{ask, event};
 use super::new_project::{HarnessChoice, HarnessState, Phase, PoolChoice, Reply, Wizard};
+use super::new_project_publish::{GitHub, PUBLISH_STARTED};
 use super::new_project_view::{Look, Row, Screen as View, wizard_screen};
 use super::project::plain_problem;
 use super::project_page::ProjectPage;
@@ -6,11 +8,13 @@ use super::settings_accounts::{plain, settings_event};
 use super::settings_harnesses::{control_sentence, control_word};
 use super::{Flow, Place, ProjectTab, Screen};
 use crate::engine::owner::{OwnerResponse, OwnerResult, random_id};
+use crate::github::{GitHubOwners, GitHubPublishPlan};
 use crate::harnesses::{HarnessEntry, HarnessStatus, TeamUse};
 use crate::pools::{MemberKind, PoolSummary};
 use crate::project_setup::{ProjectSetup, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
 use crate::sandbox::policy::AgentAccess;
+use crate::tui::client::intake::{IntakeQuery, IntakeView};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{
     CreationEvent, CreationJob, CreationSubmission, MutationDelivery, OwnerEvent,
@@ -219,6 +223,7 @@ struct Creation {
     submission: CreationSubmission,
     pool: Option<CredentialRef>,
     access: AgentAccess,
+    publish: Option<GitHubPublishPlan>,
     recovered: bool,
     delivery: MutationDelivery,
     again: bool,
@@ -365,6 +370,35 @@ impl NewProjectPage {
         }
     }
 
+    fn github_arrived(
+        &mut self,
+        query: &IntakeQuery,
+        result: &Result<IntakeView, String>,
+        ctx: &mut Ctx,
+    ) {
+        let publish = &mut self.wizard.publish;
+        match (query, result) {
+            (IntakeQuery::GitHubStatus, Ok(IntakeView::GitHub(status))) if status.signed_in => {
+                publish.set_github(GitHub::SignedIn);
+                ask(ctx, IntakeQuery::GitHubOwners);
+            }
+            (IntakeQuery::GitHubStatus, Ok(IntakeView::GitHub(_))) => {
+                publish.set_github(GitHub::SignedOut);
+            }
+            (IntakeQuery::GitHubStatus, Err(code)) => {
+                publish.set_github(GitHub::Failed(plain(code).to_owned()));
+            }
+            (IntakeQuery::GitHubOwners, Ok(IntakeView::Owners(owners))) => {
+                publish.set_owners(owners.clone());
+            }
+            (IntakeQuery::GitHubOwners, Err(code)) => publish.set_owners(GitHubOwners {
+                owners: Vec::new(),
+                problem: Some(plain(code).to_owned()),
+            }),
+            _ => {}
+        }
+    }
+
     fn redraw(&mut self, ctx: &Ctx) {
         self.wizard.width = ctx.width;
         self.view = wizard_screen(&self.wizard, ctx.width, ctx.height, &look(ctx));
@@ -383,6 +417,7 @@ impl NewProjectPage {
             Reply::Leave => Flow::Back,
             Reply::Background => Flow::Open(Place::Home),
             Reply::CreatePool => Flow::Open(Place::NewPool),
+            Reply::SignInGitHub => Flow::Open(Place::CloneRepo),
             Reply::CheckHarnesses => {
                 self.ask_harnesses(true, ctx);
                 Flow::Handled
@@ -412,6 +447,10 @@ impl NewProjectPage {
             return;
         };
         let pool = setup.pool.clone();
+        let publish = self
+            .wizard
+            .publish
+            .plan(self.wizard.name.value(), self.wizard.about.value());
         let submission = CreationSubmission {
             identity,
             generation: ctx.next_generation(),
@@ -425,6 +464,7 @@ impl NewProjectPage {
             submission,
             pool,
             access: self.wizard.access,
+            publish,
             recovered: false,
             delivery: MutationDelivery::Submit,
             again: false,
@@ -499,10 +539,24 @@ impl NewProjectPage {
             .expect("only a finished creation opens its project");
         assert!(!creation.assigning);
         if !creation.finished {
+            let publish = creation.publish.take();
             ctx.say(Message::success(
                 &format!("{} is ready.", creation.submission.spec.name),
-                "",
+                if publish.is_some() {
+                    PUBLISH_STARTED
+                } else {
+                    ""
+                },
             ));
+            if let Some(plan) = publish {
+                ask(
+                    ctx,
+                    IntakeQuery::GitHubPublishStart {
+                        project: creation.submission.project_id.clone(),
+                        plan,
+                    },
+                );
+            }
         }
         let saves_access = !creation.finished && creation.access != AgentAccess::Sandboxed;
         creation.finished = true;
@@ -664,6 +718,16 @@ impl Screen for NewProjectPage {
             self.redraw(ctx);
             return Flow::Handled;
         }
+        if let Some(reply) = event(arrival).filter(|reply| {
+            matches!(
+                reply.query,
+                IntakeQuery::GitHubStatus | IntakeQuery::GitHubOwners
+            )
+        }) {
+            self.github_arrived(&reply.query, &reply.result, ctx);
+            self.redraw(ctx);
+            return Flow::Handled;
+        }
         if matches!(arrival, Arrival::Disconnected(_)) {
             self.checking = false;
             return Flow::Handled;
@@ -708,6 +772,7 @@ impl Screen for NewProjectPage {
             self.ask_harnesses(false, ctx);
         }
         self.ask_catalog(ctx);
+        ask(ctx, IntakeQuery::GitHubStatus);
         self.redraw(ctx);
     }
 

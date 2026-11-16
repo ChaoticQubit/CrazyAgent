@@ -3,10 +3,12 @@ use super::new_project::{
     harness_name, size_label, team_summary,
 };
 use super::new_project_input::{TextInput, cells, char_cells};
+use super::new_project_publish::{
+    GitHub, PUBLISH_DOCS, PUBLISH_LINE, PUBLISH_TOGGLE, PanelRow, SIGN_IN_WAIT,
+};
 use super::project_access::FULL_ACCESS_WARNING;
 use super::project_markdown::sanitize;
 use crate::project_setup::ResearchKind;
-use crate::sandbox::LINUX_NESTED_GIT_LINE;
 use crate::sandbox::policy::AgentAccess;
 #[cfg(all(test, unix))]
 use ratatui::style::Modifier;
@@ -610,6 +612,20 @@ pub(in crate::tui) fn wizard_screen(
     let mut rows = rows;
     rows.truncate(body_height);
     let mut help = help_keys(wizard);
+    if let Some(open) = wizard.publish.panel {
+        rows = publish_box(wizard, rows, width, look);
+        help = vec![
+            match open {
+                PanelRow::Visibility => ("Space", "Private or public"),
+                PanelRow::Account => ("\u{2190}\u{2192}", "Change account"),
+                PanelRow::Name | PanelRow::Description => ("Type", "Edit"),
+                PanelRow::Docs => ("Space", "On or off"),
+                PanelRow::Done => ("Enter", "Done"),
+            },
+            ("\u{2191}\u{2193}", "Move"),
+            ("Esc", "Close"),
+        ];
+    }
     if let Some(picker) = wizard.picker {
         rows = picker_box(wizard, picker.target, picker.cursor, rows, width, look);
         help = vec![
@@ -715,8 +731,108 @@ fn about(draw: &mut Draw) {
         "Agents can change files only inside this folder.",
         look.muted,
     ));
+    publish_row(draw);
     draw.add(Row::default());
     draw.buttons("Continue");
+}
+
+fn publish_row(draw: &mut Draw) {
+    let look = *draw.look;
+    let wizard = draw.wizard;
+    let publish = &wizard.publish;
+    let (name, about) = (wizard.name.value(), wizard.about.value());
+    let (state, style) = match (&publish.github, publish.on) {
+        (_, false) => (String::new(), look.muted),
+        (GitHub::Checking, true) => ("Checking GitHub...".to_owned(), look.muted),
+        (GitHub::SignedOut, true) => ("Not signed in".to_owned(), look.warning),
+        (GitHub::Failed(problem), true) => (problem.clone(), look.error),
+        (GitHub::SignedIn, true) => match (publish.problem(name, about), publish.shown_owner()) {
+            (None, Some(owner)) => (
+                format!(
+                    "{}, {owner}/{}",
+                    if publish.private { "Private" } else { "Public" },
+                    publish.shown_name(name)
+                ),
+                look.fg,
+            ),
+            _ => ("Check the GitHub details (Enter)".to_owned(), look.error),
+        },
+    };
+    let label = checkbox(publish.on, PUBLISH_TOGGLE);
+    let focus = draw.focus(Control::Publish) && publish.panel.is_none();
+    draw.add(
+        Row::of(label, if focus { look.accent } else { look.fg })
+            .push("  ", Style::new())
+            .push(state, style),
+    );
+    let line = if publish.on && publish.github == GitHub::SignedOut {
+        format!("{SIGN_IN_WAIT} Enter signs in.")
+    } else {
+        PUBLISH_LINE.to_owned()
+    };
+    draw.add(Row::of(format!("    {line}"), look.muted));
+}
+
+fn shown_tail(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_owned();
+    }
+    let tail: String = text.chars().skip(count - (width - 1)).collect();
+    format!("\u{2026}{tail}")
+}
+
+fn publish_box(wizard: &Wizard, base: Vec<Row>, width: usize, look: &Look) -> Vec<Row> {
+    let publish = &wizard.publish;
+    let Some(open) = publish.panel else {
+        return base;
+    };
+    let (name, about) = (wizard.name.value(), wizard.about.value());
+    let problem = publish.problem(name, about);
+    let field = |text: String| format!("[ {:<34} ]", shown_tail(&text, 34));
+    let owner = publish.shown_owner().map_or_else(
+        || "No account yet".to_owned(),
+        |login| {
+            let personal = publish
+                .owners
+                .iter()
+                .any(|owner| owner.login == login && owner.personal);
+            format!("< {login}{} >", if personal { " (you)" } else { "" })
+        },
+    );
+    let line = |row: PanelRow| -> Row {
+        let text = match row {
+            PanelRow::Visibility => format!(
+                "Visibility   {}  {}",
+                radio(publish.private, "Private"),
+                radio(!publish.private, "Public")
+            ),
+            PanelRow::Account => format!("Account      {owner}"),
+            PanelRow::Name => format!("Repository   {}", field(publish.shown_name(name))),
+            PanelRow::Description => {
+                format!("Description  {}", field(publish.shown_description(about)))
+            }
+            PanelRow::Docs => checkbox(publish.docs, PUBLISH_DOCS),
+            PanelRow::Done => "[ Done ]".to_owned(),
+        };
+        let error = problem.is_some_and(|(at, _)| at == row);
+        let style = if error { look.error } else { look.fg };
+        list_row(Row::of(text, style), 56, row == open, true, look)
+    };
+    let mut body: Vec<Row> = PanelRow::ALL[..5].iter().map(|row| line(*row)).collect();
+    if let Some((_, text)) = problem {
+        for wrapped in wrap_words(text, 56) {
+            body.push(Row::of(wrapped, look.error));
+        }
+    }
+    if let Some(text) = &publish.owners_problem {
+        for wrapped in wrap_words(&printable(text.clone()), 56).into_iter().take(3) {
+            body.push(Row::of(wrapped, look.muted));
+        }
+    }
+    body.push(Row::default());
+    body.push(line(PanelRow::Done));
+    modal(&base, width, 64, "Publish on GitHub", body, 2, look)
 }
 
 fn stack(draw: &mut Draw) {
@@ -1410,8 +1526,9 @@ fn review_summary(draw: &mut Draw) {
         ));
         if wizard.access == AgentAccess::Full {
             draw.note(FULL_ACCESS_WARNING, look.warning);
-        } else if wizard.linux {
-            draw.note(LINUX_NESTED_GIT_LINE, look.warning);
+        }
+        for gap in wizard.gaps() {
+            draw.note(gap, look.warning);
         }
     }
     draw.add(Row::default());
@@ -1595,6 +1712,13 @@ pub(in crate::tui) fn help_keys(wizard: &Wizard) -> Vec<(&'static str, &'static 
         Control::Continue => vec![
             ("Enter", "Continue"),
             ("Shift-Tab", "Previous"),
+            STEPS,
+            LEAVE,
+        ],
+        Control::Publish => vec![
+            ("Space", "On or off"),
+            ("Enter", "GitHub details"),
+            ("Tab", "Next"),
             STEPS,
             LEAVE,
         ],

@@ -213,6 +213,8 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
     await click("button=New project");
     await type("#np-name", PROJECT);
     await type("#np-about", ABOUT);
+    await click("#np-publish");
+    assert.equal(await page("#np-publish", "checked"), false, "publishing on GitHub is off for this run");
     await click("button=Next");
     await until(async () => (await text("h2")).includes("Documents") || await page("#np-doc-path"), 15000, "documents step did not open");
     await click("button=Next");

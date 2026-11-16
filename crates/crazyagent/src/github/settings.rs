@@ -20,16 +20,14 @@ impl GitHub {
         state::load_defaults(&self.root)
     }
 
-    /// Saves the rules a new repository starts with. Input: the rules on.
-    /// Output: the rules as saved, read back.
+    /// Saves the rules a new repository starts with. Input: the rules on. Output: the
+    /// rules read back, which are another client's when it saved in between.
     pub fn set_rule_defaults(
         &self,
         rules: &BTreeSet<GitHubRule>,
     ) -> Result<BTreeSet<GitHubRule>, EngineError> {
         state::save_defaults(&self.root, rules)?;
-        let saved = state::load_defaults(&self.root)?;
-        assert_eq!(&saved, rules);
-        Ok(saved)
+        state::load_defaults(&self.root)
     }
 
     /// Reads the live rules of the repository a project was published to, for Project >

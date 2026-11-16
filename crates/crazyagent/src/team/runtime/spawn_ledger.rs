@@ -171,8 +171,58 @@ pub(super) fn recover(team: &Connection, root: &Path) {
                 )?;
             }
         }
+        let finished = finish_gone_agent_notices(&ledger, team)?;
+        if finished > 0 {
+            eprintln!("team_notices_of_gone_agents_finished count={finished}");
+        }
         Ok(())
     }));
+}
+
+/// Finishes, as unknown, the start and worktree notices whose agent row is gone, which a
+/// project removal before RV-DS241-64's fix left: no banner shows them, and each would hold
+/// a pending slot of the ledger for good. Notices of agents still there, and actions another
+/// part of the engine wrote, stay. Inputs: the ledger and the team database. Output: how
+/// many were finished, or the ledger's or the database's failure.
+fn finish_gone_agent_notices(ledger: &Connection, team: &Connection) -> Result<usize, EngineError> {
+    let mut finished = 0usize;
+    for kind in [ActionKind::AgentSpawn, ActionKind::WorktreeCreate] {
+        for action in ledger::pending(ledger, kind)? {
+            let Some(agent) = noticed_agent(&action) else {
+                continue;
+            };
+            let there: bool = team
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM team_agents WHERE id=?1)",
+                    [agent],
+                    |row| row.get(0),
+                )
+                .map_err(unavailable)?;
+            if !there {
+                ledger::finish(ledger, action.id, Outcome::Unknown)?;
+                finished += 1;
+            }
+        }
+    }
+    Ok(finished)
+}
+
+/// Reads the agent a start or worktree notice this module kept names. Input: the action.
+/// Output: the agent, none for an intent a check still settles or a payload another part
+/// of the engine wrote.
+fn noticed_agent(action: &Action) -> Option<i64> {
+    let agent = match action.kind {
+        ActionKind::AgentSpawn => serde_json::from_str::<SpawnIntent>(&action.payload)
+            .ok()
+            .filter(|intent| intent.unknown)
+            .map(|intent| intent.team_agent),
+        ActionKind::WorktreeCreate => serde_json::from_str::<WorktreeIntent>(&action.payload)
+            .ok()
+            .filter(|intent| intent.unknown)
+            .map(|intent| intent.team_agent),
+        _ => None,
+    }?;
+    (action.key == key(agent)).then_some(agent)
 }
 
 /// Settles the pane starts an engine stop left pending against the stored pane records

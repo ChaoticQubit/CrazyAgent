@@ -1744,7 +1744,7 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
     let leader = AgentId::team(1).unwrap();
     let engine_agent = AgentId::team(2).unwrap();
     let command = lead.confined("lead$ ", &["/bin/sh"]);
-    host.spawn_own_server(&leader, &command).unwrap();
+    host.spawn_own_server(&leader, &command, false).unwrap();
     assert!(
         std::fs::symlink_metadata(&lead.socket)
             .unwrap()
@@ -1767,7 +1767,7 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
         "terminal_agent_running"
     );
     assert_eq!(
-        host.spawn_own_server(&engine_agent, &command)
+        host.spawn_own_server(&engine_agent, &command, false)
             .unwrap_err()
             .0,
         "terminal_agent_running"
@@ -1848,7 +1848,7 @@ fn an_adopted_teammate_pane_is_reached_and_ended_by_its_own_name_even_after_a_re
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let [ann, bob, missing] = [2, 3, 9].map(|id| AgentId::team(id).unwrap());
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]), false)
         .unwrap();
     let own_pane = host.panes(&leader).unwrap()[0].id.clone();
     let ann_out = root.join("ann.txt");
@@ -1918,7 +1918,7 @@ fn a_native_lead_and_each_adopted_teammate_name_their_own_first_process() {
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let [ann, bob] = [2, 3].map(|id| AgentId::team(id).unwrap());
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]), false)
         .unwrap();
     let ann_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
     let bob_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 601");
@@ -1965,7 +1965,7 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let [ann, bob] = [2, 3].map(|id| AgentId::team(id).unwrap());
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]), false)
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !contains(&host.snapshot(&leader).unwrap().screen, b"lead$") {
@@ -2050,7 +2050,7 @@ fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teamma
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let ann = AgentId::team(2).unwrap();
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]), false)
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !contains(&host.snapshot(&leader).unwrap().screen, b"lead$") {
@@ -2154,7 +2154,7 @@ fn an_adopted_teammate_survives_one_failed_connect_to_its_teammates_server() {
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let ann = AgentId::team(2).unwrap();
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]), false)
         .unwrap();
     let ann_out = root.join("ann.txt");
     let ann_pane = lead.new_pane(
@@ -2235,7 +2235,7 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_r
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let command = lead.confined("lead$ ", &["/bin/sh"]);
-    host.spawn_own_server(&leader, &command).unwrap();
+    host.spawn_own_server(&leader, &command, false).unwrap();
     assert_eq!(host.panes(&leader).unwrap().len(), 1);
     for socket in [&lead.socket, &lead.mates] {
         let killed = crazyagent::spawn_gate::status(
@@ -2285,7 +2285,7 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_the_lead_was_kille
     let root = lead.path();
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]), false)
         .unwrap();
     assert_eq!(host.panes(&leader).unwrap().len(), 1);
     host.kill(&leader).unwrap();
@@ -2308,7 +2308,7 @@ fn a_restarted_engine_refuses_a_teammates_server_whose_pin_record_is_gone() {
     let root = lead.path();
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]), false)
         .unwrap();
     assert_eq!(host.panes(&leader).unwrap().len(), 1);
     std::fs::remove_file(crazyagent::team::runtime::agent_teammates_server_pid(
@@ -2354,7 +2354,7 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
         socket: crazyagent::terminal::renew_teammates_socket(&root, &next).unwrap(),
     };
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
-    host.spawn_own_server(&refused, &lead.confined("one$ ", &["/bin/sh"]))
+    host.spawn_own_server(&refused, &lead.confined("one$ ", &["/bin/sh"]), false)
         .unwrap();
     let next_profile = crazyagent::team::runtime::agent_profile(&team, 2);
     let next_command = lead.shell(
@@ -2366,7 +2366,7 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
             "/bin/sh",
         ],
     );
-    host.spawn_own_server(&next, &next_command).unwrap();
+    host.spawn_own_server(&next, &next_command, false).unwrap();
     host.spawn(
         &AgentId::team(3).unwrap(),
         &lead.shell("three$ ", &["/bin/sh"]),

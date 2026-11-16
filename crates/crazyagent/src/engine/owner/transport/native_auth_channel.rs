@@ -32,11 +32,39 @@ use std::task::Poll;
 
 const READ_BOUND: Duration = Duration::from_secs(10);
 const CLEANUP_BOUND: Duration = Duration::from_secs(2);
+/// The longest a logout's custody holds its slot: a `claude auth logout` and the status
+/// check after it, each allowed the whole 9 s account check bound, plus the launch and the
+/// exchanges around them; a Codex logout's own 5 s fits inside it (RV-DS241-55).
+const LOGOUT_BOUND: Duration = Duration::from_secs(30);
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// A test's hold on one custody reply: how many exchanges pass first, then how long the
+    /// next one waits after its request is written.
+    pub(in crate::engine) static REPLY_DELAY: std::cell::Cell<(usize, Duration)> =
+        const { std::cell::Cell::new((0, Duration::ZERO)) };
+}
+
+/// Waits as a test chose through [`REPLY_DELAY`] before one reply is read, so a row can
+/// hold an exchange open past a deadline. No input. Output: once that wait, if any, ends.
+#[cfg(all(test, unix))]
+async fn held_reply() {
+    let (skip, delay) = REPLY_DELAY.get();
+    if delay.is_zero() {
+        return;
+    }
+    if skip > 0 {
+        REPLY_DELAY.set((skip - 1, delay));
+        return;
+    }
+    REPLY_DELAY.set((0, Duration::ZERO));
+    tokio::time::sleep(delay).await;
+}
 
 fn operation_bound(fact: &NativeAuthFact) -> Duration {
     match fact.action {
         NativeAuthAction::SignIn { method } => method.sign_in_window(),
-        NativeAuthAction::Logout => READ_BOUND,
+        NativeAuthAction::Logout => LOGOUT_BOUND,
     }
 }
 
@@ -2643,6 +2671,8 @@ impl NativeAuthCustodyChannel {
                     .write_all(&encode_frame(&request).map_err(io_error)?)
                     .await
                     .map_err(io_error)?;
+                #[cfg(all(test, unix))]
+                held_reply().await;
                 let frame = read_frame(stream).await?;
                 let reply: Reply = serde_json::from_slice(&frame[4..])
                     .map_err(|_| failure("native_auth_reply_invalid"))?;
@@ -3141,6 +3171,24 @@ fallback_allowed = false
                 NativeAuthPhase::AuthenticatedObserved
             );
             drop(foreign);
+            case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    /// RV-DS241-55: a logout's custody outlasts a `claude auth logout` and the status check
+    /// after it, each allowed the whole 9 s account check bound under build load, plus the
+    /// exchanges around them, so the slot never ends a logout the host still runs.
+    #[tokio::test]
+    async fn native_auth_logout_custody_outlasts_a_logout_and_a_status_check_at_their_bounds() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let case = Case::open(NativeAuthAction::Logout).await;
+            let bound = operation_bound(&case.fact);
+            assert!(
+                bound >= Duration::from_secs(2 * 9) + READ_BOUND,
+                "{bound:?}"
+            );
             case.close().await;
         })
         .await

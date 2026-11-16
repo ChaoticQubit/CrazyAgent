@@ -438,3 +438,48 @@ fn agent_spawn_interrupted_does_not_start_a_second_harness() {
     assert_eq!(case.outcomes("agent_spawn"), expected);
     assert_eq!(case.pending(ActionKind::AgentSpawn), 0);
 }
+
+/// RV-DS241-64 residual: a start or worktree notice that an earlier project removal left
+/// naming an agent whose row is gone is finished, as unknown, by the next engine start's
+/// recovery, so it never sits pending, hidden from every banner and holding a pending slot;
+/// a notice of an agent still there stays for the owner.
+#[test]
+fn an_engine_start_finishes_the_notices_of_agents_that_are_gone() {
+    let case = Case::new();
+    let ledger = case.ledger();
+    let gone = case.agent();
+    let kept = case.agent();
+    for agent in [gone, kept] {
+        let payload = format!("{{\"team_agent\":{agent},\"pane\":false,\"unknown\":true}}");
+        crate::ledger::begin(&ledger, ActionKind::AgentSpawn, &key(agent), &payload).unwrap();
+    }
+    let worktree = serde_json::json!({
+        "team_agent": gone,
+        "repository": case.repo,
+        "worktree": case.repo.join(".crazyagent/worktrees/gone"),
+        "unknown": true,
+    });
+    crate::ledger::begin(
+        &ledger,
+        ActionKind::WorktreeCreate,
+        &key(gone),
+        &worktree.to_string(),
+    )
+    .unwrap();
+    case.team
+        .execute("DELETE FROM team_agents WHERE id=?1", [gone])
+        .unwrap();
+
+    recover(&case.team, &case.base);
+
+    assert_eq!(
+        case.outcomes("agent_spawn"),
+        vec![ended(gone, "unknown"), shown(kept)]
+    );
+    assert_eq!(
+        case.outcomes("worktree_create"),
+        vec![ended(gone, "unknown")]
+    );
+    assert_eq!(case.pending(ActionKind::AgentSpawn), 1);
+    assert_eq!(case.pending(ActionKind::WorktreeCreate), 0);
+}

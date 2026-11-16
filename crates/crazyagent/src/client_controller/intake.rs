@@ -1,6 +1,9 @@
 use super::*;
 use crate::engine::owner::AccountSecret;
-use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
+use crate::github::{
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan,
+    GitHubRepoPage, GitHubStatus,
+};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::icloud::{DOWNLOAD_TIME_MAX, Progress};
 use crate::projects_home::job::{JobSubject, JobView};
@@ -154,6 +157,26 @@ impl OwnerController {
             return Err(EngineError("github_page_invalid".into()));
         }
         self.owner_client()?.github_repos(page).await
+    }
+
+    /// Lists the GitHub accounts a published project's repository can go under.
+    /// Takes nothing.
+    /// Returns the accounts, the personal one first, and a plain problem, if any.
+    pub async fn github_owners(&mut self) -> Result<GitHubOwners, EngineError> {
+        self.owner_client()?.github_owners().await
+    }
+
+    /// Starts publishing a project on GitHub; the engine checks the plan, the sign-in and the git.
+    /// Takes the project id and the plan the New Project publish block built.
+    /// Returns the job at its .gitignore lines.
+    pub async fn github_publish_start(
+        &mut self,
+        project: ProjectId,
+        plan: GitHubPublishPlan,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.owner_client()?
+            .github_publish_start(project, plan)
+            .await
     }
 
     /// Clones a GitHub repository into the projects home, where it then shows as Found.

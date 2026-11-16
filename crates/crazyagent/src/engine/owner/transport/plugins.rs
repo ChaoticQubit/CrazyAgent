@@ -1509,10 +1509,10 @@ async fn start_check(
 /// npx, the check is not run and says why. Its own project, home and temp folders under
 /// `mcp-checks/<id>` in the engine folder, reads of system paths, the command's folder and
 /// that shared install only, open network without binding the owner's ports, and only its
-/// own secrets. Inputs: the engine folder, server id, approved command, arguments, secret
-/// values and the configured local model ports to keep. Output: the tool names, or a plain
-/// rejection code, or for a boundary that cannot hold the check the boundary's own reason
-/// ([`crate::plugins::check_refused`]).
+/// own secrets, under the owner's call supervisor choice on Linux. Inputs: the engine folder,
+/// server id, approved command, arguments, secret values and the configured local model
+/// ports to keep. Output: the tool names, or a plain rejection code, or for a boundary that
+/// cannot hold the check the boundary's own reason ([`crate::plugins::check_refused`]).
 #[cfg(unix)]
 fn boundary_check(
     root: &Path,
@@ -1607,6 +1607,13 @@ fn boundary_check(
         .create(&profiles)
         .map_err(|error| refused(&error))?;
     let reads = program.parent().ok_or("server_command_not_runnable")?;
+    #[cfg(target_os = "linux")]
+    let calls = crate::sandbox_settings::stored(root)
+        .map_err(|error| refused(&error.0))?
+        .linux_supervisor;
+    #[cfg(not(target_os = "linux"))]
+    let calls = crate::sandbox::LinuxSupervisor::On;
+    let profile = check_profile(&checks, id);
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
         .and_then(|sandbox| sandbox.keep_ports(kept))
         .and_then(|sandbox| sandbox.guard_engine(root))
@@ -1615,7 +1622,7 @@ fn boundary_check(
             Some(install) => sandbox.allow_read(install),
             None => Ok(sandbox),
         })
-        .and_then(|sandbox| InstalledSandbox::install(sandbox, &check_profile(&checks, id)))
+        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profile, calls))
         .map_err(boundary)?;
     let mut server = std::process::Command::new(program);
     server.args(args).current_dir(&folders[0]);

@@ -13,7 +13,8 @@ import { homePath } from "../settings/harnesses";
 import { NotReady } from "../project/shared";
 import { AccessLevels, accessLabel, policyOf } from "../project/access";
 import { PoolPicker } from "./pool-picker";
-import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "./fields";
+import { BasicsFields, PublishFields, ResearchSwitches, RoadmapSwitch, useGitHubPublish } from "./fields";
+import { PUBLISH_STARTED, createWait, emptyPublish, startPublish } from "./publish";
 import { TeamEditor } from "./team-editor";
 import {
   STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, draftAccess, emptyDraft, levelUnavailable, poolName, preselectPool,
@@ -55,6 +56,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const [createError, setCreateError] = useState("");
   const [discarding, setDiscarding] = useState(false);
   const session = useContext(SessionContext);
+  const github = useGitHubPublish();
 
   const setDraft = (next: ProjectDraft) => {
     setDraftState(next);
@@ -127,7 +129,8 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const index = STEPS.findIndex((item) => item.id === step);
   const showBasicsErrors = visited.has("documents") || visited.has("work") || visited.has("pool") || visited.has("team") || draft.name !== "";
   const teamOk = draft.team !== null && teamValid(draft.team, harnessValue);
-  const canCreate = catalog?.kind === "ok" && Object.keys(basics).length === 0 && teamOk && !creating;
+  const publishWait = createWait(draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered, github.signedIn);
+  const canCreate = catalog?.kind === "ok" && Object.keys(basics).length === 0 && !publishWait && teamOk && !creating;
 
   async function create() {
     if (!canCreate) return;
@@ -174,6 +177,8 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         message = `${message} Its agents stay Sandboxed: ${accessLabel(access)} wasn't saved.${why} Choose it again in the project's Settings, Agent access.`;
       }
     }
+    const publishing = startPublish(id, draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered);
+    if (publishing) message = `${message} ${PUBLISH_STARTED}`;
     kept = null;
     await session?.refreshProjects();
     flash(message);
@@ -227,6 +232,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         {step === "basics" && <div className="pj-stack">
           <h2 id="pj-step-title">Basics</h2>
           <BasicsFields prefix="np" draft={draft} onChange={setDraft} catalog={catalog} errors={basics} showErrors={showBasicsErrors} autoFocus />
+          <PublishFields prefix="np" draft={draft} onChange={setDraft} github={github} />
           <div className="pj-field">
             <span className="pj-label">Project folder</span>
             <p>CrazyAgent creates a new folder for this project when you create it.</p>
@@ -280,7 +286,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
             onChange={(team) => { setTeamEdited(true); setDraft({ ...draft, team }); }} />
             : catalog === undefined ? <p className="pj-muted" role="status">Loading team defaults...</p> : <NotReady what="team defaults come from the engine, which isn't ready in this build." />}
           {teamEdited && catalogValue && <button type="button" className="btn quiet" onClick={() => { setTeamEdited(false); setDraft({ ...draft, team: defaultTeam(catalogValue.default_team, harnessValue) }); }}>Use smart defaults</button>}
-          <AccessLevels name="np-access" value={draftAccess(draft, catalogValue?.agent_access)} unavailable={(level) => levelUnavailable(catalogValue?.agent_access, level)} onChange={(access) => setDraft({ ...draft, access })} />
+          <AccessLevels name="np-access" value={draftAccess(draft, catalogValue?.agent_access)} unavailable={(level) => levelUnavailable(catalogValue?.agent_access, level)} gaps={(level) => catalogValue?.agent_access?.find((item) => item.access === level)?.gaps ?? []} onChange={(access) => setDraft({ ...draft, access })} />
           <p className="pj-help">You can change agent access later in the project's Settings, Agent access.</p>
           <p className="pj-summary">{summary(draft, chosenPool ? poolName(chosenPool.pool) : null)}</p>
         </div>}
@@ -289,7 +295,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           {step === "team"
             ? <Button type="submit" variant="primary" icon="folder-plus" pending={creating} pendingLabel="Creating..." disabled={!canCreate} aria-describedby={!canCreate ? "np-create-why" : undefined}>Create project</Button>
             : <Button type="submit" variant="primary">Next</Button>}
-          {step === "team" && !canCreate && !creating && <span className="pj-small pj-muted" id="np-create-why">{catalog?.kind !== "ok" ? "Create project needs the engine's project setup." : Object.keys(basics).length ? "Finish Basics first." : "Fix the team above first."}</span>}
+          {step === "team" && !canCreate && !creating && <span className="pj-small pj-muted" id="np-create-why">{catalog?.kind !== "ok" ? "Create project needs the engine's project setup." : Object.keys(basics).length ? "Finish Basics first." : publishWait ?? "Fix the team above first."}</span>}
         </footer>
       </form>
     </div>

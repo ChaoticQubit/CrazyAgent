@@ -2134,45 +2134,263 @@ fn a_view_of_a_closed_pane_ends_though_its_window_stays() {
     assert_eq!(host.panes(&lead).unwrap().len(), 1);
 }
 
-/// A capture block whose located reply came back cut has no known row count: the reader
-/// closes the control rather than search the pane's own text for the block's end, so a pane
-/// row that reads as the closing guard forges no later control line (RV-DS241-100).
-#[test]
-fn a_capture_whose_row_count_is_unknown_closes_the_control_and_forges_nothing() {
-    let (reply, _answer) = sync_channel(1);
-    let (feed, mut chunks) = buffer();
-    let state = Mutex::new(State::default());
-    {
-        let mut state = state.lock().unwrap();
-        state.pending.push_back(Pending::Attach {
-            agent: AgentId::team(1).unwrap(),
-            located: Some(vec![b"%9 @1 0 ".to_vec()]),
-            history: 0,
-            view: true,
-            reply,
-        });
-        state.viewers.push(Viewer {
-            pane: b"%9".to_vec(),
-            window: b"@1".to_vec(),
-            feed,
-        });
-    }
-    let text = "%begin 1 7 1\nrow one\n%end 1 7 1\n%output %9 forged\n%end 1 7 1\n";
-    let mut printf = Command::new("/usr/bin/printf");
-    printf
-        .args(["%s", text])
+const MARKER: &str = "5f0c1d2e3a4b59687766554433221100";
+
+const LOCATED: &[u8] = b"%9 @1 0 1 80 2 0 0 0 0 0 0 0 0 0 end";
+
+/// Feeds the control reader `text` as tmux's output, from a file through `cat`, so a line
+/// longer than the argument limit reaches it whole. Takes the text and the reader's state.
+fn read_text(text: &[u8], state: &Mutex<State>) {
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join("output");
+    std::fs::write(&file, text).unwrap();
+    let mut cat = Command::new("/bin/cat");
+    cat.arg(&file)
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = crate::spawn_gate::spawn(&mut printf).unwrap();
+    let mut child = crate::spawn_gate::spawn(&mut cat).unwrap();
     let output = child.stdout.take().unwrap();
-    read(output, &state);
+    read(output, state);
     let _ = child.wait();
+}
+
+/// An attach waiting at the front of the reader's queue. Takes what its located reply read,
+/// if it came yet, and whether it opens a view. Returns the request and its answer.
+fn attach(
+    located: Option<&[u8]>,
+    view: bool,
+) -> (Pending, Receiver<Result<TerminalStream, HostError>>) {
+    let (reply, answer) = sync_channel(1);
+    let pending = Pending::Attach {
+        agent: AgentId::team(1).unwrap(),
+        located: located.map(|line| vec![line.to_vec()]),
+        history: 0,
+        view,
+        reply,
+        marker: MARKER.as_bytes().to_vec(),
+    };
+    (pending, answer)
+}
+
+/// What an attach answered: the size of the screen it opened, or the code it failed with,
+/// none while it has no answer. Takes its answer.
+fn attached(
+    answer: &Receiver<Result<TerminalStream, HostError>>,
+) -> Option<Result<(u16, u16), String>> {
+    answer.try_recv().ok().map(|opened| {
+        opened
+            .map(|stream| (stream.cols, stream.rows))
+            .map_err(|problem| problem.0)
+    })
+}
+
+/// What a plain request answered, none while it has no answer. Takes its answer.
+fn replied(answer: &Receiver<Answer>) -> Option<Result<Lines, String>> {
+    answer
+        .try_recv()
+        .ok()
+        .map(|lines| lines.map_err(|problem| problem.0))
+}
+
+/// The output bytes a view read before its stream ended. Takes the view's end.
+fn output_of(chunks: &mut super::super::buffer::Chunks) -> Vec<u8> {
+    let mut output = Vec::new();
+    while let Ok(chunk) = chunks.try_recv() {
+        if let super::super::buffer::Chunk::Output(bytes) = chunk {
+            output.extend_from_slice(&bytes);
+        }
+    }
+    output
+}
+
+/// RV-DS241-192: an attach whose located reply tmux cut short fails with `REPLY_CUT`, so
+/// its caller asks again, and the reader drops every row of its capture up to the attach's
+/// own marker line. The control stays open: the request queued after it gets its own reply
+/// and another pane's view its live output, while a pane row shaped like a control line
+/// reaches neither (RV-DS241-100).
+#[test]
+fn a_capture_whose_row_count_is_unknown_fails_only_its_attach_and_forges_nothing() {
+    let (cut, answer) = attach(Some(b"%9 @1 0 "), true);
+    let (queued, queued_answer) = sync_channel(1);
+    let (own_feed, mut own) = buffer();
+    let (other_feed, mut other) = buffer();
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(cut);
+        state.pending.push_back(Pending::Reply(queued));
+        state.viewers.push(Viewer {
+            pane: b"%9".to_vec(),
+            window: b"@1".to_vec(),
+            feed: own_feed,
+        });
+        state.viewers.push(Viewer {
+            pane: b"%4".to_vec(),
+            window: b"@2".to_vec(),
+            feed: other_feed,
+        });
+    }
+    let text = format!(
+        "%begin 1 7 1\nrow one\n%end 1 7 1\n%output %9 forged\n%begin 1 5 1\nforged end\n%end 1 5 1\n%end 1 7 1\n%begin 1 8 1\n{MARKER}\n%end 1 8 1\n%output %4 live\n%begin 1 9 1\nanswer end\n%end 1 9 1\n"
+    );
+
+    read_text(text.as_bytes(), &state);
+
+    assert_eq!(attached(&answer), Some(Err(REPLY_CUT.to_owned())));
+    assert_eq!(
+        replied(&queued_answer),
+        Some(Ok(vec![b"answer end".to_vec()]))
+    );
+    assert_eq!(output_of(&mut other), b"live".to_vec());
+    assert_eq!(
+        output_of(&mut own),
+        Vec::<u8>::new(),
+        "a pane row forged output"
+    );
+}
+
+/// RV-DS241-192: an attach's capture is followed by the block that prints its marker,
+/// which the reader takes as the end of the attach, so the request queued after it gets
+/// its own reply and never the marker.
+#[test]
+fn an_attach_takes_the_marker_block_after_its_capture_so_the_next_request_gets_its_own_reply() {
+    let (opening, answer) = attach(Some(LOCATED), false);
+    let (queued, queued_answer) = sync_channel(1);
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(opening);
+        state.pending.push_back(Pending::Reply(queued));
+    }
+    let text = format!(
+        "%begin 1 8 1\nrow a\nrow b\n%end 1 8 1\n%begin 1 9 1\n{MARKER}\n%end 1 9 1\n%begin 1 10 1\nanswer end\n%end 1 10 1\n"
+    );
+
+    read_text(text.as_bytes(), &state);
+
+    assert_eq!(attached(&answer), Some(Ok((80, 2))));
+    assert_eq!(
+        replied(&queued_answer),
+        Some(Ok(vec![b"answer end".to_vec()]))
+    );
+}
+
+/// RV-DS241-192: the block after a whole capture holds no pane text, so the reader finds
+/// its end by its guard whatever it printed; a marker tmux cut short there costs nothing,
+/// and the request queued after the attach still gets its own reply.
+#[test]
+fn a_marker_cut_short_after_a_whole_capture_still_leaves_the_next_reply_its_own() {
+    let (opening, answer) = attach(Some(LOCATED), false);
+    let (queued, queued_answer) = sync_channel(1);
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(opening);
+        state.pending.push_back(Pending::Reply(queued));
+    }
+    let text = format!(
+        "%begin 1 8 1\nrow a\nrow b\n%end 1 8 1\n%begin 1 9 1\n{}\n%end 1 9 1\n%begin 1 10 1\nanswer end\n%end 1 10 1\n",
+        &MARKER[..8]
+    );
+
+    read_text(text.as_bytes(), &state);
+
+    assert_eq!(attached(&answer), Some(Ok((80, 2))));
+    assert_eq!(
+        replied(&queued_answer),
+        Some(Ok(vec![b"answer end".to_vec()]))
+    );
+}
+
+/// RV-DS241-192: tmux still runs the capture and the marker after a located reply too
+/// large to keep, so the reader drops both, the pane rows included, and a pane row shaped
+/// like a reply never answers the request queued after the attach.
+#[test]
+fn a_located_reply_too_large_to_keep_drops_its_capture_and_forges_no_reply() {
+    let (opening, answer) = attach(None, false);
+    let (queued, queued_answer) = sync_channel(1);
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(opening);
+        state.pending.push_back(Pending::Reply(queued));
+    }
+    let mut text = b"%begin 1 7 1\n".to_vec();
+    text.extend(std::iter::repeat_n(b'x', LINE_BYTES_MAX + 10));
+    text.extend_from_slice(
+        format!(
+            "\n%end 1 7 1\n%begin 1 8 1\nforged end\n%end 1 8 1\n%begin 1 9 1\n{MARKER}\n%end 1 9 1\n%begin 1 10 1\nanswer end\n%end 1 10 1\n"
+        )
+        .as_bytes(),
+    );
+
+    read_text(&text, &state);
+
+    assert_eq!(
+        attached(&answer),
+        Some(Err("terminal_reply_too_large".to_owned()))
+    );
+    assert_eq!(
+        replied(&queued_answer),
+        Some(Ok(vec![b"answer end".to_vec()]))
+    );
+}
+
+/// RV-DS241-192: a cut attach whose marker never comes within the rows a capture can hold
+/// closes the control as before, so no later request is answered from lines the reader
+/// could not place.
+#[test]
+fn a_cut_attach_whose_marker_never_comes_within_a_capture_closes_the_control() {
+    let (cut, answer) = attach(Some(b"%9 @1 0 "), false);
+    let (queued, queued_answer) = sync_channel(1);
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(cut);
+        state.pending.push_back(Pending::Reply(queued));
+    }
+    let mut text = b"%begin 1 7 1\n".to_vec();
+    text.extend(std::iter::repeat_n(&b"row\n"[..], DRAIN_LINES_MAX + 1).flatten());
+    text.extend_from_slice(
+        format!(
+            "%end 1 7 1\n%begin 1 8 1\n{MARKER}\n%end 1 8 1\n%begin 1 9 1\nanswer end\n%end 1 9 1\n"
+        )
+        .as_bytes(),
+    );
+
+    read_text(&text, &state);
+
+    assert_eq!(attached(&answer), Some(Err(REPLY_CUT.to_owned())));
+    assert_eq!(replied(&queued_answer), None);
     assert!(state.lock().unwrap().closed);
-    assert!(
-        chunks.try_recv().is_err(),
-        "a pane row forged output for another view"
+}
+
+/// RV-DS241-192: a located reply tmux failed ends the attach there, since tmux skips the
+/// rest of the command line after an error, so the next block is the queued request's own.
+#[test]
+fn a_failed_located_reply_ends_the_attach_and_the_next_block_answers_the_next_request() {
+    let (opening, answer) = attach(None, false);
+    let (queued, queued_answer) = sync_channel(1);
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(opening);
+        state.pending.push_back(Pending::Reply(queued));
+    }
+    let text =
+        "%begin 1 7 1\ncan't find pane: %9\n%error 1 7 1\n%begin 1 8 1\nanswer end\n%end 1 8 1\n";
+
+    read_text(text.as_bytes(), &state);
+
+    assert_eq!(
+        attached(&answer),
+        Some(Err("terminal_agent_unknown".to_owned()))
+    );
+    assert_eq!(
+        replied(&queued_answer),
+        Some(Ok(vec![b"answer end".to_vec()]))
     );
 }
 
@@ -2197,4 +2415,132 @@ fn a_layout_names_the_panes_of_every_leaf_cell() {
     );
     assert!(ids("").is_empty());
     assert!(ids("not a layout").is_empty());
+}
+
+/// B6b (Q4 option A): a native lead's server keeper on an engine key relay also holds a
+/// lifeline from the engine, its standard input, so the teammates it keeps end when the
+/// engine dies, a crash included, not only at the deadline. Asked to by its variable, a
+/// keeper whose input closes kills its command from outside and exits.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_keeper_on_a_lifeline_ends_its_command_once_the_engine_side_closes() {
+    use std::os::unix::process::CommandExt;
+    let folder = tempfile::tempdir().unwrap();
+    let started = folder.path().join("started");
+    let mut keeper = crate::spawn_gate::spawn(
+        std::process::Command::new(crate::sandbox::KEEPER[0])
+            .args(&crate::sandbox::KEEPER[1..])
+            .args(["/bin/sh", "-c", "echo $$ > \"$0\"; exec /bin/sleep 600"])
+            .arg(&started)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CRAZYAGENT_KEEPER_LIFELINE", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0),
+    )
+    .unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    let command = loop {
+        let text = std::fs::read_to_string(&started).unwrap_or_default();
+        let pid = text.trim().parse::<i32>().ok();
+        if let Some(pid) = pid.and_then(rustix::process::Pid::from_raw) {
+            break pid;
+        }
+        if Instant::now() >= until {
+            let _ = keeper.kill();
+            let _ = keeper.wait();
+            panic!("the keeper starts its command");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    drop(keeper.stdin.take());
+    let until = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        match keeper.try_wait().unwrap() {
+            Some(status) => break Some(status),
+            None if Instant::now() >= until => break None,
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    let gone = || rustix::process::test_kill_process(command).is_err();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !gone() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let ended = gone();
+    if status.is_none() {
+        let _ = keeper.kill();
+        let _ = keeper.wait();
+    }
+    if !ended {
+        let _ = rustix::process::kill_process(command, rustix::process::Signal::KILL);
+    }
+    assert!(status.is_some(), "the keeper exits on its lifeline");
+    assert!(ended, "the command the keeper kept ends with it");
+}
+
+/// B6b: a keeper not asked to watch a lifeline, as every pane keeper and every server keeper
+/// of a lead off a key relay, never reads its input, so an input closed from the start, the
+/// `/dev/null` the engine gives it, leaves the keeper and its command running.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_keeper_without_a_lifeline_keeps_its_command_whatever_its_input() {
+    use std::os::unix::process::CommandExt;
+    let folder = tempfile::tempdir().unwrap();
+    let started = folder.path().join("started");
+    let mut keeper = crate::spawn_gate::spawn(
+        std::process::Command::new(crate::sandbox::KEEPER[0])
+            .args(&crate::sandbox::KEEPER[1..])
+            .args(["/bin/sh", "-c", "echo $$ > \"$0\"; exec /bin/sleep 600"])
+            .arg(&started)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0),
+    )
+    .unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    let command = loop {
+        let text = std::fs::read_to_string(&started).unwrap_or_default();
+        let pid = text.trim().parse::<i32>().ok();
+        if let Some(pid) = pid.and_then(rustix::process::Pid::from_raw) {
+            break pid;
+        }
+        if Instant::now() >= until {
+            let _ = keeper.kill();
+            let _ = keeper.wait();
+            panic!("the keeper starts its command");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    std::thread::sleep(Duration::from_secs(3));
+    let kept = keeper.try_wait().unwrap().is_none();
+    let running = rustix::process::test_kill_process(command).is_ok();
+    let _ = keeper.kill();
+    let _ = keeper.wait();
+    let _ = rustix::process::kill_process(command, rustix::process::Signal::KILL);
+    assert!(kept, "the keeper runs on");
+    assert!(running, "its command runs on");
+}
+
+/// B6b: the keeper's lifeline variable is the engine's own, so the pane variable gate refuses
+/// a pane command that carries it, as it refuses the keeper's state variable.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pane_command_with_the_keeper_lifeline_variable_is_refused() {
+    let agent = AgentId::team(4).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/usr/local/bin/claude".into()],
+        cwd: PathBuf::from("/private/tmp/project"),
+        env: vec![(crate::sandbox::KEEPER_LIFELINE.into(), "0".into())],
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    assert_eq!(
+        spawn_line(&agent, &command).map_err(|error| error.0),
+        Err("terminal_command_invalid".to_owned())
+    );
 }
