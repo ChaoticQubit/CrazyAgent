@@ -483,7 +483,7 @@ impl Job<'_> {
     /// Takes a copy of a caller's descriptor that a call acts on as an open file, refusing
     /// an `O_PATH` one with `EBADF` as the kernel's `fdget` does (LINUX-TEAM-TIME-CALLS).
     /// Input: the descriptor register. Output: the copy, or the error.
-    fn opened(&self, register: u64) -> Result<OwnedFd, Errno> {
+    fn taken_open(&self, register: u64) -> Result<OwnedFd, Errno> {
         let file = self.taken(register)?;
         if rustix::fs::fcntl_getfl(&file)?.contains(OFlags::PATH) {
             return Err(Errno::BADF);
@@ -948,7 +948,7 @@ impl Job<'_> {
             Call::Futimesat => {
                 let times = self.stamps(a[2], Stamps::Micros)?;
                 let pin = match a[1] {
-                    0 if !matches!(Base::of(a[0]), Base::Here) => self.opened(a[0])?,
+                    0 if !matches!(Base::of(a[0]), Base::Here) => self.taken_open(a[0])?,
                     _ => self.pinned(a[0], text(a[1])?, true)?,
                 };
                 (pin, Change::Times(times))
@@ -963,7 +963,7 @@ impl Job<'_> {
                         if a[3] as u32 != 0 {
                             return Err(Errno::INVAL);
                         }
-                        self.opened(a[0])?
+                        self.taken_open(a[0])?
                     }
                     _ => self.owner_pin(a[0], a[1], a[3])?,
                 };
