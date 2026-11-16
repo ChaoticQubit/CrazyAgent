@@ -334,6 +334,8 @@ pub(in crate::tui) fn project_screen(
             56,
         )
         .into_iter()
+        .chain(std::iter::once(String::new()))
+        .chain(wrap_words(HIDDEN_SEERS_COVER, 56))
         .map(|line| Row::of(line, look.muted))
         .collect();
         if screen
@@ -2629,6 +2631,11 @@ fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
     };
     Row::of(text, look.fg).push("   f Edit read-only folders", look.muted)
 }
+
+/// What the hidden-folders editor says the Settings list of agents that can still open a
+/// hidden folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A
+/// r1): team agents, taken-over panes included, and not the engine's other sandboxed runs.
+const HIDDEN_SEERS_COVER: &str = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named under Hidden with h Restart them. Research, overview, roadmap and onboarding runs keep their access until they end.";
 
 /// The Settings line naming the running agents that can still open a folder hidden after
 /// they started, with the key that restarts them (SA-VID14-A). Takes the screen and look.

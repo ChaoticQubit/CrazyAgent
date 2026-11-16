@@ -502,6 +502,11 @@ function SandboxSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+/** What the hidden folders section says its list of agents that can still open a hidden
+ * folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A r1): team
+ * agents, taken-over ones included, and not the engine's other sandboxed runs. */
+export const HIDDEN_SEERS_COVER = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named here with Restart them. Research, overview, roadmap and onboarding runs keep their access until they end.";
+
 /** The running agents a team status lists as able to open a folder hidden after they
  * started (SA-VID14-A). Input: the team status, or null before it is read. Output: those
  * agents in the status order. */
@@ -591,6 +596,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
     <h2>Folders agents can't open</h2>
     <p className="pj-secondary">Folders inside the project that agents, the master and research jobs can't read, write or run while access is Sandboxed. Use it for a secrets folder or a vendored dump you don't want touched. Each must be a folder inside the project that git does not track.</p>
     {fullAccess && <p className="pj-note warn" role="status">Full access runs agents without a sandbox, so hidden folders do not apply.</p>}
+    {!fullAccess && <p className="pj-secondary">{HIDDEN_SEERS_COVER}</p>}
     {!fullAccess && seers.length > 0 && <div className="pj-note warn" role="status">
       <p>{seersLine(seers)}</p>
       <Button pending={restarting} pendingLabel="Restarting..." disabled={restarting} onClick={() => void restart()}>Restart them</Button>
