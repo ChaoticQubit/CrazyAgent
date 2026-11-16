@@ -3395,12 +3395,14 @@ impl ProjectSandbox {
     /// does, only by a profile that adds worktrees ([`Self::adding_worktrees`] or a lead's
     /// teammates' setup), since the owner's `git worktree repair` would point a real
     /// checkout at an admin folder planted with them; they are never rewritten, removed,
-    /// re-permissioned, flagged, given an ACL or hard linked under a name an agent could
-    /// change them through, so the owner's git keeps reading them (RV-DS241-185, rv-sa241
-    /// NV-1), and no `config.worktree` may be written. No link
-    /// may be made anywhere in the git folder, in any letter case: git's `worktree prune`,
-    /// which the owner's next commit runs as maintenance, empties whatever folder a link at
-    /// `.git/worktrees` or `.git/worktrees/<name>` names (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
+    /// re-permissioned, flagged, given an ACL or a time, or hard linked under a name an agent
+    /// could change them through, so the owner's git keeps reading them (RV-DS241-185, rv-sa241
+    /// NV-1, LINUX-TEAM-TIME-CALLS: a profile adding none denies every write, since Apple's
+    /// `utimensat` sets times past `file-write-times`), and no `config.worktree` may be
+    /// written. No link may be made anywhere in the git folder, in any letter case: git's
+    /// `worktree prune`, which the owner's next commit runs as maintenance, empties whatever
+    /// folder a link at `.git/worktrees` or `.git/worktrees/<name>` names
+    /// (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
     /// name below the project root, and each extra worktree's `.git` link, matches in any
     /// letter case, as in `clone_store_denies`, since the case-insensitive disk finds it
     /// however it is typed (DEC-123 rv-secreview L2, RV-DS241-15).
@@ -3416,14 +3418,14 @@ impl ProjectSandbox {
         let mut moves = format!(
             "(deny file-write-unlink\n  (literal \"{project}\")\n  (regex #\"^{pattern}/{git}/{worktrees}$\")\n  (regex #\"^{pattern}(/{state})?/{worktrees}$\")\n  (regex #\"^{admin}$\")\n  (regex #\"^{checkouts}$\")"
         );
-        let create = if self.adds_worktrees || self.setup.is_some() {
-            ""
+        let denied = if self.adds_worktrees || self.setup.is_some() {
+            "file-write-unlink file-write-data file-write-mode file-write-flags file-write-acl file-write-times file-link"
         } else {
-            " file-write-create"
+            "file-write* file-link"
         };
         let [commondir, gitdir] = ADMIN_LINKS.map(any_case);
         let mut links = format!(
-            "(deny file-write-unlink file-write-data file-write-mode file-write-flags file-write-acl file-link{create}\n  (regex #\"^{admin}/({commondir}|{gitdir})$\")\n  (regex #\"^{checkouts}/{git}$\")"
+            "(deny {denied}\n  (regex #\"^{admin}/({commondir}|{gitdir})$\")\n  (regex #\"^{checkouts}/{git}$\")"
         );
         for worktree in &self.worktrees {
             moves.push_str(&format!("\n  (literal \"{}\")", worktree.display()));

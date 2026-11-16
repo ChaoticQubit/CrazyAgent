@@ -480,6 +480,17 @@ impl Job<'_> {
         rustix::process::pidfd_getfd(&held, number, PidfdGetfdFlags::empty())
     }
 
+    /// Takes a copy of a caller's descriptor that a call acts on as an open file, refusing
+    /// an `O_PATH` one with `EBADF` as the kernel's `fdget` does (LINUX-TEAM-TIME-CALLS).
+    /// Input: the descriptor register. Output: the copy, or the error.
+    fn opened(&self, register: u64) -> Result<OwnedFd, Errno> {
+        let file = self.taken(register)?;
+        if rustix::fs::fcntl_getfl(&file)?.contains(OFlags::PATH) {
+            return Err(Errno::BADF);
+        }
+        Ok(file)
+    }
+
     /// A pidfd of the calling thread (`PIDFD_THREAD`, Linux 6.9), so `pidfd_getfd` reads
     /// that thread's descriptor table. An older kernel opens only a thread-group leader:
     /// there the leader's table is read, which every thread shares unless it unshared its
@@ -905,9 +916,9 @@ impl Job<'_> {
 
     /// Changes a file's mode, owner or times for the caller once the held guard lets it: a
     /// path form pins the file its call names ([`Job::pinned`]), a descriptor form (a null
-    /// path on a time call) takes a copy of the caller's descriptor, the pin is judged
-    /// ([`Job::kept_pin`]) and the change is made on that pin. An owner or group of -1
-    /// stays as it is. Input: which call. Output: zero, or the error.
+    /// path on a time call, refused for an `O_PATH` one) takes a copy of the caller's
+    /// descriptor, the pin is judged ([`Job::kept_pin`]) and the change is made on that pin.
+    /// An owner or group of -1 stays as it is. Input: which call. Output: zero, or the error.
     fn change(&self, call: Call) -> Result<Answer, Errno> {
         let a = self.notice.args;
         let here = AT_FDCWD as u32 as u64;
@@ -937,7 +948,7 @@ impl Job<'_> {
             Call::Futimesat => {
                 let times = self.stamps(a[2], Stamps::Micros)?;
                 let pin = match a[1] {
-                    0 if !matches!(Base::of(a[0]), Base::Here) => self.taken(a[0])?,
+                    0 if !matches!(Base::of(a[0]), Base::Here) => self.opened(a[0])?,
                     _ => self.pinned(a[0], text(a[1])?, true)?,
                 };
                 (pin, Change::Times(times))
@@ -952,7 +963,7 @@ impl Job<'_> {
                         if a[3] as u32 != 0 {
                             return Err(Errno::INVAL);
                         }
-                        self.taken(a[0])?
+                        self.opened(a[0])?
                     }
                     _ => self.owner_pin(a[0], a[1], a[3])?,
                 };
