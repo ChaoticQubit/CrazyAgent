@@ -911,7 +911,7 @@ async fn a_project_kept_outside_the_projects_folder_moves_in_as_the_engine_s_job
     pump(&mut shell, &mut connection).await;
     shell.key(Key::ShiftLeft);
     pump(&mut shell, &mut connection).await;
-    shell.key(Key::Char('m'));
+    shell.key(Key::Char('M'));
     let shown = render(&mut shell, 120, 30);
     assert!(
         shown.contains("Move Notes CLI into your CrazyAgent folder?"),
@@ -1035,7 +1035,7 @@ async fn job_until(
     }
 }
 
-/// Opens a project's page on Settings and asks its move twice, as m opens the question and m
+/// Opens a project's page on Settings and asks its move twice, as M opens the question and m
 /// moves. Inputs: the shell, its connection, the project and its name. Output: the requests sent
 /// after the second m.
 async fn move_from_settings(
@@ -1046,7 +1046,7 @@ async fn move_from_settings(
     pump(shell, connection).await;
     shell.key(Key::ShiftLeft);
     pump(shell, connection).await;
-    shell.key(Key::Char('m'));
+    shell.key(Key::Char('M'));
     let shown = render(shell, 120, 30);
     assert!(
         shown.contains(&format!("Move {name} into your CrazyAgent folder?")),

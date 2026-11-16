@@ -2646,7 +2646,7 @@ fn seers_line(screen: &ProjectScreen, look: &Look) -> Option<Row> {
             format!("{} can still open a hidden folder", seers.join(", ")),
             look.warning,
         )
-        .push("   h Restart them", look.muted)
+        .push("   r Restart them", look.muted)
     })
 }
 
@@ -2732,7 +2732,7 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
             "Folder",
             Row::of(folder(screen), look.fg)
                 .push("   x Remove project", look.muted)
-                .push("   m Move into CrazyAgent folder", look.muted),
+                .push("   M Move into CrazyAgent folder", look.muted),
         ),
         entry("Pool", pool),
         entry(
