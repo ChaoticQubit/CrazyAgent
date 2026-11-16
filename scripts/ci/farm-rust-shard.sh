@@ -2,7 +2,10 @@ set -euo pipefail
 archive=${1:?usage: farm-rust-shard.sh <archive> <part> <parts>}
 part=${2:?usage: farm-rust-shard.sh <archive> <part> <parts>}
 parts=${3:?usage: farm-rust-shard.sh <archive> <part> <parts>}
-[[ "$part" =~ ^[1-9][0-9]*$ && "$parts" =~ ^[1-9][0-9]*$ ]] && (( part <= parts )) || { echo "::error::shard $part/$parts is no k/N with 1 <= k <= N"; exit 2; }
+if ! [[ "$part" =~ ^[1-9][0-9]*$ && "$parts" =~ ^[1-9][0-9]*$ ]] || (( part > parts )); then
+  echo "::error::shard $part/$parts is no k/N with 1 <= k <= N"
+  exit 2
+fi
 [ -f "$archive" ] || { echo "::error::no test archive at $archive; the build job for this platform failed"; exit 1; }
 workspace=${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}
 [ "${NEXTEST_PROFILE:-}" = farm ] || { echo "::error::NEXTEST_PROFILE must be farm, the profile that writes target/nextest/farm/junit.xml"; exit 2; }
