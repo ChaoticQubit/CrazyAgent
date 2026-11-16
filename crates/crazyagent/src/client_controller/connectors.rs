@@ -2,7 +2,7 @@ use super::*;
 use crate::app_plugins::Preview;
 use crate::connectors::approvals::{AllowedWrites, ApprovalView};
 use crate::connectors::audit::ActivityView;
-use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
+use crate::connectors::{ConnectorSettings, ConnectorsView, SignInWith, Who};
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
 
 impl OwnerController {
@@ -97,6 +97,18 @@ impl OwnerController {
     ) -> Result<ConnectorsView, EngineError> {
         self.connectors_client()?
             .connector_grant(project, connector, enabled, who)
+            .await
+    }
+
+    /// Chooses how a connector whose file offers a key and a browser sign-in signs in.
+    /// Inputs: the connector and the way. Output: the page.
+    pub async fn connector_set_sign_in_with(
+        &self,
+        name: String,
+        way: SignInWith,
+    ) -> Result<ConnectorsView, EngineError> {
+        self.connectors_client()?
+            .connector_set_sign_in_with(name, way)
             .await
     }
 
