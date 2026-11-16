@@ -421,7 +421,9 @@ impl ConnectorsPage {
                 self.pending = None;
                 self.saved(result, ctx);
             }
-            ConnectorsEvent::Activity(_) => {}
+            ConnectorsEvent::Activity(_)
+            | ConnectorsEvent::Approval(_)
+            | ConnectorsEvent::Writes(_) => {}
         }
     }
 

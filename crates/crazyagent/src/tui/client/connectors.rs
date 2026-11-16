@@ -2,14 +2,16 @@ use super::app_plugins::read_manifest;
 use super::settings::problem;
 use super::*;
 use crate::app_plugins::Preview;
+use crate::connectors::approvals::{AllowedWrites, ApprovalView};
 use crate::connectors::audit::ActivityView;
 use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
 use crate::engine::EngineError;
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
 use std::path::PathBuf;
 
-/// One Connectors request a Settings page or a project's Connectors page sends. A typed key
-/// travels only inside `SetKey`, as the engine's secret type, and is never printed.
+/// One Connectors request a Settings page, a project's Connectors page or the approval page
+/// sends. A typed key travels only inside `SetKey`, as the engine's secret type, and is never
+/// printed.
 pub(in crate::tui) enum ConnectorsJob {
     Activity {
         connector: Option<String>,
@@ -58,6 +60,20 @@ pub(in crate::tui) enum ConnectorsJob {
         enabled: bool,
         who: Who,
     },
+    Approval {
+        id: i64,
+    },
+    Answer {
+        id: i64,
+        allow: bool,
+    },
+    Writes {
+        project: String,
+    },
+    Revoke {
+        project: String,
+        connector: String,
+    },
 }
 
 impl std::fmt::Debug for ConnectorsJob {
@@ -67,8 +83,9 @@ impl std::fmt::Debug for ConnectorsJob {
 }
 
 /// The engine's answer to one Connectors request: the activity view, how a settings save
-/// ended, the Connectors page every page change answers with, or a trust screen (`read`
-/// carries the text a typed path held).
+/// ended, the Connectors page every page change answers with, a trust screen (`read`
+/// carries the text a typed path held), one write approval as read or answered, or a
+/// project's standing write allows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ConnectorsEvent {
     Activity(Result<ActivityView, String>),
@@ -78,6 +95,8 @@ pub(in crate::tui) enum ConnectorsEvent {
         read: Option<String>,
         result: Result<Preview, String>,
     },
+    Approval(Result<ApprovalView, String>),
+    Writes(Result<AllowedWrites, String>),
 }
 
 impl ConnectorsEvent {
@@ -106,7 +125,11 @@ fn failed(job: &ConnectorsJob, code: String) -> ConnectorsEvent {
         | ConnectorsJob::Remove { .. }
         | ConnectorsJob::SetKey { .. }
         | ConnectorsJob::ClearKey { .. }
-        | ConnectorsJob::Grant { .. } => ConnectorsEvent::Page(Err(code)),
+        | ConnectorsJob::Grant { .. }
+        | ConnectorsJob::Approval { .. }
+        | ConnectorsJob::Answer { .. }
+        | ConnectorsJob::Writes { .. }
+        | ConnectorsJob::Revoke { .. } => ConnectorsEvent::Page(Err(code)),
     }
 }
 
@@ -125,7 +148,11 @@ pub(in crate::tui) fn job_name(job: &ConnectorsJob) -> &'static str {
         ConnectorsJob::Remove { .. } => "ConnectorRemove",
         ConnectorsJob::SetKey { .. } => "ConnectorSetKey",
         ConnectorsJob::ClearKey { .. } => "ConnectorClearKey",
-        ConnectorsJob::Grant { .. } => "ConnectorGrant",
+        ConnectorsJob::Grant { .. }
+        | ConnectorsJob::Approval { .. }
+        | ConnectorsJob::Answer { .. }
+        | ConnectorsJob::Writes { .. }
+        | ConnectorsJob::Revoke { .. } => "ConnectorGrant",
     }
 }
 
@@ -231,7 +258,11 @@ async fn page(
         | ConnectorsJob::SaveSettings { .. }
         | ConnectorsJob::Preview { .. }
         | ConnectorsJob::ReadFile { .. }
-        | ConnectorsJob::Review { .. } => unreachable!("{} has its own answer", job_name(&job)),
+        | ConnectorsJob::Review { .. }
+        | ConnectorsJob::Approval { .. }
+        | ConnectorsJob::Answer { .. }
+        | ConnectorsJob::Writes { .. }
+        | ConnectorsJob::Revoke { .. } => unreachable!("{} has its own answer", job_name(&job)),
     }
 }
 
@@ -261,5 +292,41 @@ mod tests {
                 result: Err("trusted_connection_unavailable".into()),
             }
         );
+    }
+
+    #[test]
+    fn an_approval_or_writes_job_has_its_own_name_and_unavailable_answer() {
+        let gone = || "trusted_connection_unavailable".to_owned();
+        let cases = [
+            (
+                ConnectorsJob::Approval { id: 7 },
+                "ConnectorApproval",
+                ConnectorsEvent::Approval(Err(gone())),
+            ),
+            (
+                ConnectorsJob::Answer { id: 7, allow: true },
+                "ConnectorAnswer",
+                ConnectorsEvent::Approval(Err(gone())),
+            ),
+            (
+                ConnectorsJob::Writes {
+                    project: "alpha".into(),
+                },
+                "ConnectorWrites",
+                ConnectorsEvent::Writes(Err(gone())),
+            ),
+            (
+                ConnectorsJob::Revoke {
+                    project: "alpha".into(),
+                    connector: "linear".into(),
+                },
+                "ConnectorRevokeWrites",
+                ConnectorsEvent::Writes(Err(gone())),
+            ),
+        ];
+        for (job, name, unavailable) in cases {
+            assert_eq!(format!("{job:?}"), name);
+            assert_eq!(ConnectorsEvent::unavailable(&job), unavailable, "{name}");
+        }
     }
 }
