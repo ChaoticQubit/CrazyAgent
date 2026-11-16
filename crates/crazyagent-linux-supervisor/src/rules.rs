@@ -311,7 +311,8 @@ impl HeldNodes {
                     nodes.trees.push(node);
                 }
             }
-            let there = |path: &Path| stat(path)?.ok_or_else(|| io::ErrorKind::NotFound.into());
+            let there =
+                |path: &Path| stat(path)?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound));
             nodes.names.push((there(folder)?, name.to_os_string()));
             for above in path.ancestors().skip(1) {
                 nodes.above.push(there(above)?);
@@ -909,10 +910,10 @@ mod tests {
     #[test]
     fn the_held_nodes_are_taken_once_and_a_held_name_that_is_not_there_yet_is_kept() {
         let nodes = nodes();
-        let mut held = nodes.nodes.clone();
-        held.sort_unstable();
+        let mut found = nodes.nodes.clone();
+        found.sort_unstable();
         assert_eq!(
-            held,
+            found,
             vec![(1, 14), (1, 16), (1, 22)],
             "commondir is not there yet"
         );
