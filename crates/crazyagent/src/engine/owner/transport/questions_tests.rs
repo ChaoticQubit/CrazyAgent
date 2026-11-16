@@ -403,3 +403,34 @@ fn an_approved_github_rule_proposal_is_applied_after_the_answer_and_told() {
     assert_eq!(told.len(), 1, "{told:?}");
     assert!(told[0].ends_with(": refused."), "{}", told[0]);
 }
+
+/// rv-code gh-s7 N5: an answer starts no proposal pass while no proposal waits, so an answer
+/// to any other question spawns no thread; an approved proposal starts one, which tells its
+/// agent.
+#[cfg(unix)]
+#[test]
+fn the_proposal_pass_starts_only_while_a_proposal_waits() {
+    let (_tmp, root, _) = engine();
+    let db = questions::open(&root).unwrap();
+    assert_eq!(crate::github::proposals::start_store(&db).unwrap(), 0);
+    assert!(!apply_later(&root, &db), "nothing waits");
+    db.execute(
+        "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,created_ms) \
+         VALUES (?1,'agent:4','wiki_off',1,'Docs live in the repository.','octo-cat/tool',\
+         'approved',0)",
+        [PROJECT],
+    )
+    .unwrap();
+    assert!(apply_later(&root, &db), "an approved proposal waits");
+    let told = || -> i64 {
+        db.query_row("SELECT told FROM github_rule_requests", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    };
+    let started = std::time::Instant::now();
+    while told() == 0 && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(told(), 1, "the pass ran and told the agent");
+}
