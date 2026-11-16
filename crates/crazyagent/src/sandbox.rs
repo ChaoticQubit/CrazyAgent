@@ -1237,7 +1237,7 @@ pub struct ProjectSandbox {
     kept_ports: Vec<u16>,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
-    carved_home: Option<PathBuf>,
+    carved_home: Option<(PathBuf, PathBuf)>,
     checkout: Option<Checkout>,
     clone: Option<PathBuf>,
     sockets: Vec<PathBuf>,
@@ -1586,12 +1586,12 @@ impl ProjectSandbox {
 
     /// Adds the engine root's secrets for an agent whose runtime folder is one folder in it,
     /// as an owner generation is for a master: every entry guard_engine would name for the
-    /// engine root except that folder itself, where the agent's home lives. An rcli master's
-    /// home may instead be one configured SDK home directly in the engine root's folder of
-    /// them: that folder stays a secret and only this home is carved back out of it, so every
-    /// other home, even one made later, stays denied. Call it after guard_engine on the
-    /// runtime folder, whose secrets stay. Inputs: the engine root and the runtime folder.
-    /// Output: the guarded sandbox, or a refusal.
+    /// engine root except that folder itself, where the agent's home lives. A master's home
+    /// may instead sit in one secret folder ([`carved_folder`]): that folder stays a secret and
+    /// only this home is carved back out of it, so every other home, even one made later,
+    /// stays denied. Call it after guard_engine on the runtime folder, whose secrets stay.
+    /// Inputs: the engine root and the runtime folder. Output: the guarded sandbox, or a
+    /// refusal.
     pub fn guard_engine_around(
         mut self,
         engine: &Path,
@@ -1607,16 +1607,15 @@ impl ProjectSandbox {
                 "engine root must be the existing folder around the runtime",
             ));
         }
-        let homes = engine.join(crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER);
-        let carved =
-            (self.agent_home.parent() == Some(homes.as_path())).then(|| self.agent_home.clone());
+        let carved = carved_folder(&engine, &self.agent_home)
+            .map(|folder| (self.agent_home.clone(), folder));
         let secrets: Vec<PathBuf> = engine_secrets_in(&engine)?
             .into_iter()
             .filter(|secret| *secret != runtime)
             .collect();
         let around_home: Vec<PathBuf> = secrets
             .iter()
-            .filter(|secret| **secret != homes)
+            .filter(|secret| carved.as_ref().is_none_or(|(_, folder)| *secret != folder))
             .cloned()
             .collect();
         for root in self
@@ -1625,7 +1624,7 @@ impl ProjectSandbox {
             .chain(self.tool_roots.iter())
             .chain(self.tool_files.iter())
         {
-            if carved.as_ref() == Some(root) {
+            if carved.as_ref().is_some_and(|(home, _)| home == root) {
                 clear_of_secrets(root, &around_home)?;
             } else {
                 clear_of_secrets(root, &secrets)?;
@@ -1637,15 +1636,15 @@ impl ProjectSandbox {
             }
         }
         assert!(!self.engine_secrets.contains(&runtime));
-        if let Some(home) = carved {
-            assert!(self.engine_secrets.contains(&homes));
+        if let Some((home, folder)) = carved {
+            assert!(self.engine_secrets.contains(&folder));
             assert!(
                 self.secret_paths()
                     .iter()
-                    .filter(|secret| **secret != homes)
+                    .filter(|secret| **secret != folder)
                     .all(|secret| !home.starts_with(secret) && !secret.starts_with(&home))
             );
-            self.carved_home = Some(home);
+            self.carved_home = Some((home, folder));
         }
         Ok(self)
     }
@@ -3019,18 +3018,24 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (global-name \"{service}\")"));
         }
         text.push_str(")\n");
-        if let Some((home, homes)) = self
+        if let Some((home, folder)) = self
             .carved_home
             .as_ref()
-            .and_then(|home| Some((home, home.parent()?)))
-            .filter(|(home, _)| clean_absolute(home))
+            .filter(|(home, folder)| clean_absolute(home) && home.starts_with(folder))
         {
-            assert!(self.engine_secrets.iter().any(|secret| secret == homes));
+            assert!(self.engine_secrets.iter().any(|secret| secret == folder));
             text.push_str(&format!(
-                "(allow file-read* file-write*\n  (subpath \"{}\"))\n(allow file-read-metadata\n  (literal \"{}\"))\n",
-                home.display(),
-                homes.display()
+                "(allow file-read* file-write*\n  (subpath \"{}\"))\n(allow file-read-metadata",
+                home.display()
             ));
+            for above in home
+                .ancestors()
+                .skip(1)
+                .take_while(|above| above.starts_with(folder))
+            {
+                text.push_str(&format!("\n  (literal \"{}\")", above.display()));
+            }
+            text.push_str(")\n");
         }
         if !self.hidden.is_empty() {
             text.push_str("(deny file-read* file-write* process-exec file-link file-clone");
@@ -4568,6 +4573,52 @@ fn bounded_entries(folder: &Path) -> Result<Vec<PathBuf>, SandboxError> {
         entries.push(entry?.path());
     }
     Ok(entries)
+}
+
+/// The engine secret folder a master's home may be carved back out of, the home alone: an
+/// rcli master's configured SDK home directly in its folder, or a listed master session's
+/// home in the native profiles folder ([`listed_master_folder`]). Inputs: the engine root and
+/// the canonical home. Output: the folder, or none for any other home.
+fn carved_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
+    let homes = engine.join(crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER);
+    if home.parent() == Some(homes.as_path()) {
+        return Some(homes);
+    }
+    listed_master_folder(engine, home)
+}
+
+/// The native profiles folder when the home is a listed master session's home,
+/// `<listed key of account>/home/<session>/<harness>/<account>` in it, so in that account's
+/// own listed slot, whose home holds no sign-in's record (DEC-180 Task 20). Inputs: the
+/// engine root and the canonical home. Output: the folder, or none for any other home.
+#[cfg(unix)]
+fn listed_master_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
+    let profiles = engine.join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER);
+    let parts: Vec<Component> = home.strip_prefix(&profiles).ok()?.components().collect();
+    let [
+        Component::Normal(key),
+        Component::Normal(slot),
+        Component::Normal(_),
+        Component::Normal(_),
+        Component::Normal(account),
+    ] = parts.as_slice()
+    else {
+        return None;
+    };
+    let listed = crate::engine::bootstrap::listed_slot_key(account.to_str()?);
+    let slot_home = profiles.join(key).join(slot);
+    (*key == listed.as_str()
+        && *slot == "home"
+        && crate::harnesses::launch::holds_no_sign_in(&slot_home).is_ok())
+    .then_some(profiles)
+}
+
+/// Carves no listed master home off Unix, where a listed master session's home is never made
+/// (its listed_home refuses with `launch_account_home_unavailable`). Takes the engine root
+/// and the home, both unused. Returns none.
+#[cfg(not(unix))]
+fn listed_master_folder(_engine: &Path, _home: &Path) -> Option<PathBuf> {
+    None
 }
 
 fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {

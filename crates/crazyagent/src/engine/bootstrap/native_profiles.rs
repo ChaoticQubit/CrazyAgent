@@ -94,14 +94,22 @@ impl StableBinding {
         digest(self.profile_ref.as_str().as_bytes())
     }
 
-    /// The slot key of a listed account's binding: the digest of `listed/` and its connection
-    /// id, which no profile reference can spell as an identity holds no `/`, so it never
-    /// names a sign-in's or an RCLI profile's slot. Output: the key.
+    /// The slot key of a listed account's binding: [`listed_slot_key`] of its connection id,
+    /// so the sandbox can tell a listed master's slot from its home's path alone. Output: the
+    /// key.
     fn listed_key(&self) -> String {
-        let named = format!("listed/{}", self.profile_ref.as_str());
-        assert!(CredentialRef::new(named.clone()).is_err());
-        digest(named.as_bytes())
+        listed_slot_key(self.profile_ref.as_str())
     }
+}
+
+/// The slot key of a listed account: the digest of `listed/` and its connection id, which no
+/// profile reference can spell as an identity holds no `/`, so it never names a sign-in's or
+/// an RCLI profile's slot. Input: the connection id. Output: the key, 64 lowercase hex
+/// digits.
+pub(crate) fn listed_slot_key(connection: &str) -> String {
+    let named = format!("listed/{connection}");
+    assert!(CredentialRef::new(named.clone()).is_err());
+    digest(named.as_bytes())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
