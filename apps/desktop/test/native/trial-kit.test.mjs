@@ -113,11 +113,17 @@ test("terminal keys refuse what the terminal path cannot send instead of typing 
 
 test("browser.keys with Meta (Cmd) is refused on macOS before any key goes out, other keys and systems pass, and the kit's keys refuses first (TRIAL-KIT-WEBDRIVER-META)", () => {
   assert.equal(typeof kit.refusedKeys, "function", "the kit names why a key sequence never goes out");
-  assert.match(kit.refusedKeys(["", "c"], "darwin"), /ABOUT-THIS-MAC/);
-  assert.notEqual(kit.refusedKeys("a", "darwin"), null, "the right Meta key too");
-  assert.notEqual(kit.refusedKeys(["x", ""], "darwin"), null, "a Meta in any part");
-  for (const value of ["a", ["", "c"], [SHIFT, ENTER], "", []]) assert.equal(kit.refusedKeys(value, "darwin"), null, JSON.stringify(value));
-  assert.equal(kit.refusedKeys(["", "c"], "linux"), null, "off a Mac a Meta key reaches no Mac menu bar");
+  assert.match(kit.refusedKeys(["\uE03D", "c"], "darwin"), /ABOUT-THIS-MAC/);
+  assert.notEqual(kit.refusedKeys("a\uE053", "darwin"), null, "the right Meta key too");
+  assert.notEqual(kit.refusedKeys(["x", "\uE03D"], "darwin"), null, "a Meta in any part");
+  for (const value of ["a", ["\uE009", "c"], [SHIFT, ENTER], "\uE00A", []]) assert.equal(kit.refusedKeys(value, "darwin"), null, JSON.stringify(value));
+  assert.equal(kit.refusedKeys(["\uE03D", "c"], "linux"), null, "off a Mac a Meta key reaches no Mac menu bar");
   const source = readFileSync(new URL("./trial-kit.mjs", import.meta.url), "utf8");
   assert.match(source, /overwriteCommand\("keys", async function keys\(webdriverKeys, value\) \{\s*const refused = refusedKeys\(value\);\s*if \(refused !== null\) throw /u, "the kit's keys refuses before it types or calls WebDriver");
+});
+
+test("browser.keys refuses on macOS the WebdriverIO key names that become Cmd there, a whole part Meta or Command and Key.Ctrl, and passes words that only start like them (TRIAL-KIT-WEBDRIVER-META, #153 F1)", () => {
+  for (const name of ["Meta", "Command", "WDIO_CONTROL"]) assert.match(kit.refusedKeys([name, "v"], "darwin") ?? "", /ABOUT-THIS-MAC/, `${name} is Cmd on macOS`);
+  for (const value of [["Metadata"], ["a Command"], ["Control", "c"], ["WDIO_CONTROLS"]]) assert.equal(kit.refusedKeys(value, "darwin"), null, JSON.stringify(value));
+  assert.equal(kit.refusedKeys(["WDIO_CONTROL", "v"], "linux"), null, "off a Mac Key.Ctrl is Control");
 });
