@@ -1400,3 +1400,27 @@ fn a_power_only_lease_refused_after_a_lid_hold_lets_the_lid_go() {
         );
     }
 }
+
+#[test]
+fn a_failed_lid_hold_that_asks_no_low_power_lets_a_power_only_lease_go() {
+    let refused = Reply::Refused {
+        reason: Refusal::Unpinned,
+    };
+    let unanswered = Err(CallError::Exchange(io::ErrorKind::TimedOut));
+    for answer in [Ok(refused), unanswered] {
+        let mut rig = Rig::enabled();
+        rig.answer(Ok(held()), power_view(Some(true), true));
+        rig.line.step(LOW_POWER_ONLY, NOW_MS);
+        rig.answer(answer.clone(), power_view(Some(true), true));
+        let support = rig.line.step(WANTED, NOW_MS + READING_MS);
+        assert_ne!(support, LidSupport::Held, "{answer:?}");
+        let calls = rig.calls();
+        let at = calls.iter().position(|call| *call == HOLD);
+        assert!(at.is_some(), "{answer:?}");
+        let why = "Low Power Mode is no longer asked and the Hold replaced nothing (rv-ds241 N2)";
+        assert!(
+            calls[at.unwrap()..].contains(&Request::Release),
+            "{answer:?}: {why}"
+        );
+    }
+}

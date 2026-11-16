@@ -176,7 +176,8 @@ pub(super) fn gate(connect: &mut dyn FnMut() -> io::Result<UnixStream>) -> io::R
 /// each reading it reads the daemon's status. While the daemon is enabled it renews the
 /// helper's lease when the lid is wanted, releases it once it is not, and otherwise reads
 /// the helper at most every `READ_EVERY_MS`, and at once after an approval or a command.
-/// It never connects while the lid rule is Off or the daemon is not enabled.
+/// It never connects while the daemon is not enabled, and with the lid rule Off only for a
+/// low power ask (QUESTION 40c).
 /// `lease_until_ms` is when the last lease the helper granted runs out at the latest, none
 /// with no lease, and `lease_sleep_off` says that lease is a lid hold, not power only.
 /// `trouble` is what the last owner command could not do, with the daemon
@@ -521,9 +522,10 @@ impl LidLine {
     /// for `pmset` or with no answer keeps the lid held, and the next reading tries again
     /// (threat model sections 9 and 10). Any other refusal, or one once the lease ran out,
     /// reads the helper once and says why: the view's reason, or the refusal when the view
-    /// shows none. A first hold with no answer counts as the last read. Inputs: whether the
-    /// display sleeps once per close and whether low power is asked (Task 16), and the time.
-    /// Output: the lid support.
+    /// shows none. A first hold with no answer counts as the last read. A failed hold that
+    /// asks no low power releases a power-only lease still running from the step before
+    /// (rv-ds241 N2). Inputs: whether the display sleeps once per close and whether low power
+    /// is asked (Task 16), and the time. Output: the lid support.
     fn hold(&mut self, ask: LidAsk, now_ms: i64) -> LidSupport {
         assert!(ask.wanted);
         let lease_live = self.lease_until_ms.is_some_and(|until| now_ms < until);
@@ -563,10 +565,15 @@ impl LidLine {
                 not_available(HELPER_UNANSWERED)
             }
         };
+        let power_only_left = self.lease_until_ms.is_some() && !self.lease_sleep_off;
+        if support != LidSupport::Held && power_only_left && !ask.low_power {
+            self.release();
+        }
         self.last = Some(support.clone());
         let live = self.lease_until_ms.is_some_and(|until| now_ms < until);
         assert!(support != LidSupport::Held || live);
         assert!(support != LidSupport::Held || self.lease_sleep_off);
+        assert!(ask.low_power || self.lease_until_ms.is_none() || self.lease_sleep_off);
         support
     }
 
