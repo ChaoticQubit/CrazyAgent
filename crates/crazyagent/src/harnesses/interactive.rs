@@ -1,10 +1,10 @@
 #[cfg(unix)]
 use super::launch::CLAUDE_NATIVE_TEAM_TOOLS;
 use super::launch::{
-    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NO_MCP, CLAUDE_TOOLS_OFF,
-    CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret,
-    TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied, codex_launch_settings, failure,
-    harness_id, key_file_text, validate,
+    AccountBinding, CLAUDE_AUTO_MEMORY_OFF, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT,
+    CLAUDE_NO_MCP, CLAUDE_TOOLS_OFF, CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError,
+    LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
+    codex_launch_settings, failure, harness_id, key_file_text, validate,
 };
 use crate::coord::settings::{HarnessKind, TerminalDisplay};
 use crate::launch_context::{Installed, NativeTeam};
@@ -643,6 +643,7 @@ fn claude(
 ) -> Result<Vec<String>, LaunchError> {
     let mut settings = serde_json::json!({
         "attribution": {"commit": "", "pr": ""},
+        "autoMemoryEnabled": false,
         "disableAllHooks": true,
         "includeCoAuthoredBy": false,
         "skipDangerousModePermissionPrompt": true,
@@ -731,6 +732,10 @@ fn claude_environment(
         (
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
             "1".to_owned(),
+        ),
+        (
+            CLAUDE_AUTO_MEMORY_OFF.0.to_owned(),
+            CLAUDE_AUTO_MEMORY_OFF.1.to_owned(),
         ),
     ];
     environment.extend(
