@@ -13,7 +13,9 @@ use base64::Engine;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 const CLIENT: &str = "board-own-client-1";
 const SECRET: &str = "own-secret-0001";
@@ -45,8 +47,9 @@ oauth:
 /// challenge), the authorization servers its resource metadata lists, the two endpoints
 /// its server metadata gives, whether it promises `iss` in every answer, whether it takes
 /// client metadata documents, its registration endpoint, the token endpoint's client
-/// sign-in methods, the tokens and registered client it gives, and the issuer its resource
-/// metadata names instead once one is set. Each `{base}` becomes the stand-in's own address.
+/// sign-in methods, the tokens and registered client it gives, the issuer its resource
+/// metadata names instead once one is set, and the hold its token endpoint keeps renewals
+/// in. Each `{base}` becomes the stand-in's own address.
 #[derive(Clone)]
 struct Shape {
     hint: Option<&'static str>,
@@ -62,6 +65,16 @@ struct Shape {
     client: &'static str,
     moved: Arc<Mutex<Option<String>>>,
     renewal: Arc<Mutex<&'static str>>,
+    hold: Option<Hold>,
+}
+
+/// A token endpoint that keeps each renewal until the row lets it go or ten seconds pass:
+/// it tells `entered` that a renewal waits, and marks `timed_out` once one gave up waiting.
+#[derive(Clone)]
+struct Hold {
+    entered: Arc<Mutex<mpsc::Sender<()>>>,
+    release: Arc<Mutex<mpsc::Receiver<()>>>,
+    timed_out: Arc<AtomicBool>,
 }
 
 fn shape() -> Shape {
@@ -79,6 +92,7 @@ fn shape() -> Shape {
         client: DCR_CLIENT,
         moved: Arc::new(Mutex::new(None)),
         renewal: Arc::new(Mutex::new("200 OK")),
+        hold: None,
     }
 }
 
@@ -143,6 +157,17 @@ fn vendor(shape: Shape) -> Vendor {
             ("POST", "/token") => {
                 let renewing = url::form_urlencoded::parse(seen.raw.as_bytes())
                     .any(|(key, value)| key == "grant_type" && value == "refresh_token");
+                if renewing && let Some(hold) = &shape.hold {
+                    let _ = hold.entered.lock().unwrap().send(());
+                    let waited = hold
+                        .release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10));
+                    if waited.is_err() {
+                        hold.timed_out.store(true, Ordering::SeqCst);
+                    }
+                }
                 let suffix = if renewing { "-renewed" } else { "" };
                 let status = *shape.renewal.lock().unwrap();
                 if renewing && status != "200 OK" {
@@ -1460,6 +1485,107 @@ fn a_failed_refresh_raises_one_sign_in_notice() {
     );
     let now = fresh_at(&sign, clock());
     assert!(matches!(now, Ok(Credential::OAuth { .. })), "{now:?}");
+}
+
+/// A renewal waits only on renewals of its own connector: while one vendor's token
+/// endpoint keeps a renewal, another connector of the same engine renews at once.
+#[test]
+fn a_slow_token_endpoint_holds_up_no_other_connectors_renewal() {
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let hold = Hold {
+        entered: Arc::new(Mutex::new(entered_tx)),
+        release: Arc::new(Mutex::new(released)),
+        timed_out: Arc::new(AtomicBool::new(false)),
+    };
+    let slow = signing(
+        Shape {
+            hold: Some(hold.clone()),
+            ..shape()
+        },
+        &["127.0.0.1"],
+    );
+    let pending = begun(&slow, false);
+    assert_eq!(
+        finished(&slow, &pending.state, Some(&slow.issuer())),
+        Ok(())
+    );
+    let quick = vendor(Shape {
+        register: Some("{base}/register"),
+        ..shape()
+    });
+    let desk = ConnectorSpec {
+        mcp: quick.endpoint(),
+        oauth: Some(OAuthSpec {
+            registration: vec![Registration::Dcr],
+            ..slow.spec.oauth.clone().unwrap()
+        }),
+        ..slow.spec.clone()
+    };
+    let desk_begun = begin_with(
+        &slow.case.root,
+        "desk",
+        SHA,
+        &desk,
+        &redirect(),
+        false,
+        None,
+        &no_lookup(),
+    );
+    assert!(desk_begun.is_ok(), "{desk_begun:?}");
+    assert_eq!(
+        finish_with(
+            &slow.case.root,
+            &desk_begun.unwrap().state,
+            CODE,
+            Some(&format!("http://127.0.0.1:{}", quick.port)),
+            &no_lookup()
+        ),
+        Ok(())
+    );
+    let later = clock() + 2 * 3_600_000;
+    let (root, spec) = (slow.case.root.clone(), slow.spec.clone());
+    let waiting = std::thread::spawn(move || {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        fresh_with(
+            &db,
+            &root,
+            "board",
+            "Board",
+            SHA,
+            &spec,
+            later,
+            &no_lookup(),
+        )
+        .is_ok()
+    });
+    assert_eq!(
+        entered.recv_timeout(Duration::from_secs(10)),
+        Ok(()),
+        "the slow renewal waits at its token endpoint"
+    );
+    let renewed = fresh_with(
+        &slow.case.db,
+        &slow.case.root,
+        "desk",
+        "Desk",
+        SHA,
+        &desk,
+        later,
+        &no_lookup(),
+    );
+    assert!(
+        matches!(renewed, Ok(Credential::OAuth { .. })),
+        "{renewed:?}"
+    );
+    assert!(
+        !hold.timed_out.load(Ordering::SeqCst),
+        "the other connector renewed without waiting on the slow one"
+    );
+    release.send(()).unwrap();
+    assert!(waiting.join().unwrap(), "the slow renewal ends once let go");
+    assert_eq!(renewals(&slow.vendor), 1);
+    assert_eq!(renewals(&quick), 1);
 }
 
 /// Removing a connector resolves its "Sign in again" item with it.
