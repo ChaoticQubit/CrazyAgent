@@ -20,6 +20,7 @@ MACOS_MIN_AARCH64=11.0
 MACOS_MIN_X86_64=10.13
 MACOS_WEAK_ALLOWED="_malloc_default_purgeable_zone ___darwin_check_fd_set_overflow"
 SOCKET_PATH_MAX=103
+LOG_TAIL_LINES=80
 USAGE="usage: build-tmux.sh --target <aarch64-apple-darwin|x86_64-apple-darwin|x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu> --work <new folder> --out <new file>"
 
 refuse() {
@@ -30,6 +31,10 @@ refuse() {
 
 fail() {
   echo "build-tmux: $1" >&2
+  if [ -n "${2:-}" ] && [ -f "$2" ]; then
+    echo "build-tmux: the last $LOG_TAIL_LINES lines of $2:" >&2
+    tail -n "$LOG_TAIL_LINES" "$2" >&2
+  fi
   exit 1
 }
 
@@ -61,18 +66,18 @@ fetch() {
 
 build_libevent() {
   local tree="$1"
-  (cd "$tree/libevent" && ./configure --prefix="$prefix" ${configure_args[@]+"${configure_args[@]}"} --disable-shared --enable-static --disable-openssl --disable-samples --disable-libevent-regress --disable-debug-mode > "$tree/libevent.log" 2>&1 && make -j"$jobs" >> "$tree/libevent.log" 2>&1 && make install >> "$tree/libevent.log" 2>&1) || fail "build_tmux_libevent_failed: $tree/libevent.log"
+  (cd "$tree/libevent" && ./configure --prefix="$prefix" ${configure_args[@]+"${configure_args[@]}"} --disable-shared --enable-static --disable-openssl --disable-samples --disable-libevent-regress --disable-debug-mode > "$tree/libevent.log" 2>&1 && make -j"$jobs" >> "$tree/libevent.log" 2>&1 && make install >> "$tree/libevent.log" 2>&1) || fail "build_tmux_libevent_failed: $tree/libevent.log" "$tree/libevent.log"
 }
 
 build_jemalloc() {
   local tree="$1"
-  (cd "$tree/jemalloc" && ./configure --prefix="$prefix" ${configure_args[@]+"${configure_args[@]}"} --disable-cxx --disable-debug --with-lg-page="$page" > "$tree/jemalloc.log" 2>&1 && make -j"$jobs" build_lib_static >> "$tree/jemalloc.log" 2>&1 && make install_include install_lib_static >> "$tree/jemalloc.log" 2>&1) || fail "build_tmux_jemalloc_failed: $tree/jemalloc.log"
+  (cd "$tree/jemalloc" && ./configure --prefix="$prefix" ${configure_args[@]+"${configure_args[@]}"} --disable-cxx --disable-debug --with-lg-page="$page" > "$tree/jemalloc.log" 2>&1 && make -j"$jobs" build_lib_static >> "$tree/jemalloc.log" 2>&1 && make install_include install_lib_static >> "$tree/jemalloc.log" 2>&1) || fail "build_tmux_jemalloc_failed: $tree/jemalloc.log" "$tree/jemalloc.log"
   test -f "$prefix/lib/libjemalloc.a" || fail "build_tmux_jemalloc_failed: no static library"
 }
 
 build_utf8proc() {
   local tree="$1"
-  (cd "$tree/utf8proc" && make -j"$jobs" libutf8proc.a CC="$CC" CFLAGS="$CFLAGS" > "$tree/utf8proc.log" 2>&1) || fail "build_tmux_utf8proc_failed: $tree/utf8proc.log"
+  (cd "$tree/utf8proc" && make -j"$jobs" libutf8proc.a CC="$CC" CFLAGS="$CFLAGS" > "$tree/utf8proc.log" 2>&1) || fail "build_tmux_utf8proc_failed: $tree/utf8proc.log" "$tree/utf8proc.log"
   mkdir -p "$prefix/lib" "$prefix/include"
   cp "$tree/utf8proc/libutf8proc.a" "$prefix/lib/libutf8proc.a"
   cp "$tree/utf8proc/utf8proc.h" "$prefix/include/utf8proc.h"
@@ -80,13 +85,13 @@ build_utf8proc() {
 
 build_ncurses() {
   local tree="$1"
-  (cd "$tree/ncurses" && ./configure --prefix="$prefix" --without-shared --with-normal --without-debug --without-ada --without-cxx --without-cxx-binding --without-manpages --without-progs --without-tests --disable-db-install --enable-overwrite --with-default-terminfo-dir=/usr/share/terminfo --with-terminfo-dirs=/etc/terminfo:/lib/terminfo:/usr/share/terminfo > "$tree/ncurses.log" 2>&1 && make -j"$jobs" >> "$tree/ncurses.log" 2>&1 && make install.libs >> "$tree/ncurses.log" 2>&1) || fail "build_tmux_ncurses_failed: $tree/ncurses.log"
+  (cd "$tree/ncurses" && ./configure --prefix="$prefix" --without-shared --with-normal --without-debug --without-ada --without-cxx --without-cxx-binding --without-manpages --without-progs --without-tests --disable-db-install --enable-overwrite --with-default-terminfo-dir=/usr/share/terminfo --with-terminfo-dirs=/etc/terminfo:/lib/terminfo:/usr/share/terminfo > "$tree/ncurses.log" 2>&1 && make -j"$jobs" >> "$tree/ncurses.log" 2>&1 && make install.libs >> "$tree/ncurses.log" 2>&1) || fail "build_tmux_ncurses_failed: $tree/ncurses.log" "$tree/ncurses.log"
 }
 
 build_tmux() {
   local tree="$1"
   shift
-  (cd "$tree/tmux" && ./configure --prefix="$prefix" ${configure_args[@]+"${configure_args[@]}"} --enable-utf8proc "$@" CPPFLAGS="-I$prefix/include" LDFLAGS="$LDFLAGS -L$prefix/lib" LIBEVENT_CORE_CFLAGS="-I$prefix/include" LIBEVENT_CORE_LIBS="-L$prefix/lib -levent_core" LIBUTF8PROC_CFLAGS="-I$prefix/include" LIBUTF8PROC_LIBS="-L$prefix/lib -lutf8proc" > "$tree/tmux.log" 2>&1 && make -j"$jobs" >> "$tree/tmux.log" 2>&1) || fail "build_tmux_tmux_failed: $tree/tmux.log"
+  (cd "$tree/tmux" && ./configure --prefix="$prefix" ${configure_args[@]+"${configure_args[@]}"} --enable-utf8proc "$@" CPPFLAGS="-I$prefix/include" LDFLAGS="$LDFLAGS -L$prefix/lib" LIBEVENT_CORE_CFLAGS="-I$prefix/include" LIBEVENT_CORE_LIBS="-L$prefix/lib -levent_core" LIBUTF8PROC_CFLAGS="-I$prefix/include" LIBUTF8PROC_LIBS="-L$prefix/lib -lutf8proc" > "$tree/tmux.log" 2>&1 && make -j"$jobs" >> "$tree/tmux.log" 2>&1) || fail "build_tmux_tmux_failed: $tree/tmux.log" "$tree/tmux.log"
   test -f "$tree/tmux/tmux" || fail "build_tmux_tmux_failed: no program"
 }
 
@@ -265,7 +270,7 @@ else
   build_ncurses "$tree"
   build_libevent "$tree"
   build_utf8proc "$tree"
-  build_tmux "$tree" --enable-static
+  build_tmux "$tree" --enable-static LIBNCURSESW_CFLAGS="-I$prefix/include" LIBNCURSESW_LIBS="-L$prefix/lib -lncursesw"
   check_linux "$tree/tmux/tmux"
 fi
 
