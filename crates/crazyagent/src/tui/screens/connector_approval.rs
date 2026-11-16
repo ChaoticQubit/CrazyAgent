@@ -37,7 +37,7 @@ pub(in crate::tui) const DENIED: &str = "Write denied.";
 pub(in crate::tui) const EXPIRED: &str = "Expired";
 /// The line an a or d says before the whole write has been on screen (rv-sec2 T13d F2).
 pub(in crate::tui) const READ_FIRST: &str =
-    "Read the whole write to its time left first, with Down, PgDn or End.";
+    "Read the whole write to its time left first, with Down or PgDn.";
 /// The Scroll hint while the end of the write is still below the page (rv-sec2 T13d F2).
 const READ_TO_ANSWER: &str = "Read to the end to answer";
 const CLOSED: &str = "connector_approval_closed";

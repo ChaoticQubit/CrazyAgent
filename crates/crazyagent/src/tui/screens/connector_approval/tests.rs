@@ -449,6 +449,16 @@ fn control_and_escape_characters_show_as_escapes_and_nothing_is_taken_out() {
     );
 }
 
+/// The line `a` or `d` shows on an unread write names only the keys that count rows as read,
+/// Down and PgDn, as the trust screen's line does; End jumps past rows it never counts.
+#[test]
+fn the_read_first_line_names_only_keys_that_count_rows_as_read() {
+    assert_eq!(
+        READ_FIRST,
+        "Read the whole write to its time left first, with Down or PgDn."
+    );
+}
+
 /// Advisor on rv-sec2 T13d F2: with the arguments open, End jumps past the end of what the
 /// write sends and its time left; only rows drawn in one run down from the top count as
 /// read, so a after End and Home answers nothing until the page is paged down to them.
