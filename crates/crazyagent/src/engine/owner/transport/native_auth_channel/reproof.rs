@@ -17,6 +17,7 @@ impl OwnerRuntimeHandle {
         let Some(admission) = self.authority.standing_admission() else {
             return;
         };
+        let engine_start = session.is_none();
         let starts = match self
             .engine
             .native_auth_job(|reply| Job::NativeAuthStale(self.identity(), session, reply))
@@ -31,7 +32,6 @@ impl OwnerRuntimeHandle {
                 return;
             }
         };
-        let engine_start = session.is_none();
         if engine_start {
             self.authority.reproof_listed(
                 starts
