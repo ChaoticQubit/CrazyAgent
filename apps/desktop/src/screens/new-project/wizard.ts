@@ -1,6 +1,8 @@
 import type { HarnessEntry, PoolSummary } from "../../api";
 import type { AccessLevel, AgentAccess, HarnessSlot, JobKind, Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
 import type { AccountPool, ModelConnection } from "../../engine-client";
+import { emptyPublish } from "./publish";
+import type { PublishDraft } from "./publish";
 
 export type StepId = "basics" | "documents" | "work" | "pool" | "team";
 
@@ -81,6 +83,7 @@ export interface ProjectDraft {
   poolChosen: boolean;
   team: TeamDraft | null;
   access?: AgentAccess;
+  publish?: PublishDraft;
 }
 
 /** One agent row being edited; `tools_wanted` keeps the owner's choice while the harness forces
@@ -97,7 +100,7 @@ export function emptyDraft(): ProjectDraft {
   return {
     name: "", about: "", stack: [], platforms: [], otherPlatform: "", documents: [],
     research: ["market_research", "competitor_research", "design_research"], roadmap: true, pool: null, poolChosen: false, team: null,
-    access: NEW_PROJECT_ACCESS,
+    access: NEW_PROJECT_ACCESS, publish: emptyPublish(),
   };
 }
 

@@ -1611,6 +1611,20 @@ export function cloneRepo(fullName: string): Promise<CloneReceipt> {
   return invoke<CloneReceipt>("desktop_clone_repo", { fullName });
 }
 
+/** Lists the GitHub accounts a published project's repository can go under, the personal
+ * account first. Output: the accounts and a plain problem, such as organizations that
+ * could not be listed. */
+export function githubOwners(): Promise<GitHubOwners> {
+  return invoke<GitHubOwners>("desktop_github_owners");
+}
+
+/** Starts publishing a project on GitHub: the engine checks the plan, the sign-in and the
+ * project's git and drafts the .gitignore lines to show first. Inputs: the project id and
+ * the plan. Output: the job at its lines. */
+export function githubPublishStart(project: string, plan: GitHubPublishPlan): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_start", { project, plan });
+}
+
 export type DependencyName = "tmux" | "uv" | "graphify" | "node";
 
 export type DependencyState =

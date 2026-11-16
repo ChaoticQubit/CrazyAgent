@@ -2,13 +2,14 @@ import { classifyFailure, namedFailure, nextGeneration, plainError, type Result 
 import { formatBytes } from "./screens/new-project/wizard";
 import { failureCopy } from "./api-projects";
 import {
-  addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
+  addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubOwners, githubPublishStart, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
   githubUseCli, icloudCancel, icloudDownload, icloudProgress, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
   fixToolPermissions as startFix, setRefusedTool as saveRefusedTool,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
-  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt, OnboardingView,
+  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob,
+  IntentReceipt, OnboardingView,
   DependencyName, ProjectsHome, RefusedTool, SetupStatus,
 } from "./engine-client";
 
@@ -378,6 +379,18 @@ export function gitHubSignOut(): Promise<Result<GitHubStatus>> {
  * Output: the status. */
 export function loadGitHubStatus(): Promise<Result<GitHubStatus>> {
   return wrap(githubStatus);
+}
+
+/** Reads the GitHub accounts a published project's repository can go under, the personal
+ * account first. Output: the accounts and a plain problem, if any. */
+export function loadGitHubOwners(): Promise<Result<GitHubOwners>> {
+  return wrap(githubOwners);
+}
+
+/** Starts publishing a project on GitHub with a plan the New Project publish block built.
+ * Inputs: the project id and the plan. Output: the job at its .gitignore lines. */
+export function startGitHubPublish(project: string, plan: GitHubPublishPlan): Promise<Result<GitHubPublishJob>> {
+  return wrap(() => githubPublishStart(project, plan));
 }
 
 /** Reads one page of the signed-in account's repositories.

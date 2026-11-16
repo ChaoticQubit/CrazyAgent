@@ -130,6 +130,8 @@ fn main() {
         "desktop_github_use_cli",
         "desktop_github_sign_out",
         "desktop_github_repos",
+        "desktop_github_owners",
+        "desktop_github_publish_start",
         "desktop_clone_repo",
         "desktop_icloud_download",
         "desktop_icloud_progress",

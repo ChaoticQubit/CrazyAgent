@@ -32,7 +32,10 @@ use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountExtras, AccountPage, AccountSecret,
     ModelAccessCollection, NativeAuthMethod,
 };
-use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
+use crazyagent::github::{
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan,
+    GitHubRepoPage, GitHubStatus,
+};
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
@@ -2525,6 +2528,28 @@ async fn desktop_github_repos(
 ) -> Result<GitHubRepoPage, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.github_repos(page)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_owners(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<GitHubOwners, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_owners()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_start(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    plan: GitHubPublishPlan,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_start(&project, plan)?;
     call.await
 }
 
@@ -5139,6 +5164,8 @@ native_commands! {
     desktop_github_use_cli,
     desktop_github_sign_out,
     desktop_github_repos,
+    desktop_github_owners,
+    desktop_github_publish_start,
     desktop_clone_repo,
     desktop_icloud_download,
     desktop_icloud_progress,

@@ -4,7 +4,10 @@ use super::{
 };
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
-use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
+use crazyagent::github::{
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan,
+    GitHubRepoPage, GitHubStatus,
+};
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::projects_home::icloud::Progress;
 use crazyagent::projects_home::job::{JobState, JobSubject, JobView};
@@ -773,6 +776,34 @@ impl NativeBridge {
         let client = self.github_client()?;
         Ok(Box::pin(async move {
             bounded(client.github_repos(page).await.map_err(github_failure)?)
+        }))
+    }
+
+    /// Lists the GitHub accounts a published project's repository can go under, the personal
+    /// account first. Output: the accounts and a plain problem, if any.
+    pub fn github_owners(&mut self) -> Result<Unlocked<GitHubOwners>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_owners().await.map_err(github_failure)?)
+        }))
+    }
+
+    /// Starts publishing a project on GitHub; the engine checks the plan, the sign-in and
+    /// the project's git. Inputs: the project id and the plan. Output: the job at its lines.
+    pub fn github_publish_start(
+        &mut self,
+        id: &str,
+        plan: GitHubPublishPlan,
+    ) -> Result<Unlocked<GitHubPublishJob>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_publish_start(project, plan)
+                    .await
+                    .map_err(github_failure)?,
+            )
         }))
     }
 

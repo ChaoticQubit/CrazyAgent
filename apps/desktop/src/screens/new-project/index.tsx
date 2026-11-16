@@ -13,7 +13,7 @@ import { homePath } from "../settings/harnesses";
 import { NotReady } from "../project/shared";
 import { AccessLevels, accessLabel, policyOf } from "../project/access";
 import { PoolPicker } from "./pool-picker";
-import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "./fields";
+import { BasicsFields, PublishFields, ResearchSwitches, RoadmapSwitch } from "./fields";
 import { TeamEditor } from "./team-editor";
 import {
   STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, draftAccess, emptyDraft, levelUnavailable, poolName, preselectPool,
@@ -227,6 +227,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         {step === "basics" && <div className="pj-stack">
           <h2 id="pj-step-title">Basics</h2>
           <BasicsFields prefix="np" draft={draft} onChange={setDraft} catalog={catalog} errors={basics} showErrors={showBasicsErrors} autoFocus />
+          <PublishFields prefix="np" draft={draft} onChange={setDraft} />
           <div className="pj-field">
             <span className="pj-label">Project folder</span>
             <p>CrazyAgent creates a new folder for this project when you create it.</p>
