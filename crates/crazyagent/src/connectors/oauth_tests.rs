@@ -1,5 +1,7 @@
 use super::*;
-use crate::app_plugins::connector::{ConnectorSpec, OAuthSpec, Registration};
+use crate::app_plugins::connector::{
+    ConnectorSpec, McpEndpoint, OAuthSpec, ReadOnly, Registration,
+};
 use crate::connectors::mcp_client::tests::{Seen, Vendor, empty, json_reply, no_lookup, send};
 use crate::connectors::mcp_client::{Access, Credential, McpError, McpSession};
 use crate::connectors::settings::SizeCap;
@@ -759,15 +761,86 @@ fn clock() -> i64 {
 }
 
 fn fresh_at(sign: &Sign, now_ms: i64) -> Result<Credential, OAuthError> {
+    fresh_for(sign, &sign.spec, now_ms)
+}
+
+/// [`fresh_at`] for the connector declared as `spec` instead of the sign's own.
+fn fresh_for(sign: &Sign, spec: &ConnectorSpec, now_ms: i64) -> Result<Credential, OAuthError> {
     fresh_with(
         &sign.case.db,
         &sign.case.root,
         "board",
         "Board",
-        &sign.spec,
+        spec,
         now_ms,
         &no_lookup(),
     )
+}
+
+/// The sign's connector declared with `read_only` as its read-only address.
+fn read_only_at(sign: &Sign, read_only: &str) -> ConnectorSpec {
+    ConnectorSpec {
+        mcp: McpEndpoint {
+            read_only: ReadOnly::Url(url::Url::parse(read_only).unwrap()),
+            ..sign.spec.mcp.clone()
+        },
+        ..sign.spec.clone()
+    }
+}
+
+/// An OAuth token goes only where the sign-in's resource reaches: a read-only address
+/// outside it is refused before a sign-in begins, and a sign-in is never handed out for a
+/// declaration whose read-only address it does not cover; one under the resource is used.
+#[test]
+fn an_oauth_token_never_goes_to_a_read_only_address_outside_its_resource() {
+    let sign = signing(shape(), &["127.0.0.1"]);
+    let pending = begun(&sign, false);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    let outside = read_only_at(&sign, &format!("{}/ro", sign.issuer()));
+    let under = read_only_at(&sign, &format!("{}/readonly", sign.resource()));
+    let seen = sign.vendor.seen().len();
+    assert_eq!(
+        fresh_for(&sign, &outside, clock()),
+        Err(OAuthError("connector_sign_in_needed")),
+        "a token is never handed out for an address its resource does not cover"
+    );
+    assert_eq!(sign.vendor.seen().len(), seen);
+    assert!(
+        matches!(
+            fresh_for(&sign, &under, clock()),
+            Ok(Credential::OAuth { .. })
+        ),
+        "a read-only address under the resource gets the token"
+    );
+    let refused = begin_with(
+        &sign.case.root,
+        "board",
+        SHA,
+        &outside,
+        &redirect(),
+        false,
+        None,
+        &no_lookup(),
+    );
+    assert_eq!(
+        refused.map(|pending| pending.state),
+        Err(OAuthError("connector_oauth_metadata_invalid")),
+        "a sign-in whose resource leaves the read-only address out never begins"
+    );
+    let allowed = begin_with(
+        &sign.case.root,
+        "board",
+        SHA,
+        &under,
+        &redirect(),
+        false,
+        None,
+        &no_lookup(),
+    );
+    assert!(allowed.is_ok(), "{allowed:?}");
 }
 
 /// The Authorization values the stand-in's MCP address was sent.

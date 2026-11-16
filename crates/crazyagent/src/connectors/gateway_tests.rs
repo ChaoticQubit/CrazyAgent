@@ -2114,6 +2114,90 @@ fn shelf_vendor(taken: Arc<Mutex<String>>) -> Vendor {
     })
 }
 
+/// Signs `shelf` in at the stand-in with the owner's own client, as the file whose sha256
+/// is given. Inputs: the bench, the stand-in and the trusted file's sha256.
+fn shelf_signed_in(bench: &Bench, vendor: &Vendor, sha256: &str) {
+    assert_eq!(
+        crate::connectors::oauth::set_own_client(
+            &bench.case.db,
+            &bench.case.root,
+            "shelf",
+            "shelf-client",
+            None
+        ),
+        Ok(())
+    );
+    let spec = ConnectorSpec {
+        mcp: vendor.endpoint(),
+        key: None,
+        oauth: Some(OAuthSpec {
+            hosts: vec!["127.0.0.1".to_owned()],
+            registration: vec![Registration::Own],
+            scopes_read: vec!["read".to_owned()],
+            scopes_write: vec!["write".to_owned()],
+        }),
+        read_tools: Vec::new(),
+    };
+    let redirect = url::Url::parse("http://127.0.0.1:53682/callback").unwrap();
+    let pending = crate::connectors::oauth::begin_with(
+        &bench.case.root,
+        "shelf",
+        sha256,
+        &spec,
+        &redirect,
+        false,
+        None,
+        &no_lookup(),
+    );
+    assert!(pending.is_ok(), "{pending:?}");
+    assert_eq!(
+        crate::connectors::oauth::finish_with(
+            &bench.case.root,
+            &pending.unwrap().state,
+            "code-1",
+            None,
+            &no_lookup()
+        ),
+        Ok(())
+    );
+}
+
+/// An OAuth connector whose read-only address is outside the resource it signed in for
+/// never sends its token there, whether writes are off (reads only) or on (both lanes),
+/// and sends nothing to its own address either.
+#[test]
+fn an_oauth_connector_never_sends_its_token_to_a_read_only_address_outside_its_sign_in() {
+    let taken = Arc::new(Mutex::new("at-shelf-1".to_owned()));
+    let vendor = shelf_vendor(taken.clone());
+    let other = shelf_vendor(taken);
+    let bench = bench();
+    add(&bench.case, SHELF, false);
+    shelf_signed_in(&bench, &vendor, "sha256-of-shelf");
+    bench.gateway.stand_in(
+        "shelf",
+        crate::app_plugins::connector::McpEndpoint {
+            read_only: ReadOnly::Url(other.endpoint().url),
+            ..vendor.endpoint()
+        },
+    );
+    grant(&bench, "shelf", true);
+    let launch = launch(&bench);
+    for write in [WritePolicy::ReadOnly, WritePolicy::AskEveryTime] {
+        set_write(&bench, write);
+        assert!(listed(&bench, &launch).is_empty(), "{write:?}");
+        let (text, error) = called(&bench, &launch, "shelf__list_items", json!({}));
+        assert!(
+            error && text.starts_with("connector_sign_in_needed"),
+            "{write:?}: {text}"
+        );
+    }
+    assert!(
+        other.seen().is_empty(),
+        "the read-only address outside the sign-in is never called"
+    );
+    assert!(bearers(&vendor).is_empty(), "no token is sent at all");
+}
+
 /// The refresh requests the stand-in's token endpoint was sent.
 fn renewals(vendor: &Vendor) -> usize {
     vendor
