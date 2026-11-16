@@ -6,7 +6,7 @@ const intake = await import("../src/screens/intake/intake.ts");
 const api = await import("../src/api-intake.ts");
 
 const SOURCE = "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop";
-const job = (state, extra = {}) => ({ id: "add-1", source: SOURCE, mode: "move", overrides: [], stopping: false, state, ...extra });
+const job = (state, extra = {}) => ({ id: "add-1", kind: "add", source: SOURCE, mode: "move", overrides: [], stopping: false, state, ...extra });
 const downloading = (done, total) => ({ state: "downloading", progress: { done, total } });
 const copying = (copied, checked = 0) => ({ state: "copying", copied, checked });
 const failed = (code, phase) => ({ state: "failed", code, phase });
