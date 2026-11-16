@@ -11,7 +11,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -309,7 +309,7 @@ impl Drop for PaneCallers {
 /// Takes what a lock holds, for a Drop that may run while a panic that held the lock unwinds.
 /// Input: the lock. Output: its value, leaving the default.
 fn taken<T: Default>(lock: &mut Mutex<T>) -> T {
-    std::mem::take(lock.get_mut().unwrap())
+    std::mem::take(lock.get_mut().unwrap_or_else(PoisonError::into_inner))
 }
 
 /// TEST-DROP-UNWRAP: the shells a failed pane call poisoned while it held them are still

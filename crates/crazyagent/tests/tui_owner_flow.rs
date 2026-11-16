@@ -13,7 +13,7 @@ use crazyagent::verification::{BaselineDraft, BaselineOrigin, CheckKind, CheckSp
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -157,7 +157,8 @@ impl Drop for Process {
 /// Output: the text.
 fn captured_text(stdout: &Mutex<Capture>, stderr: &Mutex<Capture>) -> String {
     let read = |capture: &Mutex<Capture>| {
-        String::from_utf8_lossy(&capture.lock().unwrap().bytes).into_owned()
+        let capture = capture.lock().unwrap_or_else(PoisonError::into_inner);
+        String::from_utf8_lossy(&capture.bytes).into_owned()
     };
     format!("stdout: {}\nstderr: {}", read(stdout), read(stderr))
 }
