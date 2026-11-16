@@ -292,7 +292,7 @@ function failureText(error) {
  * and the tool's arguments. Output: what the tool printed. */
 export function securityIn(home, args) {
   return execFileSync(SECURITY, args, {
-    env: { HOME: home, PATH: "/usr/bin:/bin" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: SECURITY_MS_MAX,
+    cwd: home, env: { HOME: home, PATH: "/usr/bin:/bin" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: SECURITY_MS_MAX,
   });
 }
 
@@ -310,16 +310,27 @@ function ownerSettingsAbsent(realHome) {
   assert.ok(!existsSync(settings), `the owner's keychain settings file stays absent: ${settings}`);
 }
 
+/** The owner's own keychain view: the search list and the default keychain the tool prints for
+ * the owner's home. Inputs: the owner's home and the keychain tool. Output: `{ list, chosen }`. */
+function ownerKeychains(realHome, security) {
+  return {
+    list: listedPaths(security(realHome, ["list-keychains", "-d", "user"])),
+    chosen: listedPaths(security(realHome, ["default-keychain", "-d", "user"])),
+  };
+}
+
 /** Gives a new speed state home its own empty login keychain as its default and its only
  * search-list entry, as the gate's kc-state.sh prep did by hand (DEC-146), so an app and a TUI
  * run on that home never reach the owner's keychain. Refuses a folder that is not a new speed
- * state home, and stops while the owner has a keychain settings file, before and after.
- * Inputs: the home, the owner's home and the keychain tool. Output: the keychain's path. */
+ * state home, stops while the owner has a keychain settings file, and reads the owner's search
+ * list and default keychain before and after, stopping when either changed. Inputs: the home,
+ * the owner's home and the keychain tool. Output: the keychain's path. */
 export function prepareKeychain(home, realHome = userInfo().homedir, security = securityIn) {
   assert.ok(basename(home) === "home" && SPEED_STATE.test(dirname(home)), `a speed state home: ${home}`);
   privateFolder(home);
   ownerSettingsAbsent(realHome);
   assert.ok(!existsSync(join(home, "Library")), `a new speed state home holds no Library yet: ${home}`);
+  const owner = ownerKeychains(realHome, security);
   for (const folder of ["Library", "Library/Keychains", "Library/Preferences"]) mkdirSync(join(home, folder), { mode: 0o700 });
   const keychain = join(home, "Library", "Keychains", "login.keychain-db");
   security(home, ["create-keychain", "-p", "", keychain]);
@@ -329,6 +340,9 @@ export function prepareKeychain(home, realHome = userInfo().homedir, security = 
   assert.deepEqual(listedPaths(security(home, ["list-keychains", "-d", "user"])), [keychain], "the home's search list holds only its own keychain");
   assert.deepEqual(listedPaths(security(home, ["default-keychain", "-d", "user"])), [keychain], "the home's default keychain is its own");
   ownerSettingsAbsent(realHome);
+  const after = ownerKeychains(realHome, security);
+  assert.deepEqual(after.list, owner.list, "the owner's search list is unchanged");
+  assert.deepEqual(after.chosen, owner.chosen, "the owner's default keychain is unchanged");
   return keychain;
 }
 
@@ -405,10 +419,13 @@ export function joinSample(sample, tui) {
   return joined;
 }
 
-/** The exit of a compare run: 1 when a metric failed or could not be judged, else 0. Inputs:
- * judge's rows, `incomplete`'s metrics and the failed runs per side. Output: the exit code. */
+/** The exit of a compare run: 1 when a metric failed or could not be judged, or when the
+ * candidate failed more runs than the base, since a failure only the candidate has is a finding
+ * and one both sides met is the Mac's; else 0. Inputs: judge's rows, `incomplete`'s metrics and
+ * the failed runs per side. Output: the exit code. */
 export function compareExit(rows, gaps, failed) {
-  return rows.some((row) => row.status === "fail") || gaps.length > 0 ? 1 : 0;
+  assert.ok(Number.isInteger(failed.base) && Number.isInteger(failed.candidate), "failed runs are counted per side");
+  return rows.some((row) => row.status === "fail") || gaps.length > 0 || failed.candidate > failed.base ? 1 : 0;
 }
 
 /** The floor a metric's gap must pass to fail. Input: the metric. Output: the floor. */
