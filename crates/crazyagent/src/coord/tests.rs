@@ -3573,7 +3573,7 @@ fn a_listed_harness_kind_is_stored_as_its_id_and_answers_every_question_asked_of
         );
         for endpoint in [false, true] {
             for protection in Protection::ALL {
-                assert_eq!(kind.lacks(endpoint, protection), None, "{id}");
+                assert!(kind.lacks(endpoint, protection).is_some(), "{id}");
             }
         }
         assert_eq!(

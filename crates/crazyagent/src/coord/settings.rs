@@ -170,10 +170,10 @@ impl HarnessKind {
     /// Says why this harness's agents miss one protection on one account kind, or None
     /// when they get it (DEC-141 PA-12): Claude Code on a sign-in and Codex on any account
     /// get all three; Claude Code on an API key or URL account starts bare, without hooks
-    /// or receipts; rcli has no hooks. A listed harness has no sentence yet and answers
-    /// None, as a harness without a kind did before, until the task that wires its
-    /// protections writes one. Takes the kind, whether the account is an API key or URL
-    /// one, and the protection. Returns the sentence the settings show, or None.
+    /// or receipts; rcli has no hooks; a listed harness's launch writes no hooks, so it gets
+    /// none of the three on any account (rv-sec3 T19b F2) and its agents are counted
+    /// hookless. Takes the kind, whether the account is an API key or URL one, and the
+    /// protection. Returns the sentence the settings show, or None.
     pub fn lacks(self, endpoint: bool, protection: Protection) -> Option<&'static str> {
         match (self, endpoint, protection) {
             (Self::ClaudeCode, true, Protection::Receipts) => Some(BARE_NO_RECEIPTS),
@@ -181,10 +181,11 @@ impl HarnessKind {
                 Some(BARE_NO_HOOKS)
             }
             (Self::Rcli, _, Protection::OwnerHooks | Protection::EditGuard) => Some(RCLI_NO_HOOKS),
-            (Self::ClaudeCode, false, _)
-            | (Self::Codex, _, _)
-            | (Self::Rcli, _, _)
-            | (Self::Listed(_), _, _) => None,
+            (Self::Listed(_), _, Protection::Receipts) => Some(LISTED_NO_RECEIPTS),
+            (Self::Listed(_), _, Protection::OwnerHooks | Protection::EditGuard) => {
+                Some(LISTED_NO_HOOKS)
+            }
+            (Self::ClaudeCode, false, _) | (Self::Codex, _, _) | (Self::Rcli, _, _) => None,
         }
     }
 }
