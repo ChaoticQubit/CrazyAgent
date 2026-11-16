@@ -34,7 +34,7 @@ pub(super) struct HostProcess {
     group_absent: bool,
     clean: bool,
     follower: Option<Follower>,
-    left: Option<Leftovers>,
+    left: std::sync::Mutex<Option<Leftovers>>,
     by: HoldBy,
 }
 
@@ -76,7 +76,7 @@ impl HostProcess {
             group_absent: false,
             clean: false,
             follower,
-            left: None,
+            left: std::sync::Mutex::new(None),
             by,
         };
         assert!(process.child.id() > 1);
@@ -298,21 +298,25 @@ impl HostProcess {
         };
         let code = unstopped.code();
         match unstopped {
-            Unstopped::Left(left) if ended.is_ok() => self.left = Some(left),
+            Unstopped::Left(left) if ended.is_ok() => *self.kept_left() = Some(left),
             Unstopped::Left(left) => {
                 let mode = leftovers::mode_of(self.by.project.as_deref());
                 left.hold(None, (), self.by.clone(), mode);
             }
             Unstopped::Uncertain => {}
         }
-        assert!(self.left.is_none() || ended.is_ok());
+        assert!(self.kept_left().is_none() || ended.is_ok());
         ended.and(Err(error(code)))
     }
 
     /// Names what the host's stop left running once its group ended, if anything. Input: the
     /// process. Output: the leftover code, or none.
     pub(super) fn left_code(&self) -> Option<&'static str> {
-        self.left.as_ref().map(Leftovers::code)
+        self.left
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(Leftovers::code)
     }
 
     /// Holds what the host's stop left running with `kept` listed under `account`, by the
@@ -320,11 +324,20 @@ impl HostProcess {
     /// run; with nothing left, `kept` is dropped. Inputs: the process, the account and what
     /// the hold keeps. Output: none.
     pub(super) fn hold_left<T: Send + 'static>(&mut self, account: Option<CredentialRef>, kept: T) {
-        if let Some(left) = self.left.take() {
+        if let Some(left) = self.kept_left().take() {
             let mode = leftovers::mode_of(self.by.project.as_deref());
             left.hold(account, kept, self.by.clone(), mode);
         }
-        assert!(self.left.is_none());
+        assert!(self.kept_left().is_none());
+    }
+
+    /// The leftovers the stop kept, behind a lock so the host stays `Sync` while a turn
+    /// borrows it across an await, as a lineage's pending listing is not. Input: the
+    /// process. Output: the kept leftovers, if any.
+    fn kept_left(&mut self) -> &mut Option<Leftovers> {
+        self.left
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn end_group(&mut self) -> Result<(), ProtocolError> {
