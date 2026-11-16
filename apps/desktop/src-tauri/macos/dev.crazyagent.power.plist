@@ -28,6 +28,8 @@
 		<string>GK729B5HZQ</string>
 		<key>signing-identifier</key>
 		<string>crazyagent-power-helper</string>
+		<key>validation-category</key>
+		<integer>6</integer>
 	</dict>
 </dict>
 </plist>

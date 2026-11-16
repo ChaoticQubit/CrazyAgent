@@ -576,6 +576,8 @@ jobs:
               grep -E -q "^Identifier=$name\$" <<< "$display" || { echo "::error::$name is not signed under the identifier $name"; exit 1; }
               grep -E -q '^TeamIdentifier=GK729B5HZQ$' <<< "$display" || { echo "::error::$name is not signed by team GK729B5HZQ, which the helper and its launch constraint pin"; exit 1; }
               grep -E -q 'flags=.*runtime' <<< "$display" || { echo "::error::$name is not signed with the hardened runtime"; exit 1; }
+              grep -E -q '^Authority=Developer ID Application: ' <<< "$display" || { echo "::error::$name is not signed with a Developer ID Application certificate"; exit 1; }
+              grep -E -q '^Authority=Developer ID Certification Authority$' <<< "$display" || { echo "::error::$name does not chain to the Developer ID Certification Authority"; exit 1; }
               entitlements="$(codesign --display --entitlements - --xml "$binary" 2> /dev/null)"
               if grep -q '<key>' <<< "$entitlements"; then echo "::error::$name carries an entitlement; the helper refuses an engine with any"; exit 1; fi
             fi
