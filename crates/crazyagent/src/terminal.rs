@@ -228,7 +228,11 @@ pub(crate) fn type_into(
     agent: &AgentId,
     bytes: &[u8],
 ) -> Result<(), HostError> {
-    let _ = at;
+    if let Some(at) = at
+        && host.input_at(agent, at, bytes)?
+    {
+        return Ok(());
+    }
     host.input(agent, bytes)
 }
 
@@ -529,6 +533,9 @@ impl Host for OwnServer {
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
         self.0.input(agent, bytes)
     }
+    fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        self.0.input_at(agent, at, bytes)
+    }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.0.input_live(agent)
@@ -653,6 +660,12 @@ impl Host for PaneView {
 
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
         self.host.input_pane(agent, &self.pane, bytes)
+    }
+    fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        if at.pane != self.pane {
+            return Ok(false);
+        }
+        self.host.input_at(agent, at, bytes)
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {

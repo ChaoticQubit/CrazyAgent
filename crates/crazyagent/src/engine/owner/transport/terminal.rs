@@ -8,7 +8,7 @@ use crate::terminal::{
     TerminalStream,
 };
 #[cfg(unix)]
-use crate::terminal::{CHUNK_BYTES_MAX, HostError, attach_again, type_prompt};
+use crate::terminal::{CHUNK_BYTES_MAX, HostError, PaneAt, attach_again, type_into, type_prompt};
 use tokio::io::AsyncWrite;
 
 pub(super) const MAGIC: &[u8; 4] = b"CAT1";
@@ -418,13 +418,14 @@ async fn redraw(
 async fn act(
     host: &Arc<dyn Host>,
     agent: &AgentId,
+    at: Option<PaneAt>,
     request: TerminalRequest,
 ) -> Result<(), HostError> {
     let host = host.clone();
     let agent = agent.clone();
     tokio::task::spawn_blocking(move || match request {
         TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes } => {
-            host.input(&agent, &bytes)
+            type_into(host.as_ref(), at.as_ref(), &agent, &bytes)
         }
         TerminalRequest::Prompt { text } => type_prompt(host.as_ref(), &agent, &text).map(drop),
         TerminalRequest::Resize { cols, rows } => host.resize(&agent, cols, rows),
@@ -713,7 +714,7 @@ async fn watch(
                                 }
                             }
                             request => {
-                                if act(&host, &agent, request).await.is_err_and(|error| crate::terminal::ended_code(&error.0)) {
+                                if act(&host, &agent, viewer.at.clone(), request).await.is_err_and(|error| crate::terminal::ended_code(&error.0)) {
                                     break "terminal_ended";
                                 }
                             }

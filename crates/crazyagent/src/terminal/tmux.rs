@@ -1,9 +1,9 @@
 use super::buffer::{Feed, buffer};
 pub use super::harness_socket;
 use super::{
-    AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo,
-    PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TEAMMATES_SERVER_REPLACED, TerminalStream,
-    VIEWERS_MAX, end_except, failure, pane_id_valid,
+    AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneAt,
+    PaneInfo, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TEAMMATES_SERVER_REPLACED,
+    TerminalStream, VIEWERS_MAX, end_except, failure, pane_id_valid,
 };
 use crate::harnesses::interactive::InteractiveCommand;
 use crate::harnesses::launch::Ending;
@@ -182,9 +182,14 @@ struct Control {
     input: Mutex<Option<ChildStdin>>,
     state: Arc<Mutex<State>>,
     capture: &'static str,
+    serial: u64,
     #[cfg(test)]
     listed: std::sync::atomic::AtomicUsize,
 }
+
+/// The serial the next control client gets, unique within the process, so a pane id found
+/// through one client is never used through a client of another server (`Tmux::input_at`).
+static CONTROL_SERIALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Default)]
 struct State {
@@ -643,6 +648,7 @@ impl Tmux {
             input: Mutex::new(Some(input)),
             state,
             capture: CAPTURE_TRIMMED,
+            serial: CONTROL_SERIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             #[cfg(test)]
             listed: std::sync::atomic::AtomicUsize::new(0),
         };
@@ -2143,7 +2149,16 @@ impl Tmux {
             match control.wait(&answer) {
                 Err(cut) if cut.0 == REPLY_CUT && Instant::now() < until => {}
                 Err(cut) if cut.0 == REPLY_CUT => return Err(failure("terminal_not_answering")),
-                answered => return answered,
+                answered => {
+                    return answered.map(|mut stream| {
+                        assert!(stream.at.is_none());
+                        stream.at = pane.clone().map(|pane| PaneAt {
+                            pane,
+                            serial: control.serial,
+                        });
+                        stream
+                    });
+                }
             }
         }
     }
@@ -2261,6 +2276,22 @@ impl Host for Tmux {
         let control = self.live_control()?;
         let target = self.agent_target(&control, agent)?;
         Self::send_bytes(&control, &target, bytes)
+    }
+
+    fn input_at(&self, _agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        if !pane_id_valid(&at.pane) {
+            return Ok(false);
+        }
+        let held = self
+            .control
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?
+            .clone();
+        let Some(control) = held.filter(|control| control.serial == at.serial && !control.closed())
+        else {
+            return Ok(false);
+        };
+        Self::send_bytes(&control, &at.pane, bytes).map(|()| true)
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
