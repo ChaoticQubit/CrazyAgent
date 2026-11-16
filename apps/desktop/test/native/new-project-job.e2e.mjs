@@ -368,3 +368,42 @@ test("a New Project an engine stop cut short shows on Home after the next start 
   assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Dismiss forgets the cut-short job");
   assert.ok(!(await projectNames()).includes(name), "a cut-short New Project leaves no project");
 });
+
+/** Reads the value of the checked radio of a group on the open page once one is checked.
+ * Inputs: the page and the group's name. Output: the value. */
+async function checked(page, group) {
+  for (const deadline = Date.now() + JOB_MS; ; await pause(POLL_MS)) {
+    const now = await page.evaluate(`document.querySelector('input[name=${group}]:checked')?.value ?? null`);
+    if (now !== null) return now;
+    assert.ok(Date.now() < deadline, `no ${group} choice was ever checked`);
+  }
+}
+
+test("a New Project left right after Create still gets its pool and agent access once its job is done, Home says how they ended and Settings shows both (DEC-177 add.2 Q1 B)", { timeout: 300000 }, async () => {
+  const name = "Left Early";
+  const catalog = await value(run.bridge, "desktop_project_catalog", { pool: "local-pool", research: [] });
+  const level = catalog.agent_access.find((item) => item.access === "own_branch");
+  assert.equal(level?.unavailable ?? "missing", null, `PREREQUISITE: Own branch must be available on this Mac to prove the access save: ${JSON.stringify(catalog.agent_access)}`);
+  let id = null;
+  await onPage("np-left", async (page, me) => {
+    await create(page, me, name);
+    await open(page, "/");
+    const ended = await jobUntil("the done New Project", (job) => job?.kind === "setup" && job.source === name && job.state.state === "done");
+    id = ended.project_id;
+    await me.waitFor("Home saying how the follow-ups ended", (text) => text.includes(`${name} created.`), JOB_MS);
+    const home = await me.waitFor("Home's row with the follow-ups' end", (text) => text.includes(name));
+    assert.ok(!home.includes(`${name} is set up. Choose its pool and agent access in its Settings.`), `the Done line no longer sends the owner to Settings:\n${home}`);
+    assert.ok(!home.includes("Couldn't assign") && !home.includes("Its agents stay Sandboxed"), `both follow-ups applied:\n${home}`);
+    await me.capture("np-left-home");
+    assert.equal((await value(run.bridge, "desktop_intake_status"))?.id, ended.id, "no page dismissed the job: the owner left before Done");
+    await open(page, `/projects/${encodeURIComponent(id)}/settings?section=pool`);
+    await me.waitFor("the project's Settings", (text) => text.includes("Agent access"), JOB_MS);
+    assert.equal(await checked(page, "ps-pool"), "local-pool", "Settings shows the pool picked in New Project");
+    await me.capture("np-left-settings-pool");
+    await me.click("Agent access");
+    assert.equal(await checked(page, "ps-access"), "own_branch", "Settings shows the access picked in New Project");
+    await me.capture("np-left-settings-access");
+  });
+  assert.ok((await poolProjects()).includes(id), "the follow-ups assigned the chosen pool with no page open");
+  assert.equal((await value(run.bridge, "desktop_project_agent_policy", { id })).access, "own_branch", "the follow-ups saved the chosen access with no page open");
+});

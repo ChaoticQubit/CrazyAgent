@@ -280,7 +280,7 @@ export function jobLine(job: IntakeJob): string {
   const moving = job.kind === "move_project";
   if (jobRunning(job) && job.stopping) return `Stopping ${name}...`;
   if (job.kind === "delete") return deleteLine(name, now);
-  if (job.kind === "setup") return setupLine(name, now);
+  if (job.kind === "setup") return setupLine(job.id, name, now);
   switch (now.state) {
     case "downloading": {
       const { done, total } = now.progress;
@@ -313,7 +313,7 @@ export function jobLine(job: IntakeJob): string {
     case "cut_short":
       return deleteLine(name, now);
     case "building":
-      return setupLine(name, now);
+      return setupLine(job.id, name, now);
   }
 }
 
@@ -350,11 +350,21 @@ function deleteLine(name: string, now: IntakeJob["state"]): string {
   }
 }
 
+let carriedSetup: { id: string; line: string } | null = null;
+
+/** Keeps how the pool and agent access follow-ups of a New Project job this window started
+ * ended, so its Done line says that in place of the Settings sentence (DEC-177 add.2 Q1 B);
+ * the engine runs one such job at a time. Inputs: the job id and the follow-ups' sentence. */
+export function noteSetupCarried(id: string, line: string): void {
+  if (id === "" || line === "") throw new Error("a carried New Project names its job and its end");
+  carriedSetup = { id, line };
+}
+
 /** What a New Project does now or how it ended (DEC-177 add.2), with the project's name and
- * how many of its documents were copied once they are counted; Done names the project's
- * Settings, since the page's pool and agent access follow-ups run only while it stays open.
- * Inputs: the name and the state. Output: one sentence. */
-function setupLine(name: string, now: IntakeJob["state"]): string {
+ * how many of its documents were copied once they are counted; Done says how the pool and
+ * agent access follow-ups ended when this window ran them, else names the project's Settings.
+ * Inputs: the job id, the name and the state. Output: one sentence. */
+function setupLine(id: string, name: string, now: IntakeJob["state"]): string {
   switch (now.state) {
     case "building": {
       if (now.done > now.total) throw new Error(`setup copied ${now.done} is past total ${now.total}`);
@@ -362,7 +372,7 @@ function setupLine(name: string, now: IntakeJob["state"]): string {
       return `Setting up ${name}: ${now.done} of ${now.total} document${now.total === 1 ? "" : "s"} copied`;
     }
     case "done":
-      return `${name} is set up. Choose its pool and agent access in its Settings.`;
+      return carriedSetup?.id === id ? carriedSetup.line : `${name} is set up. Choose its pool and agent access in its Settings.`;
     case "cancelled":
       return `Setting up ${name} stopped. Nothing was kept.`;
     case "failed":

@@ -5244,3 +5244,14 @@ fn delete_again_from_another_tab_opens_the_remove_ask_on_settings() {
         assert_eq!(screen.tab, Tab::Settings, "from {tab:?}");
     }
 }
+
+/// rv-ds241 S2 r2 N3: a folder cut to its tail is measured in terminal cells, so a name of
+/// wide characters keeps within the row it was given.
+#[test]
+fn a_folder_cut_to_its_tail_fits_its_cells() {
+    let tail = super::new_project_view::shown_tail("/Users/owner/プロジェクト/設計メモ", 9);
+    let cells = super::new_project_input::cells(&tail);
+    assert!(cells <= 9, "{tail:?} takes {cells} cells");
+    assert!(tail.ends_with("メモ"), "{tail:?}");
+    assert!(tail.starts_with('\u{2026}'), "{tail:?}");
+}
