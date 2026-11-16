@@ -12,7 +12,6 @@ use std::collections::BTreeSet;
 const TOKEN_FRAME_TIME: Duration = Duration::from_secs(5);
 const ACTION_TIME: Duration = Duration::from_secs(75);
 const CLONE_TIME: Duration = Duration::from_secs(1900);
-const START_TIME: Duration = crate::github::START_GIT_TIME.saturating_add(Duration::from_secs(60));
 const PUBLISH_TIME: Duration = Duration::from_secs(1900);
 const RULES_TIME: Duration = Duration::from_secs(300);
 const DRAFT_AGENT: &str = "gitignore-draft";
@@ -82,7 +81,7 @@ impl Action {
     pub(super) fn time(&self) -> Duration {
         match self {
             Self::Clone { .. } => CLONE_TIME,
-            Self::PublishStart { .. } => START_TIME,
+            Self::PublishStart { .. } => crate::github::START_TIME,
             Self::PublishApprove { .. }
             | Self::PublishExclude { .. }
             | Self::PublishRecheck { .. }

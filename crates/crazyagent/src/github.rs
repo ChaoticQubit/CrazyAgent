@@ -37,11 +37,11 @@ pub use prompt::{GitHubPromptAnswer, SNOOZE_MS};
 pub(crate) use prompt::{carry_publish, forget_job, forget_prompt};
 #[cfg(test)]
 pub(crate) use prompt::{keep_job, keep_prompt_answer, kept_job, kept_prompt_answer};
-pub(crate) use publish::START_GIT_TIME;
 pub use publish::{
     GitHubCommitted, GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding,
     GitHubSecretKind, GitHubSecretScan,
 };
+pub(crate) use publish::{START_GIT_TIME, START_TIME};
 pub use rules::{
     GitHubCi, GitHubRepoFacts, GitHubRepoRules, GitHubRule, GitHubRuleOutcome, GitHubRuleState,
 };

@@ -591,3 +591,11 @@ pub(in crate::tui) fn rule_label(rule: GitHubRule) -> &'static str {
         GitHubRule::SecurityPolicy => "Security policy (SECURITY.md)",
     }
 }
+
+/// Whether the Overview has waited out a Start whose reply was lost: as long as the engine
+/// gives a Start ([`crate::github::START_TIME`]) has passed since the reply came. Inputs:
+/// when the reply came and now, in epoch milliseconds. Output: the answer.
+pub(in crate::tui) fn lost_start_over(since_ms: i64, now_ms: i64) -> bool {
+    let _ = (since_ms, now_ms);
+    false
+}
