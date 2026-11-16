@@ -287,9 +287,11 @@ pub(super) fn apply(
     Ok(outcomes)
 }
 
-/// Sets one rule on one repository, as `apply` does for each. Inputs: endpoints, token,
-/// `owner/name`, the rule, the rules on, the facts and the repository's record.
-/// Output: the rule's outcome, or `github_token_refused`, `github_unreachable`.
+/// Sets one rule on one repository, as `apply` does for each. The record keeps the rules
+/// on only once GitHub applied this rule, so a refused or failed change leaves the wanted
+/// rules as GitHub still holds them. Inputs: endpoints, token, `owner/name`, the rule, the
+/// rules on, the facts and the repository's record. Output: the rule's outcome, or
+/// `github_token_refused`, `github_unreachable`.
 pub(super) fn set(
     endpoints: &Endpoints,
     token: &SecretString,
@@ -299,12 +301,14 @@ pub(super) fn set(
     facts: &GitHubRepoFacts,
     made: &mut RepoRecord,
 ) -> Result<GitHubRuleOutcome, EngineError> {
-    made.on = Some(on.clone());
-    let mut pass = Pass::new(endpoints, token, full_name, on, facts, made)?;
+    let state = Pass::new(endpoints, token, full_name, on, facts, made)?.state(rule)?;
+    if state == GitHubRuleState::Applied {
+        made.on = Some(on.clone());
+    }
     Ok(GitHubRuleOutcome {
         rule,
         on: on.contains(&rule),
-        state: pass.state(rule)?,
+        state,
     })
 }
 
