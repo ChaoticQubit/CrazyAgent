@@ -1203,17 +1203,17 @@ fn fields(rule: GitHubRule, wanted: bool) -> Value {
 /// default branch, or on every tag for release tags. Inputs: the rule, its ruleset name,
 /// the rules on and the CI's check names. Output: the JSON body.
 /// The body that puts CrazyAgent's rule into its ruleset as GitHub holds it now, so what
-/// the owner set on github.com stays (rv-secreview gh-s7 F1): the name, bypass list,
-/// branches and every rule there are kept, a rule type CrazyAgent's body lists is added
-/// when missing, and only the parameters CrazyAgent's switches decide change. Enforcement
-/// is active, the switch's own meaning. Inputs: the live ruleset and CrazyAgent's body.
+/// the owner set on github.com stays (rv-secreview gh-s7 F1): the bypass list, branches
+/// and every rule there are kept, a rule type CrazyAgent's body lists is added when
+/// missing, and only the parameters CrazyAgent's switches decide change. The name stays
+/// CrazyAgent's and enforcement active. Inputs: the live ruleset and CrazyAgent's body.
 fn kept(live: &Value, ours: &Value) -> Value {
     const OWN: [&str; 2] = [
         "required_review_thread_resolution",
         "required_status_checks",
     ];
     let mut body = ours.clone();
-    for key in ["name", "bypass_actors", "conditions"] {
+    for key in ["bypass_actors", "conditions"] {
         if let Some(value) = live.get(key) {
             body[key] = value.clone();
         }
