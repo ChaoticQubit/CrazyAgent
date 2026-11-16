@@ -13501,20 +13501,31 @@ const SKILLS_KEPT_PROBLEM: &str = "The agent could not start: an earlier run loc
 const WALK_TOO_LONG_PROBLEM: &str = "The agent could not start: its home folder held too many \
      files to reset at once, or something kept adding files to it. Try again";
 
-/// The owner's line for an agent whose cargo home could not be made (RESET-WALK-CODE code r1
-/// F1). Input: the error. Output: the line.
+/// The owner's line for an agent whose cargo home could not be made: removing a cargo name
+/// past its walk budget gives [`WALK_TOO_LONG_PROBLEM`] with its code, as a launch refused
+/// for it does (RESET-WALK-CODE code r1 F1), any other failure the cargo home line with its
+/// io code. Input: the error. Output: the line.
 fn cargo_home_problem(error: &std::io::Error) -> String {
-    with_code(
-        "the agent cargo home could not be made",
-        Some(io_code(error)),
-    )
+    let walk = crate::team::cleanup::WALK_TOO_LONG;
+    match crate::team::cleanup::walk_too_long_io(error) {
+        true => with_code(WALK_TOO_LONG_PROBLEM, Some(walk)),
+        false => with_code(
+            "the agent cargo home could not be made",
+            Some(io_code(error)),
+        ),
+    }
 }
 
-/// The owner's line for a native lead whose teammates' home could not be made
-/// (RESET-WALK-CODE code r1 F1). Input: the error. Output: the line.
+/// The owner's line for a native lead whose teammates' home could not be made: a reset or
+/// cargo name removal there past its walk budget gives [`WALK_TOO_LONG_PROBLEM`] with its
+/// code (RESET-WALK-CODE code r1 F1), any other failure the teammates' home line with its
+/// code. Input: the error. Output: the line.
 #[cfg(unix)]
 fn mates_home_problem(error: &EngineError) -> String {
-    with_code("the teammates' home could not be made", Some(&error.0))
+    match error.0 == crate::team::cleanup::WALK_TOO_LONG {
+        true => with_code(WALK_TOO_LONG_PROBLEM, Some(&error.0)),
+        false => with_code("the teammates' home could not be made", Some(&error.0)),
+    }
 }
 
 /// The owner's line for an agent whose harness could not start: a command that would hold

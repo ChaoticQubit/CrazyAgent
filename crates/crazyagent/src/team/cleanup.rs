@@ -1295,6 +1295,14 @@ fn folder_failed() -> EngineError {
 /// pass on to the owner ([`home_code`], RESET-WALK-CODE).
 pub(crate) const WALK_TOO_LONG: &str = "cleanup_walk_too_long";
 
+/// Whether an io error a caller made from a home removal's code with [`home_code`] carries
+/// [`WALK_TOO_LONG`], as `prepare_cargo_home` makes one (RESET-WALK-CODE). Input: the error.
+/// Output: true for the walk code; an error from the system never matches, as its text names
+/// its OS error.
+pub(crate) fn walk_too_long_io(error: &std::io::Error) -> bool {
+    error.to_string() == WALK_TOO_LONG
+}
+
 /// The error [`WALK_TOO_LONG`] names. Output: the error.
 #[cfg(unix)]
 fn walk_too_long() -> EngineError {

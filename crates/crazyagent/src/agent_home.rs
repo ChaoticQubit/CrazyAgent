@@ -1377,9 +1377,8 @@ fn link_owner_crates(
     crate::sandbox::toolchains::prepare_cargo_home(home, homes)
         .map(drop)
         .map_err(|problem| {
-            let walk = crate::team::cleanup::WALK_TOO_LONG;
-            failure(match problem.to_string() == walk {
-                true => walk,
+            failure(match crate::team::cleanup::walk_too_long_io(&problem) {
+                true => crate::team::cleanup::WALK_TOO_LONG,
                 false => "agent_home_unwritable",
             })
         })
