@@ -52,6 +52,25 @@ pub(super) struct Staging {
     _held: HeldLock,
 }
 
+/// Where [`Staging::replace_into`] failed: at its check that the staging directory is still
+/// the one the engine made, a tamper check that a directory put in its place fails
+/// (`Changed`), or at any other step, an I/O failure or a test's stop (`Stopped`). Each holds
+/// the error the caller returns.
+pub(super) enum Unreplaced {
+    Stopped(EngineError),
+    Changed(EngineError),
+}
+
+/// Gives the error an [`Unreplaced`] holds, for a caller that treats every failure alike.
+/// Input: the failure. Output: its error.
+impl From<Unreplaced> for EngineError {
+    fn from(unreplaced: Unreplaced) -> Self {
+        match unreplaced {
+            Unreplaced::Stopped(error) | Unreplaced::Changed(error) => error,
+        }
+    }
+}
+
 impl Staging {
     pub(super) fn create(parent: &File, prefix: &str) -> Result<Self, EngineError> {
         let mut random = [0_u8; 16];
@@ -107,23 +126,34 @@ impl Staging {
     /// Moves one finished file out of this staging directory over a file of the same
     /// name in another directory, then removes the emptied staging directory.
     /// Inputs: the staging parent, the file name and its destination directory.
-    /// Output: Ok once the destination names the staged file and the parent is synced.
+    /// Output: Ok once the destination names the staged file and the parent is synced,
+    /// or the failure, told apart by [`Unreplaced`].
     pub(super) fn replace_into(
         self,
         parent: &File,
         name: &str,
         destination: &File,
-    ) -> Result<(), EngineError> {
+    ) -> Result<(), Unreplaced> {
+        self.move_into(name, destination)
+            .map_err(Unreplaced::Stopped)?;
+        self.verify_in(parent).map_err(Unreplaced::Changed)?;
+        rustix::fs::unlinkat(parent, self.name.as_str(), AtFlags::REMOVEDIR)
+            .map_err(|error| Unreplaced::Stopped(unsafe_custody(error)))?;
+        parent
+            .sync_all()
+            .map_err(|error| Unreplaced::Stopped(unsafe_custody(error)))
+    }
+
+    /// Moves one finished file out of this staging directory over a file of the same name
+    /// in another directory and syncs that directory. Inputs: the file name and the
+    /// destination directory. Output: Ok once the destination names the staged file.
+    fn move_into(&self, name: &str, destination: &File) -> Result<(), EngineError> {
         self.directory.file.sync_all().map_err(unsafe_custody)?;
         step()?;
         rustix::fs::renameat(&self.directory.file, name, destination, name)
             .map_err(unsafe_custody)?;
         destination.sync_all().map_err(unsafe_custody)?;
-        step()?;
-        self.directory.verify(parent, OsStr::new(&self.name))?;
-        rustix::fs::unlinkat(parent, self.name.as_str(), AtFlags::REMOVEDIR)
-            .map_err(unsafe_custody)?;
-        parent.sync_all().map_err(unsafe_custody)
+        step()
     }
 
     /// Swaps one finished file in this staging directory with the file of the same name in
