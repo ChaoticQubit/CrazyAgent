@@ -280,10 +280,15 @@ async fn handle(
         .map_err(|_| failure("questions_unavailable"))?
 }
 
-/// Starts applying the GitHub rule proposals the owner approved (DEC-182 S7) on a thread
-/// of its own once an answer is recorded, so the reply never waits on GitHub and an engine
-/// stop never waits on it either. Input: the engine root.
-fn apply_later(root: &Path) {
+/// Starts the GitHub rule proposal pass (DEC-182 S7), which applies what the owner approved
+/// and tells each agent how its proposal ended, on a thread of its own once an answer or a
+/// dismissal is recorded, so neither the reply nor an engine stop ever waits on GitHub.
+/// Nothing starts while no proposal waits (rv-code gh-s7 N5). Inputs: the engine root and
+/// its connection, outside any transaction.
+fn apply_later(root: &Path, db: &rusqlite::Connection) {
+    if !crate::github::proposals::waiting(db) {
+        return;
+    }
     let root = root.to_path_buf();
     let started = std::thread::Builder::new()
         .name("crazyagent-github-rules".into())
@@ -320,9 +325,9 @@ fn parse(bytes: &[u8]) -> Result<Action, EngineError> {
 
 /// Runs one authenticated Questions action against the engine database in the engine root.
 /// An answer names option positions, a comment or both, never neither; the log checks them
-/// against the question, and a settled answer starts applying any approved GitHub rule
-/// proposal off the reply. Inputs: the engine root and the action. Output: the reply, or the
-/// log's refusal.
+/// against the question, and a settled answer or dismissal starts the GitHub rule proposal
+/// pass off the reply while a proposal waits. Inputs: the engine root and the action.
+/// Output: the reply, or the log's refusal.
 fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
     let db = questions::open(root)?;
     let settlement = |settlement| Ok(Reply::Settled { settlement });
@@ -342,14 +347,22 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
             let answer = Answer { picks, comment };
             let settled = questions::answer(&db, id, version, &answer)?;
             if settled == Settlement::Settled {
-                apply_later(root);
+                apply_later(root, &db);
             }
             settlement(settled)
         }
-        Action::Dismiss { id, version } => settlement(questions::dismiss(&db, id, version)?),
-        Action::DismissMany { items } => Ok(Reply::Dismissed {
-            outcome: questions::dismiss_many(&db, &items)?,
-        }),
+        Action::Dismiss { id, version } => {
+            let settled = questions::dismiss(&db, id, version)?;
+            if settled == Settlement::Settled {
+                apply_later(root, &db);
+            }
+            settlement(settled)
+        }
+        Action::DismissMany { items } => {
+            let outcome = questions::dismiss_many(&db, &items)?;
+            apply_later(root, &db);
+            Ok(Reply::Dismissed { outcome })
+        }
         Action::Counts {} => Ok(Reply::Counts {
             counts: questions::count_pending(&db)?,
         }),
