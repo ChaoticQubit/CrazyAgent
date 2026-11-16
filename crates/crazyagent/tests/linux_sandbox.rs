@@ -3433,14 +3433,15 @@ fn a_supervised_agent_makes_no_name_outside_ascii_where_a_held_name_is_not_there
         eprintln!("case folding is not on for this filesystem: the folding leg is skipped");
     }
     let held = |folder: &str| case.project.join(folder).join("config.worktree");
+    let (plain, folded) = (held("plain"), held("folding"));
     let head = case.project.join("full").join("HEAD");
     let guard = [
         "--guard-held",
-        held("plain").to_str().unwrap(),
+        plain.to_str().unwrap(),
         "--guard-held",
         head.to_str().unwrap(),
         "--guard-held",
-        held("folding").to_str().unwrap(),
+        folded.to_str().unwrap(),
     ];
     let mut script = vec!["-I", "-u", "-c", CASE_SPELLINGS];
     if folding {
@@ -3455,7 +3456,7 @@ fn a_supervised_agent_makes_no_name_outside_ascii_where_a_held_name_is_not_there
         ),
         "{report}"
     );
-    assert!(!held("plain").exists());
+    assert!(!plain.exists());
     if folding {
         assert!(
             report.ends_with("folding-rename=13\nfolding-touched=False\nfolding-held=False\n"),
