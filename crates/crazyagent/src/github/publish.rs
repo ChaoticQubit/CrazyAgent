@@ -428,6 +428,26 @@ fn inspect_within(
     })
 }
 
+/// Tells whether a project names no git remote, from its git config alone, for the publish
+/// prompt: no `.git` at all, or a plain `.git` folder whose config, includes skipped, names
+/// none. No git runs in the project. Inputs: the engine root, the project and the web host.
+/// Output: false also for a missing folder, a `.git` file or link, or a config git cannot
+/// read.
+pub(super) fn no_remote(root: &Path, project: &Path, host: &str) -> bool {
+    let folder = std::fs::symlink_metadata(project);
+    if !project.is_absolute() || !folder.is_ok_and(|metadata| metadata.is_dir()) {
+        return false;
+    }
+    match plain_repository(project) {
+        Ok(false) => true,
+        Ok(true) => match (git(), GitHome::new(root)) {
+            (Ok(git), Ok(home)) => remotes(&git, home.path(), project, host, LOOKUP_TIME).is_ok(),
+            _ => false,
+        },
+        Err(_) => false,
+    }
+}
+
 /// Tells whether a project holds its own repository: a plain `.git` folder, not a link
 /// or a file that names a git folder elsewhere. Input: the project. Output: true for a
 /// plain folder, false for none, or `github_publish_not_plain_repo`.
