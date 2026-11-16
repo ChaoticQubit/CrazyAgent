@@ -657,6 +657,32 @@ fn forget_with_an_unreadable_journal_is_refused_until_the_journal_is_gone() {
 }
 
 #[test]
+fn forget_that_cannot_remove_the_pin_file_is_refused_and_keeps_the_pin_in_memory() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    let mine = format!("{}\n", stand_in.my_uid());
+    fs::set_permissions(stand_in.folder(), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        helper.handle(me, Request::Forget, NOW_MS, OPEN),
+        Reply::Refused {
+            reason: Refusal::JournalUnreadable
+        }
+    );
+    let state = view(&mut helper, me);
+    assert_eq!(state.pin, PinView::You, "a pin file not removed keeps the pin");
+    assert!(state.journal_ok, "the journal itself is fine, so the engine tells them apart");
+    fs::set_permissions(stand_in.folder(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(stand_in.pin_text().as_deref(), Some(mine.as_str()));
+    assert_eq!(
+        helper.handle(me, Request::Forget, NOW_MS + 1_000, OPEN),
+        Reply::Forgotten
+    );
+    assert_eq!(stand_in.pin_text(), None);
+    assert_eq!(view(&mut helper, me).pin, PinView::None);
+}
+
+#[test]
 fn a_renewal_that_cannot_read_pmset_keeps_its_lease_until_it_runs_out_and_then_sleeps_the_mac() {
     let first = StandIn::new(0);
     let mut helper = Helper::start(refusing(&first));
