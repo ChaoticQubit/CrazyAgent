@@ -3,10 +3,11 @@
 //! sign-in's `state`, refuses every other request without ending the wait, and closes after
 //! `CALLBACK_WAIT`.
 
-use std::io;
-use std::net::TcpListener;
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// The path the browser comes back to.
 pub const CALLBACK_PATH: &str = "/callback";
@@ -18,6 +19,11 @@ pub const REFUSED_MAX: usize = 32;
 pub const DONE_PAGE: &str = "You can close this tab.";
 /// The page the browser shows when the answer says the sign-in was refused.
 pub const FAILED_PAGE: &str = "Sign-in did not finish. You can close this tab.";
+
+const REFUSED_PAGE: &str = "Bad request.";
+const HEAD_BYTES_MAX: usize = 8 * 1024;
+const READ_WAIT: Duration = Duration::from_secs(5);
+const ACCEPT_POLL: Duration = Duration::from_millis(20);
 
 /// How a wait for the browser ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,10 +47,17 @@ pub struct Callback {
 }
 
 impl Callback {
-    /// Binds a listener of its own on `127.0.0.1` at a port the system picks. Output: the
-    /// callback, or why it could not bind.
+    /// Binds a listener of its own on `127.0.0.1` at a port the system picks, so no other
+    /// socket shares it. Output: the callback, or why it could not bind.
     pub fn open() -> io::Result<Self> {
-        Err(io::Error::other("callback_not_built"))
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let listener = crate::spawn_gate::bind_tcp_std_exclusive(address)?;
+        listener.set_nonblocking(true)?;
+        let port = listener.local_addr()?.port();
+        assert!(port != 0, "the system picked a port");
+        let redirect = url::Url::parse(&format!("http://127.0.0.1:{port}{CALLBACK_PATH}"))
+            .map_err(io::Error::other)?;
+        Ok(Self { listener, redirect })
     }
 
     /// The address the browser is sent back to: `http://127.0.0.1:<port>/callback`.
@@ -55,9 +68,154 @@ impl Callback {
     /// Waits for the browser's answer carrying `state`, at most `limit`, until `stop` is set;
     /// the port closes when it returns. Inputs: the sign-in's state, the limit and the stop
     /// flag. Output: how the wait ended.
-    pub fn wait(self, _state: &str, _limit: Duration, _stop: &AtomicBool) -> Waited {
-        drop(self.listener);
-        Waited::Expired
+    pub fn wait(self, state: &str, limit: Duration, stop: &AtomicBool) -> Waited {
+        assert!(!state.is_empty(), "a sign-in has a state");
+        assert!(limit <= CALLBACK_WAIT, "{limit:?}");
+        let deadline = Instant::now() + limit;
+        let mut refused = 0;
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                return Waited::Stopped;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Waited::Expired;
+            }
+            let Ok((stream, _)) = self.listener.accept() else {
+                std::thread::sleep(ACCEPT_POLL);
+                continue;
+            };
+            if let Some(waited) = answer(stream, state, deadline - now) {
+                return waited;
+            }
+            refused += 1;
+            assert!(refused <= REFUSED_MAX);
+            if refused == REFUSED_MAX {
+                return Waited::Flooded;
+            }
+        }
+    }
+}
+
+/// Reads one request and answers it: a page for the one that ends the wait, a plain 400 for
+/// any other. A connection that sends nothing closes with no answer, so a browser's spare
+/// connection never reads a refusal. Inputs: the connection, the sign-in's state and the time
+/// left. Output: how the wait ended, or none for a refused request.
+fn answer(mut stream: TcpStream, state: &str, left: Duration) -> Option<Waited> {
+    let read_wait = left.min(READ_WAIT).max(Duration::from_millis(1));
+    let ready = stream.set_nonblocking(false).is_ok()
+        && stream.set_read_timeout(Some(read_wait)).is_ok()
+        && stream.set_write_timeout(Some(READ_WAIT)).is_ok();
+    if !ready {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(1024);
+    let read = head(&mut stream, &mut bytes);
+    let waited = read.and_then(|head| ended(&head, state));
+    if bytes.is_empty() {
+        assert!(waited.is_none());
+        return None;
+    }
+    let page = match &waited {
+        None => None,
+        Some(Waited::Code { .. }) => Some(DONE_PAGE),
+        Some(_) => Some(FAILED_PAGE),
+    };
+    reply(&mut stream, page);
+    waited
+}
+
+/// Reads a request head up to its blank line into `bytes`. Inputs: the connection and an
+/// empty buffer. Output: the head, or none when it passes `HEAD_BYTES_MAX`, is not UTF-8, or
+/// the connection ends or stalls.
+fn head(stream: &mut TcpStream, bytes: &mut Vec<u8>) -> Option<String> {
+    assert!(bytes.is_empty());
+    let mut chunk = [0u8; 1024];
+    while !bytes.windows(4).any(|four| four == b"\r\n\r\n") {
+        if bytes.len() >= HEAD_BYTES_MAX {
+            return None;
+        }
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    if bytes.len() > HEAD_BYTES_MAX {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
+}
+
+/// How a request head ends the wait: only a GET of `CALLBACK_PATH` whose query names each
+/// field once and carries the sign-in's state, then an `error`, or a code and the issuer
+/// when sent. Inputs: the head and the state. Output: how the wait ended, or none.
+fn ended(head: &str, state: &str) -> Option<Waited> {
+    let line = head.split("\r\n").next()?;
+    let mut parts = line.split(' ');
+    let (Some("GET"), Some(target), Some(version), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    if !version.starts_with("HTTP/1.") || !target.starts_with('/') {
+        return None;
+    }
+    let text = format!("http://127.0.0.1{target}");
+    let address = url::Url::parse(&text).ok()?;
+    if address.path() != CALLBACK_PATH {
+        return None;
+    }
+    let mut fields: BTreeMap<String, String> = BTreeMap::new();
+    for (key, value) in address.query_pairs() {
+        let old = fields.insert(key.into_owned(), value.into_owned());
+        if old.is_some() {
+            return None;
+        }
+    }
+    if !fields.get("state").is_some_and(|sent| same(sent, state)) {
+        return None;
+    }
+    if fields.contains_key("error") {
+        return Some(Waited::Refused);
+    }
+    let code = fields.remove("code").filter(|code| !code.is_empty())?;
+    let iss = fields.remove("iss");
+    Some(Waited::Code { code, iss })
+}
+
+/// Whether two texts are equal, read in a time that depends only on their lengths.
+fn same(sent: &str, state: &str) -> bool {
+    let differ = sent
+        .bytes()
+        .zip(state.bytes())
+        .fold(0u8, |differ, (one, other)| differ | (one ^ other));
+    sent.len() == state.len() && differ == 0
+}
+
+/// Answers one request with a plain page, closes its sending side and reads what is left,
+/// at most `HEAD_BYTES_MAX` bytes, so the browser reads the page before the connection goes.
+/// Inputs: the connection and the page, none for a refused request.
+fn reply(stream: &mut TcpStream, page: Option<&str>) {
+    let (status, body) = match page {
+        Some(page) => ("200 OK", page),
+        None => ("400 Bad Request", REFUSED_PAGE),
+    };
+    let length = body.len();
+    let text = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {length}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\
+         Connection: close\r\n\r\n{body}"
+    );
+    let _ = stream.write_all(text.as_bytes());
+    let _ = stream.shutdown(Shutdown::Write);
+    let mut chunk = [0u8; 1024];
+    let mut left = HEAD_BYTES_MAX;
+    while left > 0 {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => left = left.saturating_sub(read),
+        }
     }
 }
 
