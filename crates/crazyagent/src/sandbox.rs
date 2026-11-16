@@ -132,8 +132,7 @@ pub const HELD_NOT_PUT_BACK: &str =
 /// Inputs: the system's name, as `std::env::consts::OS` gives it, and the exit code.
 /// Output: the sentence to show, or none when the code is the harness's own.
 pub fn held_stop(os: &str, code: i32) -> Option<&'static str> {
-    let _ = (os, code);
-    None
+    (os == "linux" && code == HELD_NOT_PUT_BACK_EXIT).then_some(HELD_NOT_PUT_BACK)
 }
 
 const PATH_BYTES_MAX: usize = 1024;

@@ -23,6 +23,11 @@ use std::sync::Arc;
 
 pub const WORKERS: usize = 8;
 pub const STOPPED_EXIT: i32 = 125;
+/// The exit code when an entry read as `.git` or a held name could not be taken back, so
+/// the engine can say why the run stopped. It is not [`STOPPED_EXIT`], which a failed
+/// listener and a worker that ends also use; the engine keeps the same value as
+/// `sandbox::HELD_NOT_PUT_BACK_EXIT` (rv-sec3 F1).
+pub const NOT_PUT_BACK_EXIT: i32 = 122;
 const PATH_BYTES_MAX: usize = 4096;
 const LINK_HOPS_MAX: usize = 40;
 const AT_FDCWD: i32 = -100;
@@ -222,7 +227,7 @@ fn node_type(mode: u32) -> FileType {
 
 /// Checks that an entry the supervisor made was taken back after a filesystem read its name
 /// as `.git` or as a held name. When it was not, the hold no longer holds, so the supervisor
-/// stops as a failed listener does and the harness ends by its parent-death signal
+/// stops with [`NOT_PUT_BACK_EXIT`] and the harness ends by its parent-death signal
 /// (rv-sec3 F1). Input: the result of taking it back.
 fn undone(taken_back: Result<(), Errno>) {
     if let Err(error) = taken_back {
@@ -230,7 +235,7 @@ fn undone(taken_back: Result<(), Errno>) {
             "crazyagent-landlock: an entry read as .git or a held name was not removed, so \
              the call supervisor stops: {error}"
         );
-        std::process::exit(STOPPED_EXIT);
+        std::process::exit(NOT_PUT_BACK_EXIT);
     }
 }
 
