@@ -895,6 +895,43 @@ async fn a_signed_in_account_launches_after_an_engine_restart_without_a_new_sign
     .expect("the restart case exceeded 60 seconds");
 }
 
+/// SIGNOUT-AFTER-RESTART: an account proved under an earlier engine run reads Checking
+/// sign-in, a sign-in still running so the Accounts page keeps reading, while this run's
+/// engine-start re-proof runs, and Not signed in once the re-proof ended without proving it.
+/// The run has no account-check host, so its re-proof ends at once; setting the flag again
+/// stands in for a re-proof still running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_earlier_sign_in_reads_checking_while_the_re_proof_runs_and_not_signed_in_after() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        assert_eq!(first.status().await, AccountStatus::SignedIn);
+        first.stop().await;
+        let second = restart.start_bare().await;
+        let flag = second.handle.reproving();
+        assert!(cleared(&flag).await, "a re-proof with no host ends");
+        let ended = second.account().await;
+        assert_eq!(
+            (ended.status, ended.status_label.as_str()),
+            (AccountStatus::NotSignedIn, "Not signed in")
+        );
+        flag.store(true, SeqCst);
+        let checking = second.account().await;
+        assert_eq!(
+            (checking.status, checking.status_label.as_str()),
+            (AccountStatus::SigningIn, "Checking sign-in")
+        );
+        assert_eq!(restart.launch(), Err("master_authentication_stale".into()));
+        flag.store(false, SeqCst);
+        assert_eq!(second.status().await, AccountStatus::NotSignedIn);
+        second.stop().await;
+    })
+    .await
+    .expect("the re-proof status case exceeded 60 seconds");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_profile_logged_out_between_runs_shows_not_signed_in_and_cannot_launch() {
     let restart = Restart::new();
