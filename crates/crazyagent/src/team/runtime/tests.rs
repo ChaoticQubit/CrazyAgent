@@ -18915,6 +18915,72 @@ fn a_dropped_live_master_turn_counts_once_in_the_sessions_list() {
     team.workers.clear();
 }
 
+/// DEC-180 T20 M8: a live master on a listed harness whose pane reports a turn has the
+/// words its record shows as typed stored as the owner's message, read by its manifest's
+/// `turn_started` rule, then its reply, as a native terminal master's turn is stored.
+#[test]
+fn a_listed_live_master_turn_stores_the_words_its_record_shows_then_the_reply() {
+    use super::super::master::{SessionConversation, keep_conversation};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let (harness, session) = ("standin-jsonl-append", "s-listed");
+    let agent = fixture.agent(AgentRole::Master, harness, AgentStatus::Idle);
+    let mut worker = between_turns(&project, AgentRole::Master, true, true);
+    worker.harness = harness.into();
+    worker.live = true;
+    worker.session = Some(session.into());
+    team.workers.insert(agent, worker);
+    crate::master_sessions::initialize(&fixture.connection).unwrap();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    super::super::master::pane_ready(&fixture.connection, &project, agent).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let record = folder.path().join("standin-1.jsonl");
+    let lines = [
+        serde_json::json!({"type": "started", "prompt": "continue"}),
+        serde_json::json!({"type": "text", "delta": "On it"}),
+        serde_json::json!({"type": "done", "ok": true}),
+    ];
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(&record, text).unwrap();
+    let kept = SessionConversation {
+        agent,
+        harness: harness.into(),
+        connection: ENDPOINT.into(),
+        resume: Resume {
+            id: "standin-1".into(),
+            record,
+        },
+    };
+    keep_conversation(&fixture.connection, &project, session, &kept).unwrap();
+    let started = Report::Turn {
+        end: None,
+        text: String::new(),
+    };
+    let ended = Report::Turn {
+        end: Some(TurnEnd::Success),
+        text: "On it".into(),
+    };
+
+    team.apply(agent, started).unwrap();
+    team.apply(agent, ended).unwrap();
+
+    let mut statement = fixture
+        .connection
+        .prepare(
+            "SELECT speaker || ': ' || IFNULL(text, '') FROM session_messages
+             WHERE session=?1 AND speaker IN ('owner','master') ORDER BY seq",
+        )
+        .unwrap();
+    let stored: Vec<String> = statement
+        .query_map([session], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(stored, ["owner: continue", "master: On it"]);
+    team.workers.clear();
+}
+
 #[cfg(target_os = "macos")]
 const LIVE_CODEX_STARTED: &str = r#"  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
 "#;
