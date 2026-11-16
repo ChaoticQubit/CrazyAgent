@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "process", "tickets", "pack", "checks", "finished", "quit", "master", "home", "github", "sandbox", "memory", "alerts", "notifications", "app-plugins", "connector-activity", "search", "profile", "updates"] as const;
+export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "connectors", "process", "tickets", "pack", "checks", "finished", "quit", "master", "home", "github", "sandbox", "memory", "alerts", "notifications", "app-plugins", "connector-activity", "search", "profile", "updates"] as const;
 /** The settings tabs the user menu under the profile name opens as dialogs over the page
  * (DEC-151), in menu order; the Settings list leaves them out, and their routes stay so a
  * deep link opens the dialog. */
@@ -31,7 +31,7 @@ export type Route =
   | { name: "demo" }
   | { name: "onboarding"; id: string }
   | { name: "metrics" }
-  | { name: "settings"; tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string; harness?: string };
+  | { name: "settings"; tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string; harness?: string; connector?: string };
 
 function pick<T extends string>(choices: readonly T[], value: string | null | undefined, fallback: T): T {
   return choices.find((choice) => choice === value) ?? fallback;

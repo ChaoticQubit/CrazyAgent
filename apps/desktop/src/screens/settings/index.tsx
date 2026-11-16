@@ -5,6 +5,7 @@ import { Accounts } from "./accounts";
 import { AppPluginsSettings } from "./app-plugins";
 import { ChecksSettings } from "./checks";
 import { ConnectorActivity } from "./connector-activity";
+import { ConnectorsSettings } from "./connectors";
 import { FinishedAgentsSettings } from "./finished-agents";
 import { Harnesses } from "./harnesses";
 import { MasterSettings } from "./master";
@@ -32,7 +33,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     { id: "accounts", label: "Accounts" }, { id: "pools", label: "Pools" },
   ] },
   { title: "Agents", items: [
-    { id: "harnesses", label: "Harnesses" }, { id: "plugins", label: "Plugins and skills" },
+    { id: "harnesses", label: "Harnesses" }, { id: "plugins", label: "Plugins and skills" }, { id: "connectors", label: "Connectors" },
     { id: "process", label: "Process" }, { id: "tickets", label: "Tickets" }, { id: "pack", label: "Pack" },
     { id: "checks", label: "Checks" }, { id: "memory", label: "Memory" },
     { id: "finished", label: "Finished agents" }, { id: "quit", label: "Quitting" },
@@ -90,6 +91,7 @@ export function Settings({ tab, action, account, skill, harness }: { tab: Listed
       : tab === "pools" ? <Pools creating={action === "new"} />
       : tab === "harnesses" ? <Harnesses harness={harness} />
       : tab === "plugins" ? <PluginsAndSkills skill={skill} />
+      : tab === "connectors" ? <ConnectorsSettings />
       : tab === "process" ? <ProcessSettings />
       : tab === "tickets" ? <TicketSettings />
       : tab === "pack" ? <PackSettings />
