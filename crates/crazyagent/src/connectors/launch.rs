@@ -5,9 +5,19 @@ use crate::coord::settings::HarnessKind;
 use crate::engine::EngineError;
 use crate::plugins::{LaunchServer, ServerSpec};
 use std::path::Path;
+use std::time::Duration;
 
 /// The name of the one server entry a launch with a granted connector gets.
 pub const SERVER_NAME: &str = "ca-connectors";
+/// How long a harness waits for one call to the connector server: past the longest
+/// approval wait and the connector server's own wait for a held write, so the owner's
+/// answer reaches the agent before its harness gives up.
+pub const HARNESS_WAIT: Duration = Duration::from_secs(40 * 60);
+/// How long a harness waits for the connector server to start and answer its handshake.
+pub const STARTUP_WAIT: Duration = Duration::from_secs(30);
+
+const _: () = assert!(HARNESS_WAIT.as_secs() > shim::HELD_WAIT.as_secs());
+const _: () = assert!(STARTUP_WAIT.as_secs() >= 10);
 
 /// What one launch tells its harness about the connectors of the harness's own account:
 /// whether Claude Code's claude.ai connectors and Codex's apps are turned off. Both false

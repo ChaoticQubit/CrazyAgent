@@ -1191,17 +1191,21 @@ fn a_page_limit_outside_one_to_its_bound_is_refused() {
 #[test]
 fn every_kind_has_one_wire_name_and_its_class() {
     let actions = [
-        NoticeKind::Question,
-        NoticeKind::AccountSignIn,
-        NoticeKind::ResearchPool,
-        NoticeKind::MemoryReview,
-        NoticeKind::ChangeSetReview,
-        NoticeKind::ConnectorToolsChanged,
+        "question",
+        "account_sign_in",
+        "research_pool",
+        "memory_review",
+        "change_set_review",
+        "connector_tools_changed",
+        "connector_write",
     ];
+    for name in actions {
+        assert!(NoticeKind::parse(name).is_some(), "{name}");
+    }
     for kind in NoticeKind::ALL {
         assert_eq!(NoticeKind::parse(kind.name()), Some(kind));
         assert_eq!(serde_json::to_value(kind).unwrap(), kind.name());
-        let class = if actions.contains(&kind) {
+        let class = if actions.contains(&kind.name()) {
             NoticeClass::Action
         } else {
             NoticeClass::Info
