@@ -1,5 +1,5 @@
 use super::*;
-use crate::app_plugins::{Binding, Origin, PluginStatus, RunsView, SecretView};
+use crate::app_plugins::{Binding, Origin, PluginStatus, Problem, RunsView, SecretView};
 use crate::connectors::{ConnectorSettings, ConnectorView, ConnectorsView, Grant, SignIn, Who};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::connectors::{ConnectorsEvent, ConnectorsJob};
@@ -31,6 +31,22 @@ fn connector(name: &str, title: &str, status: PluginStatus) -> ConnectorView {
         }],
         sha256: "c0ffee".into(),
     }
+}
+
+fn refused_file(name: &str) -> ConnectorView {
+    let problem = Problem {
+        code: "app_plugin_name_taken".into(),
+        line: None,
+        field: Some("name".into()),
+        message: "a plugin with this name already exists; remove it or choose replace.".into(),
+    };
+    let mut file = connector(name, name, PluginStatus::Refused { problem });
+    file.version = String::new();
+    file.origin = Origin::User;
+    file.sign_in = SignIn::NotYet;
+    file.runs = None;
+    file.secrets.clear();
+    file
 }
 
 fn grant(connector: &str, enabled: bool, who: Who) -> Grant {
@@ -251,4 +267,30 @@ fn a_failed_read_offers_a_retry_and_the_crumbs_name_the_project() {
     assert!(shows(&mut shell, "Plant shop  /  Connectors"));
     keys(&mut shell, &[Key::Char('r')]);
     assert!(reads_project(&one(&mut shell)));
+}
+
+#[test]
+fn one_row_per_name_so_built_in_linear_hides_the_owner_s_refused_file_of_its_name() {
+    for enabled in [true, false] {
+        let mut read = view(vec![grant("linear", enabled, Who::Both)]);
+        read.connectors.push(refused_file("linear"));
+        let mut shell = page(read);
+        let rows = render(&mut shell, 80, 24);
+        let switches = rows.iter().filter(|row| row.contains("Linear")).count();
+        assert_eq!(switches, 1, "grant {enabled}: one switch for linear: {rows:#?}");
+        assert!(!shows(&mut shell, "linear"), "grant {enabled}: no row and no not-ready name");
+        assert!(shows(
+            &mut shell,
+            "Not ready yet: Board. Set them up in Settings, Connectors."
+        ));
+    }
+    let mut broken = view(vec![grant("broken", true, Who::Both)]);
+    broken.connectors.push(refused_file("broken"));
+    let mut shell = page(broken);
+    assert!(
+        shows(&mut shell, "Refused  On"),
+        "a refused file of its own name keeps its switch, so it can be turned off"
+    );
+    keys(&mut shell, &[Key::End, Key::Up, Key::Char(' ')]);
+    assert!(granted(&one(&mut shell), "broken", false, Who::Both));
 }

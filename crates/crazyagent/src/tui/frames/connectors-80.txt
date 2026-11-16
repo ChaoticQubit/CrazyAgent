@@ -11,14 +11,14 @@
   > Linear                                                         Needs a key  
       linear, version 1.0.0. Built in.                                          
       Set a key for each secret it needs.                                       
+      Issues and projects in Linear.                                            
       Reaches mcp.linear.app                                                    
     GitHub                                                               Ready  
       github, version 1.0.0. Built in.                                          
+      Issues and projects in GitHub.                                            
       Reaches api.githubcopilot.com                                             
     Board                                                         Needs review  
       board, version 0.2.0. Added by you.                                       
       Review this connector before a project can use it.                        
-      Reaches board.example.com                                                 
-                                                                                
                                                                                 
  ↑↓ Move  Enter Open  a Add connector  r Read again  Esc Back            ? Help 

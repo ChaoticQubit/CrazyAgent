@@ -196,6 +196,39 @@ fn with_secret(binding: Binding, at: usize) -> ConnectorsView {
     read
 }
 
+fn refused_file(name: &str, problem: Problem) -> ConnectorView {
+    ConnectorView {
+        name: name.into(),
+        title: name.into(),
+        version: String::new(),
+        description: String::new(),
+        origin: Origin::User,
+        status: PluginStatus::Refused { problem },
+        sign_in: SignIn::NotYet,
+        runs: None,
+        secrets: Vec::new(),
+        sha256: SHA.into(),
+    }
+}
+
+fn not_https() -> Problem {
+    Problem {
+        code: "app_plugin_url_not_https".into(),
+        line: Some(7),
+        field: Some("connector.url".into()),
+        message: "The address must start with https://.".into(),
+    }
+}
+
+fn taken() -> Problem {
+    Problem {
+        code: "app_plugin_name_taken".into(),
+        line: None,
+        field: Some("name".into()),
+        message: "a plugin with this name already exists; remove it or choose replace.".into(),
+    }
+}
+
 #[test]
 fn the_catalog_lists_every_connector_then_the_harnesses_and_the_two_settings() {
     let mut shell = page(view());
@@ -626,4 +659,70 @@ fn go_to_lists_connectors_under_settings_and_opens_it() {
     let screen = open(&Place::Connectors, &mut context);
     assert_eq!(screen.place(), Some(Place::Connectors));
     assert_eq!(screen.crumbs(), ["Settings", "Connectors"]);
+}
+
+#[test]
+fn a_refused_file_is_listed_by_its_name_with_why_and_where_to_fix_it_and_never_opens() {
+    let mut read = view();
+    read.connectors.truncate(1);
+    read.connectors.push(refused_file("broken", not_https()));
+    read.connectors.push(refused_file("linear", taken()));
+    let mut shell = page(read);
+    let tall = render(&mut shell, 80, 48).join("\n");
+    assert!(tall.contains("broken. Added by you."), "{tall}");
+    assert!(tall.contains("linear. Added by you."), "{tall}");
+    assert!(!tall.contains("broken, version"), "{tall}");
+    assert!(tall.contains("The address must start with https://."), "{tall}");
+    assert!(tall.contains("a plugin with this name already exists;"), "{tall}");
+    let fix = "Fix its file, or remove it on the App plugins page.";
+    assert_eq!(tall.matches(fix).count(), 2, "{tall}");
+    assert_eq!(tall.matches("Reaches ").count(), 1, "only Linear reaches a host");
+    assert!(shows(&mut shell, "Enter Open"), "Linear opens");
+    keys(&mut shell, &[Key::Down]);
+    assert!(!shows(&mut shell, "Enter Open"), "a refused file has no page to open");
+    keys(&mut shell, &[Key::Enter, Key::Down, Key::Enter]);
+    assert!(!shows(&mut shell, "/  broken"));
+    assert!(
+        !shows(&mut shell, "/  Linear") && !shows(&mut shell, "/  linear"),
+        "a refused file shadowed by Linear never opens Linear's page"
+    );
+    assert!(shows(&mut shell, "Catalog"));
+    assert!(requests(&mut shell).is_empty());
+}
+
+#[test]
+fn a_page_whose_file_turns_refused_shows_why_and_offers_no_review_no_remove_and_no_key() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::Down, Key::Down, Key::Enter]);
+    assert!(shows(&mut shell, "x Remove"));
+    let mut broken = view();
+    broken.connectors[2] = refused_file("board", not_https());
+    keys(&mut shell, &[Key::Char('r')]);
+    assert!(read_all(&one(&mut shell)));
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(broken)));
+    assert!(shows(&mut shell, "Settings  /  Connectors  /  board"));
+    assert!(shows(&mut shell, "board. Added by you."));
+    assert!(shows(&mut shell, "The address must start with https://."));
+    assert!(shows(&mut shell, "Fix its file, or remove it on the App plugins page."));
+    assert!(!shows(&mut shell, "Reaches ") && !shows(&mut shell, "Address:"));
+    assert!(!shows(&mut shell, "Signs in with OAuth"), "a refused file is not an OAuth one");
+    assert!(!shows(&mut shell, "Enter Review") && !shows(&mut shell, "x Remove"));
+    assert!(!shows(&mut shell, "k Set key"));
+    keys(&mut shell, &[Key::Char('x'), Key::Enter, Key::Char('k')]);
+    assert!(!shows(&mut shell, "Remove board?"), "x removes nothing here");
+    assert!(!said(&shell).contains("OAuth"), "{}", said(&shell));
+    assert!(requests(&mut shell).is_empty());
+}
+
+#[test]
+fn hidden_characters_in_a_title_or_description_show_as_escapes_on_the_catalog_row() {
+    let mut read = view();
+    read.connectors[0].title = "Lin\u{200b}ear".into();
+    read.connectors[0].description = "Issues\u{202e} in Linear.".into();
+    let mut shell = page(read);
+    assert!(shows(&mut shell, "Lin\\u200bear"));
+    assert!(shows(&mut shell, "Issues\\u202e in Linear."));
+    keys(&mut shell, &[Key::Enter]);
+    assert!(shows(&mut shell, "Settings  /  Connectors  /  Lin\\u200bear"));
+    assert!(shows(&mut shell, "Issues\\u202e in Linear."));
 }
