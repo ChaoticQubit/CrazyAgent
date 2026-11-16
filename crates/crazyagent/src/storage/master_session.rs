@@ -2086,9 +2086,10 @@ pub(crate) fn validate_configured_initial_conversation_receipt(
 }
 
 /// Checks that a listed master's initial conversation attempt runs on the account its proof
-/// names, as proved now (DEC-180 T20 Q7), with the same request checks an RCLI master's
-/// attempt gets. Inputs: the transaction, the pinned and current settings, the request, the
-/// proof and its binding. Output: Ok, or `gateway_initial_authentication_stale`.
+/// names, as a turn's preparation proves it now (DEC-180 T20 Q7), with the same request
+/// checks an RCLI master's attempt gets. Inputs: the transaction, the pinned and current
+/// settings, the request, the proof and its binding. Output: Ok, or
+/// `gateway_initial_authentication_stale`.
 pub(crate) fn validate_listed_initial_conversation_receipt(
     tx: &Transaction<'_>,
     pinned: &EffectiveConfig,
@@ -2103,8 +2104,9 @@ pub(crate) fn validate_listed_initial_conversation_receipt(
         db_instance: proof.database_instance.clone(),
         engine_epoch: proof.engine_epoch.clone(),
     };
-    let actual = listed_auth(tx, current, &host, &session, &proof.connection)?;
-    if actual != *proof || binding != &MasterBootstrapAuth::Listed(actual).binding() {
+    let actual = current_auth(tx, current, &host, &session, &proof.connection)?;
+    let expected = MasterBootstrapAuth::Listed(proof.clone());
+    if actual != expected || binding != &expected.binding() {
         return Err(error("gateway_initial_authentication_stale"));
     }
     initial_conversation_request(tx, pinned, current, request, &session, &proof.connection)?;
@@ -2220,10 +2222,11 @@ fn authenticated(
     Ok(fact)
 }
 
-/// Proves one listed master's pool account can authorize a turn now (DEC-180 T20 Q7): an
-/// allowed member of the pool whose harness takes it, under this engine run and the session's
-/// current settings since it opened, with the custody slot its connection keys. Inputs: the
-/// transaction, settings, host, session and member. Output: the proof, or the refusal code.
+/// Proves one listed master's pool account can authorize a turn now (DEC-180 T20 Q7): a
+/// member of the pool whose harness takes it, under this engine run and the settings the
+/// session holds now, its latest rebinding's, with the custody slot its connection keys.
+/// Inputs: the transaction, settings, host, session and member. Output: the proof, or the
+/// refusal code.
 fn listed_auth(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2234,7 +2237,8 @@ fn listed_auth(
     if !crate::master_session::backend_member(session.selection.backend, member) {
         return Err(error("native_profile_connection_missing"));
     }
-    if !session.admits_binding(&config.id, &session.source_hash, true) {
+    let (config_id, source_hash) = session.binding();
+    if config_id != &config.id {
         return Err(error("master_authentication_stale"));
     }
     let root = tx
@@ -2248,13 +2252,14 @@ fn listed_auth(
         session_id: session.session_id.clone(),
         database_instance: host.db_instance.clone(),
         engine_epoch: host.engine_epoch.clone(),
-        config_id: config.id.clone(),
-        source_hash: session.source_hash.clone(),
+        config_id: config_id.clone(),
+        source_hash: source_hash.to_owned(),
         at_revision: session.owner.revision_after.clone(),
         connection: member.clone(),
         custody_id,
     };
     assert_eq!(&proof.connection, member);
+    assert!(session.admits_binding(&proof.config_id, &proof.source_hash, true));
     Ok(proof)
 }
 
