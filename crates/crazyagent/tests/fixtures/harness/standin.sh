@@ -203,6 +203,20 @@ replay() {
 			esac
 			exit "$code"
 			;;
+		'@standin tick')
+			saved=$(stty -g)
+			stty -icanon -echo min 0 time 2
+			ticks=0
+			got=0
+			while [ "$got" = 0 ]; do
+				ticks=$((ticks + 1))
+				printf '\rworking %s' "$ticks"
+				got=$(dd bs=1 count=1 2>/dev/null | wc -c | tr -d ' ')
+			done
+			stty "$saved"
+			printf '\n'
+			printf '\n' >>"$state/stdin-$run"
+			;;
 		'@standin sleep '*)
 			pause=${line#'@standin sleep '}
 			case $pause in
