@@ -6,7 +6,7 @@ use crate::engine::EngineError;
 use crate::onboarding::draft::names;
 use crate::protocol::ProjectId;
 use crate::roadmap_status::{Claim, Runs};
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, params};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -59,10 +59,12 @@ impl Started {
     /// Closes with [`UNFINISHED`] every noted run that began [`RUN_TIME`] or longer ago on
     /// the steady clock, by its claim, so a run that already ended, or a newer run of the
     /// project, is left alone; each such entry goes whether or not its run was still
-    /// open. An entry whose close fails stays for the next try. Inputs: the connection and
-    /// the steady time now. Output: how many open runs were closed, or
+    /// open. It holds the one-writer lock, so no run is closed between its finish's claim
+    /// check and its close. An entry whose close fails stays for the next try. Inputs: the
+    /// connection and the steady time now. Output: how many open runs were closed, or
     /// `overview_unavailable`.
     fn close_overdue(&mut self, db: &Connection, now: Instant) -> Result<usize, EngineError> {
+        let _writing = writing();
         let mut closed = 0usize;
         let mut failed = None;
         self.0.retain(|(project, claim, began)| {
@@ -352,16 +354,17 @@ fn offered(
     Ok(missed_note(&missed))
 }
 
-/// Ends the run a claim names, and only that run, under the one-writer lock and in one
-/// immediate transaction, so a read sees the run still running or wholly ended, never closed
-/// with its tabs unwritten (gate race 2). The run is closed first, by its claim: a run that
-/// was closed for its time on the steady clock, or whose project is gone, ends nothing and
-/// writes no tab. A reply's tabs are offered only after that, then the time is stored, with
-/// a line naming each asked tab that was not written; a failure stores one plain line and
-/// is not retried until the next landing or Refresh; a skip only closes the run. A finish
-/// that does not commit leaves the run open, for the close at its time or at engine start.
-/// Inputs: the connection, the project, its folder, the claim, how the run ended and now.
-/// Output: whether this run was the one in flight, or `overview_unavailable`.
+/// Ends the run a claim names, and only that run, under the one-writer lock, which the close
+/// of a run for its time also takes, so a read sees the run still running or wholly ended,
+/// never closed with its tabs unwritten (gate race 2). The claim is checked first: a run
+/// closed for its time on the steady clock, or whose project is gone, ends nothing and writes
+/// no tab. A reply's tabs are offered next, then one statement closes the run by its claim
+/// with the time and a line naming each asked tab that was not written; a failure stores one
+/// plain line and is not retried until the next landing or Refresh; a skip only closes the
+/// run. A finish that stops before that close leaves the run open, for the close at its time
+/// or at engine start. Inputs: the connection, the project, its folder, the claim, how the
+/// run ended and now. Output: whether this run was the one in flight, or
+/// `overview_unavailable`.
 pub fn finish(
     db: &Connection,
     project: &ProjectId,
@@ -372,61 +375,41 @@ pub fn finish(
 ) -> Result<bool, EngineError> {
     assert!(claim.ms() >= 0 && now_ms >= 0);
     let _writing = writing();
-    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(unavailable)?;
-    let ran = finish_held(&tx, project, folder, claim, ended, now_ms)?;
-    tx.commit().map_err(unavailable)?;
-    Ok(ran)
-}
-
-/// The steps of [`finish`], run inside its transaction while it holds the one-writer lock.
-/// Inputs: the transaction's connection, the project, its folder, the claim, how the run
-/// ended and now. Output: whether this run was the one in flight, or `overview_unavailable`.
-fn finish_held(
-    db: &Connection,
-    project: &ProjectId,
-    folder: &Path,
-    claim: Claim,
-    ended: Ended<'_>,
-    now_ms: i64,
-) -> Result<bool, EngineError> {
-    assert!(claim.ms() >= 0 && now_ms >= 0);
-    let closing = match ended {
-        Ended::Reply { .. } => Some(UNFINISHED.to_owned()),
-        Ended::Failed(words) => Some(line(words)),
-        Ended::Skipped => None,
+    if !in_flight(db, project, claim)? {
+        return Ok(false);
+    }
+    let (failure, checked) = match ended {
+        Ended::Reply {
+            reply,
+            with_competitors,
+        } => match offered(db, project, folder, reply, with_competitors) {
+            Ok(left) => (left, true),
+            Err(words) => (Some(words.to_owned()), false),
+        },
+        Ended::Failed(words) => (Some(line(words)), false),
+        Ended::Skipped => (None, false),
     };
     let closed = db
         .execute(
-            "UPDATE project_overview SET running_ms=NULL, failure=?3
+            "UPDATE project_overview
+             SET running_ms=NULL, failure=?3, checked_ms=CASE WHEN ?4 THEN ?5 ELSE checked_ms END
              WHERE project=?1 AND running_ms=?2",
-            params![project.as_str(), claim.ms(), closing],
+            params![project.as_str(), claim.ms(), failure, checked, now_ms],
         )
         .map_err(unavailable)?;
     assert!(closed <= 1);
-    if closed == 0 {
-        return Ok(false);
-    }
-    let Ended::Reply {
-        reply,
-        with_competitors,
-    } = ended
-    else {
-        return Ok(true);
-    };
-    let (failure, checked) = match offered(db, project, folder, reply, with_competitors) {
-        Ok(left) => (left, true),
-        Err(words) => (Some(words.to_owned()), false),
-    };
-    let stored = db
-        .execute(
-            "UPDATE project_overview
-             SET failure=?2, checked_ms=CASE WHEN ?3 THEN ?4 ELSE checked_ms END
-             WHERE project=?1 AND running_ms IS NULL",
-            params![project.as_str(), failure, checked, now_ms],
-        )
-        .map_err(unavailable)?;
-    assert!(stored <= 1);
-    Ok(true)
+    Ok(closed == 1)
+}
+
+/// Whether the run a claim names is still the project's open run. Inputs: the connection,
+/// the project and the claim. Output: the answer, or `overview_unavailable`.
+fn in_flight(db: &Connection, project: &ProjectId, claim: Claim) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM project_overview WHERE project=?1 AND running_ms=?2)",
+        params![project.as_str(), claim.ms()],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
 }
 
 /// Ends the run a claim names with the words saying why it failed, for a run that never

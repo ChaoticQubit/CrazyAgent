@@ -2280,28 +2280,14 @@ fn an_engine_start_forgets_the_overview_rows_of_projects_that_are_gone() {
     assert_eq!(rows(&db), ["alpha", "alpha"]);
 }
 
-/// Set by [`waiting_reader`] once the page read's connection meets a held write lock.
-static READER_WAITED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// The busy handler of the page read in the half-way row: notes that the read met the
-/// run's held write lock, then retries after 1 ms as `busy_timeout` does, up to 10 000
-/// tries. Input: the tries so far. Output: whether to try again.
-fn waiting_reader(tries: i32) -> bool {
-    READER_WAITED.store(true, std::sync::atomic::Ordering::SeqCst);
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    tries < 10_000
-}
-
-/// A page read that lands while a run ends, after the close of its claim and before its
-/// first tab is written, sees the run still running or wholly ended, never closed as
-/// unfinished with no tab, which stops the desktop page reading (gate race 2,
-/// bridge-overview-tabs at 31fe8b547).
+/// A page read that lands while a run ends, after its claim is checked and before its first
+/// tab is written, sees the run still running or wholly ended, never closed as unfinished
+/// with no tab, which stops the desktop page reading (gate race 2, bridge-overview-tabs at
+/// 31fe8b547).
 #[test]
 fn a_page_read_while_a_run_ends_sees_it_running_or_ended_never_half_way() {
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::atomic::Ordering;
-    use std::time::{Duration, Instant};
     let (db, page, project, folder) = shared();
     crate::project_setup::initialize(&db).unwrap();
     db.execute("INSERT INTO project_setups VALUES ('alpha', '{}')", [])
@@ -2309,45 +2295,33 @@ fn a_page_read_while_a_run_ends_sees_it_running_or_ended_never_half_way() {
     let mut runs = FakeTabRuns::default();
     read(&db, &project, folder.path(), 1_000).unwrap();
     assert_eq!(tick(&db, &mut runs, 1_000).unwrap(), 1);
-    page.busy_handler(Some(waiting_reader)).unwrap();
-    let page = Rc::new(RefCell::new(Some(page)));
-    let reader: Rc<RefCell<Option<std::thread::JoinHandle<Overview>>>> =
-        Rc::new(RefCell::new(None));
+    let seen: Rc<RefCell<Option<Overview>>> = Rc::new(RefCell::new(None));
     {
-        let (page, reader) = (page.clone(), reader.clone());
+        let seen = seen.clone();
         let (project, path) = (project.clone(), folder.path().to_path_buf());
         BEFORE_REPLACE.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
-                let Some(page) = page.borrow_mut().take() else {
-                    return;
-                };
-                let (project, path) = (project.clone(), path.clone());
-                let reading =
-                    std::thread::spawn(move || read(&page, &project, &path, 2_000).unwrap());
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while !reading.is_finished() && !READER_WAITED.load(Ordering::SeqCst) {
-                    assert!(
-                        Instant::now() < deadline,
-                        "the page read neither ended nor waited for the run"
-                    );
-                    std::thread::yield_now();
+                if seen.borrow().is_none() {
+                    let shown = read(&page, &project, &path, 2_000).unwrap();
+                    *seen.borrow_mut() = Some(shown);
                 }
-                *reader.borrow_mut() = Some(reading);
             }));
         });
     }
     let ended = runs.end(&db, folder.path(), REPLIED, 2_000);
     BEFORE_REPLACE.with(|hook| *hook.borrow_mut() = None);
     assert_eq!(ended, 1);
-    let seen = reader
-        .borrow_mut()
-        .take()
-        .expect("the run wrote a tab")
-        .join()
-        .unwrap();
+    let seen = seen.borrow_mut().take().expect("the run wrote a tab");
     assert!(
         seen.running || tab_of(&seen, Tab::QuickInfo).text.is_some(),
         "a read while the run ended saw it closed with no tab: {seen:?}"
     );
     assert_ne!(seen.failure.as_deref(), Some(UNFINISHED), "{seen:?}");
+    let done = read(&db, &project, folder.path(), 3_000).unwrap();
+    assert!(!done.running && done.failure.is_none(), "{done:?}");
+    assert_eq!(done.checked_ms, Some(2_000));
+    assert_eq!(
+        tab_of(&done, Tab::QuickInfo).text.as_deref(),
+        Some("Alpha reads papers.\n")
+    );
 }
