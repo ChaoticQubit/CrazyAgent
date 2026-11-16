@@ -1302,6 +1302,13 @@ export function teamWakeAgent(id: string, agent: number, generation: number): Pr
   return invoke<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
 }
 
+/** Restarts the project's running agents that can still open a folder hidden after they
+ * started, as one team action. Inputs: project id and a generation. Output: the commit receipt;
+ * with no such agent it is rejected as `team_no_hidden_seers`. */
+export function teamRestartHiddenSeers(id: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_restart_hidden_seers", { id, generation });
+}
+
 /** Changes a project's name, description, stack, platforms, research, pool and team.
  * Inputs: project id, the new setup, a generation, an optional new name and the setup revision
  * shown (the engine's current one when null). Output: the engine receipt. */

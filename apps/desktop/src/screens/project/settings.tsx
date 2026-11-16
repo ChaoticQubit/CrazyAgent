@@ -2,7 +2,7 @@ import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api"
 import type { Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type ReadPaths } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, restartHiddenSeers, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type ReadPaths } from "../../api-projects";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
 import type { IntakeJob, IntentReceipt, MessageSettings, SwitchApply, TeamAgent, TeamStatus } from "../../engine-client";
 import { loadIntakeJob } from "../../api-intake";
@@ -506,15 +506,13 @@ function SandboxSection({ data }: { data: ProjectData }) {
  * started (SA-VID14-A). Input: the team status, or null before it is read. Output: those
  * agents in the status order. */
 export function hiddenSeers(status: TeamStatus | null): TeamAgent[] {
-  void status;
-  return [];
+  return status === null ? [] : status.agents.filter((agent) => agent.sees_hidden === true);
 }
 
 /** What the hidden folders section says about the agents that can still open a hidden
  * folder. Input: the agents, at least one. Output: the line naming them. */
 export function seersLine(agents: TeamAgent[]): string {
-  void agents;
-  return "";
+  return `${agents.map((agent) => agent.label).join(", ")} started before a folder was hidden and can still open it.`;
 }
 
 function HiddenSection({ data }: { data: ProjectData }) {
@@ -524,6 +522,8 @@ function HiddenSection({ data }: { data: ProjectData }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [fullAccess, setFullAccess] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const seers = hiddenSeers(data.team.result?.kind === "ok" ? data.team.result.value : null);
   const notReady = "Not ready yet: hidden folders aren't in this build.";
   useEffect(() => {
     let live = true;
@@ -574,11 +574,27 @@ function HiddenSection({ data }: { data: ProjectData }) {
     data.notify("Hidden folders saved. Agents started from now on can't open them.");
   }
 
+  async function restart() {
+    setRestarting(true);
+    const result = await restartHiddenSeers(data.id, nextGeneration());
+    setRestarting(false);
+    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    const state = receiptState(result.value);
+    if (state.kind !== "applied") return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm the restart. Check the agents and try again.");
+    setNote("");
+    data.notify("Restarting them. Each starts again in its own worktree and conversation, kept out of every hidden folder.");
+    data.reloadTeam();
+  }
+
   const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Folders agents can't open</h2>
     <p className="pj-secondary">Folders inside the project that agents, the master and research jobs can't read, write or run while access is Sandboxed. Use it for a secrets folder or a vendored dump you don't want touched. Each must be a folder inside the project that git does not track.</p>
     {fullAccess && <p className="pj-note warn" role="status">Full access runs agents without a sandbox, so hidden folders do not apply.</p>}
+    {!fullAccess && seers.length > 0 && <div className="pj-note warn" role="status">
+      <p>{seersLine(seers)}</p>
+      <Button pending={restarting} pendingLabel="Restarting..." disabled={restarting} onClick={() => void restart()}>Restart them</Button>
+    </div>}
     {saved === null && !note && <p className="pj-muted" role="status">Loading...</p>}
     {saved !== null && <ul className="pj-paths" aria-label="Hidden folders">
       {paths.length === 0 && <li className="pj-muted">No hidden folders.</li>}
