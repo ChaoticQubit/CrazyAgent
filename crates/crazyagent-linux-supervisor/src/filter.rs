@@ -454,16 +454,39 @@ mod tests {
         let create = u64::from(O_CREAT);
         let open = |args| told(x86, ALL, 2, args);
         assert_eq!(open([0, create | 1, 0o644, 0, 0, 0]), NOTIFY);
-        assert_eq!(open([0, 0o2000 | 1, 0, 0, 0, 0]), ALLOW, "append, no new file");
-        assert_eq!(open([create, 0, create, 0, 0, 0]), ALLOW, "not the flags register");
-        assert_eq!(open([0, create << 32, 0, 0, 0, 0]), ALLOW, "the high word is not read");
-        assert_eq!(open([0, 0xdead_0000_0000_0000 | create, 0, 0, 0, 0]), NOTIFY);
+        assert_eq!(
+            open([0, 0o2000 | 1, 0, 0, 0, 0]),
+            ALLOW,
+            "append, no new file"
+        );
+        assert_eq!(
+            open([create, 0, create, 0, 0, 0]),
+            ALLOW,
+            "not the flags register"
+        );
+        assert_eq!(
+            open([0, create << 32, 0, 0, 0, 0]),
+            ALLOW,
+            "the high word is not read"
+        );
+        assert_eq!(
+            open([0, 0xdead_0000_0000_0000 | create, 0, 0, 0, 0]),
+            NOTIFY
+        );
         for calls in [Calls::X86_64, Calls::AARCH64] {
             let nr = calls.number(Call::Openat).unwrap();
             let openat = |args| told(&calls, ALL, nr, args);
             assert_eq!(openat([0, 0, create | 2, 0o600, 0, 0]), NOTIFY);
-            assert_eq!(openat([0, create, 0, 0, 0, 0]), ALLOW, "not the flags register");
-            assert_eq!(openat([0, 0, 0o20200000 | 2, 0o600, 0, 0]), ALLOW, "no name yet");
+            assert_eq!(
+                openat([0, create, 0, 0, 0, 0]),
+                ALLOW,
+                "not the flags register"
+            );
+            assert_eq!(
+                openat([0, 0, 0o20200000 | 2, 0o600, 0, 0]),
+                ALLOW,
+                "no name yet"
+            );
             let unguarded = Guards {
                 create: false,
                 ..ALL
@@ -509,9 +532,19 @@ mod tests {
                     signal: false,
                     ..ALL
                 };
-                assert_eq!(told(&calls, unguarded, nr, args), ALLOW, "{nr} {command:#x}");
+                assert_eq!(
+                    told(&calls, unguarded, nr, args),
+                    ALLOW,
+                    "{nr} {command:#x}"
+                );
             }
-            let free = [(fcntl, 0), (fcntl, 4), (fcntl, 9), (ioctl, 0x5401), (ioctl, 0x8903)];
+            let free = [
+                (fcntl, 0),
+                (fcntl, 4),
+                (fcntl, 9),
+                (ioctl, 0x5401),
+                (ioctl, 0x8903),
+            ];
             for (nr, command) in free {
                 let args = [3, command, 8, 15, 0x8901, 0x8902];
                 assert_eq!(told(&calls, ALL, nr, args), ALLOW, "{nr} {command:#x}");
@@ -535,7 +568,10 @@ mod tests {
             assert_eq!(arm.number(call), None, "{call:?}");
             assert!(Calls::X86_64.number(call).is_some(), "{call:?}");
         }
-        assert_eq!(arm.numbers.len() + absent.len(), Calls::X86_64.numbers.len());
+        assert_eq!(
+            arm.numbers.len() + absent.len(),
+            Calls::X86_64.numbers.len()
+        );
         assert_eq!(told(arm, ALL, 38, [0; 6]), NOTIFY, "renameat");
         assert_eq!(told(arm, ALL, 276, [0; 6]), NOTIFY, "renameat2");
     }
@@ -569,7 +605,11 @@ mod tests {
                 }
             }
             let bare = program(&calls, Guards::default());
-            assert_eq!(bare.len(), if calls.x32 { 7 } else { 5 }, "no rule without a guard");
+            assert_eq!(
+                bare.len(),
+                if calls.x32 { 7 } else { 5 },
+                "no rule without a guard"
+            );
         }
     }
 }

@@ -145,10 +145,13 @@ pub fn is_git(name: &OsStr) -> bool {
     let text = String::from_utf8_lossy(name.as_encoded_bytes());
     let ignored = |point: &char| {
         let point = u32::from(*point);
-        IGNORED.iter().any(|(first, last)| (*first..=*last).contains(&point))
+        IGNORED
+            .iter()
+            .any(|(first, last)| (*first..=*last).contains(&point))
     };
     let kept: String = text.chars().filter(|point| !ignored(point)).collect();
-    kept.trim_end_matches(['.', ' ']).eq_ignore_ascii_case(".git")
+    kept.trim_end_matches(['.', ' '])
+        .eq_ignore_ascii_case(".git")
 }
 
 /// The git folders an agent may make entries in: the top-level `.git` of each working
@@ -426,7 +429,13 @@ mod tests {
             assert!(goes(v4(host, 443)), "{host:?}");
         }
         assert!(!goes(v4([128, 0, 0, 1], 8080)));
-        for host in ["2001:db8::7", "::", "::ffff:10.0.0.5", "::127.0.0.1", "fe80::1"] {
+        for host in [
+            "2001:db8::7",
+            "::",
+            "::ffff:10.0.0.5",
+            "::127.0.0.1",
+            "fe80::1",
+        ] {
             assert!(!goes(v6(host.parse().unwrap(), 11434)), "{host}");
             assert!(goes(v6(host.parse().unwrap(), 53)), "{host}");
         }
@@ -495,7 +504,12 @@ mod tests {
         ] {
             assert!(!made(refused), "{refused}");
         }
-        for unformed in ["work/project/src", "", "/work/../work/project/a", "sub/.git"] {
+        for unformed in [
+            "work/project/src",
+            "",
+            "/work/../work/project/a",
+            "sub/.git",
+        ] {
             assert!(!made(unformed), "{unformed}");
         }
         assert!(made("/"), "the root holds no .git name");
@@ -521,7 +535,10 @@ mod tests {
             "\u{2060}.\u{fe0f}g\u{180e}i\u{3164}t\u{200b} ",
         ];
         for name in aliases {
-            assert!(is_git(OsStr::new(name)), "a name some filesystem reads as .git: {name:?}");
+            assert!(
+                is_git(OsStr::new(name)),
+                "a name some filesystem reads as .git: {name:?}"
+            );
         }
         let others = [
             "git",
@@ -553,8 +570,16 @@ mod tests {
         assert_eq!(signal_target(-1), Target::Everyone);
         assert_eq!(signal_target(-4242), Target::Group(4242));
         assert_eq!(signal_target(i64::from(i32::MIN)), Target::Everyone);
-        assert_eq!(signal_target(0x7_0000_0001), Target::One(1), "the low 32 bits");
-        assert_eq!(signal_target(0xffff_ffff), Target::Everyone, "minus one as 32 bits");
+        assert_eq!(
+            signal_target(0x7_0000_0001),
+            Target::One(1),
+            "the low 32 bits"
+        );
+        assert_eq!(
+            signal_target(0xffff_ffff),
+            Target::Everyone,
+            "minus one as 32 bits"
+        );
         assert_eq!(owner_target(0), None);
         assert_eq!(owner_target(4242), Some(Target::One(4242)));
         assert_eq!(owner_target(-4242), Some(Target::Group(4242)));
@@ -564,7 +589,14 @@ mod tests {
 
     #[test]
     fn a_signal_goes_only_to_a_program_the_agent_started() {
-        let parents = [(300, 200), (200, 100), (100, 50), (60, 1), (70, 60), (50, 1)];
+        let parents = [
+            (300, 200),
+            (200, 100),
+            (100, 50),
+            (60, 1),
+            (70, 60),
+            (50, 1),
+        ];
         let parent_of = |pid: i32| {
             let found = parents.iter().find(|(child, _)| *child == pid);
             found.map(|(_, parent)| *parent)
@@ -583,7 +615,10 @@ mod tests {
         let chain = |pid: i32| Some(pid - 1);
         let top = 2 + TREE_DEPTH_MAX as i32;
         assert!(in_tree(top, 2, chain), "the deepest chain that is walked");
-        assert!(!in_tree(top + 1, 2, chain), "one deeper is refused, not walked");
+        assert!(
+            !in_tree(top + 1, 2, chain),
+            "one deeper is refused, not walked"
+        );
         let looped = |pid: i32| Some(if pid == 7 { 8 } else { 7 });
         assert!(!in_tree(7, 100, looped), "a loop ends");
     }
@@ -599,7 +634,13 @@ mod tests {
         assert_eq!(stat(plain), Some(read));
         let odd = "4242 (a) R 1 2 (b c)) S 4000 4242 3999 0";
         assert_eq!(stat(odd), Some(read), "the last bracket ends the name");
-        for bad in ["", "4242 (node", "4242 (node) S", "4242 (node) S x 1 2", "1 (a) S -1 2 3"] {
+        for bad in [
+            "",
+            "4242 (node",
+            "4242 (node) S",
+            "4242 (node) S x 1 2",
+            "1 (a) S -1 2 3",
+        ] {
             assert_eq!(stat(bad), None, "{bad}");
         }
         let status = "Name:\tnode\nUmask:\t0022\nState:\tS (sleeping)\nTgid:\t4242\nPid:\t4250\n";
@@ -609,7 +650,10 @@ mod tests {
         assert_eq!(field(status, "State"), Some("S (sleeping)"));
         assert_eq!(field(status, "PPid"), None);
         assert_eq!(field(status, "gid"), None, "the whole name");
-        assert_eq!(field("pos:\t0\nflags:\t02000002\nPid:\t77\n", "Pid"), Some("77"));
+        assert_eq!(
+            field("pos:\t0\nflags:\t02000002\nPid:\t77\n", "Pid"),
+            Some("77")
+        );
     }
 
     #[test]
@@ -651,7 +695,10 @@ mod tests {
     fn a_path_splits_into_its_folder_and_last_name_whatever_slashes_end_it() {
         let split = |path: &'static str| {
             let parts = split_last(path.as_bytes())?;
-            Some((std::str::from_utf8(parts.0).unwrap(), std::str::from_utf8(parts.1).unwrap()))
+            Some((
+                std::str::from_utf8(parts.0).unwrap(),
+                std::str::from_utf8(parts.1).unwrap(),
+            ))
         };
         assert_eq!(split("a/b"), Some(("a", "b")));
         assert_eq!(split("b"), Some(("", "b")));
@@ -673,14 +720,26 @@ mod tests {
         assert_eq!(agent("/proc/self"), "/proc/4242");
         assert_eq!(agent("/proc/thread-self/comm"), "/proc/4242/task/4250/comm");
         assert_eq!(agent("/proc/thread-self"), "/proc/4242/task/4250");
-        for kept in ["/proc/selfish/x", "/proc/1/fd/2", "proc/self/fd/2", "/work/proc/self", ""] {
+        for kept in [
+            "/proc/selfish/x",
+            "/proc/1/fd/2",
+            "proc/self/fd/2",
+            "/work/proc/self",
+            "",
+        ] {
             assert_eq!(agent(kept), kept);
         }
         let moved = |real: &str| from_own(Path::new(real), (900, 907), (4242, 4250));
         assert_eq!(moved("/proc/900/fd"), Some("/proc/4242/fd".into()));
         assert_eq!(moved("/proc/900"), Some("/proc/4242".into()));
-        assert_eq!(moved("/proc/900/task/907/fd"), Some("/proc/4242/task/4250/fd".into()));
-        assert_eq!(moved("/proc/900/task/908"), Some("/proc/4242/task/908".into()));
+        assert_eq!(
+            moved("/proc/900/task/907/fd"),
+            Some("/proc/4242/task/4250/fd".into())
+        );
+        assert_eq!(
+            moved("/proc/900/task/908"),
+            Some("/proc/4242/task/908".into())
+        );
         for kept in ["/proc/9000/fd", "/proc/4242/fd", "/work/proc/900", "/proc"] {
             assert_eq!(moved(kept), None, "{kept}");
         }
@@ -717,16 +776,30 @@ mod tests {
         assert_eq!(short.scope_id(), 0, "no scope in a short address");
         let unix = |path: &[u8]| [&AF_UNIX.to_ne_bytes()[..], path].concat();
         let path = |path: &[u8]| Dest::UnixPath(path.to_vec());
-        assert_eq!(dest(&unix(b"/run/user/1000/bus\0")), path(b"/run/user/1000/bus"));
+        assert_eq!(
+            dest(&unix(b"/run/user/1000/bus\0")),
+            path(b"/run/user/1000/bus")
+        );
         assert_eq!(dest(&unix(b"sock\0junk")), path(b"sock"));
-        assert_eq!(dest(&unix(b"sock")), path(b"sock"), "no zero byte at the end");
+        assert_eq!(
+            dest(&unix(b"sock")),
+            path(b"sock"),
+            "no zero byte at the end"
+        );
         assert_eq!(dest(&unix(b"")), path(b""));
-        assert_eq!(dest(&unix(b"\0name\0x")), Dest::UnixName(b"name\0x".to_vec()));
+        assert_eq!(
+            dest(&unix(b"\0name\0x")),
+            Dest::UnixName(b"name\0x".to_vec())
+        );
         assert_eq!(dest(&[0u8; 16]), Dest::Unspec);
         assert_eq!(dest(&AF_UNSPEC.to_ne_bytes()), Dest::Unspec);
         let netlink = [&16u16.to_ne_bytes()[..], &[0u8; 10][..]].concat();
         assert_eq!(dest(&netlink), Dest::Other);
-        assert_eq!(dest(&v4([127, 0, 0, 1], 8080)[..7]), Dest::Other, "a cut address");
+        assert_eq!(
+            dest(&v4([127, 0, 0, 1], 8080)[..7]),
+            Dest::Other,
+            "a cut address"
+        );
         assert_eq!(dest(&[]), Dest::Other);
         assert_eq!(dest(&[1]), Dest::Other);
     }

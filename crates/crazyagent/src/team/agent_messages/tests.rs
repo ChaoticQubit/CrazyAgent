@@ -952,7 +952,10 @@ fn an_engine_notice_still_kept_for_an_agent_is_not_written_again() {
     assert!(note(bob, line, 30), "another agent");
     let other = "On this Linux, port 443 is below 1024.";
     said(&connection, PROJECT, ada, Said::Message, other, 40);
-    assert!(note(ada, other, 50), "the master's words are not the engine's notice");
+    assert!(
+        note(ada, other, 50),
+        "the master's words are not the engine's notice"
+    );
     assert_eq!(kept(&connection, PROJECT), 4);
     let (ms, count): (i64, i64) = connection
         .query_row(

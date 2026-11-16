@@ -839,7 +839,11 @@ fn only_on_linux_does_a_port_question_say_the_port_is_open_on_every_host() {
         },
         AccessGrant::TempFolder,
     ] {
-        assert_eq!(asked_meaning(&grant, Some(line)), meaning(&grant), "{grant:?}");
+        assert_eq!(
+            asked_meaning(&grant, Some(line)),
+            meaning(&grant),
+            "{grant:?}"
+        );
     }
     let case = Case::new();
     let question = case.ask_port(5_432);

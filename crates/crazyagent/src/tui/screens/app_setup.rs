@@ -302,7 +302,10 @@ fn option_rows(
         .collect();
     for (index, (title, detail)) in options.iter().enumerate() {
         let mark = if index == choice { "> " } else { "  " };
-        lines.push(join([Line::raw(mark), styled(*title, Role::Heading, theme)]));
+        lines.push(join([
+            Line::raw(mark),
+            styled(*title, Role::Heading, theme),
+        ]));
         lines.extend(
             wrap(detail, limit.saturating_sub(4).max(1))
                 .into_iter()
@@ -2256,8 +2259,12 @@ impl AppSetup {
         let note =
             |text: &str| -> Vec<Line<'static>> { if notes { under(text) } else { Vec::new() } };
         let sandbox: [(&str, SandboxWords); 2] = [
-            ("Linux sockets", |settings| sockets_words(settings.linux_sockets)),
-            ("Linux supervisor", |settings| supervisor_words(settings.linux_supervisor)),
+            ("Linux sockets", |settings| {
+                sockets_words(settings.linux_sockets)
+            }),
+            ("Linux supervisor", |settings| {
+                supervisor_words(settings.linux_supervisor)
+            }),
         ];
         for (name, words) in sandbox {
             let (value, detail) = self.sandbox_value(words, ctx);

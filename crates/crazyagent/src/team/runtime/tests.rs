@@ -31915,7 +31915,10 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         }
     }
     if exit("control_cache").as_deref() != Some("0") {
-        problems.push(format!("control_cache refused: {:?}", exit("control_cache")));
+        problems.push(format!(
+            "control_cache refused: {:?}",
+            exit("control_cache")
+        ));
     }
     for entry in [
         ".gitconfig",

@@ -2674,7 +2674,12 @@ fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
 #[test]
 fn evidence_leaves_out_engine_folders_in_any_spelling_the_volume_opens() {
     let dir = rust_repo();
-    let spelled = ["\u{feff}.git", ".GIT", ".crazy\u{200c}agent", "Graphify-Out"];
+    let spelled = [
+        "\u{feff}.git",
+        ".GIT",
+        ".crazy\u{200c}agent",
+        "Graphify-Out",
+    ];
     for name in spelled {
         std::fs::create_dir(dir.path().join(name)).unwrap();
     }

@@ -348,7 +348,12 @@ fn a_git_folder_in_any_spelling_the_volume_opens_as_git_is_left_out_of_the_copy(
         "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}
     });
     fs::write(real.join("hooks/hooks.json"), config.to_string()).unwrap();
-    let spelled = [top, "hooks/.GIT", "hooks/\u{feff}.git", "hooks/.g\u{200c}it"];
+    let spelled = [
+        top,
+        "hooks/.GIT",
+        "hooks/\u{feff}.git",
+        "hooks/.g\u{200c}it",
+    ];
     for folder in spelled {
         fs::create_dir_all(real.join(folder)).unwrap();
         fs::write(real.join(folder).join("start.sh"), "exit 0\n").unwrap();

@@ -284,7 +284,10 @@ impl Caller {
             let from = at.checked_add(filled as u64).ok_or(Errno::FAULT)?;
             let read = self.memory.read_at(&mut text[filled..], from);
             let read = read.ok().filter(|read| *read > 0).ok_or(Errno::FAULT)?;
-            if let Some(end) = text[filled..filled + read].iter().position(|byte| *byte == 0) {
+            if let Some(end) = text[filled..filled + read]
+                .iter()
+                .position(|byte| *byte == 0)
+            {
                 text.truncate(filled + end);
                 return Ok(text);
             }
@@ -568,9 +571,8 @@ impl Job<'_> {
             return Err(Errno::EXIST);
         }
         let open = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
-        let from = |start: String| {
-            OsString::from_vec([start.as_bytes(), &b"/"[..], folder].concat())
-        };
+        let from =
+            |start: String| OsString::from_vec([start.as_bytes(), &b"/"[..], folder].concat());
         let task = self.caller.task();
         let start = match base {
             _ if folder.first() == Some(&b'/') => Ok(from(format!("{task}/root"))),
@@ -585,7 +587,10 @@ impl Job<'_> {
             Err((held, path)) => rustix::fs::openat(held, path, open, Mode::empty())?,
         };
         let mut real = real_of(held.as_fd())?;
-        let own = (self.server.own, rustix::thread::gettid().as_raw_nonzero().get());
+        let own = (
+            self.server.own,
+            rustix::thread::gettid().as_raw_nonzero().get(),
+        );
         if let Some(agent) = rules::from_own(&real, own, (tgid, tid)) {
             held = rustix::fs::openat(CWD, agent.as_path(), open, Mode::empty())?;
             real = agent;
