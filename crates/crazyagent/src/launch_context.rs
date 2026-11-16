@@ -2756,23 +2756,29 @@ pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
 
 /// Takes a context-less launch's hold on an agent home: the same per-home lock a full
 /// install takes, installing no files, and for a listed harness's private home only through
-/// its no-follow walk from the agent home ([`lock_listed`]). The guard keeps a second launch
+/// its no-follow walk from the agent home ([`lock_listed`]), with the variables its home
+/// block sets, as [`AgentContext::install_listed`] gives them. The guard keeps a second launch
 /// out of the home while this one runs, so writing the launch key never lands on a home an
 /// agent already runs on. A Codex home also loses the skills an earlier run left in it, as a
 /// full install does (CTXM1-R2-L1). Inputs: the agent's home and the harness id. Output: the
-/// lock guard, a `launch_account_home_*` refusal, `launch_home_busy` or [`SKILLS_KEPT`].
+/// lock guard, a `launch_account_home_*` refusal, `launch_manifest_invalid`,
+/// `launch_home_busy` or [`SKILLS_KEPT`].
 pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
     let piped = drivers::piped(harness);
-    let lock = match piped {
+    let (lock, environment) = match piped {
         Ok(Piped::Acp | Piped::JsonlTurn | Piped::TextTurn) => {
             let listed = crate::harnesses::registry::registry()
                 .get(harness)
                 .ok_or_else(|| failure("launch_harness_unsupported"))?;
-            lock_listed(home, Some(listed.manifest().id.as_str()))?
+            let manifest = listed.manifest();
+            let asked = crate::harnesses::home::read(manifest)
+                .map_err(|_| failure("launch_manifest_invalid"))?;
+            let lock = lock_listed(home, Some(manifest.id.as_str()))?;
+            (lock, asked.environment(home))
         }
         _ => {
             crate::harnesses::launch::validate_home(home)?;
-            lock(home)?
+            (lock(home)?, Vec::new())
         }
     };
     if piped == Ok(Piped::Codex) {
@@ -2790,7 +2796,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         model_proxy: None,
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
-        environment: Vec::new(),
+        environment,
         engine_servers: Vec::new(),
         handover: None,
         tool_home: None,

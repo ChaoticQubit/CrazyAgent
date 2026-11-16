@@ -743,11 +743,14 @@ pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
 }
 
 /// Builds a context-less durable launch's command under its agent home's lock
-/// ([`crate::launch_context::lock_only`]). Input: the routed request. Output: the command
-/// and the lock guard, or the refusal.
+/// ([`crate::launch_context::lock_only`]): a listed harness's with the variables its home
+/// block sets, which that lock carries, Codex's and Claude Code's as [`command`] builds them.
+/// Input: the routed request. Output: the command and the lock guard, or the refusal.
 fn lone_command(request: &LaunchRequest) -> Result<(Command, Installed), LaunchError> {
     let installed = crate::launch_context::lock_only(request.account.home(), &request.harness)?;
-    Ok((command(request)?, installed))
+    let listed = crate::launch_context::listed_home(&request.harness);
+    let command = build(request, listed.then_some(&installed))?;
+    Ok((command, installed))
 }
 
 /// Builds the command for an agent of one project: writes the project's approved skills,
