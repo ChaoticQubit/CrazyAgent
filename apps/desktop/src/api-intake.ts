@@ -388,7 +388,7 @@ export function loadGitHubOwners(): Promise<Result<GitHubOwners>> {
 }
 
 /** Starts publishing a project on GitHub with a plan the New Project publish block built.
- * Inputs: the project id and the plan. Output: the job at its .gitignore lines. */
+ * Inputs: the project id and the plan. Output: the job at Drafting, or a plain failure. */
 export function startGitHubPublish(project: string, plan: GitHubPublishPlan): Promise<Result<GitHubPublishJob>> {
   return wrap(() => githubPublishStart(project, plan));
 }

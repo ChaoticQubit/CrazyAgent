@@ -1,6 +1,7 @@
 use super::intake_job;
 use super::new_project::harness_name;
 use super::new_project_page::{hints_of, key_event, look, paint, pool_choices_from};
+use super::new_project_publish::{PUBLISH_NOT_STARTED, PUBLISH_STARTED};
 use super::new_project_view::{Row, Screen as View};
 use super::project::{
     MasterStatus, OpenRequest, ProjectReply, ProjectScreen, Speaker, Tab, Transcript,
@@ -15,6 +16,7 @@ use super::settings_accounts::send as send_settings;
 use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage, ToolsPage};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{ImportFile, OwnerResponse, OwnerResult};
+use crate::github::GitHubPublishPlan;
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
@@ -237,6 +239,7 @@ pub(in crate::tui) struct ProjectPage {
     uncommitted_branch: Option<String>,
     uncommitted_asked: bool,
     job_sent: Option<IntakeQuery>,
+    publish_sent: Option<IntakeQuery>,
     moving: Option<RequestId>,
 }
 
@@ -339,6 +342,7 @@ impl ProjectPage {
             uncommitted_branch: None,
             uncommitted_asked: false,
             job_sent: None,
+            publish_sent: None,
             moving: None,
         };
         page.refresh_pool(ctx);
@@ -362,6 +366,20 @@ impl ProjectPage {
             },
             ctx,
         );
+    }
+
+    /// Starts publishing the project the owner just made on GitHub with the plan from New
+    /// project (DEC-182). The engine answers once its checks pass and drafts the .gitignore
+    /// lines after, and the reply says the publish started or why not.
+    /// Takes the plan and the context. Returns nothing; the reply arrives later.
+    pub(in crate::tui) fn start_publish(&mut self, plan: GitHubPublishPlan, ctx: &mut Ctx) {
+        assert!(self.publish_sent.is_none());
+        let query = IntakeQuery::GitHubPublishStart {
+            project: self.screen.project.clone(),
+            plan,
+        };
+        self.publish_sent = Some(query.clone());
+        super::intake::ask(ctx, query);
     }
 
     fn send_created_access(&mut self, access: AgentAccess, version: u64, ctx: &mut Ctx) {
@@ -1030,6 +1048,20 @@ impl ProjectPage {
     /// for its new folder; a started delete is followed on Home, where the page goes. Takes the
     /// reply and the context. Returns whether the page changed.
     fn intake_arrived(&mut self, event: &IntakeEvent, ctx: &mut Ctx) -> bool {
+        if self.publish_sent.as_ref() == Some(&event.query) {
+            self.publish_sent = None;
+            ctx.say(match &event.result {
+                Ok(IntakeView::Publish(_)) => {
+                    Message::success(&format!("{} is ready.", self.screen.name), PUBLISH_STARTED)
+                }
+                Ok(_) => Message::warning(
+                    PUBLISH_NOT_STARTED,
+                    &super::intake::copy("github_outcome_unknown"),
+                ),
+                Err(code) => Message::warning(PUBLISH_NOT_STARTED, &super::intake::copy(code)),
+            });
+            return true;
+        }
         let answered = self.job_sent.as_ref() == Some(&event.query);
         if answered {
             self.job_sent = None;
@@ -1856,6 +1888,7 @@ impl Screen for ProjectPage {
                 }
                 self.uncommitted_asked = false;
                 self.job_sent = None;
+                self.publish_sent = None;
                 self.sent.clear();
                 self.screen.schedule = None;
                 self.schedule_asked = false;

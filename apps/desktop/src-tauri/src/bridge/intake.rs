@@ -789,7 +789,8 @@ impl NativeBridge {
     }
 
     /// Starts publishing a project on GitHub; the engine checks the plan, the sign-in and
-    /// the project's git. Inputs: the project id and the plan. Output: the job at its lines.
+    /// the project's git, then drafts the lines after it answers. Inputs: the project id and
+    /// the plan. Output: the job at Drafting.
     pub fn github_publish_start(
         &mut self,
         id: &str,

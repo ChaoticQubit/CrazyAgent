@@ -1559,6 +1559,7 @@ export interface GitHubRuleOutcome {
 }
 
 export type GitHubPublishStep =
+  | { step: "drafting" }
   | { step: "lines"; lines: string[]; draft: GitHubIgnoreDraft }
   | { step: "blocked"; scan: { findings: GitHubSecretFinding[]; truncated: boolean } }
   | { step: "checked" }
@@ -1619,8 +1620,8 @@ export function githubOwners(): Promise<GitHubOwners> {
 }
 
 /** Starts publishing a project on GitHub: the engine checks the plan, the sign-in and the
- * project's git and drafts the .gitignore lines to show first. Inputs: the project id and
- * the plan. Output: the job at its lines. */
+ * project's git, answers, and drafts the .gitignore lines to show first after. Inputs: the
+ * project id and the plan. Output: the job at Drafting. */
 export function githubPublishStart(project: string, plan: GitHubPublishPlan): Promise<GitHubPublishJob> {
   return invoke<GitHubPublishJob>("desktop_github_publish_start", { project, plan });
 }
