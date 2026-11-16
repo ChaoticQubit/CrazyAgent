@@ -41,7 +41,11 @@ test("applying a version rewrites every manifest and lock entry and nothing else
     const changed = await applyVersion(root, version);
     assert.deepEqual(changed.sort(), [...FILES].sort());
     assert.equal(await workspaceVersion(root), version);
-    const expected = { "Cargo.toml": 1, "Cargo.lock": 5, "apps/desktop/package.json": 1, "apps/desktop/package-lock.json": 2, "apps/desktop/src-tauri/tauri.conf.json": 1 };
+    const listed = before["Cargo.toml"].match(/^members = \[\n((?:[ \t]+"[^"\n]+",\n)+)\]$/m);
+    assert(listed, "the workspace Cargo.toml lists its members one a line");
+    const workspace = listed[1].trim().split("\n").length;
+    assert(workspace >= 1);
+    const expected = { "Cargo.toml": 1, "Cargo.lock": workspace, "apps/desktop/package.json": 1, "apps/desktop/package-lock.json": 2, "apps/desktop/src-tauri/tauri.conf.json": 1 };
     for (const file of FILES) {
       const was = before[file].split("\n");
       const now = (await readFile(join(root, file), "utf8")).split("\n");
@@ -61,7 +65,7 @@ test("applying a version rewrites every manifest and lock entry and nothing else
     assert.equal(JSON.parse(await readFile(join(root, "apps/desktop/src-tauri/tauri.conf.json"), "utf8")).version, version);
     const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--format-version", "1", "--locked", "--offline", "--manifest-path", join(root, "Cargo.toml")], { maxBuffer: 64 * 1024 * 1024 }).toString());
     const members = metadata.packages.filter((item) => metadata.workspace_members.includes(item.id));
-    assert.equal(members.length, 4);
+    assert.equal(members.length, workspace, "every workspace member Cargo.toml lists, the desktop app included");
     assert(members.every((item) => item.version === version));
   } finally {
     await rm(root, { recursive: true, force: true });
