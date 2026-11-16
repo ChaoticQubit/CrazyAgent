@@ -17,6 +17,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const FOLDER: &str = "/Library/Application Support/dev.crazyagent.power";
 
+/// The most `pmset` runs a served reply may wait on: the engine's call wait covers this many
+/// runs of `pmset::WAIT` each and no more (rv-code ka12 F1).
+pub const REPLY_PMSET_RUNS_MAX: usize = 2;
+
 /// Where the helper keeps its state and what it runs: its folder and the uid that must own it
 /// (root in production), the `pmset` program, and the console whose owner it pins.
 #[derive(Debug, Clone, PartialEq, Eq)]

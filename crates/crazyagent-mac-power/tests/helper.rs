@@ -3,7 +3,7 @@
 mod support;
 
 use crazyagent_mac_power::floor::{Battery, Pressure};
-use crazyagent_mac_power::helper::{Config, Helper, Readings};
+use crazyagent_mac_power::helper::{Config, Helper, REPLY_PMSET_RUNS_MAX, Readings};
 use crazyagent_mac_power::lease::Holder;
 use crazyagent_mac_power::lid::Lid;
 use crazyagent_mac_power::protocol::{
@@ -812,11 +812,14 @@ fn the_display_sleeps_once_per_close_while_a_lease_asks_for_it() {
     let mut helper = Helper::start(closed.config());
     let me = holder(&closed, 10);
     assert_eq!(ask(&mut helper, me, LidDisplay::Sleep, NOW_MS, CLOSED_ALONE), HELD);
-    assert_eq!(ran(&closed, "displaysleepnow"), 1, "a hold that starts closed, at once");
+    assert_eq!(ran(&closed, "displaysleepnow"), 0, "never before the reply");
+    helper.sense(NOW_MS, CLOSED);
+    assert_eq!(ran(&closed, "displaysleepnow"), 1, "starts closed: the next reading");
     let released = helper.handle(me, Request::Release, NOW_MS + 1_000, CLOSED_ALONE);
     assert_eq!(released, Reply::Released);
     let again = ask(&mut helper, me, LidDisplay::Sleep, NOW_MS + 2_000, CLOSED_ALONE);
     assert_eq!(again, HELD);
+    helper.sense(NOW_MS + 2_000, CLOSED);
     assert_eq!(ran(&closed, "displaysleepnow"), 2, "a new hold counts its own close");
 }
 
@@ -832,6 +835,8 @@ fn the_display_is_left_on_at_a_desk_or_while_no_lease_asks_for_it() {
     assert_eq!(ran(&stand_in, "displaysleepnow"), 0, "no lease asks for it");
     let sleep = ask(&mut helper, second, LidDisplay::Sleep, NOW_MS + 31_000, CLOSED_ALONE);
     assert_eq!(sleep, HELD);
+    assert_eq!(ran(&stand_in, "displaysleepnow"), 0, "never before the reply");
+    helper.sense(NOW_MS + 31_000, CLOSED);
     assert_eq!(ran(&stand_in, "displaysleepnow"), 1, "any live lease that asks is enough");
 
     let desk = StandIn::new(0);
@@ -895,4 +900,45 @@ fn a_hold_accepted_after_the_start_owes_no_sleep() {
     assert_eq!(ran(&stand_in, "sleepnow"), 0, "the engine still wants the lid");
     assert_eq!(stand_in.sleep_disabled(), 1);
     assert!(view(&mut second, me).held);
+}
+
+#[test]
+fn a_first_hold_with_the_lid_closed_answers_before_the_display_sleeps() {
+    let stand_in = StandIn::new(0);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(ask(&mut helper, me, LidDisplay::Sleep, NOW_MS, CLOSED_ALONE), HELD);
+    let held = stand_in.calls();
+    assert!(held.len() <= REPLY_PMSET_RUNS_MAX, "the Hold reply waited on {held:?}");
+    assert_eq!(ran(&stand_in, "displaysleepnow"), 0, "the reply goes first");
+    helper.sense(NOW_MS, CLOSED);
+    assert_eq!(ran(&stand_in, "displaysleepnow"), 1, "the reading right after the reply");
+    let before = stand_in.calls().len();
+    let released = helper.handle(me, Request::Release, NOW_MS + 1_000, CLOSED_ALONE);
+    assert_eq!(released, Reply::Released);
+    let release_runs = stand_in.calls().len() - before;
+    assert!(release_runs <= REPLY_PMSET_RUNS_MAX, "the Release reply waited on {release_runs}");
+    assert_eq!(ran(&stand_in, "sleepnow"), 1, "the hold ended with the lid closed alone");
+}
+
+#[test]
+fn a_sigterm_before_the_first_reading_sleeps_what_the_start_owes() {
+    let stand_in = StandIn::new(0);
+    let mut first = Helper::start(stand_in.config());
+    assert_eq!(hold(&mut first, holder(&stand_in, 10), NOW_MS), HELD);
+    drop(first);
+    let mut second = Helper::start(stand_in.config());
+    assert_eq!(ran(&stand_in, "sleepnow"), 0);
+    second.terminate(CLOSED_ALONE);
+    assert_eq!(ran(&stand_in, "sleepnow"), 1, "served on the way out (rv-secreview ka12 N2)");
+    assert!(second.idle());
+
+    let open = StandIn::new(0);
+    let mut first = Helper::start(open.config());
+    assert_eq!(hold(&mut first, holder(&open, 10), NOW_MS), HELD);
+    drop(first);
+    let mut second = Helper::start(open.config());
+    second.terminate(OPEN);
+    assert_eq!(ran(&open, "sleepnow"), 0, "an open lid sleeps nothing");
+    assert!(second.idle(), "the mark is cleared either way");
 }
