@@ -253,6 +253,51 @@ fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     assert_eq!(first.code(), Some(2), "process 1 is refused as an argument");
 }
 
+/// A git folder grant (DEC-185 S1) lets git's own writes through, a lock file renamed over
+/// the index and a new logs folder, but makes no symlink and links nothing to another
+/// folder, which Landlock refuses without its make-symlink and refer rights.
+#[test]
+fn a_git_folder_grant_makes_files_and_folders_but_no_symlink_and_no_link_out() {
+    let case = case();
+    let admin = case.outside.join("admin");
+    let away = case.tmp.join("away");
+    fs::create_dir_all(&admin).unwrap();
+    fs::create_dir_all(&away).unwrap();
+    fs::write(admin.join("index"), "index\n").unwrap();
+    let script = r#"admin="$1"; away="$2"; err="$away/err"
+printf new > "$admin/index.lock" && mv "$admin/index.lock" "$admin/index" && echo renamed
+mkdir "$admin/logs" && printf log > "$admin/logs/HEAD" && echo folder
+ln -s /etc "$admin/link" 2>>"$err" && echo symlinked
+ln "$admin/index" "$away/index" 2>>"$err" && echo linked
+exit 0"#;
+    let output = crazyagent::spawn_gate::output(
+        helper_command()
+            .args(["--read", "/", "--write"])
+            .arg(&case.tmp)
+            .arg("--git-write")
+            .arg(&admin)
+            .args(["--", "/bin/sh", "-c", script, "sh"])
+            .arg(&admin)
+            .arg(&away)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    let said = String::from_utf8_lossy(&output.stdout);
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{said}{errors}");
+    assert!(said.contains("renamed"), "{said}{errors}");
+    assert!(said.contains("folder"), "{said}{errors}");
+    for refused in ["symlinked", "linked"] {
+        assert!(
+            !said.lines().any(|line| line == refused),
+            "{refused}: {said}"
+        );
+    }
+    assert_eq!(fs::read_to_string(admin.join("index")).unwrap(), "new");
+    assert!(fs::symlink_metadata(admin.join("link")).is_err());
+    assert!(fs::symlink_metadata(away.join("index")).is_err());
+}
+
 #[test]
 fn landlock_holds_the_project_boundary_on_this_kernel() {
     let case = case();

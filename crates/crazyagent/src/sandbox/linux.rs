@@ -8,7 +8,7 @@ use super::{
 use crazyagent_linux_supervisor::rules::{GitOwn, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
 use landlock::{
-    ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
+    ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
     RulesetCreatedAttr, RulesetError, RulesetStatus, Scope, path_beneath_rules,
 };
 use seccompiler::{
@@ -48,6 +48,7 @@ const GRANTS_MAX: usize = 1024;
 const HELPER_PATHS_MAX: usize = GRANTS_MAX + 64;
 const READ: &str = "--read";
 const WRITE: &str = "--write";
+const GIT_WRITE: &str = "--git-write";
 const CONNECT: &str = "--connect";
 const LIMIT_NETWORK: &str = "--limit-network";
 const OPEN_SOCKETS: &str = "--open-sockets";
@@ -209,12 +210,14 @@ const LANDLOCK_DEVICES: &[&str] = &[
 /// itself, and an open-network agent binds any TCP port but those. `die_with` names the
 /// process the helper and the program it becomes are killed with (an engine git step).
 /// `nested` tells the helper it runs inside bubblewrap's namespaces ([`NEST_ARGS`]).
-/// `guard` names what the helper's call supervisor holds ([`Guard`]). The
+/// `guard` names what the helper's call supervisor holds ([`Guard`]). `git_write` names
+/// the git folders a confined agent writes with [`git_folder_rights`] only. The
 /// engine renders it as helper arguments and the helper parses it back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandlockPolicy {
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
+    pub git_write: Vec<PathBuf>,
     pub connect: Vec<u16>,
     pub limit_network: bool,
     pub open_sockets: bool,
@@ -778,6 +781,14 @@ fn bindable(keep_free: &[u16]) -> Vec<u16> {
     assert!(ports.iter().all(|port| !keep_free.contains(port)));
     assert!(ports.len() + keep_free.len() > usize::from(u16::MAX));
     ports
+}
+
+/// The rights a confined agent has in a git folder it writes ([`LandlockPolicy::git_write`]):
+/// read, write, truncate, make and remove files and folders, and nothing else, so no
+/// symlink, no move from or to another folder, no device, fifo or socket and no execute
+/// (DEC-185 S1). No input. Output: the rights.
+pub fn git_folder_rights() -> BitFlags<AccessFs> {
+    AccessFs::from_all(FS_ABI)
 }
 
 /// Applies the policy's Landlock rules to this process. A limited network handles every
@@ -2091,6 +2102,7 @@ impl Sandbox for LinuxSandbox {
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
+    git_write: Vec<PathBuf>,
 }
 
 impl Grants {
@@ -2157,7 +2169,11 @@ impl Grants {
                     || (!grant.starts_with(secret) && !secret.starts_with(grant))
             })
         }));
-        Ok(Self { read, write })
+        Ok(Self {
+            read,
+            write,
+            git_write: Vec::new(),
+        })
     }
 }
 
@@ -2272,6 +2288,7 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
     LandlockPolicy {
         read,
         write,
+        git_write: Vec::new(),
         connect,
         limit_network,
         open_sockets,
@@ -2425,6 +2442,7 @@ mod tests {
         let grants = Grants {
             read: Vec::new(),
             write: Vec::new(),
+            git_write: Vec::new(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -2441,6 +2459,7 @@ mod tests {
         let grants = Grants {
             read: Vec::new(),
             write: Vec::new(),
+            git_write: Vec::new(),
         };
         let unshares = |network: SandboxNetwork| {
             bwrap_command(
@@ -2468,6 +2487,173 @@ mod tests {
         (temp, sandbox)
     }
 
+    fn git(folder: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(folder)
+            .args([
+                "-c",
+                "user.name=row",
+                "-c",
+                "user.email=row@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A project with one commit and a linked worktree in its worktrees folder, then the
+    /// sandbox over it with the agent's home and temp folders. No input. Output: the temp
+    /// folder, the project, the sandbox and the worktree.
+    fn linked() -> (tempfile::TempDir, PathBuf, ProjectSandbox, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let folders = ["project", "home", "tmp"].map(|name| root.join(name));
+        for folder in &folders {
+            fs::create_dir(folder).unwrap();
+        }
+        let project = folders[0].clone();
+        fs::write(project.join("owner.txt"), "owner\n").unwrap();
+        git(&project, &["init", "-q"]);
+        git(&project, &["add", "owner.txt"]);
+        git(&project, &["commit", "-q", "-m", "start"]);
+        fs::create_dir(project.join("worktrees")).unwrap();
+        let worktree = project.join("worktrees").join("agent-1");
+        let path = worktree.to_str().unwrap();
+        git(
+            &project,
+            &["worktree", "add", "-q", "--detach", path, "HEAD"],
+        );
+        let sandbox =
+            ProjectSandbox::new(&project, &folders[1], &folders[2], SandboxNetwork::Open).unwrap();
+        (temp, project, sandbox, worktree)
+    }
+
+    #[test]
+    fn a_linked_worktree_writes_its_tree_its_admin_folder_without_links_and_no_object() {
+        let (_temp, project, sandbox, worktree) = linked();
+        let confined = sandbox.confine_to_worktree(&worktree).unwrap();
+        let git = project.join(".git");
+        let admin = git.join("worktrees").join("agent-1");
+        let objects = git.join("objects");
+        let grants = Grants::of(&confined).unwrap();
+        assert!(grants.write.contains(&worktree));
+        assert_eq!(grants.git_write, vec![admin.clone()]);
+        assert!(
+            !grants.write.contains(&admin),
+            "the admin folder has the git tier only"
+        );
+        for path in grants.write.iter().chain(&grants.git_write) {
+            assert!(
+                !path.starts_with(&objects) && !objects.starts_with(path),
+                "{} reaches the object store",
+                path.display()
+            );
+            assert!(
+                *path == admin || !path.starts_with(&git),
+                "{} is in the project's git folder",
+                path.display()
+            );
+        }
+        assert!(
+            grants.read.contains(&project),
+            "the object store is read through the project"
+        );
+    }
+
+    #[test]
+    fn a_clone_writes_its_whole_clone_and_has_no_git_folder_grant() {
+        let (_temp, project, sandbox, _) = linked();
+        let clone = project.join("worktrees").join("agent-2");
+        fs::create_dir(&clone).unwrap();
+        git(&clone, &["init", "-q"]);
+        let confined = sandbox.confine_to_clone(&clone).unwrap();
+        let grants = Grants::of(&confined).unwrap();
+        assert!(grants.write.contains(&clone));
+        assert!(grants.git_write.is_empty());
+        let git = project.join(".git");
+        assert!(grants.write.iter().all(|path| !path.starts_with(&git)));
+    }
+
+    #[test]
+    fn a_git_folder_grant_reaches_the_helper_and_counts_toward_its_limit() {
+        let folder = PathBuf::from("/p/.git/worktrees/agent-1");
+        let policy = LandlockPolicy {
+            read: vec![PathBuf::from("/usr")],
+            git_write: vec![folder.clone()],
+            ..LandlockPolicy::default()
+        };
+        let args = policy.args();
+        let at = args.iter().position(|arg| arg == GIT_WRITE);
+        assert_eq!(at.map(|at| &args[at + 1]), Some(&OsString::from(&folder)));
+        let mut run = args;
+        run.extend([OsString::from("--"), OsString::from("/bin/true")]);
+        let parsed = match HelperRequest::parse(run) {
+            Ok(HelperRequest::Run { policy, .. }) => Some(policy),
+            _ => None,
+        };
+        assert_eq!(parsed, Some(policy));
+        let many = LandlockPolicy {
+            git_write: vec![folder; HELPER_PATHS_MAX + 1],
+            ..LandlockPolicy::default()
+        };
+        let mut run = many.args();
+        run.extend([OsString::from("--"), OsString::from("/bin/true")]);
+        assert!(
+            HelperRequest::parse(run).is_err(),
+            "the git tier counts toward the helper's path limit"
+        );
+    }
+
+    #[test]
+    fn a_git_folder_grant_makes_no_link_and_moves_nothing_across_folders() {
+        let rights = git_folder_rights();
+        for kept_out in [
+            AccessFs::MakeSym,
+            AccessFs::Refer,
+            AccessFs::Execute,
+            AccessFs::MakeChar,
+            AccessFs::MakeBlock,
+            AccessFs::MakeFifo,
+            AccessFs::MakeSock,
+        ] {
+            assert!(!rights.contains(kept_out), "{kept_out:?}");
+        }
+        for kept in [
+            AccessFs::ReadFile,
+            AccessFs::ReadDir,
+            AccessFs::WriteFile,
+            AccessFs::Truncate,
+            AccessFs::MakeReg,
+            AccessFs::MakeDir,
+            AccessFs::RemoveFile,
+            AccessFs::RemoveDir,
+        ] {
+            assert!(rights.contains(kept), "{kept:?}");
+        }
+        assert!(AccessFs::from_all(FS_ABI).contains(rights));
+    }
+
+    #[test]
+    #[should_panic(expected = "no confined layout starts on bubblewrap")]
+    fn bubblewrap_never_takes_a_git_folder_grant() {
+        let grants = Grants {
+            read: Vec::new(),
+            write: Vec::new(),
+            git_write: vec![PathBuf::from("/p/.git/worktrees/agent-1")],
+        };
+        let _command = bwrap_command(
+            Path::new(BWRAP_PATHS[0]),
+            &helper(),
+            &grants,
+            Path::new("/tmp"),
+            &SandboxNetwork::Open,
+        );
+    }
+
     #[test]
     fn an_open_network_agent_binds_every_port_but_the_kept_ones() {
         let keep_free = [1455, 11434, 41300];
@@ -2490,6 +2676,7 @@ mod tests {
         let grants = Grants {
             read: Vec::new(),
             write: Vec::new(),
+            git_write: Vec::new(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(!policy.limit_network);
@@ -2599,6 +2786,7 @@ mod tests {
         let grants = Grants {
             read: Vec::new(),
             write: Vec::new(),
+            git_write: Vec::new(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(policy.limit_network);
@@ -2718,6 +2906,7 @@ mod tests {
         let grants = Grants {
             read: Vec::new(),
             write: Vec::new(),
+            git_write: Vec::new(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
