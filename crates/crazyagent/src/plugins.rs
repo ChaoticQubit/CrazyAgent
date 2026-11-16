@@ -392,15 +392,14 @@ pub struct LaunchServer {
 /// Why a launch left the default pack's context-mode server out rather than run its npx
 /// spec: the engine's shared install is still being set up, setting it up failed or cannot
 /// run, the installed files did not match the pinned hashes, the Node.js beside npx is older
-/// than context-mode needs, this platform has no shared install at all, or the npx a spec
-/// only shaped like that launch names is not one the engine's tool resolver finds.
+/// than context-mode needs, or the npx a spec only shaped like that launch names is not one
+/// the engine's tool resolver finds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextModeOff {
     SettingUp,
     Failed,
     Mismatch,
     NodeTooOld,
-    Unsupported,
     NpxNotFound,
 }
 

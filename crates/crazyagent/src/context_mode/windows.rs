@@ -1,7 +1,5 @@
 use super::refused;
-use crate::sandbox::{
-    InstalledSandbox, LinuxSupervisor, ProjectSandbox, SandboxNetwork, SandboxRemote,
-};
+use crate::sandbox::{InstalledSandbox, LinuxSupervisor, ProjectSandbox, SandboxNetwork};
 use crate::setup::InstallError;
 use crate::setup::run::run_bounded;
 use std::fs::{File, OpenOptions};
@@ -47,9 +45,11 @@ pub(super) fn npm_ready(bin: &Path) -> bool {
     runnable(&npm_cli(bin))
 }
 
-/// The network the install's npm may reach: HTTPS on any host, the unix reach.
+/// The network the install's npm may reach on Windows: open, for this step only, because the
+/// AppContainer refuses every endpoint limit (`FIREWALL_RULE_MISSING`) and the pinned program
+/// needs npm's dependencies. Scripts stay off and both pins are checked before it runs.
 pub(super) fn npm_network() -> SandboxNetwork {
-    SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
+    SandboxNetwork::Open
 }
 
 /// Opens a path as itself, never through a link or junction there, and keeps it only when it
