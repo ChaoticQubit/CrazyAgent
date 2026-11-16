@@ -419,7 +419,7 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
             "its copy of the project could not be checked. Close the master and open it again, then send again."
         }
         Some(MasterReason::SandboxStopped) => {
-            "the sandbox stopped it because a protected name could not be put back."
+            "the sandbox ended it because a protected name could not be put back."
         }
         Some(MasterReason::Cancelled) => "you stopped this turn.",
         Some(MasterReason::ApprovalRequired) | Some(MasterReason::Unknown) | None => {
@@ -1040,7 +1040,7 @@ mod tests {
             ),
             (
                 MasterReason::SandboxStopped,
-                "Codex stopped: the sandbox stopped it because a protected name could not be put back. (sandbox_stopped) Press r to try again.",
+                "Codex stopped: the sandbox ended it because a protected name could not be put back. (sandbox_stopped) Press r to try again.",
             ),
         ] {
             let transcript = build(

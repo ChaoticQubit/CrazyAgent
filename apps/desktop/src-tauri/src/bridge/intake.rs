@@ -149,7 +149,7 @@ pub const INTAKE_CODES: [&str; 118] = [
     "projects_removed_full",
 ];
 
-const GITHUB_CODES: [&str; 69] = [
+const GITHUB_CODES: [&str; 70] = [
     "github_not_signed_in",
     "github_token_invalid",
     "github_token_refused",
@@ -195,6 +195,7 @@ const GITHUB_CODES: [&str; 69] = [
     "github_publish_push_failed",
     "github_publish_push_timed_out",
     "github_publish_running",
+    "github_publish_secret_found",
     "github_publish_secret_in_history",
     "github_publish_step_invalid",
     "github_publish_too_large",

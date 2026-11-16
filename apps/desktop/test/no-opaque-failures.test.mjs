@@ -150,6 +150,37 @@ test("a bridge failure keeps its own sentence and names the engine code behind i
   assert.equal(api.classifyFailure({ code: "made_up_code", cause: "engine_detail" }).message, `${FALLBACK} (engine_detail)`);
 });
 
+const REPROOF = "engine/owner/transport/native_auth_channel/reproof.rs";
+const REPROOF_SKIPPED = /Some\(cause\) => \{\s*eprintln!\("native_auth_reproof_skipped harness=\{harness\} cause=\{cause\}"\)\s*\}/;
+const REPROOF_USES = [/\.filter\(\|start\| self\.unreprovable\(start\.method\)\.is_none\(\)\)/, /match self\.unreprovable\(start\.method\) \{/, /\|\| self\.unreprovable\(attempt\.method\)\.is_some\(\)/];
+
+/**
+ * Reads the causes a skipped engine-start re-proof only logs: the codes `skip_cause` returns,
+ * which reach stderr as `native_auth_reproof_skipped` and no client. Takes nothing. Returns
+ * the codes, after checking that no other engine file names or calls them and that reproof.rs
+ * only filters on them, prints them and stops waiting on them, so any new use reads as a code.
+ */
+function reproofSkipCauses() {
+  const file = engineFiles.find(({ path }) => path === REPROOF);
+  assert.ok(file, `${REPROOF} holds the engine-start re-proof`);
+  const at = file.text.indexOf("pub(super) fn skip_cause(");
+  assert.ok(at >= 0, "reproof.rs names why a re-proof is skipped in skip_cause");
+  const open = file.text.indexOf("{", at) + 1;
+  const causes = literals(file.text.slice(open, closing(file.text, open, "{", "}") - 1), /"(native_auth_[a-z_]+)"/g);
+  assert.equal(causes.length, 4, causes.join(","));
+  for (const cause of causes) {
+    const named = engineFiles.filter(({ text }) => text.includes(`"${cause}"`)).map(({ path }) => path);
+    assert.deepEqual(named, [REPROOF], `${cause} is named only by skip_cause`);
+    assert.equal(file.text.split(`"${cause}"`).length, 2, `${cause} is named once in reproof.rs`);
+  }
+  const calls = (name) => engineFiles.reduce((count, { text }) => count + (text.match(new RegExp(`\\b${name}\\(`, "g"))?.length ?? 0), 0);
+  assert.equal(calls("skip_cause"), 2, "skip_cause is called only by unreprovable");
+  assert.equal(calls("unreprovable"), 1 + REPROOF_USES.length, "unreprovable has only its known uses");
+  for (const use of REPROOF_USES) assert.match(file.text, use);
+  assert.match(file.text, REPROOF_SKIPPED, "a skip cause is only printed to stderr");
+  return new Set(causes);
+}
+
 /**
  * Collects every sign-in failure code the engine records: the custodian codes it keeps, each
  * engine failure type's `fn code` arms and its Some(...) and .unwrap_or(...) literals.
@@ -161,10 +192,12 @@ function recordedSignInCodes() {
   const custodian = literals(listed[1], /"([a-z][a-z0-9_]*)"/g);
   const arms = engineFiles.flatMap(({ text }) => codeArms(text));
   assert.ok(custodian.length > 0 && arms.length > 0, `${custodian.length} custodian codes, ${arms.length} failure arms`);
+  const logged = reproofSkipCauses();
   const facts = new Set([
     ...custodian,
     ...arms,
-    ...engineFiles.flatMap(({ text }) => literals(withoutPrints(text), /(?:Some|\.unwrap_or)\(\s*"(native_auth_[a-z_]+)"/g)),
+    ...engineFiles.flatMap(({ text }) => literals(withoutPrints(text), /(?:Some|\.unwrap_or)\(\s*"(native_auth_[a-z_]+)"/g))
+      .filter((code) => !logged.has(code)),
   ]);
   assert.ok(facts.size >= 6 && facts.has("native_auth_interrupted"), [...facts].join(","));
   return facts;
@@ -280,7 +313,7 @@ test("a configured master stopped by a harness protocol fault, the frame size li
 test("a configured master the sandbox stopped because a protected name could not be put back says so (DEC-185 S2a)", () => {
   const turn = { id: "t", ordinal: 1, phase: "failed", reason: "sandbox_stopped", reply: null, cause: "sandbox_held_not_put_back" };
   assert.equal(research.turnLine(turn),
-    "The master stopped: the sandbox stopped it because a protected name could not be put back. (sandbox_held_not_put_back)");
+    "The master stopped: the sandbox ended it because a protected name could not be put back. (sandbox_held_not_put_back)");
 });
 
 test("a team agent or task that closed on a launch code shows the engine line with its code", () => {
