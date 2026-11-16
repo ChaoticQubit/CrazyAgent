@@ -570,7 +570,10 @@ fn a_put_back_that_fails_keeps_its_entry_and_is_tried_again_at_the_next_reading(
     assert_eq!(stand_in.sleep_disabled(), 1);
     assert!(stand_in.journal_text().unwrap().contains("sleep_disabled"));
     assert!(!stand_in.calls().contains(&"sleepnow".to_string()));
-    assert!(!helper.idle(), "a value still to put back keeps the helper up");
+    assert!(
+        !helper.idle(),
+        "a value still to put back keeps the helper up"
+    );
     assert!(helper.wants_readings());
     fs::remove_file(stand_in.path("refuse-put-back")).unwrap();
     helper.sense(NOW_MS + 150_000, COOL);

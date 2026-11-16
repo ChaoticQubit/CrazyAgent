@@ -2,7 +2,7 @@
 //! connection, at most 1024 bytes, closed enums and bounded integers only, then one reply line.
 
 use serde::{Deserialize, Serialize};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 
 pub const VERSION: u8 = 1;
 pub const REQUEST_BYTES_MAX: usize = 1024;
@@ -80,22 +80,95 @@ pub enum Reply {
     Refused { reason: Refusal },
 }
 
+/// The calls a request line may name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Call {
+    Hold,
+    Release,
+    Read,
+    Forget,
+}
+
+/// A request line as it travels: the protocol version, the call and, for a hold only, its lease.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Wire {
+    version: u8,
+    call: Call,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_s: Option<u16>,
+}
+
 /// Reads one request: at most `REQUEST_BYTES_MAX` bytes up to and including its newline.
 /// Input: the connection. Output: the checked request, or why it was refused.
 pub fn read_request(reader: &mut impl Read) -> Result<Request, Refusal> {
-    let _ = reader;
-    Err(Refusal::Pmset)
+    let mut line = Vec::with_capacity(REQUEST_BYTES_MAX);
+    let mut limited = reader.by_ref().take(REQUEST_BYTES_MAX as u64);
+    let read = io::BufReader::new(&mut limited).read_until(b'\n', &mut line);
+    assert!(line.len() <= REQUEST_BYTES_MAX);
+    if read.is_err() {
+        return Err(Refusal::Malformed);
+    }
+    if line.last() != Some(&b'\n') {
+        if line.len() == REQUEST_BYTES_MAX {
+            return Err(Refusal::TooLong);
+        }
+        return Err(Refusal::Malformed);
+    }
+    let wire: Wire = serde_json::from_slice(&line).map_err(|_| Refusal::Malformed)?;
+    checked(wire)
+}
+
+/// Checks a parsed line's version and lease bounds. Input: the line. Output: the request.
+fn checked(wire: Wire) -> Result<Request, Refusal> {
+    if wire.version != VERSION {
+        return Err(Refusal::Version);
+    }
+    let request = match (wire.call, wire.lease_s) {
+        (Call::Hold, Some(lease_s)) if (LEASE_S_MIN..=LEASE_S_MAX).contains(&lease_s) => {
+            Request::Hold { lease_s }
+        }
+        (Call::Hold, _) => return Err(Refusal::LeaseOutOfRange),
+        (_, Some(_)) => return Err(Refusal::Malformed),
+        (Call::Release, None) => Request::Release,
+        (Call::Read, None) => Request::Read,
+        (Call::Forget, None) => Request::Forget,
+    };
+    if let Request::Hold { lease_s } = request {
+        assert!(lease_s >= LEASE_S_MIN);
+        assert!(lease_s <= LEASE_S_MAX);
+    }
+    Ok(request)
 }
 
 /// Writes one reply line. Input: the connection and the reply. Output: the write result.
 pub fn write_reply(writer: &mut impl Write, reply: &Reply) -> io::Result<()> {
-    let _ = (writer, reply);
-    Ok(())
+    let mut line = serde_json::to_vec(reply).map_err(io::Error::from)?;
+    line.push(b'\n');
+    assert!(line.len() <= REPLY_BYTES_MAX);
+    assert_eq!(line.iter().filter(|byte| **byte == b'\n').count(), 1);
+    writer.write_all(&line)?;
+    writer.flush()
 }
 
 /// The bytes a client sends for a request, newline included. Input: the request. Output: the
 /// line.
 pub fn encode_request(request: &Request) -> Vec<u8> {
-    let _ = request;
-    Vec::new()
+    let (call, lease_s) = match *request {
+        Request::Hold { lease_s } => (Call::Hold, Some(lease_s)),
+        Request::Release => (Call::Release, None),
+        Request::Read => (Call::Read, None),
+        Request::Forget => (Call::Forget, None),
+    };
+    let wire = Wire {
+        version: VERSION,
+        call,
+        lease_s,
+    };
+    let mut line = serde_json::to_vec(&wire).expect("a request always serializes");
+    line.push(b'\n');
+    assert!(line.len() <= REQUEST_BYTES_MAX);
+    assert_eq!(line.iter().filter(|byte| **byte == b'\n').count(), 1);
+    line
 }

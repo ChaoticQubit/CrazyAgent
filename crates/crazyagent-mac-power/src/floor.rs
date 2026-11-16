@@ -32,6 +32,19 @@ pub enum Floor {
 /// Judges one reading. Inputs: the battery and the pressure. Output: the floor that applies,
 /// heat first, or `None`.
 pub fn judge(battery: Battery, pressure: Pressure) -> Option<Floor> {
-    let _ = (battery, pressure);
-    None
+    let hot = match pressure {
+        Pressure::Level(level) => level >= PRESSURE_CRITICAL_MIN,
+        Pressure::Unread => true,
+    };
+    if hot {
+        return Some(Floor::Heat);
+    }
+    let empty = match battery {
+        Battery::OnBattery { percent } => percent <= BATTERY_PERCENT_FLOOR,
+        Battery::None | Battery::Ac { .. } | Battery::Unread => false,
+    };
+    empty.then_some(Floor::Battery)
 }
+
+const _: () = assert!(PRESSURE_CRITICAL_MIN <= PRESSURE_MAX);
+const _: () = assert!(BATTERY_PERCENT_FLOOR < 100);

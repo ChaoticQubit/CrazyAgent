@@ -11,7 +11,7 @@ pub struct Lid {
 impl Lid {
     /// Whether a hold ending now should sleep the Mac at once: lid closed, no external display.
     pub fn sleeps_now(self) -> bool {
-        false
+        self.closed && !self.external_display
     }
 }
 
@@ -19,5 +19,11 @@ impl Lid {
 /// `AppleClamshellCausesSleep`, false when an external display keeps it awake). Output: the
 /// lid, or `None` when it cannot be read.
 pub fn read() -> Option<Lid> {
-    None
+    let (closed, causes_sleep) = crate::ffi::clamshell()?;
+    let lid = Lid {
+        closed,
+        external_display: !causes_sleep,
+    };
+    assert_eq!(lid.sleeps_now(), closed && causes_sleep);
+    Some(lid)
 }

@@ -23,25 +23,30 @@ pub struct Lease {
 impl Lease {
     /// A lease of `secs` seconds from `now_ms`.
     pub fn new(now_ms: u64, secs: u16) -> Self {
-        let _ = (now_ms, secs);
-        Self { until_ms: 0 }
+        assert!(secs > 0);
+        let lease = Self {
+            until_ms: now_ms.saturating_add(u64::from(secs) * 1_000),
+        };
+        assert!(lease.until_ms >= now_ms);
+        lease
     }
 
     /// Renews the lease for `secs` seconds from `now_ms`.
     pub fn extend(&mut self, now_ms: u64, secs: u16) {
-        let _ = (now_ms, secs);
+        *self = Self::new(now_ms, secs);
+        assert!(self.left_s(now_ms) <= secs);
     }
 
     /// Whether the lease has run out at `now_ms`.
     pub fn expired(&self, now_ms: u64) -> bool {
-        let _ = now_ms;
-        false
+        now_ms >= self.until_ms
     }
 
-    /// Whole seconds left at `now_ms`, 0 once run out.
+    /// Whole seconds left at `now_ms`, rounded up, 0 once run out.
     pub fn left_s(&self, now_ms: u64) -> u16 {
-        let _ = now_ms;
-        u16::MAX
+        let left_ms = self.until_ms.saturating_sub(now_ms);
+        let left_s = left_ms.div_ceil(1_000);
+        u16::try_from(left_s).unwrap_or(u16::MAX)
     }
 }
 
@@ -58,43 +63,58 @@ pub struct Leases {
 impl Leases {
     /// Starts or renews `holder`'s lease. Output: `Full` for a new holder past `HOLDERS_MAX`.
     pub fn hold(&mut self, holder: Holder, now_ms: u64, secs: u16) -> Result<(), Full> {
-        let _ = (holder, now_ms, secs, &self.held);
-        Err(Full)
+        assert!(self.held.len() <= HOLDERS_MAX);
+        if let Some(lease) = self.held.get_mut(&holder) {
+            lease.extend(now_ms, secs);
+            return Ok(());
+        }
+        if self.held.len() == HOLDERS_MAX {
+            return Err(Full);
+        }
+        self.held.insert(holder, Lease::new(now_ms, secs));
+        assert!(self.held.len() <= HOLDERS_MAX);
+        Ok(())
     }
 
     /// Ends `holder`'s own lease. Output: whether it had one.
     pub fn release(&mut self, holder: &Holder) -> bool {
-        let _ = holder;
-        true
+        let had = self.held.remove(holder).is_some();
+        assert!(!self.held.contains_key(holder));
+        had
     }
 
     /// Ends every lease that ran out at `now_ms`. Output: how many ended.
     pub fn expire(&mut self, now_ms: u64) -> usize {
-        let _ = now_ms;
-        0
+        let before = self.held.len();
+        self.held.retain(|_, lease| !lease.expired(now_ms));
+        assert!(self.held.values().all(|lease| !lease.expired(now_ms)));
+        before - self.held.len()
     }
 
     /// Ends every lease.
-    pub fn clear(&mut self) {}
+    pub fn clear(&mut self) {
+        self.held.clear();
+    }
 
     /// How many leases live.
     pub fn len(&self) -> usize {
-        usize::MAX
+        assert!(self.held.len() <= HOLDERS_MAX);
+        self.held.len()
     }
 
     /// Whether no lease lives.
     pub fn is_empty(&self) -> bool {
-        false
+        self.held.is_empty()
     }
 
     /// The most seconds any lease has left at `now_ms`.
     pub fn left_s(&self, now_ms: u64) -> u16 {
-        let _ = now_ms;
-        0
+        let left = self.held.values().map(|lease| lease.left_s(now_ms));
+        left.max().unwrap_or(0)
     }
 
     /// When the next lease runs out, if any lives.
     pub fn next_expiry_ms(&self) -> Option<u64> {
-        None
+        self.held.values().map(|lease| lease.until_ms).min()
     }
 }

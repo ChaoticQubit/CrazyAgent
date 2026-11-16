@@ -3,9 +3,11 @@
 
 use crate::floor::Battery;
 use crate::journal::Key;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub const PMSET: &str = "/usr/bin/pmset";
 pub const OUTPUT_BYTES_MAX: u64 = 65_536;
@@ -45,37 +47,134 @@ impl Pmset {
 
     /// Writes one journaled setting: `pmset -a <key> <0|1>`.
     pub fn set(&self, key: Key, on: bool) -> Result<(), PmsetError> {
-        let _ = (key, on, &self.program);
-        Ok(())
+        let value = if on { "1" } else { "0" };
+        self.run(&["-a", key.pmset_name(), value]).map(drop)
     }
 
     /// Sleeps the Mac now: `pmset sleepnow`.
     pub fn sleep_now(&self) -> Result<(), PmsetError> {
-        Ok(())
+        self.run(&["sleepnow"]).map(drop)
     }
 
     /// Reads the settings: `pmset -g`.
     pub fn values(&self) -> Result<Values, PmsetError> {
-        Ok(Values::default())
+        self.run(&["-g"]).map(|text| parse_values(&text))
     }
 
     /// Reads the battery: `pmset -g batt`.
     pub fn battery(&self) -> Result<Battery, PmsetError> {
-        Ok(Battery::Unread)
+        self.run(&["-g", "batt"]).map(|text| parse_battery(&text))
     }
+
+    /// Runs the program once with `args`, an empty environment but `PATH` and no input.
+    /// Output: its standard output, or why the run did not succeed.
+    fn run(&self, args: &[&str]) -> Result<String, PmsetError> {
+        assert!(!args.is_empty());
+        assert!(args.len() <= ARGS_MAX);
+        let mut child = Command::new(&self.program)
+            .args(args)
+            .env_clear()
+            .env("PATH", CHILD_PATH)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(PmsetError::Spawn)?;
+        let stdout = child.stdout.take().expect("standard output is piped");
+        let reader = thread::spawn(move || read_capped(stdout));
+        let status = wait_bounded(&mut child)?;
+        if !status.success() {
+            return Err(PmsetError::Failed(status.code()));
+        }
+        let bytes = reader.join().map_err(|_| PmsetError::Output)??;
+        assert!(bytes.len() as u64 <= OUTPUT_BYTES_MAX);
+        String::from_utf8(bytes).map_err(|_| PmsetError::Output)
+    }
+}
+
+const ARGS_MAX: usize = 3;
+const POLL: Duration = Duration::from_millis(10);
+const POLLS_MAX: u32 = 501;
+const _: () = assert!(POLL.as_millis() * (POLLS_MAX as u128 - 1) >= WAIT.as_millis());
+
+/// Reads at most `OUTPUT_BYTES_MAX` bytes of the child's output. Output: the bytes, or
+/// `Output` when the child wrote more or the read failed.
+fn read_capped(stdout: ChildStdout) -> Result<Vec<u8>, PmsetError> {
+    let mut bytes = Vec::new();
+    let read = stdout.take(OUTPUT_BYTES_MAX + 1).read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() as u64 > OUTPUT_BYTES_MAX {
+        return Err(PmsetError::Output);
+    }
+    Ok(bytes)
+}
+
+/// Waits for the child up to `WAIT`, then kills and reaps it. Output: its exit status, or
+/// `TimedOut`, or `Failed(None)` when it could not be waited on.
+fn wait_bounded(child: &mut Child) -> Result<ExitStatus, PmsetError> {
+    let started = Instant::now();
+    let mut outcome = Err(PmsetError::TimedOut);
+    for _ in 0..POLLS_MAX {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if started.elapsed() < WAIT => thread::sleep(POLL),
+            Ok(None) => break,
+            Err(_) => {
+                outcome = Err(PmsetError::Failed(None));
+                break;
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(outcome.is_err());
+    outcome
 }
 
 /// Parses `pmset -g`: the `SleepDisabled` and `lowpowermode` lines, each `0` or `1`.
 pub fn parse_values(text: &str) -> Values {
-    let _ = text;
-    Values {
-        sleep_disabled: Some(true),
-        low_power: Some(true),
+    let mut values = Values::default();
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        let (Some(name), Some(word), None) = (words.next(), words.next(), words.next()) else {
+            continue;
+        };
+        let value = match word {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        };
+        match name {
+            "SleepDisabled" => values.sleep_disabled = value,
+            "lowpowermode" => values.low_power = value,
+            _ => {}
+        }
     }
+    values
 }
 
 /// Parses `pmset -g batt`: the power source line and the first internal battery's percent.
 pub fn parse_battery(text: &str) -> Battery {
-    let _ = text;
-    Battery::Ac { percent: 0 }
+    let source = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("Now drawing from '"))
+        .and_then(|rest| rest.strip_suffix('\''));
+    let percent = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("-InternalBattery-"))
+        .map(battery_percent);
+    match (source, percent) {
+        (Some("AC Power"), None) => Battery::None,
+        (Some("AC Power"), Some(Some(percent))) => Battery::Ac { percent },
+        (Some("Battery Power"), Some(Some(percent))) => Battery::OnBattery { percent },
+        _ => Battery::Unread,
+    }
+}
+
+/// The percent on one battery line: the number before `%` after the tab, at most 100.
+fn battery_percent(line: &str) -> Option<u8> {
+    let (_, rest) = line.split_once('\t')?;
+    let (digits, _) = rest.split_once('%')?;
+    let percent: u8 = digits.trim().parse().ok()?;
+    (percent <= 100).then_some(percent)
 }
