@@ -79,6 +79,7 @@ fn refused(socket: &Path) -> bool {
 /// the record of that name: [`Servers::mates`] then reads no server by the file alone, so a
 /// keeper held for it decides nothing. Takes the engine root and the lead. Returns the
 /// answer; a lead whose start named no socket counts.
+#[cfg(target_os = "macos")]
 fn teammates_socket_gone(root: &Path, lead: &AgentId) -> bool {
     !teammates_socket(root, lead).is_ok_and(|socket| listening(&socket))
 }

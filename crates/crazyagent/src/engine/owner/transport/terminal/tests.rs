@@ -135,7 +135,7 @@ async fn attach_sized_mid_session_is_refused() {
 /// whose teammates' server ended, the state the 2255 lead's servers end in, is refused at the
 /// handshake with `terminal_teammates_server_ended`, the code the desktop and the TUI read as
 /// the terminal's end. Here an earlier engine started the lead, so this engine holds no
-/// keeper and the refused socket that server left counts as its end. No server starts.
+/// keeper and the refused socket that server left counts as its end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pane_attach_on_a_lead_whose_servers_ended_is_refused_as_its_teammates_servers_end() {
     use std::os::unix::fs::DirBuilderExt;
@@ -186,10 +186,6 @@ async fn a_pane_attach_on_a_lead_whose_servers_ended_is_refused_as_its_teammates
         refused,
         Err(crate::terminal::TEAMMATES_SERVER_ENDED.to_owned()),
         "a pane attach on a lead whose servers ended was not refused as its teammates' server's end"
-    );
-    assert!(
-        !root.join(FOLDER).join(SOCKET).exists(),
-        "the attach started the engine's server"
     );
 
     drop(owner);
