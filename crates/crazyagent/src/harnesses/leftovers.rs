@@ -452,19 +452,23 @@ impl From<LineageToken> for String {
 }
 
 /// One process of an agent's lineage: its id, the start identity a reused id does not
-/// share, and its program's name as the owner reads it.
+/// share, its program's name as the owner reads it, and on macOS its unique id and the one of
+/// the process it was forked from, if read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Process {
     pid: i32,
     started: String,
     program: String,
+    unique: Option<u64>,
+    forked_from: Option<u64>,
 }
 
 /// The processes of a Full access agent the engine can still find: its leader, every
 /// process in the leader's session while that leader runs, every process whose parent is
-/// one of them, and every process whose environment holds the launch's `token`. A process
-/// that left all of them before it was seen, such as a daemon whose parent already exited
-/// and whose environment was cleared or is not shown, is not found. `table` is the command
+/// one of them, on macOS every process forked from one of them, and every process whose
+/// environment holds the launch's `token`. A process that left all of them before it was
+/// seen, such as a double-forked daemon whose short-lived middle process no table showed and
+/// whose environment was cleared or is not shown, is not found. `table` is the command
 /// that lists the processes; `unchecked` tells that a listing failed, so the lineage may
 /// miss processes; `pending` is a listing still held up past its bound, which a later read
 /// waits out instead of starting another; `sandboxed` tells the agent ran in a sandbox no
@@ -756,6 +760,8 @@ impl Lineage {
                 pid,
                 started,
                 program: String::new(),
+                unique: None,
+                forked_from: None,
             };
             if !self.known.iter().any(|known| same(known, &process)) {
                 self.known.push(process);
@@ -1060,10 +1066,16 @@ impl Lineage {
     }
 
     /// Applies one table read: keeps each known process still running with the same start,
-    /// under the name it was last read by, then adds this user's processes in the leader's session
-    /// and those whose parent is kept. Session members join only while the leader runs with
-    /// the start its first read found, so a stranger that reuses a dead leader's id never
-    /// joins (SECAUDIT-SETSID-LEFTOVER r1 L1). Inputs: the lineage and the rows. Output: none.
+    /// under the name it was last read by and with the unique ids an earlier read found, which
+    /// a later read never replaces: a process keeps its ids for life, across exec as well, so
+    /// a later read that finds none or others met a process that exited, or an id reused,
+    /// between the listing and that read (rv-ds241 N1). Then adds this user's processes in
+    /// the leader's session, those whose parent is kept, and on macOS those forked from a
+    /// process known before this read or kept in it, by the forking parent's unique id, which
+    /// the kernel keeps after that parent exits and never reuses (SETSID-A-RESIDUAL). Session
+    /// members join only while the leader runs with the start its first read found, so a
+    /// stranger that reuses a dead leader's id never joins (SECAUDIT-SETSID-LEFTOVER r1 L1).
+    /// Inputs: the lineage and the rows. Output: none.
     #[cfg(unix)]
     fn apply(&mut self, rows: &[Row]) {
         let session = self.leader_started.as_ref().is_some_and(|started| {
@@ -1078,6 +1090,8 @@ impl Lineage {
                     .find(|known| same(known, process))
                     .map(|known| Process {
                         program: known.program.clone(),
+                        unique: known.unique.or(process.unique),
+                        forked_from: known.forked_from.or(process.forked_from),
                         ..process.clone()
                     })
             })
@@ -1086,7 +1100,13 @@ impl Lineage {
             let found = rows.iter().find(|(process, parent, member)| {
                 !kept.iter().any(|known| known.pid == process.pid)
                     && ((session && *member == Some(self.leader))
-                        || kept.iter().any(|known| known.pid == *parent))
+                        || kept.iter().any(|known| known.pid == *parent)
+                        || process.forked_from.is_some_and(|from| {
+                            self.known
+                                .iter()
+                                .chain(kept.iter())
+                                .any(|known| known.unique == Some(from))
+                        }))
             });
             match found {
                 Some((process, ..)) => kept.push(process.clone()),
@@ -1112,9 +1132,13 @@ enum Following {
 /// BL-PANE-FOLLOW-GAP, LINUX-KILL-GROUP): the
 /// thread takes the first read, or a pane's own, then the engine's shared table every
 /// [`FOLLOWER_PACE`], so a process a table showed in the run stays known once it leaves the
-/// run's session and loses its parent. One that does both between two tables it took, up to the pace plus the table's age
-/// plus the reads, is never seen, and only its token can still find it at the stop: the
-/// SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
+/// run's session and loses its parent. On macOS so does a process forked from one a table
+/// showed, even when it leaves the session and that parent exits between two tables, as
+/// `ssh -f` and an ssh ControlPersist master detach: it is linked by the forking parent's
+/// unique id (SETSID-A-RESIDUAL). What stays open, accepted with owner item 6, is a double
+/// fork whose middle process lives and exits between two tables, up to the pace plus the
+/// table's age plus the reads: its child is never seen, and only its token can still find it
+/// at the stop, the SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
 /// apply a table, so a stop never waits for a read in flight. Holds the leader, the launch's
 /// token, whether the run is sandboxed, the lineage and the sender whose drop ends the thread.
 pub(crate) struct Follower {
@@ -1342,8 +1366,9 @@ fn table(
     parse(&listing, user, own)
 }
 
-/// Reads the process table with `argv` and the session of each listed process. Inputs: the
-/// command and the pending listing. Output: the rows, or uncertain when the listing fails.
+/// Reads the process table with `argv`, the session of each listed process and, on macOS, its
+/// unique ids. Inputs: the command and the pending listing. Output: the rows, or uncertain
+/// when the listing fails.
 #[cfg(unix)]
 fn rows(
     argv: &'static [&'static str],
@@ -1355,6 +1380,15 @@ fn rows(
             let session = rustix::process::Pid::from_raw(process.pid)
                 .and_then(|pid| rustix::process::getsid(Some(pid)).ok())
                 .map(|session| session.as_raw_nonzero().get());
+            #[cfg(target_os = "macos")]
+            let process = match crazyagent_macos_fs::process_ids(process.pid) {
+                Some(ids) => Process {
+                    unique: Some(ids.unique),
+                    forked_from: Some(ids.forked_from),
+                    ..process
+                },
+                None => process,
+            };
             (process, parent, session)
         })
         .collect())
@@ -1686,6 +1720,8 @@ fn parse(listing: &str, user: u32, own: i32) -> Result<Vec<(Process, i32)>, Unst
                 pid,
                 started: fields[4..TABLE_FIELDS].join(" "),
                 program: String::new(),
+                unique: None,
+                forked_from: None,
             },
             parent,
         ));
@@ -1936,6 +1972,8 @@ pub(crate) mod tests {
                 pid,
                 started: "Wed Oct 28 03:10:00 2026".into(),
                 program: "sleep".into(),
+                unique: None,
+                forked_from: None,
             })
             .collect();
         let report = Leftovers(Box::new(Lineage {
@@ -2099,6 +2137,8 @@ pub(crate) mod tests {
                 pid: 2,
                 started: "Wed Oct 28 03:10:00 2026".into(),
                 program: "sleep".into(),
+                unique: None,
+                forked_from: None,
             }],
             table: PS_TABLE,
             unchecked: true,
@@ -2143,6 +2183,8 @@ pub(crate) mod tests {
                 pid: own,
                 started: "Wed Oct 28 03:10:00 2026".into(),
                 program: "placeholder".into(),
+                unique: None,
+                forked_from: None,
             }],
             table: PS_TABLE,
             unchecked: true,
@@ -2283,8 +2325,93 @@ pub(crate) mod tests {
             pid,
             started: started.into(),
             program: "sleep".into(),
+            unique: None,
+            forked_from: None,
         };
         (process, parent, Some(session))
+    }
+
+    /// One table row of a `sleep` whose unique ids were read. Inputs: its id, parent, session,
+    /// start, unique id and the unique id of the process it was forked from. Output: the row.
+    fn forked(pid: i32, parent: i32, session: i32, started: &str, unique: u64, from: u64) -> Row {
+        let (mut process, parent, session) = row(pid, parent, session, started);
+        process.unique = Some(unique);
+        process.forked_from = Some(from);
+        (process, parent, session)
+    }
+
+    #[test]
+    fn a_setsid_child_of_a_seen_process_that_exited_joins_by_the_unique_id_it_was_forked_from() {
+        let mut lineage = bare(500, Some(FIRST));
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(600, 500, 500, FIRST, 9_100, 9_000),
+        ]);
+        let pids = |lineage: &Lineage| -> Vec<i32> {
+            lineage.known.iter().map(|process| process.pid).collect()
+        };
+        assert_eq!(pids(&lineage), [500, 600]);
+
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            row(600, 500, 500, FIRST),
+        ]);
+        assert_eq!(
+            pids(&lineage),
+            [500, 600],
+            "600 was listed, then exited before its ids were read"
+        );
+
+        let orphan = forked(601, 1, 601, FIRST, 9_101, 9_100);
+        let stranger = forked(602, 1, 602, FIRST, 9_102, 7_000);
+        let unread = row(603, 1, 603, FIRST);
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            orphan.clone(),
+            stranger.clone(),
+            unread.clone(),
+        ]);
+        assert_eq!(
+            pids(&lineage),
+            [500, 601],
+            "the child of 600 left its session and went to launchd when 600 exited"
+        );
+
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            orphan,
+            stranger,
+            unread,
+        ]);
+        assert_eq!(
+            pids(&lineage),
+            [500, 601],
+            "it stays known once its parent is no longer known"
+        );
+    }
+
+    #[test]
+    fn a_known_process_keeps_the_unique_ids_first_read_when_a_reused_id_reads_others() {
+        let mut lineage = bare(500, Some(FIRST));
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(600, 500, 500, FIRST, 9_100, 9_000),
+        ]);
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(600, 500, 500, FIRST, 9_900, 7_000),
+        ]);
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(601, 1, 601, FIRST, 9_101, 9_100),
+            forked(602, 1, 602, FIRST, 9_902, 9_900),
+        ]);
+        let pids: Vec<i32> = lineage.known.iter().map(|process| process.pid).collect();
+        assert_eq!(
+            pids,
+            [500, 601],
+            "a stranger that reused 600's id between the listing and the read brings nothing"
+        );
     }
 
     #[test]
@@ -2754,6 +2881,8 @@ pub(crate) mod tests {
             pid,
             started: started.into(),
             program: "sleep".into(),
+            unique: None,
+            forked_from: None,
         };
         let picked = targets(
             &[
