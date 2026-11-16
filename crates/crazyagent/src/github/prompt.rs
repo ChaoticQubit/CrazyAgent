@@ -112,7 +112,24 @@ impl GitHub {
 /// the move writes. A carry that fails is logged and the move still finishes; the job then
 /// stays under the old folder. Inputs: that database and both folders. Output: none.
 pub(crate) fn carry_publish(db: &Connection, from: &Path, to: &Path) {
-    let _ = (db, from, to);
+    if from == to {
+        return;
+    }
+    let Some(root) = db.path().map(Path::new).and_then(Path::parent) else {
+        eprintln!("github_publish_carry_failed code=engine_root_missing");
+        return;
+    };
+    let carried = state::load_job(root, from).and_then(|job| {
+        let Some(mut job) = job else {
+            return Ok(());
+        };
+        job.project = to.to_path_buf();
+        state::save_job(root, &job)?;
+        state::remove_job(root, from)
+    });
+    if let Err(error) = carried {
+        eprintln!("github_publish_carry_failed code={}", error.0);
+    }
 }
 
 /// Saves a project's publish job where the engine keeps it, for rows outside the GitHub
