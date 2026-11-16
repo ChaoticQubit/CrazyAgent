@@ -254,25 +254,36 @@ pub fn cancel(root: &Path, name: &str) -> SignInState {
         .map_or(SignInState::Idle, stopped)
 }
 
+fn refusal(error: OAuthError) -> EngineError {
+    EngineError(error.0.into())
+}
+
 /// Saves the owner's own OAuth app for a connector that allows one, which then signs in
-/// with that app alone; a waiting sign-in is cancelled, since it began with another client.
-/// Inputs: the engine database and root, the connector, the client id and the client
-/// secret of a confidential app. Output: Ok, or the refusal.
+/// with that app alone; a waiting sign-in is cancelled first, since it began with another
+/// client. Inputs: the engine database and root, the connector, the client id and the
+/// client secret of a confidential app. Output: Ok, or the refusal.
 pub fn save_own_app(
-    _db: &Connection,
-    _root: &Path,
-    _name: &str,
-    _client_id: &str,
-    _secret: Option<&[u8]>,
+    db: &Connection,
+    root: &Path,
+    name: &str,
+    client_id: &str,
+    secret: Option<&[u8]>,
 ) -> Result<(), EngineError> {
-    Err(EngineError("own_app_not_built".into()))
+    let secret = secret
+        .map(std::str::from_utf8)
+        .transpose()
+        .map_err(|_| EngineError("connector_oauth_client_invalid".into()))?;
+    cancel(root, name);
+    oauth::set_own_client(db, root, name, client_id, secret)
+        .map_err(refusal)
 }
 
 /// Removes the owner's own OAuth app for a connector, which then signs in the automatic
-/// way; a waiting sign-in is cancelled. Inputs: the engine database and root and the
+/// way; a waiting sign-in is cancelled first. Inputs: the engine database and root and the
 /// connector. Output: Ok, or the refusal.
-pub fn clear_own_app(_db: &Connection, _root: &Path, _name: &str) -> Result<(), EngineError> {
-    Err(EngineError("own_app_not_built".into()))
+pub fn clear_own_app(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
+    cancel(root, name);
+    oauth::clear_own_client(db, root, name).map_err(refusal)
 }
 
 #[cfg(test)]

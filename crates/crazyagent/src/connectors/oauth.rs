@@ -164,6 +164,22 @@ pub fn set_own_client(
     })
 }
 
+/// Removes the owner's own OAuth app for a trusted connector: its client id, secret and the
+/// issuer it was bound to, even when the file no longer lets the owner bring one. A sign-in
+/// made with it ends and sign-ins begun with it are dropped. Inputs: database, engine root
+/// and connector. Output: Ok, or `connector_oauth_not_offered`, `_key_store_unavailable`.
+pub fn clear_own_client(db: &Connection, root: &Path, name: &str) -> Result<(), OAuthError> {
+    let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
+    own_replaced(db, root, name, &manifest.title, now_ms(), || {
+        for reference in [own_ref, own_secret_ref, own_issuer_ref] {
+            let key = reference(name)?;
+            accounts::remove_key_in(root, PLUGIN_KEYS, key.as_str())
+                .map_err(|_| key_store())?;
+        }
+        Ok(())
+    })
+}
+
 /// Saves the owner's own app where no sign-in can be made, so none is ended. Output: the
 /// save's answer.
 #[cfg(not(unix))]
