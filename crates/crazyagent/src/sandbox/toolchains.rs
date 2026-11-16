@@ -778,18 +778,37 @@ pub(crate) fn write_getconf(home: &Path, native_lead: bool) -> io::Result<()> {
         }
         return Err(error);
     }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o700)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32)
-        .open(&path)?;
-    file.write_all(script.as_bytes())
-        .and_then(|()| file.sync_all())?;
-    let metadata = file.metadata()?;
-    assert_eq!(metadata.mode() & 0o777, 0o700);
-    assert_eq!(metadata.len(), script.len() as u64);
-    Ok(())
+    let written = fs::set_permissions(&folder, fs::Permissions::from_mode(0o700))
+        .and_then(|()| {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o700)
+                .custom_flags(
+                    (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32,
+                )
+                .open(&path)
+        })
+        .and_then(|mut file| {
+            file.set_permissions(fs::Permissions::from_mode(0o700))?;
+            file.write_all(script.as_bytes())?;
+            file.sync_all()?;
+            file.metadata()
+        });
+    match written {
+        Ok(metadata)
+            if metadata.mode() & 0o777 == 0o700 && metadata.len() == script.len() as u64 =>
+        {
+            Ok(())
+        }
+        outcome => {
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_dir(&folder);
+            Err(outcome
+                .err()
+                .unwrap_or_else(|| io::Error::other("launch_getconf_unsafe")))
+        }
+    }
 }
 
 /// Whether the launch folder already holds this exact `getconf`: `bin` a real folder and
@@ -1168,7 +1187,8 @@ impl Drop for ScopedTmp {
 /// the owner's IDE terminal home stays. A launch that finds the exact link another launch
 /// of the same home made at a name it saw free takes it (RV-DS241-199). Inputs: the agent
 /// home and the owner's tool homes. Output: the cargo home, or a refusal when `.cargo` is
-/// not a plain folder or a name will not give way.
+/// not a plain folder or a name will not give way, whose text is `cleanup_walk_too_long`
+/// when removing the name ran past its walk budget (RESET-WALK-CODE).
 #[cfg(unix)]
 pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf> {
     use rustix::fs::{CWD, Mode, OFlags};
@@ -1185,8 +1205,12 @@ pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf>
         Mode::empty(),
     )?;
     let remove = |name: &str| {
-        crate::team::cleanup::remove_home_entry(&folder, name)
-            .map_err(|_| io::Error::other("cargo cache name will not give way"))
+        crate::team::cleanup::remove_home_entry(&folder, name).map_err(|problem| {
+            io::Error::other(crate::team::cleanup::home_code(
+                &problem,
+                "cargo cache name will not give way",
+            ))
+        })
     };
     let linked = |name: &str, shared: &Path| {
         rustix::fs::readlinkat(&folder, name, Vec::new())

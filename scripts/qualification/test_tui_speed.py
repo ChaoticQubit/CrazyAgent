@@ -1,4 +1,5 @@
-from tui_speed import STEPS, at, crumb, metrics, usable
+from tui_flow import screen_text
+from tui_speed import ENTER, PROJECT, STEPS, TAB, at, crumb, metrics, ready, step_paths, usable
 
 HOME = (" [◆▪◆▪] CrazyAgent  /  Home" + " " * 60 + "2 agents running \n"
         + "─" * 100 + "\n  Projects  1\n  ▌ Speed Project\n")
@@ -6,6 +7,9 @@ LOADING = " [◆▪◆▪] CrazyAgent  /  Home\n" + "─" * 80 + "\n  Projects\n
 OVERVIEW = " [◆▪◆▪] CrazyAgent  /  Home  /  Speed Project" + " " * 50 + "\n  ◫ Overview   » Conversation\n"
 AGENTS = " [◆▪◆▪] CrazyAgent  /  Home  /  Speed Project  /  Agents\n  ◫ Overview\n"
 SETTINGS = " [◆▪◆▪] CrazyAgent  /  Settings  /  Accounts\n  @ Accounts 0   ⊞ Pools 0\n"
+CONVERSATION = " [◆▪◆▪] CrazyAgent  /  Home  /  Speed Project  /  Conversation\n  ◫ Overview\n"
+MASTER = (" [◆▪◆▪] CrazyAgent  /  Speed Project  /  Master" + " " * 50 + "\n"
+          + " s Try again   n New session   l Sessions   Esc Back   r Refresh\n")
 
 
 def test_crumb_is_the_header_path_without_the_brand_or_the_status():
@@ -41,6 +45,29 @@ def test_steps_name_one_metric_each_and_launch_comes_first():
     assert all(key for name, key, _ in STEPS[1:])
 
 
+def test_open_project_tabs_from_homes_setup_guide_to_the_projects_before_enter():
+    keys = {name: key for name, key, _ in STEPS}
+    assert keys["open_project"] == TAB + ENTER
+
+
+def test_the_conversation_step_lands_on_the_conversation_tab_or_the_live_master_view():
+    crumbs = {name: path for name, _, path in STEPS}
+    paths = step_paths("tab_conversation", crumbs["tab_conversation"], "Speed Project")
+    assert paths[0] == ("Speed Project", "Conversation")
+    assert any(usable(CONVERSATION, path, "Speed Project") for path in paths)
+    assert any(usable(MASTER, path, "Speed Project") for path in paths)
+    assert not any(at(OVERVIEW, path) for path in paths)
+    assert not any(at(AGENTS, path) for path in paths)
+
+
+def test_every_other_step_lands_only_on_its_own_crumbs():
+    for name, _, crumbs in STEPS:
+        if name == "tab_conversation":
+            continue
+        own = tuple("Speed Project" if part == PROJECT else part for part in crumbs)
+        assert step_paths(name, crumbs, "Speed Project") == [own], name
+
+
 def test_metrics_name_every_step_in_ms():
     times = {name: 10.0 + index for index, (name, _, _) in enumerate(STEPS)}
     named = metrics(times)
@@ -73,3 +100,23 @@ if __name__ == "__main__":
     for check in checks:
         check()
     print("tui_speed_checks=%d" % len(checks))
+
+
+def test_a_frame_cut_mid_write_is_not_ready_until_it_ends():
+    home = ("\x1b[1;1H [◆▪◆▪] CrazyAgent  /  Home\x1b[3;1H  Projects  1"
+            "\x1b[4;1H  ▌ Speed Project\x1b[0m\x1b[?25l").encode()
+    top = "\x1b[1;1H [◆▪◆▪] CrazyAgent  /  Settings  /  Accounts".encode()
+    body = ("\x1b[3;1H  Accounts      \x1b[4;1H                 "
+            "\x1b[5;1H  ⠦ Loading accounts\x1b[0m\x1b[?25l").encode()
+    loaded = "\x1b[5;1H  > Local models    \x1b[0m\x1b[?25l".encode()
+    path = [("Settings", "Accounts")]
+    cut = home + top
+    assert usable(screen_text(cut, 100, 24), path[0], PROJECT), "the cut frame shows the crumb over the old body"
+    assert not ready(cut, screen_text(cut, 100, 24), path, PROJECT)
+    whole = cut + body
+    assert not ready(whole, screen_text(whole, 100, 24), path, PROJECT)
+    done = whole + loaded
+    assert ready(done, screen_text(done, 100, 24), path, PROJECT)
+    assert not ready(done[:-3], screen_text(done[:-3], 100, 24), path, PROJECT)
+    cursor = done + b"\x1b[?25h\x1b[6;5H"
+    assert ready(cursor, screen_text(cursor, 100, 24), path, PROJECT)

@@ -1587,7 +1587,7 @@ fn the_set_up_projects_are_read_row_by_row_and_whole_only_when_the_database_is_u
         .execute(
             "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i < ?1)
              INSERT INTO project_setups(project, body) SELECT 'p' || i, '{}' FROM n",
-            [PROJECT_ROOTS_MAX as i64],
+            [crate::harnesses::finding::AGENT_ROWS_MAX as i64],
         )
         .unwrap();
     assert_eq!(registered_projects(&many), None);

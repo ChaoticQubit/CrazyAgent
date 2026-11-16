@@ -272,6 +272,7 @@ pub enum OwnerMutation {
     },
     SetSandboxSettings {
         settings: crate::sandbox_settings::SandboxSettings,
+        version: u64,
     },
     SetCleanupSettings {
         settings: crate::cleanup_settings::CleanupSettings,
@@ -620,8 +621,9 @@ impl OwnerMutation {
                     profile: profile.clone(),
                 }
             }
-            Self::SetSandboxSettings { settings } => Command::OwnerSandbox {
+            Self::SetSandboxSettings { settings, version } => Command::OwnerSandbox {
                 settings: *settings,
+                version: *version,
             },
             Self::SetCleanupSettings { settings } => Command::OwnerAgentCleanup {
                 settings: *settings,
@@ -1209,6 +1211,9 @@ pub enum OwnerResult {
     RcliProfileRegistered {
         registration: Box<crate::master_session::RcliProfileRegistrationMetadata>,
     },
+    OnboardingStarted {
+        project_id: ProjectId,
+    },
     Rejected {
         code: String,
     },
@@ -1395,6 +1400,7 @@ pub enum OwnerData {
     },
     SandboxSettings {
         settings: crate::sandbox_settings::SandboxSettings,
+        version: u64,
     },
     CleanupSettings {
         settings: crate::cleanup_settings::CleanupSettings,

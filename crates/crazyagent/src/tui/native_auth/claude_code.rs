@@ -16,11 +16,11 @@ impl Buffer {
         let mut bytes = [0; 4];
         let encoded = character.encode_utf8(&mut bytes);
         if self.0.len() + encoded.len() > INPUT_BYTES_MAX {
-            bytes.fill(0);
+            crate::credentials::wipe(&mut bytes);
             return Err("Claude code exceeds the private input limit".into());
         }
         self.0.extend_from_slice(encoded.as_bytes());
-        bytes.fill(0);
+        crate::credentials::wipe(&mut bytes);
         Ok(())
     }
 
@@ -28,12 +28,12 @@ impl Buffer {
         let Some(index) = self.0.iter().rposition(|byte| byte & 0xc0 != 0x80) else {
             return;
         };
-        self.0[index..].fill(0);
+        crate::credentials::wipe(&mut self.0[index..]);
         self.0.truncate(index);
     }
 
     fn clear(&mut self) {
-        self.0.fill(0);
+        crate::credentials::wipe(&mut self.0);
         self.0.clear();
     }
 }

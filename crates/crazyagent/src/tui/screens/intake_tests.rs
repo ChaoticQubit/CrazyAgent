@@ -22,6 +22,7 @@ use crate::tui::keys::Key;
 use crate::tui::run::owner_arrival;
 use crate::tui::seam::{Arrival, PoolChange, Request, ShellRequest};
 use crate::tui::shell::Shell;
+use crate::tui::test_home::{LOCAL_ADDRESS, refusing_port};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -40,35 +41,15 @@ pools = [
 ]
 "#;
 
-/// Stands for the seeded local account's address in test settings. `Engine::with` swaps it
-/// for a loopback port that refuses every connection, so no row reaches a model server the
-/// host runs (a host Ollama on 127.0.0.1:11434 made the account read ready).
-const LOCAL_ADDRESS: &str = "LOCAL_ADDRESS";
-
 struct Engine {
     root: tempfile::TempDir,
     user: tempfile::TempDir,
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
-    _refusing: tokio::net::TcpSocket,
+    _refusing: [std::net::TcpStream; 2],
     controller: OwnerController,
     #[cfg(target_os = "macos")]
     _keychain: crate::credentials::test_keychain::TestKeychain,
-}
-
-/// Binds a loopback port without listening on it, so every connection to it is refused
-/// while the socket lives and no other process can take the port. Output: the socket, which
-/// the test engine holds, and its address.
-fn refusing_port() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
-    let socket =
-        crate::spawn_gate::bind_tcp_unlistened(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .unwrap();
-    let address = socket.local_addr().unwrap();
-    assert!(
-        address.ip().is_loopback() && address.port() != 0,
-        "{address}"
-    );
-    (socket, address)
 }
 
 impl Engine {
@@ -1244,7 +1225,7 @@ async fn first_run_setup_continues_without_installing_and_home_lists_what_is_mis
     let rows = render(&mut shell, 80, 24);
     let help = crate::tui::screens::settings_accounts::tests::bar_rows(&rows).join("\n");
     assert!(help.contains("Enter Install and continue"), "{rows:#?}");
-    assert!(help.contains("c Continue without installing"), "{rows:#?}");
+    assert!(help.contains("c Skip for now"), "{rows:#?}");
 
     shell.key(Key::Char('c'));
     assert_eq!(shell.place(), Some(Place::HarnessSetup));
@@ -1597,13 +1578,12 @@ fn a_folder_that_came_with_its_own_project_instructions_says_so_in_the_desktop_w
 
 /// SA vid 7 (leader 09:27 A): a folder that arrives with its own .crazyagent/instructions.md,
 /// committed, with no git or with a git folder that cannot be read, starts onboarding with
-/// those instructions under their Imported heading and a review that says so in the desktop
-/// words, and the import Process runs later never labels the owner's text again; one whose
-/// label cannot be saved is refused, so no project holds the text unlabelled.
+/// those instructions under their Imported heading and an onboarding the engine marks as
+/// carrying them, which the review shows in the desktop words (the review row above), and
+/// the import Process runs later never labels the owner's text again; one whose label cannot
+/// be saved is refused, so no project holds the text unlabelled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_folder_that_arrives_with_project_instructions_starts_onboarding_with_them_labelled() {
-    let notice = "The folder came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
-    let wrapped = crate::tui::text::wrap(notice, 76);
     let mut engine = Engine::start().await;
     let home = engine.set_home().await;
     let mut problems = Vec::new();
@@ -1693,9 +1673,17 @@ async fn a_folder_that_arrives_with_project_instructions_starts_onboarding_with_
             ));
             continue;
         }
-        let rows = render(&mut shell, 200, 40);
-        if !wrapped.iter().all(|line| shows(&rows, line)) {
-            problems.push(format!("{name}: the review shows no notice: {rows:#?}"));
+        let Some(Place::Onboarding {
+            project: Some(project),
+            ..
+        }) = shell.place()
+        else {
+            panic!("the started onboarding names its project");
+        };
+        if !engine.controller.onboarding(project).await.unwrap().carried {
+            problems.push(format!(
+                "{name}: the onboarding does not say its instructions came with the folder"
+            ));
         }
         crate::agent_home::save_project(&folder, "OWNER-EDIT\n").unwrap();
         std::fs::write(folder.join("AGENTS.md"), "NEW-RULE\n").unwrap();

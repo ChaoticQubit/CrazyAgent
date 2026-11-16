@@ -397,12 +397,12 @@ mod run {
         PROJECT_POOL_MISSING, PROVIDER_UNREACHABLE, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE,
         WALL_TIME,
     };
+    use crate::protocol::ProjectId;
     use crate::research::accounts::{AccountPick, Reach, SettingsResolver};
     use crate::research::runner::{
         ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchLimits,
         ResearchRunner,
     };
-    use crate::protocol::ProjectId;
     use std::os::unix::fs::DirBuilderExt;
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};

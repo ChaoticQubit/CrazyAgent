@@ -4,7 +4,7 @@ use super::{RcliMasterBinding, RcliMasterHost, RcliMasterLaunch};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
 use crate::protocol::{CredentialRef, ProjectId, ProtocolError, RequestId, SessionId};
 use crate::sandbox::{
-    InstalledSandbox, LinuxSupervisor, ProjectSandbox, SandboxNetwork, SandboxRemote,
+    InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork, SandboxRemote,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -83,7 +83,7 @@ fn sandbox(case: &Case, project: &Path) -> InstalledSandbox {
     .allow_read(root)
     .unwrap();
     let profile = profiles.join("rcli.sb");
-    InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On).unwrap()
+    InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off).unwrap()
 }
 
 fn credential(text: &str) -> CredentialRef {

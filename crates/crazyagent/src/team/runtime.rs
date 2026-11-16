@@ -1,6 +1,6 @@
 use super::events::{
-    INSTRUCTIONS_RESTARTED, LEAD_STOPPED_AGENT, MASTER_STOPPED_AGENT, OWNER_RESTARTED,
-    OWNER_STOPPED_AGENT, OWNER_WOKE,
+    HIDDEN_RESTARTED, INSTRUCTIONS_RESTARTED, LEAD_STOPPED_AGENT, MASTER_STOPPED_AGENT,
+    OWNER_RESTARTED, OWNER_STOPPED_AGENT, OWNER_WOKE,
 };
 use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, CancelBy, CancelPath,
@@ -116,6 +116,9 @@ const HOOK_TRUST_WAIT: Duration = Duration::from_secs(60);
 /// How often a project's running agents are checked for an owner instruction edit under
 /// the Restart and Badge choices (DEC-111 QR1).
 const INSTRUCTION_CHECK_EVERY: Duration = Duration::from_secs(2);
+/// How often the engine lists a project's running agents that can still open a folder
+/// hidden after they started, and serves the owner's Restart them for them (SA-VID14-A).
+const HIDDEN_CHECK_EVERY: Duration = Duration::from_millis(500);
 /// How often an idle live master's account is compared with its pool's top account under
 /// the Live master account choice Move when idle (DEC-139).
 const MOVE_CHECK_EVERY: Duration = Duration::from_secs(2);
@@ -263,7 +266,8 @@ struct Grant {
 /// (F08); `terminal_display` is the project's terminal display, read when the
 /// agent is prepared (N-D9, DEC-141);
 /// `task_start` is a sub-agent's or master's Task-start reminder from its launch context
-/// (T3-15, DEC-116).
+/// (T3-15, DEC-116); `hidden` the digests of the project folders its sandbox hides, read
+/// once with the profile (SA-VID14-A).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -294,6 +298,7 @@ struct Plan {
     relay: Option<Arc<Relay>>,
     terminal_display: crate::coord::settings::TerminalDisplay,
     task_start: Option<String>,
+    hidden: Vec<String>,
 }
 
 /// Why a pane an earlier engine left running on a keyed endpoint is not taken over: its key
@@ -709,6 +714,47 @@ impl Narrowed {
     }
 }
 
+/// Why a stopped sub-agent starts again in its own worktree and conversation once its
+/// process ended: the owner changed its instructions (DEC-111), or the owner pressed Restart
+/// them for an agent that could still open a folder hidden after it started (SA-VID14-A).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Restart {
+    Instructions,
+    Hidden,
+}
+
+impl Restart {
+    /// The event the restarted agent shows. Input: the reason. Output: the text.
+    fn restarted(self) -> &'static str {
+        match self {
+            Self::Instructions => INSTRUCTIONS_RESTARTED,
+            Self::Hidden => HIDDEN_RESTARTED,
+        }
+    }
+
+    /// The team note when the owner, the master or its lead stopped the agent meanwhile,
+    /// so it is not started again. Input: the reason. Output: the text.
+    fn dropped(self) -> &'static str {
+        match self {
+            Self::Instructions => INSTRUCTIONS_RESTART_DROPPED,
+            Self::Hidden => HIDDEN_RESTART_DROPPED,
+        }
+    }
+
+    /// The team note when the agent could not start again. Inputs: the reason and the
+    /// plain cause. Output: the text.
+    fn failed(self, reason: &str) -> String {
+        let why = match self {
+            Self::Instructions => "to load your changed instructions",
+            Self::Hidden => "so it can no longer open a hidden folder",
+        };
+        format!(
+            "An agent stopped {why} but could not start again: {}.",
+            bound_text(reason, 300)
+        )
+    }
+}
+
 struct Worker {
     project: ProjectId,
     role: AgentRole,
@@ -768,6 +814,7 @@ struct Worker {
     reasked: Option<i64>,
     starts: crate::coord::relay::TaskStarts,
     after_done: AfterDone,
+    hidden: Option<Vec<String>>,
 }
 
 /// The lstat size and modification time of an agent worktree's HEAD file and of its own
@@ -861,7 +908,8 @@ pub struct TeamRuntime {
     claims_failed: Option<String>,
     reproving: Option<Arc<AtomicBool>>,
     instructions_next: BTreeMap<ProjectId, Instant>,
-    instruction_restarts: BTreeMap<i64, ProjectId>,
+    restarts: BTreeMap<i64, (ProjectId, Restart)>,
+    hidden_next: BTreeMap<ProjectId, Instant>,
     access_restarts: BTreeMap<i64, ProjectId>,
     access_widened: BTreeSet<ProjectId>,
     master_restarts: BTreeSet<ProjectId>,
@@ -1214,7 +1262,8 @@ impl TeamRuntime {
             claims_failed: None,
             reproving: None,
             instructions_next: BTreeMap::new(),
-            instruction_restarts: BTreeMap::new(),
+            restarts: BTreeMap::new(),
+            hidden_next: BTreeMap::new(),
             access_restarts: BTreeMap::new(),
             access_widened: BTreeSet::new(),
             master_restarts: BTreeSet::new(),
@@ -3345,7 +3394,7 @@ impl TeamRuntime {
             .filter_map(|row| row.ok().and_then(|p| ProjectId::new(p).ok()))
             .collect();
         projects.extend(self.workers.values().map(|w| w.project.clone()));
-        projects.extend(self.instruction_restarts.values().cloned());
+        projects.extend(self.restarts.values().map(|(project, _)| project.clone()));
         Ok(projects.into_iter().collect())
     }
 
@@ -3408,6 +3457,17 @@ impl TeamRuntime {
         self.retire_rejected(project, access);
         self.retire_narrowed(&stored);
         self.restart_widened(&stored)?;
+        let now = Instant::now();
+        if self
+            .hidden_next
+            .get(project)
+            .is_none_or(|next| now >= *next)
+        {
+            self.hidden_next
+                .insert(project.clone(), now + HIDDEN_CHECK_EVERY);
+            self.restart_seers(&stored)?;
+            self.mark_seers(&stored)?;
+        }
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
         self.resume_interrupted(&stored, access, &paused)?;
@@ -4244,6 +4304,61 @@ impl TeamRuntime {
             if live {
                 self.master_restarts.insert(project.clone());
                 self.note(project, ACCESS_MASTER_RESTARTED)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Lists the project's running agents that can still open a folder the owner hid after
+    /// they started, for the team status and the owner's Restart them (SA-VID14-A): each not
+    /// stopping, in the sandbox and not a teammate, whose start hid neither the folder nor
+    /// one above it, a pane from before the engine kept that list counting as hiding none.
+    /// Takes the project's stored setup. Returns any SQLite failure.
+    fn mark_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let saved = crate::sandbox::hidden_paths::load(&self.connection, project.as_str())
+            .map_err(error)?;
+        let seers: BTreeSet<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| &w.project == project && !w.stopping)
+            .filter(|(_, w)| w.access != AgentAccess::Full && w.role != AgentRole::Teammate)
+            .filter(|(_, w)| !crate::sandbox::hidden_paths::covers(w.hidden.as_deref(), &saved))
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(seers.len() <= self.workers.len());
+        crate::sandbox::hidden_paths::set_seers(&self.connection, project.as_str(), &seers)
+            .map_err(error)
+    }
+
+    /// Serves the owner's Restart them (SA-VID14-A): each listed agent stops at once with its
+    /// work held for it, a sub-agent to start again in its own worktree and conversation once
+    /// its process ended and the live master as a planned restart, so its next start hides
+    /// every saved folder. Takes the project's stored setup. Returns any SQLite failure.
+    fn restart_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let asked = crate::sandbox::hidden_paths::restarts(&self.connection, project.as_str())
+            .map_err(error)?;
+        for id in asked {
+            let Some(worker) = self.workers.get_mut(&id) else {
+                continue;
+            };
+            if &worker.project != project || worker.stopping || worker.role == AgentRole::Teammate {
+                continue;
+            }
+            worker.stop_for("engine_stop:hidden");
+            worker.held = true;
+            worker.cancel.store(true, Ordering::SeqCst);
+            let _ = worker.orders.send(Order::Stop);
+            match (worker.role, worker.live) {
+                (AgentRole::Sub, _) => {
+                    worker.restarting = true;
+                    self.restarts.insert(id, (project.clone(), Restart::Hidden));
+                }
+                (AgentRole::Master, true) => {
+                    self.master_restarts.insert(project.clone());
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -6513,7 +6628,7 @@ impl TeamRuntime {
         paused: &BTreeSet<CredentialRef>,
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
-        self.restart_after_edits(stored, access, paused)?;
+        self.restart_ended(stored, access, paused)?;
         let now = Instant::now();
         if self
             .instructions_next
@@ -6573,7 +6688,8 @@ impl TeamRuntime {
                     worker.restarting = true;
                     worker.stop_for("engine_stop:instructions");
                     let _ = worker.orders.send(Order::Stop);
-                    self.instruction_restarts.insert(id, project.clone());
+                    self.restarts
+                        .insert(id, (project.clone(), Restart::Instructions));
                     self.restarted_for.insert(id, hash);
                 }
                 (AgentRole::Master, true) if idle && quiet && worker.turn_started.is_none() => {
@@ -6594,28 +6710,28 @@ impl TeamRuntime {
         crate::instruction_files::set_badges(&self.connection, project, &flagged).map_err(error)
     }
 
-    /// Starts again each sub-agent of the project that stopped for an instruction edit, once
-    /// its process ended: in its own worktree and conversation through [`TeamRuntime::wake`],
-    /// with an event saying why, or a team note when it cannot; while the pool's sign-ins are
-    /// still being checked it waits for a later tick. Takes the setup, the access and the
-    /// paused accounts. Returns any SQLite failure.
-    fn restart_after_edits(
+    /// Starts again each sub-agent of the project that stopped for an instruction edit or
+    /// the owner's Restart them, once its process ended: in its own worktree and conversation
+    /// through [`TeamRuntime::wake`], with an event saying why, or a team note when it cannot;
+    /// while the pool's sign-ins are still being checked it waits for a later tick. Takes the
+    /// setup, the access and the paused accounts. Returns any SQLite failure.
+    fn restart_ended(
         &mut self,
         stored: &StoredSetup,
         access: &ModelAccess,
         paused: &BTreeSet<CredentialRef>,
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
-        let ended: Vec<i64> = self
-            .instruction_restarts
+        let ended: Vec<(i64, Restart)> = self
+            .restarts
             .iter()
-            .filter(|(id, owner)| *owner == project && !self.workers.contains_key(id))
-            .map(|(id, _)| *id)
+            .filter(|(id, (owner, _))| owner == project && !self.workers.contains_key(id))
+            .map(|(id, (_, why))| (*id, *why))
             .collect();
-        for id in ended {
-            self.instruction_restarts.remove(&id);
+        for (id, why) in ended {
+            self.restarts.remove(&id);
             if super::stopped(&self.connection, id)? {
-                self.note(project, INSTRUCTIONS_RESTART_DROPPED)?;
+                self.note(project, why.dropped())?;
                 continue;
             }
             let row: Option<(String, bool)> = self
@@ -6635,7 +6751,7 @@ impl TeamRuntime {
                     .wake(stored, id, &harness, tools, &account, None)?
                     .map(|_| ()),
                 Ok(None) => {
-                    self.instruction_restarts.insert(id, project.clone());
+                    self.restarts.insert(id, (project.clone(), why));
                     continue;
                 }
                 Err(reason) => Err(reason),
@@ -6648,17 +6764,11 @@ impl TeamRuntime {
                         id,
                         None,
                         super::events::EventKind::Progress,
-                        INSTRUCTIONS_RESTARTED,
+                        why.restarted(),
                         now_ms(),
                     )?;
                 }
-                Err(reason) => self.note(
-                    project,
-                    &format!(
-                        "An agent stopped to load your changed instructions but could not start again: {}.",
-                        bound_text(&reason, 300)
-                    ),
-                )?,
+                Err(reason) => self.note(project, &why.failed(&reason))?,
             }
         }
         Ok(())
@@ -7989,18 +8099,20 @@ impl TeamRuntime {
         assert!(!(kept_session && live));
         let fresh = matches!(&launch, Launch::Fresh(plan, _) if plan.resume.is_none()).then(now_ms);
         let resumed = matches!(&launch, Launch::Fresh(plan, _) if plan.resume.is_some());
-        let (access, toolchains, network, access_grants) = match &launch {
+        let (access, toolchains, network, access_grants, hidden) = match &launch {
             Launch::Fresh(plan, _) => (
                 plan.access,
                 Some(plan.toolchains.clone()),
                 plan.network,
                 plan.grants.clone(),
+                Some(plan.hidden.clone()),
             ),
             Launch::Adopt(adoption) => (
                 adoption.access,
                 adoption.toolchains.clone(),
                 adoption.network,
                 adoption.grants.clone(),
+                adoption.record.hidden.clone(),
             ),
         };
         let starts = crate::coord::relay::TaskStarts {
@@ -8087,6 +8199,7 @@ impl TeamRuntime {
                 reasked: None,
                 starts,
                 after_done,
+                hidden,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -9164,8 +9277,8 @@ impl TeamRuntime {
             Some(callers.as_path()),
             "the lead's servers find the caller socket its sandbox reaches"
         );
-        let mates_home = prepare_mates_home(home, homes, working_dir)
-            .map_err(|e| with_code("the teammates' home could not be made", Some(&e.0)))?;
+        let mates_home =
+            prepare_mates_home(home, homes, working_dir).map_err(|e| mates_home_problem(&e))?;
         toolchains::fresh_native_lead_tmp(scratch).map_err(|e| {
             with_code(
                 "the lead's own temp folder could not be made",
@@ -9416,8 +9529,7 @@ impl TeamRuntime {
         {
             eprintln!("agent_free_git_not_written kind={:?}", error.kind());
         }
-        toolchains::prepare_cargo_home(&home, &homes)
-            .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
+        toolchains::prepare_cargo_home(&home, &homes).map_err(|e| cargo_home_problem(&e))?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
             .and_then(|sandbox| sandbox.keep_ports(&kept))
             .map_err(sandboxed)?;
@@ -9708,6 +9820,10 @@ impl TeamRuntime {
             relay,
             terminal_display,
             task_start,
+            hidden: hidden
+                .iter()
+                .map(|folder| crate::sandbox::hidden_paths::digest(folder))
+                .collect(),
         };
         let listed = matches!(kind, Some(crate::coord::settings::HarnessKind::Listed(_)));
         let mode = match &account.reach {
@@ -9740,8 +9856,9 @@ impl TeamRuntime {
     /// Keeps in an agent's Messages timeline, once while it is kept, the engine's notice that
     /// this launch stays on this computer's network on a Linux that nests agents
     /// ([`crate::sandbox::linux_unbridged_notice`]). Takes the project, the agent, the
-    /// project's network choice and the agent's sandbox as launched. Returns nothing; a
-    /// notice that cannot be kept is logged, never a reason not to start.
+    /// project's network choice and the agent's sandbox as launched, under the owner's call
+    /// supervisor setting. Returns nothing; a notice that cannot be kept is logged, never a
+    /// reason not to start.
     fn note_unbridged(
         &self,
         project: &ProjectId,
@@ -9749,7 +9866,10 @@ impl TeamRuntime {
         choice: AgentNetwork,
         sandbox: &ProjectSandbox,
     ) {
-        let Some(text) = crate::sandbox::linux_unbridged_notice(choice, sandbox) else {
+        let calls = crate::sandbox_settings::load(&self.connection)
+            .ok()
+            .map(|settings| settings.linux_supervisor);
+        let Some(text) = crate::sandbox::linux_unbridged_notice(choice, sandbox, calls) else {
             return;
         };
         let kept = id > 0
@@ -9814,7 +9934,7 @@ impl TeamRuntime {
     /// reading its live switch here, for the tests that look at a launch's context. Takes the
     /// project, the agent id, its role, tools switch and git layout. Returns the context, or
     /// the plain reason it could not be read.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn context(
         &self,
         project: &ProjectId,
@@ -10120,12 +10240,14 @@ impl TeamRuntime {
                 let (access, toolchains) = (Some(worker.access), worker.toolchains.clone());
                 let network = Some(worker.network);
                 let grants = Some(worker.access_grants.clone());
+                let hidden = worker.hidden.clone();
                 let per_turn = worker.managed && !worker.live && !worker.kept_session;
                 let pane = pane.map(|record| PaneRecord {
                     access,
                     toolchains,
                     network,
                     grants,
+                    hidden,
                     ..*record
                 });
                 if let Some(record) = pane
@@ -12626,6 +12748,9 @@ const MASTER_NOT_LIVE: &str = "it did not open in a live terminal";
 /// The team note when a sub-agent stopping for changed instructions was stopped meanwhile,
 /// by the owner, the master or its lead, so its restart is dropped (RV-DS241-125).
 const INSTRUCTIONS_RESTART_DROPPED: &str = "An agent that stopped to load your changed instructions was stopped meanwhile, so it was not started again.";
+/// The team note when a sub-agent stopping for the owner's Restart them was stopped
+/// meanwhile, by the owner, the master or its lead, so its restart is dropped (SA-VID14-A).
+const HIDDEN_RESTART_DROPPED: &str = "An agent that stopped so it can no longer open a hidden folder was stopped meanwhile, so it was not started again.";
 /// The most queued tasks of a project dispatch reads in one tick; later ones wait behind.
 const DISPATCH_TASKS_MAX: i64 = 64;
 /// Why a queued task waits (F11), each on the task while it waits: for its own agent, busy
@@ -13399,9 +13524,42 @@ fn start_session(
 const SKILLS_KEPT_PROBLEM: &str = "The agent could not start: an earlier run locked skills into \
      its Codex home, so CrazyAgent could not remove them and Codex would have loaded them";
 
+/// The owner's line for a launch refused because resetting the agent's home ran past its
+/// walk budget ([`crate::team::cleanup::WALK_TOO_LONG`], RESET-WALK-CODE).
+const WALK_TOO_LONG_PROBLEM: &str = "The agent could not start: its home folder held too many \
+     files to reset at once, or something kept adding files to it. Try again";
+
+/// The owner's line for an agent whose cargo home could not be made: removing a cargo name
+/// past its walk budget gives [`WALK_TOO_LONG_PROBLEM`] with its code, as a launch refused
+/// for it does (RESET-WALK-CODE code r1 F1), any other failure the cargo home line with its
+/// io code. Input: the error. Output: the line.
+fn cargo_home_problem(error: &std::io::Error) -> String {
+    let walk = crate::team::cleanup::WALK_TOO_LONG;
+    match crate::team::cleanup::walk_too_long_io(error) {
+        true => with_code(WALK_TOO_LONG_PROBLEM, Some(walk)),
+        false => with_code(
+            "the agent cargo home could not be made",
+            Some(io_code(error)),
+        ),
+    }
+}
+
+/// The owner's line for a native lead whose teammates' home could not be made: a reset or
+/// cargo name removal there past its walk budget gives [`WALK_TOO_LONG_PROBLEM`] with its
+/// code (RESET-WALK-CODE code r1 F1), any other failure the teammates' home line with its
+/// code. Input: the error. Output: the line.
+#[cfg(unix)]
+fn mates_home_problem(error: &EngineError) -> String {
+    match error.0 == crate::team::cleanup::WALK_TOO_LONG {
+        true => with_code(WALK_TOO_LONG_PROBLEM, Some(&error.0)),
+        false => with_code("the teammates' home could not be made", Some(&error.0)),
+    }
+}
+
 /// The owner's line for an agent whose harness could not start: a command that would hold
-/// an MCP secret names its server and secret, skills left in a Codex home say so, and any
-/// other refusal names its plain code. Input: the launch error. Output: the line.
+/// an MCP secret names its server and secret, skills left in a Codex home or a home reset
+/// past its walk budget say so, and any other refusal names its plain code. Input: the
+/// launch error. Output: the line.
 fn start_problem(problem: &LaunchError) -> String {
     match crate::launch_context::secret_in_command_text(problem) {
         Some(sentence) => format!("The agent could not start. {sentence}"),
@@ -13409,6 +13567,9 @@ fn start_problem(problem: &LaunchError) -> String {
             with_code(SKILLS_KEPT_PROBLEM, Some(&problem.0))
         }
         None if problem.0 == COMMANDS_LEFT => with_code(COMMANDS_LEFT_PROBLEM, Some(&problem.0)),
+        None if problem.0 == crate::team::cleanup::WALK_TOO_LONG => {
+            with_code(WALK_TOO_LONG_PROBLEM, Some(&problem.0))
+        }
         None => with_code("The agent could not start", Some(&problem.0)),
     }
 }

@@ -1,7 +1,9 @@
 use super::intake_job;
 use super::new_project::harness_name;
 use super::new_project_page::{hints_of, key_event, look, paint, pool_choices_from};
-use super::new_project_publish::{PUBLISH_NOT_STARTED, PUBLISH_STARTED};
+use super::new_project_publish::{
+    PUBLISH_MAY_HAVE_STARTED, PUBLISH_NOT_STARTED, PUBLISH_STARTED, PUBLISH_WHERE_IT_STANDS,
+};
 use super::new_project_view::{Row, Screen as View};
 use super::project::{
     MasterStatus, OpenRequest, ProjectReply, ProjectScreen, Speaker, Tab, Transcript,
@@ -11,7 +13,8 @@ use super::project_markdown::sanitize;
 use super::project_master::{MasterRead, master_problem, transcript_from};
 use super::project_plugins::PluginsReply;
 use super::project_publish::{
-    AskKey, AskPane, DRAFT_POLL_MS, PaneKey, PublishPane, left_line, opens, query,
+    AskKey, AskPane, DRAFT_POLL_MS, PUBLISH_AGAIN, PUBLISH_NOT_SEEN, PaneKey, PublishPane,
+    left_line, lost_start_over, opens, query,
 };
 use super::project_time::local_offset;
 use super::project_view::{asks_github, project_screen};
@@ -60,6 +63,7 @@ const CHANGED_MISSING: &str =
 const CHANGED_NOTE: &str =
     "That was your copy in the project folder. The agent's version lands there when you accept.";
 const ANSWER_NOT_TAKEN: &str = "The publish answer wasn't taken.";
+const START_REPLY_LOST: [&str; 2] = ["github_outcome_unknown", "github_reply_bounds"];
 const ASK_STARTING: &str = "Starting the publish...";
 const ASK_SENDING: &str = "Sending your answer...";
 const ASK_READING: &str = "Checking...";
@@ -96,6 +100,17 @@ impl MasterSent {
 struct Waiting {
     text: String,
     opening: bool,
+}
+
+/// Whether a GitHub publish Start's reply was lost after the engine may have run it: the
+/// outcome is unknown, the reply was too large, or it was not a publish. Input: the reply.
+/// Output: the answer, false for a publish or a refusal.
+fn start_reply_lost(result: &Result<IntakeView, String>) -> bool {
+    match result {
+        Ok(IntakeView::Publish(_)) => false,
+        Ok(_) => true,
+        Err(code) => START_REPLY_LOST.contains(&code.as_str()),
+    }
 }
 
 fn rejection(event: &MasterEvent) -> Option<String> {
@@ -252,6 +267,7 @@ pub(in crate::tui) struct ProjectPage {
     publish_asked: Option<IntakeQuery>,
     publish_later: bool,
     publish_read_ms: Option<i64>,
+    publish_lost_ms: Option<i64>,
     ask_pane: Option<AskPane>,
     publish_offered: bool,
     moving: Option<RequestId>,
@@ -361,6 +377,7 @@ impl ProjectPage {
             publish_asked: None,
             publish_later: false,
             publish_read_ms: None,
+            publish_lost_ms: None,
             ask_pane: None,
             publish_offered: false,
             moving: None,
@@ -438,9 +455,19 @@ impl ProjectPage {
         super::intake::ask(ctx, prompt);
     }
 
-    /// Reads the publish again while its pane shows the draft running, at most every
-    /// `DRAFT_POLL_MS`. Takes the context. Returns nothing.
+    /// Reads the publish again, at most every `DRAFT_POLL_MS`, while its pane shows the draft
+    /// running or while a Start whose reply was lost may still land (GSB-1). That wait ends
+    /// when a publish shows, or after as long as the engine gives a Start, when it says no
+    /// publish showed and asks the question again. Takes the context. Returns nothing.
     fn poll_publish(&mut self, ctx: &mut Ctx) {
+        if self
+            .publish_lost_ms
+            .is_some_and(|since| lost_start_over(since, now_ms()))
+        {
+            self.publish_lost_ms = None;
+            ctx.say(Message::warning(PUBLISH_NOT_SEEN, PUBLISH_AGAIN));
+            self.ask_prompt(ctx);
+        }
         let drafting = self
             .publish_pane
             .as_ref()
@@ -448,7 +475,7 @@ impl ProjectPage {
         let due = self
             .publish_read_ms
             .is_none_or(|at| now_ms() - at >= DRAFT_POLL_MS);
-        if drafting && due && !self.publish_later {
+        if (drafting || self.publish_lost_ms.is_some()) && due && !self.publish_later {
             self.ask_publish(ctx);
         }
     }
@@ -477,11 +504,12 @@ impl ProjectPage {
                     .cloned()
                     .map(PublishPane::new);
                 if job.is_some() {
+                    self.publish_lost_ms = None;
                     self.screen.github_notice = false;
                     if let Some(said) = self.ask_pane.take().and_then(AskPane::into_refusal) {
                         ctx.say(said);
                     }
-                } else {
+                } else if self.publish_lost_ms.is_none() {
                     self.ask_prompt(ctx);
                 }
             }
@@ -623,7 +651,7 @@ impl ProjectPage {
             (None, None) => None,
         };
         let hints = if let Some(words) = waiting {
-            body.push(styled(words.into(), Role::Muted, &ctx.theme));
+            body.push(styled(words, Role::Muted, &ctx.theme));
             Vec::new()
         } else {
             text.hints
@@ -658,11 +686,7 @@ impl ProjectPage {
             .map(Line::raw)
             .collect();
         let hints = if self.publish_asked.is_some() {
-            body.push(styled(
-                "Sending your answer...".into(),
-                Role::Muted,
-                &ctx.theme,
-            ));
+            body.push(styled("Sending your answer...", Role::Muted, &ctx.theme));
             Vec::new()
         } else {
             text.hints
@@ -735,9 +759,9 @@ impl ProjectPage {
         }
     }
 
-    /// The line a made project's GitHub publish Start reply gives: the project is ready and
-    /// publishing started, or why publishing did not start. Takes the project's name and the
-    /// reply. Returns the message.
+    /// The line a GitHub publish Start reply gives: the project is ready and publishing
+    /// started, it may have started when the reply was lost after the engine ran it, or why
+    /// it did not start. Takes the project's name and the reply. Returns the message.
     pub(in crate::tui) fn publish_start_said(
         name: &str,
         result: &Result<IntakeView, String>,
@@ -746,11 +770,10 @@ impl ProjectPage {
             Ok(IntakeView::Publish(_)) => {
                 Message::success(&format!("{name} is ready."), PUBLISH_STARTED)
             }
-            Ok(_) => Message::warning(
-                PUBLISH_NOT_STARTED,
-                &super::intake::copy("github_outcome_unknown"),
-            ),
-            Err(code) => Message::warning(PUBLISH_NOT_STARTED, &super::intake::copy(code)),
+            Err(code) if !start_reply_lost(result) => {
+                Message::warning(PUBLISH_NOT_STARTED, &super::intake::copy(code))
+            }
+            _ => Message::warning(PUBLISH_MAY_HAVE_STARTED, PUBLISH_WHERE_IT_STANDS),
         }
     }
 
@@ -983,13 +1006,20 @@ impl ProjectPage {
         )
     }
 
-    /// Reads the team graph for the panel beside the master, while this page is on top on
-    /// the Conversation tab, and once on any tab while no read stands, at the first read and
-    /// each time the page comes back on top off that tab, so the next entry to that tab knows
-    /// Live terminal: at most one read out at a time, at most one every
+    /// Reads the team graph while this page is on top: on the Conversation tab for the panel
+    /// beside the master, on the Settings tab while folders are hidden to name the agents
+    /// that can still open one (SA-VID14-A), and once on any tab while no read stands, so the
+    /// next entry knows Live terminal. At most one read is out, at most one every
     /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
     fn ask_team(&mut self, ctx: &mut Ctx) {
-        let wanted = self.screen.tab == Tab::Conversation || matches!(self.screen.team, Load::Idle);
+        let hides = self.screen.tab == Tab::Settings
+            && self
+                .screen
+                .hidden_paths
+                .as_ref()
+                .is_some_and(|saved| !saved.paths.is_empty());
+        let wanted =
+            self.screen.tab == Tab::Conversation || hides || matches!(self.screen.team, Load::Idle);
         if self.covered || !wanted || ctx.link != Link::Ready {
             return;
         }
@@ -1415,6 +1445,9 @@ impl ProjectPage {
             match self.ask_pane.as_mut().filter(|pane| !pane.asking()) {
                 Some(form) => form.refused(said),
                 None => ctx.say(said),
+            }
+            if start_reply_lost(&event.result) {
+                self.publish_lost_ms = Some(now_ms());
             }
             if !started {
                 self.ask_publish(ctx);
@@ -1928,6 +1961,17 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::TeamChange(action) => {
+                let generation = ctx.next_generation();
+                self.send(
+                    SetupQuery::TeamChange {
+                        action: *action,
+                        generation,
+                    },
+                    ctx,
+                );
+                Flow::Handled
+            }
             ProjectReply::Usage => Flow::Open(Place::Usage),
             ProjectReply::AccountOrder(strategy) => {
                 self.set_order(strategy, ctx);
@@ -2277,6 +2321,7 @@ impl Screen for ProjectPage {
                 self.job_sent = None;
                 self.publish_sent = None;
                 self.publish_asked = None;
+                self.publish_lost_ms = None;
                 self.ask_pane = None;
                 self.publish_offered = false;
                 self.sent.clear();

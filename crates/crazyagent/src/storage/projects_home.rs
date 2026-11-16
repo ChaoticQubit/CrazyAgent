@@ -822,7 +822,8 @@ pub(crate) fn delete_check(
     }))
 }
 
-/// Names what holds a Delete everything back that can change while it waits: a projects
+/// Names what holds a Delete everything back that can change while it waits: a removal record
+/// with no room left (`projects_removed_full`), a projects
 /// home move still pending (`home_move_in_progress`), another registered project using one
 /// of the folders, its own folder or a repository it declares, nested either way
 /// (`delete_shared_folder`, naming that project), or research of the project queued,
@@ -835,6 +836,9 @@ fn delete_blocked(
     projects: &[Registered],
     moved: &[PathBuf],
 ) -> Result<Option<DeleteRefusal>, EngineError> {
+    if let Err(code) = crate::project_setup::removed::room(tx)? {
+        return Ok(Some(DeleteRefusal::plain(code)));
+    }
     if pending_move(tx)?.is_some() {
         return Ok(Some(DeleteRefusal::plain("home_move_in_progress")));
     }

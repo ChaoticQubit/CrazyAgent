@@ -155,16 +155,26 @@ struct FirstScreen {
 /// on the same account home.
 pub(super) struct KeyFile {
     path: PathBuf,
+    #[cfg(unix)]
+    home: Option<std::os::fd::OwnedFd>,
     digest: [u8; 32],
     listed: bool,
 }
 
 impl KeyFile {
-    /// Guards the key file at `path` that holds `content`. Inputs: the path and the bytes.
-    /// Output: the guard, which removes the file on drop only while it still holds them.
+    /// Guards the key file at `path` that holds `content`. On Unix it holds the folder the
+    /// file sits in from here on, opened without following a link, so a home swapped later
+    /// cannot redirect the removal. Inputs: the path and the bytes. Output: the guard, which
+    /// removes the file on drop only while it still holds them.
     pub(super) fn new(path: PathBuf, content: &[u8]) -> Self {
         assert!(content.len() as u64 <= KEY_FILE_BYTES_MAX);
         Self {
+            #[cfg(unix)]
+            home: path.parent().and_then(|home| {
+                use rustix::fs::{Mode, OFlags};
+                let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+                rustix::fs::open(home, flags, Mode::empty()).ok()
+            }),
             path,
             digest: Sha256::digest(content).into(),
             listed: false,
@@ -180,19 +190,50 @@ impl KeyFile {
         guard.listed = true;
         guard
     }
+
+    /// Tells whether a read of the key file found this guard's bytes. Input: the text read,
+    /// none when it could not be read as a small plain file. Output: the answer.
+    fn holds(&self, current: Option<String>) -> bool {
+        current.is_some_and(|current| <[u8; 32]>::from(Sha256::digest(current)) == self.digest)
+    }
 }
 
 impl Drop for KeyFile {
     /// Removes the key file only while it is still a regular file holding this guard's
-    /// bytes, read through one open that follows no link and waits on no FIFO, since the
-    /// path sits in the agent-writable account home; a listed home's file only through
-    /// [`remove_listed`]. Input: the guard. Output: none.
+    /// bytes, read and unlinked through the home folder held since the guard was made by an
+    /// open that follows no link and waits on no FIFO; a listed home's file only through
+    /// [`remove_listed`]. A home that could not be held removes nothing.
+    #[cfg(unix)]
+    fn drop(&mut self) {
+        use rustix::fs::{AtFlags, Mode, OFlags};
+        if self.listed {
+            remove_listed(&self.path, &self.digest);
+            return;
+        }
+        let (Some(home), Some(name)) = (&self.home, self.path.file_name()) else {
+            return;
+        };
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        let current = rustix::fs::openat(home, name, flags, Mode::empty())
+            .ok()
+            .and_then(|file| crate::platform::read_plain(file.into(), KEY_FILE_BYTES_MAX));
+        if self.holds(current) {
+            let _ = rustix::fs::unlinkat(home, name, AtFlags::empty());
+        }
+    }
+
+    /// Removes the key file only while it is still a regular file holding this guard's
+    /// bytes, read through one open that follows no link, since the path sits in the
+    /// agent-writable account home; a listed home's file only through [`remove_listed`].
+    /// Input: the guard. Output: none.
+    #[cfg(not(unix))]
     fn drop(&mut self) {
         if self.listed {
             remove_listed(&self.path, &self.digest);
-        } else if crate::platform::read_plain_file(&self.path, KEY_FILE_BYTES_MAX)
-            .is_some_and(|current| <[u8; 32]>::from(Sha256::digest(current)) == self.digest)
-        {
+        } else if self.holds(crate::platform::read_plain_file(
+            &self.path,
+            KEY_FILE_BYTES_MAX,
+        )) {
             let _ = std::fs::remove_file(&self.path);
         }
     }

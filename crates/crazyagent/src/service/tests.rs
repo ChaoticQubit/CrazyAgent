@@ -2403,10 +2403,114 @@ fn a_tool_folder_staff_may_change_through_its_access_list_is_changeable() {
     assert_eq!(changeable_past_sticky(&tool), Some(folder.clone()));
 }
 
+/// The wall clock's whole second, as change times count them. Output: the second.
+#[cfg(target_os = "macos")]
+fn now_secs() -> i64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    i64::try_from(since.as_secs()).unwrap()
+}
+
+/// The whole second an entry last changed. Input: the entry. Output: the second.
+#[cfg(target_os = "macos")]
+fn changed_secs(entry: &Path) -> i64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(entry).unwrap().ctime()
+}
+
+/// Waits, at most 1.5 s, until the clock is in a later second than every entry last
+/// changed, so an access answer read now is kept. Input: the entries.
+#[cfg(target_os = "macos")]
+fn settle(entries: &[&Path]) {
+    let changed = entries.iter().copied().map(changed_secs).max().unwrap();
+    for _ in 0..30 {
+        if now_secs() > changed {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the clock did not pass second {changed}");
+}
+
+/// Waits, at most 1.5 s, until the clock is in the first half of a second, so a change and
+/// the listing made right after it share one second.
+#[cfg(target_os = "macos")]
+fn early_in_a_second() {
+    for _ in 0..30 {
+        let since = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        if since.subsec_millis() < 500 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the clock never read the first half of a second");
+}
+
+/// HFS-CTIME: an access answer is kept only when its listing started in a later second than
+/// the entry last changed, so a later change moves the stamp even where change times keep
+/// whole seconds (HFS+), and an answer read in the second of the change is never kept.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_access_answer_is_kept_only_once_its_entry_changed_in_an_earlier_second() {
+    assert!(acl::settled(&(1, 2, 100, 0), 101));
+    assert!(acl::settled(&(1, 2, 100, 999_999_999), 101));
+    assert!(!acl::settled(&(1, 2, 100, 0), 100), "the same whole second");
+    assert!(
+        !acl::settled(&(1, 2, 100, 999_999_999), 100),
+        "the same second, to the nanosecond"
+    );
+    assert!(
+        !acl::settled(&(1, 2, 105, 0), 100),
+        "a change time ahead of the clock"
+    );
+}
+
+/// Changes a tool's folder and reads the tool's access answer within one second, at most
+/// three tries, since a slow spawn can carry the listing into the next second: the first try
+/// gives staff `add_file` on the folder's access list, a later one flips its mode, which
+/// keeps that entry. Each read lists the folder alone. Inputs: the tool, its folder, the root.
+#[cfg(target_os = "macos")]
+fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    for attempt in 0..3u32 {
+        early_in_a_second();
+        if attempt == 0 {
+            let status = crate::spawn_gate::status(
+                std::process::Command::new("/bin/chmod")
+                    .arg("+a")
+                    .arg("group:staff allow add_file,delete_child")
+                    .arg(folder),
+            )
+            .unwrap();
+            assert!(status.success());
+        } else {
+            let mode = if attempt == 1 { 0o750 } else { 0o755 };
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        assert_eq!(changeable_by_others(tool), Some(folder.to_path_buf()));
+        let changed = acl::take_listings();
+        assert_eq!(changed.len(), 1, "{changed:?}");
+        let ours: Vec<PathBuf> = changed[0]
+            .iter()
+            .filter(|listed| listed.starts_with(root))
+            .cloned()
+            .collect();
+        assert_eq!(ours, vec![folder.to_path_buf()], "the changed part alone");
+        if now_secs() == changed_secs(folder) {
+            return;
+        }
+    }
+    panic!("no change and its listing shared a second in three tries");
+}
+
 /// RV-DS241-18 r2: one `ls -lde` lists every part of a path the first time, names with a
 /// space or an accent included; a repeat lists none of the parts it read, and an access-list
 /// change moves only the changed part's change time, so that part alone is listed again and
-/// the change counts.
+/// the change counts. HFS-CTIME: a part read in the second it changed is read again once
+/// that second has passed, and only then kept.
 #[cfg(target_os = "macos")]
 #[test]
 fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts() {
@@ -2415,6 +2519,7 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
     let folder = kit.join("bin");
     let tool = folder.join("tmux");
     write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&tool, &folder, &kit, temp.path()]);
     let ours = |listings: &[Vec<PathBuf>]| -> Vec<PathBuf> {
         listings
             .iter()
@@ -2440,20 +2545,18 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
         "nothing read is listed again"
     );
 
-    let status = crate::spawn_gate::status(
-        std::process::Command::new("/bin/chmod")
-            .arg("+a")
-            .arg("group:staff allow add_file,delete_child")
-            .arg(&folder),
-    )
-    .unwrap();
-    assert!(status.success());
+    changed_and_read_in_one_second(&tool, &folder, temp.path());
+    settle(&[&folder]);
     assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
-    let changed = acl::take_listings();
-    assert_eq!(changed.len(), 1, "{changed:?}");
     assert_eq!(
-        ours(&changed),
+        ours(&acl::take_listings()),
         vec![folder.clone()],
-        "the changed part alone"
+        "a part read in the second it changed is read again"
+    );
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    assert_eq!(
+        ours(&acl::take_listings()),
+        Vec::<PathBuf>::new(),
+        "read in a later second, it is kept"
     );
 }

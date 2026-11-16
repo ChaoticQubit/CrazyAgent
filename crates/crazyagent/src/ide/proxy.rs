@@ -54,13 +54,17 @@ const PAGE_DROPPED: [&str; 5] = [
 
 /// What one project's proxy serves: its own loopback port, the IDE server's port behind it,
 /// the build's [`PRE`] folder, the launch's connection token, which never leaves the engine
-/// except toward the server, and the engine's workspace file the workbench is pinned to.
+/// except toward the server, the engine's workspace file the workbench is pinned to, the
+/// processes the open saw listening on the server port once it was ready, unset until then,
+/// and the flag the proxy sets once none of them holds that port, so the launch is stopped.
 pub struct Site {
     pub port: u16,
     pub upstream: u16,
     pub pre: PathBuf,
     pub token: String,
     pub workspace: String,
+    pub served: Arc<std::sync::OnceLock<Vec<i32>>>,
+    pub refused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The template the workbench builds each webview's origin from: every webview gets its own
@@ -104,6 +108,8 @@ pub async fn serve(listener: TcpListener, site: Site) {
     assert!(site.port != 0 && site.upstream != 0 && site.port != site.upstream);
     assert_eq!(site.token.len(), 2 * super::token::TOKEN_BYTES);
     assert!(site.workspace.starts_with('/'));
+    assert!(site.served.get().is_none_or(|served| !served.is_empty()));
+    assert!(!site.refused.load(std::sync::atomic::Ordering::SeqCst));
     let site = Arc::new(site);
     let mut connections = tokio::task::JoinSet::new();
     loop {
@@ -542,20 +548,37 @@ async fn connection(mut client: TcpStream, site: Arc<Site>) {
     }
 }
 
-async fn upstream(port: u16) -> io::Result<TcpStream> {
-    tokio::time::timeout(
+/// Opens one request's connection to the IDE server. Nothing goes upstream before the open
+/// has seen the server ready, and each connection is checked before anything is sent on it
+/// ([`super::server::served_by`]), so a process that took the port after the server exited
+/// gets no request and no token (rv-sa241 LEAD-1), and the site is flagged ([`Site::refused`])
+/// so the launch is stopped. Input: the site. Output: the connection.
+async fn upstream(site: &Site) -> io::Result<TcpStream> {
+    let Some(served) = site.served.get() else {
+        return Err(io::Error::other("ide_proxy_not_ready"));
+    };
+    let server = tokio::time::timeout(
         CONNECT_TIME,
-        crate::spawn_gate::connect_tcp(("127.0.0.1", port)),
+        crate::spawn_gate::connect_tcp(("127.0.0.1", site.upstream)),
     )
     .await
-    .map_err(|_| io::Error::other("ide_proxy_upstream_timeout"))?
+    .map_err(|_| io::Error::other("ide_proxy_upstream_timeout"))??;
+    if let Err(refused) = super::server::served_by(site.upstream, served).await {
+        if refused.0 == "ide_server_port_taken" {
+            site.refused
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        return Err(io::Error::other(refused.0));
+    }
+    assert_eq!(server.peer_addr()?.port(), site.upstream);
+    Ok(server)
 }
 
 async fn page(mut client: TcpStream, request: &Request<'_>, site: &Site) {
     let host = request.values("host").next().unwrap_or_default();
     assert!(workbench_host(host, site.port));
     let fetched = async {
-        let mut server = upstream(site.upstream).await?;
+        let mut server = upstream(site).await?;
         server
             .write_all(&forwarded(request, "HTTP/1.0", &PAGE_DROPPED))
             .await?;
@@ -577,7 +600,7 @@ async fn page(mut client: TcpStream, request: &Request<'_>, site: &Site) {
 }
 
 async fn upgrade(mut client: TcpStream, head: &[u8], rest: &[u8], site: &Site) {
-    let Ok(mut server) = upstream(site.upstream).await else {
+    let Ok(mut server) = upstream(site).await else {
         send(&mut client, &refusal("502 Bad Gateway")).await;
         return;
     };
@@ -596,7 +619,7 @@ async fn forward(
     body: u64,
     site: &Site,
 ) {
-    let Ok(mut server) = upstream(site.upstream).await else {
+    let Ok(mut server) = upstream(site).await else {
         send(&mut client, &refusal("502 Bad Gateway")).await;
         return;
     };

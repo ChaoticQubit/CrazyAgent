@@ -14,6 +14,40 @@ const SWEPT_FILES: usize = 40_000;
 const LOCK_HELD: Duration = Duration::from_millis(1000);
 const SKILL: &str = "---\nname: release-notes\ndescription: Writes release notes from merged changes.\n---\n\n# Release notes\n";
 
+/// The codes of an engine start whose own check of its new sockets missed the owner
+/// deadline, which bounds that check as well: such a start has already stopped itself.
+const START_MISSED: [&str; 2] = [
+    "owner_outcome_unknown_reconcile_same_identity",
+    "ordinary_readiness_timeout",
+];
+
+/// The most engine starts one row tries before a start that misses the deadline fails it.
+const START_TRIES: usize = 5;
+
+/// Starts the engine with the `OWNER_TIMEOUT_MS` deadline, starting again when a start
+/// missed that deadline in its own socket check, as on a machine loaded by other test
+/// lanes (gate race 4). Inputs: the root, the global settings file and the stop signal.
+/// Output: the running engine.
+async fn started(
+    root: &std::path::Path,
+    global: &std::path::Path,
+    stopped: &tokio::sync::watch::Receiver<bool>,
+) -> EngineService {
+    let project = root.join("project.toml");
+    for _ in 1..START_TRIES {
+        match EngineService::start_with_settings_sources(root, "e.sock", global, &project, stopped)
+            .await
+        {
+            Ok(service) => return service,
+            Err(error) if START_MISSED.contains(&error.0.as_str()) => {}
+            Err(error) => panic!("the engine did not start: {error:?}"),
+        }
+    }
+    EngineService::start_with_settings_sources(root, "e.sock", global, &project, stopped)
+        .await
+        .unwrap()
+}
+
 /// A real engine whose owner deadline is `OWNER_TIMEOUT_MS`, with an owner client that
 /// waits as long as each request's own budget.
 struct Owner {
@@ -39,15 +73,7 @@ impl Owner {
         .unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (shutdown, stopped) = tokio::sync::watch::channel(false);
-        let service = EngineService::start_with_settings_sources(
-            root.path(),
-            "e.sock",
-            &global,
-            &root.path().join("project.toml"),
-            &stopped,
-        )
-        .await
-        .unwrap();
+        let service = started(root.path(), &global, &stopped).await;
         let client =
             OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(20))
                 .await

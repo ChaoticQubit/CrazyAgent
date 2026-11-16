@@ -1,7 +1,19 @@
 use super::*;
 use crate::engine::bootstrap::EngineService;
+use crate::engine::owner::{OwnerMutation, OwnerRead, OwnerResponse};
 use crate::projects_home::FoundState;
+use crate::protocol::ProjectSpec;
 use std::os::unix::fs::PermissionsExt;
+
+const POOL_SETTINGS: &str = "version = 1\ntimeout_ms = 10000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://LOCAL_ADDRESS/v1\" }\nmodel = { id = \"qwen2.5:7b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = []\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
+
+fn took(response: &OwnerResponse) -> bool {
+    matches!(
+        response,
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+            if operation.result == OwnerResult::Applied
+    )
+}
 
 fn private_root(prefix: &str) -> tempfile::TempDir {
     let root = tempfile::Builder::new()
@@ -24,20 +36,72 @@ fn a_token_job_answers_as_a_status_read_and_never_shows_the_token() {
     assert!(!shown.contains("ghp_"), "{shown}");
 }
 
-#[test]
-fn a_started_onboarding_is_named_like_the_engine_names_it() {
-    assert_eq!(
-        started("/Users/owner/Projects/My Notes_v2"),
-        Ok(ProjectId::new("my-notes-v2").unwrap())
+/// DEC-178 addendum 1: the TUI opens the project the engine started, `my-app-2` while a
+/// removal holds `my-app`, never the folder slug it guesses before sending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_started_onboarding_opens_the_project_the_engine_gave_when_the_slug_is_held() {
+    let root = private_root("ca-tonb-");
+    let work = private_root("ca-tonb-work-");
+    let (_refusing, settings) = crate::tui::test_home::refusing_settings(POOL_SETTINGS);
+    let global = root.path().join("global.toml");
+    std::fs::write(&global, &settings).unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    crate::tui::test_home::assert_no_host_model_server(&global).await;
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root.path(),
+        "e.sock",
+        &global,
+        &root.path().join("project.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let mut native = NativeOwner::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
     );
+    let (_, access) = native.attach().await;
+    assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+
+    let held = ProjectId::new("my-app").unwrap();
+    let controller = native.controller.as_mut().unwrap();
+    controller.read(OwnerRead::Capabilities).await.unwrap();
+    controller
+        .begin_mutation(
+            OwnerMutation::CreateProject {
+                project_id: held.clone(),
+                spec: ProjectSpec {
+                    name: "My app".into(),
+                    repositories: vec![],
+                },
+            },
+            1,
+        )
+        .unwrap();
+    let created = controller.send_pending().await.unwrap();
+    assert!(took(&created), "{created:?}");
+    let removed = controller.remove_project(held, 1).await.unwrap();
+    assert!(took(&removed), "{removed:?}");
+
+    let folder = std::fs::canonicalize(work.path()).unwrap().join("my-app");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("README.md"), "my app\n").unwrap();
+    let start = IntakeQuery::StartOnboarding {
+        path: folder.to_str().unwrap().to_owned(),
+        pool: CredentialRef::new("local-pool").unwrap(),
+        generation: 1,
+    };
+    let event = native.intake(IntakeJob::Query(start.clone())).await;
+    assert_eq!(event.query, start);
     assert_eq!(
-        started("/Users/owner/Projects/My Notes_v2"),
-        crate::onboarding::project_id_for(std::path::Path::new(
-            "/Users/owner/Projects/My Notes_v2"
+        event.result,
+        Ok(IntakeView::OnboardingStarted(
+            ProjectId::new("my-app-2").unwrap()
         ))
-        .map_err(|error| error.0)
     );
-    assert_eq!(started("/"), Err("onboarding_path_invalid".into()));
+
+    service.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -326,7 +390,7 @@ async fn a_second_rule_switch_while_one_runs_is_refused_at_once() {
     );
     let (_, access) = native.attach().await;
     assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
-    let (replies, receiver) = std::sync::mpsc::sync_channel(1);
+    let (replies, receiver) = std::sync::mpsc::sync_channel::<crate::tui::client::OwnerReply>(1);
     let next = || {
         let reply = tokio::task::block_in_place(|| {
             receiver.recv_timeout(std::time::Duration::from_secs(20))
@@ -379,4 +443,22 @@ async fn a_second_rule_switch_while_one_runs_is_refused_at_once() {
     assert_eq!(event.query, set);
     assert!(event.result.is_err(), "{:?}", event.result);
     service.shutdown().await.unwrap();
+}
+
+/// rv-secreview S2 F1: a started onboarding opens only the id the engine gave; a plain
+/// Applied, which only a record a pre-S1 engine stored can answer, is not confirmed, never
+/// opened under an id guessed from the folder name.
+#[test]
+fn only_the_engine_given_id_opens_a_started_onboarding() {
+    let given = crate::protocol::ProjectId::new("my-app-2").unwrap();
+    assert_eq!(
+        super::onboarded(OwnerResult::OnboardingStarted {
+            project_id: given.clone(),
+        }),
+        Ok(given)
+    );
+    assert_eq!(
+        super::onboarded(OwnerResult::Applied),
+        Err("intake_change_outcome_unknown".to_owned())
+    );
 }

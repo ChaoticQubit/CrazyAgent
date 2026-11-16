@@ -1425,6 +1425,7 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
             hookless: false,
             message_note: None,
             started_ms: None,
+            sees_hidden: false,
         }],
         edges: Vec::new(),
         messages: Vec::new(),
@@ -1586,6 +1587,12 @@ fn a_queued_research_job_shows_why_it_waits_on_its_status() {
 
     let mut screen = ProjectScreen::new(project.clone(), "Tidepool".into(), None);
     screen.setup = Some(stored(&project));
+    screen.pool = Some(PoolInfo {
+        id: CredentialRef::new("pool-main").unwrap(),
+        name: "Main".into(),
+        accounts: 1,
+        assigned: true,
+    });
     screen.now_ms = 600_000;
     screen.jobs = Some(vec![queued.clone()]);
     screen.open(Tab::Overview);
@@ -2167,17 +2174,18 @@ fn remove_preselects_the_dashboard_choice_and_deletes_only_after_the_exact_name(
         Ok(SetupView::Removal(Box::new(removal(true)))),
     );
     let shown = text(&project_screen(&mut screen, 90, 30, &Look::plain()).rows);
-    for words in [
-        "Remove from dashboard (keep files)",
-        "Delete everything",
-        "Builder 2",
-        "Tester 3",
-        "1 change set",
-    ] {
+    for words in ["Remove from dashboard (keep files)", "Delete everything"] {
         assert!(shown.contains(words), "{words:?} missing: {shown}");
     }
     assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
     assert_eq!(screen.remove_choice, RemoveChoice::Everything);
+    let shown = text(&project_screen(&mut screen, 90, 30, &Look::plain()).rows);
+    for words in ["Builder 2", "Tester 3", "1 change set"] {
+        assert!(
+            shown.contains(words),
+            "{words:?} missing once Delete everything is chosen: {shown}"
+        );
+    }
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
         ProjectReply::Handled,
@@ -2250,6 +2258,192 @@ fn the_remove_ask_says_why_delete_everything_is_not_offered() {
     assert!(!shown.contains("Type the project name"), "{shown}");
     screen.key(key(KeyCode::Down));
     assert_eq!(screen.remove_choice, RemoveChoice::Dashboard);
+}
+
+/// DEC-178 addendum 1 at the smallest terminal: with Remove from dashboard chosen the ask
+/// shows both choices' words in the owner's text and its buttons; with Delete everything
+/// chosen it folds the words and shows the folders, what would be lost and the name box, cut
+/// to the rows left, so the buttons stay on screen for a project with many folders and losses.
+#[test]
+fn the_remove_ask_fits_80_by_24_with_the_owners_words_and_a_long_preview() {
+    const REMOVE_WORDS: &str = "Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk, with every file in it.";
+    const DELETE_WORDS: &str = "Stops its agents, moves its folders to the Trash and removes its records, your notes, imports and saved selections for it included. Its token counts stay under Removed projects.";
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    let read = screen.next_query(30).unwrap();
+    let mut preview = removal(true);
+    preview.folders = (1..=5)
+        .map(|n| format!("/Users/owner/CrazyAgent/gone-app-worktrees/agent-{n}-a-long-branch-name"))
+        .collect();
+    preview.running = (1..=4).map(|n| format!("Builder {n}")).collect();
+    preview.open_change_sets = 3;
+    preview.losses = (5..=9)
+        .map(|id| crate::team::cleanup::AgentLoss {
+            id,
+            label: format!("Tester {id}"),
+            code: "cleanup_commits_unlanded".into(),
+        })
+        .collect();
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(preview))));
+    let look = Look::plain();
+    let wrapped = |words: &str| super::new_project_view::wrap_words(words, 56);
+    let counted = |shown: &str| {
+        shown
+            .lines()
+            .filter(|line| {
+                line.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .windows(3)
+                    .any(|w| w[0] == "and" && w[1].parse::<usize>().is_ok() && w[2] == "more")
+            })
+            .count()
+    };
+
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert_eq!(drawn.rows.len(), 20, "the ask never runs past the screen");
+    let shown = text(&drawn.rows);
+    for line in wrapped(REMOVE_WORDS)
+        .iter()
+        .chain(wrapped(DELETE_WORDS).iter())
+    {
+        assert!(shown.contains(line.as_str()), "{line:?} missing: {shown}");
+    }
+    for words in [
+        "(*) Remove from dashboard (keep files)",
+        "( ) Delete everything",
+        "[ Remove project ]",
+        "[> Keep project ]",
+    ] {
+        assert!(shown.contains(words), "{words:?} missing: {shown}");
+    }
+    assert!(
+        !shown.contains("Type the project name"),
+        "the details wait for Delete everything: {shown}"
+    );
+
+    assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+    assert_eq!(screen.remove_choice, RemoveChoice::Everything);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert_eq!(drawn.rows.len(), 20, "the ask never runs past the screen");
+    let shown = text(&drawn.rows);
+    for words in [
+        "( ) Remove from dashboard (keep files)",
+        "(*) Delete everything",
+        "Your notes, imports and saved selections go too.",
+        "Moves to the Trash (5 folders):",
+        "\u{2026}",
+        "gone-app-worktrees/agent-1-a-long-branch-name",
+        "Builder 1 is running and will be stopped",
+        "Type the project name",
+        "[ Delete everything ]",
+        "[> Keep project ]",
+    ] {
+        assert!(shown.contains(words), "{words:?} missing: {shown}");
+    }
+    assert_eq!(
+        counted(&shown),
+        2,
+        "the folders and the losses not shown are each counted: {shown}"
+    );
+    assert!(
+        !shown.contains(wrapped(REMOVE_WORDS)[0].as_str())
+            && !shown.contains(wrapped(DELETE_WORDS)[0].as_str()),
+        "the choices' words fold while Delete everything is chosen: {shown}"
+    );
+}
+
+/// With the rows to spare, Delete everything wraps a long folder and a long loss as before, so
+/// the folder's last name and what would be lost both show; only a screen too short for every
+/// line cuts them to one line each.
+#[test]
+fn a_tall_remove_ask_wraps_a_long_folder_and_loss_instead_of_cutting_them() {
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    let read = screen.next_query(30).unwrap();
+    let mut preview = removal(true);
+    preview.folders =
+        vec!["/Users/owner/CrazyAgent/gone-app-worktrees/agent-1-a-long-branch-name".into()];
+    preview.running = Vec::new();
+    preview.open_change_sets = 0;
+    preview.losses = vec![crate::team::cleanup::AgentLoss {
+        id: 3,
+        label: "Tester 3 of the long running research team".into(),
+        code: "cleanup_commits_unlanded".into(),
+    }];
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(preview))));
+    assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+    assert_eq!(screen.remove_choice, RemoveChoice::Everything);
+    let shown = text(&project_screen(&mut screen, 120, 40, &Look::plain()).rows);
+    assert!(
+        shown.contains("branch-name"),
+        "the folder's last name shows: {shown}"
+    );
+    assert!(
+        shown.contains("never landed"),
+        "what would be lost shows: {shown}"
+    );
+    for words in [
+        "Your notes, imports and saved selections go too.",
+        "Moves to the Trash (1 folder):",
+    ] {
+        assert!(shown.contains(words), "{words:?} missing: {shown}");
+    }
+}
+
+/// rv-ds241 S2 r1 N2: with almost no rows the folder list has none to show, so the header
+/// still counts the folders that go to the Trash.
+#[test]
+fn a_tiny_remove_ask_still_counts_the_folders_it_trashes() {
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    let read = screen.next_query(30).unwrap();
+    let mut preview = removal(true);
+    preview.folders = (1..=4)
+        .map(|n| format!("/Users/owner/CrazyAgent/gone-app-{n}"))
+        .collect();
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(preview))));
+    assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+    let shown = text(&project_screen(&mut screen, 80, 14, &Look::plain()).rows);
+    assert!(
+        shown.contains("Moves to the Trash (4 folders):"),
+        "the header counts the folders: {shown}"
+    );
+}
+
+/// At the smallest terminal a refused Delete everything still shows the owner's Remove words,
+/// the engine's reason it is not offered and the buttons.
+#[test]
+fn a_refused_delete_everything_fits_the_remove_ask_at_80_by_24() {
+    const REMOVE_WORDS: &str = "Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk, with every file in it.";
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    let read = screen.next_query(30).unwrap();
+    let mut preview = removal(false);
+    preview.blocked = Some(
+        "Service A uses a folder of this project, so deleting it would delete that project's files too. Remove it from the dashboard instead."
+            .into(),
+    );
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(preview))));
+    let shown = text(&project_screen(&mut screen, 80, 24, &Look::plain()).rows);
+    for line in super::new_project_view::wrap_words(REMOVE_WORDS, 56) {
+        assert!(shown.contains(line.as_str()), "{line:?} missing: {shown}");
+    }
+    for words in [
+        "Service A uses a folder",
+        "the dashboard instead.",
+        "[ Remove project ]",
+        "[> Keep project ]",
+    ] {
+        assert!(shown.contains(words), "{words:?} missing: {shown}");
+    }
 }
 
 #[test]
@@ -3287,6 +3481,7 @@ fn console_screen() -> ProjectScreen {
         hookless: false,
         message_note: None,
         started_ms: None,
+        sees_hidden: false,
     };
     screen.team = crate::tui::ctx::Load::Ready(Box::new(TeamGraph {
         project_id: project.clone(),
@@ -4741,6 +4936,7 @@ mod overview_read {
             checked_ms: None,
             failure: None,
             waiting_for_account: false,
+            due_in_ms: None,
             refresh: Refresh::AfterLanding,
             apply: Apply::AlwaysAsk,
             needs_home: false,
@@ -5006,6 +5202,7 @@ fn every_delete_refusal_reads_its_own_sentence() {
         "delete_agents_running",
         "delete_trash_partial",
         "delete_shared_folder",
+        "projects_removed_full",
     ] {
         let sentence = plain_problem(code);
         assert!(
@@ -5017,6 +5214,11 @@ fn every_delete_refusal_reads_its_own_sentence() {
     assert!(
         unrecorded.contains("Nothing was deleted") && unrecorded.contains("restart CrazyAgent"),
         "{unrecorded}"
+    );
+    assert_eq!(
+        plain_problem("projects_removed_full"),
+        "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash.",
+        "leader 01:11: a full record says in words why Remove and Delete everything are refused"
     );
 }
 
@@ -5049,5 +5251,113 @@ fn delete_again_from_another_tab_opens_the_remove_ask_on_settings() {
         screen.ask_delete_again();
         assert!(screen.confirm_remove, "{tab:?}");
         assert_eq!(screen.tab, Tab::Settings, "from {tab:?}");
+    }
+}
+
+/// rv-ds241 S2 r2 N3: a folder cut to its tail is measured in terminal cells, so a name of
+/// wide characters keeps within the row it was given.
+#[test]
+fn a_folder_cut_to_its_tail_fits_its_cells() {
+    let tail = super::new_project_view::shown_tail("/Users/owner/プロジェクト/設計メモ", 9);
+    let cells = super::new_project_input::cells(&tail);
+    assert!(cells <= 9, "{tail:?} takes {cells} cells");
+    assert!(tail.ends_with("メモ"), "{tail:?}");
+    assert!(tail.starts_with('\u{2026}'), "{tail:?}");
+}
+
+/// SA-VID14-A: on the Settings tab the running agents that can still open a folder hidden
+/// after they started are named under the hidden folders, with h to restart them, which
+/// sends Restart them for the project; with none listed h sends nothing. The editor says the
+/// list covers team agents and not research, overview, roadmap or onboarding runs (r1).
+#[test]
+fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them() {
+    use crate::team::{GraphNode, NodeKind, TeamAction, TeamGraph};
+    let look = Look::plain();
+    let project = ProjectId::new("hidden").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.jobs = Some(Vec::new());
+    screen.hidden_paths = Some(crate::project_setup::HiddenPaths {
+        paths: vec!["/Users/owner/secret".into()],
+        version: 0,
+    });
+    let node = |id: &str, kind, label: &str, sees_hidden: bool| GraphNode {
+        id: id.into(),
+        kind,
+        parent: None,
+        label: label.into(),
+        harness: "codex".into(),
+        status: None,
+        status_label: None,
+        account: None,
+        branch: None,
+        terminal: None,
+        questions: None,
+        agent: None,
+        pane: None,
+        presence: None,
+        waiting: None,
+        waits_for: None,
+        owner_questions: 0,
+        no_worktree: false,
+        hookless: false,
+        message_note: None,
+        started_ms: None,
+        sees_hidden,
+    };
+    let graph = |nodes: Vec<GraphNode>| {
+        crate::tui::ctx::Load::Ready(Box::new(TeamGraph {
+            project_id: project.clone(),
+            nodes,
+            edges: vec![],
+            messages: Vec::new(),
+            overlaps: Vec::new(),
+            relations: Vec::new(),
+            master_live_terminal: true,
+        }))
+    };
+    screen.team = graph(vec![
+        node("master", NodeKind::Master, "Master", false),
+        node("team-1", NodeKind::Lead, "Ada", false),
+    ]);
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(!shown.contains("can still open"), "{shown}");
+    assert!(!matches!(
+        screen.key(key(KeyCode::Char('h'))),
+        ProjectReply::TeamChange(_)
+    ));
+
+    screen.team = graph(vec![
+        node("master", NodeKind::Master, "Master", true),
+        node("team-1", NodeKind::Lead, "Ada", true),
+        node("team-2", NodeKind::Lead, "Cy", false),
+    ]);
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Hidden    /Users/owner/secret   k Edit hidden folders"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("          Master, Ada can still open a hidden folder   h Restart them"),
+        "{shown}"
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('h'))),
+        ProjectReply::TeamChange(Box::new(TeamAction::RestartHiddenSeers {
+            project_id: project.clone(),
+        }))
+    );
+
+    screen.key(key(KeyCode::Char('k')));
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    for line in [
+        "Team agents that started before you hid a folder,",
+        "research, overview, roadmap or onboarding run that",
+        "started before keeps its access until it ends.",
+    ] {
+        assert!(
+            shown.contains(line),
+            "the editor says what the list covers: {shown}"
+        );
     }
 }

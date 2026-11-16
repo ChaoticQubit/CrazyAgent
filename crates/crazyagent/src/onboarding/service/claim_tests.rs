@@ -612,6 +612,7 @@ fn a_step_of_a_project_whose_folder_is_being_moved_is_not_claimed() {
     assert_eq!(claimed(&database).as_deref(), Some("alpha"));
 }
 
+#[cfg(unix)]
 const MOVE_ALPHA: &str = "INSERT INTO projects_home_project_move
     VALUES (1,'request-1',1,'alpha','/repos/alpha','/home/alpha','move')";
 

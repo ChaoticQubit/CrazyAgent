@@ -734,6 +734,11 @@ fn finalize(
     pending: &Pending,
     next: &EffectiveConfig,
 ) -> Result<OwnerApplied, EngineError> {
+    #[cfg(unix)]
+    let dropped = super::accounts::dropped_files(
+        pending.old.config()?.settings.model_access.as_ref(),
+        next.settings.model_access.as_ref(),
+    );
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
@@ -750,6 +755,10 @@ fn finalize(
     store_config(&tx, next)?;
     if let Some(access) = &next.settings.model_access {
         crate::scheduling::forget_removed(&tx, access)?;
+    }
+    #[cfg(unix)]
+    for (kind, name) in &dropped {
+        super::trash::put(&tx, kind, name)?;
     }
     let request = &pending.request;
     let hash = request.mutation_hash()?;
@@ -788,6 +797,10 @@ fn finalize(
         &serde_json::to_vec(&OwnerResult::Applied).map_err(error)?,
     )?;
     tx.commit().map_err(error)?;
+    #[cfg(unix)]
+    for (kind, name) in &dropped {
+        super::accounts::settle_removed(db, next.settings.model_access.as_ref(), kind, name);
+    }
     assert_eq!(revision, pending.revision + 1);
     Ok(OwnerApplied {
         result: OwnerResult::Applied,

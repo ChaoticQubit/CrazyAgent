@@ -11,8 +11,8 @@ use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::{
     HOURS_DEFAULT, HOURS_MAX, HOURS_MIN, LeftRunning, OnQuit, QuitSettings,
 };
-use crate::sandbox::{LinuxSockets, LinuxSupervisor};
-use crate::sandbox_settings::SandboxSettings;
+use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
+use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crate::setup::pack::entry_title;
 use crate::setup::{
     Dependency, DependencyState, PackEntry, PackKind, PackState, RefusedTool, SetupStatus, ToolFix,
@@ -65,6 +65,9 @@ const SOCKETS_UNKNOWN: &str = "The Linux sockets setting is not known yet.";
 const SUPERVISOR_TEXT: &str = "Linux call supervisor: whether CrazyAgent checks the calls Landlock can't limit by itself when agents make them, when CrazyAgent runs on Linux.";
 const SUPERVISOR_CHOICES: [LinuxSupervisor; 2] = [LinuxSupervisor::On, LinuxSupervisor::Off];
 const SUPERVISOR_UNKNOWN: &str = "The Linux call supervisor setting is not known yet.";
+const STRICT_TEXT: &str = "Refuse agents without the full Linux sandbox: whether CrazyAgent starts an agent on Linux when this computer cannot hold everything its sandbox can, when CrazyAgent runs on Linux.";
+const STRICT_CHOICES: [LinuxStrict; 2] = [LinuxStrict::Off, LinuxStrict::On];
+const STRICT_UNKNOWN: &str = "The Linux strict setting is not known yet.";
 
 const CLEANUP_TEXT: &str =
     "Finished agents: when CrazyAgent removes a finished agent's worktree on its own.";
@@ -280,6 +283,22 @@ fn supervisor_words(calls: LinuxSupervisor) -> (&'static str, &'static str) {
     }
 }
 
+/// The plain title and explanation of one strict Linux option (DEC-185), as Settings shows
+/// it and the desktop says it. Input: the option. Output: the title and the sentence naming
+/// what starts under it.
+fn strict_words(strict: LinuxStrict) -> (&'static str, &'static str) {
+    match strict {
+        LinuxStrict::Off => (
+            "Off",
+            "Agents start with what this Linux holds, and the lines under Agent access say what it cannot hold for them.",
+        ),
+        LinuxStrict::On => (
+            "On",
+            "An agent on Linux starts only with a process space of its own, the call supervisor running and its network limits held. Otherwise the master, a plugin check or a context-mode check does not start, and says why.",
+        ),
+    }
+}
+
 /// What one Linux sandbox setting reads as: an option's title and sentence from the stored
 /// settings.
 type SandboxWords = fn(&SandboxSettings) -> (&'static str, &'static str);
@@ -302,7 +321,10 @@ fn option_rows(
         .collect();
     for (index, (title, detail)) in options.iter().enumerate() {
         let mark = if index == choice { "> " } else { "  " };
-        lines.push(join([Line::raw(mark), styled(*title, Role::Heading, theme)]));
+        lines.push(join([
+            Line::raw(mark),
+            styled(*title, Role::Heading, theme),
+        ]));
         lines.extend(
             wrap(detail, limit.saturating_sub(4).max(1))
                 .into_iter()
@@ -356,6 +378,16 @@ pub fn setup_plain(code: &str) -> String {
         }
     }
     .to_owned()
+}
+
+/// A plain sentence for a Linux sandbox setting save's problem code: a save refused as
+/// stale, as another window saved the sandbox first, says the setting changed elsewhere and
+/// that the saved one shows now, as the screen reads it again; any other code reads as
+/// [`setup_plain`] has it. Input: the code. Output: the sentence.
+fn sandbox_plain(code: &str) -> String {
+    crate::config::plain_problem(code)
+        .filter(|_| code == crate::storage::versioned::STALE_CODE)
+        .map_or_else(|| setup_plain(code), str::to_owned)
 }
 
 /// The sentence for why a tool or default skill did not install.
@@ -475,6 +507,9 @@ enum Ask {
     Supervisor {
         choice: usize,
     },
+    Strict {
+        choice: usize,
+    },
     Cleanup {
         choice: usize,
     },
@@ -522,8 +557,8 @@ enum Sent {
 /// skills and plugins pack, with ticks. First run shows it after the projects
 /// home folder: Enter installs and continues to the Harnesses step, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
-/// remove, the projects home folder, the GitHub account, the Linux sockets and call
-/// supervisor settings, when finished agents' worktrees go, what quitting does to team agents, the
+/// remove, the projects home folder, the GitHub account, the Linux sockets, call
+/// supervisor and strict settings, when finished agents' worktrees go, what quitting does to team agents, the
 /// master step, time and frame size limits and what harnesses do when a model provider
 /// can't be reached.
 pub struct AppSetup {
@@ -531,7 +566,7 @@ pub struct AppSetup {
     setup: Load<SetupStatus>,
     home: Load<ProjectsHome>,
     github: Load<GitHubStatus>,
-    sandbox: Load<SandboxSettings>,
+    sandbox: Load<StoredSandboxSettings>,
     cleanup: Load<CleanupSettings>,
     quit: Load<QuitSettings>,
     steps: Load<MasterStepSettings>,
@@ -835,7 +870,7 @@ impl AppSetup {
         }
     }
 
-    fn changed(&mut self, result: &Result<(), String>, ctx: &mut Ctx) {
+    fn changed(&mut self, result: &Result<(), String>, plain: fn(&str) -> String, ctx: &mut Ctx) {
         let (done, fixing) = match self.sent.take() {
             Some(Sent::Done(done)) => (done, None),
             Some(Sent::Fix { done, name }) => (done, Some(name)),
@@ -851,7 +886,7 @@ impl AppSetup {
                 self.reload(ctx);
             }
             Err(code) => {
-                ctx.say(Message::error(&setup_plain(code), ""));
+                ctx.say(Message::error(&plain(code), ""));
                 if code == crate::storage::versioned::STALE_CODE {
                     self.reload(ctx);
                 }
@@ -1026,7 +1061,7 @@ impl AppSetup {
     }
 
     fn ask_sockets(&mut self, ctx: &mut Ctx) {
-        let Load::Ready(settings) = &self.sandbox else {
+        let Load::Ready(StoredSandboxSettings { settings, .. }) = &self.sandbox else {
             ctx.say(Message::warning(SOCKETS_UNKNOWN, ""));
             return;
         };
@@ -1040,7 +1075,11 @@ impl AppSetup {
     fn set_sockets(&mut self, choice: usize, ctx: &mut Ctx) {
         assert!(choice < SOCKETS_CHOICES.len());
         let linux_sockets = SOCKETS_CHOICES[choice];
-        let Load::Ready(stored) = &self.sandbox else {
+        let Load::Ready(StoredSandboxSettings {
+            settings: stored,
+            version,
+        }) = &self.sandbox
+        else {
             ctx.say(Message::warning(SOCKETS_UNKNOWN, ""));
             return;
         };
@@ -1056,13 +1095,14 @@ impl AppSetup {
         let done = format!("Linux sockets: {}.", sockets_words(linux_sockets).0);
         let job = AppSetupJob::SetSandbox {
             settings,
+            version: *version,
             generation: ctx.next_generation(),
         };
         self.change(job, Sent::Done(done), ctx);
     }
 
     fn ask_supervisor(&mut self, ctx: &mut Ctx) {
-        let Load::Ready(settings) = &self.sandbox else {
+        let Load::Ready(StoredSandboxSettings { settings, .. }) = &self.sandbox else {
             ctx.say(Message::warning(SUPERVISOR_UNKNOWN, ""));
             return;
         };
@@ -1076,7 +1116,11 @@ impl AppSetup {
     fn set_supervisor(&mut self, choice: usize, ctx: &mut Ctx) {
         assert!(choice < SUPERVISOR_CHOICES.len());
         let linux_supervisor = SUPERVISOR_CHOICES[choice];
-        let Load::Ready(stored) = &self.sandbox else {
+        let Load::Ready(StoredSandboxSettings {
+            settings: stored,
+            version,
+        }) = &self.sandbox
+        else {
             ctx.say(Message::warning(SUPERVISOR_UNKNOWN, ""));
             return;
         };
@@ -1093,6 +1137,50 @@ impl AppSetup {
         let done = format!("Linux supervisor: {title}.");
         let job = AppSetupJob::SetSandbox {
             settings,
+            version: *version,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn ask_strict(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(StoredSandboxSettings { settings, .. }) = &self.sandbox else {
+            ctx.say(Message::warning(STRICT_UNKNOWN, ""));
+            return;
+        };
+        let choice = STRICT_CHOICES
+            .iter()
+            .position(|strict| *strict == settings.linux_strict)
+            .expect("every option is listed");
+        self.ask = Some(Ask::Strict { choice });
+    }
+
+    fn set_strict(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < STRICT_CHOICES.len());
+        let linux_strict = STRICT_CHOICES[choice];
+        let Load::Ready(StoredSandboxSettings {
+            settings: stored,
+            version,
+        }) = &self.sandbox
+        else {
+            ctx.say(Message::warning(STRICT_UNKNOWN, ""));
+            return;
+        };
+        if stored.linux_strict == linux_strict {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let settings = SandboxSettings {
+            linux_strict,
+            ..*stored
+        };
+        assert_eq!(settings.linux_sockets, stored.linux_sockets);
+        assert_eq!(settings.linux_supervisor, stored.linux_supervisor);
+        let (title, _) = strict_words(linux_strict);
+        let done = format!("Linux strict: {title}.");
+        let job = AppSetupJob::SetSandbox {
+            settings,
+            version: *version,
             generation: ctx.next_generation(),
         };
         self.change(job, Sent::Done(done), ctx);
@@ -1104,7 +1192,7 @@ impl AppSetup {
         ctx: &Ctx,
     ) -> (Line<'static>, Option<&'static str>) {
         match &self.sandbox {
-            Load::Ready(settings) => {
+            Load::Ready(StoredSandboxSettings { settings, .. }) => {
                 let (title, detail) = words(settings);
                 (Line::raw(title), Some(detail))
             }
@@ -1826,6 +1914,21 @@ impl AppSetup {
                 Key::Esc => {}
                 _ => self.ask = Some(Ask::Supervisor { choice }),
             },
+            Ask::Strict { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Strict {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Strict {
+                        choice: (choice + 1).min(STRICT_CHOICES.len() - 1),
+                    })
+                }
+                Key::Enter => self.set_strict(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Strict { choice }),
+            },
             Ask::Cleanup { choice } => match key {
                 Key::Up => {
                     self.ask = Some(Ask::Cleanup {
@@ -2255,9 +2358,16 @@ impl AppSetup {
         }
         let note =
             |text: &str| -> Vec<Line<'static>> { if notes { under(text) } else { Vec::new() } };
-        let sandbox: [(&str, SandboxWords); 2] = [
-            ("Linux sockets", |settings| sockets_words(settings.linux_sockets)),
-            ("Linux supervisor", |settings| supervisor_words(settings.linux_supervisor)),
+        let sandbox: [(&str, SandboxWords); 3] = [
+            ("Linux sockets", |settings| {
+                sockets_words(settings.linux_sockets)
+            }),
+            ("Linux supervisor", |settings| {
+                supervisor_words(settings.linux_supervisor)
+            }),
+            ("Linux strict", |settings| {
+                strict_words(settings.linux_strict)
+            }),
         ];
         for (name, words) in sandbox {
             let (value, detail) = self.sandbox_value(words, ctx);
@@ -2352,6 +2462,10 @@ impl AppSetup {
             Some(Ask::Supervisor { choice }) => {
                 let options = SUPERVISOR_CHOICES.map(supervisor_words);
                 lines.extend(option_rows(SUPERVISOR_TEXT, &options, *choice, limit, ctx));
+            }
+            Some(Ask::Strict { choice }) => {
+                let options = STRICT_CHOICES.map(strict_words);
+                lines.extend(option_rows(STRICT_TEXT, &options, *choice, limit, ctx));
             }
             Some(Ask::Cleanup { choice }) => lines.extend(self.cleanup_rows(*choice, limit, ctx)),
             Some(Ask::Steps { choice }) => lines.extend(self.steps_rows(*choice, limit, ctx)),
@@ -2569,6 +2683,7 @@ impl Screen for AppSetup {
             Some(
                 ask @ (Ask::Sockets { .. }
                 | Ask::Supervisor { .. }
+                | Ask::Strict { .. }
                 | Ask::Cleanup { .. }
                 | Ask::QuitChoice { .. }
                 | Ask::QuitLimit { .. }
@@ -2605,7 +2720,7 @@ impl Screen for AppSetup {
                     let skip = if self.finished_with_problems {
                         "Continue without it"
                     } else {
-                        "Continue without installing"
+                        "Skip for now"
                     };
                     hints.push(hint("c", skip));
                 }
@@ -2632,10 +2747,11 @@ impl Screen for AppSetup {
         if !self.first_run {
             hints.push(hint("h", "Home"));
             if matches!(&self.github, Load::Ready(github) if github.signed_in) {
-                hints.push(hint("g", "Sign out of GitHub"));
+                hints.push(hint("g", "Sign out"));
             }
             hints.push(hint("l", "Sockets"));
             hints.push(hint("v", "Supervisor"));
+            hints.push(hint("x", "Strict"));
             hints.push(hint("f", "Finished"));
             hints.push(hint("q", "Quitting"));
             hints.push(hint("e", "Retry"));
@@ -2721,6 +2837,10 @@ impl Screen for AppSetup {
                 self.ask_supervisor(ctx);
                 Flow::Handled
             }
+            Key::Char('x') if !self.first_run => {
+                self.ask_strict(ctx);
+                Flow::Handled
+            }
             Key::Char('f') if !self.first_run => {
                 self.ask_cleanup(ctx);
                 Flow::Handled
@@ -2770,9 +2890,9 @@ impl Screen for AppSetup {
             AppSetupEvent::Status(result) => return self.read_setup(result, ctx),
             AppSetupEvent::Ran(result) => self.ran(result, ctx),
             AppSetupEvent::Installed(_) => {}
+            AppSetupEvent::SandboxSet(result) => self.changed(result, sandbox_plain, ctx),
             AppSetupEvent::PackChanged(result)
             | AppSetupEvent::HomeSet(result)
-            | AppSetupEvent::SandboxSet(result)
             | AppSetupEvent::CleanupSet(result)
             | AppSetupEvent::QuitSet(result)
             | AppSetupEvent::MasterStepsSet(result)
@@ -2780,7 +2900,7 @@ impl Screen for AppSetup {
             | AppSetupEvent::MasterFramesSet(result)
             | AppSetupEvent::ProviderRetrySet(result)
             | AppSetupEvent::FixSet(result)
-            | AppSetupEvent::RefusedToolSet(result) => self.changed(result, ctx),
+            | AppSetupEvent::RefusedToolSet(result) => self.changed(result, setup_plain, ctx),
             AppSetupEvent::Sandbox(result) => {
                 self.reading[3] = false;
                 self.sandbox = loaded(result);
@@ -2813,7 +2933,7 @@ impl Screen for AppSetup {
                 let result = result.as_ref().map(|github| {
                     self.github = Load::Ready(github.clone());
                 });
-                self.changed(&result.map_err(Clone::clone), ctx);
+                self.changed(&result.map_err(Clone::clone), setup_plain, ctx);
             }
             AppSetupEvent::Home(result) => {
                 self.reading[1] = false;

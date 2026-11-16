@@ -1,12 +1,12 @@
 #![cfg(target_os = "linux")]
 use crazyagent::sandbox::linux::{
     BWRAP_PATHS, HelperRequest, LOADER_REFUSED, LinuxBackend, LinuxSandbox, NEST_ARGS,
-    loader_variable,
+    NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS, loader_variable,
 };
 
 use crazyagent::sandbox::{
-    InstalledSandbox, LinuxSockets, LinuxSupervisor, ProjectSandbox, Sandbox, SandboxError,
-    SandboxNetwork, SandboxRemote,
+    InstalledSandbox, LinuxSockets, LinuxStrict, LinuxSupervisor, ProjectSandbox, Sandbox,
+    SandboxError, SandboxNetwork, SandboxRemote,
 };
 
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
@@ -251,6 +251,51 @@ fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     )
     .unwrap();
     assert_eq!(first.code(), Some(2), "process 1 is refused as an argument");
+}
+
+/// A git folder grant (DEC-185 S1) lets git's own writes through, a lock file renamed over
+/// the index and a new logs folder, but makes no symlink and links nothing to another
+/// folder, which Landlock refuses without its make-symlink and refer rights.
+#[test]
+fn a_git_folder_grant_makes_files_and_folders_but_no_symlink_and_no_link_out() {
+    let case = case();
+    let admin = case.outside.join("admin");
+    let away = case.tmp.join("away");
+    fs::create_dir_all(&admin).unwrap();
+    fs::create_dir_all(&away).unwrap();
+    fs::write(admin.join("index"), "index\n").unwrap();
+    let script = r#"admin="$1"; away="$2"; err="$away/err"
+printf new > "$admin/index.lock" && mv "$admin/index.lock" "$admin/index" && echo renamed
+mkdir "$admin/logs" && printf log > "$admin/logs/HEAD" && echo folder
+ln -s /etc "$admin/link" 2>>"$err" && echo symlinked
+ln "$admin/index" "$away/index" 2>>"$err" && echo linked
+exit 0"#;
+    let output = crazyagent::spawn_gate::output(
+        helper_command()
+            .args(["--read", "/", "--write"])
+            .arg(&case.tmp)
+            .arg("--git-write")
+            .arg(&admin)
+            .args(["--", "/bin/sh", "-c", script, "sh"])
+            .arg(&admin)
+            .arg(&away)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    let said = String::from_utf8_lossy(&output.stdout);
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{said}{errors}");
+    assert!(said.contains("renamed"), "{said}{errors}");
+    assert!(said.contains("folder"), "{said}{errors}");
+    for refused in ["symlinked", "linked"] {
+        assert!(
+            !said.lines().any(|line| line == refused),
+            "{refused}: {said}"
+        );
+    }
+    assert_eq!(fs::read_to_string(admin.join("index")).unwrap(), "new");
+    assert!(fs::symlink_metadata(admin.join("link")).is_err());
+    assert!(fs::symlink_metadata(away.join("index")).is_err());
 }
 
 #[test]
@@ -861,6 +906,7 @@ fn an_installed_sandbox_on_linux_launches_through_the_linux_boundary() {
         policy(&case, SandboxNetwork::Open),
         &profiles.join("agent.sb"),
         LinuxSupervisor::On,
+        LinuxStrict::Off,
     )
     .unwrap();
     let launcher = installed.launcher().to_path_buf();
@@ -872,6 +918,29 @@ fn an_installed_sandbox_on_linux_launches_through_the_linux_boundary() {
     );
     let output = run(&installed, &case, &boundary_script(&case));
     assert_boundary(&case, &output);
+}
+
+#[test]
+fn the_strict_setting_refuses_a_launch_without_the_call_supervisor_and_off_starts_it() {
+    let case = case();
+    let profiles = case.outside.join("profiles");
+    fs::create_dir_all(&profiles).unwrap();
+    let install = |strict| {
+        InstalledSandbox::install(
+            policy(&case, SandboxNetwork::Open),
+            &profiles.join("agent.sb"),
+            LinuxSupervisor::Off,
+            strict,
+        )
+    };
+    let refused = install(LinuxStrict::On).err();
+    assert!(
+        matches!(&refused, Some(SandboxError::Unavailable(reason))
+            if reason == crazyagent::sandbox::LINUX_NOT_FULL_LINE),
+        "strict On must refuse an unsupervised launch: {refused:?}"
+    );
+    let started = install(LinuxStrict::Off).unwrap();
+    assert!(!started.launcher().as_os_str().is_empty());
 }
 
 #[test]
@@ -2415,8 +2484,14 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
     let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), data);
     assert_eq!(host.scoped, scoped);
     assert_eq!(host.nested, nesting_bwrap().is_some());
-    assert!(host.supervised, "the call supervisor probe row needs the same of this machine");
-    assert!(!host.root, "the gate runs as its own user, where the supervisor starts");
+    assert!(
+        host.supervised,
+        "the call supervisor probe row needs the same of this machine"
+    );
+    assert!(
+        !host.root,
+        "the gate runs as its own user, where the supervisor starts"
+    );
     let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"), data);
     assert!(!absent.scoped && !absent.nested, "{absent:?}");
     assert!(!absent.supervised, "{absent:?}");
@@ -2425,14 +2500,20 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
 #[test]
 fn a_host_whose_landlock_does_not_hold_reports_the_process_namespace_bubblewrap_gives() {
     let refusing = Path::new("/bin/false");
-    assert!(refusing.is_file(), "the row needs /bin/false as a helper that holds nothing");
+    assert!(
+        refusing.is_file(),
+        "the row needs /bin/false as a helper that holds nothing"
+    );
     let bwrap = BWRAP_PATHS.iter().any(|path| Path::new(path).is_file());
     assert!(bwrap, "Linux test machines need bubblewrap installed");
     let data = tempfile::tempdir().unwrap();
     let host = crazyagent::sandbox::linux::read_host(refusing, Some(data.path()));
     assert!(!host.scoped, "{host:?}");
     assert!(host.nested, "{host:?}");
-    assert!(!host.supervised, "bubblewrap alone runs no call supervisor: {host:?}");
+    assert!(
+        !host.supervised,
+        "bubblewrap alone runs no call supervisor: {host:?}"
+    );
 }
 
 /// The host report blames AppArmor only where its user namespace restriction is on, nothing
@@ -2519,9 +2600,20 @@ fn planted_or_concurrent_probe_folders_never_turn_the_call_supervisor_off() {
     }
     assert!(alone.supervised, "{alone:?}");
     assert!(both.iter().all(|host| host.supervised), "{both:?}");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(!folder.join(".git").exists(), "the plain probe held with the folders planted");
-    assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "every probe folder removed");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !folder.join(".git").exists(),
+        "the plain probe held with the folders planted"
+    );
+    assert_eq!(
+        fs::read_dir(&data).unwrap().count(),
+        0,
+        "every probe folder removed"
+    );
 }
 
 /// This computer's address on its default route, which is never loopback. No input.
@@ -2533,7 +2625,10 @@ fn outward_address() -> std::net::IpAddr {
         .connect("192.0.2.1:9")
         .expect("Linux test machines need a default route");
     let address = socket.local_addr().unwrap().ip();
-    assert!(!address.is_loopback() && !address.is_unspecified(), "{address}");
+    assert!(
+        !address.is_loopback() && !address.is_unspecified(),
+        "{address}"
+    );
     address
 }
 
@@ -2621,6 +2716,398 @@ fn the_broker_runs_while_the_agent_does_and_ends_with_it() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(!broker_runs(port), "the broker ends with the agent");
+}
+
+/// Tells, by a control that owes the engine nothing, whether this machine has what a
+/// routed agent needs besides nesting: slirp4netns at its fixed place and an
+/// `iptables-restore` on the nf_tables backend. No input. Output: true when it has both.
+fn routing_tools() -> bool {
+    let slirp = SLIRP_PATHS.iter().all(|path| Path::new(path).is_file());
+    let version = crazyagent::spawn_gate::output(
+        Command::new("/usr/sbin/iptables-restore")
+            .arg("--version")
+            .stdin(Stdio::null()),
+    );
+    let said = |output: Output| String::from_utf8_lossy(&output.stdout).contains("(nf_tables)");
+    slirp && version.is_ok_and(said)
+}
+
+/// The routed backend for a policy, on a machine whose controls say it nests agents and
+/// has the routing tools, where the host report and detection must both route this one.
+/// Input: the policy. Output: the sandbox, or none, with the reason printed, where the
+/// machine lacks either and the row is skipped (DEC-179 SBX-2).
+fn routed(sandbox: ProjectSandbox) -> Option<LinuxSandbox> {
+    nesting_bwrap()?;
+    if !routing_tools() {
+        eprintln!("skipped: this machine has no slirp4netns or no nf_tables iptables");
+        return None;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(data.path()));
+    assert!(
+        host.routed,
+        "this machine can route agents, so the report says so: {host:?}"
+    );
+    let sandbox = nested(sandbox)?;
+    assert!(
+        sandbox.routed().is_some(),
+        "this machine routes agents, so detection routes this one"
+    );
+    Some(sandbox)
+}
+
+/// Runs a bash script as the agent, for the rows that open TCP connections through bash's
+/// `/dev/tcp`. Inputs: the sandbox, the case and the script, which exits 0. Output: what it
+/// printed.
+fn bash(sandbox: &dyn Sandbox, case: &Case, script: &str) -> String {
+    let mut harness = Command::new("/bin/bash");
+    harness
+        .args(["-c", script])
+        .current_dir(case.project.join("worktrees"));
+    agent_stdout(Some(sandbox), harness)
+}
+
+/// Serves `pong` on every address at a port Linux picks, for up to 16 connections. No
+/// input. Output: the port.
+fn pong_everywhere() -> u16 {
+    let served = crazyagent::spawn_gate::bind_tcp_std("0.0.0.0:0").unwrap();
+    let port = served.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut asked in served.incoming().flatten().take(16) {
+            let _ = asked.write_all(b"pong\n");
+        }
+    });
+    port
+}
+
+#[test]
+fn a_routed_agent_reaches_its_any_host_port_and_not_a_bridged_port_on_another_host() {
+    let case = case();
+    let other = outward_address();
+    let (any, port) = (pong_everywhere(), pong_everywhere());
+    let reach = format!(
+        "read -r line </dev/tcp/{other}/{any}; echo \"any=$line\"; \
+         (exec 4<>/dev/tcp/{other}/{port}) 2>/dev/null && echo other=reached || echo other=refused; \
+         read -r line </dev/tcp/127.0.0.1/{port}; echo \"loopback=$line\""
+    );
+    let gateway = format!(
+        "(exec 4<>/dev/tcp/10.0.2.2/{port}) 2>/dev/null && echo gateway=reached || echo gateway=refused"
+    );
+    let network = SandboxNetwork::Only(vec![
+        SandboxRemote::AnyHost(any),
+        SandboxRemote::Loopback(port),
+    ]);
+    let shared = pinned(policy(&case, network.clone()));
+    assert_eq!(
+        bash(&shared, &case, &reach),
+        "any=pong\nother=reached\nloopback=pong\n",
+        "on the shared network the bridged port is open on every host (RV-DS241-83)"
+    );
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    assert_eq!(
+        bash(&sandbox, &case, &reach),
+        "any=pong\nother=refused\nloopback=pong\n"
+    );
+    assert_eq!(bash(&sandbox, &case, &gateway), "gateway=refused\n");
+}
+
+#[test]
+fn a_routed_agent_holds_no_capability_and_cannot_change_its_rules() {
+    let case = case();
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]);
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    let script = "grep '^CapEff:' /proc/self/status; \
+        printf '*filter\\nCOMMIT\\n' | iptables-restore 2>/dev/null && echo rules=changed || echo rules=kept; \
+        ip link set tap0 down 2>/dev/null && echo link=changed || echo link=kept";
+    assert_eq!(
+        bash(&sandbox, &case, script),
+        "CapEff:\t0000000000000000\nrules=kept\nlink=kept\n"
+    );
+}
+
+/// The agent's resolver file names slirp's resolver alone, a name only the host's resolver
+/// knows (systemd-resolved's `_gateway`, in no hosts file) is found through it over TCP, and
+/// no UDP socket opens to reach another resolver.
+#[test]
+fn a_routed_agent_looks_names_up_through_the_sandbox_resolver() {
+    let case = case();
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]);
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    let script = "grep '^nameserver' /etc/resolv.conf; \
+        getent hosts _gateway >/dev/null && echo name=found || echo name=missing; \
+        python3 -c 'import socket
+try:
+    socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b\"x\", (\"1.1.1.1\", 53))
+    print(\"udp=sent\")
+except OSError:
+    print(\"udp=refused\")'";
+    assert_eq!(
+        bash(&sandbox, &case, script),
+        "nameserver 10.0.2.3\nname=found\nudp=refused\n"
+    );
+}
+
+/// The processes that build a routed agent's network: each setup child, found by its
+/// arguments with the route port, and each slirp4netns one of them started. Input: the
+/// port. Output: their process ids, setup children first.
+fn route_processes(port: u16) -> (Vec<u32>, Vec<u32>) {
+    let wanted = port.to_string();
+    let pids: Vec<u32> = fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .collect();
+    let setup: Vec<u32> = pids
+        .iter()
+        .copied()
+        .filter(|pid| {
+            fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|line| {
+                let words: Vec<&[u8]> = line.split(|byte| *byte == 0).collect();
+                words.contains(&b"--egress".as_slice()) && words.contains(&wanted.as_bytes())
+            })
+        })
+        .collect();
+    let slirp = pids
+        .into_iter()
+        .filter(|pid| {
+            let named = fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|comm| comm.trim_end() == "slirp4netns");
+            let parent = fs::read_to_string(format!("/proc/{pid}/status"))
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find_map(|line| line.strip_prefix("PPid:"))
+                        .and_then(|value| value.trim().parse::<u32>().ok())
+                });
+            named && parent.is_some_and(|parent| setup.contains(&parent))
+        })
+        .collect();
+    (setup, slirp)
+}
+
+#[test]
+fn the_routed_network_ends_with_the_agent() {
+    let case = case();
+    let route = 18_443;
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(route)]);
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    let none = (Vec::new(), Vec::new());
+    assert_eq!(route_processes(route), none);
+    let (mut child, _output) = started(&sandbox, &case, "echo ready; read -r line");
+    let (setup, slirp) = route_processes(route);
+    assert_eq!(
+        (setup.len(), slirp.len()),
+        (1, 1),
+        "a routed agent runs with its setup child and slirp4netns"
+    );
+    drop(child.stdin.take());
+    assert!(exit_within(&mut child, Duration::from_secs(5)).is_some());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while route_processes(route) != none && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        route_processes(route),
+        none,
+        "the network ends with the agent"
+    );
+}
+
+/// Stage 1 as a shell stands in for it: it starts the setup child on two named pipes, then
+/// becomes bubblewrap with its info and block descriptors on them, but leaves the network
+/// shared. The setup child refuses, writes no block byte and kills bubblewrap's child, so
+/// the command bubblewrap was to start never runs. Positional arguments: the folder, the
+/// helper and bubblewrap.
+const STAGED: &str = "cd \"$1\" && mkfifo info block || exit 9
+\"$2\" --egress $$ 18444 <info >block 2>said &
+exec \"$3\" --unshare-user --die-with-parent --dev-bind / / --info-fd 3 --block-fd 4 -- /bin/touch \"$1/started\" 3>info 4<block";
+
+#[test]
+fn a_failed_setup_never_starts_the_agent() {
+    let Some(bwrap) = nesting_bwrap() else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let folder = temp.path().canonicalize().unwrap();
+    let mut staged = crazyagent::spawn_gate::spawn(
+        Command::new("/bin/sh")
+            .args(["-c", STAGED, "sh"])
+            .arg(&folder)
+            .arg(HELPER)
+            .arg(&bwrap)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let status = exit_within(&mut staged, Duration::from_secs(10));
+    if status.is_none() {
+        staged.kill().unwrap();
+        staged.wait().unwrap();
+    }
+    let said = fs::read_to_string(folder.join("said")).unwrap_or_default();
+    assert!(
+        status.is_some_and(|status| !status.success()),
+        "{status:?}: {said}"
+    );
+    assert!(said.contains(NETWORK_SHARED), "{said}");
+    assert!(!folder.join("started").exists(), "the command ran: {said}");
+}
+
+/// Stage 1's two start bytes as a shell stands them in: bubblewrap blocks on descriptor 4
+/// and starts the helper's probe with `--route-fd 5`, a second descriptor on the same
+/// input, which holds the bytes given as a line. Positional arguments: the folder,
+/// bubblewrap, the helper and the bytes.
+const GO_STAGED: &str = "cd \"$1\" && exec \"$2\" --unshare-user --die-with-parent --dev-bind / / --block-fd 4 -- \"$3\" --route-fd 5 --probe 4<<X 5<&4 2>said
+$4
+X";
+
+#[test]
+fn a_nested_helper_starts_only_on_the_go_byte_after_bubblewraps_own() {
+    let Some(bwrap) = nesting_bwrap() else {
+        return;
+    };
+    let run = |bytes: &str| {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().canonicalize().unwrap();
+        let mut staged = crazyagent::spawn_gate::spawn(
+            Command::new("/bin/sh")
+                .args(["-c", GO_STAGED, "sh"])
+                .arg(&folder)
+                .arg(&bwrap)
+                .arg(HELPER)
+                .arg(bytes)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        let status = exit_within(&mut staged, Duration::from_secs(10));
+        if status.is_none() {
+            staged.kill().unwrap();
+            staged.wait().unwrap();
+        }
+        let said = fs::read_to_string(folder.join("said")).unwrap_or_default();
+        (status.and_then(|status| status.code()), said)
+    };
+    let (code, said) = run("12");
+    assert_eq!(code, Some(0), "the go byte after bubblewrap's: {said}");
+    for refused in ["1", ""] {
+        let (code, said) = run(refused);
+        assert_eq!(code, Some(3), "{refused:?}: {said}");
+        assert!(said.contains("the agent's network was not built"), "{said}");
+    }
+}
+
+/// The setup child runs only as its nest's child, so a caller of the helper never reaches
+/// the agent's namespaces through it (leader 23:16): without the two pipes stage 1 hands it,
+/// for a process that is not its parent's child, or under a parent that is not one of the
+/// fixed bubblewraps, it refuses with its reason, writes nothing and kills nothing. These
+/// need no bubblewrap, so they hold on every machine.
+#[test]
+fn the_setup_child_runs_only_on_its_nests_pipes_for_its_nests_child() {
+    let mut stand_in = crazyagent::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let ask = |named: u32, piped: bool| -> String {
+        let mut setup = helper_command();
+        setup
+            .arg("--egress")
+            .arg(std::process::id().to_string())
+            .arg("18445")
+            .stderr(Stdio::piped());
+        if piped {
+            setup.stdin(Stdio::piped()).stdout(Stdio::piped());
+        } else {
+            setup.stdin(Stdio::null()).stdout(Stdio::null());
+        }
+        let mut child = crazyagent::spawn_gate::spawn(&mut setup).unwrap();
+        if let Some(mut input) = child.stdin.take() {
+            let info = format!("{{\n    \"child-pid\": {named}\n}}\n");
+            let _ = input.write_all(info.as_bytes());
+        }
+        let output = child.wait_with_output().unwrap();
+        let said = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(!output.status.success(), "{said}");
+        assert!(output.stdout.is_empty(), "a block byte: {said}");
+        said
+    };
+    let unpiped = ask(stand_in.id(), false);
+    let unrelated = ask(std::process::id(), true);
+    let unnested = ask(stand_in.id(), true);
+    let alive = stand_in.try_wait().unwrap().is_none();
+    stand_in.kill().unwrap();
+    stand_in.wait().unwrap();
+    assert!(unpiped.contains(SETUP_UNPIPED), "{unpiped}");
+    assert!(unrelated.contains(SETUP_NOT_CHILD), "{unrelated}");
+    assert!(unnested.contains(SETUP_NOT_NEST), "{unnested}");
+    assert!(alive, "a refused setup child kills nothing");
+}
+
+#[test]
+fn without_slirp_the_agent_keeps_the_shared_network_and_the_supervisor() {
+    if let Some(slirp) = SLIRP_PATHS.iter().find(|path| Path::new(path).exists()) {
+        eprintln!("skipped: {slirp} is installed here");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().canonicalize().unwrap();
+    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(data.as_path()));
+    assert!(!host.routed, "{host:?}");
+    let case = case();
+    let other = outward_address();
+    let port = pong_everywhere();
+    let network = SandboxNetwork::Only(vec![
+        SandboxRemote::AnyHost(443),
+        SandboxRemote::Loopback(port),
+    ]);
+    let Some(sandbox) = nested(policy(&case, network)) else {
+        return;
+    };
+    assert!(sandbox.routed().is_none());
+    let supervised = sandbox.supervise(LinuxSupervisor::On, Some(data.as_path()));
+    let script = format!(
+        "read -r line </dev/tcp/127.0.0.1/{port}; echo \"loopback=$line\"; \
+         (exec 4<>/dev/tcp/{other}/{port}) 2>/dev/null && echo other=reached || echo other=refused"
+    );
+    assert_eq!(
+        bash(&supervised, &case, &script),
+        "loopback=pong\nother=refused\n",
+        "the call supervisor refuses the loopback port on another host"
+    );
+}
+
+#[test]
+fn the_routed_network_leaves_no_descriptor_in_the_harness() {
+    let case = case();
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]);
+    let Some(sandbox) = routed(policy(&case, network.clone())) else {
+        return;
+    };
+    let shared = pinned(policy(&case, network));
+    let open = |sandbox: &dyn Sandbox| {
+        String::from_utf8(run(sandbox, &case, "ls /proc/self/fd").stdout).unwrap()
+    };
+    assert_eq!(open(&sandbox), "0\n1\n2\n3\n");
+    assert_eq!(open(&sandbox), open(&shared));
 }
 
 /// A guard: bubblewrap's outer process, the first process of a nested agent, runs with no
@@ -2817,7 +3304,10 @@ fn a_supervised_agent_reaches_a_guarded_port_on_this_machine_and_on_no_other_hos
     let open = finished(supervised(&case, &limited, "/usr/bin/python3", &script));
     let open = told(&open);
     assert!(open.contains("here=ok\n"), "{open}");
-    assert!(!open.contains("there=13\n"), "the port limit alone names no host: {open}");
+    assert!(
+        !open.contains("there=13\n"),
+        "the port limit alone names no host: {open}"
+    );
 }
 
 const GIT_ENTRIES: &str = r#"said() {
@@ -2871,7 +3361,10 @@ fn a_supervised_agent_makes_no_git_entry_but_inside_its_own_git_folder() {
     assert!(case.project.join(".git/objects/moved").is_file());
     assert!(sub.join("plain/file").is_file());
     let plain = finished(supervised(&case, &[], "/bin/sh", &["-c", "mkdir sub/.git"]));
-    assert!(plain.status.success(), "the control makes the folder with no guard");
+    assert!(
+        plain.status.success(),
+        "the control makes the folder with no guard"
+    );
 }
 
 const OPENS: &str = "import ctypes, os
@@ -2981,7 +3474,11 @@ fn a_supervised_agent_signals_only_the_programs_it_started() {
         "outside=1\neveryone=1\nown-group=ok\nself=ok\nchild=ok\nowner-outside=1\n\
          owner-self=ok\nended=-15\n"
     );
-    assert_eq!(outside.try_wait().unwrap(), None, "the outside process still runs");
+    assert_eq!(
+        outside.try_wait().unwrap(),
+        None,
+        "the outside process still runs"
+    );
     outside.kill().unwrap();
     outside.wait().unwrap();
 }
@@ -3083,7 +3580,10 @@ fn a_supervised_agent_ends_with_its_harness_code_and_stops_with_its_group() {
     assert_eq!(line, "stopped\n");
     let status = exit_within(&mut child, Duration::from_secs(5));
     assert_eq!(status.and_then(|status| status.code()), Some(9));
-    assert!(ended(&token), "a process the harness started outlived the stop");
+    assert!(
+        ended(&token),
+        "a process the harness started outlived the stop"
+    );
 }
 
 const STORM: &str = "import os, signal

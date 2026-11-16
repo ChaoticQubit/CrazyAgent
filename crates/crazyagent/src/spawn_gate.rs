@@ -21,6 +21,31 @@ pub(crate) fn spawned() -> usize {
     SPAWNED.get()
 }
 
+/// Test helper: names the folder a row run by [`row_alone`] works and reports in.
+#[cfg(all(test, unix))]
+pub(crate) const ROW_FOLDER: &str = "CRAZYAGENT_TEST_ROW_FOLDER";
+
+/// Test helper: runs one ignored row of this test binary in its own process, so a
+/// per-process setting, such as a umask or a file size limit, reaches no other row.
+/// Inputs: the row's full name, a shell line run before it (`:` for none) and the folder
+/// named to it in [`ROW_FOLDER`]. Output: the row's exit status.
+#[cfg(all(test, unix))]
+pub(crate) fn row_alone(row: &str, prelude: &str, folder: &std::path::Path) -> ExitStatus {
+    status(
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "{prelude}; exec \"$0\" --exact {row} --ignored --test-threads 1"
+            ))
+            .arg(std::env::current_exe().unwrap())
+            .env(ROW_FOLDER, folder)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap()
+}
+
 struct Entered(#[allow(dead_code)] MutexGuard<'static, ()>);
 
 impl Drop for Entered {
@@ -232,23 +257,6 @@ pub async fn bind_tcp(
         }
     }
     Err(last)
-}
-
-/// Binds a Tokio TCP socket to `address` without listening on it, so the port stays held
-/// and every connection to it is refused while the socket lives; the socket is created
-/// inside the gate. Input: the address. Output: the bound socket or the bind error.
-#[cfg(all(test, unix))]
-#[allow(clippy::disallowed_methods)]
-pub(crate) fn bind_tcp_unlistened(
-    address: std::net::SocketAddr,
-) -> io::Result<tokio::net::TcpSocket> {
-    let socket = guarded(|| match address {
-        std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
-        std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
-    })?;
-    socket.bind(address)?;
-    assert_eq!(socket.local_addr()?.ip(), address.ip());
-    Ok(socket)
 }
 
 /// Binds a Tokio Unix listener at `path` inside the gate, through its short address when

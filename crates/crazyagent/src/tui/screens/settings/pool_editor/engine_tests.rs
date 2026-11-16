@@ -12,7 +12,7 @@ use crate::tui::run::owner_arrival;
 use crate::tui::screens::{Place, SettingsSection, open};
 use crate::tui::seam::{Request, ShellRequest};
 use crate::tui::shell::Shell;
-use crate::tui::test_home::{ENGINE_WAIT, projects_home};
+use crate::tui::test_home::{ENGINE_WAIT, projects_home, refusing_settings};
 use crate::tui::theme::{Appearance, Colors, Depth};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -27,7 +27,7 @@ allowed_destinations = []
 [model_access]
 accounts = ["local-1"]
 connections = [
-  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
+  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://LOCAL_ADDRESS/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
 ]
 "#;
 const STRICT_LINE: &str = "Provider quota policy: strict | p switches";
@@ -40,6 +40,7 @@ struct Engine {
     _home: tempfile::TempDir,
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
+    _refusing: [std::net::TcpStream; 2],
 }
 
 impl Engine {
@@ -49,8 +50,9 @@ impl Engine {
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (refusing, settings) = refusing_settings(SETTINGS);
         let global = root.path().join("global.toml");
-        std::fs::write(&global, SETTINGS).unwrap();
+        std::fs::write(&global, &settings).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -73,6 +75,7 @@ impl Engine {
             _home: home,
             _service: service,
             _stop: stop,
+            _refusing: refusing,
         }
     }
 
@@ -186,6 +189,14 @@ fn ctx() -> Ctx {
     ctx.width = 80;
     ctx.height = 24;
     ctx
+}
+
+/// L388: the pool editor test engine seeds its local account where no model server the host
+/// runs can answer, so no row here reaches the owner's Ollama.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pool_editor_test_engine_seeds_its_local_account_where_no_host_model_server_answers() {
+    let engine = Engine::start().await;
+    crate::tui::test_home::assert_no_host_model_server(&engine.global()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

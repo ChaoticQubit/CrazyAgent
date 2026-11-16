@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { POLL_MS, STEP_MS, bridgeCall, closedPort, setUpProject, start, stop, value } from "./e2e-harness.mjs";
 import { poolForMaster, readyForAgents } from "./master-lease.mjs";
@@ -14,8 +15,63 @@ export const SESSIONS = 50;
 export const ROUND_TRIPS = 100;
 /** The project the speed rows walk. */
 export const PROJECT = "Speed Project";
+/** Leftover project ids the engine start row seeds: each has a note and no live project or
+ * removal record, as a build without the removal record leaves them (DEC-178, leader 01:11). */
+export const LEFTOVER_IDS = 1000;
+const LEFTOVER_PREFIX = "speed-left-";
 const ACTIVE_TURN = new Set(["queued", "prepared", "delivering", "running"]);
 const SESSIONS_MAX = 200;
+const BUSY_MS = 5000;
+
+/** Readies a kept engine state, while its engine is stopped, so the next start runs the held-id
+ * backfill over `LEFTOVER_IDS` leftover ids: on a build with the removal record it clears the
+ * backfill's done mark and the seeded ids the last start held, and keeps one note per seeded
+ * id. A build without the record (the base) is left as it is. Input: the engine folder.
+ * Output: how many leftover ids it seeded, 0 on a build without the record. */
+function seedLeftovers(runtime) {
+  const path = join(runtime, "engine.db");
+  assert.ok(existsSync(path), `a seeded engine state has its database: ${path}`);
+  const store = new DatabaseSync(path);
+  try {
+    store.exec(`PRAGMA busy_timeout = ${BUSY_MS}`);
+    const marked = store.prepare("SELECT 1 AS one FROM sqlite_schema WHERE type='table' AND name='projects_removed_backfill'").get();
+    if (!marked) return 0;
+    const like = `${LEFTOVER_PREFIX}%`;
+    store.exec("BEGIN IMMEDIATE");
+    try {
+      store.exec("DELETE FROM projects_removed_backfill");
+      store.prepare("DELETE FROM projects_removed WHERE project LIKE ?").run(like);
+      store.prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?)
+        INSERT OR IGNORE INTO memory_library(id,project,origin,text)
+        SELECT ?||i||'-note', ?||i, '{"kind":"written"}', 'A note a removed project left.' FROM n`)
+        .run(LEFTOVER_IDS, LEFTOVER_PREFIX, LEFTOVER_PREFIX);
+      store.exec("COMMIT");
+    } catch (error) {
+      store.exec("ROLLBACK");
+      throw error;
+    }
+    const ids = Number(store.prepare("SELECT count(DISTINCT project) AS n FROM memory_library WHERE project LIKE ?").get(like).n);
+    assert.equal(ids, LEFTOVER_IDS, "every seeded leftover id has its note");
+    assert.equal(Number(store.prepare("SELECT count(*) AS n FROM projects_removed WHERE project LIKE ?").get(like).n), 0,
+      "no seeded id is held before the start");
+    store.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    return ids;
+  } finally {
+    store.close();
+  }
+}
+
+/** How many seeded leftover ids the running engine's backfill held at this start, read from
+ * its database without writing. Input: the engine folder. Output: the count. */
+function heldLeftovers(runtime) {
+  const store = new DatabaseSync(join(runtime, "engine.db"), { readOnly: true });
+  try {
+    store.exec(`PRAGMA busy_timeout = ${BUSY_MS}`);
+    return Number(store.prepare("SELECT count(*) AS n FROM projects_removed WHERE project LIKE ?").get(`${LEFTOVER_PREFIX}%`).n);
+  } finally {
+    store.close();
+  }
+}
 
 /** The engine's global settings for a speed side: one key-less RCLI connection to a local
  * port that refuses, in one pool, so a master opens and its turns end without a model.
@@ -99,23 +155,26 @@ export async function roundTrips(bridge, calls) {
   return times;
 }
 
-/** The reads row T5 times: the project and master reads the project page makes on open. Inputs:
- * the seeded side and the project ticket. Output: the calls. */
+/** The reads row T5 times: the project and master reads the project page makes on open, the
+ * master reads on the ticket first and the project open last, as every open renews the
+ * selection and leaves the ticket stale for a read after it. Inputs: the seeded side and the
+ * project ticket. Output: the calls, in the order they are timed. */
 export function speedReads(seeded, ticket) {
   assert.match(seeded.project, /\S/, "a seeded project");
   assert.match(ticket, /\S/, "a project ticket");
   return [
-    { cmd: "desktop_open_project", args: { id: seeded.project } },
     { cmd: "desktop_master_state", args: { ticket } },
     { cmd: "desktop_master_sessions", args: { ticket } },
+    { cmd: "desktop_open_project", args: { id: seeded.project } },
   ];
 }
 
 /** The speed suite's side, from the speed driver's environment: `SPEED_SIDE`, a folder
  * build-speed-base.sh made, and `SPEED_STATE`, the side's kept engine state, made here with
- * its settings on first use. A state with an engine but no seeded.json is a broken seeding
- * and is refused, as is a state, engine or projects folder that is not this user's private
- * folder ([`privateFolder`]). Input: the app run.mjs was given. Output: the side's paths. */
+ * its settings on first use and, on every later use, readied with leftover ids for the engine
+ * start row. A state with an engine but no seeded.json is a broken seeding and is refused, as
+ * is a state, engine or projects folder that is not this user's private folder
+ * ([`privateFolder`]). Input: the app run.mjs was given. Output: the side's paths. */
 export async function speedSide(app) {
   const folder = process.env.SPEED_SIDE;
   const state = process.env.SPEED_STATE;
@@ -133,22 +192,54 @@ export async function speedSide(app) {
     privateFolder(folderMade);
   }
   if (fresh) writeFileSync(join(side.runtime, "global.toml"), speedSettings(await closedPort()), { flag: "wx", mode: 0o600 });
+  side.leftovers = fresh ? 0 : seedLeftovers(side.runtime);
   return side;
 }
 
-/** Readies a speed side once its engine runs: seeds it on first use, then times the project
- * page's reads (row T5) through the side's own bridge, which stops before the app starts.
- * Inputs: the side, the run environment and the evidence folder. Output: the seeded project,
- * its sessions and the round-trip samples. */
+/** Times one onboarding start of a new folder in the projects folder, the step that picks the
+ * folder's project id past held ids and leftover rows (rv-code4 r2 F2), then removes that
+ * project from the dashboard and deletes its folder, so the app's rows read the same projects
+ * and found folders every run. Inputs: the bridge, the projects folder and the first client
+ * generation free. Output: the ms from asking to the engine's receipt. */
+async function onboardStart(bridge, projects, generation) {
+  assert.ok(Number.isSafeInteger(generation) && generation >= 1, "a client generation");
+  const name = `speed-onboard-${Date.now()}`;
+  const folder = join(projects, name);
+  mkdirSync(folder, { mode: 0o700 });
+  const asked = performance.now();
+  const started = await value(bridge, "desktop_start_onboarding", { path: folder, pool: "local-pool", generation });
+  const ms = performance.now() - asked;
+  assert.equal(started?.outcome, "applied", `onboarding starts: ${JSON.stringify(started)}`);
+  assert.equal(started.project_id, name, "the new folder gets its own name's id");
+  const removed = await value(bridge, "desktop_remove_project", { id: started.project_id, generation: generation + 1 });
+  assert.equal(removed?.outcome, "applied", `the timed project leaves the dashboard: ${JSON.stringify(removed)}`);
+  rmSync(folder, { recursive: true, force: true });
+  assert.ok(!existsSync(folder), "the timed folder is gone");
+  assert.ok(Number.isFinite(ms) && ms >= 0, "an onboarding start time");
+  return ms;
+}
+
+/** Readies a speed side once its engine runs: checks that a start over seeded leftover ids
+ * held every one, seeds the side on first use, times the project page's reads (row T5)
+ * through the side's own bridge, which stops before the app starts, and, on a run that did not
+ * seed, one onboarding start. Inputs: the side, the run environment and the evidence folder.
+ * Output: the seeded project, its sessions, the leftover ids seeded and held at this start,
+ * the round-trip samples and the onboarding start time, or null on the seeding run. */
 export async function prepareSpeedSide(side, env, evidence) {
+  assert.ok(Number.isInteger(side.leftovers) && side.leftovers >= 0, "speedSide counted the leftover ids");
+  const leftovers = { seeded: side.leftovers, held: side.leftovers ? heldLeftovers(side.runtime) : 0 };
+  assert.equal(leftovers.held, leftovers.seeded, "this engine start's backfill held every seeded leftover id");
   const started = await start(side.bridge, [join(side.runtime, "engine.sock")], { ...env }, evidence, "speed-bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
   try {
     const bridge = { port: Number(started.match[1]), token: started.match[2] };
-    if (!existsSync(side.seeded)) writeFileSync(side.seeded, JSON.stringify(await seedSide(bridge, side.projects)), { flag: "wx", mode: 0o600 });
+    const seeding = !existsSync(side.seeded);
+    if (seeding) writeFileSync(side.seeded, JSON.stringify(await seedSide(bridge, side.projects)), { flag: "wx", mode: 0o600 });
     const seeded = JSON.parse(readFileSync(side.seeded, "utf8"));
     assert.equal((await value(bridge, "desktop_connect")).connected, true, "the bridge connects");
     const { ticket } = await value(bridge, "desktop_open_project", { id: seeded.project });
-    return { seeded, round_trip_ms: await roundTrips(bridge, speedReads(seeded, ticket)) };
+    const round_trip_ms = await roundTrips(bridge, speedReads(seeded, ticket));
+    const onboard_start_ms = seeding ? null : await onboardStart(bridge, side.projects, 1);
+    return { seeded, leftovers, round_trip_ms, onboard_start_ms };
   } finally {
     await stop(started.child);
   }

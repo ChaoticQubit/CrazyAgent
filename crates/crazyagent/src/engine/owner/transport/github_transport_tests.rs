@@ -17,6 +17,27 @@ fn a_publish_start_answers_before_the_agent_drafts_its_gitignore() {
     assert!(start.time() < crate::instruction_cleanup::WALL_TIME);
 }
 
+#[test]
+fn a_publish_start_outlasts_its_own_git_before_its_outcome_is_unknown() {
+    let start = crate::engine::owner::transport::github::Action::PublishStart {
+        project: crate::protocol::ProjectId::new("alpha").unwrap(),
+        plan: crate::github::GitHubPublishPlan {
+            owner: "octo-cat".into(),
+            name: "tool".into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(crate::github::START_GIT_TIME, Duration::from_secs(80));
+    assert!(
+        start.time() >= crate::github::START_GIT_TIME.saturating_add(Duration::from_secs(60)),
+        "the Start's git, its listing and its save fit in {:?}",
+        start.time()
+    );
+    assert!(start.time() < crate::instruction_cleanup::WALL_TIME);
+}
+
 #[tokio::test]
 async fn github_selector_reports_signed_out_and_refuses_work_before_sign_in() {
     run_case(false, |context| async move {

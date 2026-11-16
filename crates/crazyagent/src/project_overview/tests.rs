@@ -1001,14 +1001,9 @@ fn job_report(db: &Connection, folder: &std::path::Path, text: &str) -> String {
     let report = folder.join(".crazyagent").join(&stored);
     std::fs::create_dir_all(report.parent().unwrap()).unwrap();
     std::fs::write(&report, text).unwrap();
-    db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS research_jobs(id INTEGER PRIMARY KEY, project TEXT,
-           kind TEXT, status TEXT, report_path TEXT);",
-    )
-    .unwrap();
     db.execute(
-        "INSERT INTO research_jobs(project,kind,status,report_path)
-         VALUES('alpha','competitor_research','done',?1)",
+        "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
+         VALUES('alpha','competitor_research','codex',0,'done',?1,0)",
         [stored.as_str()],
     )
     .unwrap();
@@ -1068,10 +1063,11 @@ fn competitors_is_the_report_of_the_newest_finished_competitor_research_job() {
     link_competitor_research(&mut db, &project, folder.path(), "docs/competitors.md");
     let stored = job_report(&db, folder.path(), "Gamma leads.\n");
     db.execute_batch(
-        "INSERT INTO research_jobs(project,kind,status,report_path) VALUES
-           ('alpha','competitor_research','running',NULL),
-           ('alpha','market_research','done','context/research/market_research.md'),
-           ('beta','competitor_research','done','context/research/beta.md');",
+        "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
+         VALUES
+           ('alpha','competitor_research','codex',0,'running',NULL,0),
+           ('alpha','market_research','codex',0,'done','context/research/market_research.md',0),
+           ('beta','competitor_research','codex',0,'done','context/research/beta.md',0);",
     )
     .unwrap();
     assert_eq!(
@@ -2048,6 +2044,51 @@ fn an_overview_from_an_engine_without_the_wait_flag_reads_as_no_wait() {
     );
 }
 
+/// SPEED-IDLE-POLLS: a read says how long until a waiting run is due, as a span so the
+/// app compares no two clocks: zero for a first read and after Refresh, the quiet period's
+/// rest after a landing, the retry's after a wait for an account, none while a run writes
+/// or none waits, and none in an older engine's reply, so the app waits that long instead
+/// of reading every few seconds.
+#[test]
+fn a_read_says_how_long_until_a_waiting_run_is_due_and_nothing_while_one_writes_or_none_waits() {
+    let (mut db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    let quiet = crate::roadmap_status::QUIET_MS;
+    let first = read(&db, &project, folder.path(), 0).unwrap();
+    assert!(first.stale);
+    assert_eq!(first.due_in_ms, Some(0), "a first read asks for a run now");
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let writing = read(&db, &project, folder.path(), 1).unwrap();
+    assert!(writing.running);
+    assert_eq!(writing.due_in_ms, None, "a run writes, so none waits");
+    assert_eq!(runs.end(&db, folder.path(), REPLIED, 2), 1);
+    let fresh = read(&db, &project, folder.path(), 3).unwrap();
+    assert!(!fresh.stale && !fresh.running);
+    assert_eq!(fresh.due_in_ms, None);
+
+    landed(&mut db, &project, 10_000);
+    let due = |now: i64| read(&db, &project, folder.path(), now).unwrap().due_in_ms;
+    assert_eq!(due(10_000), Some(quiet));
+    assert_eq!(due(10_000 + quiet / 2), Some(quiet - quiet / 2));
+    assert_eq!(due(10_000 + quiet), Some(0));
+    assert_eq!(due(10_000 + 2 * quiet), Some(0), "never a negative wait");
+    refresh(&db, &project).unwrap();
+    assert_eq!(due(10_001), Some(0), "Refresh makes the run due at once");
+
+    let last = read(&db, &project, folder.path(), 10_001).unwrap();
+    let mut wire = serde_json::to_value(&last).unwrap();
+    let fields = wire.as_object_mut().unwrap();
+    assert_eq!(fields.remove("due_in_ms"), Some(0.into()));
+    let older: Overview = serde_json::from_value(wire).unwrap();
+    assert_eq!(older.due_in_ms, None);
+
+    assert_eq!(tick(&db, &mut runs, 10_001).unwrap(), 1);
+    let (_, waiting) = runs.claims.pop().unwrap();
+    let retry = 10_002 + 60_000;
+    assert!(wait_for_account(&db, &project, waiting, NO_ACCOUNT, retry).unwrap());
+    assert_eq!(due(10_002), Some(60_000), "due at its retry");
+}
+
 /// A writing run whose loopback provider refuses connections fails at once with the plain
 /// reach line, before its evidence is read or any agent folder is made, in place of a
 /// harness retrying the dead port until the run's time is over.
@@ -2278,4 +2319,50 @@ fn an_engine_start_forgets_the_overview_rows_of_projects_that_are_gone() {
     close_orphans(&db).unwrap();
 
     assert_eq!(rows(&db), ["alpha", "alpha"]);
+}
+
+/// A page read that lands while a run ends, after its claim is checked and before its first
+/// tab is written, sees the run still running or wholly ended, never closed as unfinished
+/// with no tab, which stops the desktop page reading (gate race 2, bridge-overview-tabs at
+/// 31fe8b547).
+#[test]
+fn a_page_read_while_a_run_ends_sees_it_running_or_ended_never_half_way() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let (db, page, project, folder) = shared();
+    crate::project_setup::initialize(&db).unwrap();
+    db.execute("INSERT INTO project_setups VALUES ('alpha', '{}')", [])
+        .unwrap();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 1_000).unwrap();
+    assert_eq!(tick(&db, &mut runs, 1_000).unwrap(), 1);
+    let seen: Rc<RefCell<Option<Overview>>> = Rc::new(RefCell::new(None));
+    {
+        let seen = seen.clone();
+        let (project, path) = (project.clone(), folder.path().to_path_buf());
+        BEFORE_REPLACE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                if seen.borrow().is_none() {
+                    let shown = read(&page, &project, &path, 2_000).unwrap();
+                    *seen.borrow_mut() = Some(shown);
+                }
+            }));
+        });
+    }
+    let ended = runs.end(&db, folder.path(), REPLIED, 2_000);
+    BEFORE_REPLACE.with(|hook| *hook.borrow_mut() = None);
+    assert_eq!(ended, 1);
+    let seen = seen.borrow_mut().take().expect("the run wrote a tab");
+    assert!(
+        seen.running || tab_of(&seen, Tab::QuickInfo).text.is_some(),
+        "a read while the run ended saw it closed with no tab: {seen:?}"
+    );
+    assert_ne!(seen.failure.as_deref(), Some(UNFINISHED), "{seen:?}");
+    let done = read(&db, &project, folder.path(), 3_000).unwrap();
+    assert!(!done.running && done.failure.is_none(), "{done:?}");
+    assert_eq!(done.checked_ms, Some(2_000));
+    assert_eq!(
+        tab_of(&done, Tab::QuickInfo).text.as_deref(),
+        Some("Alpha reads papers.\n")
+    );
 }

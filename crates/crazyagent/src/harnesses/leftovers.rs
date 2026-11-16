@@ -1,4 +1,5 @@
 use crate::protocol::CredentialRef;
+use crate::sandbox::LineageCheck;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -451,19 +452,23 @@ impl From<LineageToken> for String {
 }
 
 /// One process of an agent's lineage: its id, the start identity a reused id does not
-/// share, and its program's name as the owner reads it.
+/// share, its program's name as the owner reads it, and on macOS its unique id and the one of
+/// the process it was forked from, if read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Process {
     pid: i32,
     started: String,
     program: String,
+    unique: Option<u64>,
+    forked_from: Option<u64>,
 }
 
 /// The processes of a Full access agent the engine can still find: its leader, every
 /// process in the leader's session while that leader runs, every process whose parent is
-/// one of them, and every process whose environment holds the launch's `token`. A process
-/// that left all of them before it was seen, such as a daemon whose parent already exited
-/// and whose environment was cleared or is not shown, is not found. `table` is the command
+/// one of them, on macOS every process forked from one of them, and every process whose
+/// environment holds the launch's `token`. A process that left all of them before it was
+/// seen, such as a double-forked daemon whose short-lived middle process no table showed and
+/// whose environment was cleared or is not shown, is not found. `table` is the command
 /// that lists the processes; `unchecked` tells that a listing failed, so the lineage may
 /// miss processes; `pending` is a listing still held up past its bound, which a later read
 /// waits out instead of starting another; `sandboxed` tells the agent ran in a sandbox no
@@ -495,8 +500,10 @@ pub(crate) struct Lineage {
 }
 
 /// Where a listing thread reports its output, or none when it failed or ran out of bounds.
+/// The lock is never taken: it is reached only through `&mut` with `get_mut`, and it keeps
+/// a lineage `Sync`, so a stop's leftovers can be borrowed across an await.
 #[cfg(unix)]
-type Listing = std::sync::mpsc::Receiver<Option<Vec<u8>>>;
+type Listing = std::sync::Mutex<std::sync::mpsc::Receiver<Option<Vec<u8>>>>;
 
 /// One row of a process table: the process, its parent's id and its session's id, if read.
 #[cfg(unix)]
@@ -755,6 +762,8 @@ impl Lineage {
                 pid,
                 started,
                 program: String::new(),
+                unique: None,
+                forked_from: None,
             };
             if !self.known.iter().any(|known| same(known, &process)) {
                 self.known.push(process);
@@ -1059,10 +1068,16 @@ impl Lineage {
     }
 
     /// Applies one table read: keeps each known process still running with the same start,
-    /// under the name it was last read by, then adds this user's processes in the leader's session
-    /// and those whose parent is kept. Session members join only while the leader runs with
-    /// the start its first read found, so a stranger that reuses a dead leader's id never
-    /// joins (SECAUDIT-SETSID-LEFTOVER r1 L1). Inputs: the lineage and the rows. Output: none.
+    /// under the name it was last read by and with the unique ids an earlier read found, which
+    /// a later read never replaces: a process keeps its ids for life, across exec as well, so
+    /// a later read that finds none or others met a process that exited, or an id reused,
+    /// between the listing and that read (rv-ds241 N1). Then adds this user's processes in
+    /// the leader's session, those whose parent is kept, and on macOS those forked from a
+    /// process known before this read or kept in it, by the forking parent's unique id, which
+    /// the kernel keeps after that parent exits and never reuses (SETSID-A-RESIDUAL). Session
+    /// members join only while the leader runs with the start its first read found, so a
+    /// stranger that reuses a dead leader's id never joins (SECAUDIT-SETSID-LEFTOVER r1 L1).
+    /// Inputs: the lineage and the rows. Output: none.
     #[cfg(unix)]
     fn apply(&mut self, rows: &[Row]) {
         let session = self.leader_started.as_ref().is_some_and(|started| {
@@ -1077,6 +1092,8 @@ impl Lineage {
                     .find(|known| same(known, process))
                     .map(|known| Process {
                         program: known.program.clone(),
+                        unique: known.unique.or(process.unique),
+                        forked_from: known.forked_from.or(process.forked_from),
                         ..process.clone()
                     })
             })
@@ -1085,7 +1102,13 @@ impl Lineage {
             let found = rows.iter().find(|(process, parent, member)| {
                 !kept.iter().any(|known| known.pid == process.pid)
                     && ((session && *member == Some(self.leader))
-                        || kept.iter().any(|known| known.pid == *parent))
+                        || kept.iter().any(|known| known.pid == *parent)
+                        || process.forked_from.is_some_and(|from| {
+                            self.known
+                                .iter()
+                                .chain(kept.iter())
+                                .any(|known| known.unique == Some(from))
+                        }))
             });
             match found {
                 Some((process, ..)) => kept.push(process.clone()),
@@ -1106,28 +1129,43 @@ enum Following {
     Taken,
 }
 
-/// A Full access headless run's or pane's processes, followed from its start on a thread of
-/// its own, since neither may be polled while it waits (SETSID-L2, BL-PANE-FOLLOW-GAP): the
+/// A Full access or sandboxed headless run's or pane's processes, followed from its start on
+/// a thread of its own, since neither may be polled while it waits (SETSID-L2,
+/// BL-PANE-FOLLOW-GAP, LINUX-KILL-GROUP): the
 /// thread takes the first read, or a pane's own, then the engine's shared table every
 /// [`FOLLOWER_PACE`], so a process a table showed in the run stays known once it leaves the
-/// run's session and loses its parent. One that does both between two tables it took, up to the pace plus the table's age
-/// plus the reads, is never seen, and only its token can still find it at the stop: the
-/// SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
+/// run's session and loses its parent. On macOS so does a process forked from one a table
+/// showed, even when it leaves the session and that parent exits between two tables, as
+/// `ssh -f` and an ssh ControlPersist master detach: it is linked by the forking parent's
+/// unique id (SETSID-A-RESIDUAL). What stays open, accepted with owner item 6, is a double
+/// fork whose middle process lives and exits between two tables, up to the pace plus the
+/// table's age plus the reads: its child is never seen, and only its token can still find it
+/// at the stop, the SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
 /// apply a table, so a stop never waits for a read in flight. Holds the leader, the launch's
-/// token, the lineage and the sender whose drop ends the thread.
+/// token, whether the run is sandboxed, the lineage and the sender whose drop ends the thread.
 pub(crate) struct Follower {
     leader: u32,
     token: Option<LineageToken>,
+    sandboxed: bool,
     lineage: Arc<Mutex<Following>>,
     _wake: std::sync::mpsc::Sender<()>,
 }
 
 impl Follower {
-    /// Starts following a Full access run from its first read on a thread of its own. When no
+    /// Starts following a headless run whose stop checks its lineage, a Full access run's or
+    /// a sandboxed one's as `check` says, from its first read on a thread of its own. When no
     /// thread starts, or no table is read here, the stop reads the lineage itself. Inputs: the
-    /// run's leader, whose id is also its session's, and the launch's token. Output: the
-    /// follower.
-    pub(crate) fn start(leader: u32, token: Option<LineageToken>) -> Self {
+    /// run's leader, whose id is also its session's, the launch's token and the check. Output:
+    /// the follower, or none where the run's boundary ends every process it started.
+    pub(crate) fn start(
+        leader: u32,
+        token: Option<LineageToken>,
+        check: LineageCheck,
+    ) -> Option<Self> {
+        if check == LineageCheck::Unneeded {
+            return None;
+        }
+        let sandboxed = check == LineageCheck::Sandboxed;
         let lineage = Arc::new(Mutex::new(Following::Reading));
         let (wake, woken) = std::sync::mpsc::channel();
         #[cfg(unix)]
@@ -1135,17 +1173,18 @@ impl Follower {
             let followed = Arc::clone(&lineage);
             let first = token.clone();
             let _ = std::thread::Builder::new()
-                .name("full-access-follow".into())
-                .spawn(move || follow_run(leader, first, &followed, &woken));
+                .name("run-follow".into())
+                .spawn(move || follow_run(leader, first, sandboxed, &followed, &woken));
         }
         #[cfg(not(unix))]
         drop(woken);
-        Self {
+        Some(Self {
             leader,
             token,
+            sandboxed,
             lineage,
             _wake: wake,
-        }
+        })
     }
 
     /// Follows, on a thread of its own, a lineage its owner already read, such as a pane's
@@ -1158,6 +1197,7 @@ impl Follower {
         token: Option<LineageToken>,
         first: Result<Lineage, Unstopped>,
     ) -> Self {
+        let sandboxed = first.as_ref().is_ok_and(|lineage| lineage.sandboxed);
         let lineage = Arc::new(Mutex::new(Following::Read(first)));
         let (wake, woken) = std::sync::mpsc::channel();
         #[cfg(unix)]
@@ -1172,6 +1212,7 @@ impl Follower {
         Self {
             leader,
             token,
+            sandboxed,
             lineage,
             _wake: wake,
         }
@@ -1185,7 +1226,9 @@ impl Follower {
         let taken = std::mem::replace(&mut *following(&self.lineage), Following::Taken);
         let mut lineage = match taken {
             Following::Read(read) => read?,
-            Following::Reading | Following::Taken => Lineage::of(self.leader, self.token)?,
+            Following::Reading | Following::Taken => {
+                first_read(self.leader, self.token, self.sandboxed)?
+            }
         };
         lineage.before_stop();
         Ok(lineage)
@@ -1198,18 +1241,35 @@ fn following(lineage: &Mutex<Following>) -> MutexGuard<'_, Following> {
     lineage.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Reads a followed run's lineage from the start: a sandboxed run's
+/// ([`Lineage::of_sandboxed`]) or a Full access one's ([`Lineage::of`]). Inputs: the leader,
+/// the token and whether the run is sandboxed. Output: the lineage, or why it cannot be read.
+fn first_read(
+    leader: u32,
+    token: Option<LineageToken>,
+    sandboxed: bool,
+) -> Result<Lineage, Unstopped> {
+    if sandboxed {
+        Lineage::of_sandboxed(leader, token)
+    } else {
+        Lineage::of(leader, token)
+    }
+}
+
 /// Takes a follower's first read, then the shared table every [`FOLLOWER_PACE`] until its
 /// stop. Each read runs with no lock held, and the lock is taken only to apply it. Ends at
-/// the stop, or once the first read found no lineage. Inputs: the leader, the token, the
-/// lineage's lock and the receiver the stop disconnects. Output: none.
+/// the stop, or once the first read found no lineage. Inputs: the leader, the token, whether
+/// the run is sandboxed, the lineage's lock and the receiver the stop disconnects. Output:
+/// none.
 #[cfg(unix)]
 fn follow_run(
     leader: u32,
     token: Option<LineageToken>,
+    sandboxed: bool,
     lineage: &Mutex<Following>,
     woken: &std::sync::mpsc::Receiver<()>,
 ) {
-    let first = Lineage::of(leader, token);
+    let first = first_read(leader, token, sandboxed);
     {
         let mut slot = following(lineage);
         if !matches!(*slot, Following::Reading) {
@@ -1308,8 +1368,9 @@ fn table(
     parse(&listing, user, own)
 }
 
-/// Reads the process table with `argv` and the session of each listed process. Inputs: the
-/// command and the pending listing. Output: the rows, or uncertain when the listing fails.
+/// Reads the process table with `argv`, the session of each listed process and, on macOS, its
+/// unique ids. Inputs: the command and the pending listing. Output: the rows, or uncertain
+/// when the listing fails.
 #[cfg(unix)]
 fn rows(
     argv: &'static [&'static str],
@@ -1321,6 +1382,15 @@ fn rows(
             let session = rustix::process::Pid::from_raw(process.pid)
                 .and_then(|pid| rustix::process::getsid(Some(pid)).ok())
                 .map(|session| session.as_raw_nonzero().get());
+            #[cfg(target_os = "macos")]
+            let process = match crazyagent_macos_fs::process_ids(process.pid) {
+                Some(ids) => Process {
+                    unique: Some(ids.unique),
+                    forked_from: Some(ids.forked_from),
+                    ..process
+                },
+                None => process,
+            };
             (process, parent, session)
         })
         .collect())
@@ -1478,6 +1548,9 @@ fn read_bounded(
 ) -> Result<Vec<u8>, Unstopped> {
     use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
     if let Some(listing) = pending {
+        let listing = listing
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if matches!(listing.try_recv(), Err(TryRecvError::Empty)) {
             return Err(Unstopped::Uncertain);
         }
@@ -1494,7 +1567,7 @@ fn read_bounded(
     match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()) + TABLE_GRACE) {
         Ok(listing) => listing.ok_or(Unstopped::Uncertain),
         Err(RecvTimeoutError::Timeout) => {
-            *pending = Some(receiver);
+            *pending = Some(std::sync::Mutex::new(receiver));
             Err(Unstopped::Uncertain)
         }
         Err(RecvTimeoutError::Disconnected) => Err(Unstopped::Uncertain),
@@ -1652,6 +1725,8 @@ fn parse(listing: &str, user: u32, own: i32) -> Result<Vec<(Process, i32)>, Unst
                 pid,
                 started: fields[4..TABLE_FIELDS].join(" "),
                 program: String::new(),
+                unique: None,
+                forked_from: None,
             },
             parent,
         ));
@@ -1902,6 +1977,8 @@ pub(crate) mod tests {
                 pid,
                 started: "Wed Oct 28 03:10:00 2026".into(),
                 program: "sleep".into(),
+                unique: None,
+                forked_from: None,
             })
             .collect();
         let report = Leftovers(Box::new(Lineage {
@@ -2057,6 +2134,14 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_stops_leftovers_can_be_borrowed_across_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<Lineage>();
+        shared::<Leftovers>();
+        shared::<Unstopped>();
+    }
+
+    #[test]
     fn a_settle_ends_at_once_while_a_held_up_listing_is_still_in_flight() {
         let (_listing, held_up) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
         let lineage = Lineage {
@@ -2065,11 +2150,13 @@ pub(crate) mod tests {
                 pid: 2,
                 started: "Wed Oct 28 03:10:00 2026".into(),
                 program: "sleep".into(),
+                unique: None,
+                forked_from: None,
             }],
             table: PS_TABLE,
             unchecked: true,
             scanned: true,
-            pending: Some(held_up),
+            pending: Some(std::sync::Mutex::new(held_up)),
             sandboxed: false,
             token: None,
             leader_started: None,
@@ -2109,11 +2196,13 @@ pub(crate) mod tests {
                 pid: own,
                 started: "Wed Oct 28 03:10:00 2026".into(),
                 program: "placeholder".into(),
+                unique: None,
+                forked_from: None,
             }],
             table: PS_TABLE,
             unchecked: true,
             scanned: true,
-            pending: Some(held_up),
+            pending: Some(std::sync::Mutex::new(held_up)),
             sandboxed: false,
             token: None,
             leader_started: None,
@@ -2249,8 +2338,93 @@ pub(crate) mod tests {
             pid,
             started: started.into(),
             program: "sleep".into(),
+            unique: None,
+            forked_from: None,
         };
         (process, parent, Some(session))
+    }
+
+    /// One table row of a `sleep` whose unique ids were read. Inputs: its id, parent, session,
+    /// start, unique id and the unique id of the process it was forked from. Output: the row.
+    fn forked(pid: i32, parent: i32, session: i32, started: &str, unique: u64, from: u64) -> Row {
+        let (mut process, parent, session) = row(pid, parent, session, started);
+        process.unique = Some(unique);
+        process.forked_from = Some(from);
+        (process, parent, session)
+    }
+
+    #[test]
+    fn a_setsid_child_of_a_seen_process_that_exited_joins_by_the_unique_id_it_was_forked_from() {
+        let mut lineage = bare(500, Some(FIRST));
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(600, 500, 500, FIRST, 9_100, 9_000),
+        ]);
+        let pids = |lineage: &Lineage| -> Vec<i32> {
+            lineage.known.iter().map(|process| process.pid).collect()
+        };
+        assert_eq!(pids(&lineage), [500, 600]);
+
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            row(600, 500, 500, FIRST),
+        ]);
+        assert_eq!(
+            pids(&lineage),
+            [500, 600],
+            "600 was listed, then exited before its ids were read"
+        );
+
+        let orphan = forked(601, 1, 601, FIRST, 9_101, 9_100);
+        let stranger = forked(602, 1, 602, FIRST, 9_102, 7_000);
+        let unread = row(603, 1, 603, FIRST);
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            orphan.clone(),
+            stranger.clone(),
+            unread.clone(),
+        ]);
+        assert_eq!(
+            pids(&lineage),
+            [500, 601],
+            "the child of 600 left its session and went to launchd when 600 exited"
+        );
+
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            orphan,
+            stranger,
+            unread,
+        ]);
+        assert_eq!(
+            pids(&lineage),
+            [500, 601],
+            "it stays known once its parent is no longer known"
+        );
+    }
+
+    #[test]
+    fn a_known_process_keeps_the_unique_ids_first_read_when_a_reused_id_reads_others() {
+        let mut lineage = bare(500, Some(FIRST));
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(600, 500, 500, FIRST, 9_100, 9_000),
+        ]);
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(600, 500, 500, FIRST, 9_900, 7_000),
+        ]);
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(601, 1, 601, FIRST, 9_101, 9_100),
+            forked(602, 1, 602, FIRST, 9_902, 9_900),
+        ]);
+        let pids: Vec<i32> = lineage.known.iter().map(|process| process.pid).collect();
+        assert_eq!(
+            pids,
+            [500, 601],
+            "a stranger that reused 600's id between the listing and the read brings nothing"
+        );
     }
 
     #[test]
@@ -2601,6 +2775,63 @@ pub(crate) mod tests {
         }
     }
 
+    /// LINUX-KILL-GROUP: a headless run whose boundary leaves a process in a session of its
+    /// own running, as the plain Linux Landlock helper's does, follows a sandboxed lineage, so
+    /// the process its harness left outside the group is found once the harness is gone and
+    /// is named as a sandboxed run's leftover, never as a Full access one's. Its leader leads
+    /// a session of its own, as the Linux helper's `own_session` makes a wrapped harness.
+    #[test]
+    fn a_sandboxed_follower_names_what_its_run_left_outside_its_group_as_sandboxed() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut leader = crate::spawn_gate::spawn(
+            std::process::Command::new("/usr/bin/perl")
+                .args(["-mPOSIX", "-e", "POSIX::setsid() > 0 or exit 1; exec '/bin/sh', '-c', $ARGV[0] or exit 1"])
+                .arg(
+                    "/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30",
+                )
+                .current_dir(folder.path())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        let follower = Follower::start(leader.id(), None, LineageCheck::Sandboxed).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let child = loop {
+            if let Some(child) = std::fs::read_to_string(folder.path().join("child.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break child;
+            }
+            assert!(Instant::now() < deadline, "the stand-in never started");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        let lineage = follower.stop();
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+        let settled = lineage.and_then(Lineage::settle);
+        end_pid(child);
+
+        match settled {
+            Err(Unstopped::Left(left)) => {
+                assert_eq!(left.code(), SANDBOX_LEFT);
+                assert!(left.0.known.iter().any(|process| process.pid == child));
+            }
+            other => panic!("the leftover was not found: {other:?}"),
+        }
+    }
+
+    /// LINUX-KILL-GROUP guard: a run whose boundary ends every process it started, as the
+    /// warden, a process namespace or the job does, gets no follower.
+    #[test]
+    fn a_run_whose_boundary_ends_every_process_it_started_has_no_follower() {
+        let follower = Follower::start(std::process::id(), None, LineageCheck::Unneeded);
+
+        assert!(follower.is_none());
+    }
+
     /// Leaves a hold as a sandboxed run's stop does, for another module's row: a process in
     /// a session of its own, listed under `by` with the owner's setting `mode`. Inputs: who
     /// left it and the setting. Output: the process, which the row ends.
@@ -2663,6 +2894,8 @@ pub(crate) mod tests {
             pid,
             started: started.into(),
             program: "sleep".into(),
+            unique: None,
+            forked_from: None,
         };
         let picked = targets(
             &[

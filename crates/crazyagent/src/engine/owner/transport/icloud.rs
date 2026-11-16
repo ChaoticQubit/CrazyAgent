@@ -13,6 +13,7 @@ pub(super) const ICLOUD_TIMEOUT: Duration = Duration::from_secs(DOWNLOAD_TIME_MA
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(clippy::large_enum_variant)]
 enum Action {
     Download {
         path: String,

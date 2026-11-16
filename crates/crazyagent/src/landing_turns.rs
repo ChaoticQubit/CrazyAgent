@@ -227,9 +227,28 @@ fn hand_over(db: &Connection, id: &ChangeSetId, asker: Asker) -> Result<(), Engi
     let agent = team_agent(&set)?;
     let prompt = fitted(&landing::resolve_task_prompt(db, id)?);
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
+    if !takes_resolve(&tx, id, &project, agent)? {
+        return Err(refused("changes_stale"));
+    }
     admit(&tx, &project, agent, &prompt, asker)?.map_err(refused)?;
     tx.commit().map_err(storage)?;
     landing::resolve_handed_over(db, id)
+}
+
+/// Whether a team agent's set still takes its resolve work, read in the transaction that
+/// would admit it: an updating set waiting for its agent does, one not waiting only while
+/// no resolve task of its agent is under way, so two asks that both read none before either
+/// admitted one give the agent one task (LAND-UPDATING-RACE). Inputs: the transaction, the
+/// set, the project and the agent. Output: the answer.
+fn takes_resolve(
+    tx: &Transaction<'_>,
+    id: &ChangeSetId,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<bool, EngineError> {
+    let set = view(tx, id)?.ok_or_else(|| refused("changes_not_found"))?;
+    Ok(set.state == ChangeState::Updating
+        && (set.waiting || !crate::team::resolve_pending(tx, project, agent)?))
 }
 
 /// Admits a team agent's resolve task in the caller's transaction. For the engine, an
@@ -257,13 +276,16 @@ fn admit(
 /// owner's branch into its worktree and starts that work. A refused check changes
 /// nothing. Once merged, a resolve that does not start leaves the set merged and waiting
 /// for its agent rather than failing the update; asking again for a waiting set only
-/// starts the resolve. A master's resolve turn is started by the owner runtime after
+/// starts the resolve, and so does asking again for a team agent's updating set whose
+/// resolve task a stop failed, a crash cancelled or that ended ([`crate::team::resolve_pending`],
+/// LAND-UPDATING-STUCK). A master's resolve turn is started by the owner runtime after
 /// this returns. Inputs: the store and the change set. Output: true when this call
 /// merged, or the refusal.
 pub(crate) fn update(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
     let set = view(db, id)?.ok_or_else(|| refused("changes_not_found"))?;
-    let again = set.state == ChangeState::Updating && set.waiting;
+    let updating = set.state == ChangeState::Updating;
     if set.agent.kind == AgentKind::Master {
+        let again = updating && set.waiting;
         let session =
             SessionId::new(set.agent.id.clone()).map_err(|_| refused("changes_master_closed"))?;
         crate::storage::master_resolve_ready(db, &session)?.map_err(refused)?;
@@ -272,6 +294,9 @@ pub(crate) fn update(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineEr
         }
         return Ok(!again);
     }
+    let again = updating
+        && (set.waiting
+            || !crate::team::resolve_pending(db, &set_project(db, id)?, team_agent(&set)?)?);
     if again {
         hand_over(db, id, Asker::Owner)?;
         return Ok(false);

@@ -87,6 +87,7 @@ const SETUP_WORDS = {
   document_not_a_regular_file: "Can't add a folder or a shortcut. Choose the original file.",
   document_unreadable: "One of the documents can't be read. Check its permissions.",
   document_changed_while_copying: "A document changed while it was being copied. Try again.",
+  project_id_removed: "A project you removed used this name, so it can't be used again. Choose another project name.",
 };
 
 test("every code a New Project job is refused or ends with has New Project's own sentence and reaches the window by name", () => {
@@ -149,13 +150,21 @@ test("New Project starts the engine's job, follows it on the page and runs its f
   assert.ok(wizard.includes("session?.refreshIntake(result.job)"), "the started job shows on Home at once");
   assert.ok(wizard.includes("session?.followIntake("), "the page owns the end of the job it follows");
   assert.ok(wizard.includes("dismissIntake("), "a job the page ended leaves Home");
-  assert.ok(wizard.includes("mounted.current"), "follow-ups stop once the owner leaves the page");
+  assert.ok(wizard.includes("mounted.current"), "the page's publish and opening stop once the owner leaves it");
   const state = read("src/state.ts");
   assert.match(state, /kind === "setup"[^;]*refreshProjects\(\)/, "a New Project that ended reads the projects again");
   assert.match(state, /result\.value\.id !== followed\.current/, "Home's toast stays quiet for the job the page follows");
   const client = read("src/engine-client.ts");
   assert.match(client, /export type ProjectJobKind = "add" \| "move_project" \| "delete" \| "setup";/);
   assert.match(client, /\| \{ state: "building"; done: number; total: number \}/);
+});
+
+test("a setup job New Project dismisses leaves Home at once: the page waits for the dismiss, then reads the job again (#99 F1)", () => {
+  const wizard = read("src/screens/new-project/index.tsx");
+  const calls = wizard.match(/dismissIntake\(/g) ?? [];
+  assert.equal(calls.length, 1, "one place dismisses the page's job");
+  assert.match(wizard, /await dismissIntake\([a-z]+\);\s*session\?\.refreshIntake\(\);/, "the job is read again only once the engine dropped it");
+  assert.ok(!wizard.includes("void dismissIntake("), "no dismiss leaves Home to the 30 s idle read");
 });
 
 test("New Project opened again drops the answers of a project its job already made, read from the job or, once the job left Home, from the projects; a page closed during the follow-ups keeps none (rv-code bgjobs-3b F3)", async () => {
@@ -169,6 +178,6 @@ test("New Project opened again drops the answers of a project its job already ma
   assert.deepEqual(flow.reopened(null, started, ["reading"]), { follow: null, keep: true }, "a lost job with no such project keeps the answers");
   const wizard = read("src/screens/new-project/index.tsx");
   const finish = wizard.slice(wizard.indexOf("async function finish("));
-  assert.ok(finish.indexOf("kept = null;") >= 0 && finish.indexOf("kept = null;") < finish.indexOf("await setProjectPool("), "a made project keeps no answers before its follow-ups wait");
-  assert.match(wizard, /startedSetup = \{ id: result\.job\.id, project: /, "the started job keeps the project it makes");
+  assert.ok(finish.indexOf("kept = null;") >= 0 && finish.indexOf("kept = null;") < finish.indexOf("await carried.outcome"), "a made project keeps no answers before its follow-ups wait");
+  assert.match(wizard, /keepStarted\(\{\s*id: result\.job\.id, project: /, "the started job keeps the project it makes");
 });

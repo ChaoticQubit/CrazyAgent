@@ -55,17 +55,37 @@ pub fn check_stdio(
     for (name, value) in secrets {
         process.env(name, std::ffi::OsStr::from_bytes(value));
     }
-    check_command(process, limit)
+    check_command(process, limit, crate::sandbox::LineageCheck::Unneeded)
 }
 
 /// Starts an already built MCP server command, such as one wrapped in the agent boundary,
 /// runs `initialize` and `tools/list`, then stops its whole process group and, through the
-/// warden a boundary command gets, every process left in its sandbox. Inputs: the
-/// command with its arguments, environment and folder set, and the time bound. Output:
-/// the tool names, or a plain rejection code, `server_cleanup_uncertain` when the warden
-/// did not confirm the sandbox empty.
+/// warden a boundary command gets, every process left in its sandbox. Where `check` follows
+/// its lineage, what it left outside the group is held and its code is the answer, in place
+/// of the tool names (LINUX-KILL-GROUP r1 F1).
+/// Inputs: the command with its arguments, environment and folder set, the time bound and
+/// what the stop checks of the processes the server leaves outside its group. Output: the
+/// tool names, or a plain rejection code, `server_cleanup_uncertain` when the warden did not
+/// confirm the sandbox empty.
 #[cfg(unix)]
-pub fn check_command(mut process: Command, limit: Duration) -> Result<Vec<String>, &'static str> {
+pub fn check_command(
+    mut process: Command,
+    limit: Duration,
+    check: crate::sandbox::LineageCheck,
+) -> Result<Vec<String>, &'static str> {
+    use crate::harnesses::leftovers::{
+        self, Follower, HoldBy, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped,
+    };
+    use crate::sandbox::LineageCheck;
+    let token = match check {
+        LineageCheck::Unneeded => None,
+        LineageCheck::FullAccess | LineageCheck::Sandboxed => {
+            Some(LineageToken::new().ok_or("server_cant_start")?)
+        }
+    };
+    if let Some(token) = &token {
+        process.env(LINEAGE_VARIABLE, token.as_str());
+    }
     process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -88,6 +108,8 @@ pub fn check_command(mut process: Command, limit: Duration) -> Result<Vec<String
             return Err("server_cant_start");
         }
     };
+    let follower = Follower::start(pid, token, check);
+    assert_eq!(follower.is_some(), check != LineageCheck::Unneeded);
     let (send, receive) = sync_channel::<Line>(16);
     let reader = std::thread::Builder::new()
         .name("crazyagent-mcp-check".into())
@@ -96,11 +118,27 @@ pub fn check_command(mut process: Command, limit: Duration) -> Result<Vec<String
         Ok(_) => talk(stdin, &receive, Instant::now() + limit),
         Err(_) => Err("server_cant_start"),
     };
+    let lineage = follower.map(Follower::stop);
     stop(pid);
     let _ = child.kill();
     let _ = child.wait();
+    let settled = match lineage.map(|lineage| lineage.and_then(Lineage::settle)) {
+        None | Some(Ok(())) => Ok(()),
+        Some(Err(unstopped)) => {
+            let code = unstopped.code();
+            if let Unstopped::Left(left) = unstopped {
+                let by = HoldBy {
+                    project: None,
+                    who: "a plugin server check".to_owned(),
+                };
+                left.hold(None, (), by, leftovers::mode_of(None));
+            }
+            Err(code)
+        }
+    };
     crate::sandbox::warden::fire_reported(warden, "server_check")
         .map_err(|_| "server_cleanup_uncertain")?;
+    settled?;
     result
 }
 
@@ -417,11 +455,58 @@ mod tests {
         use crate::sandbox::warden::fixture::{DetachingRun, survivors};
         let run = DetachingRun::new();
         let (processes, checked) = std::thread::scope(|scope| {
-            let check = scope
-                .spawn(|| check_command(run.command(&run.profile), Duration::from_millis(1500)));
+            let check = scope.spawn(|| {
+                check_command(
+                    run.command(&run.profile),
+                    Duration::from_millis(1500),
+                    crate::sandbox::LineageCheck::Unneeded,
+                )
+            });
             (run.processes(), check.join().unwrap())
         });
         assert_eq!(checked.unwrap_err(), "server_check_timeout");
         assert_eq!(survivors(processes, Duration::from_secs(1)), []);
+    }
+
+    /// LINUX-KILL-GROUP r1 F1: a server checked in a boundary that leaves a process in a
+    /// session of its own running, as the plain Linux Landlock helper's does, has its lineage
+    /// followed, so what it left outside its group is held and the check answers with the
+    /// sandboxed leftover code in place of what the server itself did. Its leader leaves the
+    /// group the check starts it in and leads a session of its own, as the Linux helper's
+    /// `own_session` makes a wrapped server, so the lineage admits its children.
+    #[test]
+    fn a_followed_server_check_names_what_the_server_left_outside_its_group() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut command = Command::new("/usr/bin/perl");
+        command
+            .args(["-mPOSIX", "-e", "POSIX::setpgid(0, getpgrp(getppid())) or exit 1; POSIX::setsid() > 0 or exit 1; exec '/bin/sh', '-c', $ARGV[0] or exit 1"])
+            .arg("/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30")
+            .current_dir(folder.path());
+
+        let checked = check_command(
+            command,
+            Duration::from_millis(1500),
+            crate::sandbox::LineageCheck::Sandboxed,
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let child = loop {
+            if let Some(child) = std::fs::read_to_string(folder.path().join("child.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break child;
+            }
+            assert!(Instant::now() < deadline, "the stand-in never started");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if let Some(pid) = rustix::process::Pid::from_raw(child) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+
+        assert_eq!(checked, Err(crate::harnesses::leftovers::SANDBOX_LEFT));
+        assert_eq!(
+            crate::plugins::check_problem(crate::harnesses::leftovers::SANDBOX_LEFT),
+            "The server left processes running after its check. CrazyAgent ends them."
+        );
     }
 }

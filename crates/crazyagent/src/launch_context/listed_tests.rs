@@ -234,6 +234,7 @@ fn a_team_agent_launch_of_a_listed_harness_refused_for_its_hooks_writes_nothing(
             folder: PathBuf::from("/missing-hook-folder"),
         }],
         agent: String::new(),
+        caches: crate::agent_home::Caches::default(),
     }));
 
     let refused = context.install_listed(&manifest(BLOCKS), &home, true);
@@ -572,6 +573,7 @@ fn team_context(
         project,
         hooks,
         agent: agent.into(),
+        caches: crate::agent_home::Caches::default(),
     }));
     (data, context)
 }

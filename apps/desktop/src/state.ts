@@ -8,7 +8,8 @@ import { watchUnconfirmed, leavesProfileUnconfirmed } from "./engine-client";
 import type { ActionReceipt, FoundProject, IntakeJob, IntentReceipt, PendingIntent, ProjectPage } from "./engine-client";
 import { loadFoundProjects, loadIntakeJob } from "./api-intake";
 import { notifyIntake } from "./notify";
-import { FOUND_POLL_MS, intakePollMs, jobEndLine } from "./screens/intake/intake";
+import { foundPollMs, intakePollMs, jobEndLine } from "./screens/intake/intake";
+import { carryFollowUps } from "./screens/new-project/carry";
 import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
 import type { InputChoice } from "./screens/team/terminal-io";
 import { QUESTIONS_SHOWN_DEFAULT, questionsShown } from "./api-questions";
@@ -164,8 +165,10 @@ export interface Session {
  * the unconfirmed-change banner, the toast and a revision counter screens reload on. A start
  * moves the revision once the engine runs, before the profile lands, so a screen shown on the
  * profile reads once and one kept on screen through the start reads again. A reply that leaves
- * a change unconfirmed starts a few spaced automatic checks of that change. Output: the session. */
-export function useSession(): Session {
+ * a change unconfirmed starts a few spaced automatic checks of that change. The found folders
+ * are read at Home's pace only while Home is shown, and the window taking the focus back reads
+ * them and the intake job at once. Input: whether Home is shown. Output: the session. */
+export function useSession(home: boolean): Session {
   const [engine, setEngine] = useState<EngineState>("connecting");
   const [engineProblem, setEngineProblem] = useState<string | null>(null);
   const [unconfirmed, setUnconfirmed] = useState<Unconfirmed | null>(null);
@@ -319,7 +322,13 @@ export function useSession(): Session {
         const job = result.value;
         setIntake((shown) => keptRead(shown, job));
         if (line && result.value) {
-          if (result.value.id !== followed.current) showToast(line, { name: "home" });
+          const carried = result.value.kind === "setup" && result.value.state.state === "done" && result.value.project_id !== null
+            ? carryFollowUps(result.value.id, result.value.project_id)
+            : null;
+          if (result.value.id !== followed.current) {
+            if (carried) void carried.outcome.then((message) => { showToast(message, { name: "home" }); void refreshProjects(); });
+            else showToast(line, { name: "home" });
+          }
           setFoundTick((value) => value + 1);
           void notifyIntake(result.value.id);
           if (result.value.kind === "move_project" || result.value.kind === "delete" || result.value.kind === "setup") void refreshProjects();
@@ -340,11 +349,20 @@ export function useSession(): Session {
       const result = await loadFoundProjects();
       if (!live) return;
       setFound((shown) => keptRead<Loaded<FoundProject[]>>(shown, result));
-      if (result.kind !== "not_ready") timer = setTimeout(() => void read(), FOUND_POLL_MS);
+      if (result.kind !== "not_ready") timer = setTimeout(() => void read(), foundPollMs(home));
     };
     void read();
     return () => { live = false; clearTimeout(timer); };
-  }, [engine, foundTick]);
+  }, [engine, foundTick, home]);
+
+  useEffect(() => {
+    const look = () => {
+      setIntakeTick((value) => value + 1);
+      setFoundTick((value) => value + 1);
+    };
+    window.addEventListener("focus", look);
+    return () => window.removeEventListener("focus", look);
+  }, []);
 
   const ready = found.kind === "ok" ? found.value.filter((folder) => folder.state === "ready").map((folder) => folder.project_id ?? folder.path).sort().join("\n") : "";
   useEffect(() => { if (ready) void refreshProjects(); }, [ready]);

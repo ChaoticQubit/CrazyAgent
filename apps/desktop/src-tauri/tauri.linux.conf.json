@@ -8,6 +8,7 @@
     "linux": {
       "deb": {
         "depends": ["xdg-utils", "bubblewrap"],
+        "recommends": ["slirp4netns", "iptables"],
         "section": "devel",
         "files": {
           "/usr/share/crazyagent/apparmor/crazyagent-landlock": "linux/apparmor/crazyagent-landlock"

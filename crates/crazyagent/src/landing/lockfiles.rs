@@ -35,6 +35,9 @@ const POLL: Duration = Duration::from_millis(20);
 const RUNNING_PER_REPOSITORY_MAX: usize = 2;
 const ENV: &str = "/usr/bin/env";
 const SCRATCH_FOLDER: &str = "regenerate";
+/// The folder in a regeneration's scratch that holds only the private index of the check that
+/// the tools changed nothing else, the one folder that check's confined step may write.
+const CHECK_FOLDER: &str = "check";
 
 /// The change sets a regeneration is rewriting now, by id with their repository: one at a
 /// time for each set.
@@ -476,9 +479,11 @@ fn regenerated(
 
 /// Tells whether the tools changed any path of the temporary worktree, tracked or new,
 /// other than the lockfiles, against the merge they ran on, through the worktree's own git
-/// folder and a private index, writing no object. Inputs: the owner checkout, the scratch,
-/// the worktree, the merge and the lockfiles. Output: the answer; a listing git refuses or
-/// cuts short counts as yes.
+/// folder and a private index in a folder of its own, under the confined reading step that
+/// writes only that index ([`Repo::reading`]), so a link a tool left behind leads no git
+/// outside the step's read set. Inputs: the owner checkout, the scratch, the worktree, the
+/// merge and the lockfiles. Output: the answer; a listing git refuses or cuts short counts
+/// as yes.
 fn changed_outside(
     repository: &Path,
     scratch: &Scratch,
@@ -486,8 +491,11 @@ fn changed_outside(
     merged: &str,
     paths: &[String],
 ) -> Result<bool, EngineError> {
+    let folder = scratch.folder.join(CHECK_FOLDER);
+    std::fs::create_dir(&folder).map_err(|_| failure("changes_git_failed"))?;
     let check = Repo::open(repository, &scratch.admin, Some(worktree))?
-        .private_index(&scratch.folder.join("check-index"));
+        .private_index(&folder.join("index"))
+        .reading()?;
     check.capture(&["read-tree", merged], 256)?;
     check.exec(
         &["update-index", "-q", "--refresh"],

@@ -214,7 +214,10 @@ fn an_instructions_file_with_a_second_hard_link_is_never_read() {
     let app = project.data.join(APP_FILE);
     fs::write(&app, "App rules.\n").unwrap();
     fs::hard_link(&app, root.join("app-alias")).unwrap();
-    assert_eq!(read_app(&project.data).unwrap_err().0, "process_text_unsafe");
+    assert_eq!(
+        read_app(&project.data).unwrap_err().0,
+        "process_text_unsafe"
+    );
 }
 
 #[test]
@@ -2458,6 +2461,169 @@ fn an_owner_home_outside_the_engine_root_keeps_its_shell_startup_files() {
     }
 }
 
+/// The sorted names in one folder. Input: the folder. Output: its entries' names.
+#[cfg(unix)]
+fn names_in(folder: &Path) -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// An rcli master's kept home loses, besides its shell startup files, all its cargo home
+/// holds: `config.toml` and the older `config`, whose `build.rustc-wrapper`, linkers, runners
+/// and aliases name programs, as a file or a link, `bin`, whose `cargo-<name>` programs run
+/// as subcommands, `credentials.toml`, which can name a credential provider, and its own
+/// `registry` and `git`, whose unpacked crates cargo builds again in later turns without
+/// unpacking them anew (AGENT-HOME-CONFIG, rv-code4 and rv-sec3 r1 F1). `registry` and `git`
+/// come back as links to the owner's caches the sandbox grants read-only, as in every agent
+/// home, and what a link named outside the home stays.
+#[cfg(unix)]
+#[test]
+fn a_kept_rcli_home_loses_its_cargo_code_and_crates_and_links_the_owners_caches() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    let cargo = home.join(".cargo");
+    let unpacked = cargo.join("registry/src/index/dep-1.0.0");
+    let checkout = cargo.join("git/checkouts/dep/0a1b2c3");
+    for planted in [&unpacked, &checkout] {
+        fs::create_dir_all(planted).unwrap();
+        fs::write(planted.join("build.rs"), "fn main() { planted() }\n").unwrap();
+    }
+    fs::write(unpacked.join(".cargo-ok"), "{\"v\":1}").unwrap();
+    fs::create_dir_all(cargo.join("bin")).unwrap();
+    fs::write(cargo.join("bin").join("cargo-build"), "#!/bin/sh\n").unwrap();
+    let wrapper = "[build]\nrustc-wrapper = \"/tmp/planted\"\n";
+    fs::write(cargo.join("config.toml"), wrapper).unwrap();
+    let outside = root.join("owner-config.toml");
+    fs::write(&outside, "the owner's\n").unwrap();
+    std::os::unix::fs::symlink(&outside, cargo.join("config")).unwrap();
+    let provider = "[registry]\ncredential-provider = \"/tmp/planted\"\n";
+    fs::write(cargo.join("credentials.toml"), provider).unwrap();
+    fs::write(home.join(".zshrc"), "echo planted\n").unwrap();
+    let owner = root.join("owner");
+    let shared = owner.join(".cargo");
+    fs::create_dir_all(shared.join("registry").join("index")).unwrap();
+    fs::create_dir_all(shared.join("git").join("db")).unwrap();
+    fs::write(shared.join("registry/index/crate"), "the owner's\n").unwrap();
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&owner);
+
+    let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    assert_eq!(names_in(&cargo), ["git", "registry"]);
+    for name in ["git", "registry"] {
+        assert_eq!(
+            fs::read_link(cargo.join(name)).ok(),
+            Some(shared.join(name)),
+            "{name}"
+        );
+    }
+    assert_eq!(names_in(&shared.join("registry")), ["index"]);
+    assert_eq!(names_in(&shared.join("git")), ["db"]);
+    assert_eq!(
+        fs::read_to_string(shared.join("registry").join("index").join("crate")).unwrap(),
+        "the owner's\n"
+    );
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "the owner's\n");
+    assert!(fs::symlink_metadata(home.join(".zshrc")).is_err());
+}
+
+/// An rcli master's kept home whose owner has no crate caches still loses its own `registry`
+/// and `git` and gets nothing in their place, so no crate a turn unpacked or edited is built
+/// in a later turn (rv-code4 and rv-sec3 r1 F1).
+#[cfg(unix)]
+#[test]
+fn a_kept_rcli_home_loses_its_own_crates_when_the_owner_has_no_caches() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    let cargo = home.join(".cargo");
+    for planted in [
+        cargo.join("registry/src/index/dep-1.0.0"),
+        cargo.join("git/checkouts/dep/0a1b2c3"),
+    ] {
+        fs::create_dir_all(&planted).unwrap();
+        fs::write(planted.join("build.rs"), "fn main() { planted() }\n").unwrap();
+    }
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&root.join("owner"));
+
+    let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    assert_eq!(names_in(&cargo), Vec::<String>::new());
+}
+
+/// An rcli master's kept home whose `.cargo` is a link, which cargo would follow to a config
+/// the master keeps elsewhere, loses the link and gets a real cargo home of its own in its
+/// place, and what the link named stays (AGENT-HOME-CONFIG).
+#[cfg(unix)]
+#[test]
+fn a_kept_rcli_home_whose_cargo_home_is_a_link_gets_a_real_one_and_the_target_stays() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    fs::create_dir(&home).unwrap();
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::write(elsewhere.join("config.toml"), "[alias]\nb = \"planted\"\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, home.join(".cargo")).unwrap();
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&root.join("owner"));
+
+    let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    assert!(fs::symlink_metadata(home.join(".cargo")).is_ok_and(|found| found.is_dir()));
+    assert_eq!(names_in(&home.join(".cargo")), Vec::<String>::new());
+    assert_eq!(names_in(&elsewhere), ["config.toml"]);
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("config.toml")).unwrap(),
+        "[alias]\nb = \"planted\"\n"
+    );
+}
+
+/// A home outside the engine's data root, such as the owner's own HOME picked as an rcli SDK
+/// home, keeps its cargo config and its own crates, and the owner's caches are never linked
+/// over them: only a home the engine made loses them (rv-sec3 B2 r1 F1).
+#[cfg(unix)]
+#[test]
+fn an_owner_home_outside_the_engine_root_keeps_its_cargo_config_and_crates() {
+    let (_directory, root) = folder();
+    let engine = root.join("engine");
+    let owner = root.join("owner-home");
+    let tools = root.join("tools");
+    fs::create_dir_all(tools.join(".cargo").join("registry")).unwrap();
+    fs::create_dir_all(tools.join(".cargo").join("git")).unwrap();
+    for home in [&engine, &owner] {
+        fs::create_dir_all(home.join(".cargo").join("registry")).unwrap();
+        fs::write(home.join(".cargo").join("config.toml"), "the owner's\n").unwrap();
+        fs::write(
+            home.join(".cargo").join("registry").join("crate"),
+            "the owner's\n",
+        )
+        .unwrap();
+    }
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&tools);
+
+    let removed: Vec<_> = [&owner, &engine]
+        .into_iter()
+        .map(|home| remove_home_code(home, &engine, &homes).map_err(|error| error.0))
+        .collect();
+
+    assert_eq!(removed, [Ok(()), Ok(())]);
+    for home in [&owner, &engine] {
+        assert_eq!(names_in(&home.join(".cargo")), ["config.toml", "registry"]);
+        assert_eq!(
+            fs::read_to_string(home.join(".cargo").join("config.toml")).unwrap(),
+            "the owner's\n"
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".cargo").join("registry").join("crate")).unwrap(),
+            "the owner's\n"
+        );
+    }
+}
+
 /// A home an agent filled with more entries than one listing of it takes still launches,
 /// and every entry it planted goes while what the harness keeps stays (RV-DS241-137), so a
 /// run that makes a hundred thousand files in its home never refuses every later launch.
@@ -2809,4 +2975,122 @@ fn project_text_the_engine_never_wrote_reaches_agents_labelled_and_the_file_stay
     let label = format!("## Project instructions\n\n{heading}\n\n#### Rules\nDo X.\n");
     assert!(given.ends_with(&label), "{given}");
     assert_eq!(fs::read_to_string(&file).unwrap(), "# Rules\nDo X.\n");
+}
+
+/// Makes the folder `name` in `root` holding `files` empty files and opens it as a reset
+/// does. Inputs: the root, the name and how many files. Output: its path and its handle.
+#[cfg(unix)]
+fn walk_folder(root: &Path, name: &str, files: usize) -> (PathBuf, std::os::fd::OwnedFd) {
+    let at = root.join(name);
+    fs::create_dir_all(&at).unwrap();
+    for file in 0..files {
+        fs::write(at.join(file.to_string()), b"").unwrap();
+    }
+    let opened = open_real_folder(&at).unwrap();
+    (at, opened)
+}
+
+/// Makes a `projects` folder in `root` whose projects `p1` and `p2` each hold an auto-memory
+/// folder of two files, so one pass of [`clear_memory`] lists two projects and walks two
+/// listings of two names, six names in all. Input: the root. Output: its path and handle.
+#[cfg(unix)]
+fn memory_folder(root: &Path) -> (PathBuf, std::os::fd::OwnedFd) {
+    for project in ["p1", "p2"] {
+        let memory = root.join("projects").join(project).join(CLAUDE_MEMORY);
+        fs::create_dir_all(&memory).unwrap();
+        for file in ["1", "2"] {
+            fs::write(memory.join(file), b"").unwrap();
+        }
+    }
+    walk_folder(root, "projects", 0)
+}
+
+/// How many of the projects [`memory_folder`] made still hold their auto-memory. Input: the
+/// projects folder. Output: the count.
+#[cfg(unix)]
+fn memories_left(projects: &Path) -> usize {
+    ["p1", "p2"]
+        .iter()
+        .filter(|project| projects.join(project).join(CLAUDE_MEMORY).exists())
+        .count()
+}
+
+/// RESET-WALK-N1: one pass of a home reset spends one walk budget, a unit per name it lists,
+/// so a pass over more unwanted names than its budget refuses with a name left, though no
+/// name alone needs any walk, and a process adding names at the home root cannot stretch
+/// one pass past it. The refusal is `cleanup_walk_too_long`, which reaches the owner
+/// (RESET-WALK-CODE).
+#[cfg(unix)]
+#[test]
+fn a_home_pass_listing_more_names_than_its_walk_budget_refuses_with_one_left() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (home, opened) = walk_folder(&root, "home", 4);
+    let kept = [("kept", Kept::File)];
+
+    let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 3);
+
+    assert_eq!(reset, Err(AgentHomeError("cleanup_walk_too_long".into())));
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
+}
+
+/// RESET-WALK-N1: one pass of [`clear_memory`] spends one walk budget across the projects
+/// it lists and the auto-memory walks it makes, so two memory walks that each fit the
+/// budget alone refuse together with one memory left, instead of each walk getting a
+/// fresh budget. The walk's own refusal reaches the caller as `cleanup_walk_too_long`
+/// (RESET-WALK-CODE).
+#[cfg(unix)]
+#[test]
+fn a_memory_pass_whose_walks_together_pass_its_budget_refuses_though_each_fits_alone() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (projects, opened) = memory_folder(&root);
+
+    let cleared = clear_memory(opened.as_fd(), &projects, 5);
+
+    assert_eq!(cleared, Err(AgentHomeError("cleanup_walk_too_long".into())));
+    assert_eq!(memories_left(&projects), 1);
+}
+
+/// RESET-WALK-N1 code r1 F1: the removals one home pass makes spend its budget too, so two
+/// unwanted folders whose walks each fit the budget alone refuse together with one folder
+/// left, instead of each removal getting a fresh budget. The walk's own refusal reaches the
+/// caller as `cleanup_walk_too_long` (RESET-WALK-CODE).
+#[cfg(unix)]
+#[test]
+fn a_home_pass_whose_folder_walks_together_pass_its_budget_refuses_though_each_fits_alone() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (home, opened) = walk_folder(&root, "home", 0);
+    for name in ["a", "b"] {
+        walk_folder(&home, name, 2);
+    }
+    let kept = [("kept", Kept::File)];
+
+    let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 5);
+
+    assert_eq!(reset, Err(AgentHomeError("cleanup_walk_too_long".into())));
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
+}
+
+/// RESET-WALK-N1 guard: a pass spends exactly a unit per name it lists and per name its
+/// walks list, so a budget of exactly those clears a home pass and a memory pass, and the
+/// next pass of each starts from a fresh budget.
+#[cfg(unix)]
+#[test]
+fn a_walk_budget_of_exactly_what_a_pass_lists_clears_a_home_pass_and_a_memory_pass() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (home, opened) = walk_folder(&root, "home", 4);
+    let (projects, listed) = memory_folder(&root);
+    let kept = [("kept", Kept::File)];
+
+    let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 4);
+    let cleared = clear_memory(listed.as_fd(), &projects, 6);
+
+    assert_eq!(reset, Ok(()));
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+    assert_eq!(cleared, Ok(()));
+    assert_eq!(memories_left(&projects), 0);
+    assert!(projects.join("p1").is_dir() && projects.join("p2").is_dir());
 }

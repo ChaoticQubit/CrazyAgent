@@ -1,15 +1,16 @@
 use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS};
 use super::{
-    BRIDGE_PORT_MIN, GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED,
-    LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP,
-    LinuxSockets, LinuxSupervisor, OWNER_PORTS, ProjectSandbox, Sandbox, SandboxError,
-    SandboxNetwork, SandboxRemote, agent_env, clean_absolute, invalid,
+    ADMIN_LINKS, ADMIN_WRITES, BRIDGE_PORT_MIN, GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX,
+    LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
+    LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, LinuxSupervisor, OWNER_PORTS, ProjectSandbox,
+    REMOTES_MAX, Routed, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
+    clean_absolute, invalid,
 };
-use crazyagent_linux_supervisor::rules::{GitOwn, Reach, is_git};
+use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
 use landlock::{
-    ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetError, RulesetStatus, Scope, path_beneath_rules,
+    ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, RulesetError, RulesetStatus, Scope, make_bitflags, path_beneath_rules,
 };
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
@@ -21,7 +22,7 @@ use std::fs;
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -31,8 +32,10 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 mod bridge;
+mod egress;
 
 pub use bridge::Bridge;
+pub use egress::{NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS};
 
 /// The Landlock helper's file name. It ships next to the engine's own executable.
 pub const HELPER_NAME: &str = "crazyagent-landlock";
@@ -46,6 +49,7 @@ const GRANTS_MAX: usize = 1024;
 const HELPER_PATHS_MAX: usize = GRANTS_MAX + 64;
 const READ: &str = "--read";
 const WRITE: &str = "--write";
+const GIT_WRITE: &str = "--git-write";
 const CONNECT: &str = "--connect";
 const LIMIT_NETWORK: &str = "--limit-network";
 const OPEN_SOCKETS: &str = "--open-sockets";
@@ -62,6 +66,8 @@ const OWN_TREE: &str = "--own-tree";
 const OWN_KIDS: &str = "--own-kids";
 const OWN_GIT: &str = "--own-git";
 const GUARD_SIGNALS: &str = "--guard-signals";
+const GUARD_HELD: &str = "--guard-held";
+const GUARD_HELD_TREE: &str = "--guard-held-tree";
 const PROBE_SUPERVISOR: &str = "--probe-supervisor";
 const PROBE_SUPERVISED: &str = "--probe-supervised";
 /// Where AppArmor says whether it keeps unprivileged programs out of user namespaces, as on
@@ -79,6 +85,8 @@ const HOST_AGE_MAX: Duration = Duration::from_secs(60);
 /// The longest the call supervisor probe may run: its one wait is a 2 s connect timeout,
 /// reached only when a guard does not hold (rv-sec3 linux-t4b N4).
 const SUPERVISOR_PROBE_TIME_MAX: Duration = Duration::from_secs(10);
+/// How long the routed-network probe may run: slirp4netns's ready wait and the rules.
+const ROUTE_PROBE_TIME_MAX: Duration = Duration::from_secs(15);
 /// How the name of each private folder a supervisor probe runs in starts ([`private_folder`]).
 const PROBE_FOLDER_PREFIX: &str = "supervisor-probe-";
 /// The most names [`private_folder`] tries: each is 128 random bits, so only a name someone
@@ -89,6 +97,8 @@ const PROBE_POLL: Duration = Duration::from_millis(20);
 /// The set-user-ID and set-group-ID mode bits: a bubblewrap with either runs as someone
 /// other than the engine's user, so [`trusted`] refuses it.
 const SET_ID_BITS: u32 = 0o6000;
+/// The group and other write bits: a program anyone but its owner may change is never run.
+const OTHERS_WRITE_BITS: u32 = 0o022;
 /// The bubblewrap arguments a nested agent starts under, before its working folder: user,
 /// process, IPC and host-name namespaces of its own and a fresh `/proc`, with the whole
 /// root bound through, devices too, so the helper's Landlock rules stay the only file
@@ -111,6 +121,12 @@ const RESOLVER_ROOT: &str = "/run/systemd/resolve";
 const HELPER_MISSING: &str = "this Linux cannot fully enforce Landlock file rules (Linux 6.2 \
      or newer), and CrazyAgent's sandbox helper, which keeps a bubblewrap agent off Unix \
      sockets, is missing; reinstall CrazyAgent";
+/// The launch refusal when this computer's nest check passed ([`nest_held`]) but the launch's
+/// own nest probe failed (rv-sa241 SBX-2-R2 LOW-1), so no agent runs on the shared network
+/// with Landlock rules alone while the Agent access page says it is nested.
+const LINUX_NEST_NOT_STARTED: &str = "bubblewrap did not start this agent's sandbox the way \
+     this computer's check found it does; try again, or restart CrazyAgent to check this \
+     computer again";
 /// The most ports one agent is kept off: the owner's fixed ports, the kept local model
 /// ports and every model proxy and model relay port.
 const KEEP_FREE_MAX: usize = OWNER_PORTS.len()
@@ -184,6 +200,10 @@ const CONFINED_UNAVAILABLE: &str = "an agent confined to its own worktree cannot
      neither Landlock nor bubblewrap can keep the worktree's git links and the existing git \
      objects read-only inside the git folders it must write";
 
+const CONFINED_NEEDS_LANDLOCK: &str = "an agent confined to its own worktree or clone needs \
+     Landlock file rules on Linux (Linux 6.2 or newer), and this Linux runs agents under \
+     bubblewrap alone, which cannot give the git folders their own rights";
+
 const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/null",
     "/dev/zero",
@@ -203,12 +223,14 @@ const LANDLOCK_DEVICES: &[&str] = &[
 /// itself, and an open-network agent binds any TCP port but those. `die_with` names the
 /// process the helper and the program it becomes are killed with (an engine git step).
 /// `nested` tells the helper it runs inside bubblewrap's namespaces ([`NEST_ARGS`]).
-/// `guard` names what the helper's call supervisor holds ([`Guard`]). The
+/// `guard` names what the helper's call supervisor holds ([`Guard`]). `git_write` names
+/// the git folders a confined agent writes with [`git_folder_rights`] only. The
 /// engine renders it as helper arguments and the helper parses it back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandlockPolicy {
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
+    pub git_write: Vec<PathBuf>,
     pub connect: Vec<u16>,
     pub limit_network: bool,
     pub open_sockets: bool,
@@ -221,13 +243,15 @@ pub struct LandlockPolicy {
 /// What the helper's call supervisor holds for an agent on a host with no namespaces to
 /// nest it in (DEC-179): `loopback` names the connect ports it reaches on this machine
 /// only, `git` its own git folders, the only `.git` entries it may make, and `signals`
-/// keeps its signals inside the programs it started. With none of them the helper becomes
-/// the harness; with any it stays as the harness's parent and answers its guarded calls.
+/// keeps its signals inside the programs it started, and `held` names the entries it may
+/// not write, move, link or remove (DEC-185 S2). With none of them the helper becomes the
+/// harness; with any it stays as the harness's parent and answers its guarded calls.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Guard {
     pub loopback: Vec<u16>,
     pub git: Option<GitOwn>,
     pub signals: bool,
+    pub held: Option<Held>,
 }
 
 impl Guard {
@@ -255,6 +279,14 @@ impl Guard {
         if self.signals {
             args.push(GUARD_SIGNALS.into());
         }
+        if let Some(held) = &self.held {
+            for (flag, paths) in [(GUARD_HELD, &held.entries), (GUARD_HELD_TREE, &held.trees)] {
+                for path in paths {
+                    args.push(flag.into());
+                    args.push(path.into());
+                }
+            }
+        }
         args
     }
 
@@ -272,9 +304,10 @@ impl Guard {
             loopback: self.loopback.clone(),
         };
         Supervised {
-            reach: Some(reach).filter(|_| !self.loopback.is_empty()),
+            reach: (!self.loopback.is_empty()).then_some(reach),
             git: self.git.clone(),
             signals: self.signals,
+            held: self.held.clone(),
         }
     }
 }
@@ -289,6 +322,10 @@ impl LandlockPolicy {
         }
         for path in &self.write {
             args.push(WRITE.into());
+            args.push(path.into());
+        }
+        for path in &self.git_write {
+            args.push(GIT_WRITE.into());
             args.push(path.into());
         }
         if self.limit_network {
@@ -341,7 +378,7 @@ pub(crate) fn git_step_policy(read: &[PathBuf], write: &[PathBuf]) -> LandlockPo
         die_with: Some(std::process::id()).filter(|engine| *engine > 1),
         ..LandlockPolicy::default()
     };
-    assert!(policy.read.len() + policy.write.len() <= HELPER_PATHS_MAX);
+    assert!(policy.read.len() + policy.write.len() + policy.git_write.len() <= HELPER_PATHS_MAX);
     assert!(!policy.limit_network && policy.keep_free.is_empty());
     policy
 }
@@ -367,8 +404,9 @@ pub(crate) fn holds_file_rules(helper: &Path) -> bool {
 /// Landlock ruleset, apply a policy and start a harness, inside bubblewrap install only
 /// the socket filter and start a harness, start bubblewrap from a fixed place with
 /// [`NEST_ARGS`], which then starts the helper again inside its namespaces, tell whether
-/// the kernel scopes signals, carry a nested agent's bridged ports as its broker, tell
-/// whether this machine runs the call supervisor, or be the check that question starts.
+/// the kernel scopes signals, carry a nested agent's bridged ports as its broker, build a
+/// routed agent's network as its setup child, tell whether this machine runs the call
+/// supervisor, or be the check that question starts.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HelperRequest {
     Probe {
@@ -394,6 +432,10 @@ pub enum HelperRequest {
         parent: u32,
         ports: Vec<u16>,
     },
+    Egress {
+        parent: u32,
+        ports: Vec<u16>,
+    },
     Supervisor {
         folder: PathBuf,
     },
@@ -409,7 +451,8 @@ impl HelperRequest {
     /// `--probe` with an optional `--limit-network`, `--open-sockets` and `--keep-free`
     /// with a port, or `--filter-sockets` alone then `--` and the harness, or `--nest`
     /// alone then `--` and what [`nest_request`] takes, or `--scoped` with nothing else, or
-    /// `--broker` with what [`bridge::broker_request`] takes.
+    /// `--broker` with what [`bridge::broker_request`] takes, or `--egress` with what
+    /// [`egress::request`] takes.
     /// `--open-sockets` needs `--limit-network`. Output: the request, or the reason the
     /// arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
@@ -420,6 +463,9 @@ impl HelperRequest {
         }
         if args.first().is_some_and(|flag| flag == bridge::BROKER) {
             return bridge::broker_request(args);
+        }
+        if args.first().is_some_and(|flag| flag == egress::EGRESS) {
+            return egress::request(args);
         }
         if let Some(probe) = supervisor_probe(&args) {
             return probe;
@@ -448,6 +494,7 @@ impl HelperRequest {
                 Some(OPEN_SOCKETS) => policy.open_sockets = true,
                 Some(READ) => policy.read.push(absolute(rest.next())?),
                 Some(WRITE) => policy.write.push(absolute(rest.next())?),
+                Some(GIT_WRITE) => policy.git_write.push(absolute(rest.next())?),
                 Some(CONNECT) => policy.connect.push(port(rest.next())?),
                 Some(KEEP_FREE) => policy.keep_free.push(port(rest.next())?),
                 Some(DIE_WITH) if policy.die_with.is_none() => {
@@ -473,6 +520,7 @@ impl HelperRequest {
         }
         let bare = policy.read.is_empty()
             && policy.write.is_empty()
+            && policy.git_write.is_empty()
             && policy.connect.is_empty()
             && policy.die_with.is_none()
             && !policy.nested
@@ -504,7 +552,7 @@ fn run_request(
         return Err(format!("{NESTED} takes no {DIE_WITH}"));
     }
     let program = absolute(rest.next())?;
-    if policy.read.len() + policy.write.len() > HELPER_PATHS_MAX {
+    if policy.read.len() + policy.write.len() + policy.git_write.len() > HELPER_PATHS_MAX {
         return Err("too many path grants".into());
     }
     Ok(HelperRequest::Run {
@@ -543,7 +591,8 @@ fn supervisor_probe(args: &[OsString]) -> Option<Result<HelperRequest, String>> 
 
 /// Reads one call-supervisor flag into a guard. Inputs: the guard, the flag and the
 /// arguments after it. Output: whether the flag was one of them, or the reason its value
-/// is refused; an own git place is one only after `--guard-git`, which comes once.
+/// is refused; an own git place is one only after `--guard-git`, which comes once, and a
+/// held place is an absolute path.
 fn guard_flag(
     guard: &mut Guard,
     flag: &OsStr,
@@ -562,6 +611,8 @@ fn guard_flag(
             guard.git = Some(GitOwn::default());
             return Ok(true);
         }
+        Some(GUARD_HELD) => Some(&mut guard.held.get_or_insert_with(Held::default).entries),
+        Some(GUARD_HELD_TREE) => Some(&mut guard.held.get_or_insert_with(Held::default).trees),
         Some(OWN_TREE) => guard.git.as_mut().map(|git| &mut git.trees),
         Some(OWN_KIDS) => guard.git.as_mut().map(|git| &mut git.kids),
         Some(OWN_GIT) => guard.git.as_mut().map(|git| &mut git.exact),
@@ -586,22 +637,44 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     }
     let tcp_only = policy.limit_network && !policy.open_sockets;
     if !guard.loopback.is_empty() && !tcp_only {
-        return Err(format!("{GUARD_LOOPBACK} needs {LIMIT_NETWORK} without {OPEN_SOCKETS}"));
+        return Err(format!(
+            "{GUARD_LOOPBACK} needs {LIMIT_NETWORK} without {OPEN_SOCKETS}"
+        ));
     }
-    if !guard.loopback.iter().all(|port| policy.connect.contains(port)) {
+    if !guard
+        .loopback
+        .iter()
+        .all(|port| policy.connect.contains(port))
+    {
         return Err(format!("{GUARD_LOOPBACK} names a port with no {CONNECT}"));
     }
     let own = |git: &GitOwn| git.trees.len() + git.kids.len() + git.exact.len();
     if guard.git.as_ref().map_or(0, own) > GRANTS_MAX {
         return Err("too many own git places".into());
     }
+    let held = |held: &Held| held.entries.len() + held.trees.len();
+    if guard.held.as_ref().map_or(0, held) > GRANTS_MAX {
+        return Err("too many held places".into());
+    }
     Ok(())
 }
 
+/// The bubblewrap options no caller names before the nest's `--`, beside stage 1's own
+/// descriptor flags: one reads more arguments from a descriptor, past every check here,
+/// and the others block on or write to a descriptor the caller holds (rv-code2 N5).
+const NEST_REFUSED: [&str; 4] = [
+    "--args",
+    "--userns-block-fd",
+    "--sync-fd",
+    "--json-status-fd",
+];
+
 /// Reads what follows `--nest --`: bubblewrap at one of its fixed places, then exactly
 /// [`NEST_ARGS`], then at least the command bubblewrap starts, so the helper starts nothing
-/// else on a caller's word. Inputs: whether `--nest` was the only flag, and those
-/// arguments. Output: the request, or the reason they are refused.
+/// else on a caller's word. No option before the nest's `--` is one of the descriptor
+/// flags stage 1 writes itself ([`egress::DESCRIPTOR_FLAGS`]) or [`NEST_REFUSED`]. Inputs:
+/// whether `--nest` was the only flag, and those arguments. Output: the request, or the
+/// reason they are refused.
 fn nest_request(
     alone: bool,
     mut rest: impl Iterator<Item = OsString>,
@@ -611,7 +684,9 @@ fn nest_request(
     }
     let bwrap = absolute(rest.next())?;
     if !BWRAP_PATHS.iter().any(|path| Path::new(path) == bwrap) {
-        return Err(format!("{NEST} starts only bubblewrap from its fixed places"));
+        return Err(format!(
+            "{NEST} starts only bubblewrap from its fixed places"
+        ));
     }
     let args: Vec<OsString> = rest.collect();
     let fixed = args
@@ -619,7 +694,21 @@ fn nest_request(
         .zip(NEST_ARGS)
         .all(|(arg, fixed)| arg.as_os_str() == OsStr::new(fixed));
     if !fixed || args.len() <= NEST_ARGS.len() {
-        return Err(format!("{NEST} needs bubblewrap's fixed arguments and a command"));
+        return Err(format!(
+            "{NEST} needs bubblewrap's fixed arguments and a command"
+        ));
+    }
+    let named = args[NEST_ARGS.len()..]
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| {
+            let mut refused = egress::DESCRIPTOR_FLAGS.iter().chain(NEST_REFUSED.iter());
+            refused.any(|flag| arg == flag)
+        });
+    if named {
+        return Err(format!(
+            "{NEST} takes no descriptor flag; stage 1 writes its own"
+        ));
     }
     Ok(HelperRequest::Nest { bwrap, args })
 }
@@ -731,6 +820,17 @@ fn bindable(keep_free: &[u16]) -> Vec<u16> {
     ports
 }
 
+/// The rights a git folder grant ([`LandlockPolicy::git_write`]) adds: read, write,
+/// truncate, make and remove files and folders, and no symlink, no move from or to another
+/// folder, no device, fifo or socket and no execute. Landlock unions a folder's rights with
+/// its ancestors', so a read grant above the folder still gives execute (DEC-185 S1).
+/// No input. Output: the rights.
+pub fn git_folder_rights() -> BitFlags<AccessFs> {
+    make_bitflags!(AccessFs::{
+        ReadFile | ReadDir | WriteFile | Truncate | MakeReg | MakeDir | RemoveFile | RemoveDir
+    })
+}
+
 /// Applies the policy's Landlock rules to this process. A limited network handles every
 /// network right and allows only its `connect` ports. An open network with kept ports
 /// handles TCP bind alone and, with `rules`, allows every [`bindable`] port; without `rules`,
@@ -753,7 +853,8 @@ fn enforce(policy: &LandlockPolicy, rules: bool) -> Result<RestrictionStatus, Ru
         .add_rules(path_beneath_rules(
             &policy.write,
             AccessFs::from_all(FS_ABI),
-        ))?;
+        ))?
+        .add_rules(path_beneath_rules(&policy.git_write, git_folder_rights()))?;
     for port in &policy.connect {
         created = created.add_rule(NetPort::new(*port, AccessNet::ConnectTcp))?;
     }
@@ -928,8 +1029,9 @@ fn die_with_parent(parent: u32) -> Result<(), String> {
 /// filter to itself, moves into a session of its own and then replaces itself with the
 /// harness, or with a guard stays as its parent and ends with its exit code ([`supervise`]);
 /// a nest becomes bubblewrap, which starts a run inside its namespaces ([`nest`]).
-/// Bridge flags may lead a nest and the run or probe inside it ([`Bridge::fits`]). No mode
-/// runs while the environment holds a variable that loads code ([`LOADER_REFUSED`]).
+/// Route and bridge flags may lead a nest, and bridge flags the run or probe inside it
+/// ([`read_request`]). No mode runs while the environment holds a variable that loads code
+/// ([`LOADER_REFUSED`]).
 /// Output: the exit code, 2 for refused arguments or such a variable, 3 when the kernel
 /// cannot hold the policy, the session or the signal mask, or the process it dies with is
 /// gone, 126 when the harness or bubblewrap cannot start.
@@ -944,12 +1046,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let asked = Bridge::leading(args).and_then(|(bridge, args)| {
-        let request = HelperRequest::parse(args)?;
-        Bridge::fits(bridge.as_ref(), &request)?;
-        Ok((bridge, request))
-    });
-    let (bridge, request) = match asked {
+    let (routes, bridge, started, request) = match read_request(args) {
         Ok(asked) => asked,
         Err(reason) => {
             eprintln!("crazyagent-landlock: {reason}");
@@ -958,9 +1055,12 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     };
     let (policy, launch) = match request {
         HelperRequest::Filter { program, args } => return filtered(&program, args),
-        HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args, bridge.as_ref()),
+        HelperRequest::Nest { bwrap, args } => {
+            return nest(&bwrap, &args, bridge.as_ref(), &routes);
+        }
         HelperRequest::Scoped => return scoped(),
         HelperRequest::Broker { parent, ports } => return bridge::broker(parent, &ports),
+        HelperRequest::Egress { parent, ports } => return egress::setup(parent, &ports),
         HelperRequest::Supervisor { folder } => return probe_supervisor(&folder),
         HelperRequest::Supervised { port, folder } => return probe_supervised(port, &folder),
         HelperRequest::Probe {
@@ -982,20 +1082,53 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             args,
         } => (policy, Some((program, args))),
     };
-    hold(&policy, launch, bridge.as_ref())
+    hold(&policy, launch, bridge.as_ref(), started)
 }
 
+/// Reads what the helper was asked: the route flags first ([`egress::leading`]), then the
+/// bridge flags ([`Bridge::leading`]), then the go descriptor ([`egress::handed`]), then
+/// the request, each set of flags only where the request takes it ([`Bridge::fits`],
+/// [`egress::fits`]). A routed nest with no bridged port unshares the network for its
+/// routes alone, so the bridge's check is left to the route's. Input: the helper
+/// arguments. Output: the route ports, empty for none, the bridge, the go descriptor and
+/// the request; or the reason.
+fn read_request(args: Vec<OsString>) -> Result<Asked, String> {
+    let (routes, args) = egress::leading(args)?;
+    let (bridge, args) = Bridge::leading(args)?;
+    let (started, args) = egress::handed(args)?;
+    let request = HelperRequest::parse(args)?;
+    if routes.is_empty() || bridge.is_some() {
+        Bridge::fits(bridge.as_ref(), &request)?;
+    }
+    egress::fits(&routes, started, &request)?;
+    assert!(routes.len() <= REMOTES_MAX);
+    assert!(started.is_none() || routes.is_empty());
+    Ok((routes, bridge, started, request))
+}
+
+/// What [`read_request`] reads: the route ports, the bridge, the go descriptor and the
+/// request.
+type Asked = (Vec<u16>, Option<Bridge>, Option<RawFd>, HelperRequest);
+
 /// Holds a policy on this process, then becomes the harness, or with a guard stays as its
-/// parent ([`supervise`]); for a probe it only tells
-/// whether this kernel held it. Under a bridge it first hands the bridged listeners to the
-/// broker, before any rule; the ports it would keep free are then ports of a network of
-/// its own, so the picked range is not asked. Inputs: the policy, the harness if any, and
-/// the bridge. Output: the exit code as [`helper_main`] gives it.
+/// parent ([`supervise`]); for a probe it only tells whether this kernel held it. In a
+/// routed nest it first waits for the go byte and refuses without it
+/// ([`egress::started`]). Under a bridge it then hands the bridged listeners to the broker,
+/// before any rule; the ports it would keep free are then ports of a network of its own, so
+/// the picked range is not asked. Inputs: the policy, the harness if any, the bridge and
+/// the go descriptor. Output: the exit code as [`helper_main`] gives it.
 fn hold(
     policy: &LandlockPolicy,
     launch: Option<(PathBuf, Vec<OsString>)>,
     bridge: Option<&Bridge>,
+    started: Option<RawFd>,
 ) -> ExitCode {
+    if let Some(fd) = started
+        && let Err(reason) = egress::started(fd)
+    {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
     if let Some(parent) = policy.die_with
         && let Err(reason) = die_with_parent(parent)
     {
@@ -1094,6 +1227,7 @@ fn probe_supervisor(folder: &Path) -> ExitCode {
             loopback: vec![port],
             git: Some(GitOwn::default()),
             signals: true,
+            held: None,
         };
         serve::run(all.supervised(&[port]), &mut check)
     });
@@ -1174,10 +1308,13 @@ fn scoped() -> ExitCode {
 /// first process inside inherit the mask, so they end only with the harness or by KILL,
 /// and a stop signal to the group is the harness's to handle. Last it gives up new
 /// privileges. Output: 3 when bubblewrap is refused or any of the three fails, 126 when
-/// bubblewrap cannot start. With a bridge it first starts the
-/// broker on this network and writes the bridge flags for the helper inside
-/// ([`bridge::open`]), keeping its end of the bridge open until bubblewrap has it.
-fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
+/// bubblewrap cannot start. With route ports it first starts the setup child that builds
+/// the agent's network and writes the descriptor flags bubblewrap reports and waits on
+/// ([`egress::open`]); with a bridge it then starts the broker on this network and writes
+/// the bridge flags for the helper inside ([`bridge::open`]). It keeps every end open until
+/// bubblewrap has it, and hands the route ends over only after both children started.
+fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>, routes: &[u16]) -> ExitCode {
+    assert!(routes.len() <= REMOTES_MAX);
     let Some(program) = trusted_file(bwrap) else {
         eprintln!(
             "crazyagent-landlock: {} is not a bubblewrap to nest under",
@@ -1186,12 +1323,20 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
         return ExitCode::from(3);
     };
     let ready = own_session()
-        .and_then(|()| match bridge {
-            Some(bridge) => bridge::open(&bridge.ports, args)
-                .map(|(end, args)| (Some(end), args)),
-            None => Ok((None, args.to_vec())),
+        .and_then(|()| match routes {
+            [] => Ok((None, args.to_vec())),
+            routes => egress::open(routes, args).map(|(ends, args)| (Some(ends), args)),
+        })
+        .and_then(|(ends, args)| match bridge {
+            Some(bridge) => {
+                bridge::open(&bridge.ports, &args).map(|(end, args)| (ends, Some(end), args))
+            }
+            None => Ok((ends, None, args)),
         })
         .and_then(|opened| {
+            if let Some(ends) = &opened.0 {
+                ends.hand_over()?;
+            }
             nix::sys::signal::SigSet::all()
                 .thread_block()
                 .map_err(|error| format!("signal mask: {error}"))?;
@@ -1199,13 +1344,14 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
                 .map_err(|error| format!("no new privileges: {error}"))?;
             Ok(opened)
         });
-    let (_end, args) = match ready {
+    let (_ends, _end, args) = match ready {
         Ok(opened) => opened,
         Err(reason) => {
             eprintln!("crazyagent-landlock: {reason}");
             return ExitCode::from(3);
         }
     };
+    assert!(routes.is_empty() || egress::placed(&args).is_ok());
     assert_eq!(nix::sys::prctl::get_no_new_privs(), Ok(true));
     let error = exec_keeping_mask(&program, bwrap, &args);
     eprintln!(
@@ -1307,6 +1453,7 @@ pub struct LinuxSandbox {
     sandbox: ProjectSandbox,
     backend: LinuxBackend,
     supervision: Option<Supervision>,
+    routed: Option<Routed>,
 }
 
 /// What the call supervisor holds for a launch on this host beyond the guards every
@@ -1370,6 +1517,7 @@ impl LinuxSandbox {
             sandbox,
             backend,
             supervision: None,
+            routed: None,
         })
     }
 
@@ -1408,14 +1556,26 @@ impl LinuxSandbox {
 
     /// The policy with the guards this launch's supervision carries, none without one,
     /// checked as the helper checks it ([`guard_fits`]). A nested launch never carries the
-    /// signal guard. Input: the policy. Output: the policy, or `Invalid` for more own git
-    /// folders than the helper takes.
-    fn with_guard(&self, policy: LandlockPolicy) -> Result<LandlockPolicy, SandboxError> {
+    /// signal guard. Inputs: the policy and the guarded entries, each held whole with all
+    /// below it (DEC-185 S2a). Output: the policy, or `Invalid` for more own git folders or
+    /// held places than the helper takes.
+    fn with_guard(
+        &self,
+        policy: LandlockPolicy,
+        held: &[PathBuf],
+    ) -> Result<LandlockPolicy, SandboxError> {
         let Some(supervision) = self.supervision else {
             return Ok(policy);
         };
+        let held = Held {
+            entries: Vec::new(),
+            trees: held.to_vec(),
+        };
         let guarded = LandlockPolicy {
-            guard: guard(&self.sandbox, supervision),
+            guard: Guard {
+                held: Some(held).filter(|held| !held.trees.is_empty()),
+                ..guard(&self.sandbox, supervision)
+            },
             ..policy
         };
         assert!(!guarded.nested || !guarded.guard.signals);
@@ -1425,12 +1585,13 @@ impl LinuxSandbox {
     }
 
     /// Picks the backend this machine holds: Landlock when the helper exists and its probe
-    /// passes for the policy's network needs, nested in bubblewrap when the same probe also
-    /// passes inside its namespaces ([`nests`]), otherwise bubblewrap from a fixed path with
-    /// the helper started inside it, so no bubblewrap agent starts without the helper. An
-    /// open network probes the TCP bind rules that keep ports free and never falls back to
+    /// passes for the policy's network needs, nested in bubblewrap where this machine nests
+    /// ([`nest_held`], the answer the Agent access page reads) and the same probe passes
+    /// inside its namespaces ([`nests`]), otherwise bubblewrap from a fixed path with the
+    /// helper started inside it, so no bubblewrap agent starts without the helper. An open
+    /// network probes the TCP bind rules that keep ports free and never falls back to
     /// bubblewrap. Input: the project policy and the helper executable. Output: the
-    /// sandbox, or `Unavailable` when no backend can hold it.
+    /// sandbox, or `Unavailable` when no backend can hold it or the nest does not start.
     pub fn detect(sandbox: ProjectSandbox, helper: &Path) -> Result<Self, SandboxError> {
         let bwraps: Vec<&Path> = BWRAP_PATHS.iter().map(Path::new).collect();
         Self::detect_among(sandbox, helper, &bwraps)
@@ -1464,7 +1625,15 @@ impl LinuxSandbox {
             let nest = bwraps
                 .iter()
                 .find(|bwrap| bwrap.is_file())
-                .filter(|bwrap| nests(bwrap, &helper, &flags));
+                .filter(|bwrap| nest_held(bwrap, &helper));
+            if let Some(bwrap) = nest
+                && !nests(bwrap, &helper, &flags)
+            {
+                eprintln!(
+                    "linux_nest_not_started: this agent is refused, not moved to Landlock alone"
+                );
+                return Err(SandboxError::Unavailable(LINUX_NEST_NOT_STARTED.into()));
+            }
             let backend = match nest {
                 Some(bwrap) => LinuxBackend::Nested {
                     bwrap: bwrap.to_path_buf(),
@@ -1472,7 +1641,18 @@ impl LinuxSandbox {
                 },
                 None => LinuxBackend::Landlock { helper },
             };
-            return Self::new(sandbox, backend);
+            let mut detected = Self::new(sandbox, backend)?;
+            if let LinuxBackend::Nested { bwrap, helper } = &detected.backend
+                && let Some(routed) = detected.sandbox.routed()
+            {
+                if route_held(bwrap, helper) {
+                    detected.routed = Some(routed);
+                } else {
+                    eprintln!("linux_route_not_started: this agent keeps the shared network");
+                }
+            }
+            assert!(detected.routed.is_none() || detected.sandbox.bridged_ports().is_none());
+            return Ok(detected);
         }
         if open {
             return Err(SandboxError::Unavailable(
@@ -1503,9 +1683,34 @@ impl LinuxSandbox {
         &self.backend
     }
 
+    /// Whether stopping a run in this sandbox ends every process it started, those in a
+    /// session of their own included: bubblewrap's process namespace ends with its outer
+    /// process ([`NEST_ARGS`]), while under the plain Landlock helper such a process leaves
+    /// the group a stop kills and outlives the run (LINUX-KILL-GROUP). Output: the answer.
+    pub fn ends_every_session(&self) -> bool {
+        !matches!(self.backend, LinuxBackend::Landlock { .. })
+    }
+
     /// The project policy this sandbox holds.
     pub fn sandbox(&self) -> &ProjectSandbox {
         &self.sandbox
+    }
+
+    /// The network of its own this sandbox gives its agent, as detection found this machine
+    /// holds it ([`ProjectSandbox::routed`]); none when the agent keeps the shared network.
+    pub fn routed(&self) -> Option<&Routed> {
+        self.routed.as_ref()
+    }
+
+    /// Tells whether this launch holds the full Linux sandbox ([`super::linux_holds_fully`]):
+    /// the nested backend, the call supervisor this launch starts, and its network limits
+    /// held, a port on any host through the network of its own detection found. No input.
+    /// Output: the answer.
+    pub fn holds_fully(&self) -> bool {
+        let nested = matches!(self.backend, LinuxBackend::Nested { .. });
+        assert!(self.routed.is_none() || nested);
+        let supervised = self.supervision.is_some();
+        super::linux_holds_fully(nested, supervised, self.routed.is_some(), &self.sandbox)
     }
 
     /// The program every wrapped command starts: the Landlock helper or bwrap.
@@ -1539,7 +1744,10 @@ fn passes_within(probe: &mut Command, time_max: Duration) -> bool {
     }
     if child.kill().is_ok() {
         let reaped = child.wait();
-        assert!(reaped.is_ok(), "a killed probe is this process's child to reap");
+        assert!(
+            reaped.is_ok(),
+            "a killed probe is this process's child to reap"
+        );
     }
     false
 }
@@ -1611,11 +1819,11 @@ fn passes(probe: &mut Command) -> bool {
     .is_ok_and(|status| status.success())
 }
 
-/// Opens a bubblewrap the helper may nest an agent under and checks the file it opened, not
-/// the path again: a file that root or this user owns, with neither [`SET_ID_BITS`] bit, so
-/// it runs with this user's privileges and was put there by root or by this user. It opens
-/// without reading, so a bubblewrap that can only be run still opens. Input: its path.
-/// Output: the open file, which [`nest`] starts, or none.
+/// Opens a bubblewrap or tool the helper may run and checks the file it opened, not the
+/// path again: a file that root or this user owns, with neither [`SET_ID_BITS`] bit nor
+/// [`OTHERS_WRITE_BITS`], so it runs with this user's privileges and only root or this user
+/// put it there or may change it. It opens without reading, so a program that can only be
+/// run still opens. Input: its path. Output: the open file, which [`nest`] starts, or none.
 fn trusted_file(bwrap: &Path) -> Option<fs::File> {
     let own = rustix::process::geteuid().as_raw();
     let file = fs::OpenOptions::new()
@@ -1624,7 +1832,7 @@ fn trusted_file(bwrap: &Path) -> Option<fs::File> {
         .open(bwrap)
         .ok()?;
     let held = file.metadata().ok()?;
-    let plain = held.is_file() && held.mode() & SET_ID_BITS == 0;
+    let plain = held.is_file() && held.mode() & (SET_ID_BITS | OTHERS_WRITE_BITS) == 0;
     (plain && [0, own].contains(&held.uid())).then_some(file)
 }
 
@@ -1661,6 +1869,125 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
         )
 }
 
+/// Tells whether this machine gives a nested agent a network of its own that leaves only
+/// through its route ports: the widest routed nest a launch asks for, one route port and
+/// one bridged port, starts the helper's probe inside it within [`ROUTE_PROBE_TIME_MAX`];
+/// that probe passes only on the setup child's go byte ([`egress::started`]). Asked through
+/// [`route_held`] only. Inputs: bubblewrap and the helper. Output: true when it exits 0.
+fn routes(bwrap: &Path, helper: &Path) -> bool {
+    clean_absolute(bwrap)
+        && trusted(bwrap)
+        && passes_within(
+            Command::new(helper)
+                .arg(egress::ROUTE)
+                .arg("1")
+                .arg(bridge::BRIDGE)
+                .arg(BRIDGE_PORT_MIN.to_string())
+                .arg(NEST)
+                .arg("--")
+                .arg(bwrap)
+                .args(NEST_ARGS)
+                .arg(bridge::UNSHARE_NET)
+                .arg("--")
+                .arg(helper)
+                .arg(PROBE),
+            ROUTE_PROBE_TIME_MAX,
+        )
+}
+
+/// The route answer kept for this engine's life ([`kept_route`]): the bubblewrap and the
+/// helper it was asked for, and whether the probe passed.
+type KeptRoute = Mutex<Option<(PathBuf, PathBuf, bool)>>;
+
+/// Tells whether a nested agent gets a routed network of its own from one answer kept for
+/// the engine's life, so the Agent access page, the launch notice and the launch read the
+/// same fact (rv-code2 SX2-2, SX2B-1): false at once when `refused`, else the answer kept
+/// for this bubblewrap and helper, else the probe's, then kept, with no lock held while the
+/// probe runs. Inputs: the cell, bubblewrap, the helper, the refusal, the probe. Output: it.
+fn kept_route(
+    kept: &KeptRoute,
+    bwrap: &Path,
+    helper: &Path,
+    refused: bool,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    if refused {
+        return false;
+    }
+    let held = kept.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    if let Some((asked_bwrap, asked_helper, answer)) = held
+        && asked_bwrap == bwrap
+        && asked_helper == helper
+    {
+        return answer;
+    }
+    let answer = probe();
+    let asked = (bwrap.to_path_buf(), helper.to_path_buf(), answer);
+    *kept.lock().unwrap_or_else(PoisonError::into_inner) = Some(asked);
+    answer
+}
+
+/// What [`route_held`] answered, read by the host facts and every launch alike.
+static ROUTE_READ: KeptRoute = Mutex::new(None);
+
+/// [`kept_route`] for this machine: refused as root (rv-sa241 NOTE-2), where slirp4netns
+/// would run with root's network before it joins the agent's. The tools check runs inside
+/// the probe, so a kept answer never changes for a key: a tool removed after a true answer
+/// gives a routed launch whose setup fails, which the go byte refuses. Inputs: bubblewrap
+/// and the helper. Output: true when the agent is routed.
+fn route_held(bwrap: &Path, helper: &Path) -> bool {
+    let root = rustix::process::geteuid().is_root();
+    let probe = || {
+        let tools = SLIRP_PATHS
+            .iter()
+            .chain(egress::IPTABLES_PATHS.iter())
+            .all(|path| Path::new(path).is_file());
+        tools && routes(bwrap, helper)
+    };
+    kept_route(&ROUTE_READ, bwrap, helper, root, probe)
+}
+
+/// The bubblewrap and the helper [`kept_nest`] found a nest for.
+type KeptNest = Mutex<Option<(PathBuf, PathBuf)>>;
+
+/// Tells whether this machine nests the helper in bubblewrap from one answer the Agent access
+/// page and every launch read (rv-sa241 SBX-2-R2 LOW-1): a nest found for this bubblewrap and
+/// helper is kept for the engine's life, and one not found is asked again each time, so a
+/// machine that starts to nest is seen at its next read. No lock is held while the probe
+/// runs, and a failed probe reads the cell again, so a nest another caller found meanwhile
+/// holds. Inputs: the cell, bubblewrap, the helper, the probe. Output: true when it nests.
+fn kept_nest(kept: &KeptNest, bwrap: &Path, helper: &Path, probe: impl FnOnce() -> bool) -> bool {
+    let found = || {
+        kept.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|(asked_bwrap, asked_helper)| {
+                asked_bwrap == bwrap && asked_helper == helper
+            })
+    };
+    if found() {
+        return true;
+    }
+    if probe() {
+        let asked = (bwrap.to_path_buf(), helper.to_path_buf());
+        *kept.lock().unwrap_or_else(PoisonError::into_inner) = Some(asked);
+        return true;
+    }
+    found()
+}
+
+/// What [`nest_held`] found, read by the host facts and every launch alike.
+static NEST_READ: KeptNest = Mutex::new(None);
+
+/// [`kept_nest`] for this machine, asked with the probe alone ([`nests`]); a launch then
+/// runs its own flags' probe inside the nest and is refused when that fails. Inputs:
+/// bubblewrap and the helper. Output: true when the helper nests in it.
+fn nest_held(bwrap: &Path, helper: &Path) -> bool {
+    kept_nest(&NEST_READ, bwrap, helper, || {
+        nests(bwrap, helper, &[PROBE.into()])
+    })
+}
+
 /// Tells whether AppArmor keeps unprivileged programs out of user namespaces, from what
 /// [`APPARMOR_USERNS`] reads: only `1`, with or without its newline, does. Input: the text,
 /// none where the file cannot be read (no AppArmor, or an older one). Output: true when it
@@ -1671,10 +1998,13 @@ fn restricts(setting: Option<&str>) -> bool {
 
 /// Reads what this machine holds for an agent beyond its Landlock rules: whether the
 /// kernel scopes signals (the helper's `--scoped`), whether a launch gives the agent a
-/// process namespace ([`nests`], or the plain probe fails), whether the call supervisor
-/// holds ([`supervises`]), whether this runs as root and whether AppArmor's user namespace
-/// restriction, which never covers root, is why nothing nests ([`restricts`]). Inputs: the
-/// helper and the engine's data folder, none where no probe may run. Output: the facts.
+/// process namespace ([`nest_held`], the answer every launch reads, or the plain probe
+/// fails), whether the call supervisor
+/// holds ([`supervises`]), whether a nested agent gets a routed network of its own
+/// ([`route_held`], the answer every launch reads), whether this runs as root and whether
+/// AppArmor's user namespace restriction, which never covers root, is why nothing nests
+/// ([`restricts`]). Inputs: the helper and the engine's data folder, none where no probe
+/// may run. Output: the facts.
 pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let usable = clean_absolute(helper) && helper.is_file();
     let scoped = usable && passes(Command::new(helper).arg(SCOPED));
@@ -1683,13 +2013,16 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
         .iter()
         .map(Path::new)
         .find(|path| path.is_file());
-    let apart = |bwrap: &Path| !held || nests(bwrap, helper, &[PROBE.into()]);
+    let apart = |bwrap: &Path| !held || nest_held(bwrap, helper);
     let nested = usable && bwrap.is_some_and(apart);
     let root = rustix::process::geteuid().is_root();
     let nest = bwrap.filter(|_| nested);
     let supervised = held && data.is_some_and(|data| supervises(helper, nest, data, root));
+    let routed = held && nest.is_some_and(|bwrap| route_held(bwrap, helper));
     let setting = fs::read_to_string(APPARMOR_USERNS).ok();
     let armored = !nested && !root && restricts(setting.as_deref());
+    assert!(!routed || nested);
+    assert!(!(root && routed));
     assert!(!(root && supervised));
     assert!(!(armored && nested));
     assert!(!(armored && root));
@@ -1699,6 +2032,7 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
         supervised,
         root,
         armored,
+        routed,
     }
 }
 
@@ -1843,20 +2177,37 @@ impl Sandbox for LinuxSandbox {
             ));
         }
         let grants = Grants::of(&self.sandbox)?;
+        let confined = self.sandbox.checkout.is_some() || self.sandbox.clone.is_some();
+        if confined && matches!(self.backend, LinuxBackend::Bubblewrap { .. }) {
+            return Err(SandboxError::Unavailable(CONFINED_NEEDS_LANDLOCK.into()));
+        }
+        let unheld = !grants.guarded.is_empty() && self.supervision.is_none();
+        if self.sandbox.clone.is_some() || unheld {
+            return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
+        }
         let mut command = match &self.backend {
             LinuxBackend::Landlock { helper } => {
-                let policy = self.with_guard(landlock_policy(&grants, &self.sandbox))?;
+                let policy =
+                    self.with_guard(landlock_policy(&grants, &self.sandbox), &grants.guarded)?;
+                assert!(holds_all(&policy, &grants.guarded));
                 let mut command = Command::new(helper);
                 command.args(policy.args());
                 command
             }
             LinuxBackend::Nested { bwrap, helper } => {
-                let policy = self.with_guard(LandlockPolicy {
-                    nested: true,
-                    ..landlock_policy(&grants, &self.sandbox)
-                })?;
-                let bridged = self.sandbox.bridged_ports().unwrap_or_default();
-                nest_command(bwrap, helper, &policy, cwd, &bridged)
+                let policy = self.with_guard(
+                    LandlockPolicy {
+                        nested: true,
+                        ..landlock_policy(&grants, &self.sandbox)
+                    },
+                    &grants.guarded,
+                )?;
+                assert!(holds_all(&policy, &grants.guarded));
+                let (bridged, routes) = match &self.routed {
+                    Some(routed) => (routed.bridged.clone(), routed.any.clone()),
+                    None => (self.sandbox.bridged_ports().unwrap_or_default(), Vec::new()),
+                };
+                nest_command(bwrap, helper, &policy, cwd, &bridged, &routes)
             }
             LinuxBackend::Bubblewrap { bwrap, helper } => {
                 bwrap_command(bwrap, helper, &grants, cwd, self.sandbox.network())
@@ -1886,9 +2237,17 @@ impl Sandbox for LinuxSandbox {
     }
 }
 
+/// What a launch's Landlock rules grant: folders read, folders written whole, git folders
+/// written with [`git_folder_rights`], and `guarded`, the entries Landlock cannot keep
+/// read-only under those grants (protected paths in a git grant, [`ADMIN_WRITES`] and
+/// [`ADMIN_LINKS`] in the admin folder, the worktree's `.git` link and a clone's whole git
+/// folder), which the call supervisor must hold before a confined launch starts, the
+/// nested binds a second layer (DEC-185 S1, S2).
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
+    git_write: Vec<PathBuf>,
+    guarded: Vec<PathBuf>,
 }
 
 impl Grants {
@@ -1907,8 +2266,17 @@ impl Grants {
             .collect();
         let followed: Vec<&PathBuf> = followed.iter().collect();
         let folder = |path: &Path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+        let checkout = sandbox.checkout.as_ref();
         let mut write = Vec::new();
+        let mut git_write = Vec::new();
         for root in sandbox.writable_roots() {
+            if checkout.is_some_and(|checkout| *root == checkout.objects) {
+                continue;
+            }
+            if checkout.is_some_and(|checkout| *root == checkout.admin) {
+                git_write.push(root.clone());
+                continue;
+            }
             if root != project {
                 write.push(root.clone());
                 continue;
@@ -1937,25 +2305,52 @@ impl Grants {
                 .filter(|root| *root != project)
                 .cloned(),
         );
-        if read.len() + write.len() > GRANTS_MAX {
+        if read.len() + write.len() + git_write.len() > GRANTS_MAX {
             return Err(invalid("project folder has too many entries to grant"));
         }
-        if write.iter().any(|path| {
-            protected
+        let covers =
+            |path: &PathBuf, item: &PathBuf| path.starts_with(item) || item.starts_with(path);
+        let inside = |path: &PathBuf, item: &PathBuf| path.starts_with(item);
+        if write
+            .iter()
+            .any(|path| protected.iter().any(|item| covers(path, item)))
+            || git_write
                 .iter()
-                .any(|item| path.starts_with(item) || item.starts_with(path))
-        }) {
+                .any(|path| protected.iter().any(|item| inside(path, item)))
+        {
             return Err(invalid("a writable root sits inside a protected path"));
+        }
+        let mut guarded: Vec<PathBuf> = protected
+            .iter()
+            .filter(|item| git_write.iter().any(|root| item.starts_with(root)))
+            .cloned()
+            .collect();
+        if let Some(checkout) = checkout {
+            if git_write.contains(&checkout.admin) {
+                let held = ADMIN_WRITES.iter().chain(&ADMIN_LINKS);
+                guarded.extend(held.map(|name| checkout.admin.join(name)));
+            }
+            if write.contains(&checkout.worktree) {
+                guarded.push(checkout.worktree.join(".git"));
+            }
+        }
+        if let Some(clone) = sandbox.clone.as_ref() {
+            guarded.push(clone.join(".git"));
         }
         let secrets = sandbox.secret_paths();
         let carved = sandbox.carved_home.as_ref();
-        assert!(read.iter().chain(&write).all(|grant| {
+        assert!(read.iter().chain(&write).chain(&git_write).all(|grant| {
             secrets.iter().all(|secret| {
                 carved.is_some_and(|(home, folder)| home == grant && folder == secret)
                     || (!grant.starts_with(secret) && !secret.starts_with(grant))
             })
         }));
-        Ok(Self { read, write })
+        Ok(Self {
+            read,
+            write,
+            git_write,
+            guarded,
+        })
     }
 }
 
@@ -2007,18 +2402,28 @@ fn guard(sandbox: &ProjectSandbox, supervision: Supervision) -> Guard {
         loopback,
         git: Some(git_own(sandbox)),
         signals: supervision.signals,
+        held: None,
     };
     assert!(!held.loopback.contains(&0));
     assert!(held.loopback.windows(2).all(|pair| pair[0] < pair[1]));
     held
 }
 
+/// Tells whether a launch policy's supervisor holds every guarded entry, the rule that lets
+/// a confined launch past the tripwire (DEC-185 S2). Inputs: the policy and the guarded
+/// entries. Output: true when there are none, or each is a held tree.
+fn holds_all(policy: &LandlockPolicy, guarded: &[PathBuf]) -> bool {
+    let held = policy.guard.held.as_ref();
+    guarded.is_empty() || held.is_some_and(|held| held.trees == guarded)
+}
+
 /// The folders an agent may make a `.git` entry in, as the macOS boundary's nested git
-/// rule allows them: the top of each working tree it works in, and each folder directly
-/// inside the engine's worktree folders (when it adds worktrees) or inside a setup folder.
-/// Input: the policy. Output: the agent's own git folders.
+/// rule allows them: the top of each working tree it works in, each folder directly inside
+/// the engine's worktree folders (when it adds worktrees) or inside a setup folder, and for
+/// a linked worktree the project's `.git` its admin folder sits in, where Landlock lets it
+/// write the admin folder alone (DEC-185 S2). Input: the policy. Output: the agent's own
+/// git folders.
 fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
-    assert!(sandbox.checkout.is_none());
     assert!(sandbox.clone.is_none());
     let (working, _) = sandbox.git_deny_roots();
     let mut kids = Vec::new();
@@ -2030,10 +2435,18 @@ fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
     if let Some(setup) = &sandbox.setup {
         kids.push(setup.folder.clone());
     }
+    let common = sandbox.checkout.as_ref().and_then(|checkout| {
+        let plain = |folder: &&Path| folder.file_name() == Some(OsStr::new(".git"));
+        checkout
+            .admin
+            .ancestors()
+            .find(plain)
+            .map(Path::to_path_buf)
+    });
     let own = GitOwn {
         trees: working.into_iter().map(Path::to_path_buf).collect(),
         kids,
-        exact: Vec::new(),
+        exact: common.into_iter().collect(),
     };
     assert!(!own.trees.is_empty());
     own
@@ -2059,8 +2472,9 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
     }
     let open_sockets = limit_network && sandbox.linux_sockets() == LinuxSockets::TcpPorts;
     let keep_free = kept_free(sandbox);
+    let git_write = grants.git_write.clone();
     assert!(
-        read.len() + write.len() <= HELPER_PATHS_MAX,
+        read.len() + write.len() + git_write.len() <= HELPER_PATHS_MAX,
         "the helper accepts every policy the engine writes"
     );
     assert!(
@@ -2070,6 +2484,7 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
     LandlockPolicy {
         read,
         write,
+        git_write,
         connect,
         limit_network,
         open_sockets,
@@ -2113,25 +2528,30 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
 
 /// The command for a nested agent up to its harness: the helper asked to start bubblewrap
 /// ([`NEST`]) with [`NEST_ARGS`] in the working folder, and inside it the helper again with
-/// the policy. With bridged ports the bridge flags lead and bubblewrap gives the agent a
-/// network of its own. Inputs: bubblewrap, the helper, the policy, marked nested, the
-/// working folder and the bridged ports. Output: the command, which the harness follows
-/// after `--`.
+/// the policy. With route or bridged ports the route flags lead, then the bridge flags,
+/// and bubblewrap gives the agent a network of its own. Inputs: bubblewrap, the helper,
+/// the policy, marked nested, the working folder, the bridged ports and the route ports.
+/// Output: the command, which the harness follows after `--`.
 fn nest_command(
     bwrap: &Path,
     helper: &Path,
     policy: &LandlockPolicy,
     cwd: &Path,
     bridged: &[u16],
+    routes: &[u16],
 ) -> Command {
     assert!(policy.nested);
     assert!(policy.die_with.is_none());
+    assert!(routes.len() <= REMOTES_MAX);
     let mut command = Command::new(helper);
+    for port in routes {
+        command.arg(egress::ROUTE).arg(port.to_string());
+    }
     for port in bridged {
         command.arg(bridge::BRIDGE).arg(port.to_string());
     }
     command.arg(NEST).arg("--").arg(bwrap).args(NEST_ARGS);
-    if !bridged.is_empty() {
+    if !bridged.is_empty() || !routes.is_empty() {
         command.arg(bridge::UNSHARE_NET);
     }
     command
@@ -2157,6 +2577,10 @@ fn bwrap_command(
     cwd: &Path,
     network: &SandboxNetwork,
 ) -> Command {
+    assert!(
+        grants.git_write.is_empty(),
+        "no confined layout starts on bubblewrap"
+    );
     let mut command = Command::new(bwrap);
     command.args([
         "--die-with-parent",
@@ -2218,6 +2642,8 @@ mod tests {
         let grants = Grants {
             read: Vec::new(),
             write: Vec::new(),
+            git_write: Vec::new(),
+            guarded: Vec::new(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -2234,6 +2660,8 @@ mod tests {
         let grants = Grants {
             read: Vec::new(),
             write: Vec::new(),
+            git_write: Vec::new(),
+            guarded: Vec::new(),
         };
         let unshares = |network: SandboxNetwork| {
             bwrap_command(
@@ -2261,6 +2689,370 @@ mod tests {
         (temp, sandbox)
     }
 
+    fn git(folder: &Path, args: &[&str]) {
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(folder)
+            .args([
+                "-c",
+                "user.name=row",
+                "-c",
+                "user.email=row@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .stdout(Stdio::null());
+        let status = crate::spawn_gate::status(&mut command).unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A project with one commit and a linked worktree in its worktrees folder, then the
+    /// sandbox over it with the agent's home and temp folders. No input. Output: the temp
+    /// folder, the project, the sandbox and the worktree.
+    fn linked() -> (tempfile::TempDir, PathBuf, ProjectSandbox, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let folders = ["project", "home", "tmp"].map(|name| root.join(name));
+        for folder in &folders {
+            fs::create_dir(folder).unwrap();
+        }
+        let project = folders[0].clone();
+        fs::write(project.join("owner.txt"), "owner\n").unwrap();
+        git(&project, &["init", "-q"]);
+        git(&project, &["add", "owner.txt"]);
+        git(&project, &["commit", "-q", "-m", "start"]);
+        fs::create_dir(project.join("worktrees")).unwrap();
+        let worktree = project.join("worktrees").join("agent-1");
+        let path = worktree.to_str().unwrap();
+        git(
+            &project,
+            &["worktree", "add", "-q", "--detach", path, "HEAD"],
+        );
+        let sandbox =
+            ProjectSandbox::new(&project, &folders[1], &folders[2], SandboxNetwork::Open).unwrap();
+        (temp, project, sandbox, worktree)
+    }
+
+    #[test]
+    fn a_linked_worktree_writes_its_tree_its_admin_folder_without_links_and_no_object() {
+        let (_temp, project, sandbox, worktree) = linked();
+        let confined = sandbox.confine_to_worktree(&worktree).unwrap();
+        let git = project.join(".git");
+        let admin = git.join("worktrees").join("agent-1");
+        let objects = git.join("objects");
+        let granted = Grants::of(&confined);
+        assert!(granted.is_ok(), "{:?}", granted.as_ref().err());
+        let grants = granted.unwrap();
+        assert!(grants.write.contains(&worktree));
+        assert_eq!(grants.git_write, vec![admin.clone()]);
+        assert!(
+            !grants.write.contains(&admin),
+            "the admin folder has the git tier only"
+        );
+        for path in grants.write.iter().chain(&grants.git_write) {
+            assert!(
+                !path.starts_with(&objects) && !objects.starts_with(path),
+                "{} reaches the object store",
+                path.display()
+            );
+            assert!(
+                *path == admin || !path.starts_with(&git),
+                "{} is in the project's git folder",
+                path.display()
+            );
+        }
+        assert!(
+            grants.read.contains(&project),
+            "the object store is read through the project"
+        );
+        let mut guarded = grants.guarded.clone();
+        guarded.sort();
+        let mut held = ["HEAD", "commondir", "gitdir", "config.worktree", "modules"]
+            .map(|name| admin.join(name))
+            .to_vec();
+        held.push(worktree.join(".git"));
+        held.sort();
+        assert_eq!(
+            guarded, held,
+            "every entry macOS keeps by name under the two grants is left to the supervisor and the binds"
+        );
+    }
+
+    #[test]
+    fn a_confined_launch_on_the_bubblewrap_backend_is_refused_with_its_own_line() {
+        let (_temp, _project, sandbox, worktree) = linked();
+        let launch = LinuxSandbox {
+            sandbox: sandbox.confine_to_worktree(&worktree).unwrap(),
+            backend: LinuxBackend::Bubblewrap {
+                bwrap: PathBuf::from(BWRAP_PATHS[0]),
+                helper: helper(),
+            },
+            supervision: None,
+            routed: None,
+        };
+        let mut harness = Command::new("/bin/true");
+        harness.current_dir(&worktree);
+        let refused = launch.wrap(&harness).err();
+        assert!(
+            matches!(&refused, Some(SandboxError::Unavailable(reason))
+                if reason == CONFINED_NEEDS_LANDLOCK),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_launch_whose_git_grant_covers_a_protected_path_nothing_holds_is_refused() {
+        let (_temp, _project, sandbox, worktree) = linked();
+        let launch = LinuxSandbox {
+            sandbox: sandbox.confine_to_worktree(&worktree).unwrap(),
+            backend: LinuxBackend::Landlock { helper: helper() },
+            supervision: None,
+            routed: None,
+        };
+        let mut harness = Command::new("/bin/true");
+        harness.current_dir(&worktree);
+        let refused = launch.wrap(&harness).err();
+        assert!(
+            matches!(&refused, Some(SandboxError::Unavailable(reason))
+                if reason == CONFINED_UNAVAILABLE),
+            "{refused:?}"
+        );
+    }
+
+    /// LINUX-KILL-GROUP: only the plain Landlock backend leaves a process in a session of its
+    /// own running after a stop's group kill, so only its runs have their lineage checked;
+    /// both bubblewrap backends end every process with their process namespace.
+    #[test]
+    fn only_the_plain_landlock_backend_leaves_a_session_of_its_own_running() {
+        let (_temp, _project, sandbox, _worktree) = linked();
+        let ends = |backend: LinuxBackend| {
+            LinuxSandbox {
+                sandbox: sandbox.clone(),
+                backend,
+                supervision: None,
+                routed: None,
+            }
+            .ends_every_session()
+        };
+        let bwrap = PathBuf::from("/usr/bin/bwrap");
+
+        assert!(!ends(LinuxBackend::Landlock { helper: helper() }));
+        assert!(ends(LinuxBackend::Nested {
+            bwrap: bwrap.clone(),
+            helper: helper(),
+        }));
+        assert!(ends(LinuxBackend::Bubblewrap {
+            bwrap,
+            helper: helper(),
+        }));
+    }
+
+    fn supervised_launch(sandbox: ProjectSandbox) -> LinuxSandbox {
+        LinuxSandbox {
+            sandbox,
+            backend: LinuxBackend::Landlock { helper: helper() },
+            supervision: Some(Supervision { signals: false }),
+            routed: None,
+        }
+    }
+
+    fn flag_values(words: &[OsString], flag: &str) -> Vec<PathBuf> {
+        words
+            .windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| PathBuf::from(&pair[1]))
+            .collect()
+    }
+
+    #[test]
+    fn a_supervised_linked_worktree_launches_with_every_guarded_entry_held() {
+        let (_temp, project, sandbox, worktree) = linked();
+        let confined = sandbox.confine_to_worktree(&worktree).unwrap();
+        let mut guarded = Grants::of(&confined).unwrap().guarded;
+        guarded.sort();
+        let launch = supervised_launch(confined);
+        let mut harness = Command::new("/bin/true");
+        harness.current_dir(&worktree);
+        let wrapped = launch.wrap(&harness);
+        assert!(wrapped.is_ok(), "{:?}", wrapped.as_ref().err());
+        let words: Vec<OsString> = wrapped
+            .unwrap()
+            .get_args()
+            .map(OsStr::to_os_string)
+            .collect();
+        let mut held = flag_values(&words, GUARD_HELD_TREE);
+        held.extend(flag_values(&words, GUARD_HELD));
+        held.sort();
+        assert_eq!(
+            held, guarded,
+            "the supervisor holds the list the tripwire reads"
+        );
+        assert_eq!(flag_values(&words, OWN_TREE), vec![worktree.clone()]);
+        assert_eq!(flag_values(&words, OWN_GIT), vec![project.join(".git")]);
+    }
+
+    #[test]
+    fn a_linked_worktree_agent_makes_entries_in_its_admin_folder_and_no_other_git() {
+        let (_temp, project, sandbox, worktree) = linked();
+        let confined = sandbox.confine_to_worktree(&worktree).unwrap();
+        let own = git_own(&confined);
+        let admin = project.join(".git").join("worktrees").join("agent-1");
+        for made in [
+            admin.join("index.lock"),
+            admin.join("logs").join("HEAD"),
+            worktree.join("src").join("main.rs"),
+        ] {
+            assert!(own.allows(&made), "{}", made.display());
+        }
+        for refused in [
+            worktree.join("vendor").join(".git"),
+            admin.join("modules").join("sub").join(".git"),
+            project.join("other").join(".git").join("config"),
+        ] {
+            assert!(!own.allows(&refused), "{}", refused.display());
+        }
+    }
+
+    #[test]
+    fn a_supervised_clone_is_refused_until_its_store_is_held() {
+        let (_temp, project, sandbox, _) = linked();
+        let clone = project.join("worktrees").join("agent-2");
+        fs::create_dir(&clone).unwrap();
+        git(&clone, &["init", "-q"]);
+        let launch = supervised_launch(sandbox.confine_to_clone(&clone).unwrap());
+        let mut harness = Command::new("/bin/true");
+        harness.current_dir(&clone);
+        let refused = launch.wrap(&harness).err();
+        assert!(
+            matches!(&refused, Some(SandboxError::Unavailable(reason))
+                if reason == CONFINED_UNAVAILABLE),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_clone_writes_its_whole_clone_and_has_no_git_folder_grant() {
+        let (_temp, project, sandbox, _) = linked();
+        let clone = project.join("worktrees").join("agent-2");
+        fs::create_dir(&clone).unwrap();
+        git(&clone, &["init", "-q"]);
+        let confined = sandbox.confine_to_clone(&clone).unwrap();
+        let grants = Grants::of(&confined).unwrap();
+        assert!(grants.write.contains(&clone));
+        assert!(grants.git_write.is_empty());
+        assert_eq!(
+            grants.guarded,
+            vec![clone.join(".git")],
+            "a clone's git folder stays guarded whole until the supervisor holds its store"
+        );
+        let git = project.join(".git");
+        assert!(grants.write.iter().all(|path| !path.starts_with(&git)));
+    }
+
+    #[test]
+    fn a_clone_on_the_bubblewrap_backend_is_refused_with_the_landlock_line() {
+        let (_temp, project, sandbox, _) = linked();
+        let clone = project.join("worktrees").join("agent-2");
+        fs::create_dir(&clone).unwrap();
+        git(&clone, &["init", "-q"]);
+        let launch = LinuxSandbox {
+            sandbox: sandbox.confine_to_clone(&clone).unwrap(),
+            backend: LinuxBackend::Bubblewrap {
+                bwrap: PathBuf::from(BWRAP_PATHS[0]),
+                helper: helper(),
+            },
+            supervision: None,
+            routed: None,
+        };
+        let mut harness = Command::new("/bin/true");
+        harness.current_dir(&clone);
+        let refused = launch.wrap(&harness).err();
+        assert!(
+            matches!(&refused, Some(SandboxError::Unavailable(reason))
+                if reason == CONFINED_NEEDS_LANDLOCK),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_git_folder_grant_reaches_the_helper_and_counts_toward_its_limit() {
+        let folder = PathBuf::from("/p/.git/worktrees/agent-1");
+        let policy = LandlockPolicy {
+            read: vec![PathBuf::from("/usr")],
+            git_write: vec![folder.clone()],
+            ..LandlockPolicy::default()
+        };
+        let args = policy.args();
+        let at = args.iter().position(|arg| arg == GIT_WRITE);
+        assert_eq!(at.map(|at| &args[at + 1]), Some(&OsString::from(&folder)));
+        let mut run = args;
+        run.extend([OsString::from("--"), OsString::from("/bin/true")]);
+        let parsed = match HelperRequest::parse(run) {
+            Ok(HelperRequest::Run { policy, .. }) => Some(policy),
+            _ => None,
+        };
+        assert_eq!(parsed, Some(policy));
+        let many = LandlockPolicy {
+            git_write: vec![folder; HELPER_PATHS_MAX + 1],
+            ..LandlockPolicy::default()
+        };
+        let mut run = many.args();
+        run.extend([OsString::from("--"), OsString::from("/bin/true")]);
+        assert_eq!(
+            HelperRequest::parse(run).err(),
+            Some("too many path grants".to_owned()),
+            "the git tier counts toward the helper's path limit"
+        );
+    }
+
+    #[test]
+    fn a_git_folder_grant_makes_no_link_and_moves_nothing_across_folders() {
+        let rights = git_folder_rights();
+        for kept_out in [
+            AccessFs::MakeSym,
+            AccessFs::Refer,
+            AccessFs::Execute,
+            AccessFs::MakeChar,
+            AccessFs::MakeBlock,
+            AccessFs::MakeFifo,
+            AccessFs::MakeSock,
+        ] {
+            assert!(!rights.contains(kept_out), "{kept_out:?}");
+        }
+        for kept in [
+            AccessFs::ReadFile,
+            AccessFs::ReadDir,
+            AccessFs::WriteFile,
+            AccessFs::Truncate,
+            AccessFs::MakeReg,
+            AccessFs::MakeDir,
+            AccessFs::RemoveFile,
+            AccessFs::RemoveDir,
+        ] {
+            assert!(rights.contains(kept), "{kept:?}");
+        }
+        assert!(AccessFs::from_all(FS_ABI).contains(rights));
+    }
+
+    #[test]
+    #[should_panic(expected = "no confined layout starts on bubblewrap")]
+    fn bubblewrap_never_takes_a_git_folder_grant() {
+        let grants = Grants {
+            read: Vec::new(),
+            write: Vec::new(),
+            git_write: vec![PathBuf::from("/p/.git/worktrees/agent-1")],
+            guarded: Vec::new(),
+        };
+        let _command = bwrap_command(
+            Path::new(BWRAP_PATHS[0]),
+            &helper(),
+            &grants,
+            Path::new("/tmp"),
+            &SandboxNetwork::Open,
+        );
+    }
+
     #[test]
     fn an_open_network_agent_binds_every_port_but_the_kept_ones() {
         let keep_free = [1455, 11434, 41300];
@@ -2283,6 +3075,8 @@ mod tests {
         let grants = Grants {
             read: Vec::new(),
             write: Vec::new(),
+            git_write: Vec::new(),
+            guarded: Vec::new(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(!policy.limit_network);
@@ -2392,6 +3186,8 @@ mod tests {
         let grants = Grants {
             read: Vec::new(),
             write: Vec::new(),
+            git_write: Vec::new(),
+            guarded: Vec::new(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(policy.limit_network);
@@ -2511,6 +3307,8 @@ mod tests {
         let grants = Grants {
             read: Vec::new(),
             write: Vec::new(),
+            git_write: Vec::new(),
+            guarded: Vec::new(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -2635,6 +3433,157 @@ mod tests {
     }
 
     #[test]
+    fn only_a_tcp_only_agent_with_a_port_on_any_host_and_loopback_ports_from_1024_up_is_routed() {
+        use SandboxRemote::{AnyHost, Loopback};
+        let routed = |remotes: &[SandboxRemote], sockets: LinuxSockets| {
+            let (_temp, sandbox) = project(SandboxNetwork::Only(remotes.to_vec()));
+            let sandbox = sandbox.limit_sockets(sockets);
+            let routed = sandbox.routed();
+            assert!(routed.is_none() || sandbox.bridged_ports().is_none());
+            routed.map(|routed| (routed.any, routed.bridged))
+        };
+        let default = LinuxSockets::TcpOnly;
+        assert_eq!(routed(&[AnyHost(443)], default), Some((vec![443], vec![])));
+        assert_eq!(
+            routed(&[Loopback(18080), AnyHost(8443), AnyHost(443)], default),
+            Some((vec![443, 8443], vec![18080]))
+        );
+        assert_eq!(
+            routed(&[AnyHost(443), Loopback(1024)], default),
+            Some((vec![443], vec![1024]))
+        );
+        assert_eq!(routed(&[AnyHost(443), Loopback(1023)], default), None);
+        assert_eq!(routed(&[AnyHost(443), Loopback(53)], default), None);
+        assert_eq!(
+            routed(&[Loopback(8080)], default),
+            None,
+            "the bridge's case"
+        );
+        assert_eq!(routed(&[], default), None);
+        assert_eq!(routed(&[AnyHost(443)], LinuxSockets::TcpPorts), None);
+        assert_eq!(routed(&[AnyHost(443)], LinuxSockets::Refuse), None);
+        let (_temp, open) = project(SandboxNetwork::Open);
+        assert_eq!(open.routed(), None);
+    }
+
+    #[test]
+    fn a_routed_agent_starts_with_its_route_flags_first_and_a_network_of_its_own() {
+        use bridge::{BRIDGE, UNSHARE_NET};
+        let (_temp, sandbox) = project(SandboxNetwork::Only(vec![
+            SandboxRemote::AnyHost(443),
+            SandboxRemote::Loopback(18080),
+        ]));
+        let cwd = sandbox.project_root().to_path_buf();
+        let grants = Grants::of(&sandbox).unwrap();
+        let policy = LandlockPolicy {
+            nested: true,
+            ..landlock_policy(&grants, &sandbox)
+        };
+        let bwrap = Path::new(BWRAP_PATHS[0]);
+        let helper = helper();
+        let words = |bridged: &[u16], routes: &[u16]| -> Vec<OsString> {
+            nest_command(bwrap, &helper, &policy, &cwd, bridged, routes)
+                .get_args()
+                .map(OsStr::to_os_string)
+                .collect()
+        };
+        let expected = |head: &[&str]| -> Vec<OsString> {
+            let mut expected: Vec<OsString> = head.iter().map(OsString::from).collect();
+            expected.extend([NEST, "--"].map(OsString::from));
+            expected.push(bwrap.into());
+            expected.extend(NEST_ARGS.map(OsString::from));
+            expected.extend([UNSHARE_NET, "--chdir"].map(OsString::from));
+            expected.push(cwd.clone().into());
+            expected.push("--".into());
+            expected.push(helper.clone().into());
+            expected.extend(policy.args());
+            expected
+        };
+        let both = [egress::ROUTE, "443", BRIDGE, "18080"];
+        assert_eq!(words(&[18080], &[443]), expected(&both));
+        let routes = [egress::ROUTE, "443", egress::ROUTE, "8443"];
+        assert_eq!(words(&[], &[443, 8443]), expected(&routes));
+        for routed in [words(&[18080], &[443]), words(&[], &[443])] {
+            for flag in egress::DESCRIPTOR_FLAGS {
+                assert!(
+                    !routed.iter().any(|word| word == flag),
+                    "{flag}: {routed:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn route_flags_lead_only_a_nest_that_unshares_the_network_and_no_caller_names_its_descriptors()
+    {
+        use bridge::{BRIDGE, UNSHARE_NET};
+        let nest = |head: &[&str], options: &[&str]| -> Vec<OsString> {
+            let mut args: Vec<OsString> = head.iter().map(OsString::from).collect();
+            args.extend([NEST, "--", BWRAP_PATHS[0]].map(OsString::from));
+            args.extend(NEST_ARGS.map(OsString::from));
+            args.extend(options.iter().map(OsString::from));
+            args.push("--".into());
+            args.push(helper().into());
+            args.push(PROBE.into());
+            args
+        };
+        let read = |args: Vec<OsString>| {
+            read_request(args).map(|(routes, bridge, _, _)| (routes, bridge.map(|held| held.ports)))
+        };
+        let route = [egress::ROUTE, "443"];
+        let bridged = [BRIDGE, "18080"];
+        assert_eq!(read(nest(&route, &[UNSHARE_NET])), Ok((vec![443], None)));
+        let both = [egress::ROUTE, "443", egress::ROUTE, "8443", BRIDGE, "18080"];
+        assert_eq!(
+            read(nest(&both, &[UNSHARE_NET])),
+            Ok((vec![443, 8443], Some(vec![18080])))
+        );
+        assert_eq!(read(nest(&[], &[])), Ok((Vec::new(), None)));
+        assert!(
+            read(nest(&route, &[])).is_err(),
+            "a route needs --unshare-net"
+        );
+        assert!(
+            read(nest(&[], &[UNSHARE_NET])).is_err(),
+            "--unshare-net needs a port"
+        );
+        let mut probe: Vec<OsString> = route.iter().map(OsString::from).collect();
+        probe.push(PROBE.into());
+        assert!(read(probe).is_err(), "a route leads a nest only");
+        for options in [
+            &[UNSHARE_NET, "--info-fd", "5"][..],
+            &[UNSHARE_NET, "--block-fd", "6"],
+            &[UNSHARE_NET, "--ro-bind-data", "7", "/etc/resolv.conf"],
+            &["--info-fd", "5", UNSHARE_NET],
+            &[UNSHARE_NET, "--args", "5"],
+            &[UNSHARE_NET, "--userns-block-fd", "5"],
+            &[UNSHARE_NET, "--sync-fd", "5"],
+            &[UNSHARE_NET, "--json-status-fd", "5"],
+        ] {
+            assert!(read(nest(&route, options)).is_err(), "{options:?}");
+            assert!(read(nest(&bridged, options)).is_err(), "{options:?}");
+        }
+    }
+
+    #[test]
+    fn a_slirp4netns_or_bubblewrap_that_others_may_write_to_is_never_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let moded = |mode: u32| {
+            let path = root.join(format!("slirp4netns-{mode:o}"));
+            fs::write(&path, b"").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        assert!(trusted(&moded(0o755)));
+        assert!(trusted(&moded(0o700)));
+        for refused in [0o757, 0o775, 0o777, 0o722] {
+            assert!(!trusted(&moded(refused)), "{refused:o}");
+        }
+    }
+
+    #[test]
     fn a_set_user_or_set_group_id_bubblewrap_is_never_nested_under() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
@@ -2668,6 +3617,61 @@ mod tests {
             assert!(refused, "{}", bwrap.display());
             assert!(!nests(bwrap, &agreeing, &probe), "{}", bwrap.display());
         }
+    }
+
+    /// rv-sa241 SBX-2-R2 LOW-1: where this computer's nest check passes, a launch whose own
+    /// nest probe fails is refused with words to try again or restart, instead of running on
+    /// the shared network with Landlock rules only while the Agent access page says it is
+    /// nested; where the nest check fails too, the launch is a Landlock one, as the page says.
+    #[test]
+    fn a_launch_whose_own_nest_probe_fails_where_this_computer_nests_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let place = temp.path().canonicalize().unwrap();
+        let bwrap = place.join("bwrap");
+        fs::write(&bwrap, b"").unwrap();
+        fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(trusted(&bwrap));
+        let fake = |name: &str, failing: &str| {
+            let helper = place.join(name);
+            let script = format!(
+                "#!/bin/sh\nnest=0\nfailing=0\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    \
+                 {NEST}) nest=1 ;;\n    {failing}) failing=1 ;;\n  esac\ndone\n\
+                 [ \"$nest\" = 1 ] && [ \"$failing\" = 1 ] && exit 1\nexit 0\n"
+            );
+            fs::write(&helper, script).unwrap();
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+            helper
+        };
+        let flagged = fake("flagged", KEEP_FREE);
+        let neither = fake("neither", PROBE);
+        assert!(
+            nests(&bwrap, &flagged, &[PROBE.into()]),
+            "this computer nests"
+        );
+        let (_project, sandbox) = project(SandboxNetwork::Open);
+        let answer = LinuxSandbox::detect_among(sandbox.clone(), &flagged, &[bwrap.as_path()]);
+        let shown = match &answer {
+            Ok(sandbox) => format!("{:?}", sandbox.backend()),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            matches!(
+                &answer,
+                Err(SandboxError::Unavailable(reason)) if reason.contains("restart CrazyAgent")
+            ),
+            "a launch that cannot nest where this computer nests is refused, never run on \
+             Landlock alone: {shown}"
+        );
+        assert!(
+            !nests(&bwrap, &neither, &[PROBE.into()]),
+            "this computer does not nest"
+        );
+        let landlock = LinuxSandbox::detect_among(sandbox, &neither, &[bwrap.as_path()]).unwrap();
+        assert!(
+            matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+            "where nothing nests the launch is a Landlock one, as the page says"
+        );
     }
 
     #[test]
@@ -2714,7 +3718,10 @@ mod tests {
         let outside = temp.path().join("outside");
         fs::create_dir_all(outside.join(".git")).unwrap();
         symlink(&outside, project.join("linked")).unwrap();
-        assert!(!holds_other_git(&project), "its own .git, and a link is not followed");
+        assert!(
+            !holds_other_git(&project),
+            "its own .git, and a link is not followed"
+        );
         let found = |make: &dyn Fn(&Path), undo: &dyn Fn(&Path)| {
             make(&project);
             let held = holds_other_git(&project);
@@ -2732,7 +3739,10 @@ mod tests {
             fs::write(project.join("vendor/lib/.git"), "gitdir: x").unwrap();
         };
         let unlink = |project: &Path| fs::remove_file(project.join("vendor/lib/.git")).unwrap();
-        assert!(found(&link, &unlink), "a .git file is rewritten without a create");
+        assert!(
+            found(&link, &unlink),
+            "a .git file is rewritten without a create"
+        );
         let pointer = |project: &Path| symlink(&outside, project.join("vendor/.git")).unwrap();
         let unpoint = |project: &Path| fs::remove_file(project.join("vendor/.git")).unwrap();
         assert!(found(&pointer, &unpoint), "a link named .git counts");
@@ -2753,7 +3763,10 @@ mod tests {
         };
         let few = |project: &Path| fs::remove_dir_all(project.join("many")).unwrap();
         assert!(found(&many, &few), "more entries than it reads");
-        assert!(holds_other_git(&temp.path().join("missing")), "no folder to read");
+        assert!(
+            holds_other_git(&temp.path().join("missing")),
+            "no folder to read"
+        );
     }
 
     #[test]
@@ -2768,6 +3781,7 @@ mod tests {
                 supervised: false,
                 root: false,
                 armored: false,
+                routed: false,
             })
         };
         let launched = |remotes: &[SandboxRemote]| {
@@ -2781,24 +3795,234 @@ mod tests {
         assert_eq!(said(true, &low), Some(linux_unbridged_line(80)));
         assert!(said(true, &low).unwrap().contains("port 80 is below 1024"));
         assert_eq!(said(false, &low), None, "no nest");
-        assert_eq!(linux_unbridged_notice_on(None, AgentNetwork::None, &low), None);
+        assert_eq!(
+            linux_unbridged_notice_on(None, AgentNetwork::None, &low),
+            None
+        );
         assert_eq!(said(true, &launched(&[Loopback(11434)])), None, "bridged");
         let (_temp, open) = project(SandboxNetwork::Open);
         assert_eq!(said(true, &open), None);
         let plain = Some(super::super::LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        let unrouted = Some(super::super::LINUX_UNROUTED_LINE.to_owned());
         let hosted = launched(&[AnyHost(443), Loopback(8080)]);
-        assert_eq!(said(true, &hosted), plain, "a model on a host, tools off");
-        assert_eq!(said(false, &hosted), None, "the page says it without a nest");
+        assert_eq!(
+            said(true, &hosted),
+            unrouted,
+            "a model on a host, tools off"
+        );
+        assert_eq!(
+            said(false, &hosted),
+            None,
+            "the page says it without a nest"
+        );
         let ports = launched(&[Loopback(8080)]).limit_sockets(LinuxSockets::TcpPorts);
         assert_eq!(said(true, &ports), plain);
-        assert_eq!(said(true, &launched(&[AnyHost(443)])), None, "no port here");
+        let any_host = Some(super::super::LINUX_UNROUTED_ANY_HOST_LINE.to_owned());
+        assert_eq!(
+            said(true, &launched(&[AnyHost(443)])),
+            any_host,
+            "unrouted, any host"
+        );
         assert_eq!(said(true, &launched(&[])), None);
         for choice in [AgentNetwork::Https, AgentNetwork::Open] {
             let said = |sandbox| linux_unbridged_notice_on(host(true), choice, sandbox);
-            assert_eq!(said(&hosted), None, "{choice:?}: the page says it");
+            assert_eq!(said(&hosted), unrouted, "{choice:?}: no network of its own");
             assert_eq!(said(&ports), None, "{choice:?}: the page says it");
             assert_eq!(said(&low), Some(linux_unbridged_line(80)), "{choice:?}");
         }
+    }
+
+    #[test]
+    fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself() {
+        use super::super::policy::AgentNetwork;
+        use super::super::{LINUX_UNROUTED_ANY_HOST_LINE, LINUX_UNROUTED_LINE, LinuxHost};
+        use super::super::{linux_unbridged_line, linux_unbridged_notice_on};
+        use SandboxRemote::{AnyHost, Loopback};
+        let host = |routed, supervised| {
+            Some(LinuxHost {
+                nested: true,
+                scoped: false,
+                supervised,
+                root: false,
+                armored: false,
+                routed,
+            })
+        };
+        let launched = |remotes: &[SandboxRemote]| {
+            let (_temp, sandbox) = project(SandboxNetwork::Only(remotes.to_vec()));
+            sandbox
+        };
+        let said = |held, sandbox: &ProjectSandbox| {
+            linux_unbridged_notice_on(held, AgentNetwork::Https, sandbox)
+        };
+        let wide = Some(LINUX_UNROUTED_LINE.to_owned());
+        let any_host = Some(LINUX_UNROUTED_ANY_HOST_LINE.to_owned());
+        let model = launched(&[AnyHost(443), Loopback(18080)]);
+        let remote = launched(&[AnyHost(443)]);
+        assert!(model.routed().is_some() && remote.routed().is_some());
+        assert_eq!(said(host(false, false), &model), wide);
+        assert_eq!(
+            said(host(false, true), &model),
+            any_host,
+            "loopback kept by the supervisor"
+        );
+        assert_eq!(
+            said(host(false, false), &remote),
+            any_host,
+            "no loopback port"
+        );
+        assert_eq!(said(host(false, true), &remote), any_host);
+        for supervised in [false, true] {
+            assert_eq!(said(host(true, supervised), &model), None, "routed");
+            assert_eq!(said(host(true, supervised), &remote), None, "routed");
+        }
+        for line in [LINUX_UNROUTED_LINE, LINUX_UNROUTED_ANY_HOST_LINE] {
+            let why = "On this Linux, this agent has no network of its own: ";
+            assert!(line.starts_with(why), "{line}");
+            assert!(
+                line.contains("AppArmor") && line.contains("as root"),
+                "{line}"
+            );
+        }
+        assert!(LINUX_UNROUTED_LINE.contains("on every host, this computer included."));
+        assert!(LINUX_UNROUTED_ANY_HOST_LINE.contains("on any host include this computer"));
+        let low = launched(&[AnyHost(443), Loopback(18080), Loopback(80), Loopback(53)]);
+        assert!(low.routed().is_none());
+        let named = Some(linux_unbridged_line(53));
+        assert_eq!(
+            said(host(true, false), &low),
+            named,
+            "the low port keeps it unrouted"
+        );
+        assert_eq!(said(host(true, true), &low), named);
+        assert_eq!(
+            said(host(false, false), &low),
+            None,
+            "the page says it on this host"
+        );
+    }
+
+    #[test]
+    fn the_route_answer_is_asked_once_per_engine_and_never_when_refused() {
+        let kept: KeptRoute = Mutex::new(None);
+        let probes = &std::cell::Cell::new(0u32);
+        let probe = |answer: bool| {
+            move || {
+                probes.set(probes.get() + 1);
+                answer
+            }
+        };
+        let (bwrap, helper) = (Path::new(BWRAP_PATHS[0]), helper());
+        assert!(
+            !kept_route(&kept, bwrap, &helper, true, probe(true)),
+            "as root"
+        );
+        assert_eq!(probes.get(), 0, "a refusal starts no probe");
+        assert!(kept_route(&kept, bwrap, &helper, false, probe(true)));
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, probe(false)),
+            "kept"
+        );
+        assert_eq!(probes.get(), 1, "page, notice and launch read one answer");
+        assert!(
+            !kept_route(&kept, bwrap, &helper, true, probe(true)),
+            "refused while kept"
+        );
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, probe(false)),
+            "still kept"
+        );
+        assert_eq!(probes.get(), 1);
+        let other = Path::new("/usr/local/bin/bwrap");
+        assert!(
+            !kept_route(&kept, other, &helper, false, probe(false)),
+            "another bubblewrap"
+        );
+        assert!(
+            !kept_route(&kept, other, &helper, false, probe(true)),
+            "a failed answer too"
+        );
+        assert_eq!(probes.get(), 2);
+    }
+
+    /// rv-sa241 SBX-2-R2 LOW-1: the nest answer the page and every launch read keeps a nest
+    /// found for the same bubblewrap and helper without asking again, and asks again after a
+    /// nest was not found and for another bubblewrap, whose miss keeps the found one.
+    #[test]
+    fn a_found_nest_is_kept_and_a_missing_one_is_asked_again() {
+        let kept: KeptNest = Mutex::new(None);
+        let probes = &std::cell::Cell::new(0u32);
+        let probe = |answer: bool| {
+            move || {
+                probes.set(probes.get() + 1);
+                answer
+            }
+        };
+        let (bwrap, helper) = (Path::new(BWRAP_PATHS[0]), helper());
+        assert!(!kept_nest(&kept, bwrap, &helper, probe(false)));
+        assert!(
+            kept_nest(&kept, bwrap, &helper, probe(true)),
+            "a missing nest is asked again"
+        );
+        assert!(
+            kept_nest(&kept, bwrap, &helper, probe(false)),
+            "a found one is kept"
+        );
+        assert_eq!(
+            probes.get(),
+            2,
+            "page, notice and launch read one found nest"
+        );
+        let other = Path::new("/usr/local/bin/bwrap");
+        assert!(
+            !kept_nest(&kept, other, &helper, probe(false)),
+            "another bubblewrap is asked"
+        );
+        assert!(
+            kept_nest(&kept, bwrap, &helper, probe(false)),
+            "its miss keeps the found one"
+        );
+        assert_eq!(probes.get(), 3);
+        let racing: KeptNest = Mutex::new(None);
+        let found_meanwhile = || {
+            *racing.lock().unwrap() = Some((bwrap.to_path_buf(), helper.clone()));
+            false
+        };
+        assert!(
+            kept_nest(&racing, bwrap, &helper, found_meanwhile),
+            "a nest another caller found while this probe failed holds"
+        );
+    }
+
+    #[test]
+    fn a_launch_that_could_have_a_network_of_its_own_says_why_it_has_none() {
+        use super::super::policy::AgentNetwork;
+        use super::super::{LINUX_UNROUTED_LINE, LinuxHost, linux_unbridged_notice_on};
+        use SandboxRemote::{AnyHost, Loopback};
+        let host = |nested, routed| {
+            Some(LinuxHost {
+                nested,
+                scoped: false,
+                supervised: false,
+                root: false,
+                armored: false,
+                routed,
+            })
+        };
+        let (_temp, eligible) = project(SandboxNetwork::Only(vec![AnyHost(443), Loopback(18080)]));
+        assert!(eligible.routed().is_some());
+        let unrouted = Some(LINUX_UNROUTED_LINE.to_owned());
+        for choice in AgentNetwork::ALL {
+            let said = |held| linux_unbridged_notice_on(held, choice, &eligible);
+            assert_eq!(said(host(true, false)), unrouted, "{choice:?}");
+            assert_eq!(said(host(true, true)), None, "{choice:?}: routed");
+            assert_eq!(said(host(false, false)), None, "{choice:?}: no nest");
+        }
+        assert!(LINUX_UNROUTED_LINE.contains("has no network of its own: "));
+        let ports = eligible.limit_sockets(LinuxSockets::TcpPorts);
+        assert!(ports.routed().is_none());
+        let said = linux_unbridged_notice_on(host(true, false), AgentNetwork::Https, &ports);
+        assert_eq!(said, None, "not routed-eligible, the page says it");
     }
 
     #[test]
@@ -2831,7 +4055,11 @@ mod tests {
         let file = trusted_file(&plain).unwrap();
         fs::set_permissions(&plain, fs::Permissions::from_mode(0o4755)).unwrap();
         let mode = file.metadata().unwrap().mode();
-        assert_ne!(mode & SET_ID_BITS, 0, "the open file is the one a swap changes");
+        assert_ne!(
+            mode & SET_ID_BITS,
+            0,
+            "the open file is the one a swap changes"
+        );
     }
 
     fn nested_words(network: SandboxNetwork) -> (PathBuf, PathBuf, Vec<OsString>) {
@@ -2853,7 +4081,10 @@ mod tests {
     #[test]
     fn a_loopback_only_nested_agent_starts_with_a_network_of_its_own_and_its_ports_bridged() {
         use bridge::{BRIDGE, BRIDGE_FD, UNSHARE_NET};
-        let loopback = [SandboxRemote::Loopback(11434), SandboxRemote::Loopback(8080)];
+        let loopback = [
+            SandboxRemote::Loopback(11434),
+            SandboxRemote::Loopback(8080),
+        ];
         let (helper, cwd, words) = nested_words(SandboxNetwork::Only(loopback.to_vec()));
         let mut head: Vec<OsString> = [BRIDGE, "8080", BRIDGE, "11434", NEST, "--"]
             .map(OsString::from)
@@ -2867,7 +4098,10 @@ mod tests {
         assert_eq!(words.get(..head.len()), Some(&head[..]), "{words:?}");
         let inside = &words[head.len()..];
         let written = |word: &OsString| word == BRIDGE || word == BRIDGE_FD;
-        assert!(!inside.iter().any(written), "the nest writes them: {words:?}");
+        assert!(
+            !inside.iter().any(written),
+            "the nest writes them: {words:?}"
+        );
         let (bridge, rest) = Bridge::leading(words.clone()).unwrap();
         let asked = Bridge {
             fd: None,
@@ -2991,6 +4225,10 @@ mod tests {
                     exact: vec![PathBuf::from("/p/modules/.git")],
                 }),
                 signals: true,
+                held: Some(Held {
+                    entries: vec![PathBuf::from("/p/.git/worktrees/a/HEAD")],
+                    trees: vec![PathBuf::from("/p/.git/worktrees/a/modules")],
+                }),
             },
             ..LandlockPolicy::default()
         }
@@ -3011,6 +4249,10 @@ mod tests {
             OWN_GIT,
             "/p/modules/.git",
             GUARD_SIGNALS,
+            GUARD_HELD,
+            "/p/.git/worktrees/a/HEAD",
+            GUARD_HELD_TREE,
+            "/p/.git/worktrees/a/modules",
         ]
         .iter()
         .map(OsString::from)
@@ -3047,6 +4289,17 @@ mod tests {
         assert_eq!(held(&[GUARD_SIGNALS, "--", "/bin/true"]), Some(signals));
         assert_eq!(held(&[GUARD_GIT, "--", "/bin/true"]), Some(git));
         assert_eq!(held(&["--", "/bin/true"]), Some(Guard::default()));
+        let tree = Guard {
+            held: Some(Held {
+                entries: Vec::new(),
+                trees: vec![PathBuf::from("/p/t")],
+            }),
+            ..Guard::default()
+        };
+        assert_eq!(
+            held(&[GUARD_HELD_TREE, "/p/t", "--", "/bin/true"]),
+            Some(tree)
+        );
         for refused in [
             &[OWN_TREE, "/p", "--", "/bin/true"][..],
             &[OWN_KIDS, "/p", GUARD_GIT, "--", "/bin/true"],
@@ -3058,6 +4311,10 @@ mod tests {
             &[PROBE, GUARD_SIGNALS],
             &[PROBE, GUARD_GIT],
             &[FILTER_SOCKETS, GUARD_SIGNALS, "--", "/bin/true"],
+            &[GUARD_HELD, "p/.git/worktrees/a/HEAD", "--", "/bin/true"],
+            &[GUARD_HELD_TREE, "--", "/bin/true"],
+            &[GUARD_HELD, "/p/a", DIE_WITH, "4242", "--", "/bin/true"],
+            &[PROBE, GUARD_HELD, "/p/a"],
         ] {
             assert!(parse(refused).is_err(), "{refused:?}");
         }
@@ -3074,7 +4331,10 @@ mod tests {
     fn a_guard_keeps_its_ports_on_this_machine_and_leaves_the_others_to_every_host() {
         let policy = guarded();
         let held = policy.guard.supervised(&policy.connect);
-        let reach = held.reach.as_ref().expect("a guarded port is a guarded connect");
+        let reach = held
+            .reach
+            .as_ref()
+            .expect("a guarded port is a guarded connect");
         assert_eq!(reach.any, [443]);
         assert_eq!(reach.loopback, [8080]);
         assert_eq!(held.git, policy.guard.git);
@@ -3213,10 +4473,22 @@ mod tests {
         for folder in &folders {
             assert!(Path::new(folder).starts_with(&data), "{folder}");
         }
-        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "every folder removed");
+        assert_eq!(
+            fs::read_dir(&data).unwrap().count(),
+            0,
+            "every folder removed"
+        );
         assert!(!supervises(&holding, None, &data, true), "never as root");
-        assert_eq!(fs::read_to_string(&seen).unwrap(), told, "as root no probe runs");
-        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "and no folder is made");
+        assert_eq!(
+            fs::read_to_string(&seen).unwrap(),
+            told,
+            "as root no probe runs"
+        );
+        assert_eq!(
+            fs::read_dir(&data).unwrap().count(),
+            0,
+            "and no folder is made"
+        );
     }
 
     /// AppArmor keeps unprivileged programs out of user namespaces only where its setting
@@ -3230,7 +4502,14 @@ mod tests {
         );
         assert!(restricts(Some("1\n")));
         assert!(restricts(Some("1")));
-        for free in [Some("0\n"), Some(""), Some("2\n"), Some("11\n"), Some("1 0"), None] {
+        for free in [
+            Some("0\n"),
+            Some(""),
+            Some("2\n"),
+            Some("11\n"),
+            Some("1 0"),
+            None,
+        ] {
             assert!(!restricts(free), "{free:?}");
         }
     }
@@ -3273,6 +4552,7 @@ mod tests {
             supervised: true,
             root: false,
             armored: false,
+            routed: false,
         };
         let at = Instant::now();
         let kept: KeptHost = Mutex::new(Some((at, host)));
@@ -3315,6 +4595,7 @@ mod tests {
             loopback: vec![8080],
             git: Some(own),
             signals: true,
+            held: None,
         };
         assert_eq!(guard(&sandbox, alone), expected);
         let nested = Guard {
@@ -3331,7 +4612,10 @@ mod tests {
         let (_open, open) = project(SandboxNetwork::Open);
         let held = guard(&open, alone);
         assert!(held.loopback.is_empty(), "{held:?}");
-        assert!(held.git.is_some_and(|git| git.trees == [open.project_root()]));
+        assert!(
+            held.git
+                .is_some_and(|git| git.trees == [open.project_root()])
+        );
     }
 
     /// The git folders a supervised agent owns are the ones the macOS boundary leaves it:

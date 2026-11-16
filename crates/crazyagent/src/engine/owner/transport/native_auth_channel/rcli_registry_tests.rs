@@ -1302,7 +1302,10 @@ async fn a_found_rcli_is_pinned_only_once_the_file_it_resolved_passes_the_start_
         host.registered_rcli_master_executable(),
         host.registered_rcli_private_key_executable(),
     ]
-    .map(|role| role.ok().and_then(|found| found.verified_path().ok()));
+    .map(|role| {
+        role.ok()
+            .and_then(|found| found.verified_path().ok().map(|path| path.to_path_buf()))
+    });
     fixture.service.shutdown().await.unwrap();
     assert_eq!(
         refused.as_deref(),
@@ -1317,44 +1320,40 @@ async fn a_found_rcli_is_pinned_only_once_the_file_it_resolved_passes_the_start_
     assert_eq!(pinned, [Some(installed.clone()), Some(installed)]);
 }
 
-/// RV-DS241-191: the master and the key writer are each pinned only from a checked file the
-/// entry still leads to. A link that moves to an agent's file after the master's capture and
-/// before the writer's is refused as changed, and neither identity is pinned.
+/// rv-sec2 B1 N2: the master and the key writer are one capture of one checked file, held as
+/// one pinned host in both roles, so no link that moves after it can split them. A step
+/// queued for a second capture never runs, and both roles hold the owner's install.
 #[tokio::test]
-async fn a_found_rcli_whose_link_moves_between_its_two_captures_pins_neither() {
+async fn a_found_rcli_pins_the_master_and_the_key_writer_from_one_capture() {
     let mut fixture = RegistryCase::start().await;
     let host = fixture.host();
     let root = std::fs::canonicalize(fixture.tools.path()).unwrap();
-    let (entry, middle, _, dropped) = rcli_chain(&root, false);
+    let (entry, middle, installed, dropped) = rcli_chain(&root, false);
     {
         let mut steps = super::BETWEEN_CHECK_AND_CAPTURE.lock().unwrap();
         steps.push((entry.clone(), Box::new(|| {})));
         steps.push((entry.clone(), relink(middle, dropped)));
     }
-    let refused = fixture
+    let registered = fixture
         .service
         .register_found_rcli_executable(&entry)
-        .err()
-        .map(|error| error.0);
-    let unpinned = (
-        host.registered_rcli_master_executable().is_err(),
-        host.registered_rcli_private_key_executable().is_err(),
-    );
-    let steps_left = super::BETWEEN_CHECK_AND_CAPTURE
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(path, _)| *path == entry)
-        .count();
+        .map_err(|error| error.0);
+    let master = host.registered_rcli_master_executable();
+    let writer = host.registered_rcli_private_key_executable();
+    let one = matches!((&master, &writer), (Ok(master), Ok(writer)) if Arc::ptr_eq(master, writer));
+    let pinned = [master, writer].map(|role| {
+        role.ok()
+            .and_then(|found| found.verified_path().ok().map(|path| path.to_path_buf()))
+    });
+    let steps_left = {
+        let mut steps = super::BETWEEN_CHECK_AND_CAPTURE.lock().unwrap();
+        let left = steps.iter().filter(|(path, _)| *path == entry).count();
+        steps.retain(|(path, _)| *path != entry);
+        left
+    };
     fixture.service.shutdown().await.unwrap();
-    assert_eq!(
-        refused.as_deref(),
-        Some("native_auth_host_executable_changed")
-    );
-    assert_eq!(
-        unpinned,
-        (true, true),
-        "a refused RCLI pins neither identity"
-    );
-    assert_eq!(steps_left, 0, "both captures ran");
+    assert_eq!(registered, Ok(()));
+    assert!(one, "one pinned host fills both roles");
+    assert_eq!(pinned, [Some(installed.clone()), Some(installed)]);
+    assert_eq!(steps_left, 1, "no second capture ran");
 }

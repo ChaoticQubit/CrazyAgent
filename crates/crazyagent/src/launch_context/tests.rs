@@ -2071,6 +2071,8 @@ fn a_launch_clears_its_home_caches_when_its_context_names_a_wider_level() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let home = root.join("claude");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
@@ -5188,10 +5190,6 @@ fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
             "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n",
         ),
         (
-            ContextModeOff::Unsupported,
-            "- context-mode is off for this launch: CrazyAgent cannot run it on this platform yet. Use the shell instead.\n",
-        ),
-        (
             ContextModeOff::NpxNotFound,
             "- context-mode is off for this launch: CrazyAgent did not find the npx it runs on this computer, so it did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n",
         ),
@@ -5212,4 +5210,51 @@ fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
         assert!(section.contains(line), "{off:?}: {section}");
         assert!(!section.contains("ctx_execute"), "{off:?}: {section}");
     }
+}
+
+/// Runs only in the process the row below starts: writes a launch context file under umask
+/// 0277, which clears the owner's write bit, and reports what it got. Input: the folder
+/// named in `ROW_FOLDER`; without it, nothing.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn a_context_file_written_under_a_narrow_umask_in_its_own_process() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+        return;
+    };
+    let folder = PathBuf::from(folder);
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
+    let file = folder.join("context.json");
+    let outcome = match write_private(&file, b"{}") {
+        Ok(()) => format!(
+            "ok {:o} {}",
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            std::fs::read_to_string(&file).unwrap()
+        ),
+        Err(error) => format!("err {}", error.0),
+    };
+    std::fs::write(folder.join("outcome"), outcome).unwrap();
+}
+
+/// UMASK-MODE-ASSERTS: an engine that inherited a umask clearing the owner's write bit
+/// still writes a launch context file as a private 0600 file, where it used to panic on the
+/// file's mode after writing.
+#[cfg(unix)]
+#[test]
+fn a_context_file_written_under_a_narrow_umask_is_private() {
+    let folder = tempfile::tempdir().unwrap();
+    let status = crate::spawn_gate::row_alone(
+        "launch_context::tests::a_context_file_written_under_a_narrow_umask_in_its_own_process",
+        ":",
+        folder.path(),
+    );
+    assert!(
+        status.success(),
+        "the write under umask 0277 ended in {status}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.path().join("outcome")).unwrap(),
+        "ok 600 {}"
+    );
 }

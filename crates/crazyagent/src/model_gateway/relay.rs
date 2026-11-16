@@ -1,3 +1,4 @@
+use crate::credentials::Piece::{Escaped, Plain};
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -560,12 +561,12 @@ fn exchange(
     let input = child.stdin.take();
     let output = child.stdout.take();
     if let Err(mut child) = shared.attach(id, child) {
-        config.fill(0);
+        crate::credentials::wipe(&mut config);
         stop(&mut child);
         return Err(502);
     }
     let written = input.map(|mut input| input.write_all(&config));
-    config.fill(0);
+    crate::credentials::wipe(&mut config);
     let sent = match (written, body) {
         (Some(Ok(())), Some(mut body)) => body.write_all(&incoming.body).is_ok(),
         (Some(Ok(())), None) => true,
@@ -646,7 +647,7 @@ fn upstream_child(
     match spawned {
         Ok(child) => Ok((child, config, body)),
         Err(_) => {
-            config.fill(0);
+            crate::credentials::wipe(&mut config);
             Err(502)
         }
     }
@@ -925,16 +926,6 @@ fn percent_decoded(bytes: &[u8]) -> Vec<u8> {
     decoded
 }
 
-fn quoted(value: &str) -> Result<String, EngineError> {
-    if value.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
-        return Err(failure("model_relay_request_invalid"));
-    }
-    Ok(format!(
-        "\"{}\"",
-        value.replace('\\', "\\\\").replace('"', "\\\"")
-    ))
-}
-
 /// Builds the curl config for one forwarded request, which goes only to curl's stdin: the
 /// provider URL, method, the harness's headers minus hop-by-hop, encoding and key headers,
 /// the real key in the header form the harness used, and the body file.
@@ -946,51 +937,63 @@ pub(crate) fn upstream_config(
     key: &SecretString,
     body: Option<&Path>,
 ) -> Result<Vec<u8>, EngineError> {
-    let mut config = forwarded(upstream, incoming, |_| false)?;
-    let key_header = match scheme {
-        KeyHeader::XApiKey => format!("x-api-key: {}", key.expose()),
-        KeyHeader::Bearer => format!("Authorization: Bearer {}", key.expose()),
-        KeyHeader::XGoogApiKey => format!("x-goog-api-key: {}", key.expose()),
-    };
-    config.push_str(&format!("header = {}\n", quoted(&key_header)?));
-    body_line(&mut config, body)?;
-    Ok(config.into_bytes())
+    let mut pieces = forwarded(upstream, incoming, |_| false);
+    pieces.extend([
+        Plain(match scheme {
+            KeyHeader::XApiKey => "header = \"x-api-key: ",
+            KeyHeader::Bearer => "header = \"Authorization: Bearer ",
+            KeyHeader::XGoogApiKey => "header = \"x-goog-api-key: ",
+        }),
+        Escaped(key.expose()),
+        Plain("\"\n"),
+    ]);
+    body_line(&mut pieces, body)?;
+    crate::credentials::sized(&pieces).ok_or_else(|| failure("model_relay_request_invalid"))
 }
 
 /// The start of every curl config: the provider URL, the method, and the harness's headers
-/// minus hop-by-hop, encoding and key headers and those `dropped` names.
-/// Inputs: the upstream, the request and the extra drop test on lowercase header names.
-/// Output: the config text, or `model_relay_request_invalid`.
-fn forwarded(
-    upstream: &Upstream,
-    incoming: &Incoming,
+/// minus hop-by-hop, encoding and key headers and those `dropped` names, as pieces for
+/// [`crate::credentials::sized`]. Inputs: the upstream, the request and the extra drop
+/// test on lowercase header names. Output: the pieces.
+fn forwarded<'a>(
+    upstream: &'a Upstream,
+    incoming: &'a Incoming,
     dropped: impl Fn(&str) -> bool,
-) -> Result<String, EngineError> {
-    let mut config = format!(
-        "url = {}\nrequest = {}\nheader = \"Expect:\"\n",
-        quoted(&format!("{}{}", upstream.origin, incoming.target))?,
-        quoted(&incoming.method)?
-    );
+) -> Vec<crate::credentials::Piece<'a>> {
+    let mut pieces = vec![
+        Plain("url = \""),
+        Escaped(&upstream.origin),
+        Escaped(&incoming.target),
+        Plain("\"\nrequest = \""),
+        Escaped(&incoming.method),
+        Plain("\"\nheader = \"Expect:\"\n"),
+    ];
     for (name, value) in &incoming.headers {
         if REQUEST_DROPPED.contains(&name.as_str()) || dropped(name.as_str()) {
             continue;
         }
-        config.push_str(&format!(
-            "header = {}\n",
-            quoted(&format!("{name}: {value}"))?
-        ));
+        pieces.extend([
+            Plain("header = \""),
+            Escaped(name),
+            Plain(": "),
+            Escaped(value),
+            Plain("\"\n"),
+        ]);
     }
-    Ok(config)
+    pieces
 }
 
 /// Ends a curl config with the body file, when the request has a body.
-/// Inputs: the config and the body path. Output: Ok, or `model_relay_request_invalid`.
-fn body_line(config: &mut String, body: Option<&Path>) -> Result<(), EngineError> {
+/// Inputs: the pieces and the body path. Output: Ok, or `model_relay_request_invalid`.
+fn body_line<'a>(
+    pieces: &mut Vec<crate::credentials::Piece<'a>>,
+    body: Option<&'a Path>,
+) -> Result<(), EngineError> {
     if let Some(body) = body {
         let body = body
             .to_str()
             .ok_or_else(|| failure("model_relay_request_invalid"))?;
-        config.push_str(&format!("data-binary = {}\n", quoted(&format!("@{body}"))?));
+        pieces.extend([Plain("data-binary = \"@"), Escaped(body), Plain("\"\n")]);
     }
     Ok(())
 }
@@ -1007,20 +1010,26 @@ pub(crate) fn chatgpt_config(
     account_id: Option<&str>,
     body: Option<&Path>,
 ) -> Result<Vec<u8>, EngineError> {
-    let mut config = forwarded(upstream, incoming, |name| {
+    let mut pieces = forwarded(upstream, incoming, |name| {
         CHATGPT_DROPPED.contains(&name)
             || CHATGPT_DROPPED_PREFIXES
                 .iter()
                 .any(|prefix| name.starts_with(prefix))
-    })?;
-    let bearer = format!("Authorization: Bearer {}", access.expose());
-    config.push_str(&format!("header = {}\n", quoted(&bearer)?));
+    });
+    pieces.extend([
+        Plain("header = \"Authorization: Bearer "),
+        Escaped(access.expose()),
+        Plain("\"\n"),
+    ]);
     if let Some(account_id) = account_id {
-        let account = format!("chatgpt-account-id: {account_id}");
-        config.push_str(&format!("header = {}\n", quoted(&account)?));
+        pieces.extend([
+            Plain("header = \"chatgpt-account-id: "),
+            Escaped(account_id),
+            Plain("\"\n"),
+        ]);
     }
-    body_line(&mut config, body)?;
-    Ok(config.into_bytes())
+    body_line(&mut pieces, body)?;
+    crate::credentials::sized(&pieces).ok_or_else(|| failure("model_relay_request_invalid"))
 }
 
 /// Builds the curl command for the provider without running it: no `.curlrc`, no

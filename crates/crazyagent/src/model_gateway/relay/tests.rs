@@ -1276,3 +1276,68 @@ fn dropping_a_chatgpt_relay_during_a_renewal_returns_promptly() {
     let _ = client.join();
     assert!(provider.seen().is_empty());
 }
+
+/// SECRET-FORMAT-COPIES: the forwarded request's curl config keeps the same bytes in both
+/// key forms, with a header and a key that need escaping, and a control byte in a header
+/// still refuses it.
+#[test]
+fn upstream_config_bytes_stay_the_same() {
+    let target = upstream("https://api.example.test/v1").unwrap();
+    let key = SecretString::new(b"sk-pin\"q\\b".to_vec()).unwrap();
+    let mut incoming = Incoming {
+        method: "POST".into(),
+        target: "/v1/messages".into(),
+        headers: vec![
+            ("host".into(), "127.0.0.1:9".into()),
+            ("x-api-key".into(), "placeholder".into()),
+            ("anthropic-version".into(), "2023-06-01".into()),
+            ("x-pin".into(), "quote\" back\\slash".into()),
+        ],
+        body: b"{}".to_vec(),
+    };
+    let head = concat!(
+        r#"url = "https://api.example.test/v1/messages""#,
+        "\n",
+        r#"request = "POST""#,
+        "\n",
+        r#"header = "Expect:""#,
+        "\n",
+        r#"header = "anthropic-version: 2023-06-01""#,
+        "\n",
+        r#"header = "x-pin: quote\" back\\slash""#,
+        "\n",
+    );
+    let with_body = upstream_config(
+        &target,
+        &incoming,
+        KeyHeader::XApiKey,
+        &key,
+        Some(Path::new("/dev/fd/7")),
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(with_body).unwrap(),
+        format!(
+            "{head}{}\n{}\n",
+            r#"header = "x-api-key: sk-pin\"q\\b""#, r#"data-binary = "@/dev/fd/7""#
+        )
+    );
+    let bearer = upstream_config(&target, &incoming, KeyHeader::Bearer, &key, None).unwrap();
+    assert_eq!(
+        String::from_utf8(bearer).unwrap(),
+        format!(
+            "{head}{}\n",
+            r#"header = "Authorization: Bearer sk-pin\"q\\b""#
+        )
+    );
+    incoming
+        .headers
+        .push(("x-bad".into(), "line\u{1}break".into()));
+    assert_eq!(
+        upstream_config(&target, &incoming, KeyHeader::Bearer, &key, None)
+            .err()
+            .unwrap()
+            .0,
+        "model_relay_request_invalid"
+    );
+}

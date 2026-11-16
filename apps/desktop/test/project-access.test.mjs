@@ -102,7 +102,7 @@ test("New Project preselects Sandboxed where the engine says Own branch can't ru
   assert.equal(wizard.levelUnavailable(levels(linux), "sandboxed"), null);
   assert.equal(wizard.levelUnavailable(undefined, "full"), null);
   const page = readFileSync(new URL("../src/screens/new-project/index.tsx", import.meta.url), "utf8");
-  assert.match(page, /const access = draftAccess\(draft, catalogValue\?\.agent_access\);/, "create saves the level the form shows");
+  assert.match(page, /access: draftAccess\(draft, catalogValue\?\.agent_access\),/, "create saves the level the form shows");
   assert.match(page, /<AccessLevels name="np-access" value=\{draftAccess\(draft, catalogValue\?\.agent_access\)\} unavailable=\{\(level\) => levelUnavailable\(catalogValue\?\.agent_access, level\)\}/);
   assert.ok(!page.includes("unavailable={() => null}"));
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/project_setup.rs", import.meta.url), "utf8");
@@ -163,8 +163,9 @@ test("agent access saves at the version the page read, and a stale save reads th
   const client = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
   assert.match(client, /export interface PolicyView \{[\s\S]*?\n  version: number;\n\}/);
   assert.match(client, /call<IntentReceipt>\("desktop_set_project_agent_policy", \{ id, version, policy, generation \}\)/);
-  const created = readFileSync(new URL("../src/screens/new-project/index.tsx", import.meta.url), "utf8");
-  assert.match(created, /const read = await loadAgentPolicy\(id\);\n\s*const saved = read\.kind === "ok" \? await saveAgentPolicy\(id, policyOf\(read\.value, access, read\.value\.network, read\.value\.toolchains\.map\(\(row\) => row\.allowed\), read\.value\.ide_git_hooks, read\.value\.ide_agent_files\), read\.value\.version, nextGeneration\(\)\) : read;/,
+  const created = readFileSync(new URL("../src/screens/new-project/carry.ts", import.meta.url), "utf8");
+  assert.match(created, /const LIVE: CarryDeps = \{ assign: setProjectPool, read: loadAgentPolicy, save: saveAgentPolicy, generation: nextGeneration \};/);
+  assert.match(created, /const read = await deps\.read\(project\);\n\s*const saved = read\.kind === "ok"\n\s*\? await deps\.save\(project, policyOf\(read\.value, access, read\.value\.network, read\.value\.toolchains\.map\(\(row\) => row\.allowed\), read\.value\.ide_git_hooks, read\.value\.ide_agent_files\), read\.value\.version, deps\.generation\(\)\)\n\s*: read;/,
     "a new project's chosen access is saved at the version the engine holds, keeping the toolchains and shared folders onboarding recorded");
   const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   assert.match(lib, /async fn desktop_set_project_agent_policy\([^)]*version: u64/);
@@ -184,7 +185,7 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
   assert.ok(page.includes("ideGitHooks !== view.ide_git_hooks"));
   assert.ok(page.includes("setIdeGitHooks(next.ide_git_hooks)"));
   assert.match(page, /<IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} \/>/);
-  const created = readFileSync(new URL("../src/screens/new-project/index.tsx", import.meta.url), "utf8");
+  const created = readFileSync(new URL("../src/screens/new-project/carry.ts", import.meta.url), "utf8");
   assert.ok(created.includes("read.value.ide_git_hooks"), "a new project keeps the IDE hooks switch the engine saved, Off");
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
   assert.match(engine, /#\[serde\(default\)\]\n    pub ide_git_hooks: bool,/);

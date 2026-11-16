@@ -206,6 +206,7 @@ pub enum Command {
     #[serde(skip_deserializing)]
     OwnerSandbox {
         settings: crate::sandbox_settings::SandboxSettings,
+        version: u64,
     },
     #[serde(skip_deserializing)]
     OwnerAgentCleanup {

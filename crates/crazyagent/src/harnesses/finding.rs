@@ -1,6 +1,5 @@
 use super::{Search, in_crazyagent_folder, is_shim, is_shim_folder};
 use crate::engine::EngineError;
-use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
@@ -37,7 +36,11 @@ pub(crate) const LINK_HOPS_MAX: usize = 40;
 /// ever left out of an [`AgentSpace`].
 pub const AGENT_ROWS_MAX: usize = 1024;
 pub const PROJECT_REPOSITORIES_MAX: usize = 64;
-const AGENT_FOLDERS_MAX: usize = 2 * (AGENT_ROWS_MAX * (PROJECT_REPOSITORIES_MAX + 3) + 1);
+/// The most folders the agent tables can name: per row read, a setup names one folder, a
+/// project at most [`PROJECT_REPOSITORIES_MAX`] and each worktree table one, so
+/// (1 + 64 + 1 + 1) for each of [`AGENT_ROWS_MAX`] rows.
+pub(crate) const NAMED_FOLDERS_MAX: usize = AGENT_ROWS_MAX * (PROJECT_REPOSITORIES_MAX + 3);
+const AGENT_FOLDERS_MAX: usize = 2 * (NAMED_FOLDERS_MAX + 1);
 /// The engine tables that name folders agents can write, how each names them and the query
 /// that reads them, bounded by its one parameter: engine start's [`AgentSpace`] and the tool
 /// resolver's places ([`crate::tools::Places`]) read this one list.
@@ -119,35 +122,11 @@ impl AgentSpace {
 
     /// Reads the agent space from the engine database; a table not made yet names nothing.
     /// Inputs: the engine folder and its database. Output: the space, or
-    /// `harness_path_unreadable` for a failed read, a body that is not JSON, or more rows
-    /// than [`AGENT_ROWS_MAX`], so a read that falls short never lets a file through.
+    /// `harness_path_unreadable` for a failed read, a bad row ([`BadRow::Fail`]), or more
+    /// rows than [`AGENT_ROWS_MAX`], so a read that falls short never lets a file through.
     pub fn read(root: &Path, db: &Connection) -> Result<Self, EngineError> {
-        let unreadable = |_: rusqlite::Error| failure(PATH_UNREADABLE);
-        let mut named = Vec::new();
-        for (table, names, query) in AGENT_TABLES {
-            let present: bool = db
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-                    [table],
-                    |row| row.get(0),
-                )
-                .map_err(unreadable)?;
-            if !present {
-                continue;
-            }
-            let mut statement = db.prepare(query).map_err(unreadable)?;
-            let rows: Vec<String> = statement
-                .query_map([AGENT_ROWS_MAX as i64 + 1], |row| row.get(0))
-                .map_err(unreadable)?
-                .collect::<Result<_, _>>()
-                .map_err(unreadable)?;
-            if rows.len() > AGENT_ROWS_MAX {
-                return Err(failure(PATH_UNREADABLE));
-            }
-            for text in rows {
-                named.extend(folders_in(names, &text)?);
-            }
-        }
+        let (named, skipped) = named_folders(db, BadRow::Fail)?;
+        assert_eq!(skipped, 0);
         Ok(Self::of(root, named, &owner_temp()))
     }
 
@@ -226,15 +205,7 @@ pub(crate) fn folders_in(names: Names, text: &str) -> Result<Vec<PathBuf>, Engin
         Names::Setup => body()?
             .get("folder")
             .and_then(serde_json::Value::as_str)
-            .map(|folder| {
-                let folder = Path::new(folder);
-                match folder.parent() {
-                    Some(project) if folder.ends_with(CRAZYAGENT_DIRECTORY) => {
-                        project.to_path_buf()
-                    }
-                    _ => folder.to_path_buf(),
-                }
-            })
+            .map(|folder| crate::project_setup::project_folder_of(Path::new(folder)))
             .into_iter()
             .collect(),
         Names::Project => {
@@ -256,6 +227,64 @@ pub(crate) fn folders_in(names: Names, text: &str) -> Result<Vec<PathBuf>, Engin
     };
     assert!(folders.len() <= PROJECT_REPOSITORIES_MAX);
     Ok(folders)
+}
+
+/// What a reader of the agent tables does with a row it cannot read: a body that is not
+/// JSON, a value that is not text, or a project declaring more than
+/// [`PROJECT_REPOSITORIES_MAX`] repositories. Engine start's [`AgentSpace`] fails the whole
+/// read on one; the tool resolver's places skip the row alone and count it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BadRow {
+    Skip,
+    Fail,
+}
+
+/// Reads every folder the agent tables name, as stored, in table and row order
+/// ([`AGENT_TABLES`]): the one reader for engine start and the tool resolver; a table not
+/// made yet names none. Inputs: the database and what a bad row does. Output: the folders
+/// and the rows skipped, or `harness_path_unreadable` for a failed read, a table past
+/// [`AGENT_ROWS_MAX`] rows, or a bad row under [`BadRow::Fail`].
+pub(crate) fn named_folders(
+    db: &Connection,
+    bad: BadRow,
+) -> Result<(Vec<PathBuf>, usize), EngineError> {
+    let unreadable = |_: rusqlite::Error| failure(PATH_UNREADABLE);
+    let mut named = Vec::new();
+    let mut skipped = 0usize;
+    for (table, names, query) in AGENT_TABLES {
+        let present: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(unreadable)?;
+        if !present {
+            continue;
+        }
+        let mut statement = db.prepare(query).map_err(unreadable)?;
+        let rows: Vec<Option<String>> = statement
+            .query_map([AGENT_ROWS_MAX as i64 + 1], |row| {
+                Ok(row.get_ref(0)?.as_str().ok().map(str::to_owned))
+            })
+            .map_err(unreadable)?
+            .collect::<Result<_, _>>()
+            .map_err(unreadable)?;
+        if rows.len() > AGENT_ROWS_MAX {
+            return Err(failure(PATH_UNREADABLE));
+        }
+        for row in rows {
+            match row.map(|text| folders_in(names, &text)) {
+                Some(Ok(folders)) => named.extend(folders),
+                _ if bad == BadRow::Skip => skipped += 1,
+                Some(Err(error)) => return Err(error),
+                None => return Err(failure(PATH_UNREADABLE)),
+            }
+        }
+    }
+    assert!(skipped <= AGENT_TABLES.len() * AGENT_ROWS_MAX);
+    assert!(named.len() <= NAMED_FOLDERS_MAX);
+    Ok((named, skipped))
 }
 
 /// Opens the engine database without making it, as engine start reads it before the

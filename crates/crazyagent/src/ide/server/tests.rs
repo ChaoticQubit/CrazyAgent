@@ -143,6 +143,110 @@ fn group_listeners(group: i32) -> Vec<String> {
     addresses
 }
 
+/// IDE-PORT-TOCTOU: the engine picks the server port and drops it before the server binds
+/// it, so another local process can take it first. The open catches that before it returns:
+/// every listener at 127.0.0.1 on the port must be in the server's process group, so one of
+/// another group there, or none, refuses with `ide_server_port_taken`, and one in the group
+/// passes.
+#[tokio::test]
+async fn a_listener_outside_the_servers_group_refuses_the_open() {
+    let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let port = held.local_addr().unwrap().port();
+    let ours = rustix::process::getpgid(None).unwrap();
+    let other = Pid::from_raw(1).unwrap();
+    assert_ne!(ours, other);
+    let taken = owned_listener(port, other).await.unwrap_err();
+    assert_eq!(taken.0, "ide_server_port_taken");
+    assert!(owned_listener(port, ours).await.is_ok());
+    drop(held);
+    let gone = owned_listener(port, ours).await.unwrap_err();
+    assert_eq!(gone.0, "ide_server_port_taken");
+}
+
+/// rv-sa241 LOW-1 (ide-port follow-up r2): only a listener on exactly 127.0.0.1 at the server
+/// port can take the proxy's connection. Every other form that can bind beside the server
+/// prints another address (probed: `*:P`, `[::1]:P`, a LAN address), and a v4-mapped bind,
+/// which lsof prints as 127.0.0.1, cannot. So at ready a listener outside the group refuses
+/// the open only there, a group listener elsewhere is `ide_server_not_loopback`, and the
+/// processes the proxy serves are the group's alone.
+#[test]
+fn only_a_listener_outside_the_group_on_127_0_0_1_refuses_the_open() {
+    let port = 4100;
+    let at = |address: &str| format!("{address}:{port}");
+    let owns = |pid: i32| pid == 7;
+    let beside = [
+        (7, at("127.0.0.1")),
+        (9, at("[::1]")),
+        (9, at("192.0.2.4")),
+        (11, at("*")),
+    ];
+    let shared = [(7, at("127.0.0.1")), (9, at("127.0.0.1"))];
+    let wide = [(7, at("127.0.0.1")), (7, at("*"))];
+    let elsewhere = [(9, at("[::1]"))];
+    let refused = |listeners: &[(i32, String)]| judged(listeners, port, owns).map_err(|e| e.0);
+    assert_eq!(refused(&beside), Ok(vec![7]));
+    assert_eq!(refused(&shared), Err("ide_server_port_taken".to_owned()));
+    assert_eq!(refused(&wide), Err("ide_server_not_loopback".to_owned()));
+    assert_eq!(refused(&elsewhere), Err("ide_server_port_taken".to_owned()));
+    assert_eq!(refused(&[]), Err("ide_server_port_taken".to_owned()));
+}
+
+/// rv-ds241 L1: a port a wildcard listener of this user holds is not free, so the open picks
+/// another server port instead of recording one the server would only bind beside it, which
+/// would refuse every later open of the project.
+#[test]
+fn a_port_a_wildcard_listener_of_this_user_holds_is_not_free() {
+    let held = crate::spawn_gate::bind_tcp_std(("0.0.0.0", 0)).unwrap();
+    let port = held.local_addr().unwrap().port();
+    assert!(!ports::free(port), "a wildcard listener holds {port}");
+    drop(held);
+    assert!(ports::free(port), "free once it is released");
+}
+
+/// The running launch of a slot and its refused flag, if any. Input: the slot. Output: them.
+fn running_launch(slot: &Slot) -> Option<(u64, Arc<AtomicBool>)> {
+    locked(&slot.state)
+        .as_ref()
+        .map(|running| (running.launch, Arc::clone(&running.refused)))
+}
+
+/// rv-sa241 LOW-1, rv-ds241 N1: a launch its proxy flagged, because no process the open saw
+/// ready held the server port any more, is never handed to a later open, which starts a new
+/// launch, and its watch stops it within a few polls, so a refused request costs the owner a
+/// reload and not the session.
+#[tokio::test]
+async fn a_launch_its_proxy_refused_is_stopped_and_never_reused() {
+    let checkout = scratch();
+    let data = scratch();
+    let build = cached_build();
+    let project = project("refused");
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
+    let slot = servers.slot(&project).unwrap();
+    let (first, refused) = running_launch(&slot).unwrap();
+    assert!(!refused.load(Ordering::SeqCst));
+    refused.store(true, Ordering::SeqCst);
+    servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
+    let (second, refused) = running_launch(&slot).unwrap();
+    assert_ne!(second, first, "a refused launch is not reused");
+    assert!(!refused.load(Ordering::SeqCst));
+    refused.store(true, Ordering::SeqCst);
+    for _ in 0..50 {
+        if running_launch(&slot).is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(running_launch(&slot).is_none(), "the watch stops it");
+    servers.stop_all().await;
+}
+
 #[tokio::test]
 async fn ide_server_listens_only_on_loopback() {
     let checkout = scratch();
@@ -3156,4 +3260,30 @@ fn the_start_sweep_removes_only_temp_folders_an_earlier_engine_moved_aside() {
     );
     assert_eq!(kept, [true; 3], "open to others, named otherwise, link");
     assert!(outside_kept, "a file behind the link was removed");
+}
+
+/// Runs only in the process the row below starts, under a file size limit of zero with
+/// SIGXFSZ ignored, so the token write fails after the file was made. Input: the folder
+/// named in `ROW_FOLDER`; without it, nothing.
+#[test]
+#[ignore]
+fn an_ide_token_write_cut_short_in_its_own_process() {
+    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+        return;
+    };
+    assert!(token::issue(Path::new(&folder)).is_err());
+}
+
+/// UMASK-MODE-ASSERTS: an IDE token write that fails part way leaves no token file, where
+/// it used to leave the empty file behind.
+#[test]
+fn an_ide_token_write_cut_short_leaves_no_token_file() {
+    let folder = tempfile::tempdir().unwrap();
+    let status = crate::spawn_gate::row_alone(
+        "ide::server::tests::an_ide_token_write_cut_short_in_its_own_process",
+        "trap '' XFSZ; ulimit -f 0",
+        folder.path(),
+    );
+    assert!(status.success(), "the cut token write ended in {status}");
+    assert!(std::fs::symlink_metadata(folder.path().join(token::FILE)).is_err());
 }

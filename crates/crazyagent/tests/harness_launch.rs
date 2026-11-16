@@ -957,17 +957,96 @@ fn stopping_a_full_access_headless_agent_names_what_left_its_session_and_parent(
     drop(leftover);
 }
 
-const FAST_ORPHANING_AGENT: &str = r#"#!/bin/sh
+const SEEN_PARENT_ORPHANING_AGENT: &str = r#"#!/bin/sh
 [ "$1" = first-exec ] && exit 3
-/usr/bin/perl -mPOSIX -e 'defined(my $child = fork()) or exit 1; if ($child == 0) { POSIX::setsid() > 0 or exit 1; open(my $file, ">", "orphan.pid") or exit 1; print $file "$$\n"; close($file); sleep 60; exit 0 } POSIX::_exit(0)' < /dev/null > /dev/null 2>&1 &
+/usr/bin/perl -mPOSIX -e 'sleep 4; defined(my $child = fork()) or exit 1; if ($child == 0) { POSIX::setsid() > 0 or exit 1; open(my $file, ">", "orphan.pid") or exit 1; print $file "$$\n"; close($file); sleep 60; exit 0 } POSIX::_exit(0)' < /dev/null > /dev/null 2>&1 &
 echo $$ > leader.pid
 exec /bin/sleep 30
 "#;
 
-/// SETSID-L2 r1 L2, the SECAUDIT-SETSID-LEFTOVER option (a) residual: a Full access headless
-/// agent's process that leaves its session and loses its parent within microseconds, between
-/// two tables the follower takes, running a program whose environment macOS hides, is never
-/// known, so the stop reports clean, or unchecked under load, naming nothing, while it keeps
+/// SETSID-A-RESIDUAL, as `ssh -f` and an ssh ControlPersist master detach: a Full access
+/// headless agent's process that runs long enough for the follower's tables to show it, then
+/// forks and exits at once, leaves a child that setsids and goes to launchd before any table
+/// shows it, running a program whose environment macOS hides. The stop still names that
+/// child: it was forked from a process the lineage knew, by the unique id the kernel keeps.
+#[test]
+fn a_full_access_headless_stop_names_a_setsid_child_whose_seen_parent_exited_at_its_fork() {
+    let root = private_dir("crazyagent-seen-parent-orphan-");
+    let project = private_folder(root.path(), "project");
+    let home = private_folder(root.path(), "home");
+    let bin = private_folder(root.path(), "bin");
+    let harness = bin.join("claude");
+    std::fs::write(&harness, SEEN_PARENT_ORPHANING_AGENT).unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let first = crazyagent::spawn_gate::status(
+        std::process::Command::new(&harness)
+            .arg("first-exec")
+            .current_dir(&bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(first.code(), Some(3));
+    let session = Session::start(LaunchRequest {
+        harness: "claude-code".into(),
+        executable: harness,
+        working_dir: project.clone(),
+        account: AccountBinding::Subscription { home },
+        model: None,
+        tools: false,
+        sandbox_profile: None,
+        unconfined: true,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    })
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let (leader, orphan) = loop {
+        if let (Some(leader), Some(orphan)) = (
+            written_pid(&project, "leader.pid"),
+            written_pid(&project, "orphan.pid"),
+        ) && parent_of(orphan) == Some(1)
+        {
+            break (leader, orphan);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in agent left no orphan"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let leftover = Leftover(vec![orphan]);
+    assert_ne!(rustix::process::getsid(Some(orphan)), Ok(leader));
+
+    let left = match session.stop() {
+        Err(Unstopped::Left(left)) => left,
+        other => panic!(
+            "the stop of a Full access agent was reported {other:?} while its orphan {orphan:?} kept running"
+        ),
+    };
+    let report = left.plain();
+    assert_eq!(
+        named_in(&report).get(&orphan.as_raw_nonzero().get()),
+        Some(&"perl".to_owned()),
+        "{report}"
+    );
+    drop(leftover);
+}
+
+const FAST_ORPHANING_AGENT: &str = r#"#!/bin/sh
+[ "$1" = first-exec ] && exit 3
+/usr/bin/perl -mPOSIX -e 'defined(my $middle = fork()) or exit 1; if ($middle == 0) { POSIX::setsid() > 0 or POSIX::_exit(1); defined(my $child = fork()) or POSIX::_exit(1); if ($child == 0) { open(my $file, ">", "orphan.pid") or exit 1; print $file "$$\n"; close($file); sleep 60; exit 0 } POSIX::_exit(0) } POSIX::_exit(0)' < /dev/null > /dev/null 2>&1 &
+echo $$ > leader.pid
+exec /bin/sleep 30
+"#;
+
+/// SETSID-L2 r1 L2, the SECAUDIT-SETSID-LEFTOVER option (a) residual the owner accepted
+/// (SETSID-A-RESIDUAL): a Full access headless agent's double fork whose middle process
+/// setsids, forks and exits within microseconds, between two tables the follower takes,
+/// leaves a grandchild running a program whose environment macOS hides. No table showed the
+/// middle, so neither the grandchild's parent nor the unique id it was forked from links it to
+/// the agent: the stop reports clean, or unchecked under load, naming nothing, while it keeps
 /// running. Pins today's result; a later fix that catches it turns this row red on purpose.
 #[test]
 fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
@@ -1066,6 +1145,7 @@ fn group_alive(group: u32) -> bool {
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_groups() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()
@@ -1103,6 +1183,7 @@ fn live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_group
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_interrupt_stops_a_running_turn_through_the_harness_protocol() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()
@@ -1150,6 +1231,7 @@ fn live_interrupt_stops_a_running_turn_through_the_harness_protocol() {
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()
@@ -1191,6 +1273,59 @@ fn live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_
     }
 }
 
+/// A keyed launch of Codex or Claude Code hands its harness a 0600 key file in the account
+/// home that holds the relay's placeholder, never the key, and goes when the session stops.
+/// A stand-in that only sleeps takes the harness's place and the provider is a loopback port
+/// that refuses, so the row needs no model and no network (rv-sec3 engine-hermetic F1).
+#[test]
+fn a_keyed_launch_writes_a_private_placeholder_key_file_that_ends_with_its_session() {
+    let (_refusing, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    assert!(!crazyagent::sandbox::OWNER_PORTS.contains(&port), "{port}");
+    for (harness, name, base_url) in [
+        ("codex", "codex", format!("http://127.0.0.1:{port}/v1")),
+        ("claude-code", "claude", format!("http://127.0.0.1:{port}")),
+    ] {
+        let root = private_dir("ca-launch-keyed-");
+        let home = private_folder(root.path(), "home");
+        let work = private_folder(root.path(), "work");
+        let bin = private_folder(root.path(), "bin");
+        let executable = bin.join(name);
+        std::fs::write(&executable, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let session = Session::start(LaunchRequest {
+            harness: harness.into(),
+            executable,
+            working_dir: work.clone(),
+            account: AccountBinding::Url {
+                home: home.clone(),
+                base_url,
+                key: Some(Secret::new(DUMMY_KEY.into()).unwrap()),
+            },
+            model: Some(LOCAL_MODEL.into()),
+            tools: false,
+            sandbox_profile: Some(project_profile(&work, &home)),
+            unconfined: false,
+            git_identity: None,
+            limits: LaunchLimits::default(),
+        })
+        .unwrap();
+        let key_file = home.join(KEY_FILE);
+        let written = std::fs::read_to_string(&key_file).unwrap();
+        assert!(is_placeholder(&written), "{harness}");
+        assert!(!written.contains(DUMMY_KEY), "{harness}");
+        assert_eq!(
+            std::fs::metadata(&key_file).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "{harness}"
+        );
+        session.stop().unwrap();
+        assert!(
+            !key_file.exists(),
+            "{harness}: the key file ends with its session"
+        );
+    }
+}
+
 fn project_profile(work: &Path, home: &Path) -> PathBuf {
     let profile = work.join("project.sb");
     let rules = format!(
@@ -1203,6 +1338,7 @@ fn project_profile(work: &Path, home: &Path) -> PathBuf {
 }
 
 #[test]
+#[ignore = "live qualification: needs Codex and Claude Code installed and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 fn live_tools_on_turn_completes_inside_the_project_sandbox() {
     let _owner = LOCAL_MODEL_OWNER
         .lock()

@@ -166,8 +166,17 @@ function harnessRow(harness, displays) {
 
 const ENGINE_ROWS = [harnessRow("claude-code", BOTH_DISPLAYS), harnessRow("codex", BOTH_DISPLAYS), harnessRow("rcli", ["classic"])];
 
-test("one Terminal display row serves every harness with Classic as the default, and each option shows as chosen with its own words (N-D9, DEC-141)", () => {
-  assert.equal(coord.COORD_DEFAULTS.terminal_display, "classic");
+test("the desktop's Terminal display default is the engine's, Fullscreen, so both apps show the same default (DEC-174 add. 2)", () => {
+  const source = readFileSync(new URL("../../../crates/crazyagent/src/coord/settings.rs", import.meta.url), "utf8");
+  const block = source.slice(source.indexOf("pub enum TerminalDisplay"), source.indexOf("}", source.indexOf("pub enum TerminalDisplay")));
+  const engine = block.match(/#\[default\]\s*(\w+)/u)?.[1];
+  assert.equal(engine, "Fullscreen");
+  assert.equal(coord.COORD_DEFAULTS.terminal_display, engine.toLowerCase());
+  assert.equal(coord.coordination({ coordination: undefined }).settings.terminal_display, "fullscreen", "an engine that sends no coordination shows Fullscreen");
+});
+
+test("one Terminal display row serves every harness with Fullscreen as the default, and each option shows as chosen with its own words (N-D9, DEC-141)", () => {
+  assert.equal(coord.COORD_DEFAULTS.terminal_display, "fullscreen");
   assert.deepEqual(coord.DISPLAY_OPTIONS, [{ value: "classic", label: "Classic" }, { value: "fullscreen", label: "Fullscreen" }]);
   assert.equal(typeof coord.TerminalDisplaySetting, "function", "the display has its own row, outside the per-harness groups");
   const status = (terminal_display) => ({ project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, terminal_display }, harnesses: ENGINE_ROWS } });
@@ -241,7 +250,7 @@ function coordEngine(stored) {
     seen.sent.push(args.settings);
     await new Promise((done) => setTimeout(done, 20));
     running -= 1;
-    const refused = args.settings.terminal_display === "fullscreen";
+    const refused = args.settings.terminal_display === "classic";
     if (!refused) stored[args.id] = { ...args.settings };
     return { outcome: "applied", pending: false, rejection: refused ? "team_settings_invalid" : null };
   } } };
@@ -256,12 +265,12 @@ test("quick coordination saves from any row keep every change: one save at a tim
   const both = await Promise.all([coord.saveCoordSettings("p1", { overlaps: "block" }), coord.saveCoordSettings("p1", { nudges: "ten_minutes" })]);
   assert.deepEqual(both.map((result) => result.kind), ["ok", "ok"]);
   assert.equal(engine.most, 1, "one coordination save runs at a time");
-  assert.deepEqual(engine.sent.map(pick), [["block", "off", "on", "classic"], ["block", "ten_minutes", "on", "classic"]], "the second save keeps Block");
-  await coord.saveCoordSettings("p1", { terminal_display: "fullscreen" });
+  assert.deepEqual(engine.sent.map(pick), [["block", "off", "on", "fullscreen"], ["block", "ten_minutes", "on", "fullscreen"]], "the second save keeps Block");
+  await coord.saveCoordSettings("p1", { terminal_display: "classic" });
   await coord.saveCoordSettings("p1", { nudges: "first_edit" });
-  assert.deepEqual(pick(engine.sent[3]), ["block", "first_edit", "on", "classic"], "a refused save is not built on");
+  assert.deepEqual(pick(engine.sent[3]), ["block", "first_edit", "on", "fullscreen"], "a refused save is not built on");
   await coord.saveCoordSettings("p2", { task_start: "off" });
-  assert.deepEqual(pick(engine.sent[4]), ["warn", "off", "off", "classic"], "each project keeps its own saves");
+  assert.deepEqual(pick(engine.sent[4]), ["warn", "off", "off", "fullscreen"], "each project keeps its own saves");
 });
 
 test("a coordination save keeps the value the TUI or another window set since, even one equal to an older read, and sends nothing when the team read fails", async () => {
@@ -270,10 +279,10 @@ test("a coordination save keeps the value the TUI or another window set since, e
   await coord.saveCoordSettings("p", { overlaps: "block" });
   stored.p = { ...stored.p, overlaps: "warn" };
   await coord.saveCoordSettings("p", { nudges: "ten_minutes" });
-  assert.deepEqual(pick(engine.sent[1]), ["warn", "ten_minutes", "on", "classic"], "Warn set back elsewhere stays");
+  assert.deepEqual(pick(engine.sent[1]), ["warn", "ten_minutes", "on", "fullscreen"], "Warn set back elsewhere stays");
   stored.p = { ...stored.p, overlaps: "block" };
   await coord.saveCoordSettings("p", { task_start: "off" });
-  assert.deepEqual(pick(engine.sent[2]), ["block", "ten_minutes", "off", "classic"], "Block set elsewhere stays");
+  assert.deepEqual(pick(engine.sent[2]), ["block", "ten_minutes", "off", "fullscreen"], "Block set elsewhere stays");
   assert.deepEqual((await coord.saveCoordSettings("missing", { nudges: "off" })).kind, "not_ready", "a failed team read is the save's result");
   assert.equal(engine.sent.length, 3, "nothing is sent without the engine's settings");
   assert.throws(() => coord.saveCoordSettings("p", {}), /changes at least one setting/);

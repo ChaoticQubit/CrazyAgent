@@ -927,6 +927,7 @@ async fn wiring_an_account_check_slower_than_the_owner_wait_still_answers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 async fn local_model_discovery_reads_the_real_ollama() {
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
@@ -938,6 +939,16 @@ async fn local_model_discovery_reads_the_real_ollama() {
         models.iter().any(|model| model == "qwen2.5:0.5b"),
         "real local ollama models: {models:?}"
     );
+    fixture.stop().await;
+}
+
+/// Local model discovery through the owner API refuses a URL off this machine with its
+/// plain code before any connect, so the default suite keeps this half of the live row
+/// above. Input: none. Output: none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_model_discovery_refuses_a_url_off_this_machine() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
     assert_eq!(
         client
             .local_models("http://example.com:11434/v1".into())
@@ -953,6 +964,7 @@ async fn local_model_discovery_reads_the_real_ollama() {
 /// API: the engine reads the model list Ollama really serves at /v1/models. This is the
 /// real-provider counterpart of the stand-in server wiring tests; Ollama ignores the key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 async fn an_openai_compatible_account_check_lists_the_real_ollama_models() {
     let fixture = Fixture::start().await;
     let client = fixture.client().await;

@@ -519,18 +519,17 @@ struct Authority {
 }
 
 /// Removes what an earlier engine left at a runner folder's place beside the engine's root
-/// (RV-DS241-77): a folder with all it holds, or a file or link itself, never what a link
-/// names. No runner of this engine owns that place, as each slot's folder is named by its
-/// index and a new slot takes the next free index. Takes the folder's path. Returns Ok once
-/// nothing has that name, or the I/O error.
+/// (RV-DS241-77): a folder with all it holds, clearing the flags, modes and ACLs its runner
+/// set there when a plain delete stops (G5 sec F1), or a file or link itself, never what a
+/// link names. No runner of this engine owns that place: a new slot takes the next free
+/// index. Takes the folder's path. Returns Ok once nothing has that name, or the failure.
 fn clear_stale_runner(path: &Path) -> Result<(), EngineError> {
-    let removed = match std::fs::symlink_metadata(path) {
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(problem) => Err(problem),
-        Ok(found) if found.is_dir() => std::fs::remove_dir_all(path),
-        Ok(_) => std::fs::remove_file(path),
-    };
-    removed.map_err(io_error)
+    match std::fs::symlink_metadata(path) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(problem) => Err(io_error(problem)),
+        Ok(found) if found.is_dir() => crate::team::cleanup::remove_agent_tree(path),
+        Ok(_) => std::fs::remove_file(path).map_err(io_error),
+    }
 }
 
 impl Authority {

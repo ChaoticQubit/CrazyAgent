@@ -215,6 +215,11 @@ export function icloudProgressLine(progress: IcloudProgress | null): string {
 /** How often the app reads the engine's intake job while one runs. */
 export const INTAKE_POLL_MS = 1000;
 
+/** How long the app waits between reads nothing on screen follows closely: the intake job
+ * while none runs, and the found folders on pages other than Home. The window taking the
+ * focus back reads both at once. */
+export const IDLE_POLL_MS = 30_000;
+
 /** Whether the job is still at work: downloading, waiting for agents to stop, copying, moving
  * folders to the Trash, building a New Project or clearing. Input: the job, if any. Output:
  * true while it runs. */
@@ -265,10 +270,19 @@ export function startReached(source: string, after: IntakeJob | null, before: Re
 }
 
 /** How long until the app reads the intake job again: every second while one runs, else at
- * the found-folder pace, so a job another client started shows up too. Input: the last read
- * job. Output: the wait in ms. */
+ * the idle pace, so a job another client started shows up too. This app's own jobs and the
+ * window taking the focus back read it at once. Input: the last read job. Output: the wait in
+ * ms. */
 export function intakePollMs(job: IntakeJob | null): number {
-  return jobRunning(job) ? INTAKE_POLL_MS : FOUND_POLL_MS;
+  return jobRunning(job) ? INTAKE_POLL_MS : IDLE_POLL_MS;
+}
+
+/** How long until the app reads the found folders again: at the found-folder pace while Home
+ * shows their states, else at the idle pace, since off Home they only feed the sidebar and a
+ * job's end and the window taking the focus back read them at once. Input: whether Home is
+ * shown. Output: the wait in ms. */
+export function foundPollMs(home: boolean): number {
+  return home ? FOUND_POLL_MS : IDLE_POLL_MS;
 }
 
 /** What the job does now or how it ended, with the folder's name and the counts as files land,
@@ -280,7 +294,7 @@ export function jobLine(job: IntakeJob): string {
   const moving = job.kind === "move_project";
   if (jobRunning(job) && job.stopping) return `Stopping ${name}...`;
   if (job.kind === "delete") return deleteLine(name, now);
-  if (job.kind === "setup") return setupLine(name, now);
+  if (job.kind === "setup") return setupLine(job.id, name, now);
   switch (now.state) {
     case "downloading": {
       const { done, total } = now.progress;
@@ -313,7 +327,7 @@ export function jobLine(job: IntakeJob): string {
     case "cut_short":
       return deleteLine(name, now);
     case "building":
-      return setupLine(name, now);
+      return setupLine(job.id, name, now);
   }
 }
 
@@ -350,11 +364,21 @@ function deleteLine(name: string, now: IntakeJob["state"]): string {
   }
 }
 
+let carriedSetup: { id: string; line: string } | null = null;
+
+/** Keeps how the pool and agent access follow-ups of a New Project job this window started
+ * ended, so its Done line says that in place of the Settings sentence (DEC-177 add.2 Q1 B);
+ * the engine runs one such job at a time. Inputs: the job id and the follow-ups' sentence. */
+export function noteSetupCarried(id: string, line: string): void {
+  if (id === "" || line === "") throw new Error("a carried New Project names its job and its end");
+  carriedSetup = { id, line };
+}
+
 /** What a New Project does now or how it ended (DEC-177 add.2), with the project's name and
- * how many of its documents were copied once they are counted; Done names the project's
- * Settings, since the page's pool and agent access follow-ups run only while it stays open.
- * Inputs: the name and the state. Output: one sentence. */
-function setupLine(name: string, now: IntakeJob["state"]): string {
+ * how many of its documents were copied once they are counted; Done says how the pool and
+ * agent access follow-ups ended when this window ran them, else names the project's Settings.
+ * Inputs: the job id, the name and the state. Output: one sentence. */
+function setupLine(id: string, name: string, now: IntakeJob["state"]): string {
   switch (now.state) {
     case "building": {
       if (now.done > now.total) throw new Error(`setup copied ${now.done} is past total ${now.total}`);
@@ -362,7 +386,7 @@ function setupLine(name: string, now: IntakeJob["state"]): string {
       return `Setting up ${name}: ${now.done} of ${now.total} document${now.total === 1 ? "" : "s"} copied`;
     }
     case "done":
-      return `${name} is set up. Choose its pool and agent access in its Settings.`;
+      return carriedSetup?.id === id ? carriedSetup.line : `${name} is set up. Choose its pool and agent access in its Settings.`;
     case "cancelled":
       return `Setting up ${name} stopped. Nothing was kept.`;
     case "failed":

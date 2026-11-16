@@ -119,6 +119,7 @@ pub(super) struct ListedSpec<'a> {
 pub(super) struct ListedLaunch {
     pub(super) command: Command,
     pub(super) servers: Vec<EngineServer>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) written: Vec<PathBuf>,
 }
 

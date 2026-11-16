@@ -53,7 +53,7 @@ fn rejection(response: &OwnerResponse) -> Option<String> {
     match response {
         OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
             match &operation.result {
-                OwnerResult::Applied => None,
+                OwnerResult::Applied | OwnerResult::OnboardingStarted { .. } => None,
                 OwnerResult::Rejected { code } => Some(code.clone()),
                 other => panic!("unexpected owner result: {other:?}"),
             }

@@ -15,6 +15,7 @@ fn refused_page(name: &str) -> NewProjectPage {
         creation: None,
         checking: false,
         asked: false,
+        carried: false,
     }
 }
 
@@ -97,4 +98,29 @@ fn a_stopped_or_refused_new_project_job_is_said_in_new_project_words() {
     let (title, detail) = said("project_folder_unavailable");
     assert_eq!(title, "Could not copy a document.");
     assert!(detail.contains("without documents"), "{detail}");
+}
+
+/// DEC-178: a New Project named like a project the owner removed is refused in New project's
+/// words and Enter goes back to the name, the only thing that gets a new id.
+#[test]
+fn a_new_project_named_like_a_removed_one_goes_back_to_the_name() {
+    let (title, detail) = said("project_id_removed");
+    assert_eq!(title, "Could not create the project.");
+    assert_eq!(
+        detail,
+        "A project you removed used this name, so it can't be used again. Choose another project name."
+    );
+    let mut wizard = named("Tidepool");
+    wizard.failed("project_id_removed");
+    assert!(
+        matches!(
+            wizard.phase,
+            Phase::Failed {
+                step: super::super::new_project::Step::About,
+                ..
+            }
+        ),
+        "Enter goes to the name: {:?}",
+        wizard.phase
+    );
 }

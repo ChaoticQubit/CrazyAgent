@@ -43,6 +43,7 @@ fn wait_for(deadline: Duration, mut done: impl FnMut() -> bool) {
 
 #[cfg(target_os = "macos")]
 #[test]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b and Codex installed"]
 fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
     let runtime = EngineRuntime::with_projects(&[(
         "project-a",

@@ -40,6 +40,9 @@ mod live_terminal_probe_tests;
 #[path = "freeze_tests.rs"]
 mod freeze_tests;
 
+#[path = "hidden_seers_tests.rs"]
+mod hidden_seers_tests;
+
 #[cfg(target_os = "macos")]
 #[path = "stop_race_tests.rs"]
 mod stop_race_tests;
@@ -4318,7 +4321,9 @@ fn an_owner_stop_of_a_clashing_sub_agent_leaves_its_set_for_the_owner() {
 
 /// The owner asks a sub-agent that has stopped to update its change set: the resolve task
 /// is pinned to that agent's worktree, so the same agent comes back in the same worktree
-/// and works on it, and no other sub-agent or worktree is started for it.
+/// and works on it, and no other sub-agent or worktree is started for it. The owner first
+/// cancels the task its stop held for it, since a resolve task waits behind held work and
+/// keeps its own pin (RV-DS241-123, GB-4).
 #[cfg(target_os = "macos")]
 #[test]
 fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
@@ -4442,12 +4447,35 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
     let sets = crate::landing::list(&db, &fixture.setup.project_id).unwrap();
     assert_eq!(sets.len(), 1, "{sets:?}");
     assert_eq!(sets[0].agent.id, member.id.to_string());
+    let held: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM team_tasks WHERE prompt='Write page.md' AND status='queued'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::Cancel {
+                project_id: fixture.setup.project_id.clone(),
+                task: Some(held),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    assert_eq!(task_of(&fixture, "Write page.md").0, "cancelled");
     assert!(crate::landing_turns::update(&db, &sets[0].id).unwrap());
     let prompt = crate::landing::resolve_task_prompt(&db, &sets[0].id).unwrap();
     let resolve: i64 = fixture
         .connection
         .query_row(
-            "SELECT task FROM team_task_pins WHERE agent=?1",
+            "SELECT task FROM team_task_pins WHERE agent=?1 AND resolve=1",
             [member.id],
             |row| row.get(0),
         )
@@ -5579,7 +5607,9 @@ fn an_owner_line_waits_until_the_live_masters_app_reads_keys() {
 /// R10-M1 / F1: while the engine cannot watch a new live master's first screen, as when
 /// every terminal viewer of the host is taken, the owner's line waits and the engine looks
 /// again on the next pass; once a viewer is free the app's screen is watched as usual and
-/// the line opens a turn, instead of waiting forever.
+/// the line opens a turn, instead of waiting forever. Views count per pane and per server,
+/// so the row takes every view the server serves, over enough other panes, since the live
+/// master's own pane has none (GB-5).
 #[cfg(target_os = "macos")]
 #[test]
 fn an_owner_line_reaches_a_live_master_once_its_first_screen_can_be_watched() {
@@ -5587,21 +5617,37 @@ fn an_owner_line_reaches_a_live_master_once_its_first_screen_can_be_watched() {
     let host = fixture.host();
     let mut team = live_runtime(&fixture, &host, LIVE_CODEX);
     let project = fixture.setup.project_id.clone();
-    let held = AgentId::new("viewers-held").unwrap();
     let command = InteractiveCommand {
         argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/sleep 300".into()],
         cwd: fixture.base.clone(),
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&held, &command).unwrap();
-    let viewers: Vec<_> = (0..crate::terminal::VIEWERS_MAX)
-        .map(|_| host.attach(&held).unwrap())
+    let (all, per_pane) = (
+        crate::terminal::CONNECTIONS_MAX,
+        crate::terminal::VIEWERS_MAX,
+    );
+    let held: Vec<AgentId> = (0..=all.div_ceil(per_pane))
+        .map(|at| AgentId::new(&format!("viewers-held-{at}")).unwrap())
         .collect();
+    for pane in &held {
+        host.spawn(pane, &command).unwrap();
+    }
+    let (fresh, filled) = held.split_last().unwrap();
+    let mut viewers = Vec::new();
+    for pane in filled {
+        while viewers.len() < all {
+            match host.attach(pane) {
+                Ok(view) => viewers.push(view),
+                Err(full) if full.0 == "terminal_viewers_full" => break,
+                Err(other) => panic!("{other:?}"),
+            }
+        }
+    }
     assert_eq!(
-        host.attach(&held).map(drop).unwrap_err().0,
+        host.attach(fresh).map(drop).unwrap_err().0,
         "terminal_viewers_full",
-        "every viewer of the host is taken"
+        "a pane with no view of its own finds every viewer of the host taken"
     );
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
     fixture.until(&mut team, "the live master's pane runs", |f| {
@@ -9150,6 +9196,7 @@ fn an_idle_stopped_live_master_starts_again_on_the_same_conversation() {
         fixture.status().live_idle_stopped,
         "the idle stop is told apart"
     );
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::Off);
     start_again(&fixture);
     fixture.until(&mut team, "the master runs again", |f| {
         live_agent(&f.connection) == Some(id) && f.agent_status(id).0 == AgentStatus::Idle
@@ -9204,6 +9251,7 @@ fn an_idle_stopped_live_master_with_no_owner_turn_starts_again() {
         fixture.status().live_idle_stopped,
         "the idle stop is told apart"
     );
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::Off);
     start_again(&fixture);
     fixture.until(&mut team, "the master runs again", |f| {
         live_agent(&f.connection) == Some(id) && f.agent_status(id).0 == AgentStatus::Idle
@@ -12597,6 +12645,7 @@ fn own_turn_outliving(
         Some(LaunchEvent::Ready { .. })
     ));
     session.follow_own_turns();
+    std::fs::create_dir_all(home.join(".cache")).unwrap();
     std::fs::write(home.join(".cache/go"), "").unwrap();
     let (order, orders) = channel();
     let (reports, reported) = channel();
@@ -15499,6 +15548,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
+        hidden: Vec::new(),
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),
@@ -17504,6 +17554,7 @@ fn between_turns(
         reasked: None,
         starts: crate::coord::relay::TaskStarts::default(),
         after_done: AfterDone::default(),
+        hidden: None,
     }
 }
 
@@ -23403,6 +23454,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
+        hidden: Vec::new(),
     }
 }
 
@@ -23935,26 +23987,27 @@ fn team_terminal_display(fixture: &Fixture, runtime: &TeamRuntime) -> Vec<(Strin
         .collect()
 }
 
-/// A team Claude Code terminal of a project that never chose a display starts Classic
-/// (N-D9): Claude Code's alternate screen is off, so the app's view scrolls with the wheel.
+/// A team Claude Code terminal of a project that never chose a display starts Fullscreen
+/// (DEC-174 add. 2): Claude Code's fullscreen renderer at 3 rows a notch on its alternate
+/// screen, so a resize of the pane leaves no repainted copy of a reply in its history.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_team_claude_code_terminal_starts_classic_by_default() {
+fn a_team_claude_code_terminal_starts_fullscreen_by_default() {
     let fixture = Fixture::new(1);
     let mut runtime = exiting_claude_runtime(&fixture);
     assert_eq!(
         team_terminal_display(&fixture, &runtime),
-        [(
-            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
-            "1".to_owned()
-        )]
+        [
+            ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
+            ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned())
+        ]
     );
     runtime.shutdown().unwrap();
 }
 
-/// The display is read when each agent is prepared (N-D9): after the owner picks Fullscreen
-/// the next team Claude Code terminal asks for Claude Code's fullscreen renderer at 3 rows a
-/// notch (R8-FS), and after Classic again the next one turns the alternate screen off.
+/// The display is read when each agent is prepared (N-D9): after the owner picks Classic the
+/// next team Claude Code terminal turns the alternate screen off, and after Fullscreen again
+/// the next one asks for Claude Code's fullscreen renderer at 3 rows a notch (R8-FS).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_team_claude_code_terminal_gets_the_display_the_owner_chose_last() {
@@ -23973,14 +24026,6 @@ fn a_team_claude_code_terminal_gets_the_display_the_owner_chose_last() {
         )
         .unwrap();
     };
-    choose(TerminalDisplay::Fullscreen);
-    assert_eq!(
-        team_terminal_display(&fixture, &runtime),
-        [
-            ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
-            ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned())
-        ]
-    );
     choose(TerminalDisplay::Classic);
     assert_eq!(
         team_terminal_display(&fixture, &runtime),
@@ -23988,6 +24033,14 @@ fn a_team_claude_code_terminal_gets_the_display_the_owner_chose_last() {
             "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
             "1".to_owned()
         )]
+    );
+    choose(TerminalDisplay::Fullscreen);
+    assert_eq!(
+        team_terminal_display(&fixture, &runtime),
+        [
+            ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
+            ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned())
+        ]
     );
     runtime.shutdown().unwrap();
 }
@@ -25170,6 +25223,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
+        hidden: Vec::new(),
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),
@@ -29868,6 +29922,57 @@ fn an_agent_refused_for_skills_left_in_its_codex_home_says_what_happened() {
     );
 }
 
+/// RESET-WALK-CODE code r1 F1: a team agent whose cargo home could not be made because
+/// removing a cargo name ran past its walk budget says so in its start line with its code
+/// kept, and any other failure keeps the cargo home line with its io code.
+#[test]
+fn an_agent_whose_cargo_name_walk_ran_past_its_budget_says_so_in_its_start_line() {
+    let walked = std::io::Error::other(crate::team::cleanup::WALK_TOO_LONG);
+    let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+    assert_eq!(
+        cargo_home_problem(&walked),
+        "The agent could not start: its home folder held too many files to reset at once, or \
+         something kept adding files to it. Try again. (cleanup_walk_too_long)"
+    );
+    assert_eq!(
+        cargo_home_problem(&missing),
+        "the agent cargo home could not be made. (io_not_found)"
+    );
+}
+
+/// RESET-WALK-CODE code r1 F1: a native lead whose teammates' home reset or cargo name
+/// removal ran past its walk budget says so in its start line with its code kept, and any
+/// other failure keeps the teammates' home line with its code.
+#[cfg(unix)]
+#[test]
+fn a_lead_whose_teammates_home_walk_ran_past_its_budget_says_so_in_its_start_line() {
+    let walked = EngineError("cleanup_walk_too_long".into());
+    let changed = EngineError("team_shared_folder_changed".into());
+
+    assert_eq!(
+        mates_home_problem(&walked),
+        "The agent could not start: its home folder held too many files to reset at once, or \
+         something kept adding files to it. Try again. (cleanup_walk_too_long)"
+    );
+    assert_eq!(
+        mates_home_problem(&changed),
+        "the teammates' home could not be made. (team_shared_folder_changed)"
+    );
+}
+
+/// RESET-WALK-CODE: a launch refused because resetting the agent's home ran past its walk
+/// budget says so in words, with its code kept, and asks for another try, since a refused
+/// pass already removed what it reached.
+#[test]
+fn an_agent_refused_for_a_home_reset_past_its_walk_budget_says_what_happened() {
+    assert_eq!(
+        start_problem(&LaunchError("cleanup_walk_too_long".into(), None)),
+        "The agent could not start: its home folder held too many files to reset at once, or \
+         something kept adding files to it. Try again. (cleanup_walk_too_long)"
+    );
+}
+
 /// SA vid 12: an agent is not started while a hold still lists commands a sandboxed run of
 /// it left that the owner has not ended, since they write where the agent does and its next
 /// run would run what they leave in its home. The refusal says what to do, with its code
@@ -30398,6 +30503,7 @@ fn ended_native_lead_on<T>(
     let written = plan.working_dir.join("left.pid");
     let deadline = Instant::now() + WAIT;
     let pid = loop {
+        hand_warden_pid(&plan.working_dir);
         let read = [&written, &teammate_wrote].iter().find_map(|path| {
             std::fs::read_to_string(path)
                 .ok()
@@ -30451,17 +30557,70 @@ tmux -S "$s" kill-window -t crazyagent:_crazyagent || exit 1
 exec /bin/sleep 300
 "#;
 
+/// Answers a stand-in that asks for the warden of its own server (FBTMUX-P1-R1-L1 r1): once
+/// `warden.ask` in the lead's folder names the server's process, writes the one `perl` child
+/// of that process, found from outside the sandbox where `ps` runs, to `warden.pid`. The
+/// lead's profile runs no process lister, so the stand-in cannot find the warden itself; it
+/// still sends the kill from inside. Input: the lead's folder. Output: none.
+#[cfg(target_os = "macos")]
+fn hand_warden_pid(folder: &Path) {
+    let answer = folder.join("warden.pid");
+    if answer.exists() {
+        return;
+    }
+    let Some(server) = std::fs::read_to_string(folder.join("warden.ask"))
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
+    else {
+        return;
+    };
+    assert!(server > 1, "the stand-in named a server process");
+    let listed = crate::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-ax", "-o", "pid=,ppid=,comm="])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(listed.status.success(), "ps listed the processes");
+    let wardens: Vec<u32> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let parent = fields.next()?.parse::<u32>().ok()?;
+            let command = fields.next()?;
+            (parent == server && command.ends_with("perl")).then_some(pid)
+        })
+        .collect();
+    assert_eq!(
+        wardens.len(),
+        1,
+        "the lead's server {server} has one warden: {wardens:?}"
+    );
+    let staged = folder.join("warden.pid.part");
+    std::fs::write(&staged, format!("{}\n", wardens[0])).unwrap();
+    std::fs::rename(&staged, &answer).unwrap();
+}
+
 /// A stand-in Claude Code that, run as a native lead, kills the warden of its own server,
-/// which the keeper's shim forks inside the lead's sandbox as the server's child, and ends
-/// that server's holder window (FBTMUX-P1-R1-L1 r1), so neither the warden nor the holder
-/// ends the server; then it writes its own id to `left.pid` and waits. A refused kill or
-/// end fails the row.
+/// which the keeper's shim forks as the server's child inside the server's sandbox, the one
+/// the lead's pane runs nested in, and ends that server's holder window (FBTMUX-P1-R1-L1
+/// r1), so neither the warden nor the holder ends the server; then it writes its own id to
+/// `left.pid` and waits. Its profile runs no process lister, so it asks the row for the
+/// warden's id through `warden.ask` and [`hand_warden_pid`], and sends the kill itself. A
+/// refused kill or end, or no answer within 30 s, fails the row.
 #[cfg(target_os = "macos")]
 const WARDEN_ENDING_CLAUDE: &str = r#"#!/bin/sh
 t="${TMPDIR%/}"
 s="${t%/*}/tmux.sock"
 p=$(tmux -S "$s" display-message -p '#{pid}') && [ -n "$p" ] || exit 1
-/usr/bin/pkill -9 -P "$p" perl || exit 1
+echo "$p" > "$PWD/warden.ask.part" && mv "$PWD/warden.ask.part" "$PWD/warden.ask" || exit 1
+i=0
+until [ -s "$PWD/warden.pid" ]; do i=$((i+1)); [ "$i" -le 300 ] || exit 1; /bin/sleep 0.1; done
+kill -9 "$(cat "$PWD/warden.pid")" || exit 1
 tmux -S "$s" kill-window -t crazyagent:_crazyagent || exit 1
 exec /usr/bin/perl -e 'open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid"
 "#;
@@ -30564,8 +30723,9 @@ fn a_native_lead_that_ends_its_holder_window_still_ends_at_its_deadline() {
     );
 }
 
-/// FBTMUX-P1-R1-L1 r1: a native lead that kills its own server's warden, which runs inside
-/// its sandbox, and ends its holder window still has its own server, its teammates' server
+/// FBTMUX-P1-R1-L1 r1: a native lead that kills its own server's warden, which runs in the
+/// server's sandbox that the lead's pane is nested in, and ends its holder window still has
+/// its own server, its teammates' server
 /// and its own process end at the deadline the engine last renewed, since the keeper ends
 /// the server it started from outside the sandbox.
 #[cfg(target_os = "macos")]
@@ -32032,7 +32192,10 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         }
     }
     if exit("control_cache").as_deref() != Some("0") {
-        problems.push(format!("control_cache refused: {:?}", exit("control_cache")));
+        problems.push(format!(
+            "control_cache refused: {:?}",
+            exit("control_cache")
+        ));
     }
     for entry in [
         ".gitconfig",

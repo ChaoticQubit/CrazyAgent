@@ -155,17 +155,25 @@ export function readQuiet() {
   return { load1, compilers, memoryLevel, onAC, screenLocked, busy };
 }
 
+/** The kinds of WebKit helper process the speed rows read, as their process names end. */
+export const WEBKIT_KINDS = ["WebContent", "Networking", "GPU"];
+
+/** Finds the WebKit helpers in a `ps -axo pid=,comm=` listing. Input: the listing. Output:
+ * `[{ pid, kind }]` for every WebContent, Networking and GPU process, in listing order. */
+export function webkitHelpersIn(listing) {
+  const helpers = listing.split("\n").flatMap((line) => {
+    const found = line.trim().match(/^(\d+)\s+(?:.*\/)?com\.apple\.WebKit\.(WebContent|Networking|GPU)$/);
+    return found ? [{ pid: Number(found[1]), kind: found[2] }] : [];
+  });
+  assert.ok(helpers.every(({ pid, kind }) => Number.isInteger(pid) && pid > 1 && WEBKIT_KINDS.includes(kind)));
+  return helpers;
+}
+
 /** WebKit helper processes run under launchd, not under the app, and their command lines name
  * no client; the speed rows find the ones the app started as the pids new since its launch.
- * Input: none. Output: the pids of every WebKit WebContent, Networking and GPU process. */
+ * Input: none. Output: `[{ pid, kind }]` for every WebKit helper running now. */
 export function webkitHelpers() {
-  const listed = output("/bin/ps", ["-axo", "pid=,comm="]).split("\n");
-  const pids = listed.flatMap((line) => {
-    const found = line.trim().match(/^(\d+)\s+(?:.*\/)?com\.apple\.WebKit\.(WebContent|Networking|GPU)$/);
-    return found ? [Number(found[1])] : [];
-  });
-  assert.ok(pids.every((pid) => Number.isInteger(pid) && pid > 1));
-  return pids;
+  return webkitHelpersIn(output("/bin/ps", ["-axo", "pid=,comm="]));
 }
 
 /** Reads one process's memory footprint, the number Activity Monitor shows as Memory.
@@ -182,7 +190,8 @@ export function footprintMb(pid) {
 /** Fewest valid samples per side a metric needs to be judged (DEC-169 keeps 10). */
 export const KEPT_MIN = 8;
 /** Metrics read and shown but never failing a run until their reading is proven (DEC-169 Q9). */
-export const REPORT_ONLY = new Set(["memory_webkit_mb"]);
+export const REPORT_ONLY = new Set(["memory_webkit_mb", "memory_webkit_idle_mb", "memory_app_idle_mb",
+  ...WEBKIT_KINDS.flatMap((kind) => [`memory_webkit_${kind.toLowerCase()}_mb`, `memory_webkit_${kind.toLowerCase()}_idle_mb`])]);
 /** Metrics a run may lack: the launch is only timed when the spec's first look comes before
  * Home is usable; `launch_webview_ms` and `reload_home_ms` always time the launch path. */
 const OPTIONAL = new Set(["launch_ms"]);
@@ -205,13 +214,25 @@ export function sampleMetrics(engine, app) {
   metrics.launch_webview_ms = app.launch.webview_ms;
   metrics.reload_home_ms = app.launch.reload_ms;
   metrics.engine_start_ms = engine.engine_start_ms;
+  if (engine.onboard_start_ms !== undefined && engine.onboard_start_ms !== null) metrics.onboard_start_ms = engine.onboard_start_ms;
   for (const [name, ms] of Object.entries(app.big)) metrics[`big_${name}`] = ms;
   for (const [page, ms] of Object.entries(app.switch_cold)) metrics[`switch_cold_${page}_ms`] = ms;
   for (const [page, ms] of Object.entries(app.switch_warm)) metrics[`switch_warm_${page}_ms`] = ms;
   for (const [cmd, times] of Object.entries(engine.round_trip_ms)) metrics[`round_trip_${cmd}_ms`] = summary(times).median;
   metrics.memory_engine_mb = app.memory.engine_mb;
   metrics.memory_app_mb = app.memory.app_mb;
-  metrics.memory_webkit_mb = round(app.memory.webkit_mb.reduce((total, mb) => total + mb, 0));
+  const { webkit_mb: webkit, webkit_kinds: kinds, idle } = app.memory;
+  assert.ok(Array.isArray(kinds) && kinds.length === webkit.length, "a kind for each WebKit helper");
+  assert.ok(idle && Array.isArray(idle.webkit_mb) && idle.webkit_mb.length === webkit.length, "an idle reading for each WebKit helper");
+  metrics.memory_webkit_mb = round(webkit.reduce((total, mb) => total + mb, 0));
+  metrics.memory_app_idle_mb = idle.app_mb;
+  metrics.memory_webkit_idle_mb = round(idle.webkit_mb.reduce((total, mb) => total + mb, 0));
+  for (const [index, kind] of kinds.entries()) {
+    assert.ok(WEBKIT_KINDS.includes(kind), `a WebKit helper kind: ${kind}`);
+    const name = `memory_webkit_${kind.toLowerCase()}`;
+    metrics[`${name}_mb`] = round((metrics[`${name}_mb`] ?? 0) + webkit[index]);
+    metrics[`${name}_idle_mb`] = round((metrics[`${name}_idle_mb`] ?? 0) + idle.webkit_mb[index]);
+  }
   for (const [metric, value] of Object.entries(metrics)) assert.ok(Number.isFinite(value) && value >= 0, `${metric} is a reading: ${value}`);
   return metrics;
 }
@@ -319,4 +340,49 @@ export function privateFolder(folder) {
   assert.equal(info.uid, process.getuid(), `${folder} is this user's own`);
   assert.equal(info.mode & 0o022, 0, `${folder}: no group or other user can write it`);
   return folder;
+}
+
+/** Runs in the page: clicks an element and times, with the page's clock, until the page at its
+ * address is usable: the clicked link or button marked current, selected or expanded, a heading
+ * in main, no skeleton left in main, and `want` elements matching `extra` when given. A
+ * MutationObserver and a 4 ms check both look. Inputs: the selector, the extra condition, the
+ * count, the limit in ms and WebDriver's callback. Output: `done` with the ms, or an error
+ * at once for a missing or disabled target, which a click could not reach. */
+export function clickUntilUsable(selector, extra, want, limitMs, done) {
+  const target = document.querySelector(selector);
+  if (!target) {
+    done({ error: `nothing matches ${selector}` });
+    return;
+  }
+  if (target.disabled) {
+    done({ error: `${selector} is disabled, so a click would do nothing` });
+    return;
+  }
+  const hash = target.getAttribute("href") ?? location.hash;
+  const marked = () => {
+    const now = document.querySelector(selector);
+    return Boolean(now) && (now.getAttribute("aria-current") === "page" || now.getAttribute("aria-selected") === "true"
+      || now.getAttribute("aria-expanded") === "true");
+  };
+  const ready = () => location.hash === hash && marked() && Boolean(document.querySelector("main h1"))
+    && !document.querySelector("main .skeleton") && (extra === null || document.querySelectorAll(extra).length >= want);
+  let ended = false;
+  let timer = 0;
+  let limit = 0;
+  const observer = new MutationObserver(() => finish());
+  const end = (value) => {
+    if (ended) return;
+    ended = true;
+    observer.disconnect();
+    clearInterval(timer);
+    clearTimeout(limit);
+    done(value);
+  };
+  const began = performance.now();
+  const finish = () => { if (ready()) end({ ms: performance.now() - began }); };
+  target.click();
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
+  timer = setInterval(finish, 4);
+  limit = setTimeout(() => end({ error: `not usable in ${limitMs} ms`, text: document.body.innerText.slice(0, 1500) }), limitMs);
+  finish();
 }

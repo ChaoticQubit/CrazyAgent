@@ -1395,7 +1395,9 @@ async fn a_delete_refused_after_its_plan_records_and_removes_nothing() {
 }
 
 /// A replayed delete records and removes nothing twice: files that appear under the same
-/// names after the first delete stay through the replay and a start.
+/// names after the first delete stay through the replay and a start. The engine drops the
+/// first send's claim on its request id after the reply, so a replay sent before that is
+/// answered `InProgress` and sent again, as a client does (gate race 4).
 /// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
 #[cfg(target_os = "macos")]
 #[tokio::test]
@@ -1430,7 +1432,16 @@ async fn a_replayed_delete_records_and_removes_nothing_twice() {
     assert!(!made[0].exists(), "the first delete removes the files");
     assert_eq!(recorded(&engine), 0, "the first delete clears its record");
     let again = engine_files(engine.root.path(), 9, "job-41-1");
-    let replayed = client.request(request).await.unwrap().response;
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    let replayed = loop {
+        let replayed = client.request(request.clone()).await.unwrap().response;
+        if !matches!(replayed, OwnerResponse::InProgress { .. })
+            || std::time::Instant::now() >= deadline
+        {
+            break replayed;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert!(
         matches!(&replayed, OwnerResponse::Applied { operation } if operation.historical_replay),
         "{replayed:?}"

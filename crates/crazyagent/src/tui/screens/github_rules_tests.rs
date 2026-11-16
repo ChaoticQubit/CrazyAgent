@@ -203,7 +203,7 @@ fn a_default_switch_saves_the_whole_set_once_and_the_standard_setup_comes_back()
     let sent = IntakeQuery::GitHubRuleDefaultsSet {
         rules: without.clone(),
     };
-    assert_eq!(asked(&mut shell), [sent.clone()]);
+    assert_eq!(asked(&mut shell), std::slice::from_ref(&sent));
     shell.key(Key::Down);
     shell.key(Key::Char(' '));
     shell.key(Key::Char('s'));
@@ -296,7 +296,7 @@ fn the_repository_page_sends_one_switch_at_a_time_for_the_repository_it_showed()
         rule: GitHubRule::WikiOff,
         on: true,
     };
-    assert_eq!(asked(&mut shell), [sent.clone()]);
+    assert_eq!(asked(&mut shell), std::slice::from_ref(&sent));
     let rows = render(&mut shell, 80, 24);
     let sending = format!("Sending {}{SENDING_TAIL}", rule_label(GitHubRule::WikiOff));
     assert!(flat(&rows).contains(&sending), "{rows:#?}");
@@ -401,7 +401,7 @@ fn a_failed_switch_keeps_its_problem_and_reads_the_page_again() {
         shell.key(Key::Char(' '));
         let [sent] = <[IntakeQuery; 1]>::try_from(asked(&mut shell)).unwrap();
         shell.arrive(arrival(sent, Err(code.into())));
-        assert_eq!(asked(&mut shell), [read.clone()], "{code}");
+        assert_eq!(asked(&mut shell), std::slice::from_ref(&read), "{code}");
         shell.arrive(arrival(
             read.clone(),
             Ok(IntakeView::Rules(Box::new(page(|_| {})))),
@@ -460,7 +460,7 @@ fn a_long_required_checks_detail_keeps_the_sending_line_and_the_problem_at_80_by
     assert!(ellipsis(&shell, &rows), "{rows:#?}");
     shell.arrive(arrival(sent, Err("github_outcome_unknown".into())));
     let read = IntakeQuery::GitHubRules { project: id };
-    assert_eq!(asked(&mut shell), [read.clone()]);
+    assert_eq!(asked(&mut shell), std::slice::from_ref(&read));
     shell.arrive(arrival(read, Ok(IntakeView::Rules(Box::new(long())))));
     let rows = render(&mut shell, 80, 24);
     assert!(
@@ -519,7 +519,7 @@ fn a_switch_answered_as_changing_waits_for_its_own_result() {
     shell.key(Key::Char(' '));
     let [sent] = <[IntakeQuery; 1]>::try_from(asked(&mut shell)).unwrap();
     shell.arrive(arrival(sent, Err("github_rule_busy".into())));
-    assert_eq!(asked(&mut shell), [read.clone()]);
+    assert_eq!(asked(&mut shell), std::slice::from_ref(&read));
     shell.arrive(arrival(read, Ok(IntakeView::Rules(Box::new(page(|_| {}))))));
     let rows = render(&mut shell, 80, 24);
     assert!(flat(&rows).contains(busy), "{rows:#?}");
@@ -548,7 +548,7 @@ fn a_project_crazyagent_did_not_publish_says_where_its_rules_show() {
             &mut ctx,
         );
         let mut shell = Shell::with(ctx, screen);
-        assert_eq!(asked(&mut shell), [read.clone()]);
+        assert_eq!(asked(&mut shell), std::slice::from_ref(&read));
         shell.arrive(arrival(read.clone(), Err(code.into())));
         let rows = render(&mut shell, 120, 40);
         assert!(flat(&rows).contains(&sentence), "{code}\n{rows:#?}");
@@ -559,7 +559,7 @@ fn a_project_crazyagent_did_not_publish_says_where_its_rules_show() {
         let again = asked(&mut shell);
         if code == "github_unreachable" {
             assert!(shows(&rows, "r Try again"), "{rows:#?}");
-            assert_eq!(again, [read.clone()]);
+            assert_eq!(again, std::slice::from_ref(&read));
         } else {
             assert!(again.is_empty(), "{code}");
         }

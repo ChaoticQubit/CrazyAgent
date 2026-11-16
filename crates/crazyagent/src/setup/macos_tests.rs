@@ -54,6 +54,8 @@ fn leftovers(setup: &Path) -> Vec<String> {
 /// A clean-Mac gate build maps Homebrew's folders for every search the tool resolver makes
 /// ([`crate::tools::homebrew_folders`]); setup's Mac finder takes its `brew` and Homebrew
 /// folders from there too, each that exists, so under the gate it never runs this Mac's own.
+/// On a Mac with none of them the search half checks nothing and the fixed-folder half still
+/// does.
 #[test]
 fn setup_looks_for_homebrew_where_the_tool_resolver_does() {
     let root = root();

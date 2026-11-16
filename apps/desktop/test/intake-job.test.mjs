@@ -24,6 +24,8 @@ test("an intake job line says what it does now, with counts as files land", () =
   assert.equal(intake.jobLine(job({ state: "done" })), "shop is in your projects folder. Set it up from Home.");
   assert.equal(intake.jobLine(job({ state: "cancelled", phase: "copying" })), "Adding shop stopped. Nothing was moved or copied.");
   assert.equal(intake.jobLine(job(failed("home_copy_failed", "copying"))), "shop: Couldn't copy the folder. The original is untouched. Try again.");
+  assert.equal(intake.jobLine(job(failed("home_copy_names_fold", "copying"))), "shop: Two names in the folder differ only in case or accents, and your projects folder can't keep both. Rename one of them, then try again. The original is untouched.");
+  assert.equal(intake.jobLine(job(failed("home_copy_entry_swapped", "copying"))), "shop: Something replaced a file or folder in it while it was being copied, so the copy stopped. The original is untouched. Try again once nothing else is changing the folder.");
   assert.equal(intake.jobLine(job(failed("home_move_source_left", "clearing"))),
     "shop: The folder was added, but part of the original couldn't be removed. What's left there may be newer than the copy, so check it before you delete anything.");
   assert.equal(intake.jobLine(job({ state: "needs_answer", code: "home_move_worktrees" })), "shop needs your answer before it is moved.");
@@ -43,15 +45,20 @@ test("an intake job offers stop while it runs, retry only when nothing landed, a
   assert.deepEqual(intake.jobActions(job({ state: "needs_answer", code: "home_move_worktrees" })), ["answer", "dismiss"]);
 });
 
-test("the app reads the job every second while it runs and at the found-folder pace otherwise", () => {
+test("the app reads the job every second while it runs and every 30 s otherwise", () => {
   assert.equal(intake.INTAKE_POLL_MS, 1000);
-  assert.equal(intake.intakePollMs(null), intake.FOUND_POLL_MS);
+  assert.equal(intake.intakePollMs(null), 30_000);
   assert.equal(intake.intakePollMs(job(downloading(0, 0))), intake.INTAKE_POLL_MS);
   assert.equal(intake.intakePollMs(job({ state: "clearing" })), intake.INTAKE_POLL_MS);
-  assert.equal(intake.intakePollMs(job({ state: "done" })), intake.FOUND_POLL_MS);
+  assert.equal(intake.intakePollMs(job({ state: "done" })), 30_000);
   assert.equal(intake.jobRunning(job(copying(1))), true);
   assert.equal(intake.jobRunning(job({ state: "cancelled", phase: "copying" })), false);
   assert.equal(intake.jobRunning(null), false);
+});
+
+test("the app reads the found folders every 3 s while Home shows them and every 30 s on other pages", () => {
+  assert.equal(intake.foundPollMs(true), 3_000);
+  assert.equal(intake.foundPollMs(false), 30_000);
 });
 
 test("a failed start goes Home only for a job adding this folder that runs, or ended done and is not the job read before the start", () => {

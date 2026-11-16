@@ -141,8 +141,9 @@ async fn a_tab_request_that_cannot_take_the_owner_barrier_in_time_is_refused_bus
 }
 
 /// Codes in the open path's sources that no IDE tab request answers with: the IDE bridge's
-/// replies to the workbench and its extension, the extension approvals, and a line only
-/// logged.
+/// replies to the workbench and its extension, the extension approvals, and the lines only
+/// logged, such as a confined start's temp folder record that could not be written, after
+/// which the start goes on.
 const NOT_OPEN: &[&str] = &[
     "ide_agent_message_outcome_unknown",
     "ide_capability_cleanup_failed",
@@ -168,6 +169,8 @@ const NOT_OPEN: &[&str] = &[
     "ide_request_timeout",
     "ide_request_unavailable",
     "ide_server_group_unrecorded",
+    "ide_server_tmp_left",
+    "ide_server_tmp_unrecorded",
     "ide_session_required",
     "ide_session_taken",
     "ide_show_all_agents_outcome_unknown",

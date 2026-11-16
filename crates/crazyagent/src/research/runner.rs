@@ -4698,8 +4698,8 @@ mod tests {
     }
 
     /// A research job's Claude Code pane gets the display the owner chose for the project's
-    /// terminals (N-D9): Classic while none is saved, Fullscreen once chosen, and a project
-    /// without settings stays Classic.
+    /// terminals (N-D9): the default, Fullscreen, while none is saved (DEC-174 add. 2),
+    /// Classic once chosen, and a project without settings stays at Fullscreen.
     #[test]
     fn a_research_job_reads_the_claude_code_display_of_its_project() {
         use crate::coord::settings::{CoordSettings, TerminalDisplay, write};
@@ -4719,25 +4719,25 @@ mod tests {
         let jobs = ResearchJobs::open(&database).unwrap();
         assert_eq!(
             jobs.terminal_display(&project).unwrap(),
-            TerminalDisplay::Classic
+            TerminalDisplay::Fullscreen
         );
         write(
             &connection,
             &project,
             &CoordSettings {
-                terminal_display: TerminalDisplay::Fullscreen,
+                terminal_display: TerminalDisplay::Classic,
                 ..CoordSettings::default()
             },
         )
         .unwrap();
         assert_eq!(
             jobs.terminal_display(&project).unwrap(),
-            TerminalDisplay::Fullscreen
+            TerminalDisplay::Classic
         );
         let other = ProjectId::new("research-elsewhere").unwrap();
         assert_eq!(
             jobs.terminal_display(&other).unwrap(),
-            TerminalDisplay::Classic
+            TerminalDisplay::Fullscreen
         );
     }
 
