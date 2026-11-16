@@ -442,6 +442,23 @@ test("a wheel report between typed keys closes the typed batch and a typed key c
   assert.deepEqual(lane.sent, [["x", false], ["ab", false], ["WV", true], ["c", false]]);
 });
 
+test("a prompt queued between keys or wheel reports closes their batch, so input after the prompt goes after it (DEC-187 typing A)", async () => {
+  const lane = heldSends();
+  const run = io.jobQueue(() => assert.fail("no stop"));
+  const lanes = io.inputLanes(run, lane.send);
+  const prompt = (text) => assert.equal(run(() => lane.send(io.encodeTyped(text), "prompt")), true);
+  lanes.typed(io.encodeTyped("x"));
+  await until(() => lane.sent.length === 1);
+  lanes.typed(io.encodeTyped("a"));
+  prompt("P");
+  lanes.typed(io.encodeTyped("b"));
+  lanes.wheel(io.encodeTyped("W"));
+  prompt("Q");
+  lanes.wheel(io.encodeTyped("V"));
+  await drain(lane, 7);
+  assert.deepEqual(lane.sent, [["x", false], ["a", false], ["P", "prompt"], ["b", false], ["W", true], ["Q", "prompt"], ["V", true]]);
+});
+
 test("a lone Esc closes its batch, so Esc and a quick key after it never go out as one Alt key (DEC-187 typing A)", async () => {
   const lane = heldSends();
   const lanes = io.inputLanes(io.jobQueue(() => assert.fail("no stop")), lane.send);
