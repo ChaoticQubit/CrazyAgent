@@ -1218,8 +1218,8 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
 /// Output: true when it does, so a nest refuses to start bubblewrap with it
 /// ([`LOADER_REFUSED`]).
 fn loader_variable(name: &OsStr) -> bool {
-    let _ = name;
-    false
+    let name = name.as_bytes();
+    name.starts_with(b"LD_") || name == b"GLIBC_TUNABLES"
 }
 
 /// Replaces this process with the open `program`, keeping its signal mask and its
@@ -1228,6 +1228,7 @@ fn loader_variable(name: &OsStr) -> bool {
 /// program, the name it starts under and its arguments after that name. Output: only the
 /// reason the exec failed.
 fn exec_keeping_mask(program: &fs::File, name: &Path, args: &[OsString]) -> String {
+    assert!(std::env::vars_os().all(|(name, _)| !loader_variable(&name)));
     let words: Result<Vec<CString>, _> = std::iter::once(name.as_os_str())
         .chain(args.iter().map(OsString::as_os_str))
         .map(|word| CString::new(word.as_bytes()))
@@ -1670,8 +1671,8 @@ fn restricts(setting: Option<&str>) -> bool {
 /// kernel scopes signals (the helper's `--scoped`), whether a launch gives the agent a
 /// process namespace ([`nests`], or the plain probe fails), whether the call supervisor
 /// holds ([`supervises`]), whether this runs as root and whether AppArmor's user namespace
-/// restriction is why nothing nests ([`restricts`]). Inputs: the helper and the engine's
-/// data folder, none where no probe may run. Output: the facts.
+/// restriction, which never covers root, is why nothing nests ([`restricts`]). Inputs: the
+/// helper and the engine's data folder, none where no probe may run. Output: the facts.
 pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let usable = clean_absolute(helper) && helper.is_file();
     let scoped = usable && passes(Command::new(helper).arg(SCOPED));
@@ -1685,9 +1686,11 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let root = rustix::process::geteuid().is_root();
     let nest = bwrap.filter(|_| nested);
     let supervised = held && data.is_some_and(|data| supervises(helper, nest, data, root));
-    let armored = !nested && restricts(fs::read_to_string(APPARMOR_USERNS).ok().as_deref());
+    let setting = fs::read_to_string(APPARMOR_USERNS).ok();
+    let armored = !nested && !root && restricts(setting.as_deref());
     assert!(!(root && supervised));
     assert!(!(armored && nested));
+    assert!(!(armored && root));
     super::LinuxHost {
         nested,
         scoped,

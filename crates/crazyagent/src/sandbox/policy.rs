@@ -948,7 +948,7 @@ pub fn linux_gaps(
     } else {
         lines.push(crate::sandbox::LINUX_NESTED_GIT_LINE);
     }
-    if host.armored {
+    if host.armored && !host.root {
         lines.push(crate::sandbox::LINUX_APPARMOR_LINE);
     }
     if !host.nested && (host.scoped || host.supervised) {
