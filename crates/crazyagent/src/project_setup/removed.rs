@@ -239,10 +239,10 @@ pub(crate) fn claim(
 }
 
 /// The id a folder with no project of its own is onboarded as: its name's id, or the first
-/// of `-2` to `-99` after it that no removal holds and no project uses. A live id here is
-/// always another folder's, since a folder's own project is answered before an id is
-/// picked. Inputs: the connection and the folder. Output: the id, or
-/// `onboarding_project_ids_used` when every one is taken.
+/// of `-2` to `-99` after it that no removal holds, no project uses and no leftover row
+/// keeps. A live id here is always another folder's, since a folder's own project is
+/// answered before an id is picked. Inputs: the connection and the folder. Output: the id,
+/// or `onboarding_project_ids_used` when every one is taken.
 pub(crate) fn free_id(
     connection: &Connection,
     folder: &Path,
@@ -265,11 +265,37 @@ pub(crate) fn free_id(
                 |row| row.get(0),
             )
             .map_err(error)?;
-        if !live {
+        if !live && !left(connection, &candidate)? {
             return Ok(Ok(candidate));
         }
     }
     Ok(Err("onboarding_project_ids_used"))
+}
+
+/// Whether a table with a `project` column still has a row of this id, in any case, so a
+/// removal made after the backfill by a build without the removal record never gives its
+/// id out. The onboarding table is left out: starting onboarding replaces or refuses its
+/// row itself. Inputs: the connection and an id that is not live. Output: the answer;
+/// nothing is written.
+fn left(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    for table in keyed_tables(connection)? {
+        if table == "onboarding" {
+            continue;
+        }
+        let found: bool = connection
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM \"{table}\" WHERE lower(project)=lower(?1))"
+                ),
+                [project.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The id `base-n`, the base cut so the id stays within `SLUG_BYTES_MAX` bytes, with no dash
