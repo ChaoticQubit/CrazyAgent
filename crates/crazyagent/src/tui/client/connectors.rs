@@ -125,11 +125,13 @@ fn failed(job: &ConnectorsJob, code: String) -> ConnectorsEvent {
         | ConnectorsJob::Remove { .. }
         | ConnectorsJob::SetKey { .. }
         | ConnectorsJob::ClearKey { .. }
-        | ConnectorsJob::Grant { .. }
-        | ConnectorsJob::Approval { .. }
-        | ConnectorsJob::Answer { .. }
-        | ConnectorsJob::Writes { .. }
-        | ConnectorsJob::Revoke { .. } => ConnectorsEvent::Page(Err(code)),
+        | ConnectorsJob::Grant { .. } => ConnectorsEvent::Page(Err(code)),
+        ConnectorsJob::Approval { .. } | ConnectorsJob::Answer { .. } => {
+            ConnectorsEvent::Approval(Err(code))
+        }
+        ConnectorsJob::Writes { .. } | ConnectorsJob::Revoke { .. } => {
+            ConnectorsEvent::Writes(Err(code))
+        }
     }
 }
 
@@ -148,11 +150,11 @@ pub(in crate::tui) fn job_name(job: &ConnectorsJob) -> &'static str {
         ConnectorsJob::Remove { .. } => "ConnectorRemove",
         ConnectorsJob::SetKey { .. } => "ConnectorSetKey",
         ConnectorsJob::ClearKey { .. } => "ConnectorClearKey",
-        ConnectorsJob::Grant { .. }
-        | ConnectorsJob::Approval { .. }
-        | ConnectorsJob::Answer { .. }
-        | ConnectorsJob::Writes { .. }
-        | ConnectorsJob::Revoke { .. } => "ConnectorGrant",
+        ConnectorsJob::Grant { .. } => "ConnectorGrant",
+        ConnectorsJob::Approval { .. } => "ConnectorApproval",
+        ConnectorsJob::Answer { .. } => "ConnectorAnswer",
+        ConnectorsJob::Writes { .. } => "ConnectorWrites",
+        ConnectorsJob::Revoke { .. } => "ConnectorRevokeWrites",
     }
 }
 
@@ -214,6 +216,30 @@ impl NativeOwner {
                 trust(controller.connector_review(name).await, None, lost)
             }
             ConnectorsJob::ReadFile { .. } => unreachable!("a typed path is read above"),
+            ConnectorsJob::Approval { id } => ConnectorsEvent::Approval(
+                controller
+                    .connector_approval(id)
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            ConnectorsJob::Answer { id, allow } => ConnectorsEvent::Approval(
+                controller
+                    .answer_connector_write(id, allow)
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            ConnectorsJob::Writes { project } => ConnectorsEvent::Writes(
+                controller
+                    .connector_writes(project)
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            ConnectorsJob::Revoke { project, connector } => ConnectorsEvent::Writes(
+                controller
+                    .revoke_connector_writes(project, connector)
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
             other => ConnectorsEvent::Page(
                 page(controller, other)
                     .await

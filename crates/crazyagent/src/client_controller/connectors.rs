@@ -1,5 +1,6 @@
 use super::*;
 use crate::app_plugins::Preview;
+use crate::connectors::approvals::{AllowedWrites, ApprovalView};
 use crate::connectors::audit::ActivityView;
 use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
@@ -120,6 +121,43 @@ impl OwnerController {
     ) -> Result<ActivityView, EngineError> {
         self.connectors_client()?
             .connector_activity(connector, project)
+            .await
+    }
+
+    /// Reads one connector write that waits for, or had, the owner's answer. Input: the
+    /// approval id from its notice. Output: the approval, or `connector_approval_unknown`.
+    pub async fn connector_approval(&self, id: i64) -> Result<ApprovalView, EngineError> {
+        self.connectors_client()?.connector_approval(id).await
+    }
+
+    /// Answers one waiting connector write once. Inputs: the approval id and whether the
+    /// owner allows it. Output: the approval after the answer, or `connector_approval_closed`
+    /// when it was answered or its wait ran out first.
+    pub async fn answer_connector_write(
+        &self,
+        id: i64,
+        allow: bool,
+    ) -> Result<ApprovalView, EngineError> {
+        self.connectors_client()?
+            .answer_connector_write(id, allow)
+            .await
+    }
+
+    /// Reads the connectors a project may write with without asking again. Input: the
+    /// project. Output: them by name, or `connector_project_unknown`.
+    pub async fn connector_writes(&self, project: String) -> Result<AllowedWrites, EngineError> {
+        self.connectors_client()?.connector_writes(project).await
+    }
+
+    /// Takes back a project's standing allow for one connector, so its next write asks
+    /// again. Inputs: the project and the connector. Output: the standing allows left.
+    pub async fn revoke_connector_writes(
+        &self,
+        project: String,
+        connector: String,
+    ) -> Result<AllowedWrites, EngineError> {
+        self.connectors_client()?
+            .revoke_connector_writes(project, connector)
             .await
     }
 }
