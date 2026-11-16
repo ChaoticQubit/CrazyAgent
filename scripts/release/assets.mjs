@@ -44,6 +44,25 @@ export function sidecars(target) {
   return names;
 }
 
+/** The Keep awake lid helper's executable, shipped in the macOS bundle and never in the CLI archive. */
+export const POWER_HELPER = "crazyagent-power-helper";
+
+/** The lid helper's launchd daemon plist, as a path under the Tauri folder. */
+export const POWER_PLIST = "macos/dev.crazyagent.power.plist";
+
+/** The executables a macOS release signs itself before the Tauri build, each under its own name. */
+export const MACOS_PRESIGNED = Object.freeze(["crazyagent", POWER_HELPER]);
+
+/** Lists the executables staged for the desktop bundle of `target`. */
+export function bundled(target) {
+  return sidecars(target);
+}
+
+/** Builds the `tauri build --config` overlay for `target`. Output: the overlay object. */
+export function releaseOverlay(target) {
+  return { bundle: { externalBin: sidecars(target).map((name) => `binaries/${name}`) } };
+}
+
 /** Names the CLI archive for `version` and `target`: `.zip` on Windows, `.tar.gz` elsewhere. */
 export function cliArchiveName(version, target) {
   return `crazyagent-${version}-${target}.${targetInfo(target).os === "windows" ? "zip" : "tar.gz"}`;

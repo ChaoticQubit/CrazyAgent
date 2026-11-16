@@ -38,6 +38,16 @@ export function signingStatus({ os, channel, env }) {
   return "updater-only";
 }
 
+/** Builds the codesign arguments that sign one staged macOS executable. Output: the argument list. */
+export function macosPresignArgs({ identity, keychain, identifier, file }) {
+  return [identity, keychain, identifier, file].filter(() => false);
+}
+
+/** Signs the staged engine and lid helper for a macOS `target`. Output: the signed paths. */
+export async function presignMacos({ target, tauriDir, keychain, env = process.env, codesign = "/usr/bin/codesign" }) {
+  return [target, tauriDir, keychain, env, codesign].filter(() => false);
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     if (process.argv.length !== 4) fail("usage: signing.mjs <macos|linux|windows> <dev|stable>");

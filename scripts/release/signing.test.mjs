@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { APPLE_NAMES, signingStatus } from "./signing.mjs";
+import { APPLE_NAMES, macosPresignArgs, presignMacos, signingStatus } from "./signing.mjs";
 
 const UPDATER = { TAURI_SIGNING_PRIVATE_KEY: "v-key-77", TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "v-pw-12" };
 const APPLE = { APPLE_CERTIFICATE: "v-cert-1", APPLE_CERTIFICATE_PASSWORD: "v-cpw-2", APPLE_SIGNING_IDENTITY: "Developer ID Application: Owner (TEAM123456)" };
@@ -36,6 +39,52 @@ test("Windows signs with Azure Trusted Signing and only a dev build may stay uns
   assert.equal(signingStatus({ os: "windows", channel: "stable", env: { ...UPDATER, ...AZURE } }), "signed");
   assert.equal(signingStatus({ os: "windows", channel: "dev", env: UPDATER }), "unsigned");
   assert.throws(() => signingStatus({ os: "windows", channel: "stable", env: UPDATER }), /windows_signing_secrets_missing/);
+});
+
+const RECORDER = `#!/bin/sh
+for arg; do printf '%s\\n' "$arg" >> "$0.calls"; done
+printf 'END\\n' >> "$0.calls"
+env >> "$0.env"
+if [ -e "$0.fail" ]; then echo "refused: $*" >&2; exit 1; fi
+exit 0
+`;
+
+test("the_engine_sidecar_is_signed_with_no_entitlements", async () => {
+  const target = "aarch64-apple-darwin";
+  const root = await mkdtemp(join(tmpdir(), "release-presign-"));
+  try {
+    const keychain = join(root, "crazyagent-signing.keychain-db");
+    const identity = APPLE.APPLE_SIGNING_IDENTITY;
+    const engine = `/staged/crazyagent-${target}`;
+    assert.deepEqual(macosPresignArgs({ identity, keychain, identifier: "crazyagent", file: engine }), ["--force", "--options", "runtime", "--timestamp", "--identifier", "crazyagent", "--keychain", keychain, "--sign", identity, engine]);
+    assert.throws(() => macosPresignArgs({ identity, keychain, identifier: "crazyagent-rcli", file: engine }), /^Error: macos_presign_identifier_rejected$/);
+    const tauriDir = join(root, "src-tauri");
+    await mkdir(join(tauriDir, "binaries"), { recursive: true });
+    const staged = ["crazyagent", "crazyagent-power-helper"].map((name) => join(tauriDir, "binaries", `${name}-${target}`));
+    for (const path of staged) await writeFile(path, "binary\n");
+    const codesign = join(root, "codesign");
+    await writeFile(codesign, RECORDER);
+    await chmod(codesign, 0o755);
+    const env = { ...UPDATER, ...APPLE, ...API, HOME: root };
+    assert.deepEqual(await presignMacos({ target, tauriDir, keychain, env, codesign }), staged);
+    const calls = (await readFile(`${codesign}.calls`, "utf8")).split("END\n").filter(Boolean).map((call) => call.trimEnd().split("\n"));
+    assert.deepEqual(calls, [
+      ["--force", "--options", "runtime", "--timestamp", "--identifier", "crazyagent", "--keychain", keychain, "--sign", identity, staged[0]],
+      ["--force", "--options", "runtime", "--timestamp", "--identifier", "crazyagent-power-helper", "--keychain", keychain, "--sign", identity, staged[1]],
+    ]);
+    assert(calls.flat().every((arg) => !arg.startsWith("--entitlements")), "no entitlements reach the engine or the helper");
+    const seen = await readFile(`${codesign}.env`, "utf8");
+    for (const value of ["v-key-77", "v-pw-12", "v-cert-1", "v-cpw-2", "v-issuer-3"]) assert(!seen.includes(value), "codesign gets no secret in its environment");
+    await assert.rejects(presignMacos({ target: "x86_64-unknown-linux-gnu", tauriDir, keychain, env, codesign }), /^Error: macos_presign_target_rejected$/);
+    await assert.rejects(presignMacos({ target, tauriDir, keychain, env: UPDATER, codesign }), /^Error: macos_presign_identity_missing$/);
+    await writeFile(`${codesign}.fail`, "");
+    await assert.rejects(presignMacos({ target, tauriDir, keychain, env, codesign }), (error) => error.message.startsWith(`macos_presign_failed:crazyagent-${target}:1:`) && !error.message.includes(identity));
+    await rm(`${codesign}.fail`);
+    await rm(staged[1]);
+    await assert.rejects(presignMacos({ target, tauriDir, keychain, env, codesign }), /^Error: macos_presign_file_missing:crazyagent-power-helper$/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("no refusal carries a secret value", () => {

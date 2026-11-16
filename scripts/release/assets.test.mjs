@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
-import { cliArchiveName, collectDesktop, packageCli, sidecars, signFile, stageSidecars, verifySignature } from "./assets.mjs";
+import { POWER_HELPER, bundled, cliArchiveName, collectDesktop, packageCli, releaseOverlay, sidecars, signFile, stageSidecars, verifySignature } from "./assets.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const TAURI = join(REPO, "apps/desktop/node_modules/@tauri-apps/cli/tauri.js");
@@ -101,17 +101,22 @@ test("staging takes the bundled tmux from its own build, never from Cargo, and r
     const tauri = join(root, "src-tauri");
     await mkdir(cargo);
     await mkdir(tauri);
-    for (const name of ["crazyagent", "crazyagent-runner", "crazyagent-tmux"]) await executable(join(cargo, name), `cargo-${name}`);
+    for (const name of ["crazyagent", "crazyagent-runner", "crazyagent-tmux", POWER_HELPER]) await executable(join(cargo, name), `cargo-${name}`);
     await executable(join(root, "crazyagent-rcli"), "rcli");
     await executable(join(root, "built-tmux"), "tmux");
     const target = "aarch64-apple-darwin";
     const given = { target, cargoDir: cargo, rcli: join(root, "crazyagent-rcli"), tmux: join(root, "built-tmux"), tauriDir: tauri };
     const { staged, config } = await stageSidecars(given);
-    assert.deepEqual(staged.map((path) => path.slice(tauri.length + 1)), sidecars(target).map((name) => `binaries/${name}-${target}`));
+    assert.deepEqual(bundled(target), [...sidecars(target), POWER_HELPER], "the lid helper ships in the macOS bundle only, never in the CLI archive");
+    assert.deepEqual(staged.map((path) => path.slice(tauri.length + 1)), bundled(target).map((name) => `binaries/${name}-${target}`));
     assert.equal(await readFile(join(tauri, `binaries/crazyagent-tmux-${target}`), "utf8"), "#!/bin/sh\necho tmux\n");
+    assert.equal(await readFile(join(tauri, `binaries/${POWER_HELPER}-${target}`), "utf8"), `#!/bin/sh\necho cargo-${POWER_HELPER}\n`);
+    assert.deepEqual(JSON.parse(await readFile(config, "utf8")), releaseOverlay(target));
     assert.deepEqual(JSON.parse(await readFile(config, "utf8")).bundle.externalBin.filter((name) => name.includes("tmux")), ["binaries/crazyagent-tmux"]);
     await assert.rejects(stageSidecars({ ...given, tmux: undefined }), /release_sidecar_missing:crazyagent-tmux/);
     await assert.rejects(stageSidecars({ ...given, tmux: join(root, "absent") }), /release_sidecar_missing:crazyagent-tmux/);
+    await rm(join(cargo, POWER_HELPER));
+    await assert.rejects(stageSidecars(given), /release_sidecar_missing:crazyagent-power-helper/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

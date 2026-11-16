@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { MACOS_PRESIGNED, POWER_HELPER, releaseOverlay, sidecars } from "./assets.mjs";
 
 const WORKFLOWS = new URL("../../.github/workflows/", import.meta.url);
 
@@ -288,6 +289,144 @@ test("no release step pipes a tool into grep -q, since under pipefail an early g
   const build = steps(release, "build");
   const stage = build.find((step) => /^\s*(- )?name: Stage desktop sidecars$/m.test(step));
   assert.match(stage, /\$\{tmux\[@\]\+"\$\{tmux\[@\]\}"\}/, "an empty tmux list expands to nothing under set -u on any bash");
+});
+
+const DAEMON_PLIST = new URL("../../apps/desktop/src-tauri/macos/dev.crazyagent.power.plist", import.meta.url);
+const HELPER_SOURCE = new URL("../../crates/crazyagent-mac-power/src/", import.meta.url);
+const PLIST_HEADER = '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n';
+
+/**
+ * Parses the plist subset a launchd daemon plist needs (dict, array, key, string, integer, true,
+ * false) into plain values and throws on any other element, a duplicate key or trailing content,
+ * so a row can compare the whole file. Input: the plist text. Output: the top-level value.
+ */
+function plistValue(text) {
+  assert(text.startsWith(PLIST_HEADER) && text.endsWith("</plist>\n"), "one XML plist 1.0 document");
+  const tokens = text.slice(PLIST_HEADER.length, -"</plist>\n".length).match(/<[^>]+>|[^<]+/g).filter((token) => token.trim() !== "");
+  let at = 0;
+  const value = () => {
+    const token = tokens[at++];
+    if (token === "<true/>" || token === "<false/>") return token === "<true/>";
+    if (token === "<dict>" || token === "<array>") {
+      const close = token === "<dict>" ? "</dict>" : "</array>";
+      const entries = [];
+      while (at < tokens.length && tokens[at] !== close) {
+        if (token === "<array>") entries.push(value());
+        else {
+          assert.equal(tokens[at], "<key>");
+          assert.equal(tokens[at + 2], "</key>");
+          at += 3;
+          entries.push([tokens[at - 2], value()]);
+        }
+      }
+      assert.equal(tokens[at++], close);
+      if (token === "<array>") return entries;
+      assert.equal(new Set(entries.map(([key]) => key)).size, entries.length, "no key twice");
+      return Object.fromEntries(entries);
+    }
+    const close = { "<string>": "</string>", "<integer>": "</integer>" }[token];
+    assert(close, `no ${token} in a daemon plist`);
+    const inner = tokens[at];
+    assert.equal(tokens[at + 1], close);
+    at += 2;
+    if (token === "<string>") return inner;
+    assert.match(inner, /^\d{1,10}$/);
+    return Number(inner);
+  };
+  const top = value();
+  assert.equal(at, tokens.length, "one top-level value");
+  return top;
+}
+
+function daemonPlist() {
+  assert(existsSync(DAEMON_PLIST), "the daemon plist exists");
+  const text = readFileSync(DAEMON_PLIST, "utf8");
+  assert(!text.includes("\r"), "the daemon plist has LF line endings");
+  return plistValue(text);
+}
+
+/**
+ * Reads one string constant the lid helper source pins, so the plist and the release checks are
+ * held to the helper's own values. Inputs: the source file under the helper's src folder and a
+ * pattern with one capture. Output: the one captured value.
+ */
+function helperPins(file, pattern) {
+  const found = [...readFileSync(new URL(file, HELPER_SOURCE), "utf8").matchAll(pattern)];
+  assert.equal(found.length, 1, `${file} pins exactly one value for ${pattern}`);
+  return found[0][1];
+}
+
+const helperTeam = () => helperPins("caller.rs", /\\"([A-Z0-9]{10})\\" and identifier \\"crazyagent\\"/g);
+
+test("the_macos_bundle_carries_the_signed_power_helper_and_its_daemon_plist", async () => {
+  for (const target of ["aarch64-apple-darwin", "x86_64-apple-darwin"]) {
+    assert.deepEqual(releaseOverlay(target), {
+      bundle: {
+        externalBin: ["binaries/crazyagent-rcli", "binaries/crazyagent-runner", "binaries/crazyagent-tmux"],
+        macOS: {
+          files: {
+            "MacOS/crazyagent": `binaries/crazyagent-${target}`,
+            "MacOS/crazyagent-power-helper": `binaries/crazyagent-power-helper-${target}`,
+            "Library/LaunchDaemons/dev.crazyagent.power.plist": "macos/dev.crazyagent.power.plist",
+          },
+        },
+      },
+    }, `${target}: Tauri signs every externalBin with the app's entitlements, so the engine and the helper go in signed, as files`);
+  }
+  for (const target of ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]) {
+    assert.deepEqual(releaseOverlay(target), { bundle: { externalBin: sidecars(target).map((name) => `binaries/${name}`) } }, target);
+  }
+  assert.deepEqual(MACOS_PRESIGNED, ["crazyagent", POWER_HELPER]);
+  const build = steps(await workflow("release.yml"), "build");
+  const index = (name) => build.findIndex((step) => new RegExp(`^\\s*(- )?name: ${name}$`, "m").test(step));
+  const order = ["Build command line binaries", "Stage desktop sidecars", "Build desktop bundle", "Check the bundled engine and Keep awake helper", "Package release assets"].map(index);
+  assert(order.every((at) => at >= 0), `all five steps exist: ${order}`);
+  assert.deepEqual([...order].sort((a, b) => a - b), order, "built, staged, signed and bundled, checked, then packed into the CLI archive");
+  const [binaries, , bundle, check] = order.map((at) => build[at]);
+  assert.match(binaries, /\n {10}if \[ "\$PLATFORM" = macos \]; then\n {12}cargo build --release --locked --target "\$TARGET" -p crazyagent-mac-power --bin crazyagent-power-helper\n {10}fi\n/);
+  const presign = bundle.indexOf('\n          if [ "$PLATFORM" = macos ] && [ "$status" = signed ]; then\n            node scripts/release/signing.mjs presign --target "$TARGET" --tauri-dir apps/desktop/src-tauri --keychain "$keychain"\n          fi\n');
+  assert(presign > 0, "a signed macOS build signs the engine and the helper itself");
+  assert(presign > bundle.indexOf("security find-identity -p codesigning"), "after the job keychain holds the identity");
+  assert(presign > bundle.indexOf("unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD"), "after the certificate secrets leave the environment");
+  assert(presign < bundle.indexOf("tauri.js build"), "before Tauri copies both into the bundle and seals it");
+  assert.match(check, /^ {8}if: matrix\.os == 'macos'$/m);
+  assert.match(check, /^ {10}app="\$\{CARGO_TARGET_DIR:-target\}\/\$TARGET\/release\/bundle\/macos\/CrazyAgent\.app"$/m);
+  assert.match(check, /^ {10}cmp "\$app\/Contents\/Library\/LaunchDaemons\/dev\.crazyagent\.power\.plist" apps\/desktop\/src-tauri\/macos\/dev\.crazyagent\.power\.plist$/m);
+  assert.match(check, /^ {10}for name in crazyagent crazyagent-power-helper; do$/m);
+  assert.match(check, /test -f "\$binary" && test -x "\$binary"/);
+  assert.match(check, /test "\$\(lipo -archs "\$binary"\)" = "\$arch"/);
+  assert.match(check, /codesign --verify --strict --verbose=2 "\$binary"/);
+  assert(check.includes(`grep -E -q "^Identifier=$name\\$" <<< "$display"`), "each is signed under its own name, which the caller check and the launch constraint pin");
+  assert(check.includes(`grep -E -q '^TeamIdentifier=${helperTeam()}$' <<< "$display"`), "each is signed by the team the helper pins");
+  assert(check.includes(`grep -E -q 'flags=.*runtime' <<< "$display"`), "each runs under the hardened runtime");
+  assert(check.includes('entitlements="$(codesign --display --entitlements - --xml "$binary" 2> /dev/null)"'));
+  assert(check.includes(`if grep -q '<key>' <<< "$entitlements"; then`), "neither carries an entitlement");
+  assert.match(check, /codesign --verify --deep --strict --verbose=2 "\$app"/);
+});
+
+test("the_daemon_plist_runs_at_load_with_its_socket_and_no_environment", () => {
+  const { SpawnConstraint: _constraint, ...daemon } = daemonPlist();
+  const desktop = JSON.parse(readFileSync(new URL("../../apps/desktop/src-tauri/tauri.conf.json", import.meta.url), "utf8")).identifier;
+  assert.equal(desktop, "dev.crazyagent.desktop");
+  const socket = helperPins("server.rs", /^pub const SOCKET: &str = "([^"]+)";$/gm);
+  const listeners = helperPins("server.rs", /^pub const LISTENERS: &str = "([^"]+)";$/gm);
+  assert.deepEqual(daemon, {
+    Label: "dev.crazyagent.power",
+    BundleProgram: `Contents/MacOS/${POWER_HELPER}`,
+    AssociatedBundleIdentifiers: [desktop],
+    RunAtLoad: true,
+    Sockets: { [listeners]: { SockPathName: socket, SockPathMode: 0o666 } },
+  });
+  assert.equal(socket, "/var/run/dev.crazyagent.power.sock");
+  for (const key of ["EnvironmentVariables", "UserName", "GroupName", "Program", "ProgramArguments", "MachServices", "KeepAlive", "WorkingDirectory", "StandardOutPath", "StandardErrorPath"]) {
+    assert(!Object.hasOwn(daemon, key), `${key}: launchd runs the bundled helper as root with nothing else set`);
+  }
+});
+
+test("the_daemon_plist_carries_the_helper_launch_constraint", () => {
+  const team = helperTeam();
+  assert.deepEqual(daemonPlist().SpawnConstraint, { "team-identifier": team, "signing-identifier": POWER_HELPER });
+  assert.equal(team, "GK729B5HZQ");
 });
 
 test("every badal job refuses to run under Rosetta before anything else", async () => {
