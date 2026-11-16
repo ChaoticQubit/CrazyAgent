@@ -1,5 +1,8 @@
 use super::master_launch::error;
-use crate::harnesses::leftovers::{self, Follower, HoldBy, LINEAGE_VARIABLE, LineageToken};
+use crate::harnesses::leftovers::{
+    self, Follower, HoldBy, LINEAGE_VARIABLE, Leftovers, Lineage, LineageToken, Unstopped,
+};
+use crate::protocol::CredentialRef;
 use crate::protocol::{FRAME_BYTES_MAX, ProtocolError};
 use crate::sandbox::LineageCheck;
 use crate::sandbox::warden::{self, Warden};
@@ -31,6 +34,7 @@ pub(super) struct HostProcess {
     group_absent: bool,
     clean: bool,
     follower: Option<Follower>,
+    left: Option<Leftovers>,
     by: HoldBy,
 }
 
@@ -43,12 +47,19 @@ impl HostProcess {
         check: LineageCheck,
         by: HoldBy,
     ) -> Result<Self, ProtocolError> {
-        let token = LineageToken::new().ok_or_else(|| error("rcli_master_spawn_failed"))?;
-        command.env(LINEAGE_VARIABLE, token.as_str());
+        let token = match check {
+            LineageCheck::Unneeded => None,
+            LineageCheck::FullAccess | LineageCheck::Sandboxed => {
+                Some(LineageToken::new().ok_or_else(|| error("rcli_master_spawn_failed"))?)
+            }
+        };
+        if let Some(token) = &token {
+            command.env(LINEAGE_VARIABLE, token.as_str());
+        }
         let (mut child, warden) =
             warden::spawn(&mut command).map_err(|_| error("rcli_master_spawn_failed"))?;
         assert!(child.id() > 1);
-        let follower = Follower::start(child.id(), Some(token), check);
+        let follower = Follower::start(child.id(), token, check);
         assert_eq!(follower.is_some(), check != LineageCheck::Unneeded);
         let stdin = child.stdin.take().expect("configured host input pipe");
         let stdout = child.stdout.take().expect("configured host output pipe");
@@ -65,6 +76,7 @@ impl HostProcess {
             group_absent: false,
             clean: false,
             follower,
+            left: None,
             by,
         };
         assert!(process.child.id() > 1);
@@ -271,17 +283,48 @@ impl HostProcess {
 
     /// Ends the host and everything it left in its group. At Full access, and under the plain
     /// Linux Landlock helper, no warden reaches what left the group (LINUX-KILL-GROUP r1 F1),
-    /// so the lineage followed from the start is taken before the kill and settled after it,
-    /// and what still runs is held under the host's project. Input: the process. Output: Ok,
-    /// `rcli_master_cleanup_incomplete`, or the leftover code.
+    /// so the lineage followed from the start is taken before the kill and settled after it.
+    /// What still runs once the group ended is kept for [`Self::hold_left`], so the custody
+    /// holds it with the profile; past a group that did not end it is held at once with none.
+    /// Input: the process. Output: Ok, `rcli_master_cleanup_incomplete`, or the leftover code.
     pub(super) fn cleanup(&mut self) -> Result<(), ProtocolError> {
         if self.clean {
             return Ok(());
         }
         let lineage = self.follower.take().map(Follower::stop);
         let ended = self.end_group();
-        let settled = leftovers::settle_and_hold(lineage, self.by.clone()).map_err(error);
-        ended.and(settled)
+        let Some(Err(unstopped)) = lineage.map(|lineage| lineage.and_then(Lineage::settle)) else {
+            return ended;
+        };
+        let code = unstopped.code();
+        match unstopped {
+            Unstopped::Left(left) if ended.is_ok() => self.left = Some(left),
+            Unstopped::Left(left) => {
+                let mode = leftovers::mode_of(self.by.project.as_deref());
+                left.hold(None, (), self.by.clone(), mode);
+            }
+            Unstopped::Uncertain => {}
+        }
+        assert!(self.left.is_none() || ended.is_ok());
+        ended.and(Err(error(code)))
+    }
+
+    /// Names what the host's stop left running once its group ended, if anything. Input: the
+    /// process. Output: the leftover code, or none.
+    pub(super) fn left_code(&self) -> Option<&'static str> {
+        self.left.as_ref().map(Leftovers::code)
+    }
+
+    /// Holds what the host's stop left running with `kept` listed under `account`, by the
+    /// project's leftover setting, as a Claude host turn's hold keeps its lease until none
+    /// run; with nothing left, `kept` is dropped. Inputs: the process, the account and what
+    /// the hold keeps. Output: none.
+    pub(super) fn hold_left<T: Send + 'static>(&mut self, account: Option<CredentialRef>, kept: T) {
+        if let Some(left) = self.left.take() {
+            let mode = leftovers::mode_of(self.by.project.as_deref());
+            left.hold(account, kept, self.by.clone(), mode);
+        }
+        assert!(self.left.is_none());
     }
 
     fn end_group(&mut self) -> Result<(), ProtocolError> {
@@ -335,6 +378,7 @@ impl Drop for HostProcess {
         if !self.clean {
             let _cleanup = self.cleanup();
         }
+        self.hold_left(None, ());
     }
 }
 
@@ -405,6 +449,12 @@ mod tests {
         );
         assert!(process.clean);
         assert!(process.group_absent);
+        assert_eq!(
+            process.left_code(),
+            Some(crate::harnesses::leftovers::SANDBOX_LEFT)
+        );
+        process.hold_left(None, ());
+        assert_eq!(process.left_code(), None);
     }
 
     #[cfg(target_os = "macos")]

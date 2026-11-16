@@ -51,6 +51,18 @@ mod master_process {
         pub(super) fn cleanup(&mut self) -> Result<(), ProtocolError> {
             match *self {}
         }
+
+        pub(super) fn left_code(&self) -> Option<&'static str> {
+            match *self {}
+        }
+
+        pub(super) fn hold_left<T: Send + 'static>(
+            &mut self,
+            _account: Option<crate::protocol::CredentialRef>,
+            _kept: T,
+        ) {
+            match *self {}
+        }
     }
 }
 #[path = "rcli_host/master_reply.rs"]

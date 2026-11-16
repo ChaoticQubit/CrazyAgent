@@ -657,6 +657,14 @@ const PROBLEMS: &[(&str, &str)] = &[
         "server_cleanup_uncertain",
         "The server's processes could not be confirmed stopped.",
     ),
+    (
+        crate::harnesses::leftovers::SANDBOX_LEFT,
+        "The server left processes running after its check. CrazyAgent ends them.",
+    ),
+    (
+        crate::harnesses::leftovers::SANDBOX_UNCHECKED,
+        "The server's processes could not be listed after its check. CrazyAgent keeps looking for them and ends them.",
+    ),
     ("server_exited", "The server stopped before answering."),
     (
         "server_check_timeout",

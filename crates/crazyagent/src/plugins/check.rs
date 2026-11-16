@@ -61,7 +61,8 @@ pub fn check_stdio(
 /// Starts an already built MCP server command, such as one wrapped in the agent boundary,
 /// runs `initialize` and `tools/list`, then stops its whole process group and, through the
 /// warden a boundary command gets, every process left in its sandbox. Where `check` follows
-/// its lineage, what it left outside the group is held and named (LINUX-KILL-GROUP r1 F1).
+/// its lineage, what it left outside the group is held and its code is the answer, in place
+/// of the tool names (LINUX-KILL-GROUP r1 F1).
 /// Inputs: the command with its arguments, environment and folder set, the time bound and
 /// what the stop checks of the processes the server leaves outside its group. Output: the
 /// tool names, or a plain rejection code, `server_cleanup_uncertain` when the warden did not
@@ -72,10 +73,20 @@ pub fn check_command(
     limit: Duration,
     check: crate::sandbox::LineageCheck,
 ) -> Result<Vec<String>, &'static str> {
-    use crate::harnesses::leftovers::{self, Follower, HoldBy, LINEAGE_VARIABLE, LineageToken};
-    let token = LineageToken::new().ok_or("server_cant_start")?;
+    use crate::harnesses::leftovers::{
+        self, Follower, HoldBy, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped,
+    };
+    use crate::sandbox::LineageCheck;
+    let token = match check {
+        LineageCheck::Unneeded => None,
+        LineageCheck::FullAccess | LineageCheck::Sandboxed => {
+            Some(LineageToken::new().ok_or("server_cant_start")?)
+        }
+    };
+    if let Some(token) = &token {
+        process.env(LINEAGE_VARIABLE, token.as_str());
+    }
     process
-        .env(LINEAGE_VARIABLE, token.as_str())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -97,11 +108,8 @@ pub fn check_command(
             return Err("server_cant_start");
         }
     };
-    let follower = Follower::start(pid, Some(token), check);
-    assert_eq!(
-        follower.is_some(),
-        check != crate::sandbox::LineageCheck::Unneeded
-    );
+    let follower = Follower::start(pid, token, check);
+    assert_eq!(follower.is_some(), check != LineageCheck::Unneeded);
     let (send, receive) = sync_channel::<Line>(16);
     let reader = std::thread::Builder::new()
         .name("crazyagent-mcp-check".into())
@@ -114,11 +122,20 @@ pub fn check_command(
     stop(pid);
     let _ = child.kill();
     let _ = child.wait();
-    let by = HoldBy {
-        project: None,
-        who: "a plugin server check".to_owned(),
+    let settled = match lineage.map(|lineage| lineage.and_then(Lineage::settle)) {
+        None | Some(Ok(())) => Ok(()),
+        Some(Err(unstopped)) => {
+            let code = unstopped.code();
+            if let Unstopped::Left(left) = unstopped {
+                let by = HoldBy {
+                    project: None,
+                    who: "a plugin server check".to_owned(),
+                };
+                left.hold(None, (), by, leftovers::mode_of(None));
+            }
+            Err(code)
+        }
     };
-    let settled = leftovers::settle_and_hold(lineage, by);
     crate::sandbox::warden::fire_reported(warden, "server_check")
         .map_err(|_| "server_cleanup_uncertain")?;
     settled?;
@@ -453,8 +470,8 @@ mod tests {
 
     /// LINUX-KILL-GROUP r1 F1: a server checked in a boundary that leaves a process in a
     /// session of its own running, as the plain Linux Landlock helper's does, has its lineage
-    /// followed, so what it left outside its group is named as a sandboxed run's leftover and
-    /// held, never reported as the check's own failure.
+    /// followed, so what it left outside its group is held and the check answers with the
+    /// sandboxed leftover code in place of what the server itself did.
     #[test]
     fn a_followed_server_check_names_what_the_server_left_outside_its_group() {
         let folder = tempfile::tempdir().unwrap();
@@ -485,5 +502,9 @@ mod tests {
         }
 
         assert_eq!(checked, Err(crate::harnesses::leftovers::SANDBOX_LEFT));
+        assert_eq!(
+            crate::plugins::check_problem(crate::harnesses::leftovers::SANDBOX_LEFT),
+            "The server left processes running after its check. CrazyAgent ends them."
+        );
     }
 }

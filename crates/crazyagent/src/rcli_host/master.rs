@@ -245,6 +245,23 @@ impl RcliMasterHost {
         Ok(())
     }
 
+    /// Names what the host's stop left running once its group ended (LINUX-KILL-GROUP r1
+    /// F1), if anything. Input: the host. Output: the leftover code, or none.
+    pub fn left_code(&self) -> Option<&'static str> {
+        self.process.left_code()
+    }
+
+    /// Holds what the host's stop left running with `kept`, such as the profile in use,
+    /// listed under `account` until none run; with nothing left, `kept` is dropped. Inputs:
+    /// the host, the account and what the hold keeps. Output: none.
+    pub fn hold_leftovers<T: Send + 'static>(
+        &mut self,
+        account: Option<crate::protocol::CredentialRef>,
+        kept: T,
+    ) {
+        self.process.hold_left(account, kept);
+    }
+
     fn available(&mut self) -> Result<(), ProtocolError> {
         if let Some(failure) = &self.failure {
             return Err(failure.clone());
@@ -285,10 +302,12 @@ impl RcliMasterHost {
     fn fault(&mut self, failure: ProtocolError) -> ProtocolError {
         self.stopped = true;
         self.ready = false;
-        let failure = if self.process.cleanup().is_err() {
-            ProtocolError(format!("{};rcli_master_cleanup_incomplete", failure.0))
-        } else {
-            failure
+        let failure = match (self.process.cleanup(), self.process.left_code()) {
+            (Ok(()), _) => failure,
+            (Err(_), Some(left)) => ProtocolError(format!("{};{left}", failure.0)),
+            (Err(_), None) => {
+                ProtocolError(format!("{};rcli_master_cleanup_incomplete", failure.0))
+            }
         };
         self.failure = Some(failure.clone());
         failure
