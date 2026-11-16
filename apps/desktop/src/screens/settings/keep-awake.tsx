@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState, type FormEvent } from "react";
-import { KEEP_AWAKE_CHANGED, KEEP_AWAKE_DEFAULTS, KEEP_AWAKE_POLL_MS, KEEP_AWAKE_SETTINGS, loadKeepAwake, sendKeepAwake, type KeepAwakeSettingId, type KeepAwakeSettings as Stored, type KeepAwakeView, type LidAction } from "../../api-keep-awake";
+import { KEEP_AWAKE_CHANGED, KEEP_AWAKE_DEFAULTS, KEEP_AWAKE_POLL_MS, KEEP_AWAKE_SETTINGS, loadKeepAwake, saveKeepAwake, sendKeepAwake, type KeepAwakeSettingId, type KeepAwakeSettings as Stored, type KeepAwakeView, type LidAction } from "../../api-keep-awake";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, NotReady, Notice, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { lidHelperLine, unavailable } from "../keep-awake/model";
@@ -21,6 +21,7 @@ const SECTIONS: readonly { title: string; about: string; ids: readonly KeepAwake
   { title: "Lid closed", about: "Whether a hold goes on with the lid closed.", ids: ["lid", "lid_display"] },
   { title: "Ends by itself", about: "The limits that end a hold to protect the battery and the computer.", ids: ["battery_floor", "heat_end", "heat_notice"] },
   { title: "Display", about: "What a hold does with the display.", ids: ["display_awake"] },
+  { title: "Power", about: "What a hold does to save the battery.", ids: ["low_power"] },
 ];
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -134,7 +135,8 @@ const NOT_READY = "The engine is not ready yet. Try again.";
  * Keep awake changes in this window and every 5 s, so a lid helper command shows what it
  * did once the engine ran it, and saves the picked options over the settings the engine
  * holds at that moment, so a change made in the panel or by another client while the page
- * was open is kept. The picks stay until a save took them. */
+ * was open is kept, laying them again when another window saved first. The picks stay until
+ * a save took them. */
 export function KeepAwakeSettings() {
   const session = useAppSession();
   const [view, reload] = useLoad(loadKeepAwake);
@@ -162,13 +164,7 @@ export function KeepAwakeSettings() {
     if (view.kind !== "ok" || saving) return;
     setSaving(true);
     setProblem("");
-    const fresh = await loadKeepAwake();
-    if (fresh.kind !== "ok") {
-      setSaving(false);
-      setProblem(fresh.kind === "error" ? fresh.message : NOT_READY);
-      return;
-    }
-    const result = await sendKeepAwake({ set: { settings: savedKeepAwake(fresh.value.settings, picks) } });
+    const result = await saveKeepAwake((stored) => savedKeepAwake(stored, picks));
     setSaving(false);
     if (result.kind === "error") { setProblem(result.message); return; }
     if (result.kind === "not_ready") { setProblem(NOT_READY); return; }

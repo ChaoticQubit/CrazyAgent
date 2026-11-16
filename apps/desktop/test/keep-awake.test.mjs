@@ -59,6 +59,7 @@ const view = (state = {}, extra = {}) => ({
   lid_platform: extra.lid_platform ?? { kind: "helper_missing" },
   platform: extra.platform ?? "mac_os",
   work: extra.work ?? 0,
+  version: extra.version ?? 0,
 });
 const working = (count, extra = {}) => view({ want: HELD, reason: "work" }, { work: count, ...extra });
 const timer = (left, extra = {}) => view({ want: HELD, reason: "timer", ends_at_ms: NOW + left }, extra);
@@ -88,7 +89,7 @@ const STATES = [
 ];
 
 test("the window names every engine option and default of Keep awake as the engine does", () => {
-  const enums = { mode: "Mode", grace: "Grace", cap: "Cap", lid: "LidRule", battery_floor: "BatteryFloor", heat_end: "HeatEnd", heat_notice: "HeatNotice", lid_display: "LidDisplay", display_awake: "DisplayAwake" };
+  const enums = { mode: "Mode", grace: "Grace", cap: "Cap", lid: "LidRule", battery_floor: "BatteryFloor", heat_end: "HeatEnd", heat_notice: "HeatNotice", lid_display: "LidDisplay", display_awake: "DisplayAwake", low_power: "LowPower" };
   const fields = [...ENGINE_SETTINGS.slice(ENGINE_SETTINGS.indexOf("pub struct KeepAwakeSettings {")).split("\n}")[0].matchAll(/pub (\w+): (\w+),/g)].map(([, field, type]) => [field, type]);
   assert.deepEqual(fields, Object.entries(enums), "the settings fields in engine order");
   assert.deepEqual(api.KEEP_AWAKE_SETTINGS.map((setting) => setting.id), Object.keys(enums), "one line per engine setting, in engine order");
@@ -119,8 +120,10 @@ test("the settings matrix words are the plan's, with the default of each", () =>
     "Heat notice": ["At serious heat", "Off"],
     "Display with the lid closed (macOS)": ["Sleep the display", "Leave on"],
     "Display awake with the lid open": ["Off", "While holding"],
+    "Low Power Mode": ["On battery below 40 %", "Whenever on battery", "Off"],
   });
-  assert.equal(api.KEEP_AWAKE_SETTINGS.reduce((count, setting) => count + setting.options.length, 0), 27);
+  assert.equal(api.KEEP_AWAKE_SETTINGS.reduce((count, setting) => count + setting.options.length, 0), 30);
+  assert.match(ENGINE_SETTINGS, /pub const BELOW_PCT: u8 = 40;/, "the 40 % is the engine's");
   const display = api.KEEP_AWAKE_SETTINGS.find((setting) => setting.id === "display_awake");
   assert.equal(display.help, DISPLAY_HELP, "the help says plainly that the screen stays unlocked");
   assert.ok(TUI_SETTINGS.includes(JSON.stringify(DISPLAY_HELP)), "the TUI says the same words");
@@ -517,6 +520,23 @@ test("a save sends every setting with the picks applied, and refuses a name the 
   assert.throws(() => settings.savedKeepAwake(stored, { volume: "loud" }), /no setting volume/);
 });
 
+test("a save keeps the stored Low Power Mode when the page picked none", () => {
+  const stored = { ...api.KEEP_AWAKE_DEFAULTS, low_power: "on_battery" };
+  assert.equal(settings.savedKeepAwake(stored, {}).low_power, "on_battery", "no pick sends what is stored");
+  assert.equal(settings.savedKeepAwake(stored, { grace: "min30" }).low_power, "on_battery", "another pick leaves it");
+  assert.equal(settings.savedKeepAwake(stored, { low_power: "off" }).low_power, "off", "its own pick lands");
+  assert.equal(api.KEEP_AWAKE_DEFAULTS.low_power, "battery_below40", "the engine's default and wire name");
+});
+
+test("Settings shows Low Power Mode in its own Power section after Display", () => {
+  const markup = settingsView(ok(view({}, { lid_support: { kind: "held" } })));
+  const display = markup.search(/<h3[^>]*>Display<\/h3>/);
+  const power = markup.search(/<h3[^>]*>Power<\/h3>/);
+  assert.ok(display > 0 && power > display, "Power comes after Display");
+  assert.ok(markup.indexOf('data-setting="low_power"') > power, "the row sits in Power");
+  assert.ok(text(markup).includes("What a hold does to save the battery."));
+});
+
 test("a Settings save keeps what changed elsewhere while the page was open", () => {
   const changedElsewhere = { ...api.KEEP_AWAKE_DEFAULTS, mode: "off", lid: "always" };
   const sent = settings.savedKeepAwake(changedElsewhere, { grace: "min30" });
@@ -524,8 +544,77 @@ test("a Settings save keeps what changed elsewhere while the page was open", () 
   assert.match(SETTINGS_PAGE, /window\.addEventListener\(KEEP_AWAKE_CHANGED, /, "the page reads again after a change made in the panel");
   assert.match(SETTINGS_PAGE, /window\.removeEventListener\(KEEP_AWAKE_CHANGED, /);
   assert.doesNotMatch(SETTINGS_PAGE, /\[view\]\)/, "a read never drops the picks");
-  assert.match(SETTINGS_PAGE, /const fresh = await loadKeepAwake\(\);/, "a save reads the engine's settings first");
-  assert.match(SETTINGS_PAGE, /savedKeepAwake\(fresh\.value\.settings, picks\)/, "and sends the picks over those");
+  assert.match(SETTINGS_PAGE, /saveKeepAwake\(\(stored\) => savedKeepAwake\(stored, picks\)\)/, "a save lays the picks over the engine's settings at that moment");
+  assert.doesNotMatch(SETTINGS_PAGE, /sendKeepAwake\(\{ set:/, "and never sends settings of an older read");
+});
+
+test("the panel's mode pick lays only the mode over the engine's settings at that moment", () => {
+  assert.match(PANEL_PAGE, /saveKeepAwake\(\(stored\) => \(\{ \.\.\.stored, mode: picked \}\)\)/);
+  assert.doesNotMatch(PANEL_PAGE, /\.\.\.view\.value\.settings/, "never the settings the panel read up to 5 s ago");
+});
+
+const APPLIED = { outcome: "applied", pending: false, rejection: null };
+const BEATEN = { outcome: "rejected", pending: false, rejection: "stale_revision" };
+const keepAwakeBridge = (views, receipts) => {
+  const seen = [];
+  const before = globalThis.window;
+  globalThis.window = { dispatchEvent: () => true, __TAURI_INTERNALS__: { async invoke(command, args) {
+    seen.push({ command, action: args?.action });
+    if (command === "desktop_keep_awake_read") return views.shift();
+    assert.equal(command, "desktop_keep_awake_act");
+    return receipts.shift();
+  } } };
+  return { seen, restore: () => { globalThis.window = before; } };
+};
+
+test("a save another window beat reads again and lays the same picks over the newer settings", async () => {
+  const first = view({}, { settings: { grace: "min5" }, version: 4 });
+  first.settings.low_power = "off";
+  const newer = view({}, { settings: { grace: "min5", lid: "always" }, version: 5 });
+  newer.settings.low_power = "off";
+  const fake = keepAwakeBridge([first, newer], [BEATEN, APPLIED]);
+  try {
+    const result = await api.saveKeepAwake((stored) => settings.savedKeepAwake(stored, { cap: "h4" }));
+    assert.deepEqual(result, { kind: "ok", value: undefined });
+    assert.deepEqual(fake.seen.map(({ command }) => command), ["desktop_keep_awake_read", "desktop_keep_awake_act", "desktop_keep_awake_read", "desktop_keep_awake_act"]);
+    const [, beaten, , landed] = fake.seen;
+    assert.equal(beaten.action.set.version, 4);
+    assert.equal(landed.action.set.version, 5, "the version of the newer read");
+    assert.deepEqual(landed.action.set.settings, { ...newer.settings, cap: "h4" }, "the other window's change is kept and the pick lands");
+    assert.equal(landed.action.set.settings.low_power, "off", "a setting this window does not list stays as read");
+  } finally {
+    fake.restore();
+  }
+});
+
+test("a save beaten every time stops after three with the engine's sentence, and no other refusal is tried again", async () => {
+  const read = () => view({}, { version: 7 });
+  const beaten = keepAwakeBridge([read(), read(), read(), read()], [BEATEN, BEATEN, BEATEN, BEATEN]);
+  try {
+    const result = await api.saveKeepAwake((stored) => stored);
+    assert.equal(api.SAVE_ATTEMPTS, 3);
+    assert.equal(beaten.seen.filter(({ command }) => command === "desktop_keep_awake_act").length, 3);
+    assert.deepEqual(result, { kind: "error", code: "stale_revision", message: api.KEEP_AWAKE_STALE });
+    assert.ok(ENGINE.includes(`"${api.KEEP_AWAKE_STALE}"`), "the engine has the same words");
+  } finally {
+    beaten.restore();
+  }
+  const off = keepAwakeBridge([read(), read()], [{ outcome: "rejected", pending: false, rejection: "keep_awake_off" }, APPLIED]);
+  try {
+    const result = await api.saveKeepAwake((stored) => stored);
+    assert.equal(result.code, "keep_awake_off");
+    assert.equal(off.seen.length, 2, "one read, one change");
+  } finally {
+    off.restore();
+  }
+  const unsure = keepAwakeBridge([read(), read()], [{ outcome: "applied", pending: true, rejection: null }, APPLIED]);
+  try {
+    const result = await api.saveKeepAwake((stored) => stored);
+    assert.equal(result.code, "uncertain");
+    assert.equal(unsure.seen.length, 2, "a save that may have landed is never sent again");
+  } finally {
+    unsure.restore();
+  }
 });
 
 test("Settings shows the reason on a setting this computer cannot honour and keeps it editable", () => {
@@ -558,7 +647,7 @@ test("the window reads and changes Keep awake through two commands the app regis
   const sent = (action) => api.keepAwakeArgs(action, 7);
   assert.deepEqual(sent({ start: { minutes: 60 } }), { action: { start: { minutes: 60 } }, generation: 7 });
   assert.deepEqual(sent("end"), { action: "end", generation: 7 });
-  assert.deepEqual(sent({ set: { settings: api.KEEP_AWAKE_DEFAULTS } }).action.set.settings, api.KEEP_AWAKE_DEFAULTS);
+  assert.deepEqual(sent({ set: { settings: api.KEEP_AWAKE_DEFAULTS, version: 3 } }).action.set, { settings: api.KEEP_AWAKE_DEFAULTS, version: 3 });
   assert.throws(() => api.keepAwakeArgs({ start: { minutes: 0 } }, 7), /minutes/);
   assert.throws(() => api.keepAwakeArgs({ extend: { minutes: 1441 } }, 7), /minutes/);
   assert.throws(() => api.keepAwakeArgs("end", 0), /generation/);

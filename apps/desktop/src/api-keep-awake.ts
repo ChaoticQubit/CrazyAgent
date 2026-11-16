@@ -10,6 +10,7 @@ export type HeatEnd = "critical" | "serious" | "never";
 export type HeatNotice = "serious" | "off";
 export type LidDisplay = "sleep" | "leave_on";
 export type DisplayAwake = "off" | "while_holding";
+export type LowPower = "battery_below40" | "on_battery" | "off";
 
 /** The Keep awake settings as the engine stores them (DEC-167), one field per setting. */
 export interface KeepAwakeSettings {
@@ -22,6 +23,7 @@ export interface KeepAwakeSettings {
   heat_notice: HeatNotice;
   lid_display: LidDisplay;
   display_awake: DisplayAwake;
+  low_power: LowPower;
 }
 
 export type KeepAwakeSettingId = keyof KeepAwakeSettings;
@@ -46,11 +48,12 @@ export type LidSupport =
 
 export type KeepAwakePlatform = "mac_os" | "linux" | "windows";
 
-/** Keep awake as the engine last evaluated it: the settings, the decision, the lid support,
- * what this computer itself says of the lid whatever the rule, the platform and how many
- * agents work. */
+/** Keep awake as the engine last evaluated it: the settings, the settings version a save
+ * sends back, the decision, the lid support, what this computer itself says of the lid
+ * whatever the rule, the platform and how many agents work. */
 export interface KeepAwakeView {
   settings: KeepAwakeSettings;
+  version: number;
   state: { want: KeepAwakeWant; reason: KeepAwakeReason; ends_at_ms: number | null; ended: KeepAwakeEnd | null };
   lid_support: LidSupport;
   lid_platform: LidSupport;
@@ -59,13 +62,13 @@ export interface KeepAwakeView {
 }
 
 /** One change the owner makes: start a timer, move the running one later, end the hold,
- * save the settings, on macOS turn on the lid-closed hold or remove the lid helper, or on
- * Windows put the lid setting back now. */
+ * save the settings over the settings version read, on macOS turn on the lid-closed hold or
+ * remove the lid helper, or on Windows put the lid setting back now. */
 export type KeepAwakeAction =
   | { start: { minutes: number } }
   | { extend: { minutes: number } }
   | "end"
-  | { set: { settings: KeepAwakeSettings } }
+  | { set: { settings: KeepAwakeSettings; version: number } }
   | LidAction;
 
 /** The lid commands, sent by their engine names: the two macOS lid helper ones and the
@@ -75,6 +78,15 @@ export type LidAction = "turn_on_lid_hold" | "remove_lid_helper" | "put_lid_back
 export const MINUTES_MIN = 1;
 export const MINUTES_MAX = 1440;
 export const KEEP_AWAKE_POLL_MS = 5000;
+
+/** How many times a save reads and lays its picks, the first time included, while another
+ * window keeps saving first. */
+export const SAVE_ATTEMPTS = 3;
+
+/** The engine's sentence once another window saved first on every attempt, as the TUI says it. */
+export const KEEP_AWAKE_STALE = "Keep awake changed in another window meanwhile. Try again.";
+
+const STALE = "stale_revision";
 
 /** The window event that says Keep awake changed here, so the control reads at once. */
 export const KEEP_AWAKE_CHANGED = "crazyagent:keep-awake-changed";
@@ -87,6 +99,7 @@ export const KEEP_AWAKE_OPEN = "crazyagent:keep-awake-open";
 export const KEEP_AWAKE_DEFAULTS: KeepAwakeSettings = {
   mode: "auto", grace: "min10", cap: "h24", lid: "ac_only", battery_floor: "pct10",
   heat_end: "critical", heat_notice: "serious", lid_display: "sleep", display_awake: "off",
+  low_power: "battery_below40",
 };
 
 interface SettingWords { id: KeepAwakeSettingId; label: string; help: string; options: readonly { value: string; label: string }[] }
@@ -112,6 +125,8 @@ export const KEEP_AWAKE_SETTINGS: readonly SettingWords[] = [
     options: [{ value: "sleep", label: "Sleep the display" }, { value: "leave_on", label: "Leave on" }] },
   { id: "display_awake", label: "Display awake with the lid open", help: "Whether a hold also keeps the display on. While it does, the screen stays unlocked.",
     options: [{ value: "off", label: "Off" }, { value: "while_holding", label: "While holding" }] },
+  { id: "low_power", label: "Low Power Mode", help: "During a hold on battery, turns on the computer's low power mode to save charge, and puts it back when the hold ends.",
+    options: [{ value: "battery_below40", label: "On battery below 40 %" }, { value: "on_battery", label: "Whenever on battery" }, { value: "off", label: "Off" }] },
 ];
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -143,4 +158,20 @@ export async function sendKeepAwake(action: KeepAwakeAction): Promise<Result<voi
   const taken = receiptResult(result.value);
   if (taken.kind === "ok" && typeof window !== "undefined") window.dispatchEvent(new Event(KEEP_AWAKE_CHANGED));
   return taken;
+}
+
+/** Saves picked settings over the settings the engine holds at that moment: reads, lays the
+ * picks over that read, keeps every field this window does not list as read, and sends them
+ * with the read's version. When another window saved first it reads and lays them again, at
+ * most `SAVE_ATTEMPTS` times, then says so. Input: the lay from the read settings to the sent
+ * ones. Output: nothing, or why it was not saved. */
+export async function saveKeepAwake(lay: (stored: KeepAwakeSettings) => KeepAwakeSettings): Promise<Result<void>> {
+  for (let attempt = 1; attempt <= SAVE_ATTEMPTS; attempt += 1) {
+    const fresh = await loadKeepAwake();
+    if (fresh.kind !== "ok") return fresh;
+    const settings = { ...fresh.value.settings, ...lay(fresh.value.settings) };
+    const result = await sendKeepAwake({ set: { settings, version: fresh.value.version } });
+    if (result.kind !== "error" || result.code !== STALE) return result;
+  }
+  return { kind: "error", code: STALE, message: KEEP_AWAKE_STALE };
 }
