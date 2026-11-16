@@ -2191,7 +2191,7 @@ fn codex_hook_table(hooks: &[CodexHook], source: &str) -> toml_edit::Table {
 /// Inputs: the hooks and the canonical `config.toml` path. Output: one key per hook.
 fn codex_hook_keys(hooks: &[CodexHook], source: &str) -> Vec<String> {
     let mut groups: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    let keys: Vec<String> = hooks
+    hooks
         .iter()
         .map(|hook| {
             let group = groups.entry(hook.event).or_insert(0);
@@ -2199,9 +2199,7 @@ fn codex_hook_keys(hooks: &[CodexHook], source: &str) -> Vec<String> {
             *group += 1;
             key
         })
-        .collect();
-    assert_eq!(keys.len(), hooks.len());
-    keys
+        .collect()
 }
 
 /// The launch state file holding the hook trust keys a Codex launch pinned under
