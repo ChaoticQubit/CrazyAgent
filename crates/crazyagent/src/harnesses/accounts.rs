@@ -371,7 +371,8 @@ fn filled(
 /// relay's loopback URL, its placeholder and the model chosen for the run, filled into the
 /// manifest's `openai-responses` entry; the sign-in's stored `native-default` is never
 /// handed out. Inputs: the harness, the stored sign-in, its ChatGPT relay and the run's
-/// model. Output: the hand-over; `account_not_compatible` for another account or harness,
+/// model. A relay of another sign-in than the stored one is a wiring fault and stops on an
+/// assertion. Output: the hand-over; `account_not_compatible` for another account or harness,
 /// `account_chatgpt_relay_missing` for a relay that is not a ChatGPT relay,
 /// `account_model_missing` for a blank model, or `account_handover_missing`.
 pub fn chatgpt_handover(
@@ -386,6 +387,13 @@ pub fn chatgpt_handover(
     if !relay.is_chatgpt() {
         return Err(failure("account_chatgpt_relay_missing"));
     }
+    let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
+        return Err(failure("account_not_compatible"));
+    };
+    assert!(
+        relay.chatgpt_profile() == Some(profile_ref),
+        "a ChatGPT relay serves only the sign-in it was read from"
+    );
     if model.trim().is_empty() {
         return Err(failure("account_model_missing"));
     }

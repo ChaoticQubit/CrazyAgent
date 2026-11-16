@@ -454,7 +454,8 @@ impl NativeProfileUse {
 impl NativeProfileUse {
     /// Makes the ChatGPT sign-in source a ChatGPT relay forwards with: the account's access
     /// token and account id, read from its record into engine memory, renewed shortly
-    /// before they lapse only through the engine's own renewal under this account's lease.
+    /// before they lapse only through the engine's own renewal under this account's lease,
+    /// and named after the account's native profile, which routing and the hand-over check.
     /// Input: the Codex executable the renewal runs. Output: the source;
     /// `native_profile_codex_api_key` or `native_profile_codex_token_unreadable` for a
     /// record without usable ChatGPT tokens, or the unavailable refusal.
@@ -474,6 +475,12 @@ impl NativeProfileUse {
         {
             return Err(unavailable());
         }
+        let crate::config::ModelAuthentication::NativeManaged { profile_ref } =
+            &self.binding.connection.auth
+        else {
+            return Err(unavailable());
+        };
+        let profile = profile_ref.clone();
         let mut record = account_record(Harness::Codex, &self.home.file, &self.profile_path()?)?;
         let tokens = chatgpt_tokens(&record.copy);
         record.copy.fill(0);
@@ -485,7 +492,7 @@ impl NativeProfileUse {
             record.copy.fill(0);
             tokens
         });
-        Ok(ChatGptSource::new(self.account().clone(), tokens, renew))
+        Ok(ChatGptSource::new(profile, tokens, renew))
     }
 }
 

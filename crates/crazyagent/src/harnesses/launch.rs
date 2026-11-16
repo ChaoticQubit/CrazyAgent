@@ -612,11 +612,13 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
 /// that home. Codex and Claude Code keep their own sign-in paths. Inputs: the request bound
 /// to the sign-in, with no sandbox profile yet, the harness, the stored sign-in, the
 /// agent's own 0700 home and the sign-in source. Output: the request to launch and the
-/// relay, which must live as long as the agent; `launch_chatgpt_unsupported` for an own
-/// adapter, a harness that does not list `openai-responses`, another account or a request
-/// not bound to a sign-in, `launch_chatgpt_sandbox_premade` for a request that already
-/// carries a sandbox profile, `launch_account_home_holds_sign_in` where a sign-in's record
-/// lies, or the private home's refusal.
+/// relay, which must live as long as the agent. A source read from another sign-in than
+/// the stored one is a wiring fault and stops on an assertion before any relay starts.
+/// Refusals: `launch_chatgpt_unsupported` for an own adapter, a harness that does not list
+/// `openai-responses`, another account or a request not bound to a sign-in,
+/// `launch_chatgpt_sandbox_premade` for a request that already carries a sandbox profile,
+/// `launch_account_home_holds_sign_in` where a sign-in's record lies, or the private
+/// home's refusal.
 pub fn route_chatgpt(
     mut request: LaunchRequest,
     harness: &super::registry::Harness,
@@ -634,6 +636,13 @@ pub fn route_chatgpt(
     if request.sandbox_profile.is_some() {
         return Err(failure("launch_chatgpt_sandbox_premade"));
     }
+    let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
+        return Err(failure("launch_chatgpt_unsupported"));
+    };
+    assert!(
+        source.profile() == profile_ref,
+        "a ChatGPT relay serves only the sign-in it was read from"
+    );
     let home = chatgpt_home(base, harness, &connection.id)?;
     let relay = Relay::start_chatgpt(source).map_err(|error| LaunchError(error.0, None))?;
     request.account = AccountBinding::Url {
