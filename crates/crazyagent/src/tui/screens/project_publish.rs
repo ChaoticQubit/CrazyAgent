@@ -1,11 +1,13 @@
 use super::intake::copy;
+use super::new_project_publish::Publish;
+use super::new_project_view::{Look, Row};
 use super::project_markdown::sanitize;
 use crate::github::{
-    GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishLeft, GitHubPublishStep, GitHubRule,
-    GitHubRuleState, GitHubSecretKind,
+    GitHubIgnoreDraft, GitHubPromptAnswer, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan,
+    GitHubPublishStep, GitHubRule, GitHubRuleState, GitHubSecretKind,
 };
 use crate::protocol::ProjectId;
-use crate::tui::client::intake::IntakeQuery;
+use crate::tui::client::intake::{IntakeEvent, IntakeQuery};
 use crate::tui::keys::Key;
 use std::collections::BTreeSet;
 
@@ -24,6 +26,79 @@ const BLOCKED: &str = "These files look like they hold secrets, so nothing was p
 const MORE: &str = "There are more. Check again after these.";
 const DISCARD_ASK: &str = "Discard this publish? CrazyAgent forgets it so you can start again. Files it wrote in the project stay, and a repository it made stays on GitHub.";
 const REFUSAL_CHARS_MAX: usize = 300;
+pub(in crate::tui) const PROMPT_LINE: &str = "This project is not on GitHub. Publish it?";
+pub(in crate::tui) const PROMPT_KEY: (&str, &str) = ("G", "Publish on GitHub");
+const CHECKING: &str = "Checking your GitHub sign-in...";
+const SIGNED_OUT: &str = "Sign in to GitHub to publish this project.";
+const STATUS_FAILED: &str = "CrazyAgent couldn't read your GitHub sign-in.";
+
+/// What one key in the Overview's publish question or its form asks of the page: nothing
+/// more, close the pane, keep Not now or Don't ask again, send a GitHub read, open the
+/// GitHub sign-in, or start the publish with the plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::tui) enum AskKey {
+    Handled,
+    Close,
+    Answer(GitHubPromptAnswer),
+    Read(IntakeQuery),
+    SignIn,
+    Start(GitHubPublishPlan),
+}
+
+/// The question's or the form's words: the title, the body rows and the key hints, as key
+/// and label.
+pub(in crate::tui) struct AskText {
+    pub title: &'static str,
+    pub body: Vec<Row>,
+    pub hints: Vec<(&'static str, &'static str)>,
+}
+
+/// The Overview's question for a project with no GitHub publish (DEC-182 S5b): the question
+/// with Publish, Not now and Don't ask again, then the New project publish panel that
+/// Publish opens, with the GitHub read it waits on.
+#[derive(Debug, Clone, Default)]
+pub(in crate::tui) struct AskPane {
+    form: Option<Publish>,
+    reading: Option<IntakeQuery>,
+}
+
+impl AskPane {
+    /// Says whether a reply answers the GitHub read the form waits on. Takes the query.
+    /// Returns the answer.
+    pub fn takes(&self, _query: &IntakeQuery) -> bool {
+        false
+    }
+
+    /// Handles a key: on the question Enter opens the form and reads the GitHub sign-in,
+    /// n keeps Not now, x keeps Don't ask again and Esc closes; in the form Esc closes,
+    /// Enter on Publish starts with the plan or moves to the row that stops it, Enter opens
+    /// the sign-in while signed out or reads it again after a failed read, and every other
+    /// key goes to the panel. Takes the key, the project's name and its about text.
+    /// Returns what the page does next.
+    pub fn key(&mut self, _key: &Key, _name: &str, _about: &str) -> AskKey {
+        AskKey::Handled
+    }
+
+    /// Takes the reply to the form's GitHub read: the sign-in, then the accounts while
+    /// signed in, which opens the panel on its first row. Takes the reply, one [`takes`]
+    /// accepts. Returns the read to send next, if any.
+    ///
+    /// [`takes`]: AskPane::takes
+    pub fn arrived(&mut self, _event: &IntakeEvent) -> Option<IntakeQuery> {
+        None
+    }
+
+    /// The pane's words: the question, the sign-in being read, signed out, a read that
+    /// failed, or the publish panel with Publish as its last row. Takes the project's name,
+    /// its about text and the look. Returns the words.
+    pub fn text(&self, _name: &str, _about: &str, _look: &Look) -> AskText {
+        AskText {
+            title: PUBLISH_TITLE,
+            body: Vec::new(),
+            hints: Vec::new(),
+        }
+    }
+}
 
 /// What the owner asked for in the publish pane, before it becomes a query.
 #[derive(Debug, Clone, PartialEq, Eq)]

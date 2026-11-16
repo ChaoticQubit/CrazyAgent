@@ -64,6 +64,13 @@ pub(in crate::tui) enum IntakeQuery {
     GitHubPublishContinue {
         project: ProjectId,
     },
+    GitHubPublishPrompt {
+        project: ProjectId,
+    },
+    GitHubPublishPromptSet {
+        project: ProjectId,
+        answer: crate::github::GitHubPromptAnswer,
+    },
     GitHubPublishDiscard {
         project: ProjectId,
     },
@@ -118,6 +125,8 @@ pub(in crate::tui) enum IntakeView {
     Owners(GitHubOwners),
     Publish(Box<GitHubPublishJob>),
     PublishStatus(Option<Box<GitHubPublishJob>>),
+    Prompt(bool),
+    PromptKept,
     Discarded(Option<GitHubPublishLeft>),
     Cloned(CloneReceipt),
     Changed(OwnerResult),
@@ -301,6 +310,10 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             )),
+            IntakeQuery::GitHubPublishPrompt { .. }
+            | IntakeQuery::GitHubPublishPromptSet { .. } => {
+                return Err("github_outcome_unknown".to_owned());
+            }
             IntakeQuery::GitHubPublishDiscard { project } => IntakeView::Discarded(
                 controller
                     .github_publish_discard(project)

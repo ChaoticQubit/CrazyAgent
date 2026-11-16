@@ -230,6 +230,25 @@ impl OwnerController {
         self.owner_client()?.github_publish_continue(project).await
     }
 
+    /// Says whether the Overview asks to publish a project that has no GitHub publish: it
+    /// names no git remote and the owner said neither Not now in the last seven days nor
+    /// Don't ask again. Takes the project. Returns the answer.
+    pub async fn github_publish_prompt(&mut self, project: ProjectId) -> Result<bool, EngineError> {
+        self.owner_client()?.github_publish_prompt(project).await
+    }
+
+    /// Keeps the owner's Not now or Don't ask again for a project's publish question.
+    /// Takes the project and the answer. Returns nothing.
+    pub async fn github_publish_prompt_set(
+        &mut self,
+        project: ProjectId,
+        answer: crate::github::GitHubPromptAnswer,
+    ) -> Result<(), EngineError> {
+        self.owner_client()?
+            .github_publish_prompt_set(project, answer)
+            .await
+    }
+
     /// Forgets a project's publish before its push. Takes the project.
     /// Returns the repository GitHub made or may have made, if any.
     pub async fn github_publish_discard(

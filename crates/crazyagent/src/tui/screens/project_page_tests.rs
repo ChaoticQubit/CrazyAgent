@@ -164,6 +164,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         IntakeQuery::Found => "found",
                         IntakeQuery::GitHubPublishStart { .. } => "github publish",
                         IntakeQuery::GitHubPublishStatus { .. } => "github publish status",
+                        IntakeQuery::GitHubPublishPrompt { .. } => "github publish prompt",
                         _ => "intake",
                     });
                     connection.intake(*job).unwrap();
@@ -725,9 +726,16 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
         1,
         "the Overview reads the project's GitHub publish once: {sent:?}"
     );
+    assert_eq!(
+        sent.iter()
+            .filter(|label| **label == "github publish prompt")
+            .count(),
+        1,
+        "a project with no publish asks once whether to offer one: {sent:?}"
+    );
     let sent: Vec<&str> = sent
         .into_iter()
-        .filter(|label| *label != "github publish status")
+        .filter(|label| !matches!(*label, "github publish status" | "github publish prompt"))
         .collect();
     assert_eq!(
         sent,
@@ -7630,6 +7638,11 @@ fn publish_asks(shell: &mut Shell) -> Vec<IntakeQuery> {
             matches!(
                 query,
                 IntakeQuery::GitHubPublishStatus { .. }
+                    | IntakeQuery::GitHubPublishPrompt { .. }
+                    | IntakeQuery::GitHubPublishPromptSet { .. }
+                    | IntakeQuery::GitHubPublishStart { .. }
+                    | IntakeQuery::GitHubStatus
+                    | IntakeQuery::GitHubOwners
                     | IntakeQuery::GitHubPublishApprove { .. }
                     | IntakeQuery::GitHubPublishExclude { .. }
                     | IntakeQuery::GitHubPublishRecheck { .. }
@@ -7756,6 +7769,142 @@ fn a_project_without_a_publish_shows_no_pane_and_a_refused_answer_is_said() {
     assert_eq!(message.rest, super::intake::copy("github_publish_running"));
     let shown = render(&mut shell, 100, 30);
     assert!(shown.contains("[x] .env*"), "the pane stays: {shown}");
+}
+
+/// Opens the Overview of project `notes`, named Notes, and answers its publish read with
+/// no publish. Takes nothing. Returns the shell and the project.
+fn unpublished() -> (Shell, ProjectId) {
+    let mut ctx = ctx(100, 30);
+    let project = ProjectId::new("notes").unwrap();
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    (shell, project)
+}
+
+/// Opens the same Overview with the engine saying to offer a publish. Takes nothing.
+/// Returns the shell and the project.
+fn offered() -> (Shell, ProjectId) {
+    let (mut shell, project) = unpublished();
+    let prompt = IntakeQuery::GitHubPublishPrompt {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    (shell, project)
+}
+
+#[test]
+fn a_project_with_no_publish_shows_the_question_on_its_overview_and_keeps_not_now() {
+    let (mut shell, project) = offered();
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+    assert!(shown.contains("G Publish on GitHub"), "{shown}");
+    shell.key(Key::Char('G'));
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("x Don't ask again"), "{shown}");
+    shell.key(Key::Char('n'));
+    let kept = IntakeQuery::GitHubPublishPromptSet {
+        project: project.clone(),
+        answer: crate::github::GitHubPromptAnswer::NotNow,
+    };
+    assert_eq!(publish_asks(&mut shell), [kept.clone()]);
+    shell.key(Key::Char('x'));
+    assert!(publish_asks(&mut shell).is_empty(), "one answer at a time");
+    publish_reply(&mut shell, kept, Ok(IntakeView::PromptKept));
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        !shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+    assert!(!shown.contains("Don't ask again"), "{shown}");
+    shell.key(Key::Char('G'));
+    assert!(!render(&mut shell, 100, 30).contains("Don't ask again"));
+    let (mut quiet, project) = unpublished();
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut quiet), [prompt.clone()]);
+    publish_reply(&mut quiet, prompt, Err("github_store_unavailable".into()));
+    assert!(
+        quiet.ctx.message().is_none(),
+        "a failed question read stays quiet"
+    );
+    let shown = render(&mut quiet, 100, 30);
+    assert!(
+        !shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+}
+
+#[test]
+fn publish_from_the_overview_question_starts_the_publish_the_form_shows_and_says_so() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    shell.key(Key::Esc);
+    assert!(publish_asks(&mut shell).is_empty(), "Esc starts nothing");
+    let shown = render(&mut shell, 100, 30);
+    assert!(!shown.contains("[ Publish ]"), "{shown}");
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "the question stays: {shown}"
+    );
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("[ Publish ]"), "{shown}");
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert!(
+        publish_asks(&mut shell).is_empty(),
+        "the question is gone once a publish starts"
+    );
+    publish_reply(
+        &mut shell,
+        start,
+        Ok(IntakeView::Publish(Box::new(publish_job(
+            GitHubPublishStep::Drafting,
+        )))),
+    );
+    let message = shell.ctx.message().expect("the start is said");
+    assert_eq!(message.lead, super::new_project_publish::PUBLISH_STARTED);
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains("Drafting the .gitignore lines..."),
+        "{shown}"
+    );
 }
 
 #[test]
