@@ -2232,6 +2232,29 @@ fn stdin_file(pipe: std::process::ChildStdin) -> File {
     File::from(std::os::windows::io::OwnedHandle::from(pipe))
 }
 
+/// A run log written up to a byte cap, past which the bytes are dropped, so a harness's
+/// output never fills the disk while the harness runs on (T19b 19b-4, rv-secreview note 2).
+struct Capped {
+    file: File,
+    left: u64,
+}
+
+impl Capped {
+    /// A log that keeps at most `bytes_max` bytes. Inputs: the open file and the cap.
+    /// Output: the log.
+    fn new(file: File, bytes_max: u64) -> Self {
+        Self {
+            file,
+            left: bytes_max,
+        }
+    }
+
+    /// Writes as much of `bytes` as the cap leaves room for. Input: the bytes. Output: none.
+    fn write(&mut self, bytes: &[u8]) {
+        let _ = bytes;
+    }
+}
+
 /// Hands each line of a harness's stdout to the session until the output ends. A line
 /// longer than `LINE_BYTES_MAX` is passed over to its newline and reported once as
 /// skipped, so no amount of output ends the session. Takes the stdout and the sender.

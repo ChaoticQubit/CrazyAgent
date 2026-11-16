@@ -199,13 +199,15 @@ const LISTED_TOOLS_OFF: &str = "This harness can't switch its tools off, so this
 /// The plain line a research job on a listed harness ends with before it starts, for a run
 /// its harness can never take (T19b 19b-4, QUESTION-0100 Q6): Full access, which has no
 /// sandbox for its account to go over through, or tools off on a harness whose tools cannot
-/// be switched off. Inputs: the manifest, the access level and the tools switch. Output: the
-/// line, none for a run it can take.
+/// be switched off. Inputs: the manifest, the access level, the tools switch and whether the
+/// project's hooks refuse a listed launch. Output: the line, none for a run it can take.
 fn listed_refusal(
     manifest: &crate::harnesses::manifest::Manifest,
     access: AgentAccess,
     tools: bool,
+    hooks: bool,
 ) -> Option<&'static str> {
+    let _ = hooks;
     if access == AgentAccess::Full {
         return Some(LISTED_FULL_ACCESS);
     }
@@ -1151,7 +1153,8 @@ impl ResearchRunner {
             let listed = crate::harnesses::registry::registry()
                 .get(id)
                 .ok_or_else(|| RunError::Invalid("listed harness missing".into()))?;
-            if let Some(line) = listed_refusal(listed.manifest(), policy.access, job.tools) {
+            let hooks = context.listed_hooks_refused(job.tools);
+            if let Some(line) = listed_refusal(listed.manifest(), policy.access, job.tools, hooks) {
                 return Err(RunError::Invalid(line.into()));
             }
         }

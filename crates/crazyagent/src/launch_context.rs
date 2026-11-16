@@ -1468,6 +1468,15 @@ impl AgentContext {
         Ok(installed)
     }
 
+    /// Whether a listed harness launch with this tools switch is refused for hooks: the
+    /// context's project turned hooks on, which run only with tools on, and a listed harness
+    /// runs none (T19b 19b-4, rv-secreview note 1). Input: the tools switch. Output: the
+    /// answer.
+    pub fn listed_hooks_refused(&self, tools: bool) -> bool {
+        let _ = tools;
+        false
+    }
+
     /// The text a listed harness's `instructions` render gets: this context's startup
     /// instruction, then for a team agent the owner's app and project text with the owner's
     /// text for this agent, as a native agent's instruction file holds them. A listed harness

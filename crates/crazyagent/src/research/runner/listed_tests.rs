@@ -215,16 +215,19 @@ fn a_listed_research_run_its_harness_can_never_take_is_refused_in_plain_words_be
     let parse = |text: &str| crate::harnesses::manifest::parse(text.as_bytes()).unwrap();
     let (standin, limited) = (parse(STANDIN), parse(&limited));
 
-    let off = listed_refusal(&limited, AgentAccess::Sandboxed, false);
+    let off = listed_refusal(&limited, AgentAccess::Sandboxed, false, false);
 
     assert_eq!(off, Some(LISTED_TOOLS_OFF));
-    assert_eq!(listed_refusal(&limited, AgentAccess::Sandboxed, true), None);
     assert_eq!(
-        listed_refusal(&standin, AgentAccess::OwnBranch, false),
+        listed_refusal(&limited, AgentAccess::Sandboxed, true, false),
         None
     );
     assert_eq!(
-        listed_refusal(&standin, AgentAccess::Full, true),
+        listed_refusal(&standin, AgentAccess::OwnBranch, false, false),
+        None
+    );
+    assert_eq!(
+        listed_refusal(&standin, AgentAccess::Full, true, false),
         Some(LISTED_FULL_ACCESS)
     );
     for line in [LISTED_TOOLS_OFF, LISTED_FULL_ACCESS] {
@@ -247,4 +250,53 @@ fn a_listed_research_job_refused_for_its_projects_hooks_ends_in_plain_words() {
     assert!(owner_refusal(&line), "{line}");
     assert!(line.contains("hooks"), "{line}");
     assert!(!line.contains('_'), "{line}");
+}
+
+/// T19b 19b-4 (rv-secreview note 1, QUESTION-0151 A): a tools-on research job on a listed
+/// harness in a project that turned hooks on is refused by the check Full access meets,
+/// before its worktree is made; with tools off no hook applies.
+#[test]
+fn a_tools_on_listed_research_job_in_a_project_with_hooks_is_refused_before_its_worktree() {
+    const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-acp.yaml");
+    let standin = crate::harnesses::manifest::parse(STANDIN.as_bytes()).unwrap();
+
+    let hooked = listed_refusal(&standin, AgentAccess::Sandboxed, true, true);
+
+    assert_eq!(hooked, Some(LISTED_HOOKS));
+    assert_eq!(
+        listed_refusal(&standin, AgentAccess::Sandboxed, false, false),
+        None
+    );
+    assert_eq!(
+        listed_refusal(&standin, AgentAccess::OwnBranch, true, false),
+        None
+    );
+}
+
+/// T19b 19b-4 (rv-secreview note 2, QUESTION-0151 A): a listed research run keeps its
+/// harness's raw output as the bundled runs on pipes do, `events.jsonl` and `stderr.log` in
+/// its agent folder, owner-only, so the owner has a record of what it did.
+#[test]
+fn a_listed_research_run_keeps_its_harness_output_in_owner_only_logs() {
+    let root = engine_root();
+    let (folder, runner, _jobs, id) = listed_job(&root, &replying_standin(REPORT));
+    let (access, pool) = local_access();
+    let picked = crate::research::accounts::pool_account(&access, &pool, "standin-acp", &|_| true);
+    let project = ResearchProject {
+        id: "alpha",
+        root: &folder,
+        account: picked.map(|(_, account)| account),
+    };
+
+    let run = runner.run_once(&project);
+
+    assert!(run.is_ok(), "{:?}", run.as_ref().err());
+    let agent = root.state.join("agents").join(format!("job-{id}-1"));
+    let events = fs::read_to_string(agent.join(EVENTS_LOG)).unwrap_or_default();
+    assert!(events.contains("agent_message_chunk"), "{events}");
+    assert!(events.contains(REPORT), "{events}");
+    for name in [EVENTS_LOG, "stderr.log"] {
+        let mode = fs::symlink_metadata(agent.join(name)).map(|meta| meta.permissions().mode());
+        assert_eq!(mode.ok().map(|mode| mode & 0o777), Some(0o600), "{name}");
+    }
 }
