@@ -1,5 +1,6 @@
 import { call, knownError, namedFailure, type Result } from "./api";
 import { problemText, shown, type Origin, type PluginStatus, type Preview, type Problem, type SecretView } from "./api-app-plugins";
+import { displayText } from "./screens/conversation";
 import type { Tone } from "./ui";
 
 export type WritePolicy = "ask_every_time" | "ask_once_per_project" | "read_only";
@@ -97,7 +98,26 @@ export const PROJECT_CONNECTORS = {
   none: "No connectors yet. Add one in Settings, Connectors.",
   notFound: "Not found",
   notChanged: "The connector was not changed.",
+  writes: "Allowed writes",
+  writesAbout: "Connectors that may change things in this project without asking again.",
+  writesNone: "No connector may change things here without asking.",
+  writesFailed: "Couldn't load the allowed writes.",
+  revoke: "Revoke",
 } as const;
+
+/** The connectors a project may write with without asking again, each with the title of the
+ * first listed connector of that name, else its name. Inputs: the page read and the allowed
+ * writes. Output: the rows, in the allowed writes' order. */
+export function writeRows(page: ConnectorsView, writes: AllowedWrites): { name: string; title: string }[] {
+  if (writes.project !== page.project) throw new Error("the allowed writes are for the project the page read");
+  return writes.connectors.map((name) => ({ name, title: page.connectors.find((listed) => listed.name === name)?.title ?? name }));
+}
+
+/** The toast after a Revoke, the same in the TUI. Input: the connector's title. Output: the
+ * sentence. */
+export function writesRevoked(title: string): string {
+  return `${title} asks again before its next write.`;
+}
 
 /** The line naming the connectors a project cannot switch yet, the same in the TUI. Input:
  * their titles, at least one. Output: the line. */
@@ -158,6 +178,10 @@ export const CONNECTORS_PAGE = {
   oauthNotYet: "Signs in with OAuth, which this build does not have.",
   refusedFile: "Fix its file, or remove it on the App plugins page.",
   settings: "Connector settings",
+  write: "Write actions",
+  writeHelp: "What happens when an agent calls a connector tool that changes something: each call waits for your Allow, your first Allow in a project lets later calls run, or those tools stay hidden.",
+  wait: "Approval wait",
+  waitHelp: "How long a call that changes something waits for your answer before it fails.",
   native: "Harness-native connectors",
   nativeHelp: "Connectors from the harness's own account (claude.ai connectors in Claude Code, ChatGPT apps in Codex). The engine neither filters nor logs them.",
   sizeCap: "Tool result size cap",
@@ -181,6 +205,14 @@ export const CONNECTORS_PAGE = {
   removeBody: "Its manifest is deleted from your plugins folder, with its keys and its switch in every project.",
 } as const;
 
+/** The write action choices in the order both apps list them, the default first. */
+export const WRITE_CHOICES: { choice: WritePolicy; label: string }[] = [
+  { choice: "ask_every_time", label: "Ask every time" }, { choice: "ask_once_per_project", label: "Ask once per project and connector" }, { choice: "read_only", label: "Read-only" },
+];
+/** The approval wait choices in the order both apps list them; 10 min is the default. */
+export const WAIT_CHOICES: { choice: Wait; label: string }[] = [
+  { choice: "minutes2", label: "2 min" }, { choice: "minutes10", label: "10 min" }, { choice: "minutes30", label: "30 min" },
+];
 /** The harness-native choices in the order both apps list them, the default first. */
 export const NATIVE_CHOICES: { choice: NativeConnectors; label: string }[] = [{ choice: "off", label: "Off" }, { choice: "on", label: "On" }];
 /** The size cap choices in the order both apps list them; 256 KiB is the default. */
@@ -192,11 +224,24 @@ const NOT_CONNECTOR: Problem = { code: "app_plugin_not_connector", line: null, f
 /** The settings an owner has until they pick others: the engine's `ConnectorSettings::DEFAULT`. */
 export const CONNECTOR_DEFAULTS: ConnectorSettings = { write: "ask_every_time", wait: "minutes10", native: "off", size_cap: "kib256", keep_log: "days30" };
 
-/** The settings a Connectors page save sends: the ones read, with only the two this page
- * shows replaced, so the write, wait and keep settings go back as they were. Inputs: the
- * settings read and the picked values. Output: the settings to save. */
-export function settingsToSave(read: ConnectorSettings, native: NativeConnectors, sizeCap: SizeCap): ConnectorSettings {
-  return { ...read, native, size_cap: sizeCap };
+/** What the owner picked on the Connectors page for each setting it shows, or null where they
+ * picked nothing. */
+export type SettingPicks = { write: WritePolicy | null; wait: Wait | null; native: NativeConnectors | null; size_cap: SizeCap | null };
+
+/** The settings a Connectors page save sends: the ones read, with only the four this page
+ * shows replaced by their picks, so the keep setting goes back as it was. Inputs: the
+ * settings read and the picks. Output: the settings to save, or null when no pick differs
+ * from what was read. */
+export function settingsToSave(read: ConnectorSettings, picks: SettingPicks): ConnectorSettings | null {
+  const next: ConnectorSettings = {
+    ...read,
+    write: picks.write ?? read.write,
+    wait: picks.wait ?? read.wait,
+    native: picks.native ?? read.native,
+    size_cap: picks.size_cap ?? read.size_cap,
+  };
+  const changed = next.write !== read.write || next.wait !== read.wait || next.native !== read.native || next.size_cap !== read.size_cap;
+  return changed ? next : null;
 }
 
 /** A connector's state word with its tone and the line under it, checked in a fixed order:
@@ -295,6 +340,8 @@ export const CONNECTOR_PAGE_REFUSALS: Record<string, string> = {
   app_plugin_secret_not_declared: "This connector doesn't declare that secret.",
   app_plugins_unavailable: "Connectors aren't available in this engine yet.",
   owner_entropy_unavailable: "This computer couldn't make a random value for the request. Nothing changed; try again.",
+  connector_approval_unknown: "That approval is gone.",
+  connector_approval_closed: "This write was already answered or its wait ran out. The page now shows where it stands.",
 };
 
 /** One plain sentence for a refused Connectors request: the engine's sentence for its own
@@ -305,10 +352,22 @@ export function connectorProblem(refusal: { code: string; cause?: string; messag
   return refusal.message ?? namedFailure(knownError(refusal.code), refusal.code, refusal.cause);
 }
 
-async function connectorCall<T>(command: string, args: Record<string, unknown>): Promise<Result<T>> {
+/** One agent- or vendor-supplied name or text as the approval page shows it: each typed
+ * backslash doubled, then each hidden character escaped, so a typed escape never shows like
+ * the character it names, as the engine shows the full arguments. Input: the text the engine
+ * answered. Output: the text to show. */
+export function approvalText(text: string): string {
+  return displayText(text.replaceAll("\\", "\\\\"));
+}
+
+function approvalShown(view: ApprovalView): ApprovalView {
+  return { ...shown(view), title: approvalText(view.title), tool: approvalText(view.tool), agent: approvalText(view.agent), preview: approvalText(view.preview) };
+}
+
+async function connectorCall<T>(command: string, args: Record<string, unknown>, show: (value: T) => T = shown): Promise<Result<T>> {
   const result = await call<T>(command, args);
   if (result.kind === "error") return { ...result, message: connectorProblem(result) };
-  return result.kind === "ok" ? { kind: "ok", value: shown(result.value) } : result;
+  return result.kind === "ok" ? { kind: "ok", value: show(result.value) } : result;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -411,4 +470,102 @@ export function clearConnectorKey(name: string, secret: string): Promise<Result<
  * project, the connector, the switch and who. Output: the page with that project's switches. */
 export function setConnectorGrant(project: string, connector: string, enabled: boolean, who: Who): Promise<Result<ConnectorsView>> {
   return connectorCall<ConnectorsView>("desktop_connector_grant", { project, connector, enabled, who });
+}
+
+/** Where one connector write stands: waiting for the owner, allowed, denied, or past its wait. */
+export type ApprovalState = "waiting" | "allowed" | "denied" | "expired";
+
+/** One connector write as the approval page shows it, the engine's ApprovalView: what asks,
+ * where, the preview, the full arguments with hidden characters already escaped and `hidden`
+ * marking that they hold some, where it stands and its times in epoch milliseconds. */
+export interface ApprovalView {
+  id: number;
+  project: string;
+  project_name: string;
+  agent: string;
+  connector: string;
+  title: string;
+  tool: string;
+  preview: string;
+  arguments: string;
+  hidden: boolean;
+  state: ApprovalState;
+  created_ms: number;
+  expires_ms: number;
+  answered_ms: number | null;
+}
+
+/** The connectors one project may write with without asking again, by name. */
+export interface AllowedWrites { project: string; connectors: string[] }
+
+/** The approval page's words, the same in the TUI (WORDS-t4.md r6, r8). */
+export const APPROVAL_PAGE = {
+  title: "Connector write",
+  purpose: "An agent wants a connector to change something. Nothing is sent until you allow it.",
+  hidden: "This write holds hidden or control characters; each one is shown as a \\u escape.",
+  fold: "All arguments",
+  allow: "Allow",
+  deny: "Deny",
+  allowed: "Write allowed.",
+  denied: "Write denied.",
+  expired: "Expired",
+} as const;
+
+/** The approval page's lines, in order: connector, tool, project, agent, when it asked and
+ * what it sends. Input: the approval. Output: the lines. */
+export function approvalLines(view: ApprovalView): string[] {
+  return [
+    `Connector: ${view.title}`,
+    `Tool: ${view.tool}`,
+    `Project: ${view.project_name}`,
+    `Agent: ${view.agent}`,
+    `Asked: ${stampWords(view.created_ms)}`,
+    `What it sends: ${view.preview}`,
+  ];
+}
+
+/** The time a waiting write has left, in whole seconds rounded up and never below 0:00.
+ * Inputs: now and the end of the wait, in epoch milliseconds. Output: such as "9:59". */
+export function timeLeft(nowMs: number, expiresMs: number): string {
+  const seconds = Math.max(0, Math.ceil((expiresMs - nowMs) / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** Where a write stands as the page shows it: one still waiting when its wait ran out reads
+ * as expired, since the engine refuses an answer from then on. Inputs: the approval and now
+ * in epoch milliseconds. Output: the state to show. */
+export function shownState(approval: ApprovalView, now: number): ApprovalState {
+  return approval.state === "waiting" && now >= approval.expires_ms ? "expired" : approval.state;
+}
+
+/** Where an answered write stands: "Allowed <stamp>", "Denied <stamp>" or "Expired".
+ * Input: the approval. Output: the line, empty while it waits. */
+export function answeredLine(view: ApprovalView): string {
+  if (view.state === "waiting") return "";
+  if (view.state === "expired") return APPROVAL_PAGE.expired;
+  if (view.answered_ms === null) throw new Error("an allowed or denied write has its answer time");
+  return `${view.state === "allowed" ? "Allowed" : "Denied"} ${stampWords(view.answered_ms)}`;
+}
+
+/** Reads one connector write by the id its notice carries. Input: the id. Output: the approval. */
+export function loadApproval(id: number): Promise<Result<ApprovalView>> {
+  return connectorCall<ApprovalView>("desktop_connector_approval", { id }, approvalShown);
+}
+
+/** Answers one waiting connector write once. Inputs: the id and whether the owner allows it.
+ * Output: the approval after the answer. */
+export function answerApproval(id: number, allow: boolean): Promise<Result<ApprovalView>> {
+  return connectorCall<ApprovalView>("desktop_connector_answer", { id, allow }, approvalShown);
+}
+
+/** Reads the connectors a project may write with without asking again. Input: the project.
+ * Output: them by name. */
+export function loadAllowedWrites(project: string): Promise<Result<AllowedWrites>> {
+  return connectorCall<AllowedWrites>("desktop_connector_writes", { project });
+}
+
+/** Takes back a project's standing allow for one connector. Inputs: the project and the
+ * connector. Output: the standing allows left. */
+export function revokeWrites(project: string, connector: string): Promise<Result<AllowedWrites>> {
+  return connectorCall<AllowedWrites>("desktop_connector_revoke_writes", { project, connector });
 }

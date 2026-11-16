@@ -14,6 +14,7 @@ const ACCOUNT_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const SKILL_ID = /^[a-z0-9-]{1,64}$/;
 const HARNESS_ID = /^[a-z0-9-]{1,32}$/;
 const CONNECTOR_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+const APPROVAL_ID = /^[1-9][0-9]{0,15}$/;
 
 export type SettingsTab = typeof SETTINGS_TABS[number];
 export type UserMenuTab = typeof USER_MENU_TABS[number];
@@ -32,6 +33,7 @@ export type Route =
   | { name: "demo" }
   | { name: "onboarding"; id: string }
   | { name: "metrics" }
+  | { name: "connector-approval"; id: number }
   | { name: "settings"; tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string; harness?: string; connector?: string };
 
 function pick<T extends string>(choices: readonly T[], value: string | null | undefined, fallback: T): T {
@@ -49,7 +51,8 @@ export function isUserMenuTab(tab: SettingsTab): tab is UserMenuTab {
  * has the engine's account id shape; an open skill stays only on Plugins and skills and only with
  * the engine's skill id shape; an open harness page stays only on Harnesses and only with the
  * engine's harness id shape; an open connector page stays only on Connectors and only with
- * the manifest name shape. Input: a location hash such as "#/settings/pools".
+ * the manifest name shape; a connector write's approval page keeps only a whole id from 1
+ * to 2^53-1. Input: a location hash such as "#/settings/pools".
  * Output: a route. */
 export function parseRoute(hash: string): Route {
   const [path, query = ""] = hash.replace(/^#/, "").split("?", 2);
@@ -59,6 +62,10 @@ export function parseRoute(hash: string): Route {
   if (parts[0] === "metrics" && parts.length === 1) return { name: "metrics" };
   if (parts[0] === "demo" && parts.length === 1) return { name: "demo" };
   if (parts[0] === "settings" && parts[1] === "usage") return { name: "metrics" };
+  if (parts[0] === "connectors" && parts[1] === "approval" && parts.length === 3 && APPROVAL_ID.test(parts[2])) {
+    const id = Number(parts[2]);
+    if (Number.isSafeInteger(id)) return { name: "connector-approval", id };
+  }
   if (parts[0] === "settings" && parts.length <= 2) {
     const tab = pick(SETTINGS_TABS, parts[1], "accounts");
     const action = SETTINGS_ACTIONS.find((choice) => choice === params.get("action"));
@@ -102,6 +109,7 @@ export function formatRoute(route: Route): string {
     case "demo": return "#/demo";
     case "onboarding": return `#/projects/${encodeURIComponent(route.id)}/setup`;
     case "metrics": return "#/metrics";
+    case "connector-approval": return `#/connectors/approval/${route.id}`;
     case "settings": {
       const account = route.action && route.account ? `&account=${encodeURIComponent(route.account)}` : "";
       if (!route.action && route.tab === "plugins" && route.skill) return `#/settings/plugins?skill=${encodeURIComponent(route.skill)}`;

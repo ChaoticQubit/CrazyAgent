@@ -3,6 +3,7 @@ pub mod add_project;
 pub mod app_setup;
 pub(in crate::tui) mod changes;
 pub mod clone_repo;
+pub(in crate::tui) mod connector_approval;
 pub(in crate::tui) mod console;
 pub(in crate::tui) mod demo;
 pub(in crate::tui) mod first_run_accounts;
@@ -275,6 +276,9 @@ pub enum Place {
     SearchSettings,
     Connectors,
     ConnectorActivity,
+    ConnectorApproval {
+        id: i64,
+    },
 }
 
 /// One item a screen picks when a notification opens it (DEC-136a): a logged question on
@@ -477,7 +481,8 @@ pub trait Screen {
             | Place::AppPlugins
             | Place::SearchSettings
             | Place::Connectors
-            | Place::ConnectorActivity => None,
+            | Place::ConnectorActivity
+            | Place::ConnectorApproval { .. } => None,
         }
     }
 }
@@ -583,6 +588,9 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::Connectors => Box::new(settings::connectors::ConnectorsPage::new()),
         Place::ConnectorActivity => {
             Box::new(settings::connector_activity::ConnectorActivityPage::new())
+        }
+        Place::ConnectorApproval { id } => {
+            Box::new(connector_approval::ConnectorApprovalPage::new(*id))
         }
         Place::Onboarding {
             path,

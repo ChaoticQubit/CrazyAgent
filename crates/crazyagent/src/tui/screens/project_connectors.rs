@@ -1,4 +1,5 @@
-use crate::connectors::{ConnectorsView, Grant, Who};
+use crate::connectors::approvals::AllowedWrites;
+use crate::connectors::{ConnectorsView, Grant, Who, WritePolicy};
 use crate::protocol::ProjectId;
 use crate::tui::client::connectors::{ConnectorsEvent, ConnectorsJob};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
@@ -40,7 +41,33 @@ pub(in crate::tui) const WHO_CHOICES: [(Who, &str); 3] = [
     (Who::Master, "Master only"),
     (Who::Agents, "Agents only"),
 ];
+/// The Allowed writes block's title (PROJECT_CONNECTORS.writes).
+pub(in crate::tui) const WRITES: &str = "Allowed writes";
+/// The line under it (PROJECT_CONNECTORS.writesAbout).
+pub(in crate::tui) const WRITES_ABOUT: &str =
+    "Connectors that may change things in this project without asking again.";
+/// The line of a project with no standing allow (PROJECT_CONNECTORS.writesNone).
+pub(in crate::tui) const WRITES_NONE: &str = "No connector may change things here without asking.";
+/// The lead of a failed read of them (PROJECT_CONNECTORS.writesFailed).
+pub(in crate::tui) const WRITES_FAILED: &str = "Couldn't load the allowed writes.";
+/// The action that takes one back (PROJECT_CONNECTORS.revoke).
+pub(in crate::tui) const REVOKE: &str = "Revoke";
 const NOT_READ: &str = "Couldn't load the connectors.";
+
+/// The sentence after a revoke (writesRevoked). Input: the connector's shown title.
+/// Output: the sentence.
+pub(in crate::tui) fn writes_revoked(title: &str) -> String {
+    format!("{title} asks again before its next write.")
+}
+
+/// The title an allowed write shows: the first listed connector's with that name, else
+/// the name (writeRows). Inputs: the page and the name. Output: the shown title.
+fn write_title(view: &ConnectorsView, name: &str) -> String {
+    view.connectors
+        .iter()
+        .find(|connector| connector.name == name)
+        .map_or_else(|| safe(name), |connector| safe(&connector.title))
+}
 
 /// The line naming every connector not listed, once (notReadyLine). Input: their titles.
 /// Output: the line.
@@ -119,29 +146,37 @@ fn switches(view: &ConnectorsView) -> (Vec<Switch>, Vec<String>) {
     (listed, others)
 }
 
-/// The one request in flight: a read of the page or a change to one switch.
+/// The one request in flight: a read of the page, a change to one switch, a read of the
+/// allowed writes or a revoke of one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pending {
     Read,
     Change,
+    Writes,
+    Revoke,
 }
 
-/// Which line the cursor rests on: a switch, or the who row under an On one.
+/// Which line the cursor rests on: a switch, the who row under an On one, or an allowed
+/// write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Row {
     Switch(usize),
     Who(usize),
+    Write(usize),
 }
 
 /// A project's Connectors page (DEC-168 addenda 18, 20 and 27): every ready connector and
 /// every one turned on for this project, with its On switch and, while On and Ready, who
 /// it reaches; the rest are named once. Space or Enter turns a switch on or off, Left and
-/// Right change who; each change goes to the engine at once. Opened with b on the
-/// project's Settings tab.
+/// Right change who; each change goes to the engine at once. Under Ask once per project
+/// and connector the Allowed writes follow, read after the page, and x takes one back
+/// (DEC-168 addendum 32). Opened with b on the project's Settings tab.
 pub(in crate::tui) struct ProjectConnectorsPage {
     project: ProjectId,
     name: String,
     stored: Load<ConnectorsView>,
+    writes: Load<AllowedWrites>,
+    revoking: Option<String>,
     selected: usize,
     top: usize,
     pending: Option<Pending>,
@@ -155,6 +190,8 @@ impl ProjectConnectorsPage {
             project,
             name,
             stored: Load::Idle,
+            writes: Load::Idle,
+            revoking: None,
             selected: 0,
             top: 0,
             pending: None,
@@ -169,6 +206,12 @@ impl ProjectConnectorsPage {
             }
             ConnectorsJob::Grant { project, .. } if project == self.project.as_str() => {
                 Pending::Change
+            }
+            ConnectorsJob::Writes { project } if project == self.project.as_str() => {
+                Pending::Writes
+            }
+            ConnectorsJob::Revoke { project, .. } if project == self.project.as_str() => {
+                Pending::Revoke
             }
             _ => panic!("the page asks only about its own project"),
         };
@@ -185,6 +228,36 @@ impl ProjectConnectorsPage {
         }
         let project = Some(self.project.as_str().to_owned());
         self.ask(ConnectorsJob::View { project }, ctx);
+    }
+
+    fn read_writes(&mut self, ctx: &mut Ctx) {
+        if !self.asks_once() || self.pending.is_some() {
+            return;
+        }
+        if self.writes.ready().is_none() {
+            self.writes = Load::Loading;
+        }
+        let project = self.project.as_str().to_owned();
+        self.ask(ConnectorsJob::Writes { project }, ctx);
+    }
+
+    fn asks_once(&self) -> bool {
+        self.stored
+            .ready()
+            .is_some_and(|view| view.settings.write == WritePolicy::AskOncePerProject)
+    }
+
+    fn allowed(&self) -> &[String] {
+        match &self.writes {
+            Load::Ready(writes) if self.asks_once() => &writes.connectors,
+            _ => &[],
+        }
+    }
+
+    fn all_rows(&self, switches: &[Switch]) -> Vec<Row> {
+        let mut rows = Self::rows(switches);
+        rows.extend((0..self.allowed().len()).map(Row::Write));
+        rows
     }
 
     fn listed(&self) -> (Vec<Switch>, Vec<String>) {
@@ -207,14 +280,24 @@ impl ProjectConnectorsPage {
 
     fn current(&self) -> Option<(Row, Switch)> {
         let (listed, _) = self.listed();
-        let row = *Self::rows(&listed).get(self.selected)?;
-        let (Row::Switch(at) | Row::Who(at)) = row;
+        let row = *self.all_rows(&listed).get(self.selected)?;
+        let (Row::Switch(at) | Row::Who(at)) = row else {
+            return None;
+        };
         Some((row, listed[at].clone()))
+    }
+
+    fn current_write(&self) -> Option<String> {
+        let (listed, _) = self.listed();
+        let Row::Write(at) = *self.all_rows(&listed).get(self.selected)? else {
+            return None;
+        };
+        Some(self.allowed()[at].clone())
     }
 
     fn moved(&mut self, to: usize) {
         let (listed, _) = self.listed();
-        let count = Self::rows(&listed).len();
+        let count = self.all_rows(&listed).len();
         self.selected = to.min(count.saturating_sub(1));
         assert!(count == 0 || self.selected < count);
     }
@@ -247,23 +330,81 @@ impl ProjectConnectorsPage {
         self.grant(&switch, true, who, ctx);
     }
 
+    fn revoke(&mut self, ctx: &mut Ctx) {
+        let Some(name) = self.current_write() else {
+            return;
+        };
+        let title = self
+            .stored
+            .ready()
+            .map_or_else(|| safe(&name), |view| write_title(view, &name));
+        self.revoking = Some(title);
+        let project = self.project.as_str().to_owned();
+        self.ask(
+            ConnectorsJob::Revoke {
+                project,
+                connector: name,
+            },
+            ctx,
+        );
+    }
+
     fn take(&mut self, event: &ConnectorsEvent, ctx: &mut Ctx) {
-        let ConnectorsEvent::Page(result) = event else {
+        match event {
+            ConnectorsEvent::Page(result) => self.page(result, ctx),
+            ConnectorsEvent::Writes { project, result } if project == self.project.as_str() => {
+                self.allowed_writes(result, ctx);
+            }
+            _ => {}
+        }
+    }
+
+    fn allowed_writes(&mut self, result: &Result<AllowedWrites, String>, ctx: &mut Ctx) {
+        let Some(pending @ (Pending::Writes | Pending::Revoke)) = self.pending else {
             return;
         };
-        let Some(pending) = self.pending.take() else {
+        if let Ok(writes) = result
+            && writes.project != self.project.as_str()
+        {
+            return;
+        }
+        self.pending = None;
+        let revoked = self.revoking.take();
+        match (result, pending) {
+            (Ok(writes), _) => {
+                self.writes = Load::Ready(writes.clone());
+                self.moved(self.selected);
+                if let Some(title) = revoked {
+                    ctx.say(Message::success(&writes_revoked(&title), ""));
+                }
+            }
+            (Err(code), Pending::Writes) => self.writes = Load::Failed(code.clone()),
+            (Err(code), _) => ctx.say(Message::error(NOT_CHANGED, &refusal(code))),
+        }
+        assert!(self.pending.is_none() && self.revoking.is_none());
+    }
+
+    fn page(&mut self, result: &Result<ConnectorsView, String>, ctx: &mut Ctx) {
+        let Some(pending @ (Pending::Read | Pending::Change)) = self.pending else {
             return;
         };
+        self.pending = None;
         match result {
             Ok(view) if view.project.as_deref() == Some(self.project.as_str()) => {
                 self.stored = Load::Ready(view.clone());
+                if !self.asks_once() {
+                    self.writes = Load::Idle;
+                }
                 self.moved(self.selected);
+                if pending == Pending::Read || self.writes.ready().is_none() {
+                    self.read_writes(ctx);
+                }
             }
             Ok(_) => self.read(ctx),
             Err(code) => match (self.stored.ready(), pending) {
                 (None, _) => self.stored = Load::Failed(code.clone()),
                 (Some(_), Pending::Read) => ctx.say(Message::error(NOT_READ, &refusal(code))),
-                (Some(_), Pending::Change) => {
+                (Some(_), _) => {
                     ctx.say(Message::error(NOT_CHANGED, &refusal(code)));
                     if code == "app_plugin_not_found" {
                         self.read(ctx);
@@ -326,6 +467,7 @@ impl ProjectConnectorsPage {
                     let content = Line::raw(format!("  {WHO}  {word}"));
                     list_row(content, width, self.selected == at, true, theme, ctx.glyphs)
                 }
+                Row::Write(_) => unreachable!("the switch rows hold no allowed write"),
             });
         }
         if listed.is_empty() && others.is_empty() {
@@ -335,7 +477,36 @@ impl ProjectConnectorsPage {
             lines.push(Line::default());
             lines.extend(muted(&not_ready_line(&others)));
         }
-        assert_eq!(spans.len(), Self::rows(&listed).len());
+        if self.asks_once() {
+            lines.push(Line::default());
+            let heading = lines.len();
+            lines.push(styled(WRITES, Role::Heading, theme));
+            lines.extend(muted(WRITES_ABOUT));
+            match &self.writes {
+                Load::Ready(writes) if writes.connectors.is_empty() => {
+                    lines.extend(muted(WRITES_NONE));
+                }
+                Load::Ready(writes) => {
+                    for (index, name) in writes.connectors.iter().enumerate() {
+                        let at = spans.len();
+                        spans.push((if index == 0 { heading } else { lines.len() }, lines.len()));
+                        let title = Line::raw(write_title(view, name));
+                        let selected = self.selected == at;
+                        lines.push(list_row(title, width, selected, true, theme, ctx.glyphs));
+                    }
+                }
+                Load::Failed(code) => {
+                    lines.push(styled(WRITES_FAILED, Role::Warning, theme));
+                    lines.extend(muted(&refusal(code)));
+                }
+                Load::Idle | Load::Loading | Load::NotReady => lines.push(styled(
+                    format!("Reading allowed writes{}", ctx.glyphs.ellipsis),
+                    Role::Muted,
+                    theme,
+                )),
+            }
+        }
+        assert_eq!(spans.len(), self.all_rows(&listed).len());
         (lines, spans)
     }
 }
@@ -359,22 +530,22 @@ impl Screen for ProjectConnectorsPage {
             return Vec::new();
         }
         let mut hints = Vec::new();
-        let current = self.current();
-        if current.is_some() {
+        let (listed, _) = self.listed();
+        let rows = self.all_rows(&listed);
+        if !rows.is_empty() {
             hints.push(hint(
                 &format!("{}{}", ctx.glyphs.up, ctx.glyphs.down),
                 "Move",
             ));
         }
-        match current {
-            Some((Row::Switch(_), switch)) if switch.on() => {
-                hints.push(hint("Space", "Turn off"));
-            }
-            Some((Row::Switch(_), _)) => hints.push(hint("Space", "Turn on")),
-            Some((Row::Who(_), _)) => hints.push(hint(
+        match rows.get(self.selected).copied() {
+            Some(Row::Switch(at)) if listed[at].on() => hints.push(hint("Space", "Turn off")),
+            Some(Row::Switch(_)) => hints.push(hint("Space", "Turn on")),
+            Some(Row::Who(_)) => hints.push(hint(
                 &format!("{}{}", ctx.glyphs.left, ctx.glyphs.right),
                 "Change",
             )),
+            Some(Row::Write(_)) => hints.push(hint("x", REVOKE)),
             None => {}
         }
         hints.push(hint("r", "Read again"));
@@ -394,7 +565,7 @@ impl Screen for ProjectConnectorsPage {
             return Flow::Handled;
         }
         let (listed, _) = self.listed();
-        let last = Self::rows(&listed).len().saturating_sub(1);
+        let last = self.all_rows(&listed).len().saturating_sub(1);
         match key {
             Key::Up => self.moved(self.selected.saturating_sub(1)),
             Key::Down => self.moved(self.selected + 1),
@@ -403,6 +574,7 @@ impl Screen for ProjectConnectorsPage {
             Key::Char(' ') | Key::Enter => self.toggle(ctx),
             Key::Right => self.change(true, ctx),
             Key::Left => self.change(false, ctx),
+            Key::Char('x') => self.revoke(ctx),
             Key::Char('r') => self.read(ctx),
             _ => return Flow::Ignored,
         }

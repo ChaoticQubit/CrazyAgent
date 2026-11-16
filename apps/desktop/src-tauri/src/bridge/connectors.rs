@@ -1,5 +1,6 @@
 use super::*;
 use crazyagent::app_plugins::Preview;
+use crazyagent::connectors::approvals::{AllowedWrites, ApprovalView};
 use crazyagent::connectors::audit::ActivityView;
 use crazyagent::connectors::{ConnectorSettings, ConnectorsView, Who};
 use crazyagent::engine::EngineError;
@@ -217,6 +218,62 @@ impl NativeBridge {
         }))
     }
 
+    /// Reads one connector write that waits for, or had, the owner's answer, run without the
+    /// bridge lock. Input: the approval id from its notice. Output: the approval.
+    pub fn connector_approval(&self, id: i64) -> Result<Unlocked<ApprovalView>, BridgeError> {
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client.connector_approval(id).await.map_err(connector_error)
+        }))
+    }
+
+    /// Answers one waiting connector write once, run without the bridge lock. Inputs: the
+    /// approval id and whether the owner allows it. Output: the approval after the answer.
+    pub fn connector_answer(
+        &self,
+        id: i64,
+        allow: bool,
+    ) -> Result<Unlocked<ApprovalView>, BridgeError> {
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .answer_connector_write(id, allow)
+                .await
+                .map_err(connector_error)
+        }))
+    }
+
+    /// Reads the connectors a project may write with without asking again, run without the
+    /// bridge lock. Input: the project. Output: them by name.
+    pub fn connector_writes(
+        &self,
+        project: String,
+    ) -> Result<Unlocked<AllowedWrites>, BridgeError> {
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_writes(project)
+                .await
+                .map_err(connector_error)
+        }))
+    }
+
+    /// Takes back a project's standing allow for one connector, run without the bridge
+    /// lock. Inputs: the project and the connector. Output: the standing allows left.
+    pub fn connector_revoke_writes(
+        &self,
+        project: String,
+        connector: String,
+    ) -> Result<Unlocked<AllowedWrites>, BridgeError> {
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .revoke_connector_writes(project, connector)
+                .await
+                .map_err(connector_error)
+        }))
+    }
+
     /// What the Connectors page says each harness reaches, one row per harness kind in
     /// settings order, in the engine crate's own words (DEC-141), with no engine call.
     /// Output: the rows.
@@ -280,6 +337,27 @@ mod tests {
         match result {
             Ok(_) => panic!("a bridge with no engine readied a Connectors call"),
             Err(error) => error.code,
+        }
+    }
+
+    /// The approval page's four commands need the engine: on a bridge with none each is
+    /// not_connected before any call is readied.
+    #[test]
+    fn approval_commands_need_the_engine() {
+        let bridge = NativeBridge::new(None);
+        assert_eq!(refused(bridge.connector_approval(7)), "not_connected");
+        assert_eq!(refused(bridge.connector_answer(7, true)), "not_connected");
+        assert_eq!(refused(bridge.connector_answer(7, false)), "not_connected");
+        assert_eq!(
+            refused(bridge.connector_writes("alpha".into())),
+            "not_connected"
+        );
+        assert_eq!(
+            refused(bridge.connector_revoke_writes("alpha".into(), "linear".into())),
+            "not_connected"
+        );
+        for code in ["connector_approval_unknown", "connector_approval_closed"] {
+            assert_eq!(connector_error(EngineError(code.into())).code, code);
         }
     }
 

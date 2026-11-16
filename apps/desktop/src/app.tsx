@@ -6,6 +6,7 @@ import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
 import { engineLostStep, noticeWatch, reportNotice, type EngineWatch } from "./notify";
 import { NoticeBell } from "./screens/notifications/panel";
+import { ConnectorApprovalPage } from "./screens/connectors/approval";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
 import { DemoPage } from "./screens/demo/offer";
@@ -152,6 +153,7 @@ export function Screen({ route, session }: { route: Route; session: Session }) {
     case "demo": return <DemoPage />;
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
     case "metrics": return <AppMetrics projects={projects ?? []} />;
+    case "connector-approval": return <ConnectorApprovalPage key={route.id} id={route.id} />;
     case "project": return <ProjectPage key={route.id} id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
     default: return <Home />;
   }

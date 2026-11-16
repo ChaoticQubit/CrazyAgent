@@ -4348,6 +4348,54 @@ async fn desktop_connector_reach(
 }
 
 #[tauri::command]
+async fn desktop_connector_approval(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: i64,
+) -> Result<crazyagent::connectors::approvals::ApprovalView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_approval(id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_answer(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: i64,
+    allow: bool,
+) -> Result<crazyagent::connectors::approvals::ApprovalView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_answer(id, allow)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_writes(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<crazyagent::connectors::approvals::AllowedWrites, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_writes(project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_revoke_writes(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    connector: String,
+) -> Result<crazyagent::connectors::approvals::AllowedWrites, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .connector_revoke_writes(project, connector)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_app_plugins(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -6029,6 +6077,10 @@ native_commands! {
     desktop_connector_clear_key,
     desktop_connector_grant,
     desktop_connector_reach,
+    desktop_connector_approval,
+    desktop_connector_answer,
+    desktop_connector_writes,
+    desktop_connector_revoke_writes,
     desktop_app_plugins,
     desktop_app_plugin_preview,
     desktop_app_plugin_review,

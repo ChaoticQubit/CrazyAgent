@@ -36,7 +36,8 @@ const VIEW = {
 };
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const render = (patch = {}) => renderToStaticMarkup(createElement(section.ProjectConnectorsView, {
-  view: { kind: "ok", value: VIEW }, busy: null, problem: "", onChange: forbidden, onRetry: forbidden, ...patch,
+  view: { kind: "ok", value: VIEW }, writes: { kind: "ok", value: { project: "alpha", connectors: [] } }, busy: null, revoking: null, problem: "",
+  onChange: forbidden, onRevoke: forbidden, onRetry: forbidden, ...patch,
 }));
 const text = (markup) => markup.replace(/<[^>]*>/gu, " ").replace(/&#x27;/gu, "'").replace(/&quot;/gu, "\"").replace(/&amp;/gu, "&").replace(/\s+/gu, " ").trim();
 const row = (markup, name) => markup.match(new RegExp(`<li data-connector="${name}"[^>]*>.*?</li>`, "su"))?.[0] ?? null;
@@ -94,6 +95,61 @@ test("The section keeps its title while loading, when the engine is not ready an
   assert.ok(text(render({ view: { kind: "error", message: "The engine could not be reached." } })).includes("Couldn't load the connectors. The engine could not be reached."));
 });
 
+const ONCE = { ...VIEW, settings: { ...SETTINGS, write: "ask_once_per_project" } };
+const WRITES = { project: "alpha", connectors: ["github", "gone"] };
+const revokeOf = (markup, title) => markup.match(new RegExp(`<button[^>]*aria-label="Revoke writes for ${title}"[^>]*>Revoke</button>`, "u"))?.[0] ?? null;
+
+test("While Write actions is Ask once per project and connector, the section lists each connector allowed to write with Revoke, after the connector rows", () => {
+  const markup = render({ view: { kind: "ok", value: ONCE }, writes: { kind: "ok", value: WRITES } });
+  const shown = text(markup);
+  let at = shown.indexOf("Not ready yet: Board, Desk.");
+  assert.ok(at >= 0, shown);
+  for (const words of ["Allowed writes", "Connectors that may change things in this project without asking again.", "GitHub Revoke", "gone Revoke"]) {
+    const found = shown.indexOf(words, at);
+    assert.ok(found >= at, `${words} comes next: ${shown.slice(at)}`);
+    at = found + words.length;
+  }
+  assert.ok(revokeOf(markup, "GitHub"), "Revoke names the connector it takes back");
+  assert.ok(revokeOf(markup, "gone"), "a connector the page no longer lists is named by its name");
+  assert.ok(!shown.includes("No connector may change things here without asking."), shown);
+  assert.deepEqual(api.writeRows(ONCE, WRITES), [{ name: "github", title: "GitHub" }, { name: "gone", title: "gone" }]);
+  const shadow = { ...VIEW.connectors[0], title: "linear", version: "", origin: "user", runs: null, status: { kind: "refused", problem: { code: "app_plugin_name_taken", line: null, field: "name", message: "taken" } } };
+  assert.deepEqual(api.writeRows({ ...ONCE, connectors: [...ONCE.connectors, shadow] }, { project: "alpha", connectors: ["linear"] }), [{ name: "linear", title: "Linear" }],
+    "a refused file sharing a name does not rename the listed connector");
+  assert.equal(api.writesRevoked("GitHub"), "GitHub asks again before its next write.");
+});
+
+test("With none allowed the section says so, and under the other two Write actions there is no Allowed writes at all", () => {
+  const empty = text(render({ view: { kind: "ok", value: ONCE } }));
+  assert.ok(empty.includes("Allowed writes"), empty);
+  assert.ok(empty.includes("No connector may change things here without asking."), empty);
+  for (const write of ["ask_every_time", "read_only"]) {
+    const shown = text(render({ view: { kind: "ok", value: { ...VIEW, settings: { ...SETTINGS, write } } }, writes: { kind: "ok", value: WRITES } }));
+    assert.ok(!shown.includes("Allowed writes"), `${write}: ${shown}`);
+    assert.ok(!shown.includes("Revoke"), `${write}: ${shown}`);
+  }
+});
+
+test("While a Revoke is on its way every Revoke waits and no switch does; Allowed writes keeps its heading while loading, not ready and failed", () => {
+  const markup = render({ view: { kind: "ok", value: ONCE }, writes: { kind: "ok", value: WRITES }, revoking: "github" });
+  assert.match(revokeOf(markup, "GitHub") ?? "", /disabled=""/u);
+  assert.match(revokeOf(markup, "gone") ?? "", /disabled=""/u, "one Revoke at a time");
+  assert.doesNotMatch(switchOf(markup, "github") ?? "", /aria-disabled/u, "the connector's switch does not wait");
+  for (const writes of [{ kind: "loading" }, { kind: "not_ready" }, { kind: "error", message: "The engine could not be reached." }]) {
+    const shown = text(render({ view: { kind: "ok", value: ONCE }, writes }));
+    assert.ok(shown.includes("Allowed writes"), `${writes.kind}: ${shown}`);
+    assert.ok(!shown.includes("No connector may change things here without asking."), `${writes.kind}: ${shown}`);
+  }
+  assert.ok(text(render({ view: { kind: "ok", value: ONCE }, writes: { kind: "error", message: "The engine could not be reached." } })).includes("Couldn't load the allowed writes. The engine could not be reached."));
+});
+
+test("The project section reads its allowed writes, revokes one for this project and says it asks again", () => {
+  const container = source("../src/screens/project/connectors.tsx");
+  assert.match(container, /useLoad\(\(\) => loadAllowedWrites\(projectId\), \[projectId\]\)/u);
+  assert.match(container, /revokeWrites\(projectId, connector\)/u);
+  assert.match(container, /session\.showToast\(writesRevoked\(title\)\)/u);
+});
+
 test("A switch change sends the project's last Who for that connector, or both when it has none", () => {
   assert.equal(api.switchWho(VIEW, "linear"), "agents", "an Off row keeps its Who for the next On");
   assert.equal(api.switchWho(VIEW, "github"), "master");
@@ -118,11 +174,11 @@ const CATALOG = {
 const actions = new Proxy({}, { get: () => forbidden });
 const REACH = ["Harness A: yes", "Harness B: yes", "Harness C: yes (master)"];
 const page = (patch = {}) => renderToStaticMarkup(createElement(settingsPage.ConnectorsSettingsView, {
-  view: { kind: "ok", value: CATALOG }, reach: { kind: "ok", value: REACH }, open: null, dialog: { kind: "none" }, native: null, sizeCap: null,
+  view: { kind: "ok", value: CATALOG }, reach: { kind: "ok", value: REACH }, open: null, dialog: { kind: "none" }, write: null, wait: null, native: null, sizeCap: null,
   busy: false, saving: false, failure: "", problem: "", actions, ...patch,
 }));
 const pageLink = (markup, name, title) => new RegExp(`<a[^>]*href="#/settings/connectors\\?connector=${name}"[^>]*>${title}</a>`, "u").test(markup);
-const radios = (markup, name) => [...markup.matchAll(new RegExp(`<input type="radio" name="${name}" value="([a-z0-9]+)"( checked="")?`, "gu"))].map((match) => [match[1], match[2] !== undefined]);
+const radios = (markup, name) => [...markup.matchAll(new RegExp(`<input type="radio" name="${name}" value="([a-z0-9_]+)"( checked="")?`, "gu"))].map((match) => [match[1], match[2] !== undefined]);
 const saveButton = (markup) => markup.match(/<button[^>]*>Save changes<\/button>/u)?.[0] ?? "";
 const TRUST = {
   name: "board", title: "Board", version: "2.1.0", description: "Board through its own MCP server.", kind: "connector",
@@ -250,35 +306,69 @@ test("The key dialog names where the key goes and holds a masked field with no v
   assert.ok(remove.includes(api.CONNECTORS_PAGE.removeBody), remove);
 });
 
-test("Connector settings: Harness-native connectors and Tool result size cap list every option in order, mark a change from the default, and Save changes waits for one", () => {
+test("Connector settings: Write actions, Approval wait, Harness-native connectors and Tool result size cap list every option in order, mark a change from the default, and Save changes waits for one", () => {
+  assert.deepEqual(api.WRITE_CHOICES, [
+    { choice: "ask_every_time", label: "Ask every time" }, { choice: "ask_once_per_project", label: "Ask once per project and connector" }, { choice: "read_only", label: "Read-only" },
+  ]);
+  assert.deepEqual(api.WAIT_CHOICES, [{ choice: "minutes2", label: "2 min" }, { choice: "minutes10", label: "10 min" }, { choice: "minutes30", label: "30 min" }]);
   assert.deepEqual(api.NATIVE_CHOICES, [{ choice: "off", label: "Off" }, { choice: "on", label: "On" }]);
   assert.deepEqual(api.SIZE_CHOICES, [{ choice: "kib64", label: "64 KiB" }, { choice: "kib256", label: "256 KiB" }, { choice: "mib1", label: "1 MiB" }]);
   assert.deepEqual(api.CONNECTOR_DEFAULTS, SETTINGS);
   const read = page();
   const shown = text(read);
-  for (const words of ["Connector settings", "Harness-native connectors", api.CONNECTORS_PAGE.nativeHelp, "Tool result size cap", api.CONNECTORS_PAGE.sizeCapHelp,
-    "Tool list check and third-party label", api.CONNECTORS_PAGE.lockedReason]) assert.ok(shown.includes(words), `the settings show ${words}`);
+  const writeHelp = "What happens when an agent calls a connector tool that changes something: each call waits for your Allow, your first Allow in a project lets later calls run, or those tools stay hidden.";
+  const waitHelp = "How long a call that changes something waits for your answer before it fails.";
+  let at = shown.indexOf("Connector settings");
+  assert.ok(at >= 0, shown);
+  for (const words of ["Write actions", writeHelp, "Approval wait", waitHelp, "Harness-native connectors", api.CONNECTORS_PAGE.nativeHelp, "Tool result size cap", api.CONNECTORS_PAGE.sizeCapHelp,
+    "Tool list check and third-party label", api.CONNECTORS_PAGE.lockedReason]) {
+    const found = shown.indexOf(words, at);
+    assert.ok(found >= at, `the settings show ${words} next: ${shown.slice(at)}`);
+    at = found + words.length;
+  }
   const locked = read.match(/<div class="set-row"[^>]*data-setting="Tool list check and third-party label"[^>]*>.*?<\/div><\/div>/su)?.[0] ?? "";
   assert.ok(text(locked).includes("Always on"), `the locked line says Always on: ${locked}`);
   assert.doesNotMatch(locked, /<input|<button/u, "the locked line has no control");
+  assert.deepEqual(radios(read, "connector-write"), [["ask_every_time", true], ["ask_once_per_project", false], ["read_only", false]]);
+  assert.deepEqual(radios(read, "connector-wait"), [["minutes2", false], ["minutes10", true], ["minutes30", false]]);
   assert.deepEqual(radios(read, "connector-native"), [["off", true], ["on", false]]);
   assert.deepEqual(radios(read, "connector-size-cap"), [["kib64", false], ["kib256", true], ["mib1", false]]);
   const marks = (markup) => (markup.match(/class="set-changed"/gu) ?? []).length;
   assert.equal(marks(read), 0, "the defaults are not marked");
   assert.match(saveButton(read), /disabled=""/u, "nothing to save yet");
-  const picked = page({ native: "on", sizeCap: "mib1" });
+  const picked = page({ write: "read_only", wait: "minutes2", native: "on", sizeCap: "mib1" });
+  assert.deepEqual(radios(picked, "connector-write"), [["ask_every_time", false], ["ask_once_per_project", false], ["read_only", true]]);
+  assert.deepEqual(radios(picked, "connector-wait"), [["minutes2", true], ["minutes10", false], ["minutes30", false]]);
   assert.deepEqual(radios(picked, "connector-native"), [["off", false], ["on", true]]);
   assert.deepEqual(radios(picked, "connector-size-cap"), [["kib64", false], ["kib256", false], ["mib1", true]]);
-  assert.equal(marks(picked), 2, "each setting away from its default is marked");
+  assert.equal(marks(picked), 4, "each setting away from its default is marked");
   assert.doesNotMatch(saveButton(picked), /disabled=""/u);
+  for (const [patch, what] of [[{ write: "ask_once_per_project" }, "Write actions"], [{ wait: "minutes30" }, "Approval wait"]]) {
+    const one = page(patch);
+    assert.doesNotMatch(saveButton(one), /disabled=""/u, `a ${what} pick alone can be saved`);
+    assert.equal(marks(one), 1, `${what} is marked`);
+  }
+  assert.match(saveButton(page({ write: "ask_every_time", wait: "minutes10", native: "off", sizeCap: "kib256" })), /disabled=""/u, "picks equal to the settings read are no change");
   assert.match(page({ native: "on", problem: api.CONNECTORS_PAGE.stale }), /role="alert"[^>]*>.*The connector settings changed elsewhere\. Check them and try again\./su);
-  assert.match(page({ native: "on", saving: true }), /<fieldset[^>]*disabled=""[^>]*data-setting="native"/u, "a save in flight locks the choices");
+  const saving = page({ write: "read_only", saving: true });
+  for (const setting of ["write", "wait", "native", "size_cap"]) assert.match(saving, new RegExp(`<fieldset[^>]*disabled=""[^>]*data-setting="${setting}"`, "u"), `a save in flight locks ${setting}`);
 });
 
-test("A settings save sends the settings read with only the two this page shows replaced", () => {
+test("A settings save sends the settings read with only the four this page shows replaced, and nothing when no pick differs from them", () => {
   const read = { write: "read_only", wait: "minutes30", native: "off", size_cap: "kib256", keep_log: "days90" };
-  assert.deepEqual(api.settingsToSave(read, "on", "mib1"), { write: "read_only", wait: "minutes30", native: "on", size_cap: "mib1", keep_log: "days90" });
+  const none = { write: null, wait: null, native: null, size_cap: null };
+  assert.deepEqual(api.settingsToSave(read, { write: "ask_once_per_project", wait: "minutes2", native: "on", size_cap: "mib1" }),
+    { write: "ask_once_per_project", wait: "minutes2", native: "on", size_cap: "mib1", keep_log: "days90" });
+  for (const [key, value] of [["write", "ask_every_time"], ["wait", "minutes2"], ["native", "on"], ["size_cap", "mib1"]]) {
+    assert.deepEqual(api.settingsToSave(read, { ...none, [key]: value }), { ...read, [key]: value }, `a ${key} pick alone is saved`);
+  }
+  assert.equal(api.settingsToSave(read, none), null, "nothing picked, nothing to save");
+  assert.equal(api.settingsToSave(read, { write: "read_only", wait: "minutes30", native: "off", size_cap: "kib256" }), null, "picks equal to the read are no change");
+  assert.equal(api.settingsToSave(read, { ...none, native: "on", keep_log: "days7" })?.keep_log, "days90", "the keep setting always goes back as read");
   assert.deepEqual(read, { write: "read_only", wait: "minutes30", native: "off", size_cap: "kib256", keep_log: "days90" }, "the settings read are not changed");
+  const container = source("../src/screens/settings/connectors.tsx");
+  assert.match(container, /const settings = settingsToSave\(read, \{ write, wait, native, size_cap: sizeCap \}\);\s*if \(settings === null\) return;/u,
+    "a save sends nothing only when settingsToSave finds no change");
 });
 
 test("A connector's own page shows where it came from, its state, hosts and address, each secret with Set key or Clear key, Review and Remove, and no catalog or settings", () => {
@@ -354,6 +444,8 @@ test("Every refusal the Connectors protocol answers, past the owner codes, has a
     connector_request_invalid: "The request could not be read.",
     connector_request_bounds: "The request is too large.",
     connector_outcome_unknown: "The engine did not answer in time; check the list again.",
+    connector_approval_unknown: "That approval is gone.",
+    connector_approval_closed: "This write was already answered or its wait ran out. The page now shows where it stands.",
   };
   for (const [code, sentence] of Object.entries(words)) {
     assert.equal(api.connectorProblem({ code, cause: code, message: "Something went wrong. Try again." }), sentence, code);

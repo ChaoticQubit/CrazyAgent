@@ -276,7 +276,10 @@ impl ConnectorActivityPage {
                 }
                 self.read(ctx);
             }
-            ConnectorsEvent::Page(_) | ConnectorsEvent::Preview { .. } => {}
+            ConnectorsEvent::Page(_)
+            | ConnectorsEvent::Preview { .. }
+            | ConnectorsEvent::Approval { .. }
+            | ConnectorsEvent::Writes { .. } => {}
         }
     }
 
