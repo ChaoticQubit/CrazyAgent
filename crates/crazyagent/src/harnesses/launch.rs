@@ -742,6 +742,14 @@ pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
     build(request, None)
 }
 
+/// Builds a context-less durable launch's command under its agent home's lock
+/// ([`crate::launch_context::lock_only`]). Input: the routed request. Output: the command
+/// and the lock guard, or the refusal.
+fn lone_command(request: &LaunchRequest) -> Result<(Command, Installed), LaunchError> {
+    let installed = crate::launch_context::lock_only(request.account.home(), &request.harness)?;
+    Ok((command(request)?, installed))
+}
+
 /// Builds the command for an agent of one project: writes the project's approved skills,
 /// MCP servers, brief, context index and approved memories into the agent home, then
 /// points the harness at them. Input: the launch request and the project's context from
@@ -1809,19 +1817,13 @@ impl Session {
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
         let (command, installed) = match &context {
-            Some(context) => {
-                let (command, installed) = command_with_context(&request, context)?;
-                (command, Some(installed))
-            }
-            None => {
-                let installed =
-                    crate::launch_context::lock_only(request.account.home(), &request.harness)?;
-                (command(&request)?, Some(installed))
-            }
+            Some(context) => command_with_context(&request, context)?,
+            None => lone_command(&request)?,
         };
         drop(context);
         let io = DurableIo::create(state)?;
         let key = write_key_file(&request)?;
+        let installed = Some(installed);
         Self::spawn(request, command, installed, Some(io), (relay, key), &[])
     }
 
