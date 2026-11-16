@@ -21,7 +21,7 @@ use std::fs;
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -971,7 +971,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let (routes, bridge, request) = match read_request(args) {
+    let (routes, bridge, _started, request) = match read_request(args) {
         Ok(asked) => asked,
         Err(reason) => {
             eprintln!("crazyagent-landlock: {reason}");
@@ -1011,22 +1011,28 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
 }
 
 /// Reads what the helper was asked: the route flags first ([`egress::leading`]), then the
-/// bridge flags ([`Bridge::leading`]), then the request, each set of flags only where the
-/// request takes it ([`Bridge::fits`], [`egress::fits`]). A routed nest with no bridged
-/// port unshares the network for its routes alone, so the bridge's check is left to the
-/// route's. Input: the helper arguments. Output: the route ports, empty for none, the
-/// bridge and the request; or the reason.
-fn read_request(args: Vec<OsString>) -> Result<(Vec<u16>, Option<Bridge>, HelperRequest), String> {
+/// bridge flags ([`Bridge::leading`]), then the go descriptor ([`egress::handed`]), then
+/// the request, each set of flags only where the request takes it ([`Bridge::fits`],
+/// [`egress::fits`]). A routed nest with no bridged port unshares the network for its
+/// routes alone, so the bridge's check is left to the route's. Input: the helper
+/// arguments. Output: the route ports, empty for none, the bridge, the go descriptor and
+/// the request; or the reason.
+fn read_request(args: Vec<OsString>) -> Result<Asked, String> {
     let (routes, args) = egress::leading(args)?;
     let (bridge, args) = Bridge::leading(args)?;
+    let (started, args) = egress::handed(args)?;
     let request = HelperRequest::parse(args)?;
     if routes.is_empty() || bridge.is_some() {
         Bridge::fits(bridge.as_ref(), &request)?;
     }
     egress::fits(&routes, &request)?;
     assert!(routes.len() <= REMOTES_MAX);
-    Ok((routes, bridge, request))
+    Ok((routes, bridge, started, request))
 }
+
+/// What [`read_request`] reads: the route ports, the bridge, the go descriptor and the
+/// request.
+type Asked = (Vec<u16>, Option<Bridge>, Option<RawFd>, HelperRequest);
 
 /// Holds a policy on this process, then becomes the harness, or with a guard stays as its
 /// parent ([`supervise`]); for a probe it only tells
@@ -2840,7 +2846,7 @@ mod tests {
             args
         };
         let read = |args: Vec<OsString>| {
-            read_request(args).map(|(routes, bridge, _)| (routes, bridge.map(|held| held.ports)))
+            read_request(args).map(|(routes, bridge, _, _)| (routes, bridge.map(|held| held.ports)))
         };
         let route = [egress::ROUTE, "443"];
         let bridged = [BRIDGE, "18080"];

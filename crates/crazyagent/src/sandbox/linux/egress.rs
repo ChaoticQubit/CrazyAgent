@@ -16,6 +16,9 @@ use std::time::Duration;
 
 pub(super) const ROUTE: &str = "--route";
 pub(super) const EGRESS: &str = "--egress";
+/// The flag stage 1 writes right after this helper's name in a routed nest: the descriptor
+/// the setup child's go byte reaches stage 2 on ([`started`]).
+pub(super) const ROUTE_FD: &str = "--route-fd";
 const INFO_FD: &str = "--info-fd";
 const BLOCK_FD: &str = "--block-fd";
 const RO_BIND_DATA: &str = "--ro-bind-data";
@@ -46,6 +49,10 @@ pub const SETUP_UNPIPED: &str = "the setup child runs only on the pipes its nest
 pub const SETUP_NOT_CHILD: &str = "the setup child builds a network only for its nest's child";
 /// What the setup child says when its parent is not one of the fixed bubblewraps.
 pub const SETUP_NOT_NEST: &str = "the setup child runs only under a fixed bubblewrap";
+/// What stage 2 says when no go byte came: bubblewrap starts its command on end of file,
+/// so a setup child that ended without one must not leave the agent running on a network
+/// whose rules were never read back (rv-code2 SX2-1, rv-sa241 N1).
+const ROUTE_NOT_BUILT: &str = "the agent's network was not built, so the agent does not start";
 const SANDBOX_RESOLVER: &str = "10.0.2.3";
 /// slirp4netns's own network: its gateway, which maps to this computer, and its resolver
 /// alias, which maps to this computer's DNS address on any port. No route-port rule reaches
@@ -70,6 +77,7 @@ const NUMBER_DIGITS_MAX: usize = 10;
 const READY_TIME: Duration = Duration::from_secs(10);
 const READY: u8 = b'1';
 const BLOCK: u8 = b'1';
+const GO: u8 = b'2';
 const CHAINS: &str = concat!(
     "*filter\n",
     ":INPUT ACCEPT [0:0]\n",
@@ -765,6 +773,33 @@ pub(super) fn placed(args: &[OsString]) -> Result<(), String> {
     Ok(())
 }
 
+/// Writes the route flag for the helper bubblewrap starts, right after its name: the
+/// descriptor the go byte arrives on, which [`handed`] reads back inside the nest. A routed
+/// nest whose command is not this helper is refused, bridged or not, so no other program
+/// starts there without the go byte. Inputs: the nest's arguments, the descriptor and this
+/// helper. Output: the arguments with the flag, or the reason.
+pub(super) fn inner(args: &[OsString], fd: RawFd, helper: &Path) -> Result<Vec<OsString>, String> {
+    let _ = (args, fd, helper);
+    Err(format!("{ROUTE_FD} is not written yet"))
+}
+
+/// Splits the route flag that may follow the bridge flags at the head of stage 2's
+/// arguments: `--route-fd` with a descriptor above 2, at most once. Input: the arguments.
+/// Output: the descriptor, none when no such flag leads, and the arguments after it; or the
+/// reason it is refused.
+pub(super) fn handed(args: Vec<OsString>) -> Result<(Option<RawFd>, Vec<OsString>), String> {
+    Ok((None, args))
+}
+
+/// Waits inside the nest for the go byte, which the setup child writes only once the
+/// agent's rules are read back and its capabilities dropped, then closes the descriptor so
+/// the harness never holds it. Input: the descriptor `--route-fd` names. Output: Ok on the
+/// go byte; [`ROUTE_NOT_BUILT`] on end of file, an error or any other byte.
+pub(super) fn started(fd: RawFd) -> Result<(), String> {
+    let _ = fd;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1052,5 +1087,77 @@ mod tests {
         ] {
             assert!(request(words(refused)).is_err(), "{refused:?}");
         }
+    }
+
+    #[test]
+    fn stage_two_starts_only_on_the_go_byte_and_then_holds_no_descriptor() {
+        use std::os::fd::IntoRawFd;
+        let handed = |bytes: &[u8]| {
+            let (read, mut write) = std::io::pipe().unwrap();
+            write.write_all(bytes).unwrap();
+            (read.into_raw_fd(), write)
+        };
+        let closed = |write: &mut PipeWriter| write.write(&[GO]).map_err(|error| error.kind());
+        let broken = Err(std::io::ErrorKind::BrokenPipe);
+        assert_ne!(BLOCK, GO);
+        let (fd, mut write) = handed(&[GO]);
+        assert_eq!(started(fd), Ok(()));
+        assert_eq!(closed(&mut write), broken, "the go descriptor is closed");
+        let (fd, mut write) = handed(&[BLOCK]);
+        assert_eq!(started(fd), Err(ROUTE_NOT_BUILT.to_owned()), "a byte but the go byte");
+        assert_eq!(closed(&mut write), broken);
+        let (fd, write) = handed(&[]);
+        drop(write);
+        assert_eq!(started(fd), Err(ROUTE_NOT_BUILT.to_owned()), "a setup child gone");
+    }
+
+    #[test]
+    fn a_routed_nest_names_its_go_descriptor_to_this_helper_alone_after_the_bridge_flags() {
+        use super::super::bridge::{self, BRIDGE, BRIDGE_FD};
+        use super::super::{NEST, PROBE, SCOPED, read_request};
+        let helper = std::env::current_exe().unwrap();
+        let mut args = nest_args(&[UNSHARE_NET, "--chdir", "/work", "--"]);
+        args.push(helper.clone().into());
+        args.push(PROBE.into());
+        let described = insert(&args, [5, 6, 7]);
+        let routed = inner(&described, 8, &helper);
+        assert!(routed.is_ok(), "{routed:?}");
+        let Ok(routed) = routed else {
+            return;
+        };
+        let written = bridge::inner(&routed, 9, &[18080], &helper).unwrap();
+        assert_eq!(placed(&written), Ok(()));
+        let named = written.iter().position(|word| word.as_os_str() == helper.as_os_str());
+        let at = named.unwrap() + 1;
+        let inside = words(&[BRIDGE_FD, "9", BRIDGE, "18080", ROUTE_FD, "8", PROBE]);
+        assert_eq!(written[at..], inside);
+        let asked = |args: Vec<OsString>| {
+            read_request(args).map(|(routes, bridge, started, request)| {
+                let probe = matches!(request, HelperRequest::Probe { .. });
+                (routes, bridge.map(|held| (held.fd, held.ports)), started, probe)
+            })
+        };
+        let bridged = Some((Some(9), vec![18080]));
+        assert_eq!(asked(inside), Ok((Vec::new(), bridged, Some(8), true)));
+        assert_eq!(asked(words(&[ROUTE_FD, "8", PROBE])), Ok((Vec::new(), None, Some(8), true)));
+        let nested = asked(words(&[ROUTE_FD, "8", "--nested", "--", "/bin/true"]));
+        assert_eq!(nested.map(|asked| (asked.2, asked.3)), Ok((Some(8), false)));
+        let mut other = described.clone();
+        let command = other.len() - 2;
+        other[command] = "/bin/sh".into();
+        assert!(inner(&other, 8, &helper).is_err(), "not this helper");
+        let mut outer = words(&[ROUTE, "443", ROUTE_FD, "8", NEST, "--", BWRAP_PATHS[0]]);
+        outer.extend(args.iter().cloned());
+        for refused in [
+            &[ROUTE_FD, "2", PROBE][..],
+            &[ROUTE_FD, "x", PROBE],
+            &[ROUTE_FD, "8", ROUTE_FD, "9", PROBE],
+            &[ROUTE_FD, "8", BRIDGE, "18080", PROBE],
+            &[ROUTE_FD, "8", "--", "/bin/true"],
+            &[ROUTE_FD, "8", SCOPED],
+        ] {
+            assert!(asked(words(refused)).is_err(), "{refused:?}");
+        }
+        assert!(asked(outer).is_err(), "stage 1 takes no go descriptor");
     }
 }
