@@ -1654,6 +1654,21 @@ export function githubPublishContinue(project: string): Promise<GitHubPublishJob
   return invoke<GitHubPublishJob>("desktop_github_publish_continue", { project });
 }
 
+/** The owner's answer to the Overview's publish prompt: Not now asks again in 7 days. */
+export type GitHubPromptAnswer = "not_now" | "never";
+
+/** Tells whether a project's Overview asks to publish it on GitHub. Input: the project id.
+ * Output: true to ask. */
+export function githubPublishPrompt(project: string): Promise<boolean> {
+  return invoke<boolean>("desktop_github_publish_prompt", { project });
+}
+
+/** Keeps the owner's answer to a project's publish prompt. Inputs: the project id and the
+ * answer. Output: null once kept. */
+export function githubPublishPromptSet(project: string, answer: GitHubPromptAnswer): Promise<null> {
+  return invoke<null>("desktop_github_publish_prompt_set", { project, answer });
+}
+
 /** Discards a project's publish record; the files it wrote and a repository it made stay.
  * Input: the project id. Output: the repository GitHub made or may have made, or null. */
 export function githubPublishDiscard(project: string): Promise<GitHubPublishLeft | null> {

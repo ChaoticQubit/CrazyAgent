@@ -1,6 +1,8 @@
 import { classifyFailure, namedFailure, nextGeneration, plainError, type Result } from "./api";
 import { formatBytes } from "./screens/new-project/wizard";
 import { failureCopy } from "./api-projects";
+import { githubPublishPrompt, githubPublishPromptSet } from "./engine-client";
+import type { GitHubPromptAnswer } from "./engine-client";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubOwners, githubPublishApprove, githubPublishContinue, githubPublishDiscard, githubPublishExclude, githubPublishRecheck, githubPublishStart, githubPublishStatus, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
   githubUseCli, icloudCancel, icloudDownload, icloudProgress, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
@@ -458,6 +460,18 @@ export function recheckGitHubPublish(project: string): Promise<Result<GitHubPubl
  * plain failure. */
 export function continueGitHubPublish(project: string): Promise<Result<GitHubPublishJob>> {
   return wrap(() => githubPublishContinue(project));
+}
+
+/** Reads whether the Overview asks to publish the project on GitHub. Input: the project id.
+ * Output: true to ask, or a plain failure. */
+export function loadGitHubPublishPrompt(project: string): Promise<Result<boolean>> {
+  return wrap(() => githubPublishPrompt(project));
+}
+
+/** Keeps Not now or Don't ask again for the project's publish prompt. Inputs: the project id
+ * and the answer. Output: null once kept, or a plain failure. */
+export function answerGitHubPublishPrompt(project: string, answer: GitHubPromptAnswer): Promise<Result<null>> {
+  return wrap(() => githubPublishPromptSet(project, answer));
 }
 
 /** Discards the publish record. Input: the project id. Output: the repository left on

@@ -136,6 +136,8 @@ fn main() {
         "desktop_github_publish_exclude",
         "desktop_github_publish_recheck",
         "desktop_github_publish_continue",
+        "desktop_github_publish_prompt",
+        "desktop_github_publish_prompt_set",
         "desktop_github_publish_discard",
         "desktop_github_publish_start",
         "desktop_clone_repo",

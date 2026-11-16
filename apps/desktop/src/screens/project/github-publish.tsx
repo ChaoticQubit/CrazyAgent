@@ -1,19 +1,54 @@
 import { useEffect, useState } from "react";
 import type { Result } from "../../api";
-import { approveGitHubPublish, continueGitHubPublish, discardGitHubPublish, excludeFromGitHubPublish, loadGitHubPublish, recheckGitHubPublish } from "../../api-intake";
+import { answerGitHubPublishPrompt, approveGitHubPublish, continueGitHubPublish, discardGitHubPublish, excludeFromGitHubPublish, loadGitHubPublish, loadGitHubPublishPrompt, recheckGitHubPublish } from "../../api-intake";
 import type { GitHubPublishJob } from "../../engine-client";
 import { ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
-import { DRAFT_POLL_MS, discardable, leftLine, publishView } from "./publish-job";
+import { PublishFields, useGitHubPublish } from "../new-project/fields";
+import { createWait, emptyPublish, publishOutcome, startPublish } from "../new-project/publish";
+import { emptyDraft } from "../new-project/wizard";
+import type { ProjectDraft } from "../new-project/wizard";
+import { DRAFT_POLL_MS, PROMPT_LINE, PROMPT_NEVER, PROMPT_NOT_NOW, PROMPT_PUBLISH, discardable, leftLine, noticeShown, publishView } from "./publish-job";
 
 const ENGINE_STARTING = "CrazyAgent's engine is still starting. Try again in a moment.";
+
+/** The New Project publish fields for a project made without them, opened by the Overview's
+ * Publish: the visibility, account, repository name, description and docs switch, each name
+ * and description following the project's until edited. Inputs: the project's id, name and
+ * about, what to do with the Start's job and its line, and Cancel. Output: the form. */
+function PublishForm({ projectId, name, about, onStarted, onCancel }: { projectId: string; name: string; about: string; onStarted: (job: GitHubPublishJob | null, line: string) => void; onCancel: () => void }) {
+  const github = useGitHubPublish();
+  const [draft, setDraft] = useState<ProjectDraft>(() => ({ ...emptyDraft(), name, about, publish: emptyPublish() }));
+  const [busy, setBusy] = useState(false);
+  const publish = draft.publish ?? emptyPublish();
+  const wait = createWait(publish, name, about, github.offered, github.signedIn, github.checking);
+
+  async function start() {
+    const started = startPublish(projectId, publish, name, about, github.offered);
+    if (!started) return;
+    setBusy(true);
+    const result = await started;
+    setBusy(false);
+    onStarted(result.kind === "ok" ? result.value : null, publishOutcome(result));
+  }
+
+  return <div className="pj-stack-s">
+    <PublishFields prefix="pj-github" draft={draft} onChange={setDraft} github={github} />
+    {wait && <p className="pj-muted" id="pj-github-why">{wait}</p>}
+    <div className="pj-need">
+      <button type="button" className="btn primary" disabled={busy || !publish.on || wait !== null} aria-describedby={wait ? "pj-github-why" : undefined} onClick={() => void start()}>Publish on GitHub</button>
+      <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
+    </div>
+  </div>;
+}
 
 /** The Overview card for a project's GitHub publish (DEC-182): the draft while it runs, the
  * .gitignore lines to edit and approve, the secrets that block it with Leave this file out
  * and Check again, a stop with Try again, the finished repository, and Discard before the
- * push. Shows nothing while the project has no publish. Input: the project id. Output: the
- * card, or nothing. */
-export function GitHubPublishCard({ projectId }: { projectId: string }) {
+ * push. With no publish it asks "This project is not on GitHub. Publish it?" when the engine
+ * says to, with Publish, Not now and Don't ask again. Inputs: the project's id, name and
+ * about. Output: the card, or nothing. */
+export function GitHubPublishCard({ projectId, name, about }: { projectId: string; name: string; about: string }) {
   const [read, setRead] = useState<Result<GitHubPublishJob | null> | null>(null);
   const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -21,14 +56,26 @@ export function GitHubPublishCard({ projectId }: { projectId: string }) {
   const [edited, setEdited] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [left, setLeft] = useState("");
+  const [prompt, setPrompt] = useState<Result<boolean> | null>(null);
+  const [form, setForm] = useState(false);
+  const [said, setSaid] = useState("");
   const job = read?.kind === "ok" ? read.value : null;
   const view = publishView(job);
+  const noJob = read?.kind === "ok" && read.value === null;
+  const notice = noticeShown(read, prompt);
 
   useEffect(() => {
     let live = true;
     void loadGitHubPublish(projectId).then((result) => { if (live) setRead(result); });
     return () => { live = false; };
   }, [projectId, tick]);
+
+  useEffect(() => {
+    if (!noJob) return;
+    let live = true;
+    void loadGitHubPublishPrompt(projectId).then((result) => { if (live) setPrompt(result); });
+    return () => { live = false; };
+  }, [projectId, noJob]);
 
   useEffect(() => {
     if (view.kind !== "drafting") return;
@@ -50,6 +97,26 @@ export function GitHubPublishCard({ projectId }: { projectId: string }) {
     setEdited(null);
   }
 
+  async function answer(run: () => Promise<Result<null>>) {
+    setBusy(true);
+    setProblem(null);
+    const result = await run();
+    setBusy(false);
+    if (result.kind !== "ok") return failed(result);
+    setPrompt({ kind: "ok", value: false });
+  }
+
+  function started(made: GitHubPublishJob | null, line: string) {
+    if (!made) {
+      setProblem(line);
+      return;
+    }
+    setForm(false);
+    setProblem(null);
+    setSaid(line);
+    setRead({ kind: "ok", value: made });
+  }
+
   async function discard() {
     setBusy(true);
     setProblem(null);
@@ -62,10 +129,16 @@ export function GitHubPublishCard({ projectId }: { projectId: string }) {
     setEdited(null);
   }
 
-  if (view.kind === "none" && !left && !problem) return null;
+  if (view.kind === "none" && !left && !problem && !notice && !form) return null;
   const lines = view.kind === "lines" ? edited ?? view.lines.join("\n") : "";
   return <section className="pj-stack-s" aria-labelledby="pj-github-publish">
     <h2 id="pj-github-publish">Publish on GitHub</h2>
+    {notice && !form && <div className="pj-need"><span>{PROMPT_LINE}</span>
+      <button type="button" className="btn primary" disabled={busy} onClick={() => setForm(true)}>{PROMPT_PUBLISH}</button>
+      <button type="button" className="btn" disabled={busy} onClick={() => void answer(() => answerGitHubPublishPrompt(projectId, "not_now"))}>{PROMPT_NOT_NOW}</button>
+      <button type="button" className="btn" disabled={busy} onClick={() => void answer(() => answerGitHubPublishPrompt(projectId, "never"))}>{PROMPT_NEVER}</button></div>}
+    {form && view.kind === "none" && <PublishForm projectId={projectId} name={name} about={about} onStarted={started} onCancel={() => setForm(false)} />}
+    {said && <p className="pj-muted" role="status">{displayText(said)}</p>}
     {view.kind === "drafting" && <p className="pj-muted" role="status">Drafting the .gitignore lines...</p>}
     {view.kind === "lines" && <>
       <p className="pj-help">{view.note}</p>

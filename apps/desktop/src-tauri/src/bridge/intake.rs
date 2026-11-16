@@ -959,6 +959,36 @@ impl NativeBridge {
         }))
     }
 
+    /// Tells whether a project's Overview asks to publish it on GitHub (DEC-182 S5b). Input: the
+    /// project id. Output: true to ask.
+    pub fn github_publish_prompt(&mut self, id: &str) -> Result<Unlocked<bool>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            client
+                .github_publish_prompt(project)
+                .await
+                .map_err(github_failure)
+        }))
+    }
+
+    /// Keeps the owner's answer to a project's publish prompt, Not now or Don't ask again.
+    /// Inputs: the project id and the answer. Output: nothing.
+    pub fn github_publish_prompt_set(
+        &mut self,
+        id: &str,
+        answer: crazyagent::github::GitHubPromptAnswer,
+    ) -> Result<Unlocked<()>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            client
+                .github_publish_prompt_set(project, answer)
+                .await
+                .map_err(github_failure)
+        }))
+    }
+
     /// Discards a project's publish record; files it wrote and a repository it made stay. Input:
     /// the project id. Output: the repository GitHub made or may have made, if any.
     pub fn github_publish_discard(

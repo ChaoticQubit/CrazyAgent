@@ -138,6 +138,8 @@
     "allow-desktop-github-publish-exclude",
     "allow-desktop-github-publish-recheck",
     "allow-desktop-github-publish-continue",
+    "allow-desktop-github-publish-prompt",
+    "allow-desktop-github-publish-prompt-set",
     "allow-desktop-github-publish-discard",
     "allow-desktop-github-publish-start",
     "allow-desktop-clone-repo",

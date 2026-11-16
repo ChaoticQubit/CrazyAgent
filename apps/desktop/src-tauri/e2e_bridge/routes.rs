@@ -1945,6 +1945,33 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_continue(&project)?; call.await }.await;
             routed(result)
         }
+        "desktop_github_publish_prompt" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+            }
+            let Args { project } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_prompt(&project)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_github_publish_prompt_set" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+                answer: crazyagent::github::GitHubPromptAnswer,
+            }
+            let Args { project, answer } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_prompt_set(&project, answer)?; call.await }.await;
+            routed(result)
+        }
         "desktop_github_publish_discard" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

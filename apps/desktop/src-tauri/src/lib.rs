@@ -2598,6 +2598,31 @@ async fn desktop_github_publish_continue(
 }
 
 #[tauri::command]
+async fn desktop_github_publish_prompt(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_prompt(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_prompt_set(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    answer: crazyagent::github::GitHubPromptAnswer,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .github_publish_prompt_set(&project, answer)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_github_publish_discard(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5237,6 +5262,8 @@ native_commands! {
     desktop_github_publish_exclude,
     desktop_github_publish_recheck,
     desktop_github_publish_continue,
+    desktop_github_publish_prompt,
+    desktop_github_publish_prompt_set,
     desktop_github_publish_discard,
     desktop_github_publish_start,
     desktop_clone_repo,
