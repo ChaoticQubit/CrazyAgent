@@ -1,5 +1,5 @@
 use super::super::{
-    AgentId, Host, HostError, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo, PaneRef,
+    AgentId, Host, HostError, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneAt, PaneInfo, PaneRef,
     TEAMMATES_SERVER_ENDED, TerminalStream, failure,
 };
 use super::super::{keep_servers_deadline, teammates_socket};
@@ -943,6 +943,13 @@ impl Host for Servers {
 
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
         self.on(agent, |server| server.input(agent, bytes))
+    }
+
+    fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        if self.on(agent, |server| server.input_at(agent, at, bytes))? {
+            return Ok(true);
+        }
+        self.on_panes(agent, |server| server.input_at(agent, at, bytes))
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {

@@ -200,6 +200,7 @@ impl Host for ConptyHost {
             history: Vec::new(),
             screen,
             chunks,
+            at: None,
         })
     }
 

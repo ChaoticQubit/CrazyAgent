@@ -1474,6 +1474,158 @@ fn a_pane_view_shows_and_types_into_only_the_teammate_pane_its_lead_window_lists
     }
 }
 
+/// Counts the pane listings a host's held control client ran. Input: the host. Output: the
+/// count, zero when no control client is held.
+#[cfg(target_os = "macos")]
+fn listed(host: &Tmux) -> usize {
+    host.control.lock().unwrap().as_ref().map_or(0, |control| {
+        control.listed.load(std::sync::atomic::Ordering::Relaxed)
+    })
+}
+
+/// v242 typing C (BRIEF-typing-path): a pane view types its keys straight into the pane it
+/// was attached to, with no pane listing per key while the control client that found that
+/// pane still serves it; a pane its attach did not find never takes the view's keys, and a
+/// pane found by another connection is typed into only after the usual lookup.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pane_view_types_keys_into_its_attached_pane_with_no_pane_listing() {
+    use std::os::unix::fs::PermissionsExt;
+    const KEYS: usize = 20;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Arc::new(Tmux::open(Some(tmux.clone()), &folder));
+    let socket = host.socket();
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let shell = |script: &str| InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    let lead = AgentId::team(1).unwrap();
+    let other = AgentId::team(2).unwrap();
+    host.spawn(&lead, &shell("echo lead-own-screen; exec /bin/cat"))
+        .unwrap();
+    host.spawn(&other, &shell("echo other-lead-screen; exec /bin/cat"))
+        .unwrap();
+    let client = |args: &[&str]| {
+        let output = crate::spawn_gate::output(
+            Command::new(&tmux)
+                .arg("-S")
+                .arg(&socket)
+                .args(args)
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "tmux {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let teammate = client(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &target(&lead),
+        "--",
+        "/bin/sh",
+        "-c",
+        "echo teammate-pane-ready; exec /bin/cat",
+    ]);
+    let elsewhere = client(&["list-panes", "-t", &target(&other), "-F", "#{pane_id}"]);
+    assert!(pane_id_valid(&teammate), "{teammate}");
+    assert!(pane_id_valid(&elsewhere), "{elsewhere}");
+    assert_ne!(teammate, elsewhere);
+    let shared: Arc<dyn Host> = host.clone();
+    let shows = |terminal: &dyn Host, agent: &AgentId, wanted: &str| -> String {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let screen =
+                String::from_utf8_lossy(&terminal.snapshot(agent).unwrap().screen).into_owned();
+            if screen.contains(wanted) {
+                return screen;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the pane showed {wanted} in time: {screen}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let view = crate::terminal::pane_view(shared.clone(), &teammate).unwrap();
+    shows(&*view, &lead, "teammate-pane-ready");
+    let attached = view.attach(&lead).unwrap();
+    assert!(
+        shared.attach(&lead).unwrap().at.is_none(),
+        "an own view on the engine's server keeps typing by the agent's name"
+    );
+
+    let typed = "q".repeat(KEYS);
+    let before = listed(&host);
+    for _ in 0..KEYS {
+        crate::terminal::type_into(&*view, attached.at.as_ref(), &lead, b"q").unwrap();
+    }
+    crate::terminal::type_into(&*view, attached.at.as_ref(), &lead, b"\r").unwrap();
+    assert_eq!(
+        listed(&host),
+        before,
+        "{KEYS} keys typed into an attached pane view listed no panes"
+    );
+    shows(&*view, &lead, &typed);
+    let own = shows(&*shared, &lead, "lead-own-screen");
+    assert!(
+        !own.contains(&typed),
+        "the keys reached the teammate's pane only: {own}"
+    );
+
+    let at = attached
+        .at
+        .clone()
+        .expect("a pane view's stream names the pane it was attached to");
+    assert_eq!(at.pane, teammate);
+    let forged = crate::terminal::PaneAt {
+        pane: elsewhere.clone(),
+        serial: at.serial,
+    };
+    crate::terminal::type_into(&*view, Some(&forged), &lead, b"forged-pane\r").unwrap();
+    shows(&*view, &lead, "forged-pane");
+    let stale = crate::terminal::PaneAt {
+        pane: teammate.clone(),
+        serial: at.serial.wrapping_add(1),
+    };
+    let before = listed(&host);
+    crate::terminal::type_into(&*view, Some(&stale), &lead, b"stale-serial\r").unwrap();
+    assert!(
+        listed(&host) > before,
+        "a pane found by another connection is typed into only after the lookup"
+    );
+    shows(&*view, &lead, "stale-serial");
+    let seen = shows(&*shared, &other, "other-lead-screen");
+    assert!(
+        !seen.contains("forged-pane"),
+        "a pane the view was not attached to never took its keys: {seen}"
+    );
+    assert!(
+        !seen.contains("stale-serial") && !seen.contains(&typed),
+        "no key of the view reached another agent's pane: {seen}"
+    );
+}
+
 /// Says whether a host still holds a control connection that reads. Input: the host.
 /// Output: true while its held control has not seen its server end.
 #[cfg(target_os = "macos")]

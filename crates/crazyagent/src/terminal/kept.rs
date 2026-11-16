@@ -1,5 +1,7 @@
 use super::buffer::buffer;
-use super::{AgentId, Host, HostError, PaneInfo, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX};
+use super::{
+    AgentId, Host, HostError, PaneAt, PaneInfo, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX,
+};
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
@@ -75,6 +77,7 @@ impl LastScreens {
             history: Vec::new(),
             screen: kept.screen.clone(),
             chunks,
+            at: None,
         })
     }
 }
@@ -203,6 +206,10 @@ impl<H: Host> Host for LastScreenHost<H> {
 
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
         self.inner.input(agent, bytes)
+    }
+
+    fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        self.inner.input_at(agent, at, bytes)
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
@@ -501,6 +508,7 @@ mod tests {
                 history: Vec::new(),
                 screen: b"last screen".to_vec(),
                 chunks,
+                at: None,
             })
         }
 

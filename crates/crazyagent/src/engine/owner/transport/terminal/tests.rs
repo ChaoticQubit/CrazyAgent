@@ -300,3 +300,252 @@ fn wheel_keys_and_a_views_own_reports_never_count_as_owner_keys() {
         "a wheel request carrying other keys counts as the owner typing (OB10-L1)"
     );
 }
+
+/// How long a held send waits for its row before it answers anyway, so a failed row never
+/// leaves a blocking thread behind.
+const HELD: Duration = Duration::from_secs(5);
+
+/// A host whose every send of typed bytes reports them and then waits until the row lets it
+/// go, at most `HELD`, as a tmux server slow to answer `send-keys` does; every other call
+/// answers at once.
+struct Holding {
+    started: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Host for Holding {
+    fn spawn(
+        &self,
+        _: &AgentId,
+        _: &InteractiveCommand,
+    ) -> Result<crate::terminal::PaneRef, HostError> {
+        Err(HostError("terminal_unavailable".into()))
+    }
+
+    fn attach(&self, _: &AgentId) -> Result<TerminalStream, HostError> {
+        Err(HostError("terminal_agent_unknown".into()))
+    }
+
+    fn input(&self, _: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
+        let _ = self.started.send(bytes.to_vec());
+        let _ = self.release.lock().unwrap().recv_timeout(HELD);
+        Ok(())
+    }
+
+    fn resize(&self, _: &AgentId, _: u16, _: u16) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    fn kill(&self, _: &AgentId) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    fn alive(&self) -> Result<Vec<AgentId>, HostError> {
+        Ok(Vec::new())
+    }
+}
+
+/// A grant that always stands and records nothing, so a row drives a view's loop alone.
+struct Open;
+
+impl Viewing for Open {
+    fn allows(&self) -> bool {
+        true
+    }
+
+    fn holds(&self) -> impl Future<Output = bool> + Send {
+        async { true }
+    }
+
+    fn typed(&self, _: &TerminalRequest) {}
+
+    fn heard(&self, _: String) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+}
+
+/// v242 typing B (BRIEF-typing-path): a send waiting on the host never stops the view's
+/// output: what the agent prints while a typed key's send is held reaches the viewer before
+/// that send answers, and the next key waits for that answer, so keys stay in order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn output_reaches_the_view_while_a_typed_keys_send_is_held() {
+    let (started, mut sends) = tokio::sync::mpsc::unbounded_channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let host: Arc<dyn Host> = Arc::new(Holding {
+        started,
+        release: std::sync::Mutex::new(released),
+    });
+    let (feed, chunks) = crate::terminal::buffer::buffer();
+    let viewer = TerminalStream {
+        agent: AgentId::team(1).unwrap(),
+        cols: 80,
+        rows: 24,
+        history: Vec::new(),
+        screen: Vec::new(),
+        chunks,
+        at: None,
+    };
+    let (requests, mut asked) = tokio::sync::mpsc::channel(REQUESTS_QUEUED);
+    let (mut ours, mut theirs) = tokio::io::duplex(1 << 16);
+    let pumping =
+        tokio::spawn(async move { pump(&mut ours, viewer, &mut asked, host, &Open).await });
+    for key in [b"a", b"b"] {
+        let bytes = key.to_vec();
+        requests
+            .send(TerminalRequest::Input { bytes })
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        tokio::time::timeout(WAIT, sends.recv()).await,
+        Ok(Some(b"a".to_vec())),
+        "the first key's send started"
+    );
+
+    assert!(feed.push(b"printed-while-held"));
+    let frame = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut theirs))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|frame| serde_json::from_slice::<TerminalFrame>(&frame[4..]).ok());
+    assert_eq!(
+        frame,
+        Some(TerminalFrame::Output {
+            bytes: b"printed-while-held".to_vec()
+        }),
+        "output reached the view while a typed key's send was held"
+    );
+    assert!(
+        sends.try_recv().is_err(),
+        "the next key waits for the held send's answer"
+    );
+
+    release.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(WAIT, sends.recv()).await,
+        Ok(Some(b"b".to_vec())),
+        "keys are sent in the order typed"
+    );
+    release.send(()).unwrap();
+    drop(requests);
+    assert_eq!(
+        tokio::time::timeout(WAIT, pumping).await.map(Result::ok),
+        Ok(Some("terminal_detached")),
+        "the view ends as detached once its requests end"
+    );
+    drop(feed);
+}
+
+/// v242 typing timing row (BRIEF-typing-path): 50 keys typed as fast as a view sends them
+/// into a stand-in agent whose terminal echoes each key all echo back within a loose
+/// budget; prints each key's echo time at p50 and p95 and the last echo's time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fifty_typed_keys_echo_back_within_budget() {
+    const KEYS: usize = 50;
+    const BUDGET: Duration = Duration::from_secs(10);
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-term-typing-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = tmp.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let tmux = installed(root).expect("tmux must be installed on this machine");
+    let folder = root.join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/cat".into()],
+        cwd: root.to_path_buf(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let _launcher = {
+        let (agent, folder) = (agent.clone(), folder.clone());
+        tokio::task::spawn_blocking(move || {
+            let launcher = Tmux::open(Some(tmux), &folder);
+            launcher.spawn(&agent, &command).unwrap();
+            launcher
+        })
+        .await
+        .unwrap()
+    };
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root,
+        "e.sock",
+        &global,
+        &root.join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let (_, owner, _) = Client::new(root.join("e.sock"), WAIT)
+        .unwrap()
+        .with_owner(OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = owner.terminal_attach(agent).await.unwrap();
+
+    let typing = tokio::spawn(async move {
+        let mut sent = Vec::with_capacity(KEYS);
+        for _ in 0..KEYS {
+            sent.push(std::time::Instant::now());
+            let bytes = b"%".to_vec();
+            control
+                .send(&TerminalRequest::Input { bytes })
+                .await
+                .unwrap();
+        }
+        (control, sent)
+    });
+    let started = std::time::Instant::now();
+    let mut seen = Vec::with_capacity(KEYS);
+    while seen.len() < KEYS {
+        let left = BUDGET.saturating_sub(started.elapsed());
+        let frame = tokio::time::timeout(left, output.next()).await;
+        let Ok(Ok(TerminalFrame::Output { bytes })) = frame else {
+            panic!(
+                "all {KEYS} keys echoed within {BUDGET:?}, {} did: {frame:?}",
+                seen.len()
+            );
+        };
+        let at = std::time::Instant::now();
+        seen.extend(bytes.iter().filter(|byte| **byte == b'%').map(|_| at));
+    }
+    let (control, sent) = typing.await.unwrap();
+    assert_eq!(seen.len(), KEYS, "each key echoed once");
+    assert_eq!(sent.len(), KEYS);
+    let mut waits: Vec<Duration> = seen
+        .iter()
+        .zip(&sent)
+        .map(|(seen, sent)| seen.saturating_duration_since(*sent))
+        .collect();
+    waits.sort();
+    let last = seen[KEYS - 1].saturating_duration_since(sent[0]);
+    eprintln!(
+        "typing timing: {KEYS} keys, echo p50 {:?}, p95 {:?}, last echo {last:?} after the first key",
+        waits[KEYS / 2],
+        waits[KEYS * 95 / 100]
+    );
+    assert!(
+        last <= BUDGET,
+        "the last echo came within {BUDGET:?}: {last:?}"
+    );
+
+    drop(control);
+    drop(owner);
+    tokio::time::timeout(WAIT, service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+}

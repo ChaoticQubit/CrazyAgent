@@ -206,6 +206,34 @@ pub struct TerminalStream {
     pub history: Vec<u8>,
     pub screen: Vec<u8>,
     pub(crate) chunks: buffer::Chunks,
+    pub(crate) at: Option<PaneAt>,
+}
+
+/// The pane a view was attached to and the serial of the host connection that found it, so
+/// the view's keys can go straight to that pane while that same connection still serves it.
+/// Fields: the pane id and the connection serial, unique within the process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneAt {
+    pub pane: String,
+    pub serial: u64,
+}
+
+/// Types a view's keys: straight into the pane its stream was attached to when the host can
+/// still use it, else by the agent's name as `input` does. Takes the host the view was
+/// attached through, the view's pane, the agent and at most `INPUT_BYTES_MAX` bytes.
+/// Returns as `input`.
+pub(crate) fn type_into(
+    host: &dyn Host,
+    at: Option<&PaneAt>,
+    agent: &AgentId,
+    bytes: &[u8],
+) -> Result<(), HostError> {
+    if let Some(at) = at
+        && host.input_at(agent, at, bytes)?
+    {
+        return Ok(());
+    }
+    host.input(agent, bytes)
 }
 
 impl TerminalStream {
@@ -289,6 +317,14 @@ pub trait Host: Send + Sync {
     /// Takes the name and at most `INPUT_BYTES_MAX` bytes.
     /// Returns once the host accepted them.
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError>;
+
+    /// Types bytes straight into the pane a view of this agent was attached to, with no
+    /// lookup, while the connection that found that pane still serves it. Takes the name,
+    /// the pane from the view's stream and at most `INPUT_BYTES_MAX` bytes. Returns true
+    /// once typed, false when this host cannot use that pane and the caller types by name.
+    fn input_at(&self, _agent: &AgentId, _at: &PaneAt, _bytes: &[u8]) -> Result<bool, HostError> {
+        Ok(false)
+    }
 
     /// Tells whether the app in an agent terminal reads keys itself yet: interactive apps
     /// turn on bracketed paste once their own input is live, and keys typed before that
@@ -497,6 +533,9 @@ impl Host for OwnServer {
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
         self.0.input(agent, bytes)
     }
+    fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        self.0.input_at(agent, at, bytes)
+    }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.0.input_live(agent)
@@ -621,6 +660,12 @@ impl Host for PaneView {
 
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
         self.host.input_pane(agent, &self.pane, bytes)
+    }
+    fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        if at.pane != self.pane {
+            return Ok(false);
+        }
+        self.host.input_at(agent, at, bytes)
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
