@@ -926,7 +926,9 @@ pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<Path
 /// that nothing listens at any more (KA-T17B-R2-F1), so such sockets never pile up toward
 /// the freeze's cap on engine-named sockets. The socket the new start named, one a server
 /// still answers at or that cannot be named, a link and anything not this user's socket
-/// stay. Best effort: a folder that is not this user's private folder is left as it is.
+/// stay. Best effort: a folder that is not this user's private folder, or one whose lead's
+/// own temp folder to stage in is a link or open to others (KA-KEPT-CAP-R2-NOTES Note 2), is
+/// left as it is.
 /// Takes the folder and the new socket's name.
 #[cfg(unix)]
 fn retire_dead_teammates_sockets(folder: &Path, named: &str) {
@@ -937,14 +939,12 @@ fn retire_dead_teammates_sockets(folder: &Path, named: &str) {
     let Ok(opened) = rustix::fs::openat(CWD, folder, flags, Mode::empty()) else {
         return;
     };
-    let private = rustix::fs::fstat(&opened).is_ok_and(|stat| {
-        FileType::from_raw_mode(stat.st_mode) == FileType::Directory
-            && stat.st_uid == own
-            && stat.st_mode & 0o077 == 0
-    });
-    if !private {
+    if !own_private_folder(&opened) {
         return;
     }
+    let Some(staging) = lead_staging_folder(&opened, folder) else {
+        return;
+    };
     let Ok(entries) = Dir::read_from(&opened) else {
         return;
     };
@@ -971,19 +971,64 @@ fn retire_dead_teammates_sockets(folder: &Path, named: &str) {
         }
         asked += 1;
         if matches!(tmux::listener(&folder.join(name)), Ok(None)) {
-            occupy_dead_socket(&opened, name);
+            occupy_dead_socket(&opened, &staging, name);
         }
     }
     assert!(asked <= TEAMMATES_SWEEP_ASKS_MAX);
 }
 
+/// Whether an opened node is a folder this user owns with no access for others. Input:
+/// the descriptor. Output: the answer.
+#[cfg(unix)]
+fn own_private_folder(opened: &rustix::fd::OwnedFd) -> bool {
+    use rustix::fs::FileType;
+    let own = rustix::process::getuid().as_raw();
+    rustix::fs::fstat(opened).is_ok_and(|stat| {
+        FileType::from_raw_mode(stat.st_mode) == FileType::Directory
+            && stat.st_uid == own
+            && stat.st_mode & 0o077 == 0
+    })
+}
+
+/// Opens, relative to the opened short temp folder and without following a link, the lead's
+/// own temp folder in it ([`crate::sandbox::toolchains::native_lead_tmp`]), which no
+/// teammate reads or writes, as the only place a dead socket's replacement is staged
+/// (KA-KEPT-CAP-R2-NOTES Note 2). A missing one is made with mode 0700 first, so a lead that
+/// removed its own temp folder never stops the sweep; the start makes it afresh right after
+/// anyway (`fresh_native_lead_tmp`). Inputs: the opened folder and its path. Output: the
+/// lead's folder, or none when it is a link, or not this user's private folder.
+#[cfg(unix)]
+fn lead_staging_folder(folder: &rustix::fd::OwnedFd, path: &Path) -> Option<rustix::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags};
+    let lead = crate::sandbox::toolchains::native_lead_tmp(path);
+    assert_eq!(
+        lead.parent(),
+        Some(path),
+        "the lead's own temp folder is a child"
+    );
+    let leaf = lead
+        .file_name()
+        .expect("the lead's own temp folder has a name");
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let opened = match rustix::fs::openat(folder, leaf, flags, Mode::empty()) {
+        Err(rustix::io::Errno::NOENT) => {
+            rustix::fs::mkdirat(folder, leaf, Mode::RWXU).ok()?;
+            rustix::fs::openat(folder, leaf, flags, Mode::empty()).ok()?
+        }
+        opened => opened.ok()?,
+    };
+    own_private_folder(&opened).then_some(opened)
+}
+
 /// Puts an empty plain file of this user's in place of a dead teammates' socket in one
 /// rename (QUESTION-04:15 B), so the path stays taken with no gap: a teammate still running
 /// under an earlier start's profile can never bind a listener there, and the freeze, which
-/// counts only sockets, no longer counts it. Best effort: a staged file the rename does not
-/// take is removed. Takes the opened folder and the socket's name.
+/// counts only sockets, no longer counts it. The file is made in the lead's own temp folder
+/// and renamed across, so no teammate ever sees or swaps its staged name (KA-KEPT-CAP-R2-NOTES
+/// Note 2). Best effort: a staged file the rename does not take is removed. Takes the opened
+/// folder, the opened lead's own temp folder and the socket's name.
 #[cfg(unix)]
-fn occupy_dead_socket(folder: &rustix::fd::OwnedFd, name: &str) {
+fn occupy_dead_socket(folder: &rustix::fd::OwnedFd, staging: &rustix::fd::OwnedFd, name: &str) {
     use rustix::fs::{AtFlags, Mode, OFlags};
     const STAGING_NONCE_BYTES: usize = 16;
     assert!(teammates_name_valid(name));
@@ -992,16 +1037,16 @@ fn occupy_dead_socket(folder: &rustix::fd::OwnedFd, name: &str) {
         return;
     }
     let digits: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-    let staging = format!("{name}.{digits}.tmp");
-    assert!(!teammates_name_valid(&staging));
+    let staged_name = format!("{name}.{digits}.tmp");
+    assert!(!teammates_name_valid(&staged_name));
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let Ok(staged) = rustix::fs::openat(folder, staging.as_str(), flags, Mode::RUSR | Mode::WUSR)
-    else {
+    let mode = Mode::RUSR | Mode::WUSR;
+    let Ok(staged) = rustix::fs::openat(staging, staged_name.as_str(), flags, mode) else {
         return;
     };
     drop(staged);
-    if rustix::fs::renameat(folder, staging.as_str(), folder, name).is_err() {
-        let _ = rustix::fs::unlinkat(folder, staging.as_str(), AtFlags::empty());
+    if rustix::fs::renameat(staging, staged_name.as_str(), folder, name).is_err() {
+        let _ = rustix::fs::unlinkat(staging, staged_name.as_str(), AtFlags::empty());
     }
 }
 
