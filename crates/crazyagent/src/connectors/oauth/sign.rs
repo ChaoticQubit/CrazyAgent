@@ -825,6 +825,22 @@ pub(crate) fn finish_with(
     redeem(root, take(root, state)?, code, iss, reach)
 }
 
+/// [`finish_with`] with `between` run once the sign-in is taken and before its code is
+/// redeemed, where a save the owner makes in that moment lands.
+#[cfg(test)]
+pub(crate) fn finish_with_between(
+    root: &Path,
+    state: &str,
+    code: &str,
+    iss: Option<&str>,
+    reach: &ProviderReach,
+    between: impl FnOnce(),
+) -> Result<(), OAuthError> {
+    let flow = take(root, state)?;
+    between();
+    redeem(root, flow, code, iss, reach)
+}
+
 /// Where one token of a connector signed in at one issuer is saved: the kind, the
 /// connector and the first 16 hex digits of the issuer's sha256.
 fn token_ref(kind: &str, connector: &str, issuer: &str) -> Result<CredentialRef, OAuthError> {
