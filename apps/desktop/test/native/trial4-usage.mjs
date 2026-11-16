@@ -8,20 +8,40 @@ const RESETS = /^Resets at (?:(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat) )?\d\d:\d\d, in (?
 /** The sentence the Usage card shows for an API-key Codex account, which has no windows. */
 export const API_KEY_READING = "An API-key account has no 5-hour or weekly window.";
 
+const STALE_HOURS = 5;
+const READ_AGE = /(\d+) (h|d) ago$/;
+
+/** How old a card's read line says its read is, or null for a read under an hour old or a
+ * line that names no age. Input: the line, such as "Read from the provider 14 h ago".
+ * Output: { age: "14 h ago", hours: 14 }, a day counted as 24 hours, or null. */
+function readAge(line) {
+  const found = READ_AGE.exec(line ?? "");
+  if (!found) return null;
+  const count = Number(found[1]);
+  return { age: `${found[1]} ${found[2]} ago`, hours: found[2] === "d" ? count * 24 : count };
+}
+
 /** Says whether Metrics shows every account's 5-hour and weekly use with a meter and
  * the time each window resets (OP-17); an API-key account's card saying it has no windows is
- * a valid reading, though not when every account is one. Input: the limit cards in screen
- * order, each { notice, windows: [{ label, used, meter, reset }] } as the page shows them.
- * Output: the detail; throws the first account and window that shows less, by its place so
- * no name is logged. */
+ * a valid reading, and a card read over 5 h ago is not exercised and named with its age, as
+ * its 5-hour reset has passed since (N-D16), though not when every account is one of these.
+ * Input: the limit cards in screen order, each { notice, read, windows: [{ label, used, meter,
+ * reset }] } as the page shows them. Output: the detail; throws the first account and window
+ * that shows less, by its place so no name is logged. */
 export function limitsVerdict(cards) {
   assert(Array.isArray(cards), "the limit cards are a list");
   if (cards.length === 0) throw new Error("Metrics shows no account limits");
   const keyed = cards.filter((card) => card.notice === API_KEY_READING).length;
   if (keyed === cards.length) throw new Error(`not exercised: every one of the ${cards.length} accounts is an API-key account`);
+  const stale = [];
   cards.forEach((card, at) => {
     if (card.notice === API_KEY_READING) return;
     const where = `account ${at + 1} of ${cards.length}`;
+    const read = readAge(card.read);
+    if (read !== null && read.hours >= STALE_HOURS) {
+      stale.push(`${where} read ${read.age}`);
+      return;
+    }
     const labels = card.windows.map((window) => window.label);
     if (labels.join(",") !== WINDOWS.join(",")) throw new Error(`${where} shows the windows ${JSON.stringify(labels)}, not 5-hour and Weekly`);
     for (const window of card.windows) {
@@ -30,8 +50,11 @@ export function limitsVerdict(cards) {
       if (!RESETS.test(window.reset)) throw new Error(`${where} ${window.label}: shows ${JSON.stringify(window.reset)}, not when it resets`);
     }
   });
-  const shown = `${cards.length - keyed} accounts each show their 5-hour and weekly use and reset time`;
-  return keyed === 0 ? shown : `${shown}; ${keyed} API-key accounts have no 5-hour or weekly window`;
+  if (stale.length === cards.length - keyed) throw new Error(`not exercised: every account was read over ${STALE_HOURS} h ago: ${stale.join(", ")}`);
+  const parts = [`${cards.length - keyed - stale.length} accounts each show their 5-hour and weekly use and reset time`];
+  if (keyed > 0) parts.push(`${keyed} API-key accounts have no 5-hour or weekly window`);
+  if (stale.length > 0) parts.push(`not exercised, read over ${STALE_HOURS} h ago: ${stale.join(", ")}`);
+  return parts.join("; ");
 }
 
 /** Says whether each pool that picks by Use it or lose it tries the account whose weekly
