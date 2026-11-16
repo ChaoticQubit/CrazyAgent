@@ -615,12 +615,17 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     Ok(())
 }
 
+/// The bubblewrap options no caller names before the nest's `--`, beside stage 1's own
+/// descriptor flags: one reads more arguments from a descriptor, past every check here,
+/// and the others block on or write to a descriptor the caller holds (rv-code2 N5).
+const NEST_REFUSED: [&str; 4] = ["--args", "--userns-block-fd", "--sync-fd", "--json-status-fd"];
+
 /// Reads what follows `--nest --`: bubblewrap at one of its fixed places, then exactly
 /// [`NEST_ARGS`], then at least the command bubblewrap starts, so the helper starts nothing
 /// else on a caller's word. No option before the nest's `--` is one of the descriptor
-/// flags stage 1 writes itself ([`egress::DESCRIPTOR_FLAGS`]). Inputs: whether `--nest`
-/// was the only flag, and those arguments. Output: the request, or the reason they are
-/// refused.
+/// flags stage 1 writes itself ([`egress::DESCRIPTOR_FLAGS`]) or [`NEST_REFUSED`]. Inputs:
+/// whether `--nest` was the only flag, and those arguments. Output: the request, or the
+/// reason they are refused.
 fn nest_request(
     alone: bool,
     mut rest: impl Iterator<Item = OsString>,
@@ -643,7 +648,10 @@ fn nest_request(
     let named = args[NEST_ARGS.len()..]
         .iter()
         .take_while(|arg| *arg != "--")
-        .any(|arg| egress::DESCRIPTOR_FLAGS.iter().any(|flag| arg == flag));
+        .any(|arg| {
+            let mut refused = egress::DESCRIPTOR_FLAGS.iter().chain(NEST_REFUSED.iter());
+            refused.any(|flag| arg == flag)
+        });
     if named {
         return Err(format!("{NEST} takes no descriptor flag; stage 1 writes its own"));
     }
