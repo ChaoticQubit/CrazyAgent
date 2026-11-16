@@ -413,6 +413,64 @@ fn a_failed_switch_keeps_its_problem_and_reads_the_page_again() {
     }
 }
 
+/// At 80x24 a long required-checks detail gives way to the sending line and to a failed
+/// switch's problem: the detail is cut and ends in an ellipsis, and the selected rule, the
+/// sending line and the problem all stay on screen (rv-ds241 gh-s6c LOW).
+#[test]
+fn a_long_required_checks_detail_keeps_the_sending_line_and_the_problem_at_80_by_24() {
+    let long = || {
+        page(|page| {
+            page.checks = (1..=40)
+                .map(|index| format!("ci-check-number-{index:02}"))
+                .collect();
+            set(
+                page,
+                GitHubRule::RequiredChecks,
+                false,
+                GitHubRuleState::Refused {
+                    status: 422,
+                    message: "Validation Failed: the status check contexts must each name a check that reported on the default branch".into(),
+                },
+            );
+        })
+    };
+    let label = rule_label(GitHubRule::RequiredChecks);
+    let ellipsis = |shell: &Shell, rows: &[String]| {
+        rows.iter()
+            .any(|row| row.trim_end().ends_with(shell.ctx.glyphs.ellipsis))
+    };
+    let (mut shell, id) = project(80, 24, long());
+    go(&mut shell, GitHubRule::RequiredChecks);
+    let rows = render(&mut shell, 80, 24);
+    assert!(selected(&rows).contains(label), "{rows:#?}");
+    assert!(
+        flat(&rows).contains("Checks the first CI run named: ci-check-number-01"),
+        "{rows:#?}"
+    );
+    assert!(!flat(&rows).contains("ci-check-number-40"), "{rows:#?}");
+    assert!(ellipsis(&shell, &rows), "{rows:#?}");
+    shell.key(Key::Char(' '));
+    let [sent] = <[IntakeQuery; 1]>::try_from(asked(&mut shell)).unwrap();
+    let rows = render(&mut shell, 80, 24);
+    assert!(
+        flat(&rows).contains(&format!("Sending {label}{SENDING_TAIL}")),
+        "{rows:#?}"
+    );
+    assert!(selected(&rows).contains(label), "{rows:#?}");
+    assert!(ellipsis(&shell, &rows), "{rows:#?}");
+    shell.arrive(arrival(sent, Err("github_outcome_unknown".into())));
+    let read = IntakeQuery::GitHubRules { project: id };
+    assert_eq!(asked(&mut shell), [read.clone()]);
+    shell.arrive(arrival(read, Ok(IntakeView::Rules(Box::new(long())))));
+    let rows = render(&mut shell, 80, 24);
+    assert!(
+        flat(&rows).contains(&copy("github_outcome_unknown")),
+        "{rows:#?}"
+    );
+    assert!(selected(&rows).contains(label), "{rows:#?}");
+    assert!(ellipsis(&shell, &rows), "{rows:#?}");
+}
+
 /// A project CrazyAgent did not publish says where its rules show; a build without the
 /// read says so; any other failed read offers r to read again.
 #[test]
