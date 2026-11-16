@@ -130,7 +130,9 @@ pub fn server_plan(
     } else {
         resolve(first).ok_or(InstallError("pack_server_command_missing"))?
     };
-    let dir = folder.map(|folder| folder.to_str().ok_or(invalid)).transpose()?;
+    let dir = folder
+        .map(|folder| folder.to_str().ok_or(invalid))
+        .transpose()?;
     if dir.is_none() && rest.iter().any(|word| word.contains("{dir}")) {
         return Err(unsupported);
     }

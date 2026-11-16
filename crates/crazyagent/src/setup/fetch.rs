@@ -1,7 +1,7 @@
 use super::InstallError;
+use super::launch::{runnable, safe_relative, server_plan};
 use super::pack::{PackManifestEntry, PackSource, repo_key};
 use super::process::{private_folder, run, staging_folder};
-use super::launch::{runnable, safe_relative, server_plan};
 use crate::plugins::ServerSpec;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
