@@ -32,8 +32,11 @@ pub const LISTED_HOOKLESS_WORDS: &str = "unavailable for this harness";
 /// The words a hookless agent shows in place of receipts: the harness reason for a listed
 /// harness, the account-kind reason for Claude Code started `--bare`. Input: the agent's
 /// harness, an id or alias. Output: the words.
-pub fn hookless_words(_harness: &str) -> &'static str {
-    HOOKLESS_WORDS
+pub fn hookless_words(harness: &str) -> &'static str {
+    match super::settings::HarnessKind::from_harness(harness) {
+        Some(super::settings::HarnessKind::Listed(_)) => LISTED_HOOKLESS_WORDS,
+        _ => HOOKLESS_WORDS,
+    }
 }
 /// The most bytes one adoption view takes once encoded. Newer agents are kept first; the
 /// older ones past it are counted in `Adoption::hidden`.
