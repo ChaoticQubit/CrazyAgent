@@ -9274,8 +9274,8 @@ impl TeamRuntime {
             Some(callers.as_path()),
             "the lead's servers find the caller socket its sandbox reaches"
         );
-        let mates_home = prepare_mates_home(home, homes, working_dir)
-            .map_err(|e| with_code("the teammates' home could not be made", Some(&e.0)))?;
+        let mates_home =
+            prepare_mates_home(home, homes, working_dir).map_err(|e| mates_home_problem(&e))?;
         toolchains::fresh_native_lead_tmp(scratch).map_err(|e| {
             with_code(
                 "the lead's own temp folder could not be made",
@@ -9516,8 +9516,7 @@ impl TeamRuntime {
         {
             eprintln!("agent_free_git_not_written kind={:?}", error.kind());
         }
-        toolchains::prepare_cargo_home(&home, &homes)
-            .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
+        toolchains::prepare_cargo_home(&home, &homes).map_err(|e| cargo_home_problem(&e))?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
             .and_then(|sandbox| sandbox.keep_ports(&kept))
             .map_err(sandboxed)?;
@@ -13501,6 +13500,22 @@ const SKILLS_KEPT_PROBLEM: &str = "The agent could not start: an earlier run loc
 /// walk budget ([`crate::team::cleanup::WALK_TOO_LONG`], RESET-WALK-CODE).
 const WALK_TOO_LONG_PROBLEM: &str = "The agent could not start: its home folder held too many \
      files to reset at once, or something kept adding files to it. Try again";
+
+/// The owner's line for an agent whose cargo home could not be made (RESET-WALK-CODE code r1
+/// F1). Input: the error. Output: the line.
+fn cargo_home_problem(error: &std::io::Error) -> String {
+    with_code(
+        "the agent cargo home could not be made",
+        Some(io_code(error)),
+    )
+}
+
+/// The owner's line for a native lead whose teammates' home could not be made
+/// (RESET-WALK-CODE code r1 F1). Input: the error. Output: the line.
+#[cfg(unix)]
+fn mates_home_problem(error: &EngineError) -> String {
+    with_code("the teammates' home could not be made", Some(&error.0))
+}
 
 /// The owner's line for an agent whose harness could not start: a command that would hold
 /// an MCP secret names its server and secret, skills left in a Codex home or a home reset

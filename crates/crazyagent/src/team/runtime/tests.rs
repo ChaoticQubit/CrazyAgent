@@ -29805,6 +29805,45 @@ fn an_agent_refused_for_skills_left_in_its_codex_home_says_what_happened() {
     );
 }
 
+/// RESET-WALK-CODE code r1 F1: a team agent whose cargo home could not be made because
+/// removing a cargo name ran past its walk budget says so in its start line with its code
+/// kept, and any other failure keeps the cargo home line with its io code.
+#[test]
+fn an_agent_whose_cargo_name_walk_ran_past_its_budget_says_so_in_its_start_line() {
+    let walked = std::io::Error::other(crate::team::cleanup::WALK_TOO_LONG);
+    let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+    assert_eq!(
+        cargo_home_problem(&walked),
+        "The agent could not start: its home folder held too many files to reset at once, or \
+         something kept adding files to it. Try again. (cleanup_walk_too_long)"
+    );
+    assert_eq!(
+        cargo_home_problem(&missing),
+        "the agent cargo home could not be made. (io_not_found)"
+    );
+}
+
+/// RESET-WALK-CODE code r1 F1: a native lead whose teammates' home reset or cargo name
+/// removal ran past its walk budget says so in its start line with its code kept, and any
+/// other failure keeps the teammates' home line with its code.
+#[cfg(unix)]
+#[test]
+fn a_lead_whose_teammates_home_walk_ran_past_its_budget_says_so_in_its_start_line() {
+    let walked = EngineError("cleanup_walk_too_long".into());
+    let changed = EngineError("team_shared_folder_changed".into());
+
+    assert_eq!(
+        mates_home_problem(&walked),
+        "The agent could not start: its home folder held too many files to reset at once, or \
+         something kept adding files to it. Try again. (cleanup_walk_too_long)"
+    );
+    assert_eq!(
+        mates_home_problem(&changed),
+        "the teammates' home could not be made. (team_shared_folder_changed)"
+    );
+}
+
 /// RESET-WALK-CODE: a launch refused because resetting the agent's home ran past its walk
 /// budget says so in words, with its code kept, and asks for another try, since a refused
 /// pass already removed what it reached.
