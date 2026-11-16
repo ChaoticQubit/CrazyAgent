@@ -66,7 +66,10 @@ async function effect({ bridge, me, page }, id, value) {
     await me.click("End now", `${PANEL} button`);
     return until("the hold ended", "nothing", async () => (await engineView(bridge)).state.want.kind);
   }
-  if (id === "freeze") await until("the apps line under the freeze setting", true, async () => (await page.evaluate("document.body.innerText")).includes("Apps to freeze"));
+  if (id === "freeze") {
+    const where = (await engineView(bridge)).platform;
+    await until(`the apps line under the freeze setting on ${where}`, where !== "windows", async () => (await page.evaluate("document.body.innerText")).includes("Apps to freeze"));
+  }
   assert.ok(["heat_notice", "lid_display", "freeze", "mute"].includes(id), `${id} has an effect row`);
   const view = await engineView(bridge);
   assert.equal(view.settings[id], value, `${id} is stored; its effect lands with its own task and is proven there`);
