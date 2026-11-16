@@ -73,13 +73,27 @@ impl RcliGateway {
     /// the entry. Output: the gateway, or `rcli_master_gateway_rejected` for an entry that
     /// is not exactly the `ca-connectors` stdio server with no secret.
     pub fn from_entry(server: &LaunchServer) -> Result<Self, ProtocolError> {
+        let code = "rcli_master_gateway_rejected";
         let ServerSpec::Stdio { command, args } = &server.spec else {
-            return Err(error("rcli_master_gateway_rejected"));
+            return Err(error(code));
         };
-        Ok(Self {
+        if server.name != crate::connectors::launch::SERVER_NAME
+            || !server.secrets.is_empty()
+            || args.len() != 2
+            || args[0] != crate::connectors::shim::SERVER_COMMAND
+        {
+            return Err(error(code));
+        }
+        let gateway = Self {
             engine: PathBuf::from(command),
-            folder: args.last().map(PathBuf::from).unwrap_or_default(),
-        })
+            folder: PathBuf::from(&args[1]),
+        };
+        if !gateway.engine.is_absolute() || !gateway.folder.is_absolute() {
+            return Err(error(code));
+        }
+        assert_eq!(server.name, crate::connectors::shim::SERVER_NAME);
+        assert!(server.secrets.is_empty());
+        Ok(gateway)
     }
 }
 
@@ -147,6 +161,7 @@ impl RcliMasterLaunch {
     #[cfg(unix)]
     pub fn command(&self) -> Result<Command, ProtocolError> {
         self.validate_paths()?;
+        self.validate_gateway()?;
         pinned_file(&self.executable, &self.artifact_sha256, true)?;
         self.validate_profile()?;
         let model = self.model_flag()?;
@@ -165,6 +180,10 @@ impl RcliMasterLaunch {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
+        if let Some(gateway) = &self.gateway {
+            command.arg("--gateway-engine").arg(&gateway.engine);
+            command.arg("--gateway-folder").arg(&gateway.folder);
+        }
         if let Some(instructions) = &self.instructions {
             command.arg("--instructions-file").arg(instructions);
         }
@@ -174,9 +193,39 @@ impl RcliMasterLaunch {
         assert_eq!(command.get_program(), self.executable.as_os_str());
         assert_eq!(
             command.get_args().count(),
-            8 + 2 * usize::from(self.instructions.is_some()) + 2 * usize::from(model.is_some())
+            8 + 4 * usize::from(self.gateway.is_some())
+                + 2 * usize::from(self.instructions.is_some())
+                + 2 * usize::from(model.is_some())
         );
         Ok(command)
+    }
+
+    /// Checks the gateway a granted turn hands the host: an engine file and a private launch
+    /// folder, each canonical, the folder directly in a `connector-launches` folder, and
+    /// neither inside the project or the profile home. Takes the launch. Returns Ok with no
+    /// gateway or a whole one, else `rcli_master_gateway_rejected`.
+    #[cfg(unix)]
+    fn validate_gateway(&self) -> Result<(), ProtocolError> {
+        let Some(gateway) = &self.gateway else {
+            return Ok(());
+        };
+        let code = "rcli_master_gateway_rejected";
+        canonical_path(&gateway.engine).map_err(|_| error(code))?;
+        private_directory(&gateway.folder).map_err(|_| error(code))?;
+        let engine = fs::symlink_metadata(&gateway.engine).map_err(|_| error(code))?;
+        let launches = gateway.folder.parent().and_then(Path::file_name);
+        if !engine.is_file()
+            || launches.is_none_or(|name| name != crate::connectors::gateway::LAUNCHES_FOLDER)
+            || gateway.engine == gateway.folder
+            || [&gateway.engine, &gateway.folder]
+                .iter()
+                .any(|path| path.starts_with(&self.cwd) || path.starts_with(&self.home_dir))
+        {
+            return Err(error(code));
+        }
+        assert!(gateway.folder.is_absolute());
+        assert!(!engine.file_type().is_symlink());
+        Ok(())
     }
 
     /// Names the `--model` value a chosen master model adds (DEC-150 M-5): the profile's

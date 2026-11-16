@@ -57,13 +57,14 @@ pub fn native_switch(harness: &str, native: NativeConnectors) -> NativeSwitch {
 }
 
 /// What the Connectors page says one harness reaches through the gateway (DEC-141 parity):
-/// each harness row names its harness and its state. Input: the harness kind. Output: the
-/// row's words.
+/// each harness row names its harness and its state. RCLI runs only as a CrazyAgent master,
+/// whose bundled host starts the gateway as its one MCP server (Task 14), so its row says
+/// master. Input: the harness kind. Output: the row's words.
 pub fn reach(kind: HarnessKind) -> &'static str {
     match kind {
         HarnessKind::ClaudeCode => "Claude Code: yes",
         HarnessKind::Codex => "Codex: yes",
-        HarnessKind::Rcli => "RCLI: not yet",
+        HarnessKind::Rcli => "RCLI: yes (master)",
     }
 }
 
