@@ -1066,7 +1066,8 @@ impl AppSetup {
         assert!(choice < SOCKETS_CHOICES.len());
         let linux_sockets = SOCKETS_CHOICES[choice];
         let Load::Ready(StoredSandboxSettings {
-            settings: stored, ..
+            settings: stored,
+            version,
         }) = &self.sandbox
         else {
             ctx.say(Message::warning(SOCKETS_UNKNOWN, ""));
@@ -1084,7 +1085,7 @@ impl AppSetup {
         let done = format!("Linux sockets: {}.", sockets_words(linux_sockets).0);
         let job = AppSetupJob::SetSandbox {
             settings,
-            version: 0,
+            version: *version,
             generation: ctx.next_generation(),
         };
         self.change(job, Sent::Done(done), ctx);
@@ -1106,7 +1107,8 @@ impl AppSetup {
         assert!(choice < SUPERVISOR_CHOICES.len());
         let linux_supervisor = SUPERVISOR_CHOICES[choice];
         let Load::Ready(StoredSandboxSettings {
-            settings: stored, ..
+            settings: stored,
+            version,
         }) = &self.sandbox
         else {
             ctx.say(Message::warning(SUPERVISOR_UNKNOWN, ""));
@@ -1125,7 +1127,7 @@ impl AppSetup {
         let done = format!("Linux supervisor: {title}.");
         let job = AppSetupJob::SetSandbox {
             settings,
-            version: 0,
+            version: *version,
             generation: ctx.next_generation(),
         };
         self.change(job, Sent::Done(done), ctx);
@@ -1147,7 +1149,8 @@ impl AppSetup {
         assert!(choice < STRICT_CHOICES.len());
         let linux_strict = STRICT_CHOICES[choice];
         let Load::Ready(StoredSandboxSettings {
-            settings: stored, ..
+            settings: stored,
+            version,
         }) = &self.sandbox
         else {
             ctx.say(Message::warning(STRICT_UNKNOWN, ""));
@@ -1167,7 +1170,7 @@ impl AppSetup {
         let done = format!("Linux strict: {title}.");
         let job = AppSetupJob::SetSandbox {
             settings,
-            version: 0,
+            version: *version,
             generation: ctx.next_generation(),
         };
         self.change(job, Sent::Done(done), ctx);

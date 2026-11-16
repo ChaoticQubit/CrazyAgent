@@ -2,6 +2,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
 use crate::protocol::Outcome;
 use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
+use crate::storage::versioned;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -120,7 +121,11 @@ pub(crate) fn save_from(
     settings: &SandboxSettings,
     version: u64,
 ) -> Result<Outcome, EngineError> {
-    let _ = version;
+    if versioned::owner_write(tx, &versioned::sandbox_settings_item(), version)?.is_err() {
+        return Ok(Outcome::Rejected {
+            code: versioned::STALE_CODE.into(),
+        });
+    }
     save(tx, settings)
 }
 
@@ -172,7 +177,7 @@ pub(crate) fn stored(engine: &std::path::Path) -> Result<SandboxSettings, Engine
 pub(crate) fn read(connection: &Connection) -> Result<OwnerData, EngineError> {
     Ok(OwnerData::SandboxSettings {
         settings: load(connection)?,
-        version: 0,
+        version: versioned::current(connection, &versioned::sandbox_settings_item())?.version,
     })
 }
 

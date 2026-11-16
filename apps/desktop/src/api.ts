@@ -488,14 +488,23 @@ export interface SandboxSettings {
   linux_strict: LinuxStrict;
 }
 
-/** Reads the owner's sandbox settings. Output: the stored settings, or the defaults before the first save. */
-export function getSandboxSettings(): Promise<Result<SandboxSettings>> {
-  return call<SandboxSettings>("desktop_sandbox_settings");
+/** The owner's sandbox settings with the version of the read that showed them, the engine's
+ * `StoredSandboxSettings`; a save names the version, 0 before the first save. */
+export interface StoredSandboxSettings {
+  settings: SandboxSettings;
+  version: number;
 }
 
-/** Saves the owner's sandbox settings. Input: the full settings. Output: ok once saved. */
-export function saveSandboxSettings(settings: SandboxSettings): Promise<Result<void>> {
-  return change("desktop_set_sandbox_settings", { settings, generation: nextGeneration() });
+/** Reads the owner's sandbox settings. Output: the stored settings and their version, or the
+ * defaults at version 0 before the first save. */
+export function getSandboxSettings(): Promise<Result<StoredSandboxSettings>> {
+  return call<StoredSandboxSettings>("desktop_sandbox_settings");
+}
+
+/** Saves the owner's sandbox settings. Inputs: the full settings and the version of the read
+ * they change. Output: ok once saved, or `stale_revision` once they changed since that read. */
+export function saveSandboxSettings(settings: SandboxSettings, version: number): Promise<Result<void>> {
+  return change("desktop_set_sandbox_settings", { settings, version, generation: nextGeneration() });
 }
 
 /** When the engine removes a finished agent's worktree on its own, the engine's `CleanupMode`. */

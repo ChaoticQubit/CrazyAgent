@@ -147,6 +147,11 @@ pub fn account_schedule_item() -> Item {
     named("account-schedule".to_owned())
 }
 
+/// Names the versioned item of the owner's app-wide sandbox settings.
+pub fn sandbox_settings_item() -> Item {
+    named("sandbox-settings".to_owned())
+}
+
 fn named(name: String) -> Item {
     assert!(Item::new(&name).is_ok());
     Item(name)

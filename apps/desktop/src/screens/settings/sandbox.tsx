@@ -147,23 +147,29 @@ export function SandboxSettingsView({ settings, picked, pickedSupervisor, picked
 }
 
 /** Settings, Sandbox: reads the owner's sandbox settings and saves the picked Linux
- * limited-network sockets, call supervisor and strict options in the engine, all in one save. */
+ * limited-network sockets, call supervisor and strict options in the engine, all in one save
+ * that names the read's version. A save refused as `stale_revision` reads the settings again. */
 export function SandboxSettingsTab() {
   const session = useAppSession();
-  const [settings, reload] = useLoad(getSandboxSettings);
+  const [read, reload] = useLoad(getSandboxSettings);
+  const settings: Loaded<SandboxSettings> = read.kind === "ok" ? { kind: "ok", value: read.value.settings } : read;
   const [picked, setPicked] = useState<LinuxSockets | null>(null);
   const [pickedSupervisor, setPickedSupervisor] = useState<LinuxSupervisor | null>(null);
   const [pickedStrict, setPickedStrict] = useState<LinuxStrict | null>(null);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState("");
-  useEffect(() => { setPicked(null); setPickedSupervisor(null); setPickedStrict(null); }, [settings]);
+  useEffect(() => { setPicked(null); setPickedSupervisor(null); setPickedStrict(null); }, [read]);
   async function save() {
-    if (settings.kind !== "ok" || (picked === null && pickedSupervisor === null && pickedStrict === null)) return;
+    if (read.kind !== "ok" || (picked === null && pickedSupervisor === null && pickedStrict === null)) return;
     setSaving(true);
     setProblem("");
-    const result = await saveSandboxSettings(sandboxDraft(settings.value, picked, pickedSupervisor, pickedStrict));
+    const result = await saveSandboxSettings(sandboxDraft(read.value.settings, picked, pickedSupervisor, pickedStrict), read.value.version);
     setSaving(false);
-    if (result.kind === "error") { setProblem(result.message); return; }
+    if (result.kind === "error") {
+      setProblem(result.message);
+      if (result.code === "stale_revision") reload();
+      return;
+    }
     if (result.kind === "not_ready") { setProblem("The engine is not ready yet. Try again."); return; }
     session.showToast("Sandbox setting saved.");
     reload();
