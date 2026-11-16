@@ -1601,6 +1601,57 @@ fn a_chatgpt_launch_is_refused_where_a_sign_in_record_lies() {
     );
 }
 
+/// T22 r2b (leader 20:07): the agent home a ChatGPT launch makes its private home in never
+/// overlaps the sign-in's managed home, where the engine puts Codex's own copy of the
+/// sign-in, even before that copy is there: an agent home that is the managed home, lies
+/// inside it or holds it, or a link to it, is refused before any folder is made or relay
+/// starts.
+#[cfg(unix)]
+#[test]
+fn a_chatgpt_launch_is_refused_when_its_agent_home_overlaps_the_managed_home() {
+    let registry = responses_registry();
+    let harness = registry.get("responses-launch").unwrap();
+    let refused = |managed: &std::path::Path, base: &std::path::Path| {
+        super::route_chatgpt(
+            chatgpt_request(
+                "responses-launch",
+                AccountBinding::Subscription {
+                    home: managed.to_path_buf(),
+                },
+            ),
+            harness,
+            &chatgpt_connection(),
+            base,
+            launch_source(),
+        )
+        .err()
+        .map(|problem| problem.0)
+    };
+    let (_folder, managed) = agent_base();
+    let inside = managed.join("agent");
+    private_dir(&inside);
+    let (_linked, links) = agent_base();
+    let link = links.join("managed");
+    std::os::unix::fs::symlink(&managed, &link).unwrap();
+    for base in [managed.as_path(), inside.as_path(), link.as_path()] {
+        assert_eq!(
+            refused(&managed, base).as_deref(),
+            Some("launch_chatgpt_home_is_managed"),
+            "{}",
+            base.display()
+        );
+    }
+    let (_outer, outer) = agent_base();
+    let held = outer.join("managed");
+    private_dir(&held);
+    assert_eq!(
+        refused(&held, &outer).as_deref(),
+        Some("launch_chatgpt_home_is_managed")
+    );
+    assert!(!managed.join("responses-launch").exists());
+    assert!(!outer.join("responses-launch").exists());
+}
+
 /// T22 r2 F1 (rv-code4): a request that already carries a sandbox profile is refused, since
 /// that profile was made for the home the request was bound to, the sign-in's managed
 /// home; the sandbox of a ChatGPT launch is made after routing, for its private home.
