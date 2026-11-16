@@ -414,7 +414,9 @@ pub(crate) fn listed_folder(
     step: Walk,
 ) -> Result<std::os::fd::OwnedFd, LaunchError> {
     let unsafe_home = || failure("launch_account_home_unsafe");
-    let name = |path: &Path| path.file_name().and_then(|name| name.to_str());
+    fn name(path: &Path) -> Option<&str> {
+        path.file_name().and_then(|name| name.to_str())
+    }
     let account = name(home).ok_or_else(unsafe_home)?;
     let folder = home.parent().ok_or_else(unsafe_home)?;
     let harness = name(folder).ok_or_else(unsafe_home)?;
