@@ -215,6 +215,11 @@ export function icloudProgressLine(progress: IcloudProgress | null): string {
 /** How often the app reads the engine's intake job while one runs. */
 export const INTAKE_POLL_MS = 1000;
 
+/** How long the app waits between reads nothing on screen follows closely: the intake job
+ * while none runs, and the found folders on pages other than Home. The window taking the
+ * focus back reads both at once. */
+export const IDLE_POLL_MS = 30_000;
+
 /** Whether the job is still at work: downloading, waiting for agents to stop, copying, moving
  * folders to the Trash, building a New Project or clearing. Input: the job, if any. Output:
  * true while it runs. */
@@ -265,10 +270,19 @@ export function startReached(source: string, after: IntakeJob | null, before: Re
 }
 
 /** How long until the app reads the intake job again: every second while one runs, else at
- * the found-folder pace, so a job another client started shows up too. Input: the last read
- * job. Output: the wait in ms. */
+ * the idle pace, so a job another client started shows up too. This app's own jobs and the
+ * window taking the focus back read it at once. Input: the last read job. Output: the wait in
+ * ms. */
 export function intakePollMs(job: IntakeJob | null): number {
-  return jobRunning(job) ? INTAKE_POLL_MS : FOUND_POLL_MS;
+  return jobRunning(job) ? INTAKE_POLL_MS : IDLE_POLL_MS;
+}
+
+/** How long until the app reads the found folders again: at the found-folder pace while Home
+ * shows their states, else at the idle pace, since off Home they only feed the sidebar and a
+ * job's end and the window taking the focus back read them at once. Input: whether Home is
+ * shown. Output: the wait in ms. */
+export function foundPollMs(home: boolean): number {
+  return home ? FOUND_POLL_MS : IDLE_POLL_MS;
 }
 
 /** What the job does now or how it ended, with the folder's name and the counts as files land,
