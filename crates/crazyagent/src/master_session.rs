@@ -737,8 +737,8 @@ pub(crate) fn validate_selection(
     project: &ProjectId,
     selection: &MasterSelection,
 ) -> Result<(), EngineError> {
-    if let MasterBackend::Listed(_) = selection.backend {
-        return Err(error("launch_harness_unsupported"));
+    if let MasterBackend::Listed(id) = selection.backend {
+        listed_master(id)?;
     }
     selection.route.validate().map_err(error)?;
     validate_pool_scope(
@@ -800,14 +800,17 @@ pub(crate) fn validate_selection(
 pub(crate) fn listed_master(
     id: &str,
 ) -> Result<&'static crate::harnesses::registry::Harness, EngineError> {
-    let _ = id;
-    Err(error("launch_harness_unsupported"))
+    let acp = Some(crate::harnesses::manifest::DriverKind::Acp);
+    crate::harnesses::registry::registry()
+        .get(id)
+        .filter(|harness| harness.master() && harness.piped() == acp)
+        .ok_or_else(|| error("launch_harness_unsupported"))
 }
 
 /// Tells whether a connection can run a master of this backend.
-/// Inputs: the backend and the connection. Output: true for an RCLI HTTP connection, or
-/// for a native connection of the Codex or Claude harness the backend names; false for a
-/// listed backend, which no connection runs until the engine hosts a master on it.
+/// Inputs: the backend and the connection. Output: true for an RCLI HTTP connection, for a
+/// native connection of the Codex or Claude harness the backend names, and for an account a
+/// listed master harness fits ([`listed_master`], `Harness::account_fits`).
 pub(crate) fn backend_member(backend: MasterBackend, connection: &ModelConnection) -> bool {
     match backend {
         MasterBackend::Rcli => {
@@ -824,7 +827,9 @@ pub(crate) fn backend_member(backend: MasterBackend, connection: &ModelConnectio
                 && connection.protocol.as_str() == "native"
                 && matches!(connection.endpoint, ModelEndpoint::Native {})
         }
-        MasterBackend::Listed(_) => false,
+        MasterBackend::Listed(id) => {
+            listed_master(id).is_ok_and(|harness| harness.account_fits(connection))
+        }
     }
 }
 

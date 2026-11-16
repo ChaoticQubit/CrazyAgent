@@ -1745,18 +1745,18 @@ fn rcli_profile(
     crate::config::configured_profile_ref(member)
 }
 
-/// The target a pool member runs master turns under: its connection for a native master,
-/// its RCLI profile for an RCLI one. Inputs: the session and the member. Output: the target,
-/// or None when the member has none, as every member has for a listed master the engine
-/// does not host yet.
+/// The target a pool member runs master turns under: its connection for a native or listed
+/// master (DEC-180 Task 20), its RCLI profile for an RCLI one. Inputs: the session and the
+/// member. Output: the target, or None when an RCLI member has no profile.
 fn master_target(
     session: &MasterSessionView,
     member: &ModelConnection,
 ) -> Option<crate::protocol::CredentialRef> {
     match session.selection.backend {
         MasterBackend::Rcli => rcli_profile(session, member),
-        MasterBackend::Codex | MasterBackend::Claude => Some(member.id.clone()),
-        MasterBackend::Listed(_) => None,
+        MasterBackend::Codex | MasterBackend::Claude | MasterBackend::Listed(_) => {
+            Some(member.id.clone())
+        }
     }
 }
 
