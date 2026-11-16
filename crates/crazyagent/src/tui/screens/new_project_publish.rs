@@ -362,15 +362,19 @@ impl Publish {
         PublishReply::Handled
     }
 
-    /// Inserts pasted text into the open panel's text row. Takes the text, the project name
-    /// and the about text. Returns Handled when a text row took it.
+    /// Inserts pasted text into the open panel's text row, keeping the row as typed only when
+    /// the paste changed it. Takes the text, the project name and the about text. Returns
+    /// Handled when a text row took it.
     pub fn paste(&mut self, text: &str, project: &str, about: &str) -> PublishReply {
         let Some(row) = self.panel.filter(|_| self.typing()) else {
             return PublishReply::Ignored;
         };
         let mut input = self.input(row, project, about);
+        let before = input.value().to_owned();
         input.insert_str(text);
-        self.keep(row, input);
+        if input.value() != before {
+            self.keep(row, input);
+        }
         PublishReply::Handled
     }
 }
