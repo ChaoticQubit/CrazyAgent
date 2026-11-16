@@ -297,6 +297,25 @@ test("the Add MCP server form takes exactly the full command paths the engine ta
   assert.equal(keys.isWindows("MacIntel"), false);
 });
 
+test("the Add MCP server command field's example is a drive path on Windows and a /-path elsewhere (#132 r2 F1)", async () => {
+  const { SessionContext } = await import("../src/state.ts");
+  const shown = (platform) => {
+    Object.defineProperty(navigator, "platform", { value: platform, configurable: true });
+    try {
+      return renderToStaticMarkup(createElement(SessionContext.Provider, { value: { showToast() {} } },
+        createElement(plugins.AddServerDialog, { open: true, scope: { kind: "global" }, onClose: forbidden, onAdded: forbidden })));
+    } finally {
+      delete navigator.platform;
+    }
+  };
+  const windows = shown("Win32");
+  assert.match(windows, /The full path, such as C:\\Program Files\\nodejs\\npx\.cmd\./);
+  assert.doesNotMatch(windows, /opt\/homebrew/);
+  const mac = shown("MacIntel");
+  assert.match(mac, /The full path, such as \/opt\/homebrew\/bin\/npx\./);
+  assert.doesNotMatch(mac, /npx\.cmd/);
+});
+
 test("names, secret names and skill folders are checked with the engine's rules before sending", () => {
   assert.equal(serverNameError("github"), undefined);
   assert.equal(serverNameError("GitHub tools"), "Use 1 to 64 lowercase letters, digits, - or _ for the name.");
