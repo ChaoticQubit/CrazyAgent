@@ -1298,20 +1298,24 @@ enum Acls {
 #[cfg(unix)]
 const STUCK_MAX: usize = 32;
 
-/// Extended ACLs a walk clears, each as it is taken and with no child process: an entry
-/// named in a folder the walk holds open loses its ACL relative to that folder's handle,
-/// without following a link in its name (`crazyagent_macos_fs::clear_acl_at`), and a folder
-/// the walk holds open loses it through its own handle (`crazyagent_macos_fs::clear_acl`),
-/// so no path above those handles is walked and a folder there that a process swaps for a
-/// link, even inside that call, is never followed (RV-DS241-181, ds181 N3). The one exception
-/// is a walk's top folder that will not open: it is named by its path, as its open is, so
-/// that clear walks the folders above it ([`writable`]). A link with one link loses its own
-/// ACL, so its target never changes. A file with a second link, which may
-/// be the owner's file an agent linked in, is never taken (V231-ACL). A process that swaps
-/// the name for another entry between the read and the clear has that entry's ACL cleared
-/// instead, and the clear then counts as not taken. At most [`DISK_ENTRIES_MAX`] entries are
-/// taken (RV-DS241-182), each once per walk, so a folder the clear did not help is not tried
-/// again (ds181 r2, rv-code4 F2). Holds the entries taken and how many more it takes.
+/// Extended ACLs a walk clears, each as it is taken and with no child process. An entry
+/// named in a folder the walk holds open is opened relative to that folder's handle, a link
+/// as itself, and loses its ACL through its own handle (`crazyagent_macos_fs::clear_acl`)
+/// only when that handle holds the entry read, with one link unless it is a folder, so a
+/// process that swaps the name for another entry meanwhile changes nothing (ds181 N3 r2). An
+/// entry that will not open, such as one at mode 000 or whose ACL denies reading or listing
+/// it, loses its ACL by its name relative to the folder's handle without following a link
+/// (`crazyagent_macos_fs::clear_acl_at`): a process that swaps that name for another entry,
+/// such as a hard link to an owner file, between the read and the clear has that entry's
+/// ACL cleared instead, and the clear then counts as not taken. A folder the walk holds open
+/// loses its ACL through its own handle. No path above those handles is walked, so a folder
+/// there that a process swaps for a link, even inside that call, is never followed
+/// (RV-DS241-181, ds181 N3), but for a walk's top folder that will not open, which is named
+/// by its path as its open is ([`writable`]). A link with one link loses its own ACL, so its
+/// target never changes. A file with a second link, which may be the owner's file an agent
+/// linked in, is never taken (V231-ACL). At most [`DISK_ENTRIES_MAX`] entries are taken
+/// (RV-DS241-182), each once per walk, so a folder the clear did not help is not tried again
+/// (ds181 r2, rv-code4 F2). Holds the entries taken and how many more it takes.
 #[cfg(target_os = "macos")]
 struct AclClears {
     cleared: std::collections::HashSet<(i64, u64)>,
@@ -1329,17 +1333,19 @@ impl AclClears {
     }
 
     /// Clears the ACL of the entry `found` describes once per walk: `name` in the open folder
-    /// `parent`, or `parent` itself with no name. Inputs: the handle, the name and the entry's
-    /// status, read through that handle without following a link. Output: whether the clear
-    /// took on that entry now; false for an entry taken before in this walk, one never taken,
-    /// a clear the system refused, and a name that no longer names the entry read.
+    /// `parent`, through its own handle when it opens and by that name when it will not, or
+    /// `parent` itself with no name. Inputs: the handle, the name and the entry's status, read
+    /// through that handle without following a link. Output: whether the clear took on that
+    /// entry now; false for an entry taken before in this walk, one never taken, a clear the
+    /// system refused, and a name that no longer names the entry read.
     fn add(
         &mut self,
         parent: std::os::fd::BorrowedFd<'_>,
         name: Option<&std::ffi::CStr>,
         found: &rustix::fs::Stat,
     ) -> bool {
-        use rustix::fs::{AtFlags, FileType};
+        use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+        use std::os::fd::AsFd;
         let kind = FileType::from_raw_mode(found.st_mode);
         let key = (i64::from(found.st_dev), found.st_ino);
         if self.left == 0
@@ -1357,6 +1363,14 @@ impl AclClears {
         let Some(name) = name else {
             return crazyagent_macos_fs::clear_acl(parent).is_ok();
         };
+        let held = OFlags::RDONLY | OFlags::SYMLINK | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        if let Ok(entry) = rustix::fs::openat(parent, name, held, Mode::empty()) {
+            let same = rustix::fs::fstat(&entry).is_ok_and(|opened| {
+                (opened.st_dev, opened.st_ino) == (found.st_dev, found.st_ino)
+                    && (kind == FileType::Directory || opened.st_nlink == 1)
+            });
+            return same && crazyagent_macos_fs::clear_acl(entry.as_fd()).is_ok();
+        }
         crazyagent_macos_fs::clear_acl_at(parent, name).is_ok()
             && rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
                 .is_ok_and(|after| (after.st_dev, after.st_ino) == (found.st_dev, found.st_ino))
