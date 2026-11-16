@@ -76,6 +76,7 @@ use crazyagent::usage::report::UsageReport;
 use crazyagent::usage::spend::SpendChoice;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
@@ -237,6 +238,32 @@ fn start_failure(layout: &crazyagent::paths::Layout) -> &'static str {
     } else {
         "engine_start_failed"
     }
+}
+
+/// Set once this app run has taken its one replacement of an older engine, so a swap that
+/// does not end the mismatch never turns into a restart loop (DEC-134 addendum 1).
+static ENGINE_REPLACED: AtomicBool = AtomicBool::new(false);
+
+/// Set when that replacement succeeded and no connect reply has said so yet.
+static ENGINE_UPDATE_UNTOLD: AtomicBool = AtomicBool::new(false);
+
+/// Whether an engine reporting `engine` is older than an app at `app`, so the app may replace
+/// it on its own at launch (DEC-134 addendum 1). Inputs: both versions. Output: true only
+/// when both read as versions and the app's is newer; equal, newer and unreadable give false.
+fn engine_older(_engine: &str, _app: &str) -> bool {
+    false
+}
+
+/// Takes this app run's one replacement of an older engine. Input: the run's flag. Output:
+/// true the first time, false after.
+fn first_replacement(_taken: &AtomicBool) -> bool {
+    false
+}
+
+/// Whether this app replaced an older engine since the last connect reply said so. Reading
+/// it clears it, so the owner is told once. Output: the answer.
+pub(crate) fn engine_update_untold() -> bool {
+    false
 }
 
 /// Makes sure the default engine runs before the bridge connects: when none answers it
@@ -5665,6 +5692,44 @@ mod tests {
             },
         )
         .map(|_| ())
+    }
+
+    /// DEC-134 addendum 1: the app replaces an engine on its own only when the engine's
+    /// version is older than the app's. A dev build sorts below its stable; an equal, newer or
+    /// unreadable version is never replaced, so the app never downgrades an engine.
+    #[test]
+    fn only_an_engine_older_than_the_app_is_replaced_on_its_own() {
+        let app = "2.4.1-dev.202611161323";
+        assert!(engine_older("2.4.1-dev.202611150900", app));
+        assert!(engine_older("2.4.0", app));
+        assert!(engine_older(app, "2.4.1"));
+        assert!(!engine_older(app, app));
+        assert!(!engine_older("2.4.1", app));
+        assert!(!engine_older("2.4.1-dev.202611170000", app));
+        for unreadable in ["", "x", "unknown", "2.4.1\n\u{1b}[2J"] {
+            assert!(!engine_older(unreadable, app), "{unreadable:?}");
+            assert!(!engine_older(app, unreadable), "{unreadable:?}");
+        }
+    }
+
+    /// DEC-134 addendum 1: one app run replaces an older engine at most once, so a swap that
+    /// leaves the mismatch shows the restart view instead of restarting the engine again.
+    #[test]
+    fn an_app_run_replaces_an_older_engine_at_most_once() {
+        let taken = AtomicBool::new(false);
+        assert!(first_replacement(&taken));
+        assert!(!first_replacement(&taken));
+        assert!(!first_replacement(&taken));
+        assert!(taken.load(Ordering::SeqCst));
+    }
+
+    /// DEC-134 addendum 1: a replacement that succeeded is told by the next connect reply
+    /// and by no later one.
+    #[test]
+    fn a_finished_replacement_is_told_by_one_connect_reply() {
+        ENGINE_UPDATE_UNTOLD.store(true, Ordering::SeqCst);
+        assert!(engine_update_untold());
+        assert!(!engine_update_untold());
     }
 
     /// UI-5-F3: the close walls command refuses a wall of another project and admits the main

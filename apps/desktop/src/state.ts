@@ -117,6 +117,13 @@ export function engineState(result: Result<api.ConnectionStatus>): EngineState {
   return result.kind === "ok" && result.value.connected ? "running" : "down";
 }
 
+/** The one line the owner sees after this app replaced an older engine on its own at launch
+ * (DEC-134 addendum 1). Input: the connect reply. Output: the line, or null when the reply
+ * says no engine was replaced. */
+export function engineUpdatedLine(_result: Result<api.ConnectionStatus>): string | null {
+  return null;
+}
+
 /** The refusal codes after which the session reads again whether a sign-in is stuck. */
 export const STUCK_SIGN_IN_CODES = ["native_auth_recovery_required", "native_auth_outcome_unknown_read_same_operation"];
 
