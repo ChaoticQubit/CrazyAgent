@@ -120,7 +120,9 @@ pub(super) fn cleanup_uncertain(error: &EngineError) -> bool {
 /// running or could not list, which the custody holds as leftovers by the project's setting
 /// while they may still run (SA-VID14-R2 F1). Input: the error. Output: the answer.
 pub(super) fn left_running(error: &EngineError) -> bool {
-    use crate::harnesses::leftovers::{LEFT, SANDBOX_LEFT, SANDBOX_UNCHECKED, UNCERTAIN, UNCHECKED};
+    use crate::harnesses::leftovers::{
+        LEFT, SANDBOX_LEFT, SANDBOX_UNCHECKED, UNCERTAIN, UNCHECKED,
+    };
     let held = [LEFT, UNCHECKED, UNCERTAIN, SANDBOX_LEFT, SANDBOX_UNCHECKED];
     error.0.split(';').any(|part| held.contains(&part))
 }
