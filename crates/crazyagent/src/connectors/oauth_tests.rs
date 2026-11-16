@@ -2028,6 +2028,40 @@ fn a_resource_naming_its_issuer_with_a_trailing_slash_signs_in_and_renews_under_
     assert!(next.is_ok(), "the owner's app stays bound: {next:?}");
 }
 
+/// A resource that names its issuer with two trailing slashes reaches the server's metadata
+/// at the root, and the sign-in is still refused there: only one trailing slash is
+/// forgiven, so nothing is registered, opened or redeemed.
+#[test]
+fn a_resource_naming_its_issuer_with_two_trailing_slashes_is_refused_once_the_metadata_is_read() {
+    let sign = prepared(
+        Shape {
+            servers: vec!["{base}//"],
+            cimd: true,
+            register: Some("{base}/register"),
+            ..shape()
+        },
+        &["127.0.0.1"],
+        &[Registration::Own, Registration::Cimd, Registration::Dcr],
+        None,
+    );
+    let refused = start(&sign, false);
+    assert_eq!(
+        refused.map(|pending| pending.state),
+        Err(OAuthError("connector_oauth_metadata_invalid"))
+    );
+    let paths = sign.paths();
+    assert!(
+        paths.contains(&"GET /.well-known/oauth-authorization-server".to_owned()),
+        "{paths:?}"
+    );
+    assert!(
+        paths
+            .iter()
+            .all(|path| !path.ends_with("/register") && !path.ends_with("/token")),
+        "{paths:?}"
+    );
+}
+
 /// What the probes of 11-16 found for one Group P connector (PROBES-connectors.md, Group
 /// P): its MCP address and read-only address, its MCP host, its OAuth hosts, the scopes it
 /// asks to read and to write, whether its resource metadata names the issuer with a
