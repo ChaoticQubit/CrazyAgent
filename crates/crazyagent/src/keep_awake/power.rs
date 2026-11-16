@@ -1,4 +1,4 @@
-use super::state::{Heat, LidSupport, PowerSource, Sensors};
+use super::state::{Heat, LidSupport, LowPowerSupport, PowerSource, Sensors};
 use crate::paths::Platform;
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
@@ -24,8 +24,9 @@ const THREAD_NAME: &str = "keep-awake-sensors";
 type Ask = (LidAsk, Option<LidCommand>, i64);
 
 /// One reading of the platform: where the power comes from, the battery charge, the heat,
-/// whether the lid is closed, and whether this platform can hold with the lid closed, each
-/// unknown or none where the platform does not say.
+/// whether the lid is closed, whether this platform can hold with the lid closed, and
+/// whether it can turn on low power mode, each unknown or none where the platform does not
+/// say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PowerReading {
     pub source: PowerSource,
@@ -33,19 +34,27 @@ pub struct PowerReading {
     pub heat: Heat,
     pub lid_closed: Option<bool>,
     pub lid_support: LidSupport,
+    pub low_power: LowPowerSupport,
 }
 
 impl PowerReading {
-    /// A reading that knows nothing, with the lid reason this platform starts with.
+    /// A reading that knows nothing, with the lid and low power reasons this platform starts
+    /// with.
     pub fn unknown() -> Self {
-        let lid_support = Sensors::unread().lid_support;
+        let Sensors {
+            lid_support,
+            low_power,
+            ..
+        } = Sensors::unread();
         assert_ne!(lid_support, LidSupport::Held);
+        assert_ne!(low_power, LowPowerSupport::Held);
         Self {
             source: PowerSource::Unknown,
             battery_pct: None,
             heat: Heat::Unknown,
             lid_closed: None,
             lid_support,
+            low_power,
         }
     }
 }
@@ -98,6 +107,19 @@ pub fn platform_lid() -> Option<LidReader> {
     #[cfg(not(target_os = "macos"))]
     let lid = None;
     lid
+}
+
+/// The power line on the sensor thread (Task 16, QUESTION 39g): handed whether the running
+/// hold asks for low power mode and the engine time with each reading, it holds or lets go
+/// of the platform's power saver and returns the low power support, which stands in for
+/// the reader's.
+pub type PowerLine = Box<dyn FnMut(bool, i64) -> LowPowerSupport + Send>;
+
+/// Builds this platform's power line: power-profiles-daemon on Linux, and none elsewhere,
+/// where low power mode rides the lid line (macOS) or is not available (Windows). Output:
+/// the power line, if this platform has one.
+pub fn platform_power() -> Option<PowerLine> {
+    None
 }
 
 /// Builds this platform's reader: system tools on macOS, files below `/sys`, `/proc` and
@@ -166,6 +188,7 @@ pub fn sensors(reading: &PowerReading, battery_unread_twice: bool, lid_refused: 
         heat: reading.heat,
         lid_closed: reading.lid_closed,
         lid_support,
+        low_power: reading.low_power.clone(),
     }
 }
 
@@ -221,6 +244,19 @@ impl Sensing {
             late: false,
             stopped: false,
         })
+    }
+
+    /// Starts the sensor thread around a reader, the lid line and the power line, where
+    /// the platform has them; each line's support stands in for the reader's in every
+    /// reading. Inputs: the reader and both lines, which the thread owns from here on.
+    /// Output: the line to the thread, or the error of starting it.
+    pub(super) fn start_lines(
+        reader: Reader,
+        lid: Option<LidReader>,
+        power: Option<PowerLine>,
+    ) -> std::io::Result<Self> {
+        drop(power);
+        Self::start(reader, lid)
     }
 
     /// Hands an owner command to the lid line with the next ask, which goes out at once

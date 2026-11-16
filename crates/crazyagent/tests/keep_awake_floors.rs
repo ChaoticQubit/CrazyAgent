@@ -380,6 +380,7 @@ fn the_linux_reader_reads_one_root_folder_and_no_bus() {
             heat: Heat::Serious,
             lid_closed: Some(true),
             lid_support: unknown.lid_support.clone(),
+            low_power: unknown.low_power.clone(),
         },
         "without logind's seats folder the closed lid cannot be held"
     );

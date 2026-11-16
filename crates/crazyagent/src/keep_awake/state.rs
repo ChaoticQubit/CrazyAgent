@@ -1,6 +1,7 @@
 use super::settings::{
     DisplayAwake, HeatEnd, HeatNotice, KeepAwakeSettings, LidRule, LowPower, Mode,
 };
+use crate::paths::Platform;
 use serde::{Deserialize, Serialize};
 
 /// Where the computer's power comes from, as the platform reader last saw it.
@@ -46,8 +47,39 @@ pub enum LidSupport {
     NotAvailable { reason: String },
 }
 
+/// The words the low power row shows on Windows, where no public call holds battery saver
+/// (QUESTION 39f).
+pub const LOW_POWER_WINDOWS: &str = "Not available on Windows";
+
+/// Whether a hold can turn on the platform's low power mode (Task 16): not read yet, ready,
+/// on now for the running hold, left as the owner set it during this hold, or not available
+/// with the plain reason.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LowPowerSupport {
+    #[default]
+    Unread,
+    Ready,
+    Held,
+    OwnerChanged,
+    NotAvailable { reason: String },
+}
+
+impl LowPowerSupport {
+    /// What a platform says before its low power line ran: not available on Windows, not
+    /// read yet elsewhere. Input: the platform. Output: the support.
+    pub fn at_start(platform: Platform) -> Self {
+        let red_stub = platform;
+        assert!(matches!(
+            red_stub,
+            Platform::MacOs | Platform::Linux | Platform::Windows
+        ));
+        Self::Unread
+    }
+}
+
 /// What the platform readers last saw: power source, battery percent, whether the battery
-/// could not be read twice in a row, heat, lid position and lid support.
+/// could not be read twice in a row, heat, lid position, lid support and low power support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sensors {
@@ -57,6 +89,8 @@ pub struct Sensors {
     pub heat: Heat,
     pub lid_closed: Option<bool>,
     pub lid_support: LidSupport,
+    #[serde(default)]
+    pub low_power: LowPowerSupport,
 }
 
 impl Sensors {
@@ -77,6 +111,7 @@ impl Sensors {
             heat: Heat::Unknown,
             lid_closed: None,
             lid_support,
+            low_power: LowPowerSupport::at_start(Platform::CURRENT),
         }
     }
 }

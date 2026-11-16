@@ -99,6 +99,7 @@ fn sensors(power: PowerSource, battery_pct: Option<u8>) -> Sensors {
         heat: Heat::Nominal,
         lid_closed: Some(false),
         lid_support: LidSupport::Held,
+        low_power: LowPowerSupport::Unread,
     }
 }
 
@@ -721,6 +722,30 @@ fn low_power_is_asked_only_while_a_hold_runs_on_battery_as_the_setting_says() {
 }
 
 #[test]
+fn low_power_starts_not_available_on_windows_and_unread_elsewhere() {
+    use crate::paths::Platform;
+    assert_eq!(
+        LowPowerSupport::at_start(Platform::Windows),
+        LowPowerSupport::NotAvailable {
+            reason: state::LOW_POWER_WINDOWS.into()
+        }
+    );
+    assert_eq!(
+        LowPowerSupport::at_start(Platform::MacOs),
+        LowPowerSupport::Unread
+    );
+    assert_eq!(
+        LowPowerSupport::at_start(Platform::Linux),
+        LowPowerSupport::Unread
+    );
+    assert_eq!(
+        Sensors::unread().low_power,
+        LowPowerSupport::at_start(Platform::CURRENT),
+        "the readings this platform starts with"
+    );
+}
+
+#[test]
 fn every_setting_option_round_trips_through_the_owner_protocol() {
     let (folder, connection) = engine();
     assert_eq!(
@@ -982,6 +1007,7 @@ fn a_failed_step_drops_the_platform_hold_and_the_next_good_step_takes_it_again()
 #[cfg(target_os = "macos")]
 mod lid_macos;
 mod notices;
+mod power_saver;
 mod sensing;
 
 #[cfg(target_os = "linux")]

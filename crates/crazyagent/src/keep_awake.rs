@@ -11,6 +11,8 @@ pub mod journal;
 pub mod power;
 pub mod power_linux;
 pub mod power_macos;
+#[cfg(any(test, target_os = "linux"))]
+mod power_saver;
 #[cfg(windows)]
 mod power_windows;
 pub mod settings;
@@ -26,8 +28,8 @@ pub use settings::{
     LidRule, LowPower, Mode,
 };
 pub use state::{
-    Decision, EndReason, Heat, Inputs, LidSupport, PowerSource, Reason, Sensors, Want, decide,
-    heat_notice, lid_status, low_power_wanted,
+    Decision, EndReason, Heat, Inputs, LidSupport, LowPowerSupport, PowerSource, Reason,
+    Sensors, Want, decide, heat_notice, lid_status, low_power_wanted,
 };
 
 use crate::engine::EngineError;
@@ -616,6 +618,21 @@ impl Keeper {
         }
         assert!(self.sensing.is_some() || !self.lid_line);
         self
+    }
+
+    /// Gives the keeper platform readings, the lid line and the power line, where the
+    /// platform has them, all run on the sensor thread. The power line holds the platform's
+    /// power saver while the keeper asks for low power mode (Task 16). Inputs: the reader
+    /// and both lines. Output: the keeper; when the thread cannot start that is logged and
+    /// the keeper reads nothing and holds neither line.
+    pub fn with_lines(
+        self,
+        reader: power::Reader,
+        lid: Option<power::LidReader>,
+        power: Option<power::PowerLine>,
+    ) -> Self {
+        drop(power);
+        self.with_sensors(reader, lid)
     }
 
     /// Gives the keeper what the engine start's undo left, which its next step writes to
