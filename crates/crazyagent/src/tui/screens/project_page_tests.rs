@@ -1071,15 +1071,37 @@ fn project_shell(project: &ProjectId, name: &str) -> Shell {
 }
 
 /// A fresh terminal on Home that has read the engine's job, as starting the TUI again does.
-/// Inputs: the connection. Output: the shell.
+/// The owner opens and clears the filter before the reads land, so Home keeps its focus on
+/// the list: this engine's one account sits at a port that refuses connections, so setup is
+/// never done and Home would otherwise move the focus to Get set up, where Enter opens
+/// Accounts. Inputs: the connection. Output: the shell.
 async fn home_shell(connection: &mut Connection) -> Shell {
     let mut ctx = ctx(120, 30);
     let screen = open(&Place::Home, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
+    shell.key(Key::Char('/'));
+    shell.key(Key::Esc);
     pump(&mut shell, connection).await;
     super::intake::ask(&mut shell.ctx, IntakeQuery::JobStatus);
     pump(&mut shell, connection).await;
     shell
+}
+
+/// Puts the focus of a Home that a page went to on its list, where Enter acts on the job
+/// card. Once its checks land, Home moves the focus to Get set up, since setup is never done
+/// here (see `home_shell`), and its key bar then starts with that panel's Enter; Tab moves it
+/// back. No reply arrives before the next key, so the focus holds. Input: the shell on Home.
+fn list_focus(shell: &mut Shell) {
+    let setup_keys = |shell: &mut Shell| {
+        render(shell, 120, 30)
+            .lines()
+            .last()
+            .is_some_and(|keys| keys.trim_start().starts_with("Enter Add an account"))
+    };
+    if setup_keys(shell) {
+        shell.key(Key::Tab);
+    }
+    assert!(!setup_keys(shell), "Home's focus is on its list");
 }
 
 /// DEC-177: a project move whose name is taken in the projects folder ends failed with the
@@ -1620,6 +1642,7 @@ async fn a_delete_whose_trash_move_fails_says_why_on_home_and_enter_reopens_the_
         "{rows}"
     );
     assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
+    list_focus(&mut shell);
     shell.key(Key::Home);
     shell.key(Key::Enter);
     assert_eq!(
@@ -8324,9 +8347,11 @@ fn sign_in_from_the_publish_question_closes_it_so_g_reads_the_sign_in_again() {
     );
 }
 
-#[test]
-fn g_on_an_overview_with_its_pool_picker_open_leaves_the_publish_question_closed() {
-    let mut ctx = ctx(100, 30);
+/// Opens the notes project's Overview with one pool and no project pool, answers its publish
+/// reads with no publish and the question offered, then presses Enter on Pick a pool.
+/// Input: the width. Output: the shell with the pool picker open.
+fn overview_picker(width: u16) -> Shell {
+    let mut ctx = ctx(width, 30);
     ctx.store.pools = Load::Ready(vec![main_pool()]);
     ctx.store.pool_projects = Load::Ready(Vec::new());
     let project = ProjectId::new("notes").unwrap();
@@ -8348,7 +8373,31 @@ fn g_on_an_overview_with_its_pool_picker_open_leaves_the_publish_question_closed
     assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&prompt));
     publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
     shell.key(Key::Enter);
-    let picker = "Agents of this project use its pool's accounts.";
+    shell
+}
+
+/// The Pick a pool box wraps its first sentence inside the box, so the owner reads it whole
+/// at 80 and 100 columns; the 50-wide box cut it to "account…" before.
+#[test]
+fn the_pool_picker_wraps_its_sentence_inside_the_box() {
+    for width in [80, 100] {
+        let mut shell = overview_picker(width);
+        let shown = render(&mut shell, width, 30);
+        let lines: Vec<&str> = shown.lines().collect();
+        let first = lines
+            .iter()
+            .position(|line| line.contains("Agents of this project use its pool's"))
+            .unwrap_or_else(|| panic!("the picker is open at {width}: {shown}"));
+        assert!(!lines[first].contains('…'), "{shown}");
+        assert!(lines[first + 1].contains("accounts."), "{shown}");
+        assert!(!lines[first + 1].contains('…'), "{shown}");
+    }
+}
+
+#[test]
+fn g_on_an_overview_with_its_pool_picker_open_leaves_the_publish_question_closed() {
+    let mut shell = overview_picker(100);
+    let picker = "Agents of this project use its pool's";
     let shown = render(&mut shell, 100, 30);
     assert!(shown.contains(picker), "{shown}");
     shell.key(Key::Char('G'));
