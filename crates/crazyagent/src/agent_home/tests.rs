@@ -2459,6 +2459,169 @@ fn an_owner_home_outside_the_engine_root_keeps_its_shell_startup_files() {
     }
 }
 
+/// The sorted names in one folder. Input: the folder. Output: its entries' names.
+#[cfg(unix)]
+fn names_in(folder: &Path) -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// An rcli master's kept home loses, besides its shell startup files, all its cargo home
+/// holds: `config.toml` and the older `config`, whose `build.rustc-wrapper`, linkers, runners
+/// and aliases name programs, as a file or a link, `bin`, whose `cargo-<name>` programs run
+/// as subcommands, `credentials.toml`, which can name a credential provider, and its own
+/// `registry` and `git`, whose unpacked crates cargo builds again in later turns without
+/// unpacking them anew (AGENT-HOME-CONFIG, rv-code4 and rv-sec3 r1 F1). `registry` and `git`
+/// come back as links to the owner's caches the sandbox grants read-only, as in every agent
+/// home, and what a link named outside the home stays.
+#[cfg(unix)]
+#[test]
+fn a_kept_rcli_home_loses_its_cargo_code_and_crates_and_links_the_owners_caches() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    let cargo = home.join(".cargo");
+    let unpacked = cargo.join("registry/src/index/dep-1.0.0");
+    let checkout = cargo.join("git/checkouts/dep/0a1b2c3");
+    for planted in [&unpacked, &checkout] {
+        fs::create_dir_all(planted).unwrap();
+        fs::write(planted.join("build.rs"), "fn main() { planted() }\n").unwrap();
+    }
+    fs::write(unpacked.join(".cargo-ok"), "{\"v\":1}").unwrap();
+    fs::create_dir_all(cargo.join("bin")).unwrap();
+    fs::write(cargo.join("bin").join("cargo-build"), "#!/bin/sh\n").unwrap();
+    let wrapper = "[build]\nrustc-wrapper = \"/tmp/planted\"\n";
+    fs::write(cargo.join("config.toml"), wrapper).unwrap();
+    let outside = root.join("owner-config.toml");
+    fs::write(&outside, "the owner's\n").unwrap();
+    std::os::unix::fs::symlink(&outside, cargo.join("config")).unwrap();
+    let provider = "[registry]\ncredential-provider = \"/tmp/planted\"\n";
+    fs::write(cargo.join("credentials.toml"), provider).unwrap();
+    fs::write(home.join(".zshrc"), "echo planted\n").unwrap();
+    let owner = root.join("owner");
+    let shared = owner.join(".cargo");
+    fs::create_dir_all(shared.join("registry").join("index")).unwrap();
+    fs::create_dir_all(shared.join("git").join("db")).unwrap();
+    fs::write(shared.join("registry/index/crate"), "the owner's\n").unwrap();
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&owner);
+
+    let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    assert_eq!(names_in(&cargo), ["git", "registry"]);
+    for name in ["git", "registry"] {
+        assert_eq!(
+            fs::read_link(cargo.join(name)).ok(),
+            Some(shared.join(name)),
+            "{name}"
+        );
+    }
+    assert_eq!(names_in(&shared.join("registry")), ["index"]);
+    assert_eq!(names_in(&shared.join("git")), ["db"]);
+    assert_eq!(
+        fs::read_to_string(shared.join("registry").join("index").join("crate")).unwrap(),
+        "the owner's\n"
+    );
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "the owner's\n");
+    assert!(fs::symlink_metadata(home.join(".zshrc")).is_err());
+}
+
+/// An rcli master's kept home whose owner has no crate caches still loses its own `registry`
+/// and `git` and gets nothing in their place, so no crate a turn unpacked or edited is built
+/// in a later turn (rv-code4 and rv-sec3 r1 F1).
+#[cfg(unix)]
+#[test]
+fn a_kept_rcli_home_loses_its_own_crates_when_the_owner_has_no_caches() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    let cargo = home.join(".cargo");
+    for planted in [
+        cargo.join("registry/src/index/dep-1.0.0"),
+        cargo.join("git/checkouts/dep/0a1b2c3"),
+    ] {
+        fs::create_dir_all(&planted).unwrap();
+        fs::write(planted.join("build.rs"), "fn main() { planted() }\n").unwrap();
+    }
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&root.join("owner"));
+
+    let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    assert_eq!(names_in(&cargo), Vec::<String>::new());
+}
+
+/// An rcli master's kept home whose `.cargo` is a link, which cargo would follow to a config
+/// the master keeps elsewhere, loses the link and gets a real cargo home of its own in its
+/// place, and what the link named stays (AGENT-HOME-CONFIG).
+#[cfg(unix)]
+#[test]
+fn a_kept_rcli_home_whose_cargo_home_is_a_link_gets_a_real_one_and_the_target_stays() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    fs::create_dir(&home).unwrap();
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::write(elsewhere.join("config.toml"), "[alias]\nb = \"planted\"\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, home.join(".cargo")).unwrap();
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&root.join("owner"));
+
+    let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    assert!(fs::symlink_metadata(home.join(".cargo")).is_ok_and(|found| found.is_dir()));
+    assert_eq!(names_in(&home.join(".cargo")), Vec::<String>::new());
+    assert_eq!(names_in(&elsewhere), ["config.toml"]);
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("config.toml")).unwrap(),
+        "[alias]\nb = \"planted\"\n"
+    );
+}
+
+/// A home outside the engine's data root, such as the owner's own HOME picked as an rcli SDK
+/// home, keeps its cargo config and its own crates, and the owner's caches are never linked
+/// over them: only a home the engine made loses them (rv-sec3 B2 r1 F1).
+#[cfg(unix)]
+#[test]
+fn an_owner_home_outside_the_engine_root_keeps_its_cargo_config_and_crates() {
+    let (_directory, root) = folder();
+    let engine = root.join("engine");
+    let owner = root.join("owner-home");
+    let tools = root.join("tools");
+    fs::create_dir_all(tools.join(".cargo").join("registry")).unwrap();
+    fs::create_dir_all(tools.join(".cargo").join("git")).unwrap();
+    for home in [&engine, &owner] {
+        fs::create_dir_all(home.join(".cargo").join("registry")).unwrap();
+        fs::write(home.join(".cargo").join("config.toml"), "the owner's\n").unwrap();
+        fs::write(
+            home.join(".cargo").join("registry").join("crate"),
+            "the owner's\n",
+        )
+        .unwrap();
+    }
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&tools);
+
+    let removed: Vec<_> = [&owner, &engine]
+        .into_iter()
+        .map(|home| remove_home_code(home, &engine, &homes).map_err(|error| error.0))
+        .collect();
+
+    assert_eq!(removed, [Ok(()), Ok(())]);
+    for home in [&owner, &engine] {
+        assert_eq!(names_in(&home.join(".cargo")), ["config.toml", "registry"]);
+        assert_eq!(
+            fs::read_to_string(home.join(".cargo").join("config.toml")).unwrap(),
+            "the owner's\n"
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".cargo").join("registry").join("crate")).unwrap(),
+            "the owner's\n"
+        );
+    }
+}
+
 /// A home an agent filled with more entries than one listing of it takes still launches,
 /// and every entry it planted goes while what the harness keeps stays (RV-DS241-137), so a
 /// run that makes a hundred thousand files in its home never refuses every later launch.
