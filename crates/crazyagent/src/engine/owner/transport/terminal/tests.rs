@@ -131,6 +131,75 @@ async fn attach_sized_mid_session_is_refused() {
         .unwrap();
 }
 
+/// v242 MRR2-2 (rv-code2 r2): a pane attach on a native lead whose own server is gone and
+/// whose teammates' server ended, the state the 2255 lead's servers end in, is refused at the
+/// handshake with `terminal_teammates_server_ended`, the code the desktop and the TUI read as
+/// the terminal's end. Here an earlier engine started the lead, so this engine holds no
+/// keeper and the refused socket that server left counts as its end. No server starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pane_attach_on_a_lead_whose_servers_ended_is_refused_as_its_teammates_servers_end() {
+    use std::os::unix::fs::DirBuilderExt;
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-term-mates-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = tmp.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root,
+        "e.sock",
+        &global,
+        &root.join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let (_, owner, _) = Client::new(root.join("e.sock"), WAIT)
+        .unwrap()
+        .with_owner(OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let lead = AgentId::team(1).unwrap();
+    let private = |folder: &std::path::Path| {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(folder)
+            .unwrap();
+    };
+    let record = crate::team::runtime::agent_teammates_socket_name(&root.join("team"), 1);
+    private(record.parent().unwrap());
+    let socket = crate::terminal::renew_teammates_socket(root, &lead).unwrap();
+    private(socket.parent().unwrap());
+    drop(crate::spawn_gate::bind_unix_std(&socket).unwrap());
+
+    let refused = owner
+        .terminal_attach_pane(lead, "%0".into())
+        .await
+        .map(drop)
+        .map_err(|problem| problem.0);
+    assert_eq!(
+        refused,
+        Err(crate::terminal::TEAMMATES_SERVER_ENDED.to_owned()),
+        "a pane attach on a lead whose servers ended was not refused as its teammates' server's end"
+    );
+    assert!(
+        !root.join(FOLDER).join(SOCKET).exists(),
+        "the attach started the engine's server"
+    );
+
+    drop(owner);
+    tokio::time::timeout(WAIT, service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+}
+
 #[test]
 fn an_owner_prompt_counts_as_an_owner_key_as_typed_keys_do() {
     let directory = tempfile::tempdir().unwrap();

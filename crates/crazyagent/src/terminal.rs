@@ -448,6 +448,14 @@ pub const OWN_SERVER_UNAVAILABLE: &str = "terminal_own_server_unavailable";
 /// server that no longer accepts connections; its pane ids are never read on another server.
 pub const TEAMMATES_SERVER_ENDED: &str = "terminal_teammates_server_ended";
 
+/// Whether a host's code says the terminal a view or a call asked for ended for good: no
+/// server holds the agent (`terminal_agent_unknown`), or the teammates' server a native
+/// lead's team panes were on ended ([`TEAMMATES_SERVER_ENDED`]), as once both of that lead's
+/// servers ended. Takes the code. Returns the answer.
+pub fn ended_code(code: &str) -> bool {
+    matches!(code, "terminal_agent_unknown" | TEAMMATES_SERVER_ENDED)
+}
+
 /// The refusal for a native lead's teammates' socket answered by a server under another pid
 /// than the one the engine first reached there (PLC c).
 pub const TEAMMATES_SERVER_REPLACED: &str = "terminal_teammates_server_replaced";
