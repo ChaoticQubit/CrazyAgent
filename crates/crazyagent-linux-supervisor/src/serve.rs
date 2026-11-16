@@ -8,7 +8,7 @@ use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 use rustix::net::SocketAddrUnix;
 use rustix::process::{
-    DumpableBehavior, Pid, PidfdFlags, PidfdGetfdFlags, Signal, Uid, WaitOptions,
+    DumpableBehavior, Gid, Pid, PidfdFlags, PidfdGetfdFlags, Signal, Uid, WaitOptions,
 };
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -285,6 +285,12 @@ enum Make {
     Link(Vec<u8>),
 }
 
+/// What a mode or owner call changes: the mode register, or the owner and group registers.
+enum Change {
+    Mode(u64),
+    Owner(u64, u64),
+}
+
 /// What a two-path creating call does, with its flags register: a hard link or a rename.
 enum Pair {
     Link(u64),
@@ -416,6 +422,7 @@ impl Server {
             call if filter::SIGNALLING.contains(&call) => job.signal(call),
             Call::Truncate => job.truncate(),
             call if filter::REMOVING.contains(&call) => job.remove(call),
+            call if filter::CHANGING.contains(&call) => job.change(call),
             call => job.create(call),
         }
     }
@@ -852,6 +859,99 @@ impl Job<'_> {
         self.kept(&place, true)?;
         rustix::fs::unlinkat(&place.folder, place.name(), how)?;
         Ok(Answer::Value(0))
+    }
+
+    /// Changes a file's mode or owner for the caller once the held guard lets it: a path
+    /// form pins the file its call names ([`Job::pinned`]), a descriptor form takes a copy
+    /// of the caller's descriptor, the pin is judged ([`Job::kept_pin`]) and the change is
+    /// made on that pin. An owner or group of -1 stays as it is. Input: which call.
+    /// Output: zero, or the error.
+    fn change(&self, call: Call) -> Result<Answer, Errno> {
+        let a = self.notice.args;
+        let here = AT_FDCWD as u32 as u64;
+        let text = |at: u64| self.caller.text(at);
+        let (pin, change) = match call {
+            Call::Fchmod => (self.taken(a[0])?, Change::Mode(a[1])),
+            Call::Fchown => (self.taken(a[0])?, Change::Owner(a[1], a[2])),
+            Call::Chmod => (self.pinned(here, text(a[0])?, true)?, Change::Mode(a[1])),
+            Call::Fchmodat => (self.pinned(a[0], text(a[1])?, true)?, Change::Mode(a[2])),
+            Call::Chown => (
+                self.pinned(here, text(a[0])?, true)?,
+                Change::Owner(a[1], a[2]),
+            ),
+            Call::Lchown => (
+                self.pinned(here, text(a[0])?, false)?,
+                Change::Owner(a[1], a[2]),
+            ),
+            Call::Fchownat => (self.owner_pin(a[0], a[1], a[4])?, Change::Owner(a[2], a[3])),
+            _ => return Err(Errno::NOSYS),
+        };
+        self.kept_pin(pin.as_fd())?;
+        let id = |raw: u64| Some(raw as u32).filter(|raw| *raw != u32::MAX);
+        match change {
+            Change::Mode(mode) => {
+                let mode = Mode::from_bits_truncate(mode as u32);
+                let own = format!("/proc/self/fd/{}", pin.as_raw_fd());
+                rustix::fs::chmodat(CWD, own.as_str(), mode, AtFlags::empty())?;
+            }
+            Change::Owner(owner, group) => {
+                let owner = id(owner).map(Uid::from_raw);
+                let group = id(group).map(Gid::from_raw);
+                rustix::fs::chownat(&pin, "", owner, group, AtFlags::EMPTY_PATH)?;
+            }
+        }
+        Ok(Answer::Value(0))
+    }
+
+    /// Pins the file `fchownat` names: its flags take `AT_SYMLINK_NOFOLLOW` and
+    /// `AT_EMPTY_PATH` and no other, and an empty path with `AT_EMPTY_PATH` names the
+    /// folder descriptor itself, or the working folder. Inputs: the folder, path and flags
+    /// registers. Output: the pin.
+    fn owner_pin(&self, base: u64, at: u64, flags: u64) -> Result<OwnedFd, Errno> {
+        let flags = AtFlags::from_bits_retain(flags as u32);
+        if !(flags - (AtFlags::SYMLINK_NOFOLLOW | AtFlags::EMPTY_PATH)).is_empty() {
+            return Err(Errno::INVAL);
+        }
+        let path = self.caller.text(at)?;
+        if flags.contains(AtFlags::EMPTY_PATH) && path.is_empty() {
+            return match Base::of(base) {
+                Base::Here => self.pinned(base, b".".to_vec(), true),
+                _ => self.taken(base),
+            };
+        }
+        self.pinned(base, path, !flags.contains(AtFlags::SYMLINK_NOFOLLOW))
+    }
+
+    /// Pins the file a path names for a change, as the caller's call would name it: each
+    /// link hop is judged by hand from the folder it lies in, the last link is followed
+    /// only when asked, a procfs link is followed by the kernel, which reads it as the
+    /// caller's, and a path that names no entry of its own (`.`, `..`, the root) is pinned
+    /// as the folder it names. Inputs: the folder register, the path and whether to follow
+    /// a last link. Output: an `O_PATH` descriptor of the file.
+    fn pinned(&self, base: u64, path: Vec<u8>, follow: bool) -> Result<OwnedFd, Errno> {
+        let up = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let (mut base, mut path) = (Base::of(base), path);
+        for _ in 0..=LINK_HOPS_MAX {
+            let place = match self.place(&base, &path) {
+                Err(Errno::EXIST) => {
+                    let named = [path.as_slice(), b"/x"].concat();
+                    return Ok(self.place(&base, &named)?.folder);
+                }
+                found => found?,
+            };
+            if place.proc && follow {
+                let magic = OFlags::PATH | OFlags::CLOEXEC;
+                return rustix::fs::openat(&place.folder, place.name(), magic, Mode::empty());
+            }
+            let pin = rustix::fs::openat(&place.folder, place.name(), up, Mode::empty())?;
+            let kind = FileType::from_raw_mode(rustix::fs::fstat(&pin)?.st_mode);
+            if !follow || kind != FileType::Symlink {
+                return Ok(pin);
+            }
+            path = rustix::fs::readlinkat(&place.folder, place.name(), Vec::new())?.into_bytes();
+            base = Base::Held(place.folder);
+        }
+        Err(Errno::LOOP)
     }
 
     /// Reopens a file this process pinned with `O_PATH`, through its own procfs entry, so

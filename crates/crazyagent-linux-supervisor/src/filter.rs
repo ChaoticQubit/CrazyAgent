@@ -314,9 +314,9 @@ pub struct Rule {
 
 /// The rules the chosen guards need. A call whose deciding argument lies behind a pointer
 /// is never tested here: it is trapped whole, or refused whole where a trap could not be
-/// served (`openat2`, `open_by_handle_at`, a send that opens a connection). Under the held
-/// guard every open that may write is trapped, not only one that may create. Input: the
-/// guards. Output: the rules.
+/// served (`openat2`, `open_by_handle_at`, `fchmodat2`, the extended attribute calls, a
+/// send that opens a connection). Under the held guard every open that may write is
+/// trapped, not only one that may create. Input: the guards. Output: the rules.
 pub fn rules(guards: Guards) -> Vec<Rule> {
     let mut rules = Vec::new();
     let mut add = |call, test, action| rules.push(Rule { call, test, action });
@@ -341,9 +341,13 @@ pub fn rules(guards: Guards) -> Vec<Rule> {
         add(Call::Openat2, Test::Always, ERRNO | ENOSYS);
     }
     if guards.held {
-        for call in REMOVING {
+        for call in REMOVING.into_iter().chain(CHANGING) {
             add(call, Test::Always, NOTIFY);
         }
+        for call in MARKING {
+            add(call, Test::Always, ERRNO | EOPNOTSUPP);
+        }
+        add(Call::Fchmodat2, Test::Always, ERRNO | ENOSYS);
         add(Call::OpenByHandleAt, Test::Always, ERRNO | EPERM);
     }
     if guards.signal {
