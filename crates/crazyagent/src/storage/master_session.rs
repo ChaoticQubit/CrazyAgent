@@ -16,16 +16,18 @@ use crate::engine::owner::{
 };
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::master_session::{
-    METADATA_BYTES_MAX, MasterAccountState, MasterBackend, MasterBinding, MasterBootstrapAuth,
-    MasterCursor, MasterEngineRequest, MasterOwnerAction, MasterReason, MasterReply,
-    MasterRuntimeView, MasterSessionPhase, MasterSessionView, MasterTurnPage, MasterTurnPhase,
-    MasterTurnView, PAGE_BYTES_MAX, REBINDS_MAX, REPLY_BYTES_MAX, RcliConfiguredProfileProof,
-    RcliProfileRegistration, RcliProfileRegistrationMetadata, SESSIONS_MAX, TURNS_MAX, cause_code,
-    error, master_scope, reply_bytes, validate_action, validate_page, validate_selection,
+    ListedAccountProof, METADATA_BYTES_MAX, MasterAccountState, MasterBackend, MasterBinding,
+    MasterBootstrapAuth, MasterCursor, MasterEngineRequest, MasterOwnerAction, MasterReason,
+    MasterReply, MasterRuntimeView, MasterSessionPhase, MasterSessionView, MasterTurnPage,
+    MasterTurnPhase, MasterTurnView, PAGE_BYTES_MAX, REBINDS_MAX, REPLY_BYTES_MAX,
+    RcliConfiguredProfileProof, RcliProfileRegistration, RcliProfileRegistrationMetadata,
+    SESSIONS_MAX, TURNS_MAX, cause_code, error, master_scope, reply_bytes, validate_action,
+    validate_page, validate_selection,
 };
 use crate::model_gateway::{
     self, Attempt, AttemptCompletion, AttemptOutcome, AttemptRequest,
     ConfiguredInitialConversationAuth, Effects, FailureKind, InitialConversationAuth,
+    ListedInitialConversationAuth,
 };
 use crate::protocol::{
     ClientId, ConfigId, Cursor, Outcome, PROTOCOL_VERSION, ProjectId, RequestId, SessionId,
@@ -1312,9 +1314,13 @@ fn preparation(
         turn.phase,
         MasterTurnPhase::Prepared | MasterTurnPhase::Delivering | MasterTurnPhase::Running
     );
+    let session_bound = matches!(
+        record.auth,
+        MasterBootstrapAuth::RcliConfigured(_) | MasterBootstrapAuth::Listed(_)
+    );
     if record.attempt_id != attempt.request.id
         || bound.connection != attempt.connection
-        || matches!(record.auth, MasterBootstrapAuth::RcliConfigured(_))
+        || session_bound
             && (bound.config_id != attempt.config_id
                 || !session.admits_binding(&bound.config_id, &bound.source_hash, live))
         || record.lease.project_id != session.project_id
@@ -2009,7 +2015,34 @@ pub(super) fn validate_bootstrap_auth(
             }
             Ok(())
         }
-        MasterBootstrapAuth::Listed(_) => Err(error("master_bootstrap_authentication_stale")),
+        MasterBootstrapAuth::Listed(proof) => {
+            let host = HostStamp {
+                db_instance: proof.database_instance.clone(),
+                engine_epoch: proof.engine_epoch.clone(),
+            };
+            check_owner_host(tx, &host)?;
+            check_owner_admission(
+                tx,
+                &Admission {
+                    db_instance: host.db_instance,
+                    engine_epoch: host.engine_epoch,
+                    owner_id: session.owner.owner_id.clone(),
+                    owner_epoch: session.owner.resulting_epoch,
+                },
+            )?;
+            if proof.session_id != session.session_id
+                || proof.engine_epoch != session.engine_epoch()
+                || proof.at_revision.value() < session.owner.revision_after.value()
+                || proof.at_revision.value() > owner_revision(tx)?
+                || !crate::master_session::backend_member(
+                    session.selection.backend,
+                    &proof.connection,
+                )
+            {
+                return Err(error("master_bootstrap_authentication_stale"));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -2039,23 +2072,72 @@ pub(crate) fn validate_configured_initial_conversation_receipt(
         engine_epoch: proof.engine_epoch.clone(),
     };
     let actual = configured_auth(tx, current, &host, &session, &proof.connection)?;
-    let (member_target, member_route) = member_request(&session, &proof.connection);
+    if actual != *proof
+        || binding != &MasterBootstrapAuth::RcliConfigured(actual).binding()
+        || generation != proof.generation
+        || request.target_profile_ref != proof.profile_ref
+    {
+        return Err(error("gateway_initial_authentication_stale"));
+    }
+    initial_conversation_request(tx, pinned, current, request, &session, &proof.connection)?;
+    assert_eq!(binding.connection, proof.connection);
+    assert_eq!(pinned.id, proof.config_id);
+    Ok(())
+}
+
+/// Checks that a listed master's initial conversation attempt runs on the account its proof
+/// names, as proved now (DEC-180 T20 Q7), with the same request checks an RCLI master's
+/// attempt gets. Inputs: the transaction, the pinned and current settings, the request, the
+/// proof and its binding. Output: Ok, or `gateway_initial_authentication_stale`.
+pub(crate) fn validate_listed_initial_conversation_receipt(
+    tx: &Transaction<'_>,
+    pinned: &EffectiveConfig,
+    current: &EffectiveConfig,
+    request: &AttemptRequest,
+    proof: &ListedAccountProof,
+    binding: &NativeProfileBinding,
+) -> Result<(), EngineError> {
+    let session = load_session(tx, &proof.session_id, owner_revision(tx)?)?
+        .ok_or_else(|| error("master_session_missing"))?;
+    let host = HostStamp {
+        db_instance: proof.database_instance.clone(),
+        engine_epoch: proof.engine_epoch.clone(),
+    };
+    let actual = listed_auth(tx, current, &host, &session, &proof.connection)?;
+    if actual != *proof || binding != &MasterBootstrapAuth::Listed(actual).binding() {
+        return Err(error("gateway_initial_authentication_stale"));
+    }
+    initial_conversation_request(tx, pinned, current, request, &session, &proof.connection)?;
+    assert_eq!(binding.connection, proof.connection);
+    assert_eq!(pinned.id, proof.config_id);
+    Ok(())
+}
+
+/// The request checks every master's initial conversation attempt gets: one settings
+/// version, the session's own current turn, project, pool, target and route for that
+/// member, and no earlier attempt on the turn's task unless this is its replay. Inputs:
+/// the transaction, the pinned and current settings, the request, the session and the
+/// member. Output: Ok, or `gateway_initial_authentication_stale`.
+fn initial_conversation_request(
+    tx: &Transaction<'_>,
+    pinned: &EffectiveConfig,
+    current: &EffectiveConfig,
+    request: &AttemptRequest,
+    session: &MasterSessionView,
+    member: &ModelConnection,
+) -> Result<(), EngineError> {
+    let (member_target, member_route) = member_request(session, member);
     let turn_task = session
         .current_turn
         .as_ref()
         .map(|turn| turn_task_id(&session.session_id, turn))
         .transpose()?;
-    if actual != *proof
-        || pinned.id != current.id
-        || pinned.id != proof.config_id
-        || binding != &MasterBootstrapAuth::RcliConfigured(actual).binding()
-        || generation != proof.generation
+    if pinned.id != current.id
         || request.project_id != session.project_id
         || turn_task.as_ref() != Some(&request.task_id)
         || request.role != Role::ProjectLeader
         || request.pool_ref != session.selection.pool_ref
         || request.target_profile_ref != member_target
-        || request.target_profile_ref != proof.profile_ref
         || request.route != member_route
         || request.previous_attempt.is_some()
         || !request.route.required_capabilities.is_empty()
@@ -2066,14 +2148,14 @@ pub(crate) fn validate_configured_initial_conversation_receipt(
         .current_turn
         .clone()
         .ok_or_else(|| error("master_turn_missing"))?;
-    let turn = load_turn(tx, &session, &turn_id, owner_revision(tx)?)?
+    let turn = load_turn(tx, session, &turn_id, owner_revision(tx)?)?
         .ok_or_else(|| error("master_turn_missing"))?;
     let replay = model_gateway::read_attempt(tx, &request.id)?;
     let valid = match replay {
         Some(attempt) => {
             attempt.request == *request
                 && attempt.config_id == pinned.id
-                && attempt.connection == proof.connection
+                && attempt.connection == *member
                 && (turn.attempt.as_ref().map(|attempt| &attempt.request.id) == Some(&request.id)
                     || (turn.phase == MasterTurnPhase::Queued
                         && session.current_turn.as_ref() == Some(&turn.id)))
@@ -2128,9 +2210,52 @@ fn authenticated(
                 return Err(error("master_configured_receipt_stale"));
             }
         }
-        MasterBootstrapAuth::Listed(_) => return Err(error("master_authentication_stale")),
+        MasterBootstrapAuth::Listed(proof) => {
+            let (custody_id, _) = custody.prepare_listed(host, &proof.connection)?;
+            if custody_id != proof.custody_id {
+                return Err(error("native_profile_identity_changed"));
+            }
+        }
     }
     Ok(fact)
+}
+
+/// Proves one listed master's pool account can authorize a turn now (DEC-180 T20 Q7): an
+/// allowed member of the pool whose harness takes it, under this engine run and the session's
+/// current settings since it opened, with the custody slot its connection keys. Inputs: the
+/// transaction, settings, host, session and member. Output: the proof, or the refusal code.
+fn listed_auth(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    session: &MasterSessionView,
+    member: &ModelConnection,
+) -> Result<ListedAccountProof, EngineError> {
+    if !crate::master_session::backend_member(session.selection.backend, member) {
+        return Err(error("native_profile_connection_missing"));
+    }
+    if !session.admits_binding(&config.id, &session.source_hash, true) {
+        return Err(error("master_authentication_stale"));
+    }
+    let root = tx
+        .path()
+        .map(Path::new)
+        .ok_or_else(|| error("native_profile_custody_unavailable"))?;
+    let metadata = std::fs::symlink_metadata(root).map_err(error)?;
+    let mut custody = NativeProfileCustody::capture(root, &metadata)?;
+    let (custody_id, _) = custody.prepare_listed(host, member)?;
+    let proof = ListedAccountProof {
+        session_id: session.session_id.clone(),
+        database_instance: host.db_instance.clone(),
+        engine_epoch: host.engine_epoch.clone(),
+        config_id: config.id.clone(),
+        source_hash: session.source_hash.clone(),
+        at_revision: session.owner.revision_after.clone(),
+        connection: member.clone(),
+        custody_id,
+    };
+    assert_eq!(&proof.connection, member);
+    Ok(proof)
 }
 
 /// Names why the latest sign-in cannot authorize a master turn.
@@ -2168,9 +2293,16 @@ fn current_auth(
     {
         return Err(error("native_profile_connection_missing"));
     }
-    if session.selection.backend == MasterBackend::Rcli {
-        return configured_auth(tx, config, host, session, member)
-            .map(MasterBootstrapAuth::RcliConfigured);
+    match session.selection.backend {
+        MasterBackend::Rcli => {
+            return configured_auth(tx, config, host, session, member)
+                .map(MasterBootstrapAuth::RcliConfigured);
+        }
+        MasterBackend::Listed(_) => {
+            return listed_auth(tx, config, host, session, member)
+                .map(MasterBootstrapAuth::Listed);
+        }
+        MasterBackend::Codex | MasterBackend::Claude => {}
     }
     let connection = native_profile_connection(config, &member.id)?;
     native_sign_in(tx, host, connection, Some(&member.account_ref))
@@ -2562,7 +2694,10 @@ pub(super) fn native_members(
     let Some(session) = load_session(tx, session, owner_revision(tx)?)? else {
         return Ok(None);
     };
-    if session.selection.backend == MasterBackend::Rcli {
+    if matches!(
+        session.selection.backend,
+        MasterBackend::Rcli | MasterBackend::Listed(_)
+    ) {
         return Ok(None);
     }
     let members: Vec<_> = master_members(config, &session)
@@ -3293,7 +3428,19 @@ fn admit(
                     now_ms()?,
                 )
             }
-            MasterBootstrapAuth::Listed(_) => Err(error("gateway_initial_authentication_stale")),
+            MasterBootstrapAuth::Listed(proof) => {
+                model_gateway::begin_listed_initial_conversation_attempt(
+                    tx,
+                    config,
+                    config,
+                    &request,
+                    ListedInitialConversationAuth {
+                        proof,
+                        binding: &auth.binding(),
+                    },
+                    now_ms()?,
+                )
+            }
         }
     } else {
         model_gateway::begin_attempt(tx, config, config, &request, now_ms()?)
@@ -4605,7 +4752,12 @@ pub(super) fn runtime(
                     turn.ordinal,
                     NativeProfileUsePurpose::Execution,
                 )?,
-                MasterBootstrapAuth::Listed(_) => return Err(error("native_profile_not_listed")),
+                MasterBootstrapAuth::Listed(_) => custody.acquire_listed_use(
+                    host,
+                    &record.auth.binding(),
+                    &turn.id,
+                    turn.ordinal,
+                )?,
             };
             Ok(MasterRuntimeResult::Profile(Box::new(guard)))
         }

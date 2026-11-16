@@ -4,7 +4,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::{
     NativeAuthAction, NativeAuthFact, NativeAuthMethod, NativeAuthPhase, NativeProfileBinding,
 };
-use crate::master_session::RcliConfiguredProfileProof;
+use crate::master_session::{ListedAccountProof, RcliConfiguredProfileProof};
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, RequestId, TaskId};
 use crate::routing::{ResourceBudget, RouteRequest, validate_pool_scope};
 use rusqlite::{Connection, Transaction};
@@ -161,10 +161,18 @@ pub(crate) struct ConfiguredInitialConversationAuth<'a> {
     pub generation: u64,
 }
 
+/// What admits a listed master's first attempt on a turn (DEC-180 T20 Q7): the proof of its
+/// pool account and the binding that proof gives.
+pub(crate) struct ListedInitialConversationAuth<'a> {
+    pub proof: &'a ListedAccountProof,
+    pub binding: &'a NativeProfileBinding,
+}
+
 enum AttemptPurpose<'a> {
     Ordinary,
     InitialConversation(InitialConversationAuth<'a>),
     ConfiguredInitialConversation(ConfiguredInitialConversationAuth<'a>),
+    ListedInitialConversation(ListedInitialConversationAuth<'a>),
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -558,6 +566,28 @@ pub(crate) fn begin_configured_initial_conversation_attempt(
     )
 }
 
+/// Begins a listed master's first attempt on a turn on the account its proof names, as an
+/// RCLI master's begins on its configured profile (DEC-180 T20 Q7). Inputs: the transaction,
+/// the pinned and current settings, the request, the proof and the time. Output: the attempt,
+/// or the gateway's refusal.
+pub(crate) fn begin_listed_initial_conversation_attempt(
+    tx: &Transaction<'_>,
+    pinned: &EffectiveConfig,
+    current: &EffectiveConfig,
+    request: &AttemptRequest,
+    auth: ListedInitialConversationAuth<'_>,
+    now_ms: u64,
+) -> Result<AttemptStart, EngineError> {
+    begin_attempt_for(
+        tx,
+        pinned,
+        current,
+        request,
+        now_ms,
+        AttemptPurpose::ListedInitialConversation(auth),
+    )
+}
+
 fn validate_initial_conversation(
     pinned: &EffectiveConfig,
     current: &EffectiveConfig,
@@ -674,6 +704,23 @@ fn begin_attempt_for(
                 auth.proof,
                 auth.binding,
                 auth.generation,
+            )?;
+            Some(auth.binding)
+        }
+        AttemptPurpose::ListedInitialConversation(auth) => {
+            if request.role != Role::ProjectLeader
+                || !request.route.required_capabilities.is_empty()
+                || request.previous_attempt.is_some()
+            {
+                return Err(error("gateway_initial_conversation_scope"));
+            }
+            crate::storage::validate_listed_initial_conversation_receipt(
+                tx,
+                pinned,
+                current,
+                request,
+                auth.proof,
+                auth.binding,
             )?;
             Some(auth.binding)
         }
