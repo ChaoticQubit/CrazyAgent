@@ -538,10 +538,11 @@ fn exchange(
         Key::ChatGpt(source) => {
             signed_in = match source.current(&|| shared.stop.load(Ordering::Acquire)) {
                 Ok(current) => current,
-                Err(_) => {
+                Err(problem) if problem.0 == SIGN_IN_EXPIRED => {
                     let _ = sign_in_expired(stream);
                     return Ok(());
                 }
+                Err(_) => return Err(503),
             };
             Credential::SignedIn(&signed_in.0, signed_in.1.as_deref())
         }

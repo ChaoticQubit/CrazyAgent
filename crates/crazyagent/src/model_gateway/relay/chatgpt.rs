@@ -21,6 +21,9 @@ pub const RENEW_BACKOFF: Duration = Duration::from_secs(30);
 /// The code a run gets once its ChatGPT sign-in can no longer be renewed.
 pub const SIGN_IN_EXPIRED: &str = "chatgpt_sign_in_expired";
 
+/// The code a request gets when its relay stopped while the token was being renewed.
+pub const RENEWAL_STOPPED: &str = "chatgpt_renewal_stopped";
+
 /// The plain sentence for [`SIGN_IN_EXPIRED`], shown to the owner and put in the error the
 /// relay answers the harness with.
 pub const SIGN_IN_EXPIRED_LINE: &str =
@@ -80,8 +83,9 @@ impl ChatGptSource {
     /// wait for its outcome. A renewal that fails, or leaves the token as it was, while the
     /// token still has more than [`USABLE_MIN`] left forwards that token and is not tried
     /// again for [`RENEW_BACKOFF`]; one that leaves it lapsing within [`USABLE_MIN`] stops
-    /// the source for good. Input: the relay's stop test, handed to the renewal.
-    /// Output: a copy of each, or `chatgpt_sign_in_expired`.
+    /// the source for good, unless the asking relay stopped meanwhile, since other relays
+    /// may share the source. Input: the relay's stop test, handed to the renewal.
+    /// Output: a copy of each, `chatgpt_sign_in_expired`, or `chatgpt_renewal_stopped`.
     pub fn current(
         &self,
         halted: &dyn Fn() -> bool,
@@ -107,6 +111,7 @@ impl ChatGptSource {
                 Err(_) if state.tokens.expires > now + USABLE_MIN => {
                     state.retry_at = Some(Instant::now() + RENEW_BACKOFF);
                 }
+                _ if halted() => return Err(EngineError(RENEWAL_STOPPED.to_owned())),
                 _ => {
                     state.failed = Some(SIGN_IN_EXPIRED);
                     return Err(expired());
