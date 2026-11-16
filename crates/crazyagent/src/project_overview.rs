@@ -275,6 +275,7 @@ struct State {
     refresh: Refresh,
     apply: Apply,
     stale: bool,
+    due_ms: i64,
     running_ms: Option<i64>,
     checked_ms: Option<i64>,
     failure: Option<String>,
@@ -684,13 +685,14 @@ fn state(db: &Connection, project: &ProjectId) -> Result<State, EngineError> {
         String,
         String,
         bool,
+        i64,
         Option<i64>,
         Option<i64>,
         Option<String>,
     );
     let row: Option<Row> = db
         .query_row(
-            "SELECT refresh,apply,stale,running_ms,checked_ms,failure
+            "SELECT refresh,apply,stale,due_ms,running_ms,checked_ms,failure
              FROM project_overview WHERE project=?1",
             [project.as_str()],
             |row| {
@@ -701,18 +703,20 @@ fn state(db: &Connection, project: &ProjectId) -> Result<State, EngineError> {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()
         .map_err(unavailable)?;
-    let Some((refresh, apply, stale, running_ms, checked_ms, failure)) = row else {
+    let Some((refresh, apply, stale, due_ms, running_ms, checked_ms, failure)) = row else {
         return Ok(State::default());
     };
     Ok(State {
         refresh: refresh_named(&refresh).ok_or_else(|| unavailable(()))?,
         apply: Apply::named(&apply).ok_or_else(|| unavailable(()))?,
         stale,
+        due_ms,
         running_ms,
         checked_ms,
         failure,
@@ -1199,7 +1203,9 @@ pub fn tab_foreign(
 /// setting saved earlier made the row, which asks for the first writing run; a project with
 /// no `.crazyagent` folder gets no row and `needs_home` instead, so no run is asked for it.
 /// The README and the competitor state are read as well. A run counts as running for as long as its claim is
-/// open: the engine closes it when it ends or its time is over, and at engine start.
+/// open: the engine closes it when it ends or its time is over, and at engine start. A
+/// stale row with no run writing says how long until its run is due, at least 0, so a
+/// client reads again then instead of every few seconds (SPEED-IDLE-POLLS).
 /// Inputs: the connection, the project, its folder and the time. Output: the Overview
 /// with the four tabs in order, or `overview_unavailable`.
 pub fn read(
@@ -1236,16 +1242,19 @@ pub fn read(
             .as_ref()
             .is_none_or(|failure| failure.len() <= FAILURE_BYTES_MAX)
     );
+    let stale = state.stale && !needs_home;
+    let running = state.running_ms.is_some();
+    let due_in_ms = (stale && !running).then(|| state.due_ms.saturating_sub(now_ms).max(0));
     Ok(Overview {
         readme: readme(folder),
         tabs,
         competitors: competitors(db, project, folder)?,
-        running: state.running_ms.is_some(),
-        stale: state.stale && !needs_home,
+        running,
+        stale,
         checked_ms: state.checked_ms,
         waiting_for_account: failure.as_deref().is_some_and(run::waits_for_account),
         failure,
-        due_in_ms: None,
+        due_in_ms,
         refresh: state.refresh,
         apply: state.apply,
         needs_home,

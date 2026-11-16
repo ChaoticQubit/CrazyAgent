@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { loadRunMode } from "../../api-ide";
-import { acceptOverviewTab, loadOverview, overviewCopy, refreshOverview, rejectOverviewTab, saveOverviewTab, OVERVIEW_POLL_MS, type OverviewTabId, type ProjectOverview, type Readme, type TabState } from "../../api-overview";
+import { acceptOverviewTab, loadOverview, overviewCopy, refreshOverview, rejectOverviewTab, saveOverviewTab, OVERVIEW_POLL_MS, OVERVIEW_WAIT_MAX_MS, type OverviewTabId, type ProjectOverview, type Readme, type TabState } from "../../api-overview";
 import { lineDiff } from "../../api-process";
 import { failureCopy, openLink, receiptState, updateProjectSetup, type JobKind, type ResearchJob } from "../../api-projects";
 import type { IntentReceipt } from "../../engine-client";
@@ -194,13 +194,16 @@ export function storeDrafts(projectId: string, drafts: OpenDrafts, store?: TabSt
   }
 }
 
-/** How often to read the tabs again: only while a run is writing, or a run is due and can
- * come (none comes while the tabs are off or the project is outside the CrazyAgent folder).
- * Input: the overview or null. Output: the wait in milliseconds, or null to read once. */
+/** How often to read the tabs again: at the run pace while a run is writing, and while a run
+ * waits and can come, once it is due as the engine says, between the run pace and ten minutes
+ * (none comes while the tabs are off or the project is outside the CrazyAgent folder). Input:
+ * the overview or null. Output: the wait in milliseconds, or null to read once. */
 export function pollEvery(overview: ProjectOverview | null): number | null {
   if (overview === null) return null;
+  if (overview.running) return OVERVIEW_POLL_MS;
   const due = overview.stale && overview.refresh !== "off" && !overview.needs_home;
-  return overview.running || due ? OVERVIEW_POLL_MS : null;
+  if (!due) return null;
+  return Math.min(OVERVIEW_WAIT_MAX_MS, Math.max(OVERVIEW_POLL_MS, overview.due_in_ms ?? 0));
 }
 
 /** The read the tabs show after a new one: a failed read keeps the last good one, as the TUI
@@ -798,8 +801,8 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
 }
 
 /** The Overview tabs of one project, read from the engine once per visit, on each tab pick (a
- * tab file can change outside CrazyAgent), after each action, and every `OVERVIEW_POLL_MS` only
- * while a run writes or a landed change set waits for one; keeps the picked tab for the session.
+ * tab file can change outside CrazyAgent), after each action, and again only while a run writes
+ * or one waits, at the wait `pollEvery` gives; keeps the picked tab for the session.
  * Inputs: the project data, how Quick info renders a text, the Activity panel and the read.
  * Output: the strip and its panel. */
 export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOverview }: {
