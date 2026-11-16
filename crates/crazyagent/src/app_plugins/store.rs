@@ -108,10 +108,10 @@ fn sqlite(_: rusqlite::Error) -> EngineError {
     error("app_plugins_unavailable")
 }
 
-fn forget_grants(db: &Connection, name: &str) -> Result<(), EngineError> {
+fn forget_grants(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
     crate::connectors::grants::forget_connector(db, name)
         .and_then(|()| crate::connectors::gateway::pins::forget_connector(db, name))
-        .and_then(|()| crate::connectors::oauth::forget(db, name))
+        .and_then(|()| crate::connectors::oauth::forget(db, root, name))
         .map_err(|_| error("app_plugins_unavailable"))
 }
 
@@ -141,7 +141,7 @@ fn prepare(db: &Connection, root: &Path) -> Result<(), EngineError> {
         }
         db.execute("DELETE FROM app_plugin_state WHERE name=?1", [name])
             .map_err(sqlite)?;
-        forget_grants(db, name)?;
+        forget_grants(db, root, name)?;
         crate::semantic::settings::forget(db, name)?;
         db.execute("DELETE FROM app_plugin_trust WHERE name=?1", [name])
             .map_err(sqlite)?;
@@ -610,7 +610,7 @@ fn settle(
         .map_err(sqlite)?;
     let moved = trusted_hosts.as_deref() != Some(hosts.as_str());
     if moved {
-        forget_grants(db, &manifest.name)?;
+        forget_grants(db, root, &manifest.name)?;
     }
     for (secret, source, reference) in binding_rows(db, &manifest.name)? {
         if moved || !manifest.secrets().contains(&secret) {
@@ -740,7 +740,7 @@ pub fn remove(db: &Connection, root: &Path, name: &str) -> Result<(), EngineErro
         return Err(error("app_plugin_not_found"));
     }
     crate::semantic::settings::forget(db, name)?;
-    forget_grants(db, name)?;
+    forget_grants(db, root, name)?;
     let removed = folder::remove(root, name)?;
     let known: bool = db
         .query_row(

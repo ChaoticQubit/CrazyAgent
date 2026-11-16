@@ -11,7 +11,9 @@ use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use crate::provider_reach::ProviderReach;
 use crate::storage::accounts::{self, PLUGIN_KEYS};
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
+#[cfg(unix)]
+use rusqlite::params;
 use std::path::Path;
 
 #[cfg(unix)]
@@ -23,7 +25,11 @@ use sign::finish_trusted;
 #[cfg(all(test, unix))]
 pub(crate) use sign::finish_with;
 #[cfg(unix)]
+use sign::forget_keys;
+#[cfg(unix)]
 pub(crate) use sign::fresh_with;
+#[cfg(unix)]
+use sign::own_replaced;
 #[cfg(unix)]
 pub(crate) use sign::refused_with;
 #[cfg(unix)]
@@ -118,7 +124,8 @@ fn own_issuer_ref(name: &str) -> Result<CredentialRef, OAuthError> {
 
 /// Saves the owner's own OAuth app for a trusted connector that lets the owner bring one:
 /// its client id and, for a confidential app, its secret, replacing what was saved before
-/// and freeing it from the issuer the old one was bound to.
+/// and freeing it from the issuer the old one was bound to. A sign-in made with the old
+/// one ends and asks the owner again, and sign-ins begun with it are dropped.
 /// Inputs: database, engine root, connector, client id and secret. Output: Ok, or
 /// `connector_oauth_not_offered`, `_client_invalid`, `_key_store_unavailable`.
 pub fn set_own_client(
@@ -141,18 +148,34 @@ pub fn set_own_client(
     if !visible(id, OWN_ID_BYTES_MAX) || !secret_fits {
         return Err(OAuthError("connector_oauth_client_invalid"));
     }
-    accounts::remove_key_in(root, PLUGIN_KEYS, own_issuer_ref(name)?.as_str())
-        .map_err(|_| key_store())?;
-    accounts::replace_key_in(root, PLUGIN_KEYS, &own_ref(name)?, id.as_bytes().to_vec())
-        .map_err(|_| key_store())?;
-    let secret_ref = own_secret_ref(name)?;
-    match secret {
-        Some(secret) => {
-            accounts::replace_key_in(root, PLUGIN_KEYS, &secret_ref, secret.as_bytes().to_vec())
+    own_replaced(db, root, name, &manifest.title, now_ms(), || {
+        accounts::remove_key_in(root, PLUGIN_KEYS, own_issuer_ref(name)?.as_str())
+            .map_err(|_| key_store())?;
+        accounts::replace_key_in(root, PLUGIN_KEYS, &own_ref(name)?, id.as_bytes().to_vec())
+            .map_err(|_| key_store())?;
+        let secret_ref = own_secret_ref(name)?;
+        match secret {
+            Some(secret) => {
+                accounts::replace_key_in(root, PLUGIN_KEYS, &secret_ref, secret.as_bytes().to_vec())
+            }
+            None => accounts::remove_key_in(root, PLUGIN_KEYS, secret_ref.as_str()),
         }
-        None => accounts::remove_key_in(root, PLUGIN_KEYS, secret_ref.as_str()),
-    }
-    .map_err(|_| key_store())
+        .map_err(|_| key_store())
+    })
+}
+
+/// Saves the owner's own app where no sign-in can be made, so none is ended. Output: the
+/// save's answer.
+#[cfg(not(unix))]
+fn own_replaced(
+    _db: &Connection,
+    _root: &Path,
+    _name: &str,
+    _title: &str,
+    _now_ms: i64,
+    save: impl FnOnce() -> Result<(), OAuthError>,
+) -> Result<(), OAuthError> {
+    save()
 }
 
 /// Starts a sign-in to a trusted connector: finds its authorization server, picks the
@@ -243,6 +266,7 @@ pub fn fresh(db: &Connection, root: &Path, name: &str) -> Result<Credential, OAu
         root,
         name,
         &manifest.title,
+        &manifest.sha256,
         spec,
         now_ms(),
         &ProviderReach::system(),
@@ -276,12 +300,27 @@ fn mark_sign_in(db: &Connection, name: &str, title: &str, now_ms: i64) -> Result
 /// connector. Output: Ok, or `connectors_unavailable`.
 #[cfg(unix)]
 fn signed_in(db: &Connection, name: &str) -> Result<(), OAuthError> {
-    forget(db, name).map_err(|_| OAuthError("connectors_unavailable"))
+    unmark(db, name).map_err(|_| OAuthError("connectors_unavailable"))
 }
 
-/// Deletes a connector's "Sign in again": when it is signed in, removed or trusted again.
-/// Inputs: the engine database and the connector. Output: Ok, or `connectors_unavailable`.
-pub fn forget(db: &Connection, name: &str) -> Result<(), EngineError> {
+/// Forgets a connector's sign-ins when it is removed or trusted again with other hosts:
+/// every key they saved, the sign-ins still waiting and its "Sign in again". Inputs: the
+/// engine database, root and connector. Output: Ok, `connector_oauth_key_store_unavailable`
+/// or `connectors_unavailable`.
+pub fn forget(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
+    forget_keys(root, name).map_err(|problem| EngineError(problem.0.into()))?;
+    unmark(db, name)
+}
+
+/// No sign-in key is saved where the Unix owner-only key folder does not exist. Output: Ok.
+#[cfg(not(unix))]
+fn forget_keys(_root: &Path, _name: &str) -> Result<(), OAuthError> {
+    Ok(())
+}
+
+/// Deletes a connector's "Sign in again". Inputs: the engine database and the connector.
+/// Output: Ok, or `connectors_unavailable`.
+fn unmark(db: &Connection, name: &str) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(unavailable)?;
     db.execute("DELETE FROM connector_sign_ins WHERE connector=?1", [name])
         .map_err(unavailable)?;
@@ -391,11 +430,13 @@ pub(crate) fn refused_with(
 /// No renewal where curl's private request cannot be made. Output:
 /// `connector_unavailable_here`.
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn renew_with(
     _db: &Connection,
     _root: &Path,
     _name: &str,
     _title: &str,
+    _sha256: &str,
     _spec: &crate::app_plugins::connector::ConnectorSpec,
     _now_ms: i64,
     _reach: &ProviderReach,
@@ -424,11 +465,13 @@ pub(crate) fn step_up_with(
 /// No renewal where curl's private request cannot be made. Output:
 /// `connector_unavailable_here`.
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fresh_with(
     _db: &Connection,
     _root: &Path,
     _name: &str,
     _title: &str,
+    _sha256: &str,
     _spec: &crate::app_plugins::connector::ConnectorSpec,
     _now_ms: i64,
     _reach: &ProviderReach,

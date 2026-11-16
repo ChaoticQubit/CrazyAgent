@@ -320,7 +320,7 @@ test("a picked choice or typed days enables Save; days out of bounds hold it and
 
 test("the settings a save sends keep every kind in engine order with the picks applied", () => {
   const sent = settings.savedSettings(api.NOTICE_DEFAULTS, new Map([["team_alert", "off"], ["question", "bell_only"]]), "action_only", "7");
-  assert.equal(sent.kinds.length, 20);
+  assert.equal(sent.kinds.length, api.NOTICE_KINDS.length);
   assert.deepEqual(sent.kinds.map((item) => item.kind), api.NOTICE_KINDS.map((entry) => entry.kind));
   assert.equal(sent.kinds.find((item) => item.kind === "team_alert").delivery, "off");
   assert.equal(sent.kinds.find((item) => item.kind === "question").delivery, "bell_only");

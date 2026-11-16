@@ -1,5 +1,7 @@
 use super::*;
-use crate::app_plugins::connector::{ConnectorSpec, OAuthSpec, Registration};
+use crate::app_plugins::connector::{
+    ConnectorSpec, McpEndpoint, OAuthSpec, ReadOnly, Registration,
+};
 use crate::connectors::mcp_client::tests::{Seen, Vendor, empty, json_reply, no_lookup, send};
 use crate::connectors::mcp_client::{Access, Credential, McpError, McpSession};
 use crate::connectors::settings::SizeCap;
@@ -11,7 +13,9 @@ use base64::Engine;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 const CLIENT: &str = "board-own-client-1";
 const SECRET: &str = "own-secret-0001";
@@ -43,8 +47,9 @@ oauth:
 /// challenge), the authorization servers its resource metadata lists, the two endpoints
 /// its server metadata gives, whether it promises `iss` in every answer, whether it takes
 /// client metadata documents, its registration endpoint, the token endpoint's client
-/// sign-in methods, the tokens and registered client it gives, and the issuer its resource
-/// metadata names instead once one is set. Each `{base}` becomes the stand-in's own address.
+/// sign-in methods, the tokens and registered client it gives, the issuer its resource
+/// metadata names instead once one is set, and the hold its token endpoint keeps renewals
+/// in. Each `{base}` becomes the stand-in's own address.
 #[derive(Clone)]
 struct Shape {
     hint: Option<&'static str>,
@@ -60,6 +65,16 @@ struct Shape {
     client: &'static str,
     moved: Arc<Mutex<Option<String>>>,
     renewal: Arc<Mutex<&'static str>>,
+    hold: Option<Hold>,
+}
+
+/// A token endpoint that keeps each renewal until the row lets it go or ten seconds pass:
+/// it tells `entered` that a renewal waits, and marks `timed_out` once one gave up waiting.
+#[derive(Clone)]
+struct Hold {
+    entered: Arc<Mutex<mpsc::Sender<()>>>,
+    release: Arc<Mutex<mpsc::Receiver<()>>>,
+    timed_out: Arc<AtomicBool>,
 }
 
 fn shape() -> Shape {
@@ -77,6 +92,7 @@ fn shape() -> Shape {
         client: DCR_CLIENT,
         moved: Arc::new(Mutex::new(None)),
         renewal: Arc::new(Mutex::new("200 OK")),
+        hold: None,
     }
 }
 
@@ -141,6 +157,17 @@ fn vendor(shape: Shape) -> Vendor {
             ("POST", "/token") => {
                 let renewing = url::form_urlencoded::parse(seen.raw.as_bytes())
                     .any(|(key, value)| key == "grant_type" && value == "refresh_token");
+                if renewing && let Some(hold) = &shape.hold {
+                    let _ = hold.entered.lock().unwrap().send(());
+                    let waited = hold
+                        .release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10));
+                    if waited.is_err() {
+                        hold.timed_out.store(true, Ordering::SeqCst);
+                    }
+                }
                 let suffix = if renewing { "-renewed" } else { "" };
                 let status = *shape.renewal.lock().unwrap();
                 if renewing && status != "200 OK" {
@@ -168,6 +195,7 @@ struct Sign {
     case: Case,
     vendor: Vendor,
     spec: ConnectorSpec,
+    sha256: String,
 }
 
 impl Sign {
@@ -236,7 +264,12 @@ fn prepared(
         }),
         read_tools: Vec::new(),
     };
-    Sign { case, vendor, spec }
+    Sign {
+        case,
+        vendor,
+        spec,
+        sha256: SHA.to_owned(),
+    }
 }
 
 fn redirect() -> url::Url {
@@ -251,7 +284,7 @@ fn start_with(sign: &Sign, writes: bool, cimd: Option<&url::Url>) -> Result<Pend
     begin_with(
         &sign.case.root,
         "board",
-        SHA,
+        &sign.sha256,
         &sign.spec,
         &redirect(),
         writes,
@@ -759,15 +792,208 @@ fn clock() -> i64 {
 }
 
 fn fresh_at(sign: &Sign, now_ms: i64) -> Result<Credential, OAuthError> {
+    fresh_for(sign, &sign.spec, now_ms)
+}
+
+/// [`fresh_at`] for the connector declared as `spec` instead of the sign's own.
+fn fresh_for(sign: &Sign, spec: &ConnectorSpec, now_ms: i64) -> Result<Credential, OAuthError> {
     fresh_with(
         &sign.case.db,
         &sign.case.root,
         "board",
         "Board",
-        &sign.spec,
+        &sign.sha256,
+        spec,
         now_ms,
         &no_lookup(),
     )
+}
+
+/// The sign's connector declared with `read_only` as its read-only address.
+fn read_only_at(sign: &Sign, read_only: &str) -> ConnectorSpec {
+    ConnectorSpec {
+        mcp: McpEndpoint {
+            read_only: ReadOnly::Url(url::Url::parse(read_only).unwrap()),
+            ..sign.spec.mcp.clone()
+        },
+        ..sign.spec.clone()
+    }
+}
+
+/// An OAuth token goes only where the sign-in's resource reaches: a read-only address
+/// outside it is refused before a sign-in begins, and a sign-in is never handed out for a
+/// declaration whose read-only address it does not cover; one under the resource is used.
+#[test]
+fn an_oauth_token_never_goes_to_a_read_only_address_outside_its_resource() {
+    let sign = signing(shape(), &["127.0.0.1"]);
+    let pending = begun(&sign, false);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    let outside = read_only_at(&sign, &format!("{}/ro", sign.issuer()));
+    let under = read_only_at(&sign, &format!("{}/readonly", sign.resource()));
+    let seen = sign.vendor.seen().len();
+    assert_eq!(
+        fresh_for(&sign, &outside, clock()),
+        Err(OAuthError("connector_sign_in_needed")),
+        "a token is never handed out for an address its resource does not cover"
+    );
+    assert_eq!(sign.vendor.seen().len(), seen);
+    assert!(
+        matches!(
+            fresh_for(&sign, &under, clock()),
+            Ok(Credential::OAuth { .. })
+        ),
+        "a read-only address under the resource gets the token"
+    );
+    let refused = begin_with(
+        &sign.case.root,
+        "board",
+        SHA,
+        &outside,
+        &redirect(),
+        false,
+        None,
+        &no_lookup(),
+    );
+    assert_eq!(
+        refused.map(|pending| pending.state),
+        Err(OAuthError("connector_oauth_metadata_invalid")),
+        "a sign-in whose resource leaves the read-only address out never begins"
+    );
+    let allowed = begin_with(
+        &sign.case.root,
+        "board",
+        SHA,
+        &under,
+        &redirect(),
+        false,
+        None,
+        &no_lookup(),
+    );
+    assert!(allowed.is_ok(), "{allowed:?}");
+}
+
+/// A sign-in made under one file of a connector is never used under another: the next
+/// credential read ends it with nothing sent, also when the new file moved its read-only
+/// address outside the resource, and one Action item asks the owner to sign in again.
+#[test]
+fn a_sign_in_is_ended_once_its_connector_file_changed() {
+    let mut sign = signing(shape(), &["127.0.0.1"]);
+    let pending = begun(&sign, false);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    let now = fresh_at(&sign, clock());
+    assert!(matches!(now, Ok(Credential::OAuth { .. })), "{now:?}");
+    let seen = sign.vendor.seen().len();
+    let moved = read_only_at(&sign, &format!("{}/ro", sign.issuer()));
+    sign.sha256 = "sha256-of-a-changed-board-file".to_owned();
+    assert_eq!(
+        fresh_for(&sign, &moved, clock()),
+        Err(OAuthError("connector_sign_in_needed")),
+        "a sign-in is never handed out under another file"
+    );
+    assert_eq!(
+        sign.vendor.seen().len(),
+        seen,
+        "nothing is sent for a changed file"
+    );
+    for prefix in [
+        "connector-token-board-",
+        "connector-refresh-board-",
+        "connector-signin-board",
+    ] {
+        assert!(saved(&sign.case, prefix).is_empty(), "{prefix} is removed");
+    }
+    assert_eq!(
+        notices(&mut sign.case),
+        vec![(
+            NoticeKind::ConnectorSignIn,
+            NoticeClass::Action,
+            "Board needs you to sign in again.".to_owned(),
+            json!({"page": "connectors"}),
+        )]
+    );
+    sign.sha256 = SHA.to_owned();
+    assert_eq!(
+        fresh_at(&sign, clock()),
+        Err(OAuthError("connector_sign_in_needed")),
+        "the ended sign-in is gone under the first file too"
+    );
+}
+
+/// Removing a connector drops every key its sign-ins saved: tokens, the record, the client
+/// registered at its issuer, and the owner's own app with its binding; a sign-in still
+/// waiting is never redeemed, and another connector's keys stay.
+#[test]
+fn removing_a_connector_drops_every_key_its_sign_ins_saved() {
+    let sign = prepared(
+        Shape {
+            register: Some("{base}/register"),
+            ..shape()
+        },
+        &["127.0.0.1"],
+        &[Registration::Own, Registration::Dcr],
+        None,
+    );
+    let pending = begun(&sign, false);
+    assert_eq!(query(&pending.authorize_url)["client_id"], DCR_CLIENT);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    assert_eq!(
+        set_own_client(
+            &sign.case.db,
+            &sign.case.root,
+            "board",
+            CLIENT,
+            Some(SECRET)
+        ),
+        Ok(())
+    );
+    let pending = begun(&sign, false);
+    assert_eq!(query(&pending.authorize_url)["client_id"], CLIENT);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    let waiting = begun(&sign, false);
+    for prefix in [
+        "connector-token-board-",
+        "connector-refresh-board-",
+        "connector-signin-board",
+        "connector-client-board-",
+        "connector-secret-board-own",
+        "connector-issuer-board-own",
+    ] {
+        assert!(!saved(&sign.case, prefix).is_empty(), "{prefix} is saved");
+    }
+    let another = CredentialRef::new("connector-token-board-two-0123456789abcdef").unwrap();
+    crate::storage::accounts::replace_key_in(
+        &sign.case.root,
+        PLUGIN_KEYS,
+        &another,
+        b"kept".to_vec(),
+    )
+    .unwrap();
+    let sent = token_calls(&sign.vendor).len();
+
+    crate::app_plugins::store::remove(&sign.case.db, &sign.case.root, "board").unwrap();
+    assert_eq!(
+        saved(&sign.case, "connector-"),
+        vec!["kept".to_owned()],
+        "only another connector's key is left"
+    );
+    assert_eq!(
+        finished(&sign, &waiting.state, Some(&sign.issuer())),
+        Err(OAuthError("connector_oauth_state_unknown")),
+        "a sign-in begun before the removal is never redeemed"
+    );
+    assert_eq!(token_calls(&sign.vendor).len(), sent);
 }
 
 /// The Authorization values the stand-in's MCP address was sent.
@@ -1070,6 +1296,64 @@ fn the_owners_app_is_bound_once_when_two_sign_ins_race() {
     );
 }
 
+/// Saving another own app ends the sign-in made with the one saved before and drops its
+/// sign-ins still waiting: the old issuer gets no request after the save, so it never
+/// sees the new app's id or secret, by a renewal or by a code, and one Action item asks
+/// the owner to sign in again.
+#[test]
+fn saving_another_own_app_ends_the_sign_in_made_with_the_last_one() {
+    let mut own = prepared(
+        shape(),
+        &["127.0.0.1"],
+        &[Registration::Own],
+        Some((CLIENT, Some(SECRET))),
+    );
+    let pending = begun(&own, false);
+    assert_eq!(finished(&own, &pending.state, Some(&own.issuer())), Ok(()));
+    let waiting = begun(&own, false);
+    let sent = own.vendor.seen().len();
+    assert_eq!(
+        set_own_client(
+            &own.case.db,
+            &own.case.root,
+            "board",
+            "board-own-client-2",
+            Some("own-secret-0002")
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        fresh_at(&own, clock() + 2 * 3_600_000),
+        Err(OAuthError("connector_sign_in_needed")),
+        "the last app's sign-in is never renewed with the new app"
+    );
+    assert_eq!(
+        finished(&own, &waiting.state, Some(&own.issuer())),
+        Err(OAuthError("connector_oauth_state_unknown")),
+        "a sign-in begun with the last app is never redeemed"
+    );
+    assert_eq!(
+        own.vendor.seen().len(),
+        sent,
+        "the old issuer is asked nothing after the save"
+    );
+    assert!(saved(&own.case, "connector-token-board-").is_empty());
+    assert_eq!(
+        notices(&mut own.case),
+        vec![(
+            NoticeKind::ConnectorSignIn,
+            NoticeClass::Action,
+            "Board needs you to sign in again.".to_owned(),
+            json!({"page": "connectors"}),
+        )]
+    );
+    let again = begun(&own, false);
+    assert_eq!(
+        query(&again.authorize_url)["client_id"],
+        "board-own-client-2"
+    );
+}
+
 /// The Action items waiting on the owner after one reconcile, as kind, class, text and
 /// the page a click opens.
 fn notices(case: &mut Case) -> Vec<(NoticeKind, NoticeClass, String, serde_json::Value)> {
@@ -1125,6 +1409,7 @@ fn a_failed_refresh_raises_one_sign_in_notice() {
         crate::app_plugins::store::trusted_connector(&sign.case.db, &sign.case.root, "board")
             .unwrap()
             .sha256;
+    sign.sha256 = trusted.clone();
     let signed_in = |sign: &Sign| {
         let begun = begin_with(
             &sign.case.root,
@@ -1200,6 +1485,107 @@ fn a_failed_refresh_raises_one_sign_in_notice() {
     );
     let now = fresh_at(&sign, clock());
     assert!(matches!(now, Ok(Credential::OAuth { .. })), "{now:?}");
+}
+
+/// A renewal waits only on renewals of its own connector: while one vendor's token
+/// endpoint keeps a renewal, another connector of the same engine renews at once.
+#[test]
+fn a_slow_token_endpoint_holds_up_no_other_connectors_renewal() {
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let hold = Hold {
+        entered: Arc::new(Mutex::new(entered_tx)),
+        release: Arc::new(Mutex::new(released)),
+        timed_out: Arc::new(AtomicBool::new(false)),
+    };
+    let slow = signing(
+        Shape {
+            hold: Some(hold.clone()),
+            ..shape()
+        },
+        &["127.0.0.1"],
+    );
+    let pending = begun(&slow, false);
+    assert_eq!(
+        finished(&slow, &pending.state, Some(&slow.issuer())),
+        Ok(())
+    );
+    let quick = vendor(Shape {
+        register: Some("{base}/register"),
+        ..shape()
+    });
+    let desk = ConnectorSpec {
+        mcp: quick.endpoint(),
+        oauth: Some(OAuthSpec {
+            registration: vec![Registration::Dcr],
+            ..slow.spec.oauth.clone().unwrap()
+        }),
+        ..slow.spec.clone()
+    };
+    let desk_begun = begin_with(
+        &slow.case.root,
+        "desk",
+        SHA,
+        &desk,
+        &redirect(),
+        false,
+        None,
+        &no_lookup(),
+    );
+    assert!(desk_begun.is_ok(), "{desk_begun:?}");
+    assert_eq!(
+        finish_with(
+            &slow.case.root,
+            &desk_begun.unwrap().state,
+            CODE,
+            Some(&format!("http://127.0.0.1:{}", quick.port)),
+            &no_lookup()
+        ),
+        Ok(())
+    );
+    let later = clock() + 2 * 3_600_000;
+    let (root, spec) = (slow.case.root.clone(), slow.spec.clone());
+    let waiting = std::thread::spawn(move || {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        fresh_with(
+            &db,
+            &root,
+            "board",
+            "Board",
+            SHA,
+            &spec,
+            later,
+            &no_lookup(),
+        )
+        .is_ok()
+    });
+    assert_eq!(
+        entered.recv_timeout(Duration::from_secs(10)),
+        Ok(()),
+        "the slow renewal waits at its token endpoint"
+    );
+    let renewed = fresh_with(
+        &slow.case.db,
+        &slow.case.root,
+        "desk",
+        "Desk",
+        SHA,
+        &desk,
+        later,
+        &no_lookup(),
+    );
+    assert!(
+        matches!(renewed, Ok(Credential::OAuth { .. })),
+        "{renewed:?}"
+    );
+    assert!(
+        !hold.timed_out.load(Ordering::SeqCst),
+        "the other connector renewed without waiting on the slow one"
+    );
+    release.send(()).unwrap();
+    assert!(waiting.join().unwrap(), "the slow renewal ends once let go");
+    assert_eq!(renewals(&slow.vendor), 1);
+    assert_eq!(renewals(&quick), 1);
 }
 
 /// Removing a connector resolves its "Sign in again" item with it.

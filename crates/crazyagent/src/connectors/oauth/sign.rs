@@ -2,7 +2,9 @@ use super::{
     OAuthError, OWN_ID_BYTES_MAX, Pending, key_store, mark_sign_in, not_offered, now_ms,
     own_issuer_ref, own_ref, own_secret_ref, signed_in, visible,
 };
-use crate::app_plugins::connector::{ConnectorSpec, OAuthSpec, Registration};
+use crate::app_plugins::connector::{
+    ConnectorSpec, McpEndpoint, OAuthSpec, ReadOnly, Registration,
+};
 use crate::app_plugins::http::{self, Config, Ended};
 use crate::app_plugins::store;
 use crate::connectors::mcp_client::{Credential, McpError, guard, wire};
@@ -15,9 +17,10 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// The most sign-ins one engine root waits on at once; a new one drops the oldest.
@@ -111,15 +114,18 @@ struct Client {
 
 /// What a renewal needs of a connector's last sign-in, saved after its tokens in the plugin
 /// key store: the issuer, its token endpoint, the client and how it signs in, the resource
-/// the tokens are for, the scopes it asked, how many step-ups in a row led to it, and when
-/// the access token ends (Unix ms; `i64::MAX` for no end).
+/// the tokens are for, the scopes it asked, how many step-ups in a row led to it, when the
+/// access token ends (Unix ms; `i64::MAX` for no end), the sha256 of the connector file
+/// the owner signed in under, and whether the client is the owner's own app.
 #[derive(Serialize, Deserialize)]
 struct Record {
+    sha256: String,
     issuer: String,
     token: String,
     client: String,
     secret: Option<String>,
     post: bool,
+    own: bool,
     resource: String,
     scopes: Vec<String>,
     tries: u8,
@@ -127,9 +133,22 @@ struct Record {
 }
 
 static FLOWS: Mutex<Vec<Flow>> = Mutex::new(Vec::new());
-/// Held while an access token is renewed or a code redeemed, so two calls never spend one
-/// refresh token twice and a sign-in's saves never interleave with a renewal's.
-static RENEWING: Mutex<()> = Mutex::new(());
+/// The renewal lock of each connector a call renews, signs in or forgets now, by engine
+/// root and connector; one no call holds is dropped at the next look-up.
+static RENEWING: Mutex<BTreeMap<(PathBuf, String), Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+
+/// The lock held while one connector's access token is renewed, a code redeemed for it,
+/// its own app replaced or its keys removed, so two calls never spend one refresh token
+/// twice and a sign-in's saves never interleave with a renewal's, while a slow vendor
+/// holds up no other connector. Inputs: engine root and connector. Output: its lock.
+fn renewal_lock(root: &Path, name: &str) -> Arc<Mutex<()>> {
+    let mut locks = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    let lock = locks
+        .entry((root.to_path_buf(), name.to_owned()))
+        .or_default();
+    Arc::clone(lock)
+}
 
 fn flows() -> MutexGuard<'static, Vec<Flow>> {
     FLOWS.lock().unwrap_or_else(PoisonError::into_inner)
@@ -355,6 +374,17 @@ fn at(base: &url::Url, path: &str) -> url::Url {
 
 /// Whether a resource identifier names the MCP server: same scheme, host and port, no
 /// user, query or fragment, and a path the server's path equals or sits under.
+/// Whether a token for `resource` may go to every address of an MCP endpoint: its URL and,
+/// when it has one, its read-only URL. Inputs: the resource and the endpoint. Output: true
+/// when the resource covers each.
+fn reaches(resource: &str, endpoint: &McpEndpoint) -> bool {
+    let read_only = match &endpoint.read_only {
+        ReadOnly::Url(url) => covers(resource, url),
+        ReadOnly::None | ReadOnly::Header { .. } => true,
+    };
+    covers(resource, &endpoint.url) && read_only
+}
+
 fn covers(resource: &str, mcp: &url::Url) -> bool {
     let Ok(resource) = url::Url::parse(resource) else {
         return false;
@@ -429,7 +459,7 @@ fn protected_resource(
     let resource = metadata
         .get("resource")
         .and_then(Value::as_str)
-        .filter(|resource| covers(resource, &mcp.url))
+        .filter(|resource| reaches(resource, mcp))
         .ok_or_else(metadata_invalid)?;
     let issuer = metadata
         .get("authorization_servers")
@@ -934,6 +964,81 @@ fn ended(root: &Path, name: &str, issuer: &str) -> Result<(), OAuthError> {
     Ok(())
 }
 
+/// The kinds of key a connector's sign-ins save as `connector-<kind>-<name>-<suffix>`.
+const KEY_KINDS: [&str; 5] = ["token", "refresh", "client", "secret", "issuer"];
+
+/// Whether a plugin key was saved by one connector's sign-ins: its record, or a kind of
+/// key for it whose suffix is an issuer's 16 hex digits or the owner's own app, so a
+/// connector whose name only starts with this one keeps its keys. Inputs: the key's name
+/// and the connector. Output: true for a key of that connector's sign-ins.
+fn saved_for(key: &str, name: &str) -> bool {
+    let issuer = |suffix: &str| {
+        suffix.len() == 16
+            && suffix
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    };
+    key.strip_prefix("connector-signin-") == Some(name)
+        || KEY_KINDS.iter().any(|kind| {
+            key.strip_prefix("connector-")
+                .and_then(|rest| rest.strip_prefix(*kind))
+                .and_then(|rest| rest.strip_prefix('-'))
+                .and_then(|rest| rest.strip_prefix(name))
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|suffix| suffix == "own" || issuer(suffix))
+        })
+}
+
+/// Removes every key a connector's sign-ins saved, at every issuer, and drops its sign-ins
+/// still waiting, under the renewal lock so a renewal running now saves nothing after it:
+/// for a connector removed, or trusted again with other hosts. Inputs: engine root and
+/// connector. Output: Ok, or the key store's refusal.
+pub(super) fn forget_keys(root: &Path, name: &str) -> Result<(), OAuthError> {
+    let lock = renewal_lock(root, name);
+    let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    flows().retain(|flow| !(flow.root == root && flow.connector == name));
+    let folder = match std::fs::read_dir(root.join(PLUGIN_KEYS)) {
+        Ok(folder) => folder,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(key_store()),
+    };
+    let mut keys = Vec::new();
+    for entry in folder {
+        let file = entry.map_err(|_| key_store())?.file_name();
+        if let Some(key) = file.to_str().filter(|key| saved_for(key, name)) {
+            keys.push(key.to_owned());
+        }
+    }
+    for key in &keys {
+        accounts::remove_key_in(root, PLUGIN_KEYS, key).map_err(|_| key_store())?;
+    }
+    Ok(())
+}
+
+/// Runs `save`, which replaces the owner's own app for a connector, under its renewal
+/// lock, after ending a sign-in made with the app saved before and dropping the sign-ins
+/// begun with it, so the issuer it was used at never gets the new app's id or secret; the
+/// owner is asked to sign in again. Inputs: database, root, connector, its title, the
+/// clock (Unix ms) and the save. Output: the save's answer, or the key store's or
+/// database's refusal.
+pub(super) fn own_replaced(
+    db: &Connection,
+    root: &Path,
+    name: &str,
+    title: &str,
+    now_ms: i64,
+    save: impl FnOnce() -> Result<(), OAuthError>,
+) -> Result<(), OAuthError> {
+    let lock = renewal_lock(root, name);
+    let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    flows().retain(|flow| !(flow.root == root && flow.connector == name && flow.client.own));
+    if let Some(record) = record_of(root, name)?.filter(|record| record.own) {
+        ended(root, name, &record.issuer)?;
+        mark_sign_in(db, name, title, now_ms)?;
+    }
+    save()
+}
+
 fn record_ref(name: &str) -> Result<CredentialRef, OAuthError> {
     CredentialRef::new(format!("connector-signin-{name}")).map_err(|_| key_store())
 }
@@ -964,10 +1069,11 @@ fn save_record(root: &Path, name: &str, text: String) -> Result<(), OAuthError> 
 /// Redeems an answer's code (RFC 6749 4.1.3 with PKCE and the resource): the issuer is
 /// checked first, so a code from another server is never sent anywhere. The request body
 /// lives in a buffer that never grows and is zeroed. Under the renewal lock, the owner's
-/// own app must still be bound to this issuer or to none; then the tokens are saved, the
-/// tokens of another issuer the connector was signed in at before are removed, the owner's
-/// own app is bound to this issuer, and the sign-in record is saved last. Inputs: engine root, the
-/// sign-in, the code, the answer's issuer and the lookup. Output: Ok once all is saved.
+/// own app must still be the one the sign-in began with, and bound to this issuer or to
+/// none; then the tokens are saved, the tokens of another issuer the connector was signed
+/// in at before are removed, the owner's own app is bound to this issuer, and the sign-in
+/// record is saved last. Inputs: engine root, the sign-in, the code, the answer's issuer
+/// and the lookup. Output: Ok once all is saved.
 fn redeem(
     root: &Path,
     flow: Flow,
@@ -984,8 +1090,13 @@ fn redeem(
     if !visible(code, CODE_BYTES_MAX) {
         return Err(OAuthError("connector_oauth_code_invalid"));
     }
-    let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    let lock = renewal_lock(root, &flow.connector);
+    let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
     if flow.client.own {
+        let saved_id = saved(root, &own_ref(&flow.connector)?)?;
+        if saved_id.is_none_or(|id| id.expose() != flow.client.id) {
+            return Err(OAuthError("connector_oauth_state_unknown"));
+        }
         let bound = accounts::read_bearer_in(root, PLUGIN_KEYS, &own_issuer_ref(&flow.connector)?)
             .map_err(|_| key_store())?;
         if bound.is_some_and(|issuer| issuer.expose() != flow.issuer) {
@@ -1014,6 +1125,7 @@ fn redeem(
     let tokens = reply.object().ok_or_else(token_invalid)?;
     let granted = grant(&tokens, now_ms())?;
     let text = record_text(&Record {
+        sha256: flow.sha256.clone(),
         issuer: flow.issuer.clone(),
         token: flow.token.as_str().to_owned(),
         client: flow.client.id.clone(),
@@ -1023,6 +1135,7 @@ fn redeem(
             .as_ref()
             .map(|reference| reference.as_str().to_owned()),
         post: flow.client.post,
+        own: flow.client.own,
         resource: flow.resource.clone(),
         scopes: flow.scopes.clone(),
         tries: flow.tries,
@@ -1112,35 +1225,40 @@ fn renew(
 
 /// The credential a call sends now for one connector as declared, its access token
 /// renewed first at the token endpoint of its sign-in when it ends within a minute. A
-/// sign-in for another resource than the one declared is not used. Blocking when it
-/// renews. Inputs: database, root, connector, its title, its declaration, the clock (Unix
-/// ms) and the lookup. Output: the credential, or `connector_sign_in_needed` and a
-/// renewal's refusals.
+/// sign-in for another resource than the one declared is not used, and one made under
+/// another file of the connector is ended and asks the owner again. Blocking when it
+/// renews. Inputs: database, root, connector, its title, the trusted file's sha256, its
+/// declaration, the clock (Unix ms) and the lookup. Output: the credential, or
+/// `connector_sign_in_needed` and a renewal's refusals.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fresh_with(
     db: &Connection,
     root: &Path,
     name: &str,
     title: &str,
+    sha256: &str,
     spec: &ConnectorSpec,
     now_ms: i64,
     reach: &ProviderReach,
 ) -> Result<Credential, OAuthError> {
-    current(db, root, name, title, spec, now_ms, false, reach)
+    current(db, root, name, title, sha256, spec, now_ms, false, reach)
 }
 
 /// [`fresh_with`] with the access token renewed whatever its end, for a server that
 /// refused it; a renewal or sign-in another call made since the record was read is used
 /// instead of a second one. Inputs and outputs as there.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn renew_with(
     db: &Connection,
     root: &Path,
     name: &str,
     title: &str,
+    sha256: &str,
     spec: &ConnectorSpec,
     now_ms: i64,
     reach: &ProviderReach,
 ) -> Result<Credential, OAuthError> {
-    current(db, root, name, title, spec, now_ms, true, reach)
+    current(db, root, name, title, sha256, spec, now_ms, true, reach)
 }
 
 /// Ends a sign-in whose server refused the token just renewed for it, and raises its
@@ -1162,7 +1280,8 @@ pub(crate) fn refused_with(
     else {
         return Ok(());
     };
-    let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    let lock = renewal_lock(root, name);
+    let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
     let still = record_of(root, name)?
         .is_some_and(|record| record.issuer == *issuer && record.expires_ms == *expires_ms);
     if still {
@@ -1179,23 +1298,34 @@ fn current(
     root: &Path,
     name: &str,
     title: &str,
+    sha256: &str,
     spec: &ConnectorSpec,
     now_ms: i64,
     force: bool,
     reach: &ProviderReach,
 ) -> Result<Credential, OAuthError> {
     let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
-    let usable = |record: Option<Record>| {
-        record
-            .filter(|record| covers(&record.resource, &spec.mcp.url))
-            .ok_or_else(sign_in_needed)
+    let usable = |record: Record| {
+        if reaches(&record.resource, &spec.mcp) {
+            Ok(record)
+        } else {
+            Err(sign_in_needed())
+        }
     };
+    let changed = |record: &Record| record.sha256 != sha256;
     let ends_soon = |record: &Record| now_ms.saturating_add(RENEW_EARLY_MS) >= record.expires_ms;
-    let mut record = usable(record_of(root, name)?)?;
-    if force || ends_soon(&record) {
+    let mut record = record_of(root, name)?.ok_or_else(sign_in_needed)?;
+    if force || changed(&record) || ends_soon(&record) {
         let read_ends_ms = record.expires_ms;
-        let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
-        record = usable(record_of(root, name)?)?;
+        let lock = renewal_lock(root, name);
+        let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        record = record_of(root, name)?.ok_or_else(sign_in_needed)?;
+        if changed(&record) {
+            ended(root, name, &record.issuer)?;
+            mark_sign_in(db, name, title, now_ms)?;
+            return Err(sign_in_needed());
+        }
+        record = usable(record)?;
         let renewed_since = record.expires_ms != read_ends_ms;
         if (force && !renewed_since) || (!force && ends_soon(&record)) {
             match renew(root, name, oauth, &record, now_ms, reach) {
@@ -1212,6 +1342,7 @@ fn current(
             }
         }
     }
+    let record = usable(record)?;
     let refresh = token_ref("refresh", name, &record.issuer)?;
     let renewable = accounts::key_saved_in(root, PLUGIN_KEYS, &refresh).map_err(|_| key_store())?;
     Ok(Credential::OAuth {
