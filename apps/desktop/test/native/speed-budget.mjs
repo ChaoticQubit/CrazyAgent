@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import { userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
@@ -302,22 +302,23 @@ function listedPaths(text) {
   return text.split("\n").map((line) => line.trim()).filter((line) => line !== "").map((line) => line.replace(/^"(.*)"$/, "$1"));
 }
 
-/** When the owner's keychain settings file last changed, or null while there is none. Input:
- * the owner's home. Output: the stamp. */
-function settingsStamp(realHome) {
+/** Checks the owner has no keychain settings file, as the gate's kc-state.sh did before and
+ * after each step: a keychain tool that wrote the owner's settings instead of the home's would
+ * leave one. Input: the owner's home. Output: none. */
+function ownerSettingsAbsent(realHome) {
   const settings = join(realHome, "Library", "Preferences", "com.apple.security.plist");
-  return existsSync(settings) ? statSync(settings).mtimeMs : null;
+  assert.ok(!existsSync(settings), `the owner's keychain settings file stays absent: ${settings}`);
 }
 
 /** Gives a new speed state home its own empty login keychain as its default and its only
  * search-list entry, as the gate's kc-state.sh prep did by hand (DEC-146), so an app and a TUI
  * run on that home never reach the owner's keychain. Refuses a folder that is not a new speed
- * state home, and fails when the owner's keychain settings file changed meanwhile. Inputs: the
- * home, the owner's home and the keychain tool. Output: the keychain's path. */
+ * state home, and stops while the owner has a keychain settings file, before and after.
+ * Inputs: the home, the owner's home and the keychain tool. Output: the keychain's path. */
 export function prepareKeychain(home, realHome = userInfo().homedir, security = securityIn) {
   assert.ok(basename(home) === "home" && SPEED_STATE.test(dirname(home)), `a speed state home: ${home}`);
   privateFolder(home);
-  const before = settingsStamp(realHome);
+  ownerSettingsAbsent(realHome);
   assert.ok(!existsSync(join(home, "Library")), `a new speed state home holds no Library yet: ${home}`);
   for (const folder of ["Library", "Library/Keychains", "Library/Preferences"]) mkdirSync(join(home, folder), { mode: 0o700 });
   const keychain = join(home, "Library", "Keychains", "login.keychain-db");
@@ -327,7 +328,7 @@ export function prepareKeychain(home, realHome = userInfo().homedir, security = 
   security(home, ["default-keychain", "-d", "user", "-s", keychain]);
   assert.deepEqual(listedPaths(security(home, ["list-keychains", "-d", "user"])), [keychain], "the home's search list holds only its own keychain");
   assert.deepEqual(listedPaths(security(home, ["default-keychain", "-d", "user"])), [keychain], "the home's default keychain is its own");
-  assert.equal(settingsStamp(realHome), before, "the owner's keychain settings file is unchanged");
+  ownerSettingsAbsent(realHome);
   return keychain;
 }
 

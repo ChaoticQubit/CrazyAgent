@@ -440,6 +440,12 @@ test("a keychain is prepared only in a new speed state home, only as its own, an
     assert.throws(() => prepareKeychain(home, owner, leaky.tool), /the owner's keychain settings/);
     assert.ok(existsSync(settings));
   });
+  withStateHome((home, owner) => {
+    writeFileSync(join(owner, "Library", "Preferences", "com.apple.security.plist"), "the owner's");
+    const before = keychainTool();
+    assert.throws(() => prepareKeychain(home, owner, before.tool), /the owner's keychain settings file stays absent/);
+    assert.deepEqual(before.calls, [], "no keychain tool runs while the owner has a settings file");
+  });
 });
 
 test("speed-run gives each state home its prepared keychain as it makes the home", () => {
