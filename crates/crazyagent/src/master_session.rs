@@ -66,11 +66,29 @@ pub(crate) struct RcliConfiguredProfileProof {
     pub(crate) profile_config_sha256: String,
 }
 
+/// What proves a listed master's pool account may run its turns (DEC-180 T20 Q7): the
+/// session, engine run and settings it was proved under, the connection and the custody slot
+/// prepared for it, which holds no key and no sign-in. It never holds the saved key; the
+/// connection names that key only by its reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListedAccountProof {
+    pub(crate) session_id: SessionId,
+    pub(crate) database_instance: String,
+    pub(crate) engine_epoch: String,
+    pub(crate) config_id: ConfigId,
+    pub(crate) source_hash: String,
+    pub(crate) at_revision: Cursor,
+    pub(crate) connection: ModelConnection,
+    pub(crate) custody_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum MasterBootstrapAuth {
     NativeSignIn(NativeAuthFact),
     RcliConfigured(RcliConfiguredProfileProof),
+    Listed(ListedAccountProof),
 }
 
 impl MasterBootstrapAuth {
@@ -78,6 +96,15 @@ impl MasterBootstrapAuth {
         match self {
             Self::NativeSignIn(fact) => fact.binding.clone(),
             Self::RcliConfigured(proof) => NativeProfileBinding {
+                database_instance: proof.database_instance.clone(),
+                engine_epoch: proof.engine_epoch.clone(),
+                config_id: proof.config_id.clone(),
+                source_hash: proof.source_hash.clone(),
+                at_revision: proof.at_revision.clone(),
+                connection: proof.connection.clone(),
+                custody_id: proof.custody_id.clone(),
+            },
+            Self::Listed(proof) => NativeProfileBinding {
                 database_instance: proof.database_instance.clone(),
                 engine_epoch: proof.engine_epoch.clone(),
                 config_id: proof.config_id.clone(),

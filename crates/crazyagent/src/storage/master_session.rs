@@ -2009,6 +2009,7 @@ pub(super) fn validate_bootstrap_auth(
             }
             Ok(())
         }
+        MasterBootstrapAuth::Listed(_) => Err(error("master_bootstrap_authentication_stale")),
     }
 }
 
@@ -2127,6 +2128,7 @@ fn authenticated(
                 return Err(error("master_configured_receipt_stale"));
             }
         }
+        MasterBootstrapAuth::Listed(_) => return Err(error("master_authentication_stale")),
     }
     Ok(fact)
 }
@@ -3291,6 +3293,7 @@ fn admit(
                     now_ms()?,
                 )
             }
+            MasterBootstrapAuth::Listed(_) => Err(error("gateway_initial_authentication_stale")),
         }
     } else {
         model_gateway::begin_attempt(tx, config, config, &request, now_ms()?)
@@ -4602,6 +4605,7 @@ pub(super) fn runtime(
                     turn.ordinal,
                     NativeProfileUsePurpose::Execution,
                 )?,
+                MasterBootstrapAuth::Listed(_) => return Err(error("native_profile_not_listed")),
             };
             Ok(MasterRuntimeResult::Profile(Box::new(guard)))
         }
@@ -5613,7 +5617,9 @@ mod rcli_configured_tests {
         include!("master_session/pruned_history_tests.rs");
     }
     use crate::engine::owner::{ModelAccessCollection, Started};
-    use crate::master_session::{MasterBootstrapAuth, MasterSelection, RcliConfiguredProfileProof};
+    use crate::master_session::{
+        ListedAccountProof, MasterBootstrapAuth, MasterSelection, RcliConfiguredProfileProof,
+    };
     use crate::protocol::{CredentialRef, ProjectSpec};
     use crate::routing::{ResourceBudget, RouteRequest};
     use crate::storage::{Job, Storage};
@@ -5649,6 +5655,28 @@ fallback_allowed = false
 "#;
 
     const PROMPT: &str = "Describe this project in one sentence without using tools.";
+
+    const LISTED_AUTH: &str = r#"auth = { method = "api_key", credential_ref = "listed-key" }"#;
+
+    const LISTED_KEY: &[u8] = b"sk-listed-master-saved-key-0123456789abcdef";
+
+    /// The fixture master's selection on one backend and target. Inputs: the backend and
+    /// the target. Output: the selection.
+    fn selection(backend: MasterBackend, target: &str) -> MasterSelection {
+        MasterSelection {
+            backend,
+            pool_ref: reference("local-pool"),
+            target_profile_ref: reference(target),
+            route: RouteRequest {
+                preferred_target: Some(reference(target)),
+                required_target: Some(reference(target)),
+                required_capabilities: vec![],
+                account_ref: reference("local-account"),
+                budget_ref: reference("conversation-budget"),
+                resources: ResourceBudget::unit(),
+            },
+        }
+    }
 
     const SPARE: &str = r#"[[model_access.connections]]
 id = "spare-connection"
@@ -5839,7 +5867,8 @@ auth = { method = "none" }"#;
         }
 
         async fn build(with_repository: bool, onboarded: bool, message: &str) -> Self {
-            Self::build_with(CONFIG, with_repository, onboarded, message).await
+            let selection = selection(MasterBackend::Rcli, "local-profile");
+            Self::build_with(CONFIG, with_repository, onboarded, message, selection).await
         }
 
         /// A master whose settings already hold what every model access edit writes into
@@ -5856,7 +5885,8 @@ auth = { method = "none" }"#;
                 ),
             );
             assert!(config.contains(local.as_str()));
-            Self::build_with(&config, true, false, PROMPT).await
+            let selection = selection(MasterBackend::Rcli, "local-profile");
+            Self::build_with(&config, true, false, PROMPT, selection).await
         }
 
         /// A master whose pool holds a second RCLI key on its own account and endpoint,
@@ -5898,7 +5928,8 @@ auth = { method = "none" }"#;
             ] {
                 assert!(config.contains(&replaced), "{replaced}");
             }
-            Self::build_with(&config, true, false, PROMPT).await
+            let selection = selection(MasterBackend::Rcli, "local-profile");
+            Self::build_with(&config, true, false, PROMPT, selection).await
         }
 
         /// A master whose pool's RCLI key is legacy_keyed_connection: a keyed OpenAI
@@ -5914,7 +5945,27 @@ auth = { method = "none" }"#;
                 )
                 .replace(r#"auth = { method = "none" }"#, auth);
             assert!(config.contains(provider) && config.contains(auth));
-            Self::build_with(&config, true, false, PROMPT).await
+            let selection = selection(MasterBackend::Rcli, "local-profile");
+            Self::build_with(&config, true, false, PROMPT, selection).await
+        }
+
+        /// A listed master (DEC-180 T20): its pool's one account is a keyed account of the
+        /// stand-in ACP harness, whose connection is the master's target, as a native
+        /// master's is.
+        async fn listed() -> Self {
+            let config = CONFIG
+                .replace(
+                    r#"allowed_destinations = ["local-profile"]"#,
+                    r#"allowed_destinations = ["local-connection"]"#,
+                )
+                .replace(r#"harness = "rcli""#, r#"harness = "standin-acp""#)
+                .replace(r#"auth = { method = "none" }"#, LISTED_AUTH);
+            assert!(config.contains(r#"harness = "standin-acp""#));
+            assert!(config.contains(LISTED_AUTH));
+            assert!(config.contains(r#"allowed_destinations = ["local-connection"]"#));
+            let backend = MasterBackend::Listed("standin-acp");
+            let selection = selection(backend, "local-connection");
+            Self::build_with(&config, true, false, PROMPT, selection).await
         }
 
         async fn build_with(
@@ -5922,6 +5973,7 @@ auth = { method = "none" }"#;
             with_repository: bool,
             onboarded: bool,
             message: &str,
+            selection: MasterSelection,
         ) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-mrc-")
@@ -6030,19 +6082,7 @@ auth = { method = "none" }"#;
                         project_id: project.clone(),
                         expected_config_id: basis.config_id,
                         expected_source_hash: source_hash,
-                        selection: Box::new(MasterSelection {
-                            backend: MasterBackend::Rcli,
-                            pool_ref: reference("local-pool"),
-                            target_profile_ref: reference("local-profile"),
-                            route: RouteRequest {
-                                preferred_target: Some(reference("local-profile")),
-                                required_target: Some(reference("local-profile")),
-                                required_capabilities: vec![],
-                                account_ref: reference("local-account"),
-                                budget_ref: reference("conversation-budget"),
-                                resources: ResourceBudget::unit(),
-                            },
-                        }),
+                        selection: Box::new(selection),
                     },
                 },
             )
@@ -6390,6 +6430,100 @@ auth = { method = "none" }"#;
             original_config
         );
         assert!(!case.home.join(".backboard/keys.json").exists());
+        case.close().await;
+    }
+
+    /// Saves one account key in the fixture's engine folder, as the owner's key store does.
+    /// Inputs: the fixture, the key reference and the key.
+    fn save_key(case: &Fixture, reference: &str, key: &[u8]) {
+        let folder = case.root.path().join(crate::storage::accounts::ACCOUNT_KEYS);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        private_file(&folder.join(reference), key);
+    }
+
+    /// Tells whether a file, if it exists, holds some bytes. Inputs: the file and the bytes.
+    /// Output: the answer.
+    fn file_holds(path: &Path, needle: &[u8]) -> bool {
+        std::fs::read(path)
+            .is_ok_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+    }
+
+    /// DEC-180 T20 Q7: a listed master's keyed pool account reaches a prepared turn and its
+    /// profile: the proof names that account's own custody slot under this engine run and
+    /// the session's settings, the attempt runs on that account, the turn's profile is the
+    /// slot's empty home, and the saved key is in no proof, record or database page.
+    #[tokio::test]
+    async fn a_listed_master_turn_is_prepared_on_its_own_keyless_custody_slot() {
+        let case = Fixture::listed().await;
+        save_key(&case, "listed-key", LISTED_KEY);
+        let result = case.runtime(case.prepare()).await;
+        let ready = matches!(&result, Ok(MasterRuntimeResult::Prepared(_)));
+        assert!(ready, "{:?}", result.as_ref().err());
+        let Ok(MasterRuntimeResult::Prepared(prepared)) = result else {
+            unreachable!();
+        };
+        let (auth, body) = {
+            let mut db = case.db();
+            let tx = db.transaction().unwrap();
+            let body: String = tx
+                .query_row(
+                    "SELECT body FROM master_preparations WHERE session=?1 AND turn=?2",
+                    params![case.session.session_id.as_str(), case.turn.id.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let record: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let auth: MasterBootstrapAuth = serde_json::from_value(record["auth"].clone()).unwrap();
+            assert!(validate_bootstrap_auth(&tx, &prepared.session, &auth).is_ok());
+            let mut other = auth.clone();
+            if let MasterBootstrapAuth::Listed(proof) = &mut other {
+                proof.session_id = SessionId::new("other-session").unwrap();
+            }
+            assert!(validate_bootstrap_auth(&tx, &prepared.session, &other).is_err());
+            (auth, body)
+        };
+        let MasterBootstrapAuth::Listed(proof) = &auth else {
+            panic!("a listed master's turn must be proved by its listed account");
+        };
+        let proof: &ListedAccountProof = proof;
+        assert_eq!(proof.session_id, case.session.session_id);
+        assert_eq!(proof.database_instance, case.started.host.db_instance);
+        assert_eq!(proof.engine_epoch, case.started.host.engine_epoch);
+        assert_eq!(proof.config_id, case.config.id);
+        assert_eq!(proof.source_hash, case.session.source_hash);
+        assert_eq!(proof.connection.harness, reference("standin-acp"));
+        let key_ref = reference("listed-key");
+        let keyed = ModelAuthentication::ApiKey {
+            credential_ref: key_ref,
+        };
+        assert_eq!(proof.connection.auth, keyed);
+        assert_eq!(proof.custody_id.len(), 64);
+        assert_eq!(prepared.attempt.connection, proof.connection);
+        assert_eq!(prepared.profile.binding(), &auth.binding());
+        assert!(body.contains("listed-key"));
+        let acquire = MasterRuntimeCommand::AcquireProfile {
+            host: case.started.host.clone(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+            attempt_id: prepared.attempt.request.id.clone(),
+        };
+        let acquired = case.runtime(acquire).await;
+        let held = matches!(&acquired, Ok(MasterRuntimeResult::Profile(_)));
+        assert!(held, "{:?}", acquired.as_ref().err());
+        let Ok(MasterRuntimeResult::Profile(guard)) = acquired else {
+            unreachable!();
+        };
+        let home = guard.profile_path().unwrap();
+        assert!(home.is_dir());
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+        drop(guard);
+        let wal = case.path.with_extension("db-wal");
+        for page in [&case.path, &wal] {
+            assert!(!file_holds(page, LISTED_KEY), "{}", page.display());
+        }
+        assert!(!body.contains(std::str::from_utf8(LISTED_KEY).unwrap()));
         case.close().await;
     }
 
