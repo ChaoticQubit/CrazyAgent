@@ -62,6 +62,8 @@ fn launchd_plist_runs_the_recorded_executable_with_logs_and_restart() {
 \t</dict>
 \t<key>ExitTimeOut</key>
 \t<integer>30</integer>
+\t<key>ProcessType</key>
+\t<string>Interactive</string>
 \t<key>StandardOutPath</key>
 \t<string>/Users/owner/Library/Application Support/CrazyAgent/engine/logs/engine.log</string>
 \t<key>StandardErrorPath</key>
@@ -1386,6 +1388,39 @@ fn a_definition_naming_a_missing_program_is_reinstalled_not_started() {
         assert_eq!(own.repair(&bundled, true, true), Repair::Install);
         assert_eq!(own.repair(&bundled, false, false), Repair::Install);
     }
+}
+
+/// ENGINE-START-PRE-READY: an installed launchd definition without the `ProcessType`
+/// Interactive key, as every install before 2.4.2 wrote, is reinstalled when no engine
+/// answers or after an update stops it, since launchd throttles such an engine's CPU and
+/// I/O. The same definition with the key starts as it is.
+#[cfg(unix)]
+#[test]
+fn an_installed_launchd_definition_without_process_type_is_reinstalled_not_started() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = app_engine(temp.path(), "Applications");
+    let mut own = service(Platform::MacOs);
+    own.root = temp.path().join("engine");
+    own.executable = bundled.clone();
+    own.definition = temp.path().join("dev.crazyagent.engine.plist");
+    let key = "\t<key>ProcessType</key>\n\t<string>Interactive</string>\n";
+    let text = own.definition_text().unwrap();
+    let before = text.replace(key, "");
+    assert!(!before.contains("ProcessType"));
+    write_definition(&own.definition, &before, Platform::MacOs).unwrap();
+    assert_eq!(own.broken_program(), None);
+    assert!(!own.runs_another_program());
+    assert_eq!(
+        own.repair(&bundled, true, false),
+        Repair::Install,
+        "an installed plist without ProcessType Interactive must be reinstalled"
+    );
+    write_definition(&own.definition, &text, Platform::MacOs).unwrap();
+    assert_eq!(
+        own.repair(&bundled, true, false),
+        Repair::Start,
+        "an installed plist with ProcessType Interactive starts as it is"
+    );
 }
 
 /// RV-DS241-118: a definition naming an engine on a disk image or another disk (`/Volumes`)
