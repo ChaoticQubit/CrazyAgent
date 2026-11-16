@@ -33,7 +33,7 @@ use std::time::Duration;
 const CAPTURE_BYTES_MAX: u64 = 8 * 1024 * 1024;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
 /// How often a running master turn checks its grants against the policy the owner saved.
-const POLICY_CHECK_EVERY: Duration = Duration::from_secs(1);
+pub(super) const POLICY_CHECK_EVERY: Duration = Duration::from_secs(1);
 /// SQLite's refusal when another engine connection held the database write lock past the
 /// storage wait; the write was rolled back, so the turn is driven again (LB-28).
 const STORAGE_BUSY: &str = "database is locked";
@@ -392,7 +392,7 @@ impl OwnerRuntimeHandle {
     /// turn's sandbox profile granted. Inputs: the prepared turn, its id, and the level and
     /// toolchains it runs with. Output: why it must stop, none while covered, or the storage
     /// refusal.
-    async fn master_turn_narrowed(
+    pub(super) async fn master_turn_narrowed(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,

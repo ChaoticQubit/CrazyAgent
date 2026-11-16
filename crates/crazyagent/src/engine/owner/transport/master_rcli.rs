@@ -46,6 +46,7 @@ struct ActiveRcliMaster {
     generation: u64,
     deadline: Option<Instant>,
     reported: crate::usage::capture::Tokens,
+    granted: Vec<crate::sandbox::toolchains::Toolchain>,
 }
 
 fn require_rcli_connection(connection: &ModelConnection) -> Result<(), EngineError> {
@@ -267,6 +268,7 @@ impl OwnerRuntimeHandle {
             &prepared.agent_policy,
             &prepared.hidden_paths,
         )?;
+        let granted = prepared.agent_policy.allowed(&prepared.repository);
         if !text.is_empty() {
             launch.instructions = Some(super::master_host_launch::write_master_instructions(
                 &self.authority.root,
@@ -314,6 +316,7 @@ impl OwnerRuntimeHandle {
             generation: current.ordinal,
             deadline,
             reported: crate::usage::capture::Tokens::default(),
+            granted,
         };
         let observed = self
             .collect_rcli_master_turn(prepared, turn_id, &mut active)
@@ -352,6 +355,7 @@ impl OwnerRuntimeHandle {
             .await?;
         let mut prompted = false;
         let mut inspect_at = Instant::now();
+        let mut policy_checked = Instant::now();
         loop {
             if late(active.deadline) {
                 return Err(failure(TURN_DEADLINE));
@@ -360,6 +364,11 @@ impl OwnerRuntimeHandle {
                 let current = self.inspect_rcli_scope(prepared, turn_id, active).await?;
                 if current.phase == MasterTurnPhase::Cancelled {
                     return Ok(MasterRuntimeObservation::Cancelled);
+                }
+                if policy_checked.elapsed() >= super::master_runtime::POLICY_CHECK_EVERY {
+                    policy_checked = Instant::now();
+                    self.rcli_policy_covers(prepared, turn_id, &active.granted)
+                        .await?;
                 }
                 inspect_at = Instant::now() + INSPECT_INTERVAL;
             }
@@ -441,6 +450,27 @@ impl OwnerRuntimeHandle {
                     return Err(failure(failed_turn_code(completion.failure)));
                 }
             }
+        }
+    }
+
+    /// Tells whether the policy the owner saved now still covers what a running RCLI master
+    /// turn's sandbox granted at launch, its access and the toolchains fixed then, as native
+    /// turns check (RCLI-NARROWING), never reading the toolchains from the folder again.
+    /// Inputs: the prepared turn, its id and its granted toolchains. Output: Ok while
+    /// covered, else the narrowing's code or the storage refusal.
+    pub(super) async fn rcli_policy_covers(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        granted: &[crate::sandbox::toolchains::Toolchain],
+    ) -> Result<(), EngineError> {
+        let access = prepared.agent_policy.access;
+        match self
+            .master_turn_narrowed(prepared, turn_id, access, granted)
+            .await?
+        {
+            Some(narrowed) => Err(failure(narrowed.code())),
+            None => Ok(()),
         }
     }
 
