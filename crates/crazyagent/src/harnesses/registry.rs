@@ -1,5 +1,5 @@
 use super::manifest::{
-    self, DriverKind, LimitsKind, Manifest, RecordKind, Refused, Role, SubAgents,
+    self, DriverKind, LimitsKind, Manifest, RecordKind, Refused, Role, Rule, SubAgents,
 };
 use super::{AccountKind, HarnessSpec};
 use std::sync::{LazyLock, OnceLock};
@@ -55,11 +55,13 @@ const BUNDLED: [(&str, &str); 18] = [
 ];
 
 /// One harness of the registry: its manifest and what the engine can do with it. `spec`
-/// holds the catalog row once it has been built, so it is built at most once.
+/// holds the catalog row and `record_rules` the jsonl-append record's rules once each has
+/// been built, so each is built at most once.
 #[derive(Debug, Clone)]
 pub struct Harness {
     manifest: Manifest,
     spec: OnceLock<HarnessSpec>,
+    record_rules: OnceLock<Option<Vec<Rule>>>,
 }
 
 impl Harness {
@@ -83,6 +85,19 @@ impl Harness {
     /// a harness with no piped mode the engine drives.
     pub fn piped(&self) -> Option<DriverKind> {
         self.manifest.piped
+    }
+
+    /// The rules this harness's jsonl-append record is read by, from its manifest's terminal
+    /// settings, read on first use and kept, so a record read line by line reads no manifest
+    /// per line. Output: the rules, or none for a harness that keeps no jsonl-append record
+    /// or whose terminal settings do not read.
+    pub fn appended_rules(&self) -> Option<&[Rule]> {
+        let read = || {
+            let manifest = &self.manifest;
+            let settings = super::interactive::settings::TerminalSettings::read(manifest).ok()?;
+            (manifest.record == RecordKind::JsonlAppend).then(|| settings.rules().to_vec())
+        };
+        self.record_rules.get_or_init(read).as_deref()
     }
 
     /// How the engine reads back a live terminal session. Output: the record reader kind,
@@ -298,6 +313,7 @@ impl Registry {
             harnesses.push(Harness {
                 manifest,
                 spec: OnceLock::new(),
+                record_rules: OnceLock::new(),
             });
         }
         assert_eq!(harnesses.len(), files.len());
