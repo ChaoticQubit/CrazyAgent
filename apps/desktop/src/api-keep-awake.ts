@@ -10,6 +10,7 @@ export type HeatEnd = "critical" | "serious" | "never";
 export type HeatNotice = "serious" | "off";
 export type LidDisplay = "sleep" | "leave_on";
 export type DisplayAwake = "off" | "while_holding";
+export type LowPower = "battery_below40" | "on_battery" | "off";
 
 /** The Keep awake settings as the engine stores them (DEC-167), one field per setting. */
 export interface KeepAwakeSettings {
@@ -22,6 +23,7 @@ export interface KeepAwakeSettings {
   heat_notice: HeatNotice;
   lid_display: LidDisplay;
   display_awake: DisplayAwake;
+  low_power: LowPower;
 }
 
 export type KeepAwakeSettingId = keyof KeepAwakeSettings;
@@ -97,6 +99,7 @@ export const KEEP_AWAKE_OPEN = "crazyagent:keep-awake-open";
 export const KEEP_AWAKE_DEFAULTS: KeepAwakeSettings = {
   mode: "auto", grace: "min10", cap: "h24", lid: "ac_only", battery_floor: "pct10",
   heat_end: "critical", heat_notice: "serious", lid_display: "sleep", display_awake: "off",
+  low_power: "battery_below40",
 };
 
 interface SettingWords { id: KeepAwakeSettingId; label: string; help: string; options: readonly { value: string; label: string }[] }
@@ -122,6 +125,8 @@ export const KEEP_AWAKE_SETTINGS: readonly SettingWords[] = [
     options: [{ value: "sleep", label: "Sleep the display" }, { value: "leave_on", label: "Leave on" }] },
   { id: "display_awake", label: "Display awake with the lid open", help: "Whether a hold also keeps the display on. While it does, the screen stays unlocked.",
     options: [{ value: "off", label: "Off" }, { value: "while_holding", label: "While holding" }] },
+  { id: "low_power", label: "Low Power Mode", help: "During a hold on battery, turns on the computer's low power mode to save charge, and puts it back when the hold ends.",
+    options: [{ value: "battery_below40", label: "On battery below 40 %" }, { value: "on_battery", label: "Whenever on battery" }, { value: "off", label: "Off" }] },
 ];
 
 function assert(condition: boolean, message: string): asserts condition {
