@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(unix)]
 use crate::plugins::{Scope, ServerSpec};
 use crate::setup::pack::{GRAPH_ENTRY, PackKind, PackManifest, PackManifestEntry};
 use crate::setup::{RefusedTool, SetupAction, SetupStatus, progress};
@@ -25,7 +24,6 @@ const PRESENT: &str = "present";
 const SKILLS: [&str; 2] = ["skills", "global"];
 
 pub(crate) enum Command {
-    #[cfg(unix)]
     Install {
         id: String,
         source: String,
@@ -217,7 +215,6 @@ fn save_pack(tx: &Transaction<'_>, record: &PackRecord) -> Result<(), EngineErro
     Ok(())
 }
 
-#[cfg(unix)]
 fn taken(problem: EngineError) -> EngineError {
     match problem.0.as_str() {
         "skill_name_taken" | "server_name_taken" => error("pack_name_taken"),
@@ -354,7 +351,6 @@ fn restore(moved: &[(PathBuf, PathBuf)]) {
 /// What a new pin keeps from the pin it replaces: whether the entry is on, each skill's
 /// on/off state and per-project switches by skill name, the hooks the owner switched off
 /// ([`KeptHook`]), and the server when the new pin names the same one.
-#[cfg(unix)]
 struct Kept {
     enabled: bool,
     server: Option<String>,
@@ -368,7 +364,6 @@ struct Kept {
 /// when none is live: the entry was off, or the item they followed was removed. Inputs: the
 /// transaction, engine root, old row, new server and the moved-aside folders. Output: what
 /// the new pin keeps.
-#[cfg(unix)]
 fn carry(
     tx: &Transaction<'_>,
     root: &Path,
@@ -441,7 +436,6 @@ fn carry(
 /// under the entry's name is adopted as present and never replaced or removed. Inputs: the
 /// transaction, engine root, new row, skill folders and server, plus the lists of added
 /// and moved-aside folders. Output: any failure.
-#[cfg(unix)]
 fn install(
     tx: &Transaction<'_>,
     root: &Path,
@@ -1008,7 +1002,6 @@ fn kept_for<'a>(
 /// commit; replaced ones are deleted after it commits.
 /// Inputs: the engine connection, the engine root and the job. Output: nothing, or the
 /// plain reason.
-#[cfg(unix)]
 pub(crate) fn execute(
     connection: &mut Connection,
     root: &Path,
@@ -1021,6 +1014,7 @@ pub(crate) fn execute(
             skills,
             server,
         } => (id, source, skills, server),
+        #[cfg(unix)]
         Command::SeedHooks { id, plugin } => {
             let seeded = seed_hooks(connection, root, &id, &plugin);
             progress::with(root, |state| match &seeded {
@@ -1066,19 +1060,6 @@ pub(crate) fn execute(
             Err(problem)
         }
     }
-}
-
-/// Runs the only default-pack job that exists where setup cannot install packs: the sweep
-/// of folder and secret removals left by an earlier run. Inputs: the engine connection,
-/// engine root and job. Output: nothing, or a plain reason.
-#[cfg(not(unix))]
-pub(crate) fn execute(
-    connection: &mut Connection,
-    root: &Path,
-    command: Command,
-) -> Result<(), EngineError> {
-    let Command::Sweep = command;
-    sweep(connection, root)
 }
 
 #[cfg(test)]

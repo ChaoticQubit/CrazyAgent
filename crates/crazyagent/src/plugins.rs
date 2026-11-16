@@ -57,19 +57,34 @@ fn printable(text: &str) -> bool {
     !text.chars().any(char::is_control) && !crate::memory::hidden_text(text)
 }
 
+/// Whether a server command is a full path on this system: rooted at `/` on Unix. Input:
+/// the command. Output: the answer.
+#[cfg(unix)]
+pub(crate) fn absolute_command(command: &str) -> bool {
+    command.starts_with('/')
+}
+
+/// Whether a server command is a full path on this system: on Windows a plain drive path
+/// such as `C:\Program Files\nodejs\npx.cmd`, never a `/`, UNC, verbatim, device or stream
+/// path ([`crate::sandbox::windows_clean_text`]). Input: the command. Output: the answer.
+#[cfg(not(unix))]
+pub(crate) fn absolute_command(command: &str) -> bool {
+    crate::sandbox::windows_clean_text(command)
+}
+
 impl ServerSpec {
     /// Checks the command or URL before it is saved, approved or checked, refusing control and
-    /// hidden characters (`crate::memory::hidden_text`) anywhere in it.
-    /// Input: an untrusted spec. Output: Ok, or a code naming the first problem:
-    /// a relative or oversized command, too many or bad arguments, a command and
-    /// arguments over `COMMAND_LINE_BYTES_MAX` together, or a URL that is
-    /// not https (plain http is allowed only for this Mac) or carries a password.
+    /// hidden characters (`crate::memory::hidden_text`) anywhere in it. Input: an untrusted
+    /// spec. Output: Ok, or a code naming the first problem: a command that is not a full path
+    /// ([`absolute_command`]) or is oversized, too many or bad arguments, a command and
+    /// arguments over `COMMAND_LINE_BYTES_MAX` together, or a URL that is not https (plain
+    /// http is allowed only for this Mac) or carries a password.
     pub fn validate(&self) -> Result<(), EngineError> {
         match self {
             Self::Stdio { command, args } => {
                 if command.is_empty()
                     || command.len() > COMMAND_BYTES_MAX
-                    || !command.starts_with('/')
+                    || !absolute_command(command)
                     || !printable(command)
                 {
                     return Err(error("server_command_invalid"));
@@ -410,7 +425,7 @@ pub(crate) const CONTEXT_MODE_PACKAGE: &str = "context-mode";
 const PACKAGE_VERSION_BYTES_MAX: usize = 32;
 
 /// Reads the default pack's pinned context-mode launch from an approved spec: a rooted
-/// `npx`, the leading `/` [`ServerSpec::validate`] asks for on every platform, given exactly
+/// `npx`, as the full path [`ServerSpec::validate`] asks for on this system, given exactly
 /// `-y context-mode@<version>` with an exact version (RV-DS241-153). Input: the spec.
 /// Output: npx's folder and the version, or none for any other spec.
 pub(crate) fn pinned_context_mode(spec: &ServerSpec) -> Option<(&Path, &str)> {
@@ -1075,5 +1090,36 @@ mod tests {
             pinned_context_mode(&spec),
             Some((Path::new("/usr/local/bin"), "1.0.169"))
         );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// WIN-PACK-SEED: on Windows a server command is a plain drive path, such as the `npx.cmd`
+    /// setup finds, never a `/` path, a bare name, or a UNC, verbatim, device, drive-relative,
+    /// forward-slash or stream path ([`crate::sandbox::windows_clean_text`]).
+    #[test]
+    fn a_windows_server_command_is_a_plain_drive_path() {
+        let stdio = |command: &str| ServerSpec::Stdio {
+            command: command.into(),
+            args: vec!["-y".into()],
+        };
+        assert!(stdio(r"C:\Program Files\nodejs\npx.cmd").validate().is_ok());
+        for command in [
+            "/usr/local/bin/npx",
+            "npx.cmd",
+            r"\nodejs\npx.cmd",
+            r"\\server\share\npx.cmd",
+            r"\\?\C:\nodejs\npx.cmd",
+            r"\\.\pipe\npx",
+            r"C:nodejs\npx.cmd",
+            "C:/nodejs/npx.cmd",
+            r"C:\nodejs\npx.cmd:stream",
+        ] {
+            let refused = stdio(command).validate().unwrap_err();
+            assert_eq!(refused.0, "server_command_invalid", "{command}");
+        }
     }
 }

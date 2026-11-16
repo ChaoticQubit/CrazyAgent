@@ -2,7 +2,7 @@ import { call } from "./api";
 import type { Failure, Result } from "./api";
 import { failureCopy } from "./api-projects";
 import type { RunMode } from "./screens/project/run-command";
-import { isMac } from "./ui/keys";
+import { isMac, isWindows } from "./ui/keys";
 
 /** How often a project page with its IDE loaded tells the engine the owner still uses it, in
  * milliseconds. */
@@ -150,7 +150,7 @@ export function ideReadFailed(failure: Failure, platform: string): { line: strin
  * linux, or the string itself. */
 export function desktopPlatform(platform: string = typeof navigator === "undefined" ? "" : navigator.platform): string {
   if (isMac(platform)) return "macos";
-  if (/^Win/i.test(platform)) return "windows";
+  if (isWindows(platform)) return "windows";
   if (/^Linux/i.test(platform)) return "linux";
   return platform;
 }

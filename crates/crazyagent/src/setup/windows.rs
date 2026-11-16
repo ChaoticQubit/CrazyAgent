@@ -279,6 +279,33 @@ impl Installer for WindowsInstaller {
         }
     }
 
+    fn program(&self, name: &str) -> Option<PathBuf> {
+        self.lookup_program(name).ok()
+    }
+
+    /// Finds a pack server's program: uv as the uv setup runs it ([`Self::uv`]) when it also
+    /// passes the tool resolver's place checks, any other name as `<name>.cmd`, then
+    /// `<name>.exe`, in the resolver's places only. A name that is empty, hidden or holds a
+    /// path or drive separator is refused. Input: the name. Output: the file, or why not.
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
+        if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\', ':']) {
+            return Err(super::program_not_found(name));
+        }
+        if name == "uv" {
+            return self
+                .uv()
+                .filter(|uv| matches!(crate::tools::check_place(&self.places, uv), Some(Ok(()))))
+                .ok_or_else(|| super::program_not_found(name));
+        }
+        ["cmd", "exe"]
+            .iter()
+            .find_map(|extension| {
+                crate::tools::resolve(&format!("{name}.{extension}"), &self.places).ok()
+            })
+            .map(|found| found.entry)
+            .ok_or_else(|| super::program_not_found(name))
+    }
+
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {
         let wanted = match (dep, pin) {
             (Dependency::Tmux, _) => return Version::parse(CONPTY),
@@ -547,5 +574,83 @@ mod tests {
                 Err(InstallError("setup_pin_invalid"))
             );
         }
+    }
+
+    /// WIN-PACK-SEED: a pack server's program is found as `<name>.cmd`, then `<name>.exe`,
+    /// only in a folder the installer's places keep, never by a bare file, a path, a drive
+    /// or stream name, and uv as the uv setup runs it, from the owner's WinGet Links.
+    #[test]
+    fn a_pack_program_is_found_as_cmd_or_exe_in_kept_places_and_uv_as_setup_runs_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = crate::sandbox::canonical(temp.path()).unwrap();
+        let bin = base.join("bin");
+        let links = base
+            .join("local")
+            .join("Microsoft")
+            .join("WinGet")
+            .join("Links");
+        let elsewhere = base.join("elsewhere");
+        for file in [
+            bin.join("npx.cmd"),
+            bin.join("npx.exe"),
+            bin.join("node.exe"),
+            bin.join("tool"),
+            links.join("uv.exe"),
+            elsewhere.join("other.cmd"),
+        ] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"program").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let places = crate::tools::Places::new(vec![bin.clone()], None);
+        let installer =
+            WindowsInstaller::new(&base.join("app"), Some(&base.join("local")), places).unwrap();
+        assert_eq!(installer.program("npx"), Some(bin.join("npx.cmd")));
+        assert_eq!(installer.program("node"), Some(bin.join("node.exe")));
+        assert_eq!(installer.program("uv"), Some(links.join("uv.exe")));
+        for name in [
+            "tool",
+            "other",
+            "",
+            ".npx",
+            "../npx",
+            r"..\npx",
+            "bin/npx",
+            r"bin\npx",
+            "C:npx",
+            "npx.cmd:x",
+        ] {
+            assert_eq!(installer.program(name), None, "{name}");
+        }
+        assert_eq!(
+            installer.lookup_program("tool"),
+            Err(crate::setup::program_not_found("tool"))
+        );
+    }
+
+    /// WIN-PACK-SEED: the uv a pack server is seeded with passes the tool resolver's place
+    /// checks, so a WinGet Links copy agents can write, here inside a `.crazyagent` folder,
+    /// is never stored as an approved server command.
+    #[test]
+    fn a_pack_server_is_never_seeded_with_a_uv_agents_can_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = crate::sandbox::canonical(temp.path()).unwrap();
+        let local = base.join(".crazyagent").join("local");
+        let links = local.join("Microsoft").join("WinGet").join("Links");
+        std::fs::create_dir_all(&links).unwrap();
+        let uv = links.join("uv.exe");
+        std::fs::write(&uv, b"uv").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let installer = WindowsInstaller::new(&base.join("app"), Some(&local), places()).unwrap();
+        assert_eq!(installer.uv_on(None), Some(uv));
+        assert_eq!(installer.program("uv"), None);
     }
 }
