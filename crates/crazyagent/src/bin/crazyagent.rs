@@ -21,6 +21,7 @@ crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-s
 crazyagent tui\n\
 crazyagent tui SOCKET\n\
 crazyagent service install|uninstall|status|start|stop|link-cli\n\
+crazyagent keep-awake restore\n\
 crazyagent update [--check] [--channel stable|dev]\n\
 crazyagent team-mcp DROP_FILE [MAILBOX_DIR [OFF_TOOL ...]]\n\
 crazyagent team-mcp-live MAILBOX_DIR [OFF_TOOL ...]\n\
@@ -85,6 +86,15 @@ fn main() -> ExitCode {
     }
     if args.first().is_some_and(|arg| arg == "service") {
         return match run_service(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args.first().is_some_and(|arg| arg == "keep-awake") {
+        return match run_keep_awake(&args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{error}");
@@ -1097,6 +1107,29 @@ async fn offer_restart(
 
 /// Runs `crazyagent service ACTION` for the default engine service. Input: the arguments.
 /// Output: Ok after the action and its report on stdout, or the failing step.
+/// `crazyagent keep-awake restore` (plan Task 14, for an uninstaller): puts back every
+/// setting Keep awake changed that an engine left recorded under the default engine root,
+/// while no engine runs there. Input: the arguments. Output: Ok, or why not in words.
+fn run_keep_awake(args: &[OsString]) -> Result<(), String> {
+    let usage = "usage: crazyagent keep-awake restore";
+    let [_, action] = args else {
+        return Err(usage.into());
+    };
+    if action != "restore" {
+        return Err(usage.into());
+    }
+    let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;
+    if crazyagent::service::answering(&layout.socket()) {
+        return Err(
+            "The engine is running and puts these settings back itself. Stop it, then try again."
+                .into(),
+        );
+    }
+    crazyagent::keep_awake::restore(layout.root()).map_err(str::to_owned)?;
+    println!("Keep awake has nothing left to put back.");
+    Ok(())
+}
+
 fn run_service(args: &[OsString]) -> Result<(), String> {
     let usage = "usage: crazyagent service install|uninstall|status|start|stop|link-cli";
     let [_, action] = args else {

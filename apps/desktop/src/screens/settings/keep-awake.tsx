@@ -73,11 +73,23 @@ function LidHelperLine({ view, saving, onLid }: { view: KeepAwakeView; saving: b
   </SettingLine>;
 }
 
+const LID_CRASH_GAP = "If the engine stops by a crash during a hold, the lid stays at Do nothing until the engine starts again.";
+
+/** The lid setting's line on Windows, under the lid-closed hold setting (DEC-167 addendum
+ * 26): what a crash during a hold leaves, and Put the lid setting back now. Inputs: the
+ * view, a lock flag and the command handler. Output: the line, or null off Windows. */
+function LidSettingLine({ view, saving, onLid }: { view: KeepAwakeView; saving: boolean; onLid: (action: LidAction) => void }) {
+  if (view.platform !== "windows") return null;
+  return <SettingLine label="Lid setting" help={LID_CRASH_GAP}>
+    <Button disabled={saving} onClick={() => onLid("put_lid_back")}>Put the lid setting back now</Button>
+  </SettingLine>;
+}
+
 /** Settings, Keep awake as a view of its state: the title in every state, then every
  * setting with its options, the stored one picked, a changed mark away from the default,
- * the lid helper's line on macOS, and Save changes, enabled only after a pick that differs
- * from what is stored. Inputs: the view read, the picks, a saving flag, the last problem
- * and the handlers. Output: the tab. */
+ * the lid helper's line on macOS or the lid setting's line on Windows, and Save changes,
+ * enabled only after a pick that differs from what is stored. Inputs: the view read, the
+ * picks, a saving flag, the last problem and the handlers. Output: the tab. */
 export function KeepAwakeSettingsView({ view, picks, saving, problem, onPick, onSave, onLid, onRetry }: {
   view: Loaded<KeepAwakeView>;
   picks: KeepAwakePicks;
@@ -105,6 +117,7 @@ export function KeepAwakeSettingsView({ view, picks, saving, problem, onPick, on
         {section.ids.map((id) => <Fragment key={id}>
           <OptionLine id={id} view={view.value} value={sent[id]} saving={saving} onPick={onPick} />
           {id === "lid" && <LidHelperLine view={view.value} saving={saving} onLid={onLid} />}
+          {id === "lid" && <LidSettingLine view={view.value} saving={saving} onLid={onLid} />}
         </Fragment>)}
       </SettingSection>)}
       <div className="set-body">

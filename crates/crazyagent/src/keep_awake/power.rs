@@ -98,7 +98,9 @@ pub fn platform_lid(root: &Path) -> Option<LidReader> {
     assert!(!root.as_os_str().is_empty());
     #[cfg(target_os = "macos")]
     let lid = Some(super::hold_macos::lid_reader());
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let lid = Some(super::lid_windows::lid_reader(root));
+    #[cfg(not(any(target_os = "macos", windows)))]
     let lid = None;
     lid
 }

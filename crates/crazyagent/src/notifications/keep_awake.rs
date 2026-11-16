@@ -179,12 +179,22 @@ pub(crate) fn left_over(connection: &Connection, leftover: &Leftover) -> Result<
     tx.commit().map_err(error)
 }
 
-/// Writes or clears the restore row of a lid helper that cannot read its journal (QUESTION
-/// 36b), under its own subject, which the engine start's undo leaves alone. Inputs: the
-/// engine database outside any transaction and whether the helper's journal is unreadable.
-/// Output: Ok, or the SQLite failure, with nothing changed.
+/// Writes or clears the restore row of a lid line that cannot put back or read its
+/// journal (QUESTION 36b), under its own subject, which the engine start's undo leaves
+/// alone. On Windows a clear also clears the engine start's row for a lid close action
+/// not put back, as the lid line just put it back (DEC-167 addendum 26). Inputs: the
+/// engine database outside any transaction and whether the journal is unreadable. Output:
+/// Ok, or the SQLite failure.
 pub(crate) fn lid_journal(connection: &Connection, unreadable: bool) -> Result<(), EngineError> {
     assert!(connection.is_autocommit());
+    #[cfg(windows)]
+    if !unreadable {
+        let entry = format!("{ENTRY_SUBJECT}{}", crate::keep_awake::lid_windows::KIND);
+        let gone = connection
+            .execute("DELETE FROM keep_awake_restore WHERE subject=?1", [&entry])
+            .map_err(error)?;
+        assert!(gone <= 1);
+    }
     let changed = if unreadable {
         connection.execute(
             "INSERT INTO keep_awake_restore(subject,unreadable) VALUES(?1,1) \
@@ -230,9 +240,11 @@ pub(super) fn approvals(
 }
 
 /// The line of a restore item. Inputs: its subject and whether the journal could not be
-/// read. Output: the line; the lid helper row has the fix of threat model section 8.
+/// read. Output: the line; the lid row has the fix of threat model section 8 on macOS and
+/// the Windows fix on Windows.
 fn restore_text(subject: &str, unreadable: bool) -> &'static str {
     match (subject == LID_SUBJECT, unreadable) {
+        (true, _) if cfg!(windows) => LID_SETTING_TEXT,
         (true, _) => LID_JOURNAL_TEXT,
         (false, true) => NOT_READ,
         (false, false) => NOT_PUT_BACK,

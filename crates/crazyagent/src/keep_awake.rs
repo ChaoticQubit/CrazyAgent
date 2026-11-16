@@ -9,7 +9,7 @@ mod hold_macos;
 mod hold_windows;
 pub mod journal;
 #[cfg(any(windows, test))]
-mod lid_windows;
+pub(crate) mod lid_windows;
 pub mod power;
 pub mod power_linux;
 pub mod power_macos;
@@ -62,8 +62,9 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS keep_awake_state (
 )";
 
 /// One owner change to Keep awake: start a manual timer of 1 to 1440 minutes, move a
-/// running timer later, end the hold now, save the settings, or a macOS lid helper
-/// command: Turn on lid-closed hold, or Remove lid helper (QUESTION 35i, 35j, 36a).
+/// running timer later, end the hold now, save the settings, a macOS lid helper command:
+/// Turn on lid-closed hold, or Remove lid helper (QUESTION 35i, 35j, 36a), or Put the lid
+/// setting back now on Windows (DEC-167 addendum 26).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum KeepAwakeAction {
@@ -104,6 +105,8 @@ pub fn refusal_words(code: &str) -> Option<&'static str> {
         "keep_awake_not_holding" => Some("Nothing is held right now."),
         "keep_awake_minutes_invalid" => Some("Enter whole minutes from 1 to 1440."),
         "keep_awake_no_lid_helper" => Some("Lid-closed hold is set up only on macOS."),
+        "keep_awake_no_lid_setting" => Some("Put the lid setting back is only on Windows."),
+        "keep_awake_lid_held" => Some("The lid setting goes back when this hold ends."),
         _ => None,
     }
 }
@@ -281,8 +284,9 @@ fn advance(settings: &KeepAwakeSettings, stored: &mut Stored, work: u32, now_ms:
 /// waits in the run state, numbered, until the keeper hands it to the lid line. Inputs:
 /// the change, the settings, the state and the time. Output: none when it applied, or the
 /// plain code it is refused with: `keep_awake_off`, `keep_awake_no_timer`,
-/// `keep_awake_minutes_invalid`, `keep_awake_not_holding` or `keep_awake_no_lid_helper`
-/// off macOS.
+/// `keep_awake_minutes_invalid`, `keep_awake_not_holding`, `keep_awake_no_lid_helper` off
+/// macOS, `keep_awake_no_lid_setting` off Windows, or `keep_awake_lid_held` while a hold
+/// covers the lid (QUESTION 22:58 Q3).
 fn change(
     action: &KeepAwakeAction,
     settings: &mut KeepAwakeSettings,
@@ -334,15 +338,30 @@ fn change(
                 KeepAwakeAction::TurnOnLidHold => power::LidCommand::TurnOn,
                 _ => power::LidCommand::Remove,
             };
-            let number = stored
-                .lid_order
-                .map_or(1, |order| order.number.wrapping_add(1).max(1));
-            stored.lid_order = Some(power::LidOrder { command, number });
-            assert!(number > 0);
+            lid_order(stored, command);
         }
-        KeepAwakeAction::PutLidBack => {}
+        KeepAwakeAction::PutLidBack => {
+            if !cfg!(windows) {
+                return Some("keep_awake_no_lid_setting");
+            }
+            if matches!(stored.decision.want, Want::IdleAndLid { .. }) {
+                return Some("keep_awake_lid_held");
+            }
+            lid_order(stored, power::LidCommand::PutBack);
+        }
     }
     None
+}
+
+/// Numbers one owner lid command and leaves it in the run state, where the keeper finds
+/// it and hands it to the lid line once. Inputs: the run state and the command.
+fn lid_order(stored: &mut Stored, command: power::LidCommand) {
+    let number = stored
+        .lid_order
+        .map_or(1, |order| order.number.wrapping_add(1).max(1));
+    stored.lid_order = Some(power::LidOrder { command, number });
+    assert!(number > 0);
+    assert_eq!(stored.lid_order.map(|order| order.command), Some(command));
 }
 
 /// Builds the owner's view from the settings and the run state.
@@ -469,10 +488,15 @@ fn hold_failed(connection: &Connection, now_ms: i64) -> Result<KeepAwakeView, En
     Ok(view_of(settings, &stored))
 }
 
-/// Undoes one persistent change an earlier engine recorded. No kind of change exists yet,
-/// so every entry is refused and stays recorded. Input: the entry. Output: the refusal.
+/// Undoes one persistent change an earlier engine recorded: on Windows the lid close
+/// action a hold changed (DEC-167 addendum 26); every other kind is refused and stays
+/// recorded. Input: the entry. Output: Ok, or why it is not undone.
 fn undo(entry: &journal::Entry) -> Result<(), EngineError> {
     assert!(!entry.kind.is_empty());
+    #[cfg(windows)]
+    if entry.kind == lid_windows::KIND {
+        return lid_windows::undo_with(&mut lid_windows::Windows, entry);
+    }
     Err(error(format!(
         "keep_awake_journal_kind_unknown: {}",
         entry.kind
@@ -534,7 +558,13 @@ pub const RESTORE_UNREADABLE: &str = "Keep awake could not read its list of sett
 /// is left to put back, else the owner's sentence for what is left.
 pub fn restore(root: &Path) -> Result<(), &'static str> {
     assert!(!root.as_os_str().is_empty());
-    Err("not built yet")
+    let said = match reconcile(root) {
+        Leftover::Kinds(kinds) if kinds.is_empty() => Ok(()),
+        Leftover::Kinds(_) => Err(RESTORE_LEFT),
+        Leftover::Unreadable => Err(RESTORE_UNREADABLE),
+    };
+    assert!(said.is_ok() || !said.unwrap_err().is_empty());
+    said
 }
 
 /// Cuts a logged failure to at most 300 characters. Input: the text. Output: its start.
@@ -728,8 +758,10 @@ impl Keeper {
     /// Writes the restore row while the lid line says the helper cannot read its journal,
     /// and clears it once the helper holds the lid, the one support that shows its journal
     /// reads; any other support, a rule Off or a daemon not enabled among them, leaves the
-    /// row as it is. A write that fails is logged and tried again after the next reading.
-    /// Input: the engine database outside any transaction.
+    /// row as it is. On Windows the lid line reads its own journal at every ask, so any
+    /// other support clears the row (DEC-167 addendum 26). A write that fails is logged and
+    /// tried again after the next reading. Input: the engine database outside any
+    /// transaction.
     fn note_lid_journal(&mut self, connection: &Connection) {
         let Some(reading) = self.reading.as_ref().filter(|_| self.lid_line) else {
             return;
@@ -737,6 +769,7 @@ impl Keeper {
         let unreadable = match reading.lid_support {
             LidSupport::SleepNotRestored => true,
             LidSupport::Held => false,
+            _ if cfg!(windows) => false,
             _ => return,
         };
         if self.lid_journal == Some(unreadable) {

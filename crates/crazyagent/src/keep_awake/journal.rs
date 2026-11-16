@@ -159,24 +159,9 @@ impl Journal {
     /// the first failure; the entries that failed stay recorded.
     pub fn reconcile(
         &mut self,
-        mut undo: impl FnMut(&Entry) -> Result<(), EngineError>,
+        undo: impl FnMut(&Entry) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
-        let mut kept = Vec::new();
-        let mut first = None;
-        for entry in self.entries.iter().rev() {
-            if let Err(problem) = undo(entry) {
-                kept.push(entry.clone());
-                first = first.or(Some(problem));
-            }
-        }
-        kept.reverse();
-        assert!(kept.len() <= self.entries.len());
-        assert_eq!(kept.is_empty(), first.is_none());
-        if kept.len() != self.entries.len() {
-            self.persist(&kept)?;
-            self.entries = kept;
-        }
-        first.map_or(Ok(()), Err)
+        self.undo_where(|_| true, undo)
     }
 
     /// Undoes the recorded changes of one kind, newest first, and forgets the ones whose
@@ -186,10 +171,38 @@ impl Journal {
     pub fn settle(
         &mut self,
         kind: &str,
-        _undo: impl FnMut(&Entry) -> Result<(), EngineError>,
+        undo: impl FnMut(&Entry) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
         assert!(!kind.is_empty());
-        Ok(())
+        self.undo_where(|entry| entry.kind == kind, undo)
+    }
+
+    /// Undoes the chosen entries, newest first, and forgets the ones whose undo worked;
+    /// every other entry stays, in its place. Inputs: which entries to undo and the undo for
+    /// one entry. Output: Ok when no chosen entry is left, else the first failure.
+    fn undo_where(
+        &mut self,
+        chosen: impl Fn(&Entry) -> bool,
+        mut undo: impl FnMut(&Entry) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        let mut kept = Vec::new();
+        let mut first = None;
+        for entry in self.entries.iter().rev() {
+            if !chosen(entry) {
+                kept.push(entry.clone());
+            } else if let Err(problem) = undo(entry) {
+                kept.push(entry.clone());
+                first = first.or(Some(problem));
+            }
+        }
+        kept.reverse();
+        assert!(kept.len() <= self.entries.len());
+        assert_eq!(kept.iter().any(&chosen), first.is_some());
+        if kept.len() != self.entries.len() {
+            self.persist(&kept)?;
+            self.entries = kept;
+        }
+        first.map_or(Ok(()), Err)
     }
 
     /// Replaces the journal file with the given entries: writes a draft, syncs it, renames
