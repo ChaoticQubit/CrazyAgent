@@ -17213,3 +17213,12 @@ fn an_own_clone_agent_on_the_tip_is_told_nothing() {
     ));
     assert!(engine_notes(&case).is_empty());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_engine_git_profile_ends_with_the_power_helper_deny() {
+    let deny = crate::sandbox::power_helper_denies();
+    assert!(deny.contains("/private/var/run/dev.crazyagent.power.sock"));
+    let profile = super::git::WORK_TREE_PROFILE;
+    assert!(profile.ends_with(&deny), "{profile}");
+}

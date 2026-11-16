@@ -252,6 +252,28 @@ const MACH_SERVICES: &[&str] = &[
     "com.apple.SystemConfiguration.configd",
 ];
 
+/// The Keep awake lid helper's socket as Seatbelt sees it at connect, the resolved path
+/// (`/var` is a link to `/private/var`), and the label launchd runs it under.
+pub(crate) const POWER_HELPER_SOCKET: &str = "/private/var/run/dev.crazyagent.power.sock";
+pub(crate) const POWER_HELPER_LABEL: &str = "dev.crazyagent.power";
+const POWER_HELPER_SPELLINGS: [&str; 2] = [
+    "/var/run/dev.crazyagent.power.sock",
+    POWER_HELPER_SOCKET,
+];
+
+/// The lines every agent, master, research, priming, IDE and engine git profile ends with, so
+/// no earlier allow reaches the Keep awake lid helper (threat model section 7, C6). Output: the
+/// text.
+pub(crate) fn power_helper_denies() -> String {
+    power_helper_denies_for(&POWER_HELPER_SPELLINGS)
+}
+
+/// The same lines for sockets at other paths, which only rows use. Input: the socket paths.
+/// Output: the text.
+pub(crate) fn power_helper_denies_for(_sockets: &[&str]) -> String {
+    String::new()
+}
+
 const KEYCHAIN_SERVICES: &[&str] = &[
     "com.apple.SecurityServer",
     "com.apple.securityd",

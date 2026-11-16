@@ -3221,3 +3221,41 @@ fn the_project_instructions_file_is_read_only_to_the_ide_server() {
     }
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
+
+#[test]
+fn the_ide_profile_ends_with_the_power_helper_deny() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let data = fs::canonicalize(scratch.path()).unwrap();
+    let home = data.join("ide").join("p1").join("server");
+    let build = data.join("ide").join("builds").join("v1");
+    let elsewhere = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = fs::canonicalize(elsewhere.path()).unwrap();
+    for path in [&home, &build] {
+        folder(path);
+    }
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let text = profile(&grants, PORT, closed(), &[], AgentFilesRule::default()).unwrap();
+    let deny = crate::sandbox::power_helper_denies();
+    assert!(deny.contains("/private/var/run/dev.crazyagent.power.sock"));
+    assert!(text.ends_with(&deny), "{text}");
+    let at = text.len() - deny.len();
+    assert!(text.rfind("(allow ").is_some_and(|allow| allow < at));
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}

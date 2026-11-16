@@ -1,6 +1,10 @@
-use super::{MACH_SERVICES, ProjectSandbox, SandboxNetwork, priming_profile};
+use super::{
+    MACH_SERVICES, POWER_HELPER_SOCKET, ProjectSandbox, SandboxError, SandboxNetwork, policy,
+    power_helper_denies, power_helper_denies_for, priming_profile,
+};
 use crate::keep_awake::{Want, platform_hold};
 use std::fs;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -164,4 +168,119 @@ fn the_engines_own_hold_still_works_beside_a_confined_agent() {
     assert!(until(|| engine_holders(pid) == 0));
     engine.kill().unwrap();
     engine.wait().unwrap();
+}
+
+const NC: &str = "/usr/bin/nc";
+const SH: &str = "/bin/sh";
+const HELPER_DENY: &str = concat!(
+    "(deny network-outbound\n",
+    "  (remote unix-socket (path-literal \"/var/run/dev.crazyagent.power.sock\"))\n",
+    "  (remote unix-socket (path-literal \"/private/var/run/dev.crazyagent.power.sock\")))\n",
+    "(deny mach-lookup (global-name \"dev.crazyagent.power\"))\n"
+);
+
+/// Connects to a Unix socket under a profile written as given, with `nc -U`. Inputs: the case's
+/// sandbox, the profile path and text, and the socket. Output: the finished `nc`.
+fn connect_under(sandbox: &ProjectSandbox, profile: &Path, text: &str, socket: &Path) -> Output {
+    fs::write(profile, text).unwrap();
+    let mut command = sandbox.command(profile, Path::new(NC));
+    command
+        .args(["-U", socket.to_str().unwrap()])
+        .current_dir(sandbox.project_root())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::spawn_gate::output(&mut command).unwrap()
+}
+
+#[test]
+fn an_agent_sandbox_cannot_connect_to_the_power_helper_socket() {
+    let Case {
+        _temp: temp,
+        profile,
+        sandbox,
+    } = case(SandboxNetwork::Only(Vec::new()));
+    let socket = temp.path().canonicalize().unwrap().join("helper.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let grant = policy::AccessGrant::Socket {
+        path: socket.clone(),
+    };
+    let sandbox = sandbox.grant_access(&[grant], None).unwrap();
+    let granted = sandbox.profile();
+    assert_eq!(power_helper_denies(), HELPER_DENY);
+    assert!(granted.ends_with(HELPER_DENY), "the real profile ends with the helper deny");
+    let served = std::thread::spawn(move || listener.accept().map(drop));
+    let open = connect_under(&sandbox, &profile, &granted, &socket);
+    assert!(open.status.success(), "{}", String::from_utf8_lossy(&open.stderr));
+    served.join().unwrap().unwrap();
+    let path = socket.to_str().unwrap();
+    let denied = format!("{granted}{}", power_helper_denies_for(&[path]));
+    assert!(denied.ends_with(&format!(
+        concat!(
+            "(deny network-outbound\n  (remote unix-socket (path-literal \"{}\")))\n",
+            "(deny mach-lookup (global-name \"dev.crazyagent.power\"))\n"
+        ),
+        path
+    )));
+    let shut = connect_under(&sandbox, &profile, &denied, &socket);
+    assert!(!shut.status.success());
+    let said = String::from_utf8_lossy(&shut.stderr);
+    assert!(said.contains("Operation not permitted"), "a deny after the grant wins: {said}");
+}
+
+#[test]
+fn a_socket_grant_naming_the_power_helper_is_refused() {
+    for spelling in [
+        "/var/run/dev.crazyagent.power.sock",
+        "/private/var/run/dev.crazyagent.power.sock",
+    ] {
+        let grant = policy::AccessGrant::Socket {
+            path: PathBuf::from(spelling),
+        };
+        let refused = case(SandboxNetwork::Only(Vec::new()))
+            .sandbox
+            .grant_access(&[grant], None)
+            .map(drop);
+        let named = matches!(
+            &refused,
+            Err(SandboxError::Invalid(reason)) if reason.contains("lid helper")
+        );
+        assert!(named, "{spelling}: {refused:?}");
+    }
+}
+
+#[test]
+fn the_power_helper_deny_comes_after_every_allow_in_every_profile() {
+    let open = case(SandboxNetwork::Open);
+    let limited = case(SandboxNetwork::Only(Vec::new()));
+    let folder = limited._temp.path().canonicalize().unwrap();
+    let priming = priming_profile(&folder, Path::new("/usr/bin/true"));
+    for text in [open.sandbox.profile(), limited.sandbox.profile(), priming] {
+        assert!(text.ends_with(HELPER_DENY), "{text}");
+        let deny = text.len() - HELPER_DENY.len();
+        assert!(text.rfind("(allow ").is_some_and(|allow| allow < deny));
+        assert_eq!(text.matches(POWER_HELPER_SOCKET).count(), 1);
+    }
+}
+
+#[test]
+fn an_agent_sandbox_cannot_write_the_app_bundle() {
+    let case = case(SandboxNetwork::Only(Vec::new()));
+    let root = case._temp.path().canonicalize().unwrap();
+    let contents = root.join("Applications/CrazyAgent.app/Contents");
+    let helper = contents.join("MacOS/crazyagent-power-helper");
+    let plist = contents.join("Library/LaunchDaemons/dev.crazyagent.power.plist");
+    for file in [&helper, &plist] {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "signed\n").unwrap();
+    }
+    for file in [&helper, &plist] {
+        let script = format!("echo changed > '{}'", file.display());
+        let wrote = confined(&case, SH, &["-c", &script]);
+        assert!(!wrote.status.success(), "{}", file.display());
+        assert_eq!(fs::read_to_string(file).unwrap(), "signed\n");
+        let moved = confined(&case, "/bin/mv", &[file.to_str().unwrap(), "/tmp/out"]);
+        assert!(!moved.status.success(), "{}", file.display());
+        assert!(file.exists());
+    }
 }

@@ -368,7 +368,7 @@ pub(super) struct Repo {
 /// repository's `hooks` or `config`, whatever an agent swaps a path for during the step.
 /// Paths reach it as parameters, so no path text is read as profile text.
 #[cfg(target_os = "macos")]
-const WORK_TREE_PROFILE: &str = "(version 1)\n\
+pub(super) const WORK_TREE_PROFILE: &str = "(version 1)\n\
 (allow default)\n\
 (deny file-read-data (require-not (require-any (literal \"/\") (subpath \"/System\") (subpath \"/usr/lib\") (subpath \"/usr/share\") (subpath \"/dev\") (subpath (param \"TOOLS\")) (subpath (param \"WORK\")) (subpath (param \"COMMON\")) (literal (param \"EXCLUDES\")))))\n\
 (deny file-write* (require-not (require-any (literal \"/dev/null\") (subpath (param \"WRITE\")) (literal (param \"INDEX\")) (literal (param \"INDEX_LOCK\")))))\n";
