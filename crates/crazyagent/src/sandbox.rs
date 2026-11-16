@@ -486,7 +486,7 @@ pub fn agent_env<'a>(
 /// One launch's exception to the agent variable guard (DEC-180 Task 20, rv-sa241 ruling
 /// t20-q1): the names a listed master's manifest gives its account key, each allowed to
 /// hold only this launch's own relay token or the keyless placeholder.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Handed<'a> {
     names: &'a [&'a str],
     value: &'a str,
@@ -4644,7 +4644,7 @@ mod handed_tests {
     fn a_launch_hands_its_own_relay_token_only_in_the_names_its_manifest_lists() {
         let (own, other) = (token('a'), token('b'));
         let handed = Handed::new(&NAMES, &own);
-        assert!(handed.is_ok(), "{handed:?}");
+        assert!(handed.is_ok(), "{:?}", handed.as_ref().err());
         let handed = handed.unwrap();
         let given = with(Some(handed), "OPENAI_API_KEY", &own);
         assert!(given.is_ok(), "{given:?}");
@@ -4667,7 +4667,7 @@ mod handed_tests {
     #[test]
     fn a_keyless_launch_hands_only_the_placeholder_and_never_a_saved_key() {
         let keyless = Handed::new(&NAMES, LOCAL_PLACEHOLDER);
-        assert!(keyless.is_ok(), "{keyless:?}");
+        assert!(keyless.is_ok(), "{:?}", keyless.as_ref().err());
         let given = with(Some(keyless.unwrap()), "OPENAI_API_KEY", LOCAL_PLACEHOLDER);
         assert!(given.is_ok(), "{given:?}");
         assert!(with(None, "OPENAI_API_KEY", LOCAL_PLACEHOLDER).is_err());

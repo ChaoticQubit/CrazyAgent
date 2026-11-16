@@ -122,6 +122,7 @@ mod launch {
     use std::path::Path;
 
     const SENTINEL: &str = "sk-listed-master-saved-key-0123456789abcdef";
+    const STANDIN: &str = include_str!("../../../../tests/fixtures/harness/standin-acp.yaml");
     const URL: &str = "http://127.0.0.1:9/v1";
 
     /// The stand-in ACP master a test build's registry finds. Output: the harness.
@@ -211,18 +212,22 @@ mod launch {
         }
     }
 
-    /// The stand-in ACP master with one more variable in its account entry. Input: the
-    /// manifest line that sets it. Output: the harness, kept for the test run.
-    fn standin_with(line: &str) -> &'static Harness {
-        let text = include_str!("../../../../tests/fixtures/harness/standin-acp.yaml");
-        let model = "      STANDIN_MODEL: \"{model}\"\n";
-        assert!(text.contains(model));
-        let text = text.replace(model, &format!("{model}      {line}\n"));
-        let built = Registry::build(&[("standin-acp", text.as_str())]);
+    /// A harness built from one manifest text, kept for the test run. Input: the text.
+    /// Output: the harness.
+    fn built(text: &str) -> &'static Harness {
+        let built = Registry::build(&[("standin-acp", text)]);
         assert!(built.is_ok(), "{:?}", built.as_ref().err());
         let found = Box::leak(Box::new(built.unwrap())).get("standin-acp");
         assert!(found.is_some());
         found.unwrap()
+    }
+
+    /// The stand-in ACP master with one more variable in its account entry. Input: the
+    /// manifest line that sets it. Output: the harness, kept for the test run.
+    fn standin_with(line: &str) -> &'static Harness {
+        let model = "      STANDIN_MODEL: \"{model}\"\n";
+        assert!(STANDIN.contains(model));
+        built(&STANDIN.replace(model, &format!("{model}      {line}\n")))
     }
 
     /// Builds one keyless or keyed turn's launch with tools off. Inputs: the harness, the
@@ -417,6 +422,34 @@ mod launch {
         let config = off.request.account.home().join("config/mcp.json");
         let text = std::fs::read_to_string(&config).unwrap_or_default();
         assert!(!text.contains(crate::team::tool::SERVER_NAME));
+    }
+
+    /// DEC-180 Task 20 (guards): a listed master launch never runs unconfined, where its
+    /// hand-over exception would reach a process no agent profile fences, and a tools-off
+    /// master on a harness whose manifest says its tools cannot be switched off is refused.
+    #[test]
+    fn a_listed_master_launch_is_refused_unconfined_and_tools_off_without_a_switch() {
+        let harness = standin();
+        let handed = hand_over(harness, &connection(false), None);
+        assert!(handed.is_ok(), "{:?}", handed.as_ref().err());
+        let (handover, _) = handed.unwrap();
+        let mut open = turn(false);
+        open.request.sandbox_profile = None;
+        open.request.unconfined = true;
+        let refused = launched(harness, &open, &handover).err();
+        let code = refused.map(|error| error.0);
+        assert_eq!(code.as_deref(), Some("launch_environment_refused"));
+        let switch = "  tools_off:\n    - \"--no-tools\"\n";
+        assert!(STANDIN.contains(switch));
+        let limited = STANDIN.replace(switch, "") + "tools_limited: \"no switch\"\n";
+        let limited = built(&limited);
+        assert!(!limited.tools_off());
+        let handed = hand_over(limited, &connection(false), None);
+        assert!(handed.is_ok(), "{:?}", handed.as_ref().err());
+        let (handover, _) = handed.unwrap();
+        let refused = launched(limited, &turn(false), &handover).err();
+        let code = refused.map(|error| error.0);
+        assert_eq!(code.as_deref(), Some("launch_tools_off_unsupported"));
     }
 
     /// DEC-180 Task 20 M4: the instruction text is written whole, 0600, where the manifest
