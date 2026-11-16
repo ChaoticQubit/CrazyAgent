@@ -68,18 +68,64 @@ function sharedLines(text) {
 }
 
 /**
- * Matches workflow text that reads a secret, in any form GitHub expands: `secrets.NAME`,
- * `secrets['NAME']`, a whole-context call such as `toJSON(secrets)`, or the bare context.
+ * Matches workflow text that reads a secret, in any form GitHub expands and in any case, as the
+ * runner names contexts without case: `secrets.NAME`, `SECRETS['NAME']`, a whole-context call
+ * such as `toJSON(secrets)`, or the bare context.
  */
-const SECRET = /secrets\.|\bsecrets\b/;
+const SECRET = /secrets\.|\bsecrets\b/i;
+
+/**
+ * Whether a YAML line leaves a quoted scalar open, so it runs on into the next lines: a quote
+ * opens a scalar only where a node starts, after the indent, `- `, `: `, `? `, `[`, `{` or `,`,
+ * and a `#` after a space outside one starts a comment. Input: one line outside a block scalar.
+ * Output: the answer.
+ */
+function leftOpen(line) {
+  let quote = "";
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quote !== "") {
+      if (char !== quote) continue;
+      if (quote === "'" && line[index + 1] === "'") index += 1;
+      else quote = "";
+    } else if (char === "#" && /(?:^|\s)$/.test(line.slice(0, index))) {
+      return false;
+    } else if ((char === "'" || char === '"') && /(?:^\s*|[-:?]\s+|[[{,]\s*)$/.test(line.slice(0, index))) {
+      quote = char;
+    }
+  }
+  return quote !== "";
+}
+
+/**
+ * Lists the lines of a workflow, outside block scalars (`|`, `>`), that YAML reads as more than
+ * their text: an alias, which hands a job another's keys without their words; a backslash, which
+ * a double-quoted scalar decodes; and a quoted scalar left open, which runs on into lines a block
+ * indicator would hide (B17 F1). Input: the workflow text. Output: the lines.
+ */
+function unreadLines(text) {
+  const unread = [];
+  let block = -1;
+  for (const line of text.split("\n")) {
+    const indent = line.length - line.trimStart().length;
+    if (block >= 0 && (line.trim() === "" || indent > block)) continue;
+    const opener = line.match(/^(\s*(?:- +)*)(?:[^\s#'"][^#'"]*:\s+)?[|>][-+0-9]*\s*(?:#.*)?$/);
+    block = opener ? opener[1].length : -1;
+    if (line.includes("\\") || /(?:^\s*|[-:?]\s+|[[{,]\s*)\*\S/.test(line) || leftOpen(line)) unread.push(line);
+  }
+  return unread;
+}
 
 /**
  * Names the jobs of a workflow that read a secret, hand secrets to a called workflow or bind an
- * environment, whatever the file or job; a secret outside `jobs:` reaches every job. Input: the
- * workflow text. Output: the job names in file order.
+ * environment, whatever the file or job; a secret outside `jobs:` reaches every job. A workflow
+ * whose YAML says more than its lines ([unreadLines]) is refused, as is one whose jobs do not
+ * parse. Input: the workflow text. Output: the job names in file order.
  */
 function exposedJobs(text) {
   const jobs = jobsOf(text);
+  const unread = unreadLines(text);
+  assert(unread.length === 0, `the secret guard reads YAML line by line, so it refuses an alias, a backslash or a quoted scalar left open outside a block scalar: ${JSON.stringify(unread)}`);
   const shared = sharedLines(text).some((line) => SECRET.test(line));
   return jobs.filter(({ lines }) => shared || lines.some((line) => SECRET.test(line) || /^ {4}(environment|secrets):/.test(line))).map(({ name }) => name);
 }
