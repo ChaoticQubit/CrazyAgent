@@ -207,6 +207,7 @@ impl GitHub {
         api::check_new(&new_repo(plan))?;
         let _held = publishing(&self.root, project)?;
         self.saved()?;
+        let rules = state::load_defaults(&self.root)?;
         let written = match state::load_job(&self.root, project)? {
             Some(job)
                 if match &job.step {
@@ -233,7 +234,6 @@ impl GitHub {
                 },
             ),
         };
-        let rules = state::load_defaults(&self.root)?;
         let job = GitHubPublishJob {
             project: project.to_path_buf(),
             plan: plan.clone(),
