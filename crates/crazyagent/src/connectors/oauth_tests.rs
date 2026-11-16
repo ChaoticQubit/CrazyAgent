@@ -5,6 +5,7 @@ use crate::app_plugins::connector::{
 use crate::connectors::mcp_client::tests::{Seen, Vendor, empty, json_reply, no_lookup, send};
 use crate::connectors::mcp_client::{Access, Credential, McpError, McpSession};
 use crate::connectors::settings::SizeCap;
+use crate::connectors::sign_in::{self, SignInState};
 use crate::connectors::tests::{Case, add, case};
 use crate::notifications::{NoticeClass, NoticeFilter, NoticeKind, NoticeQuery, PAGE_MAX};
 use crate::protocol::CredentialRef;
@@ -1409,6 +1410,50 @@ fn saving_an_own_app_ends_a_sign_in_made_by_registration() {
     );
 }
 
+/// Signing out at the owner's ask ends the sign-in: its tokens are not used, a sign-in
+/// begun before it is never redeemed, the vendor is asked nothing, and no Action item asks
+/// the owner to sign in again, since the owner chose it (DEC-168 addendum 30, 23:36 Q2 A).
+#[test]
+fn signing_out_ends_the_sign_in_and_asks_nothing_after() {
+    let mut sign = prepared(
+        Shape {
+            register: Some("{base}/register"),
+            ..shape()
+        },
+        &["127.0.0.1"],
+        &[Registration::Dcr],
+        None,
+    );
+    let pending = begun(&sign, false);
+    let waiting = begun(&sign, false);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    assert!(fresh_at(&sign, clock()).is_ok());
+    let sent = sign.vendor.seen().len();
+    assert_eq!(sign_out(&sign.case.db, &sign.case.root, "board"), Ok(()));
+    assert_eq!(
+        fresh_at(&sign, clock()),
+        Err(OAuthError("connector_sign_in_needed")),
+        "a signed-out connector's tokens are not used"
+    );
+    assert_eq!(
+        finished(&sign, &waiting.state, Some(&sign.issuer())),
+        Err(OAuthError("connector_oauth_state_unknown")),
+        "a sign-in begun before the sign-out is never redeemed"
+    );
+    assert_eq!(sign.vendor.seen().len(), sent);
+    for prefix in [
+        "connector-token-board-",
+        "connector-refresh-board-",
+        "connector-signin-board",
+    ] {
+        assert!(saved(&sign.case, prefix).is_empty(), "{prefix}");
+    }
+    assert!(notices(&mut sign.case).is_empty());
+}
+
 /// An own app saved while a sign-in by registration is being answered wins: the answer
 /// taken before the save is never redeemed, so no registered client's tokens are saved
 /// once an own app is. A file that takes no own app still signs in by registration with
@@ -1472,6 +1517,137 @@ fn a_registered_sign_in_answered_while_an_own_app_is_saved_is_never_redeemed() {
         Ok(()),
         "and is redeemed though an own app is saved"
     );
+}
+
+/// rv-sa241 r2 N1: signing out removes every access token and refresh token the
+/// connector's sign-ins saved, at every issuer, even with no record that names one, and a
+/// record that cannot be read; the owner's own app and a registered client stay.
+#[test]
+fn signing_out_removes_every_token_the_connector_saved_and_keeps_its_apps() {
+    let sign = signing(shape(), &["127.0.0.1"]);
+    for key in [
+        "connector-token-board-0123456789abcdef",
+        "connector-refresh-board-0123456789abcdef",
+        "connector-signin-board",
+        "connector-client-board-fedcba9876543210",
+    ] {
+        let reference = CredentialRef::new(key).unwrap();
+        crate::storage::accounts::replace_key_in(
+            &sign.case.root,
+            PLUGIN_KEYS,
+            &reference,
+            b"stale-0001".to_vec(),
+        )
+        .unwrap();
+    }
+    assert_eq!(sign_out(&sign.case.db, &sign.case.root, "board"), Ok(()));
+    for prefix in [
+        "connector-token-board-",
+        "connector-refresh-board-",
+        "connector-signin-board",
+    ] {
+        assert!(saved(&sign.case, prefix).is_empty(), "{prefix} is removed");
+    }
+    assert_eq!(saved(&sign.case, "connector-client-board-").len(), 2);
+}
+
+/// Sends the browser's answer to a sign-in's loopback address, as the owner's browser does
+/// once the vendor sends it back. Inputs: the address and the query. Output: the status.
+fn brought_back(redirect: &url::Url, query: &str) -> u16 {
+    let address = (std::net::Ipv4Addr::LOCALHOST, redirect.port().unwrap());
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream.set_read_timeout(Some(WAIT_BACK)).unwrap();
+    let request = format!("GET /callback?{query} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    let sent = std::io::Write::write_all(&mut stream, request.as_bytes());
+    sent.unwrap();
+    let mut reply = String::new();
+    let _ = std::io::Read::read_to_string(&mut stream, &mut reply);
+    reply
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0)
+}
+
+const WAIT_BACK: Duration = Duration::from_secs(30);
+
+/// Signs `board` in through the browser sign-in the owner's app runs, against the stand-in
+/// vendor: the sign-in starts with `begin_with`, or `step_up_with` for `challenge`, the
+/// browser's answer comes back to its loopback callback and its thread redeems it. Inputs:
+/// the sign and the challenge's scopes, or none. Output: the authorization address.
+fn through_the_browser(sign: &Sign, challenge: Option<&str>) -> url::Url {
+    let root = sign.case.root.clone();
+    let begin = |redirect: &url::Url| match challenge {
+        Some(challenge) => step_up_with(
+            &sign.case.root,
+            "board",
+            &sign.sha256,
+            &sign.spec,
+            challenge,
+            redirect,
+            true,
+            None,
+            &no_lookup(),
+        ),
+        None => begin_with(
+            &sign.case.root,
+            "board",
+            &sign.sha256,
+            &sign.spec,
+            redirect,
+            false,
+            None,
+            &no_lookup(),
+        ),
+    };
+    let finish = move |state: &str, code: &str, iss: Option<&str>| {
+        finish_with(&root, state, code, iss, &no_lookup())
+    };
+    let started = sign_in::start_with(&sign.case.root, "board", WAIT_BACK, begin, finish);
+    assert!(started.is_ok(), "the sign-in starts: {started:?}");
+    let opened = started.unwrap();
+    let asked = query(&opened);
+    let back = url::Url::parse(&asked["redirect_uri"]).unwrap();
+    let answer = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("state", &asked["state"])
+        .append_pair("code", CODE)
+        .append_pair("iss", &sign.issuer())
+        .finish();
+    assert_eq!(brought_back(&back, &answer), 200);
+    let began = std::time::Instant::now();
+    let waiting = || sign_in::state_of(&sign.case.root, "board") == SignInState::Waiting;
+    while waiting() {
+        assert!(began.elapsed() < WAIT_BACK, "the sign-in never ended");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let ended = sign_in::state_of(&sign.case.root, "board");
+    assert_eq!(ended, SignInState::SignedIn);
+    opened
+}
+
+/// DEC-168 addendum 30 acceptance (rv-code F2): a browser sign-in runs end to end against a
+/// loopback authorization server: the callback's address is the one sent, the answer is
+/// redeemed on the sign-in's thread, the sign-in reads signed in and its token is used. A
+/// step-up for the scope the server named runs the same way and asks for both scopes.
+#[test]
+fn a_browser_sign_in_and_its_step_up_end_signed_in_against_a_loopback_server() {
+    let sign = prepared(
+        Shape {
+            register: Some("{base}/register"),
+            ..shape()
+        },
+        &["127.0.0.1"],
+        &[Registration::Dcr],
+        None,
+    );
+    let opened = through_the_browser(&sign, None);
+    assert_eq!(query(&opened)["client_id"], DCR_CLIENT);
+    assert_eq!(query(&opened)["scope"], "read");
+    assert!(fresh_at(&sign, clock()).is_ok());
+
+    let stepped = through_the_browser(&sign, Some("write"));
+    assert_eq!(query(&stepped)["scope"], "read write");
+    assert!(fresh_at(&sign, clock()).is_ok());
 }
 
 /// The Action items waiting on the owner after one reconcile, as kind, class, text and

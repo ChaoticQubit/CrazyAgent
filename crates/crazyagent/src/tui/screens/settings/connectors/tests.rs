@@ -1,4 +1,4 @@
-use super::words::{refusal, trust_lines};
+use super::words::{refusal, state, trust_lines};
 use super::*;
 use crate::app_plugins::{
     Binding, ConnectorTrust, KeyTrust, OAuthTrust, Origin, PluginKind, PluginStatus, Preview,
@@ -16,6 +16,7 @@ use crate::tui::render_tests::{check, ready, render, shell_at};
 use crate::tui::screens::open;
 use crate::tui::seam::{Arrival, Request};
 use crate::tui::shell::{Shell, targets};
+use crate::tui::theme::Role;
 
 const SHA: &str = "c0ffee";
 const TYPED_KEY: &str = "lin-secret-typed";
@@ -48,6 +49,7 @@ fn connector(
         origin,
         status,
         sign_in: SignIn::Key,
+        oauth: None,
         runs: Some(RunsView::Connector {
             url: format!("https://{host}/mcp"),
             hosts: vec![host.into()],
@@ -206,6 +208,7 @@ fn refused_file(name: &str, problem: Problem) -> ConnectorView {
         origin: Origin::User,
         status: PluginStatus::Refused { problem },
         sign_in: SignIn::NotYet,
+        oauth: None,
         runs: None,
         secrets: Vec::new(),
         sha256: SHA.into(),
@@ -932,4 +935,19 @@ fn the_add_forms_manifest_box_draws_hidden_characters_as_escapes() {
     let form = add_form();
     assert!(form.yaml.multiline && form.yaml.escaped);
     assert!(!form.path.escaped);
+}
+
+/// rv-code FINDINGS-01:26 F1, leader 01:31: a connector that signs in through the browser
+/// reads Needs sign-in until it is signed in, with the desktop's words, and a file this
+/// build cannot sign in still reads Unavailable.
+#[test]
+fn a_connector_waiting_for_its_browser_sign_in_reads_needs_sign_in() {
+    let mut github = view().connectors[1].clone();
+    github.status = PluginStatus::NeedsSignIn;
+    let (word, role, line) = state(&github);
+    assert_eq!((word, role), ("Needs sign-in", Role::Warning));
+    let said = "Sign in on its page before a project can use it.";
+    assert_eq!(line.as_deref(), Some(said));
+    github.sign_in = SignIn::NotYet;
+    assert_eq!(state(&github).0, "Unavailable");
 }

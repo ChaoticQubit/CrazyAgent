@@ -2,13 +2,15 @@ use super::*;
 use crate::app_plugins::{PluginKind, Preview, store};
 use crate::connectors::approvals::{self, AllowedWrites, ApprovalView};
 use crate::connectors::audit::{self, ActivityView};
-use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
+use crate::connectors::sign_in::{self, SignInState};
+use crate::connectors::{ConnectorSettings, ConnectorsView, SignInWith, Who};
 use crate::engine::owner::AccountSecret;
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX;
 const NAME_BYTES_MAX: usize = 64;
+const CLIENT_ID_BYTES_MAX: usize = 255;
 const PROJECT_BYTES_MAX: usize = 128;
 const _: () = assert!(PROJECT_BYTES_MAX == audit::PROJECT_ID_BYTES_MAX);
 pub(super) const CONNECTORS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -29,12 +31,51 @@ pub const CONNECTORS_CODES: &[&str] = &[
     "app_plugin_refused",
     "app_plugin_secret_not_declared",
     "app_plugins_unavailable",
+    "connector_address_refused",
     "connector_approval_closed",
     "connector_approval_unknown",
+    "connector_arguments_invalid",
+    "connector_call_failed",
+    "connector_host_private",
+    "connector_host_unknown",
+    "connector_key_missing",
+    "connector_needs_input",
+    "connector_oauth_callback_expired",
+    "connector_oauth_callback_flooded",
+    "connector_oauth_callback_unavailable",
+    "connector_oauth_client_invalid",
+    "connector_oauth_code_invalid",
+    "connector_oauth_issuer_mismatch",
+    "connector_oauth_key_store_unavailable",
+    "connector_oauth_metadata_invalid",
+    "connector_oauth_needs_own_app",
+    "connector_oauth_not_offered",
+    "connector_oauth_pkce_unsupported",
+    "connector_oauth_redirect_invalid",
+    "connector_oauth_refused",
+    "connector_oauth_scope_undeclared",
+    "connector_oauth_sign_in_finishing",
+    "connector_oauth_state_unknown",
+    "connector_oauth_step_up_limit",
+    "connector_oauth_token_invalid",
+    "connector_oauth_trust_changed",
     "connector_outcome_unknown",
     "connector_project_unknown",
+    "connector_protocol_unsupported",
+    "connector_redirect_refused",
+    "connector_reply_invalid",
+    "connector_reply_too_large",
     "connector_request_bounds",
     "connector_request_invalid",
+    "connector_request_too_large",
+    "connector_sign_in_needed",
+    "connector_sign_in_one_way",
+    "connector_timeout",
+    "connector_tool_name_invalid",
+    "connector_tool_unknown",
+    "connector_tools_limit",
+    "connector_unavailable_here",
+    "connector_vendor_error",
     "connectors_unavailable",
     "owner_authentication_failed",
     "owner_authority_unavailable",
@@ -50,10 +91,10 @@ pub const CONNECTORS_CODES: &[&str] = &[
     "questions_unavailable",
 ];
 
-/// One Connectors request. Reads: the page, a manifest's trust screen, the activity log,
-/// one write approval and a project's standing write allows. Changes: add, trust, remove,
-/// save a key sent in the frame after the request, clear a key, turn a connector on or off
-/// for a project, save the settings, answer a waiting write and take back a standing allow.
+/// One Connectors request: a read of the page, a trust screen, the activity log, a write
+/// approval, a project's standing allows or a sign-in; or a change to files, keys, project
+/// switches, settings, write answers, browser sign-ins, own OAuth apps, sign-out or the way
+/// a connector signs in. A key or an own app's secret comes in the frame after the request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
@@ -114,6 +155,29 @@ enum Action {
         project: String,
         connector: String,
     },
+    SignIn {
+        name: String,
+    },
+    SignInState {
+        name: String,
+    },
+    CancelSignIn {
+        name: String,
+    },
+    SetOwnApp {
+        name: String,
+        client_id: String,
+    },
+    ClearOwnApp {
+        name: String,
+    },
+    SignOut {
+        name: String,
+    },
+    SetSignInWith {
+        name: String,
+        way: SignInWith,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -131,6 +195,8 @@ enum Reply {
     Activity { view: Box<ActivityView> },
     Approval { approval: Box<ApprovalView> },
     Writes { writes: AllowedWrites },
+    SignIn { authorize_url: String },
+    SignInState { sign_in: SignInState },
     Stale { current: u64 },
     Rejected { code: String },
 }
@@ -318,6 +384,75 @@ impl OwnerClient {
             .await
     }
 
+    /// Starts a connector's sign-in through the owner's browser: the engine opens its
+    /// loopback callback and answers the address the owner's app opens. Input: the
+    /// connector. Output: the authorization address.
+    pub async fn connector_sign_in(&self, name: String) -> Result<String, EngineError> {
+        match self.connectors_exchange(Action::SignIn { name }, None).await? {
+            Reply::SignIn { authorize_url } => Ok(authorize_url),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Saves the owner's own OAuth app for a connector that allows one, its client secret
+    /// sent only as a separate frame; the connector then signs in with that app alone.
+    /// Inputs: connector, client id and the secret of a confidential app. Output: the page,
+    /// which never holds the secret.
+    pub async fn connector_set_own_app(
+        &self,
+        name: String,
+        client_id: String,
+        secret: Option<AccountSecret>,
+    ) -> Result<ConnectorsView, EngineError> {
+        self.connectors_view(Action::SetOwnApp { name, client_id }, secret)
+            .await
+    }
+
+    /// Removes the owner's own OAuth app for a connector, which then signs in the automatic
+    /// way. Input: the connector. Output: the page.
+    pub async fn connector_clear_own_app(
+        &self,
+        name: String,
+    ) -> Result<ConnectorsView, EngineError> {
+        self.connectors_view(Action::ClearOwnApp { name }, None)
+            .await
+    }
+
+    /// Signs a connector out at the owner's ask: its sign-in ends and a waiting one is
+    /// cancelled, with no "Sign in again" after. Input: the connector. Output: the page.
+    pub async fn connector_sign_out(&self, name: String) -> Result<ConnectorsView, EngineError> {
+        self.connectors_view(Action::SignOut { name }, None).await
+    }
+
+    /// Chooses how a connector whose file offers a key and a browser sign-in signs in.
+    /// Inputs: the connector and the way. Output: the page.
+    pub async fn connector_set_sign_in_with(
+        &self,
+        name: String,
+        way: SignInWith,
+    ) -> Result<ConnectorsView, EngineError> {
+        self.connectors_view(Action::SetSignInWith { name, way }, None)
+            .await
+    }
+
+    /// Reads where a connector's sign-in stands. Input: the connector. Output: its state.
+    pub async fn connector_sign_in_state(&self, name: String) -> Result<SignInState, EngineError> {
+        self.sign_in_reply(Action::SignInState { name }).await
+    }
+
+    /// Cancels a connector's waiting sign-in and closes its callback. Input: the connector.
+    /// Output: where it stands after, still waiting while the browser's answer is redeemed.
+    pub async fn cancel_connector_sign_in(&self, name: String) -> Result<SignInState, EngineError> {
+        self.sign_in_reply(Action::CancelSignIn { name }).await
+    }
+
+    async fn sign_in_reply(&self, action: Action) -> Result<SignInState, EngineError> {
+        match self.connectors_exchange(action, None).await? {
+            Reply::SignInState { sign_in } => Ok(sign_in),
+            _ => Err(unknown()),
+        }
+    }
+
     async fn approval_reply(&self, action: Action) -> Result<ApprovalView, EngineError> {
         match self.connectors_exchange(action, None).await? {
             Reply::Approval { approval } => Ok(*approval),
@@ -355,10 +490,11 @@ impl OwnerClient {
         action: Action,
         key: Option<AccountSecret>,
     ) -> Result<Reply, EngineError> {
-        assert_eq!(
-            matches!(action, Action::SetKey { .. }),
-            key.is_some(),
-            "a key travels with a set_key request only"
+        let must = matches!(action, Action::SetKey { .. });
+        let may = must || matches!(action, Action::SetOwnApp { .. });
+        assert!(
+            (!must || key.is_some()) && (key.is_none() || may),
+            "a key travels with a set_key request, and may with set_own_app"
         );
         tokio::time::timeout(self.timeout.max(CONNECTORS_TIMEOUT), async {
             let frame = encode_frame(&Envelope {
@@ -468,8 +604,9 @@ async fn handle(
 }
 
 /// Reads one Connectors request from an owner frame body: the action and whether a key
-/// frame follows, which only `set_key` may announce and must announce. Names, project ids
-/// and approval ids are bounded here; the store checks them fully. Input: the body.
+/// frame follows, which `set_key` must announce and only it and `set_own_app` may. Names,
+/// project ids, client ids and approval ids are bounded here; the store checks them fully.
+/// Input: the body.
 /// Output: the action and the flag, or `connector_request_bounds` or
 /// `connector_request_invalid`.
 fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
@@ -480,13 +617,22 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         connectors,
         secret_present,
     } = serde_json::from_slice(bytes).map_err(|_| failure("connector_request_invalid"))?;
-    if matches!(connectors, Action::SetKey { .. }) != secret_present {
+    let must = matches!(connectors, Action::SetKey { .. });
+    let may = must || matches!(connectors, Action::SetOwnApp { .. });
+    if (must && !secret_present) || (secret_present && !may) {
         return Err(failure("connector_request_invalid"));
     }
     let names: &[&str] = match &connectors {
-        Action::Review { name } | Action::Trust { name, .. } | Action::Remove { name } => {
-            &[name.as_str()]
-        }
+        Action::Review { name }
+        | Action::Trust { name, .. }
+        | Action::Remove { name }
+        | Action::SignIn { name }
+        | Action::SignInState { name }
+        | Action::CancelSignIn { name }
+        | Action::SetOwnApp { name, .. }
+        | Action::ClearOwnApp { name }
+        | Action::SignOut { name }
+        | Action::SetSignInWith { name, .. } => &[name.as_str()],
         Action::SetKey { name, secret } | Action::ClearKey { name, secret } => {
             &[name.as_str(), secret.as_str()]
         }
@@ -521,13 +667,26 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         | Action::ClearKey { .. }
         | Action::Set { .. }
         | Action::Approval { .. }
-        | Action::Answer { .. } => None,
+        | Action::Answer { .. }
+        | Action::SignIn { .. }
+        | Action::SignInState { .. }
+        | Action::CancelSignIn { .. }
+        | Action::SetOwnApp { .. }
+        | Action::ClearOwnApp { .. }
+        | Action::SignOut { .. }
+        | Action::SetSignInWith { .. } => None,
     };
     let id_invalid = matches!(
         connectors,
         Action::Approval { id } | Action::Answer { id, .. } if id <= 0
     );
+    let client_invalid = matches!(
+        &connectors,
+        Action::SetOwnApp { client_id, .. }
+            if client_id.is_empty() || client_id.len() > CLIENT_ID_BYTES_MAX
+    );
     if id_invalid
+        || client_invalid
         || names
             .iter()
             .any(|name| name.is_empty() || name.len() > NAME_BYTES_MAX)
@@ -668,6 +827,51 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
             Ok(Reply::Writes {
                 writes: approvals::allowed_writes(&db, &project)?,
             })
+        }
+        Action::SignIn { name } => {
+            connector(root, &name)?;
+            let opened = sign_in::start(&db, root, &name)?;
+            Ok(Reply::SignIn {
+                authorize_url: String::from(opened),
+            })
+        }
+        Action::SignInState { name } => {
+            connector(root, &name)?;
+            Ok(Reply::SignInState {
+                sign_in: sign_in::state_of(root, &name),
+            })
+        }
+        Action::CancelSignIn { name } => {
+            connector(root, &name)?;
+            Ok(Reply::SignInState {
+                sign_in: sign_in::cancel(root, &name),
+            })
+        }
+        Action::SetOwnApp { name, client_id } => {
+            connector(root, &name)?;
+            let mut secret = key.map(AccountSecret::into_bytes);
+            let sent = secret.as_deref();
+            let saved = sign_in::save_own_app(&db, root, &name, &client_id, sent);
+            if let Some(bytes) = secret.as_mut() {
+                bytes.fill(0);
+            }
+            saved?;
+            page(&db, None)
+        }
+        Action::ClearOwnApp { name } => {
+            connector(root, &name)?;
+            sign_in::clear_own_app(&db, root, &name)?;
+            page(&db, None)
+        }
+        Action::SignOut { name } => {
+            connector(root, &name)?;
+            sign_in::sign_out(&db, root, &name)?;
+            page(&db, None)
+        }
+        Action::SetSignInWith { name, way } => {
+            connector(root, &name)?;
+            sign_in::choose(&db, root, &name, way)?;
+            page(&db, None)
         }
     }
 }

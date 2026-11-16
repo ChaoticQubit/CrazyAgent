@@ -33,6 +33,8 @@ pub(crate) use sign::fresh_with;
 #[cfg(unix)]
 use sign::own_replaced;
 #[cfg(unix)]
+use sign::signed_out;
+#[cfg(unix)]
 pub(crate) use sign::refused_with;
 #[cfg(unix)]
 pub(crate) use sign::renew_with;
@@ -41,7 +43,10 @@ pub(crate) use sign::step_up_with;
 
 /// Every sign-in refusal code this client adds beside the connector address codes of
 /// `mcp_client::MCP_CODES`, sorted.
-pub const OAUTH_CODES: [&str; 15] = [
+pub const OAUTH_CODES: [&str; 19] = [
+    "connector_oauth_callback_expired",
+    "connector_oauth_callback_flooded",
+    "connector_oauth_callback_unavailable",
     "connector_oauth_client_invalid",
     "connector_oauth_code_invalid",
     "connector_oauth_issuer_mismatch",
@@ -53,6 +58,7 @@ pub const OAUTH_CODES: [&str; 15] = [
     "connector_oauth_redirect_invalid",
     "connector_oauth_refused",
     "connector_oauth_scope_undeclared",
+    "connector_oauth_sign_in_finishing",
     "connector_oauth_state_unknown",
     "connector_oauth_step_up_limit",
     "connector_oauth_token_invalid",
@@ -121,6 +127,43 @@ fn own_issuer_ref(name: &str) -> Result<CredentialRef, OAuthError> {
     CredentialRef::new(format!("connector-issuer-{name}-own")).map_err(|_| key_store())
 }
 
+/// Whether a connector has a sign-in saved now, whichever client made it. Inputs: the
+/// engine root and the connector. Output: true once its tokens are saved.
+pub(crate) fn signed_in_now(root: &Path, name: &str) -> bool {
+    let Ok(record) = CredentialRef::new(format!("connector-signin-{name}")) else {
+        return false;
+    };
+    let saved = accounts::key_saved_in(root, PLUGIN_KEYS, &record);
+    saved.unwrap_or(false)
+}
+
+/// The owner's own OAuth app saved for a connector: its client id and whether a client
+/// secret is saved, never the secret. Inputs: the engine root and the connector. Output:
+/// the two, or none when no app is saved or the key store cannot be read.
+pub(crate) fn own_app(root: &Path, name: &str) -> Option<(String, bool)> {
+    let reference = own_ref(name).ok()?;
+    let read = accounts::read_key_in(root, PLUGIN_KEYS, &reference);
+    let id = read.ok()??;
+    let secret = own_secret_ref(name).ok()?;
+    let saved = accounts::key_saved_in(root, PLUGIN_KEYS, &secret);
+    Some((id.expose().to_owned(), saved.unwrap_or(false)))
+}
+
+/// A connector's trusted file for a sign-in step, with a file waiting for the owner's review
+/// named so and any other refusal read as offering no sign-in. Inputs: database, engine
+/// root and connector. Output: the file, or `app_plugin_needs_review`, `_oauth_not_offered`.
+fn trusted(
+    db: &Connection,
+    root: &Path,
+    name: &str,
+) -> Result<crate::app_plugins::manifest::Manifest, OAuthError> {
+    let found = store::trusted_connector(db, root, name);
+    found.map_err(|problem| match problem.0.as_str() {
+        "app_plugin_needs_review" => OAuthError("app_plugin_needs_review"),
+        _ => not_offered(),
+    })
+}
+
 /// Saves the owner's own OAuth app for a trusted connector that lets the owner bring one:
 /// its client id and, for a confidential app, its secret, replacing what was saved before
 /// and freeing it from the issuer the old one was bound to. The connector's sign-in, by
@@ -135,7 +178,7 @@ pub fn set_own_client(
     id: &str,
     secret: Option<&str>,
 ) -> Result<(), OAuthError> {
-    let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
+    let manifest = trusted(db, root, name)?;
     let declared = manifest
         .connector()
         .and_then(|spec| spec.oauth.as_ref())
@@ -164,6 +207,37 @@ pub fn set_own_client(
     })
 }
 
+/// Removes the owner's own OAuth app for a trusted connector: its client id, secret and the
+/// issuer it was bound to, even when the file no longer lets the owner bring one. A sign-in
+/// made with it ends and sign-ins begun with it are dropped. Inputs: database, engine root
+/// and connector. Output: Ok, or `connector_oauth_not_offered`, `_key_store_unavailable`.
+pub fn clear_own_client(db: &Connection, root: &Path, name: &str) -> Result<(), OAuthError> {
+    let manifest = trusted(db, root, name)?;
+    own_replaced(db, root, name, &manifest.title, now_ms(), || {
+        for reference in [own_ref, own_secret_ref, own_issuer_ref] {
+            let key = reference(name)?;
+            accounts::remove_key_in(root, PLUGIN_KEYS, key.as_str())
+                .map_err(|_| key_store())?;
+        }
+        Ok(())
+    })
+}
+
+/// Signs a connector out at the owner's ask: ends its sign-in and drops the sign-ins begun
+/// for it, and clears its "Sign in again", since the owner chose this. The vendor is not
+/// told, so its tokens stay valid there until they end. Inputs: database, engine root and
+/// connector. Output: Ok, or `connector_oauth_key_store_unavailable`, `connectors_unavailable`.
+pub fn sign_out(db: &Connection, root: &Path, name: &str) -> Result<(), OAuthError> {
+    signed_out(db, root, name)
+}
+
+/// No sign-in is saved where the Unix owner-only key folder does not exist, so none ends.
+/// Output: Ok.
+#[cfg(not(unix))]
+fn signed_out(_db: &Connection, _root: &Path, _name: &str) -> Result<(), OAuthError> {
+    Ok(())
+}
+
 /// Saves the owner's own app where no sign-in can be made, so none is ended. Output: the
 /// save's answer.
 #[cfg(not(unix))]
@@ -189,7 +263,7 @@ pub fn begin(
     redirect: &url::Url,
     writes: bool,
 ) -> Result<Pending, OAuthError> {
-    let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
+    let manifest = trusted(db, root, name)?;
     let spec = manifest.connector().ok_or_else(not_offered)?;
     let document = CLIENT_METADATA_URL
         .map(url::Url::parse)
@@ -221,7 +295,7 @@ pub fn step_up(
     redirect: &url::Url,
     writes: bool,
 ) -> Result<Pending, OAuthError> {
-    let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
+    let manifest = trusted(db, root, name)?;
     let spec = manifest.connector().ok_or_else(not_offered)?;
     let document = CLIENT_METADATA_URL
         .map(url::Url::parse)
@@ -353,6 +427,24 @@ pub(crate) fn wanting(
         .map_err(unavailable)?;
     assert!(rows.len() <= max);
     Ok(Some(rows))
+}
+
+/// The scopes a connector's server last asked for that its sign-in lacked, while the
+/// connector waits for the owner to sign in again for want of them. Inputs: the engine
+/// database and the connector. Output: the scopes as the server named them, none, or
+/// `connectors_unavailable`.
+pub(crate) fn wanted(db: &Connection, name: &str) -> Result<Option<String>, EngineError> {
+    use rusqlite::OptionalExtension;
+    db.execute_batch(SCHEMA).map_err(unavailable)?;
+    let wanted: Option<Option<String>> = db
+        .query_row(
+            "SELECT wanted FROM connector_sign_ins WHERE connector=?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    Ok(wanted.flatten())
 }
 
 /// This computer's clock as Unix milliseconds, 0 before 1970.

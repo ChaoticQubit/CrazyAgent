@@ -72,13 +72,15 @@ pub fn bundled() -> &'static [(&'static str, &'static str)] {
     &BUNDLED
 }
 
-/// A plugin ready to run: its manifest, where it came from, and where the key behind each
-/// declared secret is saved, in declaration order. It holds references only, never a key.
+/// A plugin ready to run: its manifest, where it came from, where the key behind each
+/// declared secret is saved, in declaration order, and whether a connector that also has a
+/// key signs in through the browser instead, with no binding. It holds no key.
 #[derive(Debug)]
 pub struct Loaded {
     pub manifest: Manifest,
     pub origin: Origin,
     pub bindings: Vec<Bound>,
+    pub browser: bool,
 }
 
 /// Where one bound secret's key is saved: an API-key account's saved key, or a key the
@@ -112,7 +114,28 @@ fn forget_grants(db: &Connection, root: &Path, name: &str) -> Result<(), EngineE
     crate::connectors::grants::forget_connector(db, name)
         .and_then(|()| crate::connectors::gateway::pins::forget_connector(db, name))
         .and_then(|()| crate::connectors::oauth::forget(db, root, name))
+        .and_then(|()| crate::connectors::sign_in::forget_choice(db, name))
         .map_err(|_| error("app_plugins_unavailable"))
+}
+
+/// Whether a connector signs in through the browser though its file also declares a key:
+/// its file offers both ways and the owner chose Browser. Inputs: the database and the
+/// file. Output: the answer, or `app_plugins_unavailable`.
+fn by_browser(db: &Connection, manifest: &Manifest) -> Result<bool, EngineError> {
+    if !crate::connectors::sign_in::both_ways(manifest) {
+        return Ok(false);
+    }
+    let way = crate::connectors::sign_in::chosen(db, &manifest.name)
+        .map_err(|_| error("app_plugins_unavailable"))?;
+    Ok(way == crate::connectors::SignInWith::Browser)
+}
+
+/// Whether a connector's file signs in only through the browser: a sign-in and no key.
+/// Input: the manifest. Output: the answer.
+fn browser_only(manifest: &Manifest) -> bool {
+    manifest
+        .connector()
+        .is_some_and(|spec| spec.key.is_none() && spec.oauth.is_some())
 }
 
 /// Creates the store's tables and drops what an older plugin of the owner's left under a
@@ -471,10 +494,14 @@ fn view(db: &Connection, root: &Path, found: Found) -> Result<PluginView, Engine
         });
     }
     let reviewed = reviewed(db, found.origin, &manifest)?;
+    let browser = by_browser(db, &manifest)?;
+    let signs_in = browser || browser_only(&manifest);
     let status = if !reviewed {
         PluginStatus::NeedsReview
-    } else if secrets.iter().any(|secret| secret.binding == Binding::None) {
+    } else if !browser && secrets.iter().any(|secret| secret.binding == Binding::None) {
         PluginStatus::NeedsKey
+    } else if signs_in && !crate::connectors::oauth::signed_in_now(root, &manifest.name) {
+        PluginStatus::NeedsSignIn
     } else {
         PluginStatus::Ready
     };
@@ -900,17 +927,21 @@ fn load(db: &Connection, root: &Path, name: &str, launch: bool) -> Result<Loaded
     if !launch && !enabled_flag(db, &manifest.name, found.origin)? {
         return Err(error("app_plugin_off"));
     }
-    let mut bindings = Vec::with_capacity(manifest.secrets().len());
-    for secret in manifest.secrets() {
+    let browser = by_browser(db, &manifest)?;
+    let secrets: &[String] = if browser { &[] } else { manifest.secrets() };
+    let mut bindings = Vec::with_capacity(secrets.len());
+    for secret in secrets {
         let (_, bound) = resolve(db, root, &manifest.name, secret)?;
         let bound = bound.filter(|bound| !launch || matches!(bound, Bound::Key(_)));
         bindings.push(bound.ok_or_else(|| error("app_plugin_needs_key"))?);
     }
-    assert_eq!(bindings.len(), manifest.secrets().len());
+    assert_eq!(bindings.len(), secrets.len());
+    assert!(!browser || bindings.is_empty());
     Ok(Loaded {
         manifest,
         origin: found.origin,
         bindings,
+        browser,
     })
 }
 

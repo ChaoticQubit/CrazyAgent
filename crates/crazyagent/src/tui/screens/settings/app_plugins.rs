@@ -180,8 +180,8 @@ pub(in crate::tui) fn runs_line(runs: &RunsView) -> String {
 }
 
 /// The one label a plugin row shows, in a fixed order: Refused (with its problem), Needs
-/// review, Needs a key, then Enabled or Off. Input: the plugin. Output: the word, its role
-/// and the line under it, if any.
+/// review, Needs a key, Needs sign-in, then Enabled or Off. Input: the plugin. Output: the
+/// word, its role and the line under it, if any.
 pub(in crate::tui) fn plugin_state(plugin: &PluginView) -> (&'static str, Role, Option<String>) {
     match &plugin.status {
         PluginStatus::Refused { problem } => ("Refused", Role::Error, Some(problem_text(problem))),
@@ -194,6 +194,11 @@ pub(in crate::tui) fn plugin_state(plugin: &PluginView) -> (&'static str, Role, 
             "Needs a key",
             Role::Warning,
             Some("Set a key for each secret it needs.".into()),
+        ),
+        PluginStatus::NeedsSignIn => (
+            "Needs sign-in",
+            Role::Warning,
+            Some("Sign in on its page before it runs.".into()),
         ),
         PluginStatus::Ready if plugin.enabled => ("Enabled", Role::Success, None),
         PluginStatus::Ready => ("Off", Role::Muted, None),

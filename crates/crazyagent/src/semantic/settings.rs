@@ -210,7 +210,9 @@ pub fn view(db: &Connection, root: &Path) -> Result<SearchView, EngineError> {
         } else {
             match (&plugin.status, &runs) {
                 (PluginStatus::NeedsReview, _) => reason("app_plugin_needs_review"),
-                (PluginStatus::NeedsKey, _) => reason("app_plugin_needs_key"),
+                (PluginStatus::NeedsKey | PluginStatus::NeedsSignIn, _) => {
+                    reason("app_plugin_needs_key")
+                }
                 (PluginStatus::Refused { .. }, _) => reason("app_plugin_refused"),
                 (PluginStatus::Ready, _) if unconfirmed => reason("search_confirm_required"),
                 (PluginStatus::Ready, RunsView::Local { .. }) => model_reason(&model),

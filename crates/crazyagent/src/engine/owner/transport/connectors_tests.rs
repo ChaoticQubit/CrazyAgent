@@ -3,7 +3,8 @@ use crate::app_plugins::PluginStatus;
 use crate::connectors::approvals;
 use crate::connectors::grants::{self, Role};
 use crate::connectors::{
-    ConnectorView, Grant, KeepLog, NativeConnectors, SignIn, SizeCap, Wait, WritePolicy,
+    ConnectorView, Grant, KeepLog, NativeConnectors, OAuthView, OwnAppView, SignIn, SignInWith,
+    SizeCap, Wait, WritePolicy,
 };
 use serde_json::json;
 
@@ -22,6 +23,55 @@ key:
   secret: api_key
   header: Authorization
   scheme: Bearer
+";
+
+const BOARD_OAUTH: &str = "schema: 1
+kind: connector
+name: board
+title: Board
+version: 1
+mcp:
+  url: https://mcp.board.example/mcp
+  hosts: [mcp.board.example]
+oauth:
+  hosts: [auth.board.example]
+  registration: [own, dcr]
+  scopes_read: [read]
+  scopes_write: [write]
+";
+
+const BOARD_BOTH: &str = "schema: 1
+kind: connector
+name: board
+title: Board
+version: 1
+mcp:
+  url: https://mcp.board.example/mcp
+  hosts: [mcp.board.example]
+key:
+  secret: api_key
+  header: Authorization
+  scheme: Bearer
+oauth:
+  hosts: [auth.board.example]
+  registration: [own, dcr]
+  scopes_read: [read]
+  scopes_write: [write]
+";
+
+const BOARD_DOCUMENT: &str = "schema: 1
+kind: connector
+name: board
+title: Board
+version: 1
+mcp:
+  url: https://mcp.board.example/mcp
+  hosts: [mcp.board.example]
+oauth:
+  hosts: [auth.board.example]
+  registration: [cimd]
+  scopes_read: [read]
+  scopes_write: [write]
 ";
 
 const NEAR: &str = "schema: 1
@@ -719,6 +769,332 @@ fn the_owner_answers_a_write_and_takes_back_a_standing_allow_through_the_protoco
     for code in ["connector_approval_closed", "connector_approval_unknown"] {
         assert!(CONNECTORS_CODES.contains(&code), "{code}");
     }
+}
+
+/// DEC-168 Task 10: the owner starts, reads and cancels a connector's sign-in through the
+/// protocol. Names are bounded, only a connector's name is taken, a connector with no OAuth
+/// sign-in is refused at once, and one never started reads none. Every code a sign-in can
+/// answer reaches the owner's app as itself, with a plain sentence.
+#[test]
+fn the_owner_starts_reads_and_cancels_a_sign_in_through_the_protocol() {
+    let (_tmp, root) = engine();
+    let sha256 = sha(BOARD);
+    ask(
+        &root,
+        json!({"kind": "add", "yaml": BOARD, "sha256": sha256, "replace": false}),
+    );
+    let start = json!({"kind": "sign_in", "name": "board"});
+    assert_eq!(refused(&root, start), "connector_oauth_not_offered");
+    let read = answered(&root, json!({"kind": "sign_in_state", "name": "board"}));
+    let none = json!({"kind": "sign_in_state", "sign_in": {"state": "none"}});
+    assert_eq!(read, none);
+    let stop = answered(&root, json!({"kind": "cancel_sign_in", "name": "board"}));
+    assert_eq!(stop, none);
+    for kind in ["sign_in", "sign_in_state", "cancel_sign_in"] {
+        let ghost = json!({"kind": kind, "name": "ghost"});
+        assert_eq!(refused(&root, ghost), "app_plugin_not_found", "{kind}");
+        for name in [String::new(), "n".repeat(NAME_BYTES_MAX + 1)] {
+            let action = json!({"kind": kind, "name": name});
+            let bytes = serde_json::to_vec(&request(action)).unwrap();
+            let code = parse(&bytes).unwrap_err().0;
+            assert_eq!(code, "connector_request_invalid", "{kind}");
+        }
+    }
+
+    let oauth = crate::connectors::oauth::OAUTH_CODES;
+    let mcp = crate::connectors::mcp_client::MCP_CODES;
+    for code in oauth.iter().chain(mcp.iter()) {
+        assert!(CONNECTORS_CODES.contains(code), "{code}");
+        assert!(crate::connectors::plain_problem(code).is_some(), "{code}");
+    }
+    for code in [
+        "connector_oauth_callback_expired",
+        "connector_oauth_callback_flooded",
+        "connector_oauth_callback_unavailable",
+    ] {
+        assert!(oauth.contains(&code), "{code}");
+    }
+}
+
+/// The key saved under `name` in the engine's plugin key store, as text.
+fn plugin_key(root: &Path, name: &str) -> Option<String> {
+    let reference = crate::protocol::CredentialRef::new(name.to_owned()).unwrap();
+    let keys = crate::storage::accounts::PLUGIN_KEYS;
+    let read = crate::storage::accounts::read_key_in(root, keys, &reference).unwrap();
+    read.map(|key| key.expose().to_owned())
+}
+
+/// Sends a `set_own_app` for `board`, with the client secret as the frame after it when
+/// given. Inputs: the root, the client id and the secret. Output: the reply or refusal.
+fn own_app(root: &Path, id: &str, secret: Option<&[u8]>) -> Result<Reply, EngineError> {
+    send(
+        root,
+        json!({
+            "connectors": {"kind": "set_own_app", "name": "board", "client_id": id},
+            "secret_present": secret.is_some()
+        }),
+        secret,
+    )
+}
+
+/// A sign-in of `board` waiting for the browser, started with stand-in steps. Input: the
+/// root.
+fn waiting_sign_in(root: &Path) {
+    let pending = crate::connectors::oauth::Pending {
+        authorize_url: url::Url::parse("https://auth.board.example/authorize").unwrap(),
+        state: "state-0123456789abcdef".to_owned(),
+    };
+    let begin = move |_: &url::Url| Ok(pending);
+    let finish = |_: &str, _: &str, _: Option<&str>| Ok(());
+    let limit = std::time::Duration::from_secs(30);
+    sign_in::start_with(root, "board", limit, begin, finish).unwrap();
+    assert_eq!(sign_in::state_of(root, "board"), SignInState::Waiting);
+}
+
+/// DEC-168 addendum 30 decision 4 and its update 23:19: the owner saves an own OAuth app for
+/// a connector that allows one, with or without a client secret sent in the frame after the
+/// request, and removes it; no reply carries the secret, and a save or a remove cancels a
+/// waiting sign-in, which began with another client. A connector that allows no own app
+/// refuses one, and the client id and the second frame are bounded.
+#[test]
+fn the_owner_saves_and_removes_an_own_oauth_app_through_the_protocol() {
+    let (_tmp, root) = engine();
+    let sha256 = sha(BOARD_OAUTH);
+    ask(
+        &root,
+        json!({"kind": "add", "yaml": BOARD_OAUTH, "sha256": sha256, "replace": false}),
+    );
+    let id = "connector-client-board-own";
+    let secret = "connector-secret-board-own";
+    let issuer = "connector-issuer-board-own";
+    let saved = page(own_app(&root, "app-0001", Some(b"cs-secret-0001")).unwrap());
+    let shown = serde_json::to_string(&saved).unwrap();
+    assert!(!shown.contains("cs-secret-0001"), "{shown}");
+    assert_eq!(plugin_key(&root, id).as_deref(), Some("app-0001"));
+    assert_eq!(plugin_key(&root, secret).as_deref(), Some("cs-secret-0001"));
+
+    waiting_sign_in(&root);
+    page(own_app(&root, "app-0002", None).unwrap());
+    assert_eq!(plugin_key(&root, id).as_deref(), Some("app-0002"));
+    assert_eq!(plugin_key(&root, secret), None);
+    assert_eq!(sign_in::state_of(&root, "board"), SignInState::Cancelled);
+
+    page(own_app(&root, "app-0003", Some(b"cs-secret-0003")).unwrap());
+    let bound = crate::protocol::CredentialRef::new(issuer.to_owned()).unwrap();
+    let keys = crate::storage::accounts::PLUGIN_KEYS;
+    let issued = b"https://auth.board.example".to_vec();
+    let saved = crate::storage::accounts::replace_key_in(&root, keys, &bound, issued);
+    saved.unwrap();
+    for key in [id, secret, issuer] {
+        assert!(plugin_key(&root, key).is_some(), "{key}");
+    }
+    waiting_sign_in(&root);
+    ask(&root, json!({"kind": "clear_own_app", "name": "board"}));
+    assert_eq!(sign_in::state_of(&root, "board"), SignInState::Cancelled);
+    for key in [id, secret, issuer] {
+        assert_eq!(plugin_key(&root, key), None, "{key}");
+    }
+
+    let spaced = own_app(&root, "app 0003", None).unwrap_err().0;
+    assert_eq!(spaced, "connector_oauth_client_invalid");
+    let ghost = json!({"kind": "clear_own_app", "name": "ghost"});
+    assert_eq!(refused(&root, ghost), "app_plugin_not_found");
+    let (_plain_tmp, plain) = engine();
+    let sha256 = sha(BOARD);
+    ask(
+        &plain,
+        json!({"kind": "add", "yaml": BOARD, "sha256": sha256, "replace": false}),
+    );
+    let offered = own_app(&plain, "app-0004", None).unwrap_err().0;
+    assert_eq!(offered, "connector_oauth_not_offered");
+
+    for client_id in [String::new(), "i".repeat(CLIENT_ID_BYTES_MAX + 1)] {
+        let action = json!({"kind": "set_own_app", "name": "board", "client_id": client_id});
+        let bytes = serde_json::to_vec(&request(action)).unwrap();
+        assert_eq!(parse(&bytes).unwrap_err().0, "connector_request_invalid");
+    }
+    let framed = json!({
+        "connectors": {"kind": "clear_own_app", "name": "board"},
+        "secret_present": true
+    });
+    let bytes = serde_json::to_vec(&framed).unwrap();
+    assert_eq!(parse(&bytes).unwrap_err().0, "connector_request_invalid");
+}
+
+/// DEC-168 addendum 30, 23:36 Q2 A: the owner signs a connector out through the protocol;
+/// a waiting sign-in is cancelled and the page comes back. Names are bounded, and a ghost is
+/// refused.
+#[test]
+fn the_owner_signs_a_connector_out_through_the_protocol() {
+    let (_tmp, root) = engine();
+    let sha256 = sha(BOARD_OAUTH);
+    ask(
+        &root,
+        json!({"kind": "add", "yaml": BOARD_OAUTH, "sha256": sha256, "replace": false}),
+    );
+    waiting_sign_in(&root);
+    let out = ask(&root, json!({"kind": "sign_out", "name": "board"}));
+    named(&out, "board");
+    assert_eq!(sign_in::state_of(&root, "board"), SignInState::Cancelled);
+    let ghost = json!({"kind": "sign_out", "name": "ghost"});
+    assert_eq!(refused(&root, ghost), "app_plugin_not_found");
+    for name in [String::new(), "n".repeat(NAME_BYTES_MAX + 1)] {
+        let action = json!({"kind": "sign_out", "name": name});
+        let bytes = serde_json::to_vec(&request(action)).unwrap();
+        assert_eq!(parse(&bytes).unwrap_err().0, "connector_request_invalid");
+    }
+}
+
+/// rv-code note 6: a connector file changed since the owner trusted it waits for review,
+/// and each sign-in step names that, not a missing sign-in.
+#[test]
+fn a_sign_in_step_on_a_file_that_needs_review_names_the_review() {
+    let (_tmp, root) = engine();
+    let sha256 = sha(BOARD_OAUTH);
+    ask(
+        &root,
+        json!({"kind": "add", "yaml": BOARD_OAUTH, "sha256": sha256, "replace": false}),
+    );
+    let file = root.join(crate::app_plugins::FOLDER).join("board.yaml");
+    let changed = BOARD_OAUTH.replace("version: 1", "version: 2");
+    std::fs::write(&file, changed).unwrap();
+    for action in [
+        json!({"kind": "sign_in", "name": "board"}),
+        json!({"kind": "clear_own_app", "name": "board"}),
+    ] {
+        let code = refused(&root, action.clone());
+        assert_eq!(code, "app_plugin_needs_review", "{action}");
+    }
+    let saved = own_app(&root, "app-0005", None).unwrap_err().0;
+    assert_eq!(saved, "app_plugin_needs_review");
+}
+
+/// Adds and trusts one connector file in a fresh engine root. Input: the file. Output: the
+/// temporary folder, the root and the page after the add.
+fn added(yaml: &str) -> (tempfile::TempDir, PathBuf, ConnectorsView) {
+    let (tmp, root) = engine();
+    let sha256 = sha(yaml);
+    let view = ask(
+        &root,
+        json!({"kind": "add", "yaml": yaml, "sha256": sha256, "replace": false}),
+    );
+    (tmp, root, view)
+}
+
+/// The way `board` signs in now, as its page shows it.
+fn using(view: &ConnectorsView) -> Option<SignInWith> {
+    named(view, "board").oauth.as_ref().map(|oauth| oauth.using)
+}
+
+/// DEC-168 addendum 30, 23:36 Q5 A: the page shows how each connector signs in: a key only,
+/// the browser only, either one, or not yet for a file whose only way in this build cannot
+/// use (a client document with no address for it yet), and for a browser sign-in whether
+/// it is signed in, the own app allowed and saved, never its secret, and the address to
+/// register.
+#[test]
+fn the_page_shows_how_each_connector_signs_in() {
+    let (_keyed_tmp, _keyed, keyed) = added(BOARD);
+    assert_eq!(named(&keyed, "board").sign_in, SignIn::Key);
+    assert_eq!(named(&keyed, "board").oauth, None);
+
+    let (_tmp, root, view) = added(BOARD_OAUTH);
+    let board = named(&view, "board");
+    assert_eq!(board.sign_in, SignIn::Browser);
+    assert_eq!(board.status, PluginStatus::NeedsSignIn, "Ready only once signed in");
+    let mut browser = OAuthView {
+        signed_in: false,
+        own_app_allowed: true,
+        own_app: None,
+        redirect: "http://127.0.0.1/callback".to_owned(),
+        using: SignInWith::Browser,
+    };
+    assert_eq!(board.oauth.as_ref(), Some(&browser));
+    let saved = page(own_app(&root, "app-0006", Some(b"cs-secret-0006")).unwrap());
+    browser.own_app = Some(OwnAppView {
+        client_id: "app-0006".to_owned(),
+        secret_saved: true,
+    });
+    assert_eq!(named(&saved, "board").oauth.as_ref(), Some(&browser));
+    let name = "connector-signin-board";
+    let record = crate::protocol::CredentialRef::new(name).unwrap();
+    let keys = crate::storage::accounts::PLUGIN_KEYS;
+    let saved = crate::storage::accounts::replace_key_in(&root, keys, &record, b"{}".to_vec());
+    saved.unwrap();
+    browser.signed_in = true;
+    let read = ask(&root, json!({"kind": "view", "project": null}));
+    assert_eq!(named(&read, "board").oauth.as_ref(), Some(&browser));
+    assert_eq!(named(&read, "board").status, PluginStatus::Ready);
+
+    let (_both_tmp, _both, both) = added(BOARD_BOTH);
+    assert_eq!(named(&both, "board").sign_in, SignIn::Both);
+    let (_document_tmp, _document, document) = added(BOARD_DOCUMENT);
+    assert_eq!(named(&document, "board").sign_in, SignIn::NotYet);
+    let offered = named(&document, "board").oauth.as_ref();
+    assert!(offered.is_some_and(|oauth| !oauth.own_app_allowed));
+}
+
+/// DEC-168 addendum 30, 23:36 Q1 A: a connector whose file offers a key and a browser
+/// sign-in signs in with the key until the owner chooses Browser. It is Ready once the
+/// chosen way is complete (rv-code FINDINGS-01:26 F1) and only that way is loaded to call;
+/// switching keeps both saved, removing it forgets the choice, and a one-way file refuses.
+#[test]
+fn the_owner_chooses_key_or_browser_for_a_connector_that_offers_both() {
+    let (_tmp, root, view) = added(BOARD_BOTH);
+    assert_eq!(named(&view, "board").status, PluginStatus::NeedsKey);
+    assert_eq!(using(&view), Some(SignInWith::Key));
+    let db = crate::questions::open(&root).unwrap();
+    let ready = store::connector_ready(&db, &root, "board");
+    let code = ready.err().map(|refusal| refusal.0);
+    assert_eq!(code.as_deref(), Some("app_plugin_needs_key"));
+
+    let choose = |way: &str| json!({"kind": "set_sign_in_with", "name": "board", "way": way});
+    let browser = ask(&root, choose("browser"));
+    assert_eq!(named(&browser, "board").status, PluginStatus::NeedsSignIn);
+    assert_eq!(using(&browser), Some(SignInWith::Browser));
+    let loaded = store::connector_ready(&db, &root, "board").unwrap();
+    assert!(loaded.browser && loaded.bindings.is_empty());
+    let name = "connector-signin-board";
+    let record = crate::protocol::CredentialRef::new(name).unwrap();
+    let keys = crate::storage::accounts::PLUGIN_KEYS;
+    let saved = crate::storage::accounts::replace_key_in(&root, keys, &record, b"{}".to_vec());
+    saved.unwrap();
+    let signed = ask(&root, json!({"kind": "view", "project": null}));
+    assert_eq!(named(&signed, "board").status, PluginStatus::Ready);
+
+    page(set_key(&root, "board").unwrap());
+    let keyed = ask(&root, choose("key"));
+    assert_eq!(named(&keyed, "board").status, PluginStatus::Ready);
+    assert_eq!(using(&keyed), Some(SignInWith::Key));
+    let loaded = store::connector_ready(&db, &root, "board").unwrap();
+    assert!(!loaded.browser && loaded.bindings.len() == 1);
+
+    ask(&root, choose("browser"));
+    ask(&root, json!({"kind": "remove", "name": "board"}));
+    let sha256 = sha(BOARD_BOTH);
+    let again = ask(
+        &root,
+        json!({"kind": "add", "yaml": BOARD_BOTH, "sha256": sha256, "replace": false}),
+    );
+    assert_eq!(using(&again), Some(SignInWith::Key));
+
+    for yaml in [BOARD, BOARD_OAUTH] {
+        let (_one_tmp, one, _) = added(yaml);
+        for way in ["key", "browser"] {
+            let code = refused(&one, choose(way));
+            assert_eq!(code, "connector_sign_in_one_way", "{way}");
+        }
+    }
+    for action in [
+        json!({"kind": "set_sign_in_with", "name": "board", "way": "both"}),
+        json!({"kind": "set_sign_in_with", "name": "", "way": "key"}),
+    ] {
+        let bytes = serde_json::to_vec(&request(action.clone())).unwrap();
+        let code = parse(&bytes).unwrap_err().0;
+        assert_eq!(code, "connector_request_invalid", "{action}");
+    }
+    assert!(CONNECTORS_CODES.contains(&"connector_sign_in_one_way"));
+    let plain = crate::connectors::plain_problem("connector_sign_in_one_way");
+    assert!(plain.is_some());
 }
 
 /// fix10 on T12: the owner's read of a write whose wait ran out answers expired, with no

@@ -127,14 +127,15 @@ export function notReadyLine(titles: string[]): string {
 }
 
 /** A connector's state word, checked in a fixed order: Refused, Needs review, Unavailable
- * (it signs in with OAuth, which this build does not have), Needs a key, then Ready, the
- * same in the TUI. Input: the connector. Output: the word. */
+ * (it signs in with OAuth, which this build does not have), Needs a key, Needs sign-in,
+ * then Ready, the same in the TUI. Input: the connector. Output: the word. */
 export function connectorWord(connector: ConnectorView): string {
   const status = connector.status;
   if (status.kind === "refused") return "Refused";
   if (status.kind === "needs_review") return "Needs review";
   if (connector.sign_in === "not_yet") return "Unavailable";
   if (status.kind === "needs_key") return "Needs a key";
+  if (status.kind === "needs_sign_in") return "Needs sign-in";
   return "Ready";
 }
 
@@ -254,6 +255,7 @@ export function connectorState(connector: ConnectorView): { word: string; tone: 
   if (status.kind === "needs_review") return { word, tone: "warn", detail: "Review this connector before a project can use it." };
   if (connector.sign_in === "not_yet") return { word, tone: "warn", detail: CONNECTORS_PAGE.oauthNotYet };
   if (status.kind === "needs_key") return { word, tone: "warn", detail: "Set a key for each secret it needs." };
+  if (status.kind === "needs_sign_in") return { word, tone: "warn", detail: "Sign in on its page before a project can use it." };
   return { word, tone: "ok", detail: null };
 }
 
