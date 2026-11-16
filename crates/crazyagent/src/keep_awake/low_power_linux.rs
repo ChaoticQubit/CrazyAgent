@@ -114,7 +114,10 @@ impl Daemon {
             body,
         );
         let reply = called.map_err(sorted);
-        if reply.as_ref().is_err_and(|problem| *problem == SaverError::NotRunning) {
+        if reply
+            .as_ref()
+            .is_err_and(|problem| *problem == SaverError::NotRunning)
+        {
             self.names = None;
         }
         reply
@@ -180,7 +183,9 @@ impl Saver for Daemon {
     /// makes the daemon drop every hold this engine has.
     fn release(&mut self, cookie: u32) {
         let released = match self.names {
-            Some(names) => self.call(names, None, "ReleaseProfile", &cookie).map(|_| ()),
+            Some(names) => self
+                .call(names, None, "ReleaseProfile", &cookie)
+                .map(|_| ()),
             None => Err(SaverError::NotRunning),
         };
         if let Err(problem) = released {

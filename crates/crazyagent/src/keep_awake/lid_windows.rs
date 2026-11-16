@@ -357,7 +357,9 @@ fn parsed(restore: &str) -> Option<Saved> {
     let saved: Saved = serde_json::from_str(restore).ok()?;
     let plan = saved.scheme.as_bytes();
     let shaped = plan.len() == PLAN_TEXT_LEN
-        && plan.iter().all(|byte| *byte == b'-' || byte.is_ascii_hexdigit());
+        && plan
+            .iter()
+            .all(|byte| *byte == b'-' || byte.is_ascii_hexdigit());
     if !shaped || saved.ac > ACTION_MAX || saved.dc > ACTION_MAX {
         return None;
     }
@@ -374,9 +376,8 @@ pub(crate) fn undo_with(setting: &mut impl LidSetting, entry: &Entry) -> Result<
     let Some(saved) = parsed(&entry.restore) else {
         return Err(EngineError("keep_awake_lid_entry_invalid".into()));
     };
-    let not_put_back = |refusal: &Refusal| {
-        EngineError(format!("keep_awake_lid_not_put_back: {}", words(refusal)))
-    };
+    let not_put_back =
+        |refusal: &Refusal| EngineError(format!("keep_awake_lid_not_put_back: {}", words(refusal)));
     let now = match setting.read(&saved.scheme) {
         Ok(now) => now,
         Err(Refusal::Gone) => return Ok(()),
@@ -460,8 +461,7 @@ impl LidSetting for Windows {
 /// that is not a GUID.
 #[cfg(windows)]
 fn scheme(plan: &str) -> Result<lid::Scheme, Refusal> {
-    lid::Scheme::parse(plan)
-        .ok_or_else(|| Refusal::Failed("the power plan is not a GUID".into()))
+    lid::Scheme::parse(plan).ok_or_else(|| Refusal::Failed("the power plan is not a GUID".into()))
 }
 
 /// The refusal of a Windows lid setting error. Input: the error. Output: the refusal.

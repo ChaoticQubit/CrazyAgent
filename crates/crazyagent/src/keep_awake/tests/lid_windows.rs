@@ -1,9 +1,9 @@
 use crate::keep_awake::journal::{Entry, Journal, JournalLock};
-use crate::keep_awake::{LidSupport, RESTORE_ENGINE_RUNNING, restore};
 use crate::keep_awake::lid_windows::{
     Actions, KIND, LidSetting, NEEDS_ADMIN, NOT_CHANGED, Refusal, WindowsLid, undo_with,
 };
 use crate::keep_awake::power::{LidAsk, LidCommand};
+use crate::keep_awake::{LidSupport, RESTORE_ENGINE_RUNNING, restore};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};

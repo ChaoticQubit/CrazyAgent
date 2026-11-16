@@ -91,13 +91,24 @@ fn count(daemon: &Arc<Mutex<Daemon>>, call: Call) -> usize {
 #[test]
 fn a_wanted_ask_holds_power_saver_once_and_an_unwanted_one_releases_it() {
     let (mut line, daemon) = line(true);
-    assert_eq!(line.step(false), LowPowerSupport::Ready, "a first look finds the daemon");
+    assert_eq!(
+        line.step(false),
+        LowPowerSupport::Ready,
+        "a first look finds the daemon"
+    );
     assert_eq!(line.step(true), LowPowerSupport::Held);
     assert_eq!(line.step(true), LowPowerSupport::Held);
-    assert_eq!(daemon.lock().unwrap().holds, [1], "one hold for the whole ask");
+    assert_eq!(
+        daemon.lock().unwrap().holds,
+        [1],
+        "one hold for the whole ask"
+    );
 
     assert_eq!(line.step(false), LowPowerSupport::Ready);
-    assert!(daemon.lock().unwrap().holds.is_empty(), "an unwanted ask lets go");
+    assert!(
+        daemon.lock().unwrap().holds.is_empty(),
+        "an unwanted ask lets go"
+    );
     assert_eq!(line.step(false), LowPowerSupport::Ready);
     assert_eq!(
         daemon.lock().unwrap().calls,
@@ -114,11 +125,23 @@ fn an_owner_who_picks_a_profile_keeps_it_for_the_rest_of_the_hold() {
 
     assert_eq!(line.step(true), LowPowerSupport::OwnerChanged);
     assert_eq!(line.step(true), LowPowerSupport::OwnerChanged);
-    assert_eq!(count(&daemon, Call::Hold), 1, "the owner's profile is not taken back");
+    assert_eq!(
+        count(&daemon, Call::Hold),
+        1,
+        "the owner's profile is not taken back"
+    );
 
     assert_eq!(line.step(false), LowPowerSupport::Ready);
-    assert_eq!(count(&daemon, Call::Release(1)), 0, "the daemon already dropped it");
-    assert_eq!(line.step(true), LowPowerSupport::Held, "a new hold may ask again");
+    assert_eq!(
+        count(&daemon, Call::Release(1)),
+        0,
+        "the daemon already dropped it"
+    );
+    assert_eq!(
+        line.step(true),
+        LowPowerSupport::Held,
+        "a new hold may ask again"
+    );
     assert_eq!(daemon.lock().unwrap().holds, [2]);
 }
 
@@ -130,7 +153,11 @@ fn a_missing_daemon_says_not_available_and_a_later_ask_tries_again() {
     assert!(daemon.lock().unwrap().holds.is_empty());
 
     daemon.lock().unwrap().running = true;
-    assert_eq!(line.step(true), LowPowerSupport::Held, "a daemon that came up is used");
+    assert_eq!(
+        line.step(true),
+        LowPowerSupport::Held,
+        "a daemon that came up is used"
+    );
     assert_eq!(line.step(false), LowPowerSupport::Ready);
     assert!(daemon.lock().unwrap().holds.is_empty());
 }
@@ -151,6 +178,9 @@ fn a_refused_or_failed_hold_says_why_in_bounded_words() {
     };
     let text = reason.strip_prefix(FAILED).expect("the failed words lead");
     assert_eq!(text.chars().count(), REASON_CHARS_MAX);
-    assert!(!text.chars().any(char::is_control), "no control character is shown");
+    assert!(
+        !text.chars().any(char::is_control),
+        "no control character is shown"
+    );
     assert!(daemon.lock().unwrap().holds.is_empty());
 }
