@@ -739,6 +739,33 @@ async fn look_again_searches_only_where_engine_start_said_and_an_engine_without_
     .await;
 }
 
+/// T19b 19b-4 (rv-code4 F1): the engine's lookup answers a listed harness by its exact id
+/// with the entry its catalog search finds under the search set at engine start, as a
+/// listed master turn finds it, so a listed research job or team agent finds its program.
+/// It never answers through an alias or for a kind the engine pins itself, never before a
+/// search is set, and never for a file that is gone.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn the_engine_lookup_answers_a_listed_harness_by_its_id_from_the_search_set_at_start() {
+    registry_case(|host, root| async move {
+        let bin = root.join("listed");
+        std::fs::create_dir(&bin).unwrap();
+        let program = physical_file(&bin, "standin-acp", b"#!/bin/sh\nexit 0\n");
+        physical_file(&bin, "claude", b"#!/bin/sh\nexit 0\n");
+        let lookup = host.harness_lookup();
+        assert_eq!(lookup("standin-acp"), None);
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        host.set_harness_search(on(&path)).unwrap();
+        assert_eq!(lookup("standin-acp"), Some(program.clone()));
+        assert_eq!(lookup("claude"), None);
+        assert_eq!(lookup("claude-code"), None);
+        assert_eq!(lookup("no-such-harness"), None);
+        std::fs::remove_file(&program).unwrap();
+        assert_eq!(lookup("standin-acp"), None);
+    })
+    .await;
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn check_again_replaces_a_pin_whose_file_is_gone_but_never_one_that_changed_or_is_unsafe() {
