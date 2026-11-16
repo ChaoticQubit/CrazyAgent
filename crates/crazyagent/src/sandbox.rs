@@ -1016,17 +1016,25 @@ pub const LINUX_ROOT_LINE: &str = "CrazyAgent runs as root on this Linux, so it 
 /// 53 is open to them on every host.
 pub const LINUX_DNS_ANY_HOST_LINE: &str = "On this Linux, agents can also reach port 53, used to look up names, on every host.";
 
+/// Why agents share the owner's process space where AppArmor keeps unprivileged programs
+/// out of user namespaces (Ubuntu 23.10 and newer) and this machine nests none, shown before
+/// the process or signals line it explains, with the deb package that adds the profile
+/// allowing it (DEC-179 SBX-3, addendum 7).
+pub const LINUX_APPARMOR_LINE: &str = "On this Linux, AppArmor keeps agents from getting a process space of their own. CrazyAgent's .deb package adds the AppArmor profile that allows it: install it, or if it is installed, run sudo dpkg-reconfigure crazy-agent.";
+
 /// What this Linux holds for an agent beyond its Landlock file and network rules: `nested`
 /// when it starts agents in a process namespace of their own, `scoped` when the kernel
 /// keeps their signals inside their own Landlock domain (Linux 6.12 or newer),
-/// `supervised` when the call supervisor holds every guard here, as launches start it, and
-/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1).
+/// `supervised` when the call supervisor holds every guard here, as launches start it,
+/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1), and
+/// `armored` when AppArmor's user namespace restriction is why it nests none (SBX-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinuxHost {
     pub nested: bool,
     pub scoped: bool,
     pub supervised: bool,
     pub root: bool,
+    pub armored: bool,
 }
 
 impl LinuxHost {

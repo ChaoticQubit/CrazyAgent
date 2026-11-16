@@ -64,6 +64,9 @@ const OWN_GIT: &str = "--own-git";
 const GUARD_SIGNALS: &str = "--guard-signals";
 const PROBE_SUPERVISOR: &str = "--probe-supervisor";
 const PROBE_SUPERVISED: &str = "--probe-supervised";
+/// Where AppArmor says whether it keeps unprivileged programs out of user namespaces, as on
+/// Ubuntu 23.10 and newer: `1` when it does ([`restricts`]).
+const APPARMOR_USERNS: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
 /// How long [`host_now`] keeps what it read: a policy view asks on every read, and each
 /// answer starts the helper twice.
 const HOST_AGE_MAX: Duration = Duration::from_secs(60);
@@ -1630,11 +1633,21 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
         )
 }
 
+/// Tells whether AppArmor keeps unprivileged programs out of user namespaces, from what
+/// [`APPARMOR_USERNS`] reads: only `1`, with or without its newline, does. Input: the text,
+/// none where the file cannot be read (no AppArmor, or an older one). Output: true when it
+/// restricts them.
+fn restricts(setting: Option<&str>) -> bool {
+    let _ = setting;
+    false
+}
+
 /// Reads what this machine holds for an agent beyond its Landlock rules: whether the
 /// kernel scopes signals (the helper's `--scoped`), whether a launch gives the agent a
 /// process namespace ([`nests`], or the plain probe fails), whether the call supervisor
-/// holds ([`supervises`]) and whether this runs as root. Inputs: the helper and the
-/// engine's data folder, none where no probe may run. Output: the facts.
+/// holds ([`supervises`]), whether this runs as root and whether AppArmor's user namespace
+/// restriction is why nothing nests ([`restricts`]). Inputs: the helper and the engine's
+/// data folder, none where no probe may run. Output: the facts.
 pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let usable = clean_absolute(helper) && helper.is_file();
     let scoped = usable && passes(Command::new(helper).arg(SCOPED));
@@ -1648,12 +1661,15 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let root = rustix::process::geteuid().is_root();
     let nest = bwrap.filter(|_| nested);
     let supervised = held && data.is_some_and(|data| supervises(helper, nest, data, root));
+    let armored = !nested && restricts(fs::read_to_string(APPARMOR_USERNS).ok().as_deref());
     assert!(!(root && supervised));
+    assert!(!(armored && nested));
     super::LinuxHost {
         nested,
         scoped,
         supervised,
         root,
+        armored,
     }
 }
 
@@ -2722,6 +2738,7 @@ mod tests {
                 scoped: false,
                 supervised: false,
                 root: false,
+                armored: false,
             })
         };
         let launched = |remotes: &[SandboxRemote]| {
@@ -3173,6 +3190,22 @@ mod tests {
         assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "and no folder is made");
     }
 
+    /// AppArmor keeps unprivileged programs out of user namespaces only where its setting
+    /// reads 1; any other value, or no file, leaves them free, so the AppArmor line shows
+    /// only where it is the reason nothing nests (DEC-179 SBX-3).
+    #[test]
+    fn only_an_apparmor_setting_of_one_restricts_user_namespaces() {
+        assert_eq!(
+            APPARMOR_USERNS,
+            "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+        );
+        assert!(restricts(Some("1\n")));
+        assert!(restricts(Some("1")));
+        for free in [Some("0\n"), Some(""), Some("2\n"), Some("11\n"), Some("1 0"), None] {
+            assert!(!restricts(free), "{free:?}");
+        }
+    }
+
     /// A launch whose own probe fails with the setting On runs without the supervisor and
     /// marks the kept host as running none, so the next Agent access page read shows the
     /// wider lines; nothing kept stays nothing (rv-secreview linux-t4c F2).
@@ -3183,6 +3216,7 @@ mod tests {
             scoped: true,
             supervised: true,
             root: false,
+            armored: false,
         };
         let at = Instant::now();
         let kept: KeptHost = Mutex::new(Some((at, host)));

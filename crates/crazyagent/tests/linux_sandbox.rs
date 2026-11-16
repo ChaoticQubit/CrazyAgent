@@ -2421,6 +2421,21 @@ fn a_host_whose_landlock_does_not_hold_reports_the_process_namespace_bubblewrap_
     assert!(!host.supervised, "bubblewrap alone runs no call supervisor: {host:?}");
 }
 
+/// The host report blames AppArmor only where its user namespace restriction is on and
+/// nothing nests here: a host that nests, or one without the restriction, never says so,
+/// and a missing helper nests nothing (DEC-179 SBX-3, addendum 7).
+#[test]
+fn the_host_report_names_apparmor_only_where_it_restricts_and_nothing_nests() {
+    let setting = fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns");
+    let restricted = setting.is_ok_and(|text| text.trim_end_matches('\n') == "1");
+    let temp = tempfile::tempdir().unwrap();
+    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(temp.path()));
+    assert_eq!(host.armored, restricted && !host.nested, "{host:?}");
+    let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"), None);
+    assert!(!absent.nested, "{absent:?}");
+    assert_eq!(absent.armored, restricted, "{absent:?}");
+}
+
 /// The supervisor probe never runs in a folder another process names: folders planted
 /// where the old probe made its own, in the shared temp folder for the nested probe's pid
 /// and a range after the helper's, leave it holding, as read for the page and as a plain
