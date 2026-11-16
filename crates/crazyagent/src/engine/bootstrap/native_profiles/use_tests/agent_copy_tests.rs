@@ -1124,7 +1124,7 @@ mod renewal_tests;
 /// the harness and the managed home. Output: the copy, or the refusal code.
 fn copy_of(harness: agent_copy::Harness, home: &Path) -> Result<Vec<u8>, String> {
     agent_copy::account_record(harness, &std::fs::File::open(home).unwrap(), home)
-        .map(|record| record.copy)
+        .map(|mut record| std::mem::take(&mut record.copy))
         .map_err(|problem| problem.0)
 }
 

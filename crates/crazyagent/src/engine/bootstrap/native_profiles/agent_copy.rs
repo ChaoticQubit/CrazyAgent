@@ -107,9 +107,16 @@ impl Harness {
 }
 
 /// An agent's copy of the account's credential and the moment its access token lapses.
+/// Dropping it wipes the copy, so no path frees the token unwiped.
 pub(super) struct Record {
     pub(super) copy: Vec<u8>,
     pub(super) expires: Duration,
+}
+
+impl Drop for Record {
+    fn drop(&mut self) {
+        crate::credentials::wipe(&mut self.copy);
+    }
 }
 
 /// An account credential copied into one agent's own home for one turn, with the keeper
@@ -438,16 +445,13 @@ impl NativeProfileUse {
             let renewal = self.renewal(harness, executable)?;
             record = off_worker(|| renewal.renew(record.expires))?;
             if record.expires <= since_epoch()? + USABLE_MIN {
-                crate::credentials::wipe(&mut record.copy);
                 return Err(match harness {
                     Harness::Codex => codex_expired(),
                     Harness::Claude => renewal_failed(),
                 });
             }
         }
-        let credential = poll_credential(harness, &record.copy);
-        crate::credentials::wipe(&mut record.copy);
-        credential
+        poll_credential(harness, &record.copy)
     }
 
     /// When this Claude Code account's access token lapses, read from the record exactly as
