@@ -211,7 +211,9 @@ fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
         }
     }
     let (_other, bare) = harness_home("standin-jsonl-append");
-    let plain = context().install_listed(&appended, &bare, true).unwrap();
+    let plain = super::context()
+        .install_listed(&appended, &bare, true)
+        .unwrap();
     let refused = command_with(&request, Some(&plain), &run, Some(&settings));
     assert_eq!(refused.err(), Some(failure("launch_key_relay_unsupported")));
 }

@@ -67,7 +67,7 @@ fn claude_from_the_latest_cask_updates_with_that_prefixs_brew_and_that_cask() {
     assert_eq!(fixed.program, brew);
     assert_eq!(fixed.args, ["upgrade", "--cask", "claude-code@latest"]);
     assert_eq!(
-        shown(&fixed),
+        super::shown(&fixed),
         format!("{} upgrade --cask claude-code@latest", brew.display())
     );
     let check = check_command("claude-code", &real, &machine.roots())
@@ -140,7 +140,7 @@ fn a_standalone_codex_install_updates_itself_and_the_installer_script_is_never_a
     let fixed = update_command("codex", &entry, &real, &machine.roots()).unwrap();
     assert_eq!(fixed.program, entry);
     assert_eq!(fixed.args, ["update"]);
-    assert!(!shown(&fixed).contains("install.sh"));
+    assert!(!super::shown(&fixed).contains("install.sh"));
 }
 
 #[test]
@@ -1119,7 +1119,7 @@ fn a_cask_check_also_asks_about_casks_that_update_themselves() {
         ]
     );
     assert!(check.args.len() <= ARGS_MAX);
-    assert!(shown(&check).ends_with("--greedy-auto-updates --json=v2 droid"));
+    assert!(super::shown(&check).ends_with("--greedy-auto-updates --json=v2 droid"));
 }
 
 #[test]

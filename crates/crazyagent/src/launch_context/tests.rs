@@ -2071,6 +2071,8 @@ fn a_launch_clears_its_home_caches_when_its_context_names_a_wider_level() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let home = root.join("claude");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
