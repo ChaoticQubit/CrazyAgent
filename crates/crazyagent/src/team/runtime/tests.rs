@@ -30280,13 +30280,15 @@ fn hand_warden_pid(folder: &Path) {
         return;
     };
     assert!(server > 1, "the stand-in named a server process");
-    let listed = Command::new("/bin/ps")
-        .args(["-ax", "-o", "pid=,ppid=,comm="])
-        .env_clear()
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .unwrap();
+    let listed = crate::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-ax", "-o", "pid=,ppid=,comm="])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     assert!(listed.status.success(), "ps listed the processes");
     let wardens: Vec<u32> = String::from_utf8_lossy(&listed.stdout)
         .lines()
