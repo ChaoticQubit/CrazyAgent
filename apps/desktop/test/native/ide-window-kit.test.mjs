@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { onScreen, planEnd } from "./ide-window-kit.mjs";
 
@@ -42,4 +43,13 @@ test("a window already on the list is found with no pause", async () => {
   const { waits, clock } = handClock(0);
   assert.equal(await onScreen(() => "7", { by: 1, every: 200, label: "the closed picture: the app's window", clock }), "7");
   assert.deepEqual(waits, []);
+});
+
+test("every ide-window row that sends a real System Events key is a keysIt row, skipped on macOS without E2E_REAL_KEYS=1, and every keystroke goes through realKey", () => {
+  const source = readFileSync(new URL("./ide-window.e2e.mjs", import.meta.url), "utf8");
+  const rows = source.split(/\n {2}(?=(?:it|keysIt)\()/).slice(1);
+  assert.equal(rows.length, 4, "the file's four rows were found");
+  for (const row of rows) assert.equal(/\b(?:realKey|commandKey)\(/.test(row), row.startsWith("keysIt("), row.slice(0, 120));
+  assert.doesNotMatch(source, /onApp\(`keystroke/, "a keystroke sent past realKey reaches whichever app is in front");
+  assert.match(source, /const REAL_KEYS = process\.platform !== "darwin" \|\| process\.env\.E2E_REAL_KEYS === "1";/);
 });
