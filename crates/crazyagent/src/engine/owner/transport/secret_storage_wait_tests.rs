@@ -18,6 +18,13 @@ struct Busy {
 
 impl Busy {
     async fn start() -> Self {
+        Self::with_settings("timeout_ms = 250\n").await
+    }
+
+    /// Starts the engine on owner-only settings files whose global file holds `settings`
+    /// after its version line. Input: the settings text. Output: the running engine and
+    /// its owner client.
+    async fn with_settings(settings: &str) -> Self {
         let disk = super::usage_tests::busy_storage().await;
         let root = tempfile::Builder::new()
             .prefix("ca-busy-")
@@ -25,7 +32,7 @@ impl Busy {
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        std::fs::write(&global, "version = 1\ntimeout_ms = 250\n").unwrap();
+        std::fs::write(&global, format!("version = 1\n{settings}")).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (shutdown, stopped) = tokio::sync::watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -787,5 +794,109 @@ async fn removing_an_account_leaves_no_key_in_its_generated_home() {
         "the generated home keeps the removed account's key"
     );
     assert!(!home.exists(), "the generated home goes whole");
+    busy.stop().await;
+}
+
+const SHARED_KEY: &str = "lab-shared-key";
+
+/// Settings that hold two connections of one account on one API key, `SHARED_KEY`, at a
+/// local port that refuses, with an owner wait no removal outlasts. Input: the port.
+/// Output: the settings text for [`Busy::with_settings`].
+fn shared_key_settings(port: u16) -> String {
+    let connection = |id: &str, model: &str| {
+        format!(
+            "  {{ id = \"{id}\", provider = \"openai-compatible\", harness = \"rcli\", protocol = \"openai-chat\", account_ref = \"lab-account\", endpoint = {{ kind = \"http\", url = \"http://127.0.0.1:{port}/v1\" }}, model = {{ id = \"{model}\", author = \"openai-compatible\" }}, auth = {{ method = \"api_key\", credential_ref = \"{SHARED_KEY}\" }} }},\n"
+        )
+    };
+    format!(
+        "timeout_ms = 10000\n\n[model_access]\naccounts = [\"lab-account\"]\nconnections = [\n{}{}]\n",
+        connection("lab-first", "lab-model"),
+        connection("lab-second", "lab-model-2"),
+    )
+}
+
+/// Writes `secret` as the key file `name` in the engine's owner-only key folder, where an
+/// account added with that key keeps it. Inputs: the engine root, the key name and the
+/// secret. Output: the key file's path.
+fn planted_key(root: &Path, name: &str, secret: &str) -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    let folder = root.join(crate::storage::accounts::ACCOUNT_KEYS);
+    if !folder.exists() {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&folder)
+            .unwrap();
+    }
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let key = folder.join(name);
+    std::fs::write(&key, secret.as_bytes()).unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(holders(root, secret.as_bytes()), 1);
+    key
+}
+
+/// ACCOUNT-REMOVE-KEY: removing one of two connections on one API key keeps the key file
+/// the other still uses, as removing a native sign-in keeps a profile another connection
+/// names, and removing the last of them deletes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_one_of_two_connections_on_one_key_keeps_the_key_until_the_last_goes() {
+    let (_refusing, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let busy = Busy::with_settings(&shared_key_settings(port)).await;
+    let secret = format!("sk-shared-{}", std::process::id());
+    let key = planted_key(&busy.engine_root(), SHARED_KEY, &secret);
+    let first = crate::protocol::CredentialRef::new("lab-first").unwrap();
+    let second = crate::protocol::CredentialRef::new("lab-second").unwrap();
+
+    busy.client.remove_account(first).await.unwrap();
+    assert_eq!(
+        std::fs::read(&key).ok().as_deref(),
+        Some(secret.as_bytes()),
+        "the key the other connection still uses stays"
+    );
+    let left = busy.client.list_accounts(None, 10).await.unwrap().accounts;
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0].id, second);
+
+    busy.client.remove_account(second).await.unwrap();
+    assert!(
+        none_hold(&busy.engine_root(), secret.as_bytes()).await,
+        "the key goes with the last connection that used it"
+    );
+    busy.stop().await;
+}
+
+/// ACCOUNT-REMOVE-KEY: a key replaced for a connection that was removed meanwhile stays on
+/// disk while another connection on the same key still uses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_replaced_after_its_connection_was_removed_stays_for_the_other_on_that_key() {
+    let (_refusing, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let busy = Busy::with_settings(&shared_key_settings(port)).await;
+    let before = format!("sk-shared-before-{}", std::process::id());
+    planted_key(&busy.engine_root(), SHARED_KEY, &before);
+    let first = crate::protocol::CredentialRef::new("lab-first").unwrap();
+    let shared = crate::protocol::CredentialRef::new(SHARED_KEY).unwrap();
+    let handle = busy.service.owner_runtime().unwrap();
+    let admission = busy.admission();
+
+    busy.client.remove_account(first.clone()).await.unwrap();
+    let after = format!("sk-shared-after-{}", std::process::id());
+    super::accounts::replace_key(
+        &handle.authority.root,
+        &shared,
+        AccountSecret::new(after.as_bytes().to_vec()).unwrap(),
+    )
+    .unwrap();
+    let replaced =
+        super::accounts::key_replaced(&handle.engine, &admission, &handle.authority, first, shared)
+            .await;
+    assert_eq!(
+        replaced.err().map(|error| error.0).as_deref(),
+        Some("account_not_found")
+    );
+    assert_eq!(
+        holders(&busy.engine_root(), after.as_bytes()),
+        1,
+        "the replaced key the other connection still uses stays"
+    );
     busy.stop().await;
 }
