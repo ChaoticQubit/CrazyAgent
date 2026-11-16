@@ -428,11 +428,32 @@ fn account_files(auth: &ModelAuthentication) -> Option<(&'static str, &str)> {
     }
 }
 
-/// Deletes a removed account's files straight after its removal commits; what cannot go
-/// now stays noted for the next start. Inputs: the connection, the catalog left after the
-/// removal, the kind and the reference.
+/// Names the API keys a settings change leaves no connection naming: each key reference an
+/// API key connection held before the change that no API key connection holds after it.
+/// Inputs: the catalogs before and after. Output: those references, each once.
 #[cfg(unix)]
-fn settle_removed(
+pub(super) fn dropped_keys(
+    before: Option<&crate::config::ModelAccess>,
+    after: Option<&crate::config::ModelAccess>,
+) -> std::collections::BTreeSet<CredentialRef> {
+    let keys = |catalog: Option<&crate::config::ModelAccess>| {
+        catalog
+            .into_iter()
+            .flat_map(|access| &access.connections)
+            .filter_map(|connection| match &connection.auth {
+                ModelAuthentication::ApiKey { credential_ref } => Some(credential_ref.clone()),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    keys(before).difference(&keys(after)).cloned().collect()
+}
+
+/// Deletes a removed account's files, or a dropped connection's, straight after the change
+/// commits; what cannot go now stays noted for the next start. Inputs: the connection, the
+/// catalog left after the change, the kind and the reference.
+#[cfg(unix)]
+pub(super) fn settle_removed(
     db: &Connection,
     catalog: Option<&crate::config::ModelAccess>,
     kind: &str,
