@@ -115,7 +115,7 @@ fn a_render_never_writes_through_a_link_planted_in_the_private_home() {
 /// the setting.
 #[test]
 fn render_blocks_refuse_unknown_kinds_paths_outside_the_home_and_unknown_keys() {
-    let inside = "this must be {home} followed by a file inside it.";
+    let inside = "this must be {home} followed by a file inside it, each name only ASCII letters, digits, ., _ and -.";
     let cases = [
         (
             "mcp:\n  render: \"yaml-servers\"\n  path: \"{home}/mcp.yaml\"\n",
@@ -200,6 +200,48 @@ fn a_render_path_never_names_a_file_crazyagent_keeps_in_the_home() {
             "{path}"
         );
     }
+}
+
+/// T18 r2 F1 (rv-code4): a render path names its folders and its file in ASCII letters,
+/// digits, `.`, `_` and `-` only. A macOS folder also folds Unicode letter case, so a name
+/// holding the Kelvin sign would still open the home lock or the key file, and an accented
+/// name could open another spelling of itself.
+#[test]
+fn a_render_path_holds_only_ascii_names_so_no_unicode_case_fold_reaches_an_engine_file() {
+    let inside = "this must be {home} followed by a file inside it, each name only ASCII letters, digits, ., _ and -.";
+    for (key, render, path) in [
+        ("instructions", "file", "{home}/crazyagent.loc\u{212a}"),
+        ("instructions", "file", "{home}/.crazyagent-\u{212a}ey"),
+        (
+            "mcp",
+            "json-mcp-servers",
+            "{home}/crazyagent\u{212a}/mcp.json",
+        ),
+        ("mcp", "json-mcp-servers", "{home}/agent/caf\u{e9}.json"),
+    ] {
+        let blocks = format!("{key}:\n  render: \"{render}\"\n  path: \"{path}\"\n");
+        assert_eq!(
+            renders_of(&blocks).err(),
+            Some((VALUE, format!("{key}.path: {inside}"))),
+            "{path}"
+        );
+    }
+}
+
+/// T18 r2 F1 (rv-code4): an MCP path and an instruction path that differ only in letter
+/// case name one file on a macOS folder, so the second is refused instead of being written
+/// over the first and leaving the harness with no servers.
+#[test]
+fn two_render_paths_that_differ_only_in_letter_case_are_refused_as_one_file() {
+    let blocks = "mcp:\n  render: \"json-mcp-servers\"\n  path: \"{home}/agent/A.json\"\ninstructions:\n  render: \"file\"\n  path: \"{home}/Agent/a.JSON\"\n";
+
+    assert_eq!(
+        renders_of(blocks).err(),
+        Some((
+            VALUE,
+            "instructions.path: mcp.path already names this file.".to_owned()
+        ))
+    );
 }
 
 /// Task 18: every bundled manifest's render blocks read, so no launch of a bundled harness
