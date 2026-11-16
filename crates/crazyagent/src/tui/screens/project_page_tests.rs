@@ -8348,3 +8348,25 @@ fn a_refused_publish_answer_reads_the_publish_again_and_shows_where_it_stands() 
     assert!(shown.contains("Published as me/tool."), "{shown}");
     assert!(!shown.contains("[x] .env*"), "{shown}");
 }
+
+#[test]
+fn a_start_whose_reply_was_lost_after_the_engine_ran_it_says_it_may_have_started() {
+    let said = |result: Result<IntakeView, String>| {
+        let message = super::project_page::ProjectPage::publish_start_said("Notes", &result);
+        (message.lead, message.rest)
+    };
+    let maybe = (
+        "Publishing on GitHub may have started.".to_owned(),
+        "The project's Overview shows where it stands.".to_owned(),
+    );
+    assert_eq!(said(Err("github_outcome_unknown".into())), maybe);
+    assert_eq!(said(Err("github_reply_bounds".into())), maybe);
+    assert_eq!(said(Ok(IntakeView::Prompt(true))), maybe);
+    assert_eq!(
+        said(Err("github_publish_running".into())),
+        (
+            super::new_project_publish::PUBLISH_NOT_STARTED.to_owned(),
+            super::intake::copy("github_publish_running"),
+        )
+    );
+}

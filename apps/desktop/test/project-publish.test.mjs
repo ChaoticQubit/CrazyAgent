@@ -136,6 +136,12 @@ test("a failed publish read keeps the last job shown with its problem and Try ag
   assert.match(card, /id="pj-github-reread"/, "a failed read offers Try again");
 });
 
+test("a failed Start from the Overview form reads the publish again, so a Start that ran shows where it stands", () => {
+  const card = read("src/screens/project/github-publish.tsx");
+  assert.match(card, /if \(!made\) \{\n\s+setProblem\(line\);\n\s+setTick\(\(value\) => value \+ 1\);\n\s+return;/);
+  assert.match(card, /\{form && view\.kind === "none" && <PublishForm /, "a job read after the Start closes the form");
+});
+
 test("the Overview asks to publish a project with no publish through two bridge commands, and Publish opens the New Project form", async () => {
   assert.equal(publishJob.PROMPT_LINE, "This project is not on GitHub. Publish it?");
   assert.deepEqual([publishJob.PROMPT_PUBLISH, publishJob.PROMPT_NOT_NOW, publishJob.PROMPT_NEVER], ["Publish", "Not now", "Don't ask again"]);

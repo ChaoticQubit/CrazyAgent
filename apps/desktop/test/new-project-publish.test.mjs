@@ -155,3 +155,13 @@ test("the made project's message follows the publish Start's reply", () => {
   const client = read("src/engine-client.ts");
   assert.match(client, /\| \{ step: "drafting" \}\n/);
 });
+
+test("a Start whose reply was lost after the engine ran it says it may have started and where to look, the TUI's words", () => {
+  const maybe = "Publishing on GitHub may have started. The project's Overview shows where it stands.";
+  assert.equal(publish.publishOutcome({ kind: "error", code: "github_outcome_unknown", message: "We couldn't confirm what GitHub did. Check the list again." }), maybe);
+  assert.equal(publish.publishOutcome({ kind: "error", code: "github_reply_bounds", message: "GitHub's reply was too large to show. Try again." }), maybe);
+  assert.equal(publish.publishOutcome({ kind: "error", code: "github_publish_running", message: "A publish is already running." }), "Publishing on GitHub didn't start. A publish is already running.");
+  const tui = read("../../crates/crazyagent/src/tui/screens/new_project_publish.rs");
+  assert.match(tui, /"Publishing on GitHub may have started\."/);
+  assert.match(tui, /"The project's Overview shows where it stands\."/);
+});
