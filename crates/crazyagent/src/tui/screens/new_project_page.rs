@@ -13,9 +13,9 @@ use crate::projects_home::AddMode;
 use crate::projects_home::job::{JobKind, JobState, JobSubject, JobView};
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec, RequestId};
 use crate::sandbox::policy::AgentAccess;
-use crate::tui::client::OwnerEvent;
 use crate::tui::client::intake::{IntakeEvent, IntakeQuery, IntakeView, start_id};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
+use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
@@ -208,12 +208,15 @@ pub(in crate::tui) fn harness_choices_from(entries: &[HarnessEntry]) -> Vec<Harn
 /// The New project wizard as a shell screen.
 /// Holds the wizard, its last drawn view and the catalog read it waits for.
 /// Engine reads go through the shell queue; creation runs as the engine's New Project job.
+/// A page the shell closed while its creation runs is carried, and then saves the picked
+/// agent access itself, since no project page opens for it.
 pub(in crate::tui) struct NewProjectPage {
     wizard: Wizard,
     view: View,
     creation: Option<Creation>,
     checking: bool,
     asked: bool,
+    carried: bool,
 }
 
 /// One New Project this page started as the engine's job (DEC-177 step 3b): the start's
@@ -230,7 +233,9 @@ struct Creation {
 
 /// Where one New Project stands: its start is out; its start failed or went unanswered, so
 /// the next job read decides it with the code kept; the engine runs it; it is made and its
-/// pool is being assigned; it is made and its follow-ups are due; it is finished.
+/// pool is being assigned; it is made and its follow-ups are due; a carried page reads the
+/// project's agent policy, then saves the picked access under the write's generation; it
+/// is finished.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Stage {
     Starting,
@@ -238,6 +243,8 @@ enum Stage {
     Following,
     Assigning,
     Made,
+    ReadingAccess,
+    SavingAccess(u64),
     Finished,
 }
 
@@ -300,6 +307,7 @@ impl NewProjectPage {
             creation: None,
             checking: false,
             asked: false,
+            carried: false,
         };
         page.redraw(ctx);
         page
@@ -536,6 +544,15 @@ impl NewProjectPage {
         }
         let saves_access = first && creation.access != AgentAccess::Sandboxed;
         creation.stage = Stage::Finished;
+        if self.carried {
+            if saves_access {
+                creation.stage = Stage::ReadingAccess;
+                ctx.request(Request::Setup(SetupQuery::AgentPolicy {
+                    project: creation.project_id.clone(),
+                }));
+            }
+            return Flow::Handled;
+        }
         let mut page = ProjectPage::new(
             creation.project_id.clone(),
             creation.name.clone(),
@@ -548,10 +565,52 @@ impl NewProjectPage {
         Flow::Replace(Box::new(page))
     }
 
+    /// Saves a carried page's picked agent access from the replies it waits for: the
+    /// project's policy read gives the write, the write's reply ends it, and a refusal of
+    /// either says the project stays Sandboxed (DEC-177 add.3 decision 4). Takes the setup
+    /// reply and the context. Returns true only for a reply this page waits for.
+    fn access_arrived(&mut self, event: &SetupEvent, ctx: &mut Ctx) -> bool {
+        let Some(creation) = self.creation.as_mut() else {
+            return false;
+        };
+        match (creation.stage.clone(), &event.query) {
+            (Stage::ReadingAccess, SetupQuery::AgentPolicy { project })
+                if *project == creation.project_id =>
+            {
+                match ProjectPage::created_access_write(
+                    project,
+                    creation.access,
+                    &event.result,
+                    ctx,
+                ) {
+                    Ok((write, generation)) => {
+                        creation.stage = Stage::SavingAccess(generation);
+                        ctx.request(Request::Setup(write));
+                    }
+                    Err(why) => {
+                        creation.stage = Stage::Finished;
+                        ProjectPage::stays_sandboxed(&why, ctx);
+                    }
+                }
+                true
+            }
+            (Stage::SavingAccess(sent), SetupQuery::Change { generation, .. })
+                if sent == *generation =>
+            {
+                creation.stage = Stage::Finished;
+                if let Some(why) = ProjectPage::created_access_unsaved(&event.result) {
+                    ProjectPage::stays_sandboxed(&why, ctx);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Carries one arrival for a page the shell closed. Takes the arrival and the context.
-    /// Returns true only when the arrival was this page's alone: the reply to its own start
-    /// or the pool edit its assignment waits for. A job read is every page's, so it returns
-    /// false for one.
+    /// Returns true only when the arrival was this page's alone: the reply to its own start,
+    /// the pool edit its assignment waits for, or a reply its access save waits for. A job
+    /// read is every page's, so it returns false for one.
     fn carry(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> bool {
         let Some(creation) = &self.creation else {
             return false;
@@ -569,6 +628,10 @@ impl NewProjectPage {
                 self.assigned(result, ctx);
                 true
             }
+            Arrival::Owner(event) => match event.as_ref() {
+                OwnerEvent::Setup(setup) => self.access_arrived(setup, ctx),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -613,6 +676,7 @@ impl Drop for NewProjectPage {
                 creation: self.creation.take(),
                 checking: false,
                 asked: false,
+                carried: true,
             });
             let _ = RUNNING.try_with(|running| {
                 if let Some(page) = page.take() {

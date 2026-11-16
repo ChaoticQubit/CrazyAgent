@@ -860,6 +860,14 @@ impl Storage {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::Delete(&outcome)))
                             });
+                            if result.is_ok()
+                                && let OwnerOperation::Apply {
+                                    mutation: OwnerMutation::DeleteProject { project_id, .. },
+                                } = &request.operation
+                                && let Err(e) = accounts::forget_pool_project(&mut connection, &mut config, sources.as_ref(), &admission, project_id)
+                            {
+                                eprintln!("project_pool_not_forgotten cause={}", e.0);
+                            }
                             let _ = reply.send(result);
                         }
                         Job::SetupPlan(admission, request, reply) => {
