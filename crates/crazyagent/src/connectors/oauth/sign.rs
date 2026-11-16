@@ -125,7 +125,8 @@ struct Record {
 }
 
 static FLOWS: Mutex<Vec<Flow>> = Mutex::new(Vec::new());
-/// Held while an access token is renewed, so two calls never spend one refresh token twice.
+/// Held while an access token is renewed or a code redeemed, so two calls never spend one
+/// refresh token twice and a sign-in's saves never interleave with a renewal's.
 static RENEWING: Mutex<()> = Mutex::new(());
 
 fn flows() -> MutexGuard<'static, Vec<Flow>> {
@@ -944,9 +945,10 @@ fn save_record(root: &Path, name: &str, text: String) -> Result<(), OAuthError> 
 
 /// Redeems an answer's code (RFC 6749 4.1.3 with PKCE and the resource): the issuer is
 /// checked first, so a code from another server is never sent anywhere. The request body
-/// lives in a buffer that never grows and is zeroed. The tokens are saved, the tokens of
-/// another issuer the connector was signed in at before are removed, the owner's own app
-/// is bound to this issuer, and the sign-in record is saved last. Inputs: engine root, the
+/// lives in a buffer that never grows and is zeroed. Under the renewal lock, the owner's
+/// own app must still be bound to this issuer or to none; then the tokens are saved, the
+/// tokens of another issuer the connector was signed in at before are removed, the owner's
+/// own app is bound to this issuer, and the sign-in record is saved last. Inputs: engine root, the
 /// sign-in, the code, the answer's issuer and the lookup. Output: Ok once all is saved.
 fn redeem(
     root: &Path,
@@ -963,6 +965,14 @@ fn redeem(
     }
     if !visible(code, CODE_BYTES_MAX) {
         return Err(OAuthError("connector_oauth_code_invalid"));
+    }
+    let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    if flow.client.own {
+        let bound = accounts::read_bearer_in(root, PLUGIN_KEYS, &own_issuer_ref(&flow.connector)?)
+            .map_err(|_| key_store())?;
+        if bound.is_some_and(|issuer| issuer.expose() != flow.issuer) {
+            return Err(mismatch);
+        }
     }
     let secret = secret_of(root, &flow.client)?;
     let mut form = url::form_urlencoded::Serializer::new(String::with_capacity(FORM_BYTES));

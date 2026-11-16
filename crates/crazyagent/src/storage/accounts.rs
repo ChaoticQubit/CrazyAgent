@@ -307,17 +307,6 @@ pub(crate) fn read_key_in(
     Err(error("account_key_store_unavailable"))
 }
 
-/// Refuses to read a bearer token where the Unix owner-only key folder does not exist.
-/// Output: `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn read_bearer_in(
-    _root: &Path,
-    _folder: &str,
-    _credential: &CredentialRef,
-) -> Result<Option<crate::credentials::SecretString>, EngineError> {
-    Err(error("account_key_store_unavailable"))
-}
-
 /// Refuses to check a key where the Unix owner-only key folder does not exist.
 /// Output: `account_key_store_unavailable`.
 #[cfg(not(unix))]
