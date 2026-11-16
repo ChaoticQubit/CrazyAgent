@@ -35,6 +35,8 @@ export const RULE_LABELS: Readonly<Record<string, string>> = {
 };
 
 export const DRAFT_POLL_MS = 2000;
+export const START_LOST_WAIT_MS = 140_000;
+export const PUBLISH_NOT_SEEN = "No publish has shown up. Try Publish again.";
 export const DRAFT_AGENT = "The project's agent drafted these lines from file names only. Check them before you approve.";
 export const DRAFT_STOPPED = "The draft stopped, so CrazyAgent's standard lines are shown.";
 export const DRAFT_BASELINE = "No agent drafted these lines, so CrazyAgent's standard lines are shown.";
@@ -126,4 +128,31 @@ export const ENGINE_STARTING = "CrazyAgent's engine is still starting. Try again
 export function readKept(kept: Result<GitHubPublishJob | null> | null, result: Result<GitHubPublishJob | null>): { read: Result<GitHubPublishJob | null> | null; failed: string | null } {
   if (result.kind === "ok") return { read: result, failed: null };
   return { read: kept, failed: result.kind === "error" ? result.message : ENGINE_STARTING };
+}
+
+const lostStarts = new Map<string, number>();
+
+/** Whether the Overview has waited out a Start whose reply was lost: as long as the engine
+ * gives a Start, START_LOST_WAIT_MS, has passed since the reply came. Inputs: when the reply
+ * came and now, in epoch milliseconds. Output: the answer. */
+export function lostStartOver(since: number, now: number): boolean {
+  return now - since >= START_LOST_WAIT_MS;
+}
+
+/** Marks a project whose publish Start Create sent lost its reply, so its Overview reads the
+ * publish until it shows. Inputs: the project id and when the reply came. Output: none. */
+export function noteLostStart(projectId: string, at: number): void {
+  lostStarts.set(projectId, at);
+}
+
+/** When a project's lost Start reply came, as Create marked it. Input: the project id.
+ * Output: the time, or null when none is marked. */
+export function lostStartSince(projectId: string): number | null {
+  return lostStarts.get(projectId) ?? null;
+}
+
+/** Forgets a project's lost Start once its publish shows or the wait is over. Input: the
+ * project id. Output: none. */
+export function forgetLostStart(projectId: string): void {
+  lostStarts.delete(projectId);
 }

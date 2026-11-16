@@ -26,6 +26,14 @@ const GITIGNORE_BYTES_MAX: u64 = 1 << 20;
 const FINDINGS_MAX: usize = 1000;
 const FILE_FINDINGS_MAX: usize = 20;
 const LOOKUP_TIME: Duration = Duration::from_secs(20);
+/// The longest a publish Start's own git can run: [`inspect`] reads the remotes once and
+/// the head three times, each within `LOOKUP_TIME`. The owner transport gives a Start this
+/// and more before it calls the outcome unknown.
+pub(crate) const START_GIT_TIME: Duration = LOOKUP_TIME.saturating_mul(4);
+/// How long a publish Start may run before the owner transport calls its outcome unknown:
+/// its own git ([`START_GIT_TIME`]) and a minute for the sign-in read, the listing and the
+/// Drafting save. A client whose Start reply was lost reads the publish for as long again.
+pub(crate) const START_TIME: Duration = START_GIT_TIME.saturating_add(Duration::from_secs(60));
 const WORK_TIME: Duration = Duration::from_secs(600);
 const EMPTY_TREES: [&str; 2] = [
     "4b825dc642cb6eb9a060e54bf8d69288fbee4904",

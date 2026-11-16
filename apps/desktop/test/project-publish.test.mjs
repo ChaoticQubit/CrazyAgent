@@ -136,6 +136,34 @@ test("a failed publish read keeps the last job shown with its problem and Try ag
   assert.match(card, /id="pj-github-reread"/, "a failed read offers Try again");
 });
 
+test("a failed Start from the Overview form reads the publish again, so a Start that ran shows where it stands", () => {
+  const card = read("src/screens/project/github-publish.tsx");
+  assert.match(card, /if \(!made\) \{\n\s+setProblem\(line\);\n\s+setTick\(\(value\) => value \+ 1\);\n\s+if \(lost\) setLostSince\(Date\.now\(\)\);\n\s+return;/);
+  assert.match(card, /\{form && view\.kind === "none" && <PublishForm /, "a job read after the Start closes the form");
+});
+
+test("a Start whose reply was lost keeps the Overview reading every two seconds until a publish shows or the Start's budget passes, then says so, the TUI's words", () => {
+  assert.equal(typeof publishJob.lostStartOver, "function");
+  assert.equal(publishJob.START_LOST_WAIT_MS, 140_000);
+  assert.equal(publishJob.lostStartOver(1_000, 1_000 + 139_999), false);
+  assert.equal(publishJob.lostStartOver(1_000, 1_000 + 140_000), true);
+  assert.equal(publishJob.PUBLISH_NOT_SEEN, "No publish has shown up. Try Publish again.");
+  assert.equal(publishJob.lostStartSince("project-lost"), null);
+  publishJob.noteLostStart("project-lost", 5);
+  assert.equal(publishJob.lostStartSince("project-lost"), 5);
+  publishJob.forgetLostStart("project-lost");
+  assert.equal(publishJob.lostStartSince("project-lost"), null);
+  const card = read("src/screens/project/github-publish.tsx");
+  assert.match(card, /useState<number \| null>\(\(\) => lostStartSince\(projectId\)\)/, "a Start Create lost is waited for here");
+  assert.match(card, /onStarted\(result\.kind === "ok" \? result\.value : null, publishOutcome\(result\), startReplyLost\(result\)\)/);
+  assert.match(card, /if \(lostStartOver\(lostSince, Date\.now\(\)\)\) \{\n\s+forgetLostStart\(projectId\);\n\s+setLostSince\(null\);\n\s+setProblem\(PUBLISH_NOT_SEEN\);/);
+  assert.match(card, /setTimeout\(\(\) => setTick\(\(value\) => value \+ 1\), DRAFT_POLL_MS\);\n\s+return \(\) => clearTimeout\(timer\);\n\s+\}, \[lostSince, view\.kind, answered\]\);/, "each read schedules the next");
+  assert.match(card, /if \(!noJob \|\| lostSince !== null\) return;/, "no question while the Start may still land");
+  const tui = read("../../crates/crazyagent/src/tui/screens/project_publish.rs");
+  assert.match(tui, /"No publish has shown up\."/);
+  assert.match(tui, /"Try Publish again\."/);
+});
+
 test("the Overview asks to publish a project with no publish through two bridge commands, and Publish opens the New Project form", async () => {
   assert.equal(publishJob.PROMPT_LINE, "This project is not on GitHub. Publish it?");
   assert.deepEqual([publishJob.PROMPT_PUBLISH, publishJob.PROMPT_NOT_NOW, publishJob.PROMPT_NEVER], ["Publish", "Not now", "Don't ask again"]);

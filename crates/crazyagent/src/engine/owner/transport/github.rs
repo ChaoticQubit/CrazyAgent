@@ -81,6 +81,7 @@ impl Action {
     pub(super) fn time(&self) -> Duration {
         match self {
             Self::Clone { .. } => CLONE_TIME,
+            Self::PublishStart { .. } => crate::github::START_TIME,
             Self::PublishApprove { .. }
             | Self::PublishExclude { .. }
             | Self::PublishRecheck { .. }
@@ -439,7 +440,7 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 /// Serves one GitHub owner request after the owner exchange deadline: the action runs
-/// under its own budget (75 s, a clone 1900 s) and the reply write under the owner wait.
+/// under its own budget ([`Action::time`]) and the reply write under the owner wait.
 /// Inputs: the stream, engine, authority, owner packet, admission and request bytes.
 /// Output: the reply written, a rejection code included.
 pub(super) async fn serve(

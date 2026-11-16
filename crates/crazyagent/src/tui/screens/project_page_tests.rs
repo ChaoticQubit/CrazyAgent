@@ -8388,3 +8388,109 @@ fn a_refused_publish_answer_reads_the_publish_again_and_shows_where_it_stands() 
     assert!(shown.contains("Published as me/tool."), "{shown}");
     assert!(!shown.contains("[x] .env*"), "{shown}");
 }
+
+#[test]
+fn a_start_whose_reply_was_lost_after_the_engine_ran_it_says_it_may_have_started() {
+    let said = |result: Result<IntakeView, String>| {
+        let message = super::project_page::ProjectPage::publish_start_said("Notes", &result);
+        (message.lead, message.rest)
+    };
+    let maybe = (
+        "Publishing on GitHub may have started.".to_owned(),
+        "The project's Overview shows where it stands.".to_owned(),
+    );
+    assert_eq!(said(Err("github_outcome_unknown".into())), maybe);
+    assert_eq!(said(Err("github_reply_bounds".into())), maybe);
+    assert_eq!(said(Ok(IntakeView::Prompt(true))), maybe);
+    assert_eq!(
+        said(Err("github_publish_running".into())),
+        (
+            super::new_project_publish::PUBLISH_NOT_STARTED.to_owned(),
+            super::intake::copy("github_publish_running"),
+        )
+    );
+}
+
+#[test]
+fn a_start_whose_reply_was_lost_is_waited_for_as_long_as_the_engine_gives_a_start() {
+    assert_eq!(
+        crate::github::START_TIME,
+        std::time::Duration::from_secs(140)
+    );
+    assert!(!super::project_publish::lost_start_over(
+        1_000,
+        1_000 + 139_999
+    ));
+    assert!(super::project_publish::lost_start_over(
+        1_000,
+        1_000 + 140_000
+    ));
+}
+
+/// rv-code2 GSB-1: a Start whose reply was lost may still save its publish after the first
+/// read, so the Overview reads again every `DRAFT_POLL_MS` with no question in between, and
+/// shows the publish once it lands with no remount.
+#[test]
+fn a_start_whose_reply_was_lost_reads_the_publish_again_until_it_shows() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    publish_reply(&mut shell, start, Err("github_outcome_unknown".into()));
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status.clone(),
+        Ok(IntakeView::PublishStatus(None)),
+    );
+    assert!(
+        publish_asks(&mut shell).is_empty(),
+        "no question while the Start may still land"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(
+        super::project_publish::DRAFT_POLL_MS as u64 + 50,
+    ));
+    publish_reply(
+        &mut shell,
+        IntakeQuery::GitHubPublishStatus {
+            project: ProjectId::new("other").unwrap(),
+        },
+        Ok(IntakeView::PublishStatus(None)),
+    );
+    assert_eq!(
+        publish_asks(&mut shell),
+        [status.clone()],
+        "the publish is read again after DRAFT_POLL_MS"
+    );
+    publish_reply(
+        &mut shell,
+        status,
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Drafting,
+        ))))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains("Drafting the .gitignore lines..."),
+        "{shown}"
+    );
+}
