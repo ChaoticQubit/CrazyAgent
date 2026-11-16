@@ -2724,7 +2724,33 @@ impl ProjectSandbox {
     /// [`BRIDGE_PORT_MIN`] or higher, bridged as [`ProjectSandbox::bridged_ports`] does.
     /// Output: the ports, or none when the agent keeps the shared network.
     pub fn routed(&self) -> Option<Routed> {
-        None
+        let SandboxNetwork::Only(remotes) = &self.network else {
+            return None;
+        };
+        if self.linux_sockets != LinuxSockets::TcpOnly || remotes.len() > REMOTES_MAX {
+            return None;
+        }
+        let mut any = Vec::with_capacity(remotes.len());
+        let mut bridged = Vec::with_capacity(remotes.len());
+        for remote in remotes {
+            match remote {
+                SandboxRemote::AnyHost(port) => any.push(*port),
+                SandboxRemote::Loopback(port) if *port >= BRIDGE_PORT_MIN => bridged.push(*port),
+                SandboxRemote::Loopback(_) => return None,
+            }
+        }
+        if any.is_empty() {
+            return None;
+        }
+        any.sort_unstable();
+        any.dedup();
+        bridged.sort_unstable();
+        bridged.dedup();
+        assert!(!any.contains(&0));
+        assert!(any.len() + bridged.len() <= REMOTES_MAX);
+        assert!(self.bridged_ports().is_none());
+        assert!(self.resolves_over_tcp());
+        Some(Routed { any, bridged })
     }
 
     /// The port that alone keeps this agent on this computer's network on a Linux that

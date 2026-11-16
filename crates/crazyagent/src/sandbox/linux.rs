@@ -83,6 +83,8 @@ const HOST_AGE_MAX: Duration = Duration::from_secs(60);
 /// The longest the call supervisor probe may run: its one wait is a 2 s connect timeout,
 /// reached only when a guard does not hold (rv-sec3 linux-t4b N4).
 const SUPERVISOR_PROBE_TIME_MAX: Duration = Duration::from_secs(10);
+/// How long the routed-network probe may run: slirp4netns's ready wait and the rules.
+const ROUTE_PROBE_TIME_MAX: Duration = Duration::from_secs(15);
 /// How the name of each private folder a supervisor probe runs in starts ([`private_folder`]).
 const PROBE_FOLDER_PREFIX: &str = "supervisor-probe-";
 /// The most names [`private_folder`] tries: each is 128 random bits, so only a name someone
@@ -93,6 +95,8 @@ const PROBE_POLL: Duration = Duration::from_millis(20);
 /// The set-user-ID and set-group-ID mode bits: a bubblewrap with either runs as someone
 /// other than the engine's user, so [`trusted`] refuses it.
 const SET_ID_BITS: u32 = 0o6000;
+/// The group and other write bits: a program anyone but its owner may change is never run.
+const OTHERS_WRITE_BITS: u32 = 0o022;
 /// The bubblewrap arguments a nested agent starts under, before its working folder: user,
 /// process, IPC and host-name namespaces of its own and a fresh `/proc`, with the whole
 /// root bound through, devices too, so the helper's Landlock rules stay the only file
@@ -613,8 +617,10 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
 
 /// Reads what follows `--nest --`: bubblewrap at one of its fixed places, then exactly
 /// [`NEST_ARGS`], then at least the command bubblewrap starts, so the helper starts nothing
-/// else on a caller's word. Inputs: whether `--nest` was the only flag, and those
-/// arguments. Output: the request, or the reason they are refused.
+/// else on a caller's word. No option before the nest's `--` is one of the descriptor
+/// flags stage 1 writes itself ([`egress::DESCRIPTOR_FLAGS`]). Inputs: whether `--nest`
+/// was the only flag, and those arguments. Output: the request, or the reason they are
+/// refused.
 fn nest_request(
     alone: bool,
     mut rest: impl Iterator<Item = OsString>,
@@ -633,6 +639,13 @@ fn nest_request(
         .all(|(arg, fixed)| arg.as_os_str() == OsStr::new(fixed));
     if !fixed || args.len() <= NEST_ARGS.len() {
         return Err(format!("{NEST} needs bubblewrap's fixed arguments and a command"));
+    }
+    let named = args[NEST_ARGS.len()..]
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| egress::DESCRIPTOR_FLAGS.iter().any(|flag| arg == flag));
+    if named {
+        return Err(format!("{NEST} takes no descriptor flag; stage 1 writes its own"));
     }
     Ok(HelperRequest::Nest { bwrap, args })
 }
@@ -958,7 +971,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let (_routes, bridge, request) = match read_request(args) {
+    let (routes, bridge, request) = match read_request(args) {
         Ok(asked) => asked,
         Err(reason) => {
             eprintln!("crazyagent-landlock: {reason}");
@@ -967,7 +980,9 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     };
     let (policy, launch) = match request {
         HelperRequest::Filter { program, args } => return filtered(&program, args),
-        HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args, bridge.as_ref()),
+        HelperRequest::Nest { bwrap, args } => {
+            return nest(&bwrap, &args, bridge.as_ref(), &routes);
+        }
         HelperRequest::Scoped => return scoped(),
         HelperRequest::Broker { parent, ports } => return bridge::broker(parent, &ports),
         HelperRequest::Egress { parent, ports } => return egress::setup(parent, &ports),
@@ -997,13 +1012,17 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
 
 /// Reads what the helper was asked: the route flags first ([`egress::leading`]), then the
 /// bridge flags ([`Bridge::leading`]), then the request, each set of flags only where the
-/// request takes it ([`Bridge::fits`], [`egress::fits`]). Input: the helper arguments.
-/// Output: the route ports, empty for none, the bridge and the request; or the reason.
+/// request takes it ([`Bridge::fits`], [`egress::fits`]). A routed nest with no bridged
+/// port unshares the network for its routes alone, so the bridge's check is left to the
+/// route's. Input: the helper arguments. Output: the route ports, empty for none, the
+/// bridge and the request; or the reason.
 fn read_request(args: Vec<OsString>) -> Result<(Vec<u16>, Option<Bridge>, HelperRequest), String> {
     let (routes, args) = egress::leading(args)?;
     let (bridge, args) = Bridge::leading(args)?;
     let request = HelperRequest::parse(args)?;
-    Bridge::fits(bridge.as_ref(), &request)?;
+    if routes.is_empty() || bridge.is_some() {
+        Bridge::fits(bridge.as_ref(), &request)?;
+    }
     egress::fits(&routes, &request)?;
     assert!(routes.len() <= REMOTES_MAX);
     Ok((routes, bridge, request))
@@ -1198,10 +1217,13 @@ fn scoped() -> ExitCode {
 /// first process inside inherit the mask, so they end only with the harness or by KILL,
 /// and a stop signal to the group is the harness's to handle. Last it gives up new
 /// privileges. Output: 3 when bubblewrap is refused or any of the three fails, 126 when
-/// bubblewrap cannot start. With a bridge it first starts the
-/// broker on this network and writes the bridge flags for the helper inside
-/// ([`bridge::open`]), keeping its end of the bridge open until bubblewrap has it.
-fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
+/// bubblewrap cannot start. With route ports it first starts the setup child that builds
+/// the agent's network and writes the descriptor flags bubblewrap reports and waits on
+/// ([`egress::open`]); with a bridge it then starts the broker on this network and writes
+/// the bridge flags for the helper inside ([`bridge::open`]). It keeps every end open until
+/// bubblewrap has it, and hands the route ends over only after both children started.
+fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>, routes: &[u16]) -> ExitCode {
+    assert!(routes.len() <= REMOTES_MAX);
     let Some(program) = trusted_file(bwrap) else {
         eprintln!(
             "crazyagent-landlock: {} is not a bubblewrap to nest under",
@@ -1210,12 +1232,19 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
         return ExitCode::from(3);
     };
     let ready = own_session()
-        .and_then(|()| match bridge {
-            Some(bridge) => bridge::open(&bridge.ports, args)
-                .map(|(end, args)| (Some(end), args)),
-            None => Ok((None, args.to_vec())),
+        .and_then(|()| match routes {
+            [] => Ok((None, args.to_vec())),
+            routes => egress::open(routes, args).map(|(ends, args)| (Some(ends), args)),
+        })
+        .and_then(|(ends, args)| match bridge {
+            Some(bridge) => bridge::open(&bridge.ports, &args)
+                .map(|(end, args)| (ends, Some(end), args)),
+            None => Ok((ends, None, args)),
         })
         .and_then(|opened| {
+            if let Some(ends) = &opened.0 {
+                ends.hand_over()?;
+            }
             nix::sys::signal::SigSet::all()
                 .thread_block()
                 .map_err(|error| format!("signal mask: {error}"))?;
@@ -1223,13 +1252,14 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
                 .map_err(|error| format!("no new privileges: {error}"))?;
             Ok(opened)
         });
-    let (_end, args) = match ready {
+    let (_ends, _end, args) = match ready {
         Ok(opened) => opened,
         Err(reason) => {
             eprintln!("crazyagent-landlock: {reason}");
             return ExitCode::from(3);
         }
     };
+    assert!(routes.is_empty() || egress::placed(&args).is_ok());
     assert_eq!(nix::sys::prctl::get_no_new_privs(), Ok(true));
     let error = exec_keeping_mask(&program, bwrap, &args);
     eprintln!(
@@ -1498,7 +1528,18 @@ impl LinuxSandbox {
                 },
                 None => LinuxBackend::Landlock { helper },
             };
-            return Self::new(sandbox, backend);
+            let mut detected = Self::new(sandbox, backend)?;
+            if let LinuxBackend::Nested { bwrap, helper } = &detected.backend
+                && let Some(routed) = detected.sandbox.routed()
+            {
+                if routes(bwrap, helper) {
+                    detected.routed = Some(routed);
+                } else {
+                    eprintln!("linux_route_not_started: this agent keeps the shared network");
+                }
+            }
+            assert!(detected.routed.is_none() || detected.sandbox.bridged_ports().is_none());
+            return Ok(detected);
         }
         if open {
             return Err(SandboxError::Unavailable(
@@ -1643,11 +1684,11 @@ fn passes(probe: &mut Command) -> bool {
     .is_ok_and(|status| status.success())
 }
 
-/// Opens a bubblewrap the helper may nest an agent under and checks the file it opened, not
-/// the path again: a file that root or this user owns, with neither [`SET_ID_BITS`] bit, so
-/// it runs with this user's privileges and was put there by root or by this user. It opens
-/// without reading, so a bubblewrap that can only be run still opens. Input: its path.
-/// Output: the open file, which [`nest`] starts, or none.
+/// Opens a bubblewrap or tool the helper may run and checks the file it opened, not the
+/// path again: a file that root or this user owns, with neither [`SET_ID_BITS`] bit nor
+/// [`OTHERS_WRITE_BITS`], so it runs with this user's privileges and only root or this user
+/// put it there or may change it. It opens without reading, so a program that can only be
+/// run still opens. Input: its path. Output: the open file, which [`nest`] starts, or none.
 fn trusted_file(bwrap: &Path) -> Option<fs::File> {
     let own = rustix::process::geteuid().as_raw();
     let file = fs::OpenOptions::new()
@@ -1656,7 +1697,7 @@ fn trusted_file(bwrap: &Path) -> Option<fs::File> {
         .open(bwrap)
         .ok()?;
     let held = file.metadata().ok()?;
-    let plain = held.is_file() && held.mode() & SET_ID_BITS == 0;
+    let plain = held.is_file() && held.mode() & (SET_ID_BITS | OTHERS_WRITE_BITS) == 0;
     (plain && [0, own].contains(&held.uid())).then_some(file)
 }
 
@@ -1693,6 +1734,37 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
         )
 }
 
+/// Tells whether this machine gives a nested agent a network of its own that leaves only
+/// through its route ports: slirp4netns and the `iptables` programs are at their fixed
+/// places, and the widest routed nest a launch asks for, one route port and one bridged
+/// port, starts the helper's probe inside it within [`ROUTE_PROBE_TIME_MAX`]. Inputs:
+/// bubblewrap and the helper. Output: true only when that probe exits 0.
+fn routes(bwrap: &Path, helper: &Path) -> bool {
+    let tools = SLIRP_PATHS
+        .iter()
+        .chain(egress::IPTABLES_PATHS.iter())
+        .all(|path| Path::new(path).is_file());
+    tools
+        && clean_absolute(bwrap)
+        && trusted(bwrap)
+        && passes_within(
+            Command::new(helper)
+                .arg(egress::ROUTE)
+                .arg("1")
+                .arg(bridge::BRIDGE)
+                .arg(BRIDGE_PORT_MIN.to_string())
+                .arg(NEST)
+                .arg("--")
+                .arg(bwrap)
+                .args(NEST_ARGS)
+                .arg(bridge::UNSHARE_NET)
+                .arg("--")
+                .arg(helper)
+                .arg(PROBE),
+            ROUTE_PROBE_TIME_MAX,
+        )
+}
+
 /// Tells whether AppArmor keeps unprivileged programs out of user namespaces, from what
 /// [`APPARMOR_USERNS`] reads: only `1`, with or without its newline, does. Input: the text,
 /// none where the file cannot be read (no AppArmor, or an older one). Output: true when it
@@ -1704,7 +1776,8 @@ fn restricts(setting: Option<&str>) -> bool {
 /// Reads what this machine holds for an agent beyond its Landlock rules: whether the
 /// kernel scopes signals (the helper's `--scoped`), whether a launch gives the agent a
 /// process namespace ([`nests`], or the plain probe fails), whether the call supervisor
-/// holds ([`supervises`]), whether this runs as root and whether AppArmor's user namespace
+/// holds ([`supervises`]), whether a nested agent gets a routed network of its own
+/// ([`routes`]), whether this runs as root and whether AppArmor's user namespace
 /// restriction, which never covers root, is why nothing nests ([`restricts`]). Inputs: the
 /// helper and the engine's data folder, none where no probe may run. Output: the facts.
 pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
@@ -1720,8 +1793,10 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let root = rustix::process::geteuid().is_root();
     let nest = bwrap.filter(|_| nested);
     let supervised = held && data.is_some_and(|data| supervises(helper, nest, data, root));
+    let routed = held && nest.is_some_and(|bwrap| routes(bwrap, helper));
     let setting = fs::read_to_string(APPARMOR_USERNS).ok();
     let armored = !nested && !root && restricts(setting.as_deref());
+    assert!(!routed || nested);
     assert!(!(root && supervised));
     assert!(!(armored && nested));
     assert!(!(armored && root));
@@ -1731,7 +1806,7 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
         supervised,
         root,
         armored,
-        routed: false,
+        routed,
     }
 }
 
@@ -1888,8 +1963,11 @@ impl Sandbox for LinuxSandbox {
                     nested: true,
                     ..landlock_policy(&grants, &self.sandbox)
                 })?;
-                let bridged = self.sandbox.bridged_ports().unwrap_or_default();
-                nest_command(bwrap, helper, &policy, cwd, &bridged, &[])
+                let (bridged, routes) = match &self.routed {
+                    Some(routed) => (routed.bridged.clone(), routed.any.clone()),
+                    None => (self.sandbox.bridged_ports().unwrap_or_default(), Vec::new()),
+                };
+                nest_command(bwrap, helper, &policy, cwd, &bridged, &routes)
             }
             LinuxBackend::Bubblewrap { bwrap, helper } => {
                 bwrap_command(bwrap, helper, &grants, cwd, self.sandbox.network())
@@ -2162,11 +2240,14 @@ fn nest_command(
     assert!(policy.die_with.is_none());
     assert!(routes.len() <= REMOTES_MAX);
     let mut command = Command::new(helper);
+    for port in routes {
+        command.arg(egress::ROUTE).arg(port.to_string());
+    }
     for port in bridged {
         command.arg(bridge::BRIDGE).arg(port.to_string());
     }
     command.arg(NEST).arg("--").arg(bwrap).args(NEST_ARGS);
-    if !bridged.is_empty() {
+    if !bridged.is_empty() || !routes.is_empty() {
         command.arg(bridge::UNSHARE_NET);
     }
     command
