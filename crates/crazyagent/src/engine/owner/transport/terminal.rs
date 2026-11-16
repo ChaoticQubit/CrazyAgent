@@ -742,12 +742,11 @@ impl Viewing for Grant<'_> {
     }
 }
 
-/// Streams one attached view until it ends: the agent's output as it comes, a fresh viewer
-/// once it fell behind, and the owner's requests in order, each sent only while the grant
-/// allows it. One send at a time runs beside the output, which keeps flowing while tmux
-/// answers; the next request is read only once that send answered, so the bounded request
-/// queue holds the rest in order. Takes the writer, the viewer, the request queue, the host
-/// the viewer came from and the grant. Returns the reason the view ended.
+/// Streams one attached view until it ends: output as it comes, a fresh viewer after it fell
+/// behind, and the owner's requests in order, each sent only while the grant allows it. One
+/// send runs at a time beside the output; the next request is read once it answered, and a
+/// send running when the view ends is finished first, so a prompt taken is recorded as heard.
+/// Takes the writer, the viewer, the request queue, the host and the grant. Returns why it ended.
 #[cfg(unix)]
 async fn pump(
     writer: &mut (impl AsyncWrite + Unpin),
@@ -759,7 +758,7 @@ async fn pump(
     let agent = viewer.agent.clone();
     let mut check = tokio::time::interval(GRANT_CHECK);
     let mut sending: Option<Sending> = None;
-    loop {
+    let reason = loop {
         tokio::select! {
             chunk = viewer.next() => match chunk {
                 Some(Chunk::Output(bytes)) => {
@@ -812,7 +811,13 @@ async fn pump(
                 }
             }
         }
+    };
+    if let Some(sending) = sending
+        && let Ok(Ok(Some(text))) = sending.await
+    {
+        viewing.heard(text).await;
     }
+    reason
 }
 
 /// Serves one owner terminal connection: checks the owner and attaches within the attach
