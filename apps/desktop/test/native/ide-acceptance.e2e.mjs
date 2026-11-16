@@ -12,7 +12,7 @@ import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, render } from "./bridge-routes.mjs";
 import { INTERNALS, POLL_MS, STEP_MS, bridgeCall, closedPort, freeLowPort, owner, required, serveApp, stop, value } from "./e2e-harness.mjs";
-import { BUILD_MS, FOLDER, GIT, IDE_FAILED, OWNER_EMAIL, OWNER_NAME, SETTLE_MS, SETUP_MS, WORKBENCH_MS, git, ideAnswers, input, onboard, stack, terminalRunner, workbench, workbenchUrl } from "./ide-harness.mjs";
+import { BUILD_MS, FOLDER, GIT, IDE_FAILED, OWNER_EMAIL, OWNER_NAME, SETTLE_MS, SETUP_MS, WORKBENCH_MS, coldLoad, git, ideAnswers, input, onboard, stack, terminalRunner, workbench, workbenchUrl } from "./ide-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const REPO = "seed-shop";
@@ -206,6 +206,21 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       page.on("Network.requestWillBeSent", (event) => requests.set(event.requestId, event.request.url));
       page.on("Network.responseReceived", (event) => answered.add(event.requestId));
       page.on("Network.loadingFailed", (event) => failed.set(event.requestId, event.blockedReason ?? event.errorText));
+      const timings = new Map();
+      const sockets = [];
+      const finished = (event) => {
+        const seen = timings.get(event.requestId);
+        if (seen) seen.done = event.timestamp;
+      };
+      page.on("Network.requestWillBeSent", (event) => timings.set(event.requestId, { url: event.request.url, sent: event.timestamp }));
+      page.on("Network.responseReceived", (event) => {
+        const seen = timings.get(event.requestId);
+        const timing = event.response.timing;
+        if (seen && timing) seen.firstByte = timing.receiveHeadersEnd - timing.sendEnd;
+      });
+      page.on("Network.loadingFinished", finished);
+      page.on("Network.loadingFailed", finished);
+      page.on("Network.webSocketCreated", (event) => sockets.push(event.url));
       const server = opened[0];
 
       await t.test("the workbench opens on a cold start in a fresh browser with no AI UI", async () => {
@@ -213,11 +228,14 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Network.enable");
         await page.send("Page.enable");
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+        const navigated = Date.now();
         await page.send("Page.navigate", { url: workbenchUrl(server) });
         await ide.until("the workbench with the project's folders", `(() => {
           const explorer = document.querySelector(".explorer-folders-view");
           return document.querySelector(".monaco-workbench .part.activitybar") !== null && explorer !== null && explorer.textContent.includes(${JSON.stringify(FOLDER)});
         })()`, WORKBENCH_MS);
+        const load = coldLoad(timings, sockets, new URL(workbenchUrl(server)).host, Date.now() - navigated);
+        writeFileSync(join(evidence, "workbench-cold-load.json"), JSON.stringify(load, null, 1));
         await pause(SETTLE_MS * 2);
         await me.capture("workbench-cold");
         const shown = await page.evaluate(`(() => ({
