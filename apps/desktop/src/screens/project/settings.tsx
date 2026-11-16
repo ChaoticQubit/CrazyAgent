@@ -22,6 +22,7 @@ import { MoveHome } from "./move-home";
 import { RemoveDialogView, deleteReady, removeChoices, removeTitle } from "./remove-dialog";
 import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
+import { ProjectConnectors } from "./connectors";
 import { SessionContext, useHeld, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
 import { HarnessPage } from "../settings/harness-page";
@@ -44,6 +45,7 @@ const SECTIONS = [
   { id: "team", label: "Team" },
   { id: "harnesses", label: "Harnesses" },
   { id: "plugins", label: "Plugins and skills" },
+  { id: "connectors", label: "Connectors" },
   { id: "tickets", label: "Tickets" },
   { id: "access", label: "Agent access" },
   { id: "trust", label: "Repository trust" },
@@ -905,9 +907,10 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Overview, Pool, Team, Harnesses, Plugins and skills, Tickets,
- * Agent access, Repository trust, Sandbox, Checks, Messages and Remove project. A setup that
- * belongs to another project counts as still loading, so no form seeds from it.
+/** Project Settings tab: General, Overview, Pool, Team, Harnesses, Plugins and skills,
+ * Connectors, Tickets, Agent access, Repository trust, Sandbox, Checks, Messages and Remove
+ * project. A setup that belongs to another project counts as still loading, so no form seeds
+ * from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
   const [active, setActive] = useState<SectionId>(settingsSection(section ?? hashSection()));
@@ -932,6 +935,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
         <p className="pj-secondary">What you add here applies to this project only. Items from Settings, Plugins and skills can be switched off for this project.</p>
         <PluginsAndSkills projectId={data.id} />
       </div>}
+      {active === "connectors" && <ProjectConnectors projectId={data.id} />}
       {active === "tickets" && <div className="pj-stack">
         <h2>Tickets</h2>
         <p className="pj-secondary">Choose a value here to override the app's ticket settings for this project only.</p>

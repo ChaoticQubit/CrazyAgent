@@ -1,12 +1,23 @@
 use crate::connectors::gateway::GatewayLaunch;
 use crate::connectors::settings::NativeConnectors;
 use crate::connectors::shim;
+use crate::coord::settings::HarnessKind;
 use crate::engine::EngineError;
 use crate::plugins::{LaunchServer, ServerSpec};
 use std::path::Path;
+use std::time::Duration;
 
 /// The name of the one server entry a launch with a granted connector gets.
 pub const SERVER_NAME: &str = "ca-connectors";
+/// How long a harness waits for one call to the connector server: past the longest
+/// approval wait and the connector server's own wait for a held write, so the owner's
+/// answer reaches the agent before its harness gives up.
+pub const HARNESS_WAIT: Duration = Duration::from_secs(40 * 60);
+/// How long a harness waits for the connector server to start and answer its handshake.
+pub const STARTUP_WAIT: Duration = Duration::from_secs(30);
+
+const _: () = assert!(HARNESS_WAIT.as_secs() > shim::HELD_WAIT.as_secs());
+const _: () = assert!(STARTUP_WAIT.as_secs() >= 10);
 
 /// What one launch tells its harness about the connectors of the harness's own account:
 /// whether Claude Code's claude.ai connectors and Codex's apps are turned off. Both false
@@ -55,6 +66,22 @@ pub fn native_switch(harness: &str, native: NativeConnectors) -> NativeSwitch {
     }
 }
 
+/// What the Connectors page says one harness reaches through the gateway (DEC-141 parity):
+/// each harness row names its harness and its state. RCLI runs only as a CrazyAgent master,
+/// whose bundled host starts the gateway as its one MCP server (Task 14), so its row says
+/// master. Input: the harness kind. Output: the row's words.
+pub fn reach(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::ClaudeCode => "Claude Code: yes",
+        HarnessKind::Codex => "Codex: yes",
+        HarnessKind::Rcli => "RCLI: yes (master)",
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "launch_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "launch_reach_tests.rs"]
+mod reach_tests;

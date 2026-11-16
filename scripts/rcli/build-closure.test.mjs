@@ -100,6 +100,8 @@ test("current host pins verify actual project files without admitting execution"
     "scripts/rcli/host.test.ts",
     "scripts/rcli/host.construction.test.ts",
     "scripts/rcli/host.keys.ts",
+    "scripts/rcli/host.mcp.ts",
+    "scripts/rcli/host.mcp.test.ts",
   ].sort());
 });
 

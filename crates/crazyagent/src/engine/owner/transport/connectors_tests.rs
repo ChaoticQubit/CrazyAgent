@@ -1,5 +1,6 @@
 use super::*;
 use crate::app_plugins::PluginStatus;
+use crate::connectors::approvals;
 use crate::connectors::grants::{self, Role};
 use crate::connectors::{
     ConnectorView, Grant, KeepLog, NativeConnectors, SignIn, SizeCap, Wait, WritePolicy,
@@ -644,5 +645,78 @@ fn the_activity_page_reads_with_its_filters_and_a_keep_save_drops_older_calls_at
             "connector_request_invalid",
             "{action}"
         );
+    }
+}
+
+/// One reply of this protocol as an owner client reads it, for a request that succeeds.
+fn answered(root: &Path, action: serde_json::Value) -> serde_json::Value {
+    serde_json::to_value(send(root, request(action), None).unwrap()).unwrap()
+}
+
+/// DEC-168 Task 12: the owner reads a waiting write's approval, answers it once through
+/// the protocol, reads the project's standing allows and takes one back; a second answer
+/// and an id that names no approval are refused with their own codes.
+#[test]
+fn the_owner_answers_a_write_and_takes_back_a_standing_allow_through_the_protocol() {
+    let (_tmp, root) = engine();
+    let once = ConnectorSettings {
+        write: WritePolicy::AskOncePerProject,
+        ..ConnectorSettings::DEFAULT
+    };
+    ask(
+        &root,
+        json!({"kind": "set", "settings": once, "version": 0}),
+    );
+    let pending = approvals::PendingWrite {
+        launch: "0123456789abcdef0123456789abcdef".into(),
+        project: PROJECT.into(),
+        agent: "Agent 1".into(),
+        connector: "board".into(),
+        title: "Board".into(),
+        tool: "create_issue".into(),
+        preview: "create_issue: title=\"Fix login\"".into(),
+        arguments: "{\"title\":\"Fix login\\\\u{200B}\"}".into(),
+        hidden: true,
+    };
+    let db = crate::questions::open(&root).unwrap();
+    let now = crate::semantic::now_ms();
+    let id = approvals::ask(&db, &pending, Wait::Minutes10, now).unwrap();
+
+    let read = answered(&root, json!({"kind": "approval", "id": id}));
+    assert_eq!(read["kind"], "approval", "{read}");
+    assert_eq!(read["approval"]["id"], id);
+    assert_eq!(read["approval"]["state"], "waiting");
+    assert_eq!(read["approval"]["preview"], pending.preview.as_str());
+    assert_eq!(read["approval"]["arguments"], pending.arguments.as_str());
+    assert_eq!(read["approval"]["hidden"], true, "{read}");
+    let allow = json!({"kind": "answer", "id": id, "allow": true});
+    let done = answered(&root, allow.clone());
+    assert_eq!(done["approval"]["state"], "allowed", "{done}");
+    assert_eq!(refused(&root, allow), "connector_approval_closed");
+    let ghost = json!({"kind": "answer", "id": id + 100, "allow": false});
+    assert_eq!(refused(&root, ghost), "connector_approval_unknown");
+    let ghost = json!({"kind": "approval", "id": id + 100});
+    assert_eq!(refused(&root, ghost), "connector_approval_unknown");
+
+    let writes = answered(&root, json!({"kind": "writes", "project": PROJECT}));
+    assert_eq!(writes["kind"], "writes", "{writes}");
+    assert_eq!(writes["writes"]["connectors"], json!(["board"]));
+    let revoke = json!({"kind": "revoke_writes", "project": PROJECT, "connector": "board"});
+    let left = answered(&root, revoke);
+    assert_eq!(left["writes"]["connectors"], json!([]), "{left}");
+    let ghost = json!({"kind": "writes", "project": "ghost"});
+    assert_eq!(refused(&root, ghost), "connector_project_unknown");
+    for action in [
+        json!({"kind": "approval", "id": 0}),
+        json!({"kind": "answer", "id": id}),
+        json!({"kind": "writes", "project": ""}),
+        json!({"kind": "revoke_writes", "project": PROJECT, "connector": ""}),
+    ] {
+        let bytes = serde_json::to_vec(&request(action.clone())).unwrap();
+        let code = parse(&bytes).unwrap_err().0;
+        assert_eq!(code, "connector_request_invalid", "{action}");
+    }
+    for code in ["connector_approval_closed", "connector_approval_unknown"] {
+        assert!(CONNECTORS_CODES.contains(&code), "{code}");
     }
 }

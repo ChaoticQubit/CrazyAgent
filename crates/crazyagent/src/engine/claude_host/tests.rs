@@ -1267,12 +1267,14 @@ fn a_tools_on_master_names_its_connector_server_and_the_host_runs_it_only_as_bui
         2,
         "{config}"
     );
+    let wait = u64::try_from(crate::connectors::launch::HARNESS_WAIT.as_millis()).unwrap();
     assert_eq!(
         config["mcpServers"][crate::connectors::launch::SERVER_NAME],
         serde_json::json!({
             "type": "stdio",
             "command": engine,
             "args": [crate::connectors::shim::SERVER_COMMAND, folder],
+            "timeout": wait,
         })
     );
     assert_eq!(validate_command(&on, &profile, &home).ok(), Some(true));
@@ -1307,31 +1309,43 @@ fn a_tools_on_master_names_its_connector_server_and_the_host_runs_it_only_as_bui
         (
             "another executable",
             changed(
-                serde_json::json!({"type": "stdio", "command": "/bin/sh", "args": [server, folder]}),
+                serde_json::json!({"type": "stdio", "command": "/bin/sh", "args": [server, folder], "timeout": wait}),
             ),
         ),
         (
             "an extra argument",
             changed(
-                serde_json::json!({"type": "stdio", "command": engine, "args": [server, folder, "--verbose"]}),
+                serde_json::json!({"type": "stdio", "command": engine, "args": [server, folder, "--verbose"], "timeout": wait}),
             ),
         ),
         (
             "another server command",
             changed(
-                serde_json::json!({"type": "stdio", "command": engine, "args": ["team-mcp", folder]}),
+                serde_json::json!({"type": "stdio", "command": engine, "args": ["team-mcp", folder], "timeout": wait}),
             ),
         ),
         (
             "an environment",
             changed(
-                serde_json::json!({"type": "stdio", "command": engine, "args": [server, folder], "env": {"A": "b"}}),
+                serde_json::json!({"type": "stdio", "command": engine, "args": [server, folder], "env": {"A": "b"}, "timeout": wait}),
             ),
         ),
         (
             "a relative folder",
             changed(
-                serde_json::json!({"type": "stdio", "command": engine, "args": [server, "connector-launches/x"]}),
+                serde_json::json!({"type": "stdio", "command": engine, "args": [server, "connector-launches/x"], "timeout": wait}),
+            ),
+        ),
+        (
+            "no wait",
+            changed(
+                serde_json::json!({"type": "stdio", "command": engine, "args": [server, folder]}),
+            ),
+        ),
+        (
+            "a shorter wait",
+            changed(
+                serde_json::json!({"type": "stdio", "command": engine, "args": [server, folder], "timeout": 60_000}),
             ),
         ),
     ] {

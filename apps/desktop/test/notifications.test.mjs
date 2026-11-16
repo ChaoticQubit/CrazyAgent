@@ -53,15 +53,15 @@ test("every kind has one engine name, its class and the label the engine gives i
   const arms = (text) => new Map([...text.matchAll(/Self::(\w+) => "([^"]+)",/g)].map(([, variant, words]) => [variant, words]));
   const names = arms(body("pub fn name(self)", "pub fn label(self)"));
   const labels = arms(body("pub fn label(self)", "pub fn parse("));
-  assert.equal(api.NOTICE_KINDS.length, 22);
-  assert.equal(labels.size, 22);
+  assert.equal(api.NOTICE_KINDS.length, 23);
+  assert.equal(labels.size, 23);
   for (const entry of api.NOTICE_KINDS) {
     const variant = entry.kind.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join("");
     assert.equal(names.get(variant), entry.kind, `the engine names ${entry.kind}`);
     assert.equal(labels.get(variant), entry.label, `the engine labels ${entry.kind}`);
   }
   assert.deepEqual(api.NOTICE_KINDS.filter((entry) => entry.class === "action").map((entry) => entry.kind),
-    ["question", "account_sign_in", "research_pool", "memory_review", "change_set_review", "connector_tools_changed",
+    ["question", "account_sign_in", "research_pool", "memory_review", "change_set_review", "connector_tools_changed", "connector_write",
       "connector_sign_in"]);
   assert.equal(api.kindLabel("change_set_landed"), "Change set landed");
 });
@@ -82,6 +82,7 @@ test("each target opens its exact page, with the anchor of the item to highlight
   assert.deepEqual(opened({ page: "updates" }), ["#/settings/updates", null]);
   assert.deepEqual(opened({ page: "harnesses" }), ["#/settings/harnesses", null]);
   assert.deepEqual(opened({ page: "connectors" }), ["#/settings/plugins", null]);
+  assert.deepEqual(opened({ page: "connector_approval", project_id: "p-1", id: 7 }), ["#/settings/plugins", "connector-approval-7"]);
   assert.deepEqual(opened({ page: "home" }), ["#/home", null]);
 });
 

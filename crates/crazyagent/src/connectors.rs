@@ -10,6 +10,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub mod approvals;
 pub mod audit;
 pub mod callback;
 pub mod gateway;
@@ -36,7 +37,8 @@ pub enum SignIn {
 }
 
 /// One connector as the owner's page lists it: what it is, where it came from, whether it
-/// is trusted and has its key, what it reaches and where each secret is bound.
+/// is trusted and has its key, what it reaches and where each secret is bound. A refused
+/// file whose kind reads as connector has no `runs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorView {
@@ -47,7 +49,7 @@ pub struct ConnectorView {
     pub origin: Origin,
     pub status: PluginStatus,
     pub sign_in: SignIn,
-    pub runs: RunsView,
+    pub runs: Option<RunsView>,
     pub secrets: Vec<SecretView>,
     pub sha256: String,
 }
@@ -100,6 +102,27 @@ const PLAIN: &[(&str, &str)] = &[
     (
         "connector_writes_not_yet",
         "this tool can change things at the vendor; writes arrive with the approval step.",
+    ),
+    (
+        "connector_writes_off",
+        "connector writes are set to Read-only, so this tool cannot run.",
+    ),
+    (
+        "connector_write_denied",
+        "the owner denied this call, so nothing was sent to the vendor.",
+    ),
+    (
+        "connector_write_expired",
+        "nobody answered this call in time, so nothing was sent to the vendor.",
+    ),
+    (
+        approvals::WAITING_FULL,
+        "too many connector writes are waiting for the owner; try again later.",
+    ),
+    (approvals::UNKNOWN, "that approval is not here."),
+    (
+        approvals::CLOSED,
+        "that approval was already answered or ended.",
     ),
     (
         audit::QUIET_CAP_REACHED,
@@ -258,9 +281,10 @@ pub(crate) fn project_known(db: &Connection, project: &str) -> Result<bool, Engi
     .map_err(|_| EngineError("connectors_unavailable".into()))
 }
 
-/// Reads the Connectors page. Inputs: the engine database and root, and the project whose
-/// switches to include. Output: the page, `connector_project_unknown`, or the store's
-/// refusal when the plugins folder cannot be read.
+/// Reads the Connectors page, with each refused file whose kind reads as connector listed
+/// under its file name with its reason. Inputs: the engine database and root, and the
+/// project whose switches to include. Output: the page, `connector_project_unknown`, or
+/// the store's refusal when the plugins folder cannot be read.
 pub fn view(
     db: &Connection,
     root: &Path,
@@ -276,14 +300,18 @@ pub fn view(
         .plugins
         .into_iter()
         .filter(|plugin| plugin.kind == PluginKind::Connector)
-        .filter_map(|plugin| {
-            Some(ConnectorView {
+        .map(|plugin| {
+            assert!(
+                plugin.runs.is_some() || matches!(plugin.status, PluginStatus::Refused { .. }),
+                "only a refused file has no address"
+            );
+            ConnectorView {
                 sign_in: if plugin.secrets.is_empty() {
                     SignIn::NotYet
                 } else {
                     SignIn::Key
                 },
-                runs: plugin.runs?,
+                runs: plugin.runs,
                 name: plugin.name,
                 title: plugin.title,
                 version: plugin.version,
@@ -292,7 +320,7 @@ pub fn view(
                 status: plugin.status,
                 secrets: plugin.secrets,
                 sha256: plugin.sha256,
-            })
+            }
         })
         .collect();
     assert!(connectors.len() <= store::PLUGINS_MAX);

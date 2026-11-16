@@ -1,8 +1,9 @@
 //! The engine state behind each Action kind (DEC-136a decision 1): open questions, accounts
 //! that need a sign-in, research waiting for a pool, memories to review, change sets to
-//! review, connectors whose tools changed and connectors whose sign-in ended. Each source reads only its own tables and
-//! reports at most `SOURCE_ROWS_MAX` conditions; one whose tables are missing reports none
-//! and resolves nothing, and one a cap stopped before the end of its state resolves nothing
+//! review, connectors whose tools changed, connector writes waiting for the owner and
+//! connectors whose sign-in ended. Each source reads only its own tables and reports at
+//! most `SOURCE_ROWS_MAX` conditions; one whose tables are missing reports none and
+//! resolves nothing, and one a cap stopped before the end of its state resolves nothing
 //! either.
 
 use super::reconcile::{Condition, SOURCE_ROWS_MAX};
@@ -60,13 +61,14 @@ pub(super) struct Live {
 /// Reads every Action source. Inputs: the engine database and the model access. Output:
 /// what holds now.
 pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
-    let sources: [(NoticeKind, Source); 7] = [
+    let sources: [(NoticeKind, Source); 8] = [
         (NoticeKind::Question, questions),
         (NoticeKind::AccountSignIn, accounts),
         (NoticeKind::ResearchPool, pools),
         (NoticeKind::MemoryReview, memories),
         (NoticeKind::ChangeSetReview, change_sets),
         (NoticeKind::ConnectorToolsChanged, connector_tools),
+        (NoticeKind::ConnectorWrite, writes),
         (NoticeKind::ConnectorSignIn, connector_sign_ins),
     ];
     let mut live = Live::default();
@@ -121,6 +123,38 @@ fn connector_tools(connection: &Connection, _: &ModelAccess) -> Result<Option<Fo
             subject: format!("connector:{connector}"),
             text: format!("{title} changed its tools; review them."),
             target: NoticeTarget::Connectors,
+        };
+        push(&mut found, &mut keys, condition);
+    }
+    Ok(Some(Found::read(found, capped, Vec::new())))
+}
+
+/// Connector writes waiting for the owner's Allow or Deny (DEC-168 Task 12): one item per
+/// waiting write in its project, naming the connector, the tool and the project, never an
+/// argument. Inputs: the database and the model access (unused). Output: the conditions,
+/// or none before any write asked.
+fn writes(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, EngineError> {
+    let Some(rows) = crate::connectors::approvals::waiting(connection, SOURCE_ROWS_MAX)? else {
+        return Ok(None);
+    };
+    let capped = rows.len() >= SOURCE_ROWS_MAX;
+    let mut found = Vec::new();
+    let mut keys = BTreeSet::new();
+    for waiting in rows {
+        let (title, tool, name) = (&waiting.title, &waiting.tool, &waiting.project_name);
+        let text = format!("{title} wants to run {tool} in {name}.");
+        let Ok(project_id) = ProjectId::new(waiting.project.clone()) else {
+            continue;
+        };
+        let condition = Condition {
+            kind: NoticeKind::ConnectorWrite,
+            project_id: Some(project_id.clone()),
+            subject: format!("connector_write:{}", waiting.id),
+            text,
+            target: NoticeTarget::ConnectorApproval {
+                project_id,
+                id: waiting.id,
+            },
         };
         push(&mut found, &mut keys, condition);
     }

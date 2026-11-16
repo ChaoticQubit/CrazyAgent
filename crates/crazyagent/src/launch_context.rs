@@ -2113,6 +2113,13 @@ fn codex_config(
                 entry["disabled_tools"] =
                     toml_edit::value(off.iter().map(String::as_str).collect::<toml_edit::Array>());
             }
+            if server.name == crate::connectors::launch::SERVER_NAME {
+                use crate::connectors::launch::{HARNESS_WAIT, STARTUP_WAIT};
+                let tool = i64::try_from(HARNESS_WAIT.as_secs()).unwrap_or(i64::MAX);
+                let startup = i64::try_from(STARTUP_WAIT.as_secs()).unwrap_or(i64::MAX);
+                entry["tool_timeout_sec"] = toml_edit::value(tool);
+                entry["startup_timeout_sec"] = toml_edit::value(startup);
+            }
             let name = declared_server_name(&server.name);
             if table.contains_key(name) {
                 return Err(failure("launch_context_server_name_taken"));
@@ -2374,7 +2381,7 @@ fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
         for secret in &server.secrets {
             values.insert(secret.name.clone(), secret_text(secret)?.into());
         }
-        let entry = match &server.spec {
+        let mut entry = match &server.spec {
             ServerSpec::Stdio { command, args } => serde_json::json!({
                 "type": "stdio", "command": command, "args": args, "env": values
             }),
@@ -2382,6 +2389,10 @@ fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
                 "type": "http", "url": url, "headers": values
             }),
         };
+        if server.name == crate::connectors::launch::SERVER_NAME {
+            let wait = crate::connectors::launch::HARNESS_WAIT.as_millis();
+            entry["timeout"] = serde_json::json!(u64::try_from(wait).unwrap_or(u64::MAX));
+        }
         let name = declared_server_name(&server.name);
         if declared.contains_key(name) {
             return Err(failure("launch_context_server_name_taken"));

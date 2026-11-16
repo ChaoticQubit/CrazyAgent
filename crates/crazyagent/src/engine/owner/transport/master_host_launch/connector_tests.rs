@@ -265,10 +265,13 @@ fn a_codex_master_with_a_connector_names_exactly_that_second_server() {
         .filter(|setting| setting.starts_with("mcp_servers="))
         .collect();
     assert_eq!(servers.len(), 1, "{servers:?}");
+    let tool_wait = crate::connectors::launch::HARNESS_WAIT.as_secs();
+    let startup_wait = crate::connectors::launch::STARTUP_WAIT.as_secs();
     let parsed: toml::Table = toml::from_str(&servers[0]).unwrap();
     let expected: toml::Table = toml::from_str(&format!(
         "[mcp_servers.crazyagent-team]\ncommand = {:?}\nargs = [\"team-mcp\", {:?}, {:?}, \"wake\"]\n\
-         [mcp_servers.ca-connectors]\ncommand = {:?}\nargs = [\"connector-mcp\", {:?}]\n",
+         [mcp_servers.ca-connectors]\ncommand = {:?}\nargs = [\"connector-mcp\", {:?}]\n\
+         tool_timeout_sec = {tool_wait}\nstartup_timeout_sec = {startup_wait}\n",
         engine.to_str().unwrap(),
         drop.to_str().unwrap(),
         mailbox.to_str().unwrap(),
@@ -313,51 +316,76 @@ fn a_codex_master_with_a_connector_names_exactly_that_second_server() {
     };
     let engine_text = engine.to_str().unwrap();
     let folder_text = folder.to_str().unwrap();
+    let waits = format!(
+        ",tool_timeout_sec={tool_wait},startup_timeout_sec={startup_wait}"
+    );
     assert_eq!(
         require_master_tool_policy(
             &with_servers(
                 &command,
-                &entry(engine_text, &["connector-mcp", folder_text], "")
+                &entry(engine_text, &["connector-mcp", folder_text], &waits)
             ),
             Some(with)
         ),
         Ok(()),
         "the setting spelled by hand is the one the engine builds"
     );
+    let short = format!(",tool_timeout_sec=60,startup_timeout_sec={startup_wait}");
+    let text = format!(
+        ",tool_timeout_sec=\"{tool_wait}\",startup_timeout_sec={startup_wait}"
+    );
+    let tool_only = format!(",tool_timeout_sec={tool_wait}");
+    let environment = format!("{waits},env={{A=\"b\"}}");
     for (name, servers) in [
         (
             "another executable",
-            entry("/usr/bin/true", &["connector-mcp", folder_text], ""),
+            entry("/usr/bin/true", &["connector-mcp", folder_text], &waits),
         ),
         (
             "another launch folder",
-            entry(engine_text, &["connector-mcp", other.to_str().unwrap()], ""),
+            entry(
+                engine_text,
+                &["connector-mcp", other.to_str().unwrap()],
+                &waits,
+            ),
         ),
         (
             "an extra argument",
             entry(
                 engine_text,
                 &["connector-mcp", folder_text, "--verbose"],
-                "",
+                &waits,
             ),
         ),
         (
             "another server command",
-            entry(engine_text, &["team-mcp", folder_text], ""),
+            entry(engine_text, &["team-mcp", folder_text], &waits),
         ),
         (
             "an environment",
-            entry(
-                engine_text,
-                &["connector-mcp", folder_text],
-                ",env={A=\"b\"}",
-            ),
+            entry(engine_text, &["connector-mcp", folder_text], &environment),
+        ),
+        (
+            "no wait",
+            entry(engine_text, &["connector-mcp", folder_text], ""),
+        ),
+        (
+            "a shorter tool wait",
+            entry(engine_text, &["connector-mcp", folder_text], &short),
+        ),
+        (
+            "a wait written as text",
+            entry(engine_text, &["connector-mcp", folder_text], &text),
+        ),
+        (
+            "no startup wait",
+            entry(engine_text, &["connector-mcp", folder_text], &tool_only),
         ),
         (
             "a third server",
             format!(
                 "{},owner={{command=\"/usr/bin/true\"}}}}",
-                entry(engine_text, &["connector-mcp", folder_text], "")
+                entry(engine_text, &["connector-mcp", folder_text], &waits)
                     .strip_suffix('}')
                     .unwrap()
             ),
@@ -453,9 +481,11 @@ fn a_tools_off_master_turn_is_never_handed_a_connector() {
     let _ = bench.turn(&runtime_ref, None, Some(&folder));
 }
 
-#[test]
-fn a_master_connector_launch_lasts_as_long_as_its_turn_holds_it() {
-    let (_temporary, base) = temporary();
+/// An engine root whose project alpha grants the board connector, with its key saved, to
+/// its master and agents, and whose project beta grants nothing. Output: the folder guard,
+/// the engine root and its database.
+fn granted_engine() -> (tempfile::TempDir, PathBuf, rusqlite::Connection) {
+    let (temporary, base) = temporary();
     let root = base.join("engine");
     private_directory(&root);
     let db = crate::questions::open(&root).unwrap();
@@ -477,6 +507,13 @@ fn a_master_connector_launch_lasts_as_long_as_its_turn_holds_it() {
     crate::app_plugins::store::set_key(&db, &root, "board", "api_key", KEY.as_bytes().to_vec())
         .unwrap();
     grants::set(&db, &root, "alpha", "board", true, Who::Both, 2).unwrap();
+    (temporary, root, db)
+}
+
+#[test]
+fn a_master_connector_launch_lasts_as_long_as_its_turn_holds_it() {
+    let (_temporary, root, db) = granted_engine();
+    let gateway = crate::connectors::gateway::start(&root).unwrap();
     let launches = |db: &rusqlite::Connection| -> i64 {
         db.query_row("SELECT COUNT(*) FROM connector_launches", [], |row| {
             row.get(0)
@@ -508,4 +545,24 @@ fn a_master_connector_launch_lasts_as_long_as_its_turn_holds_it() {
         "a project with no connector granted gets no launch"
     );
     assert_eq!(launches(&db), 0);
+    gateway.stop();
+}
+
+/// With no gateway serving the engine root (an engine started without a team runtime, or one
+/// whose gateway did not start), a master granted a connector gets no launch, so its turn is
+/// handed no connector server that nobody would answer.
+#[test]
+fn a_master_turn_in_an_engine_with_no_gateway_gets_no_connector() {
+    let (_temporary, root, _db) = granted_engine();
+    assert!(!crate::connectors::gateway::serving(&root));
+    assert!(
+        MasterConnector::open(&root, &ProjectId::new("alpha").unwrap())
+            .unwrap()
+            .is_none(),
+        "a granted master gets no launch while no gateway serves its engine"
+    );
+    assert!(
+        !root.join(LAUNCHES_FOLDER).exists(),
+        "and no launch folder is made"
+    );
 }

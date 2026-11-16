@@ -23,7 +23,7 @@ test("a grouped list replaces the tab row: Access, Agents and App in the approve
   const shown = await onFrame("pools", 1180, ({ evaluate }) => evaluate("Fixture.structure()"));
   assert.deepEqual(shown.groups, [
     { name: "Access", links: ["Accounts", "Pools"] },
-    { name: "Agents", links: ["Harnesses", "Plugins and skills", "Process", "Tickets", "Pack", "Checks", "Memory", "Finished agents", "Quitting", "Master"] },
+    { name: "Agents", links: ["Harnesses", "Plugins and skills", "Connectors", "Process", "Tickets", "Pack", "Checks", "Memory", "Finished agents", "Quitting", "Master"] },
     { name: "App", links: ["Sandbox", "Team alerts", "Notifications", "App plugins", "Connector activity", "Search"] },
   ]);
   assert.deepEqual(shown.current, ["Pools"]);
@@ -96,15 +96,15 @@ test("the list stops sticking up to 1070px, past the 1052px wrap point with room
 test("real Tab keys walk every Settings link in list order with a visible ring, then enter the panel", async () => {
   const walked = await onFrame("accounts", 1180, async ({ evaluate, send }) => {
     const seen = [];
-    for (let at = 0; at < 20; at += 1) {
+    for (let at = 0; at < 21; at += 1) {
       for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
       seen.push(await evaluate("Fixture.focused()"));
     }
     return seen;
   });
-  assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "Harnesses", "Plugins and skills", "Process", "Tickets", "Pack", "Checks", "Memory", "Finished agents", "Quitting", "Master",
+  assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "Harnesses", "Plugins and skills", "Connectors", "Process", "Tickets", "Pack", "Checks", "Memory", "Finished agents", "Quitting", "Master",
     "Sandbox", "Team alerts", "Notifications", "App plugins", "Connector activity", "Search", "In the panel"]);
-  assert.deepEqual([...new Set(walked.slice(1, 19).map((item) => item.outline))], ["solid"]);
+  assert.deepEqual([...new Set(walked.slice(1, 20).map((item) => item.outline))], ["solid"]);
 });
 
 test("a real Enter on a focused link opens that section's address", async () => {

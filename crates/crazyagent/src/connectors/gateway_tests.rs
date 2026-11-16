@@ -8,7 +8,7 @@ use crate::connectors::mcp_client::tests::{
     BOARD, DESK, KEY, Seen, USER, Vendor, empty, json_reply, legacy, modern, no_lookup, result,
     rpc_error, send, text_result, tool,
 };
-use crate::connectors::settings::KeepLog;
+use crate::connectors::settings::{self, ConnectorSettings, KeepLog, WritePolicy};
 use crate::connectors::shim::{self, Ask};
 use crate::connectors::tests::{Case, add, case};
 use crate::notifications::{NoticeClass, NoticeFilter, NoticeKind, NoticeQuery, PAGE_MAX};
@@ -108,6 +108,14 @@ fn launch(bench: &Bench) -> GatewayLaunch {
     )
     .unwrap()
     .expect("a launch with a granted connector gets a launch folder")
+}
+
+/// Saves the connector write setting given and keeps every other setting as it was.
+fn set_write(bench: &Bench, write: WritePolicy) {
+    let db = &bench.case.db;
+    let (saved, version) = settings::load(db).unwrap();
+    let changed = ConnectorSettings { write, ..saved };
+    settings::save(db, &changed, version).unwrap().unwrap();
 }
 
 /// A bench with `board` granted, calling the stand-in given, and one launch of it.
@@ -525,9 +533,10 @@ fn no_connector_secret_is_in_anything_an_agent_can_read() {
 }
 
 #[test]
-fn a_write_tool_is_hidden_and_refused_until_approvals_exist() {
+fn under_read_only_a_write_tool_is_hidden_and_refused() {
     let vendor = serving(vec![read_tool("list_issues"), write_tool("create_issue")]);
     let (bench, launch) = board_bench(&vendor);
+    set_write(&bench, WritePolicy::ReadOnly);
     assert_eq!(listed(&bench, &launch), ["board__list_issues"]);
     let (text, error) = called(
         &bench,
@@ -536,7 +545,7 @@ fn a_write_tool_is_hidden_and_refused_until_approvals_exist() {
         json!({"title": "x"}),
     );
     assert!(error);
-    assert!(text.starts_with("connector_writes_not_yet"), "{text}");
+    assert!(text.starts_with("connector_writes_off"), "{text}");
     assert!(vendor_calls(&vendor).is_empty());
     let (text, error) = called(&bench, &launch, "board__list_issues", json!({}));
     assert!(!error, "{text}");
@@ -565,10 +574,11 @@ fn a_tool_that_says_neither_read_nor_write_is_a_write() {
 
     let vendor = serving(vec![tool("silent"), read_tool("list_issues")]);
     let (bench, launch) = board_bench(&vendor);
+    set_write(&bench, WritePolicy::ReadOnly);
     assert_eq!(listed(&bench, &launch), ["board__list_issues"]);
     let (text, error) = called(&bench, &launch, "board__silent", json!({}));
     assert!(error);
-    assert!(text.starts_with("connector_writes_not_yet"), "{text}");
+    assert!(text.starts_with("connector_writes_off"), "{text}");
     assert!(vendor_calls(&vendor).is_empty());
 }
 
@@ -800,6 +810,7 @@ fn the_audit_row_has_sizes_and_outcome_and_no_content() {
         send(stream, &reply);
     });
     let (bench, launch) = board_bench(&vendor);
+    set_write(&bench, WritePolicy::ReadOnly);
     let before = crate::semantic::now_ms();
     assert_eq!(listed(&bench, &launch), ["board__list_issues"]);
     let arguments = json!({"note": "SECRET-ARG-TEXT", "team": "core"});
@@ -842,7 +853,7 @@ fn the_audit_row_has_sizes_and_outcome_and_no_content() {
         (
             "create_issue".to_owned(),
             CallKind::Write,
-            "connector_writes_not_yet".to_owned()
+            "connector_writes_off".to_owned()
         )
     );
     assert_eq!(
@@ -1009,6 +1020,7 @@ fn while_writes_are_off_the_vendor_sees_only_the_read_only_endpoint_or_header() 
     let by_address = serving(vec![read_tool("list_issues")]);
     let by_header = serving(vec![read_tool("search")]);
     let bench = bench();
+    set_write(&bench, WritePolicy::ReadOnly);
     let mut board = by_address.endpoint();
     board.read_only = ReadOnly::Url(
         url::Url::parse(&format!("http://127.0.0.1:{}/read-only", by_address.port)).unwrap(),
@@ -1048,6 +1060,7 @@ fn while_writes_are_off_the_vendor_sees_only_the_read_only_endpoint_or_header() 
 fn each_endpoint_has_its_own_pinned_tool_list_and_a_change_in_one_stops_the_connector() {
     let vendor = serving(vec![read_tool("list_issues")]);
     let bench = bench();
+    set_write(&bench, WritePolicy::ReadOnly);
     let mut board = vendor.endpoint();
     board.read_only = ReadOnly::Url(
         url::Url::parse(&format!("http://127.0.0.1:{}/read-only", vendor.port)).unwrap(),
@@ -1101,12 +1114,13 @@ fn a_connector_with_no_vendor_read_only_mode_is_held_by_the_gateway_filter_alone
         tool("update_issue"),
     ]);
     let (bench, launch) = board_bench(&vendor);
+    set_write(&bench, WritePolicy::ReadOnly);
     assert_eq!(vendor.endpoint().read_only, ReadOnly::None);
     assert_eq!(listed(&bench, &launch), ["board__list_issues"]);
     for name in ["board__delete_issue", "board__update_issue"] {
         let (text, error) = called(&bench, &launch, name, json!({}));
         assert!(error);
-        assert!(text.starts_with("connector_writes_not_yet"), "{text}");
+        assert!(text.starts_with("connector_writes_off"), "{text}");
     }
     let (text, error) = called(&bench, &launch, "board__list_issues", json!({}));
     assert!(!error, "{text}");
@@ -1223,9 +1237,10 @@ fn a_tool_whose_shown_name_a_harness_cannot_take_is_left_out() {
 fn a_call_before_any_list_still_checks_the_tool_and_its_kind() {
     let vendor = serving(vec![read_tool("list_issues"), write_tool("create_issue")]);
     let (bench, launch) = board_bench(&vendor);
+    set_write(&bench, WritePolicy::ReadOnly);
     let (text, error) = called(&bench, &launch, "board__create_issue", json!({}));
     assert!(error);
-    assert!(text.starts_with("connector_writes_not_yet"), "{text}");
+    assert!(text.starts_with("connector_writes_off"), "{text}");
     let (text, error) = called(&bench, &launch, "board__list_issues", json!({}));
     assert!(!error, "{text}");
     for (name, arguments) in [
@@ -1401,6 +1416,34 @@ fn the_engines_gateway_thread_answers_a_launchs_call_and_stops_when_told() {
         clock.elapsed() < 10 * TICK + Duration::from_secs(1),
         "the loop ends within a round of being told"
     );
+}
+
+/// A started gateway serves its engine root, under any spelling that resolves to it, until
+/// it is stopped, and never another root, so a master turn in an engine with no gateway is
+/// handed no connector server that nobody answers.
+#[test]
+fn a_gateway_serves_its_root_only_while_it_runs() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().join("engine");
+    let other = folder.path().join("other");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let spelled = folder.path().join("engine-link");
+    std::os::unix::fs::symlink(&root, &spelled).unwrap();
+    assert!(
+        !super::serving(&root),
+        "no gateway serves a root before one starts"
+    );
+    let running = start(&root).unwrap();
+    assert!(super::serving(&root), "a started gateway serves its root");
+    assert!(
+        super::serving(&spelled),
+        "a spelling that resolves to the root is the same root"
+    );
+    assert!(!super::serving(&other), "another root is not served");
+    assert!(!super::serving(&folder.path().join("gone")));
+    running.stop();
+    assert!(!super::serving(&root), "a stopped gateway serves nothing");
 }
 
 #[test]
@@ -1625,6 +1668,15 @@ fn every_gateway_code_has_a_plain_sentence_and_the_list_is_sorted() {
         let plain = crate::connectors::plain_problem(code);
         assert!(plain.is_some_and(|plain| !plain.is_empty()), "{code}");
     }
+    for code in [
+        "connector_write_denied",
+        "connector_write_expired",
+        "connector_writes_off",
+        "connector_writes_waiting_full",
+    ] {
+        assert!(GATEWAY_CODES.contains(&code), "{code}");
+    }
+    assert!(!GATEWAY_CODES.contains(&"connector_writes_not_yet"));
 }
 
 #[test]
@@ -1845,6 +1897,7 @@ fn one_launchs_flood_of_refused_calls_leaves_every_call_that_reached_a_vendor_in
 fn a_flood_of_refused_calls_never_erases_an_earlier_refused_write() {
     let vendor = serving(vec![read_tool("list_issues"), write_tool("create_issue")]);
     let (bench, launch) = board_bench(&vendor);
+    set_write(&bench, WritePolicy::ReadOnly);
     let (text, error) = called(
         &bench,
         &launch,
@@ -1852,7 +1905,7 @@ fn a_flood_of_refused_calls_never_erases_an_earlier_refused_write() {
         json!({"title": "x"}),
     );
     assert!(error);
-    assert!(text.starts_with("connector_writes_not_yet"), "{text}");
+    assert!(text.starts_with("connector_writes_off"), "{text}");
     let id: String = bench
         .case
         .db
@@ -1903,7 +1956,7 @@ fn a_flood_of_refused_calls_never_erases_an_earlier_refused_write() {
         )
     };
     assert_eq!(
-        rows("kind='write' AND outcome='connector_writes_not_yet' AND sent=0"),
+        rows("kind='write' AND outcome='connector_writes_off' AND sent=0"),
         1,
         "the refused write is still listed"
     );
@@ -2208,3 +2261,6 @@ fn an_oauth_connector_is_called_with_its_token_and_renews_once_when_refused() {
         "an ended sign-in sends no token"
     );
 }
+
+#[path = "approval_rows.rs"]
+mod approval_rows;
