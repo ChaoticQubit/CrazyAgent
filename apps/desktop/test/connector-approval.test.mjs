@@ -62,7 +62,21 @@ test("Time left counts whole seconds rounded up and never goes below 0:00", () =
   assert.equal(api.timeLeft(0, 1), "0:01");
   assert.equal(api.timeLeft(5, 5), "0:00");
   assert.equal(api.timeLeft(10_000, 5), "0:00");
-  assert.equal(text(render({}, { now: CREATED + WAIT_MS + 5000 })).includes("Time left: 0:00"), true);
+});
+
+test("A write still waiting when its wait runs out shows Expired and no buttons, before the engine marks it", () => {
+  assert.equal(api.shownState(WAITING, CREATED + WAIT_MS - 1), "waiting");
+  assert.equal(api.shownState(WAITING, CREATED + WAIT_MS), "expired", "the engine refuses an answer from its end on");
+  for (const state of ["allowed", "denied", "expired"]) assert.equal(api.shownState({ ...WAITING, state, answered_ms: CREATED }, CREATED), state, state);
+  for (const now of [CREATED + WAIT_MS, CREATED + WAIT_MS + 5000]) {
+    const markup = render({}, { now });
+    const shown = text(markup);
+    assert.ok(shown.includes("Expired"), shown);
+    assert.equal(button(markup, "Allow"), null, "no Allow once the wait ran out");
+    assert.equal(button(markup, "Deny"), null, "no Deny once the wait ran out");
+    assert.ok(!shown.includes("Time left"), shown);
+  }
+  assert.ok(text(render({}, { now: CREATED + WAIT_MS - 1 })).includes("Time left: 0:01"), "a millisecond before the end it still waits");
 });
 
 test("An answered or expired write shows where it stands and no buttons", () => {

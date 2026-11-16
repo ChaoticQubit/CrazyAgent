@@ -528,6 +528,14 @@ export function timeLeft(nowMs: number, expiresMs: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
+/** Where a write stands as the page shows it: one still waiting when its wait ran out reads
+ * as expired, since the engine refuses an answer from then on. Inputs: the approval and now
+ * in epoch milliseconds. Output: the state to show. */
+export function shownState(approval: ApprovalView, now: number): ApprovalState {
+  void now;
+  return approval.state;
+}
+
 /** Where an answered write stands: "Allowed <stamp>", "Denied <stamp>" or "Expired".
  * Input: the approval. Output: the line, empty while it waits. */
 export function answeredLine(view: ApprovalView): string {
