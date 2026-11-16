@@ -34,7 +34,7 @@ pub use plan::{GitHubPlanField, default_description, default_repo_name, plan_pro
 pub(crate) use prompt::carry_publish;
 pub use prompt::{GitHubPromptAnswer, SNOOZE_MS};
 #[cfg(test)]
-pub(crate) use prompt::{keep_job, kept_job};
+pub(crate) use prompt::{keep_job, keep_prompt_answer, kept_job, kept_prompt_answer};
 pub use publish::{
     GitHubCommitted, GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding,
     GitHubSecretKind, GitHubSecretScan,

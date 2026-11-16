@@ -88,22 +88,30 @@ impl GitHub {
         answer: GitHubPromptAnswer,
         now_ms: i64,
     ) -> Result<(), EngineError> {
-        let db = open(&self.root)?;
-        match answer {
-            GitHubPromptAnswer::NotNow => db.execute(
-                "INSERT INTO github_publish_prompt(project, snoozed_until, never) VALUES (?1, ?2, 0)
-                 ON CONFLICT(project) DO UPDATE SET snoozed_until = excluded.snoozed_until",
-                params![project.as_str(), now_ms.saturating_add(SNOOZE_MS)],
-            ),
-            GitHubPromptAnswer::Never => db.execute(
-                "INSERT INTO github_publish_prompt(project, snoozed_until, never) VALUES (?1, NULL, 1)
-                 ON CONFLICT(project) DO UPDATE SET never = 1",
-                params![project.as_str()],
-            ),
-        }
-        .map_err(unavailable)?;
-        Ok(())
+        keep_answer(&open(&self.root)?, project, answer, now_ms)
     }
+}
+
+fn keep_answer(
+    db: &Connection,
+    project: &ProjectId,
+    answer: GitHubPromptAnswer,
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    match answer {
+        GitHubPromptAnswer::NotNow => db.execute(
+            "INSERT INTO github_publish_prompt(project, snoozed_until, never) VALUES (?1, ?2, 0)
+             ON CONFLICT(project) DO UPDATE SET snoozed_until = excluded.snoozed_until",
+            params![project.as_str(), now_ms.saturating_add(SNOOZE_MS)],
+        ),
+        GitHubPromptAnswer::Never => db.execute(
+            "INSERT INTO github_publish_prompt(project, snoozed_until, never) VALUES (?1, NULL, 1)
+             ON CONFLICT(project) DO UPDATE SET never = 1",
+            params![project.as_str()],
+        ),
+    }
+    .map_err(unavailable)?;
+    Ok(())
 }
 
 /// Carries a moved project's publish job, if any, from its old folder to its new one, as
@@ -130,6 +138,29 @@ pub(crate) fn carry_publish(db: &Connection, from: &Path, to: &Path) {
     if let Err(error) = carried {
         eprintln!("github_publish_carry_failed code={}", error.0);
     }
+}
+
+/// Keeps an answer to a project's publish question as the owner's answer is kept, for rows
+/// outside the GitHub module. Inputs: the engine root, the project and the answer. Output:
+/// none; a failed write panics.
+#[cfg(test)]
+pub(crate) fn keep_prompt_answer(root: &Path, project: &ProjectId, answer: GitHubPromptAnswer) {
+    keep_answer(&open(root).unwrap(), project, answer, 0).unwrap();
+}
+
+/// Says whether an answer to a project's publish question is kept, for rows outside the
+/// GitHub module. Inputs: the engine root and the project. Output: the answer; a failed
+/// read panics.
+#[cfg(test)]
+pub(crate) fn kept_prompt_answer(root: &Path, project: &ProjectId) -> bool {
+    open(root)
+        .unwrap()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM github_publish_prompt WHERE project = ?1)",
+            params![project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 /// Saves a project's publish job where the engine keeps it, for rows outside the GitHub

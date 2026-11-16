@@ -119,6 +119,75 @@ fn a_home_move_carries_each_moved_projects_github_publish_job() {
     );
 }
 
+/// rv-code2 GH5B-1, DEC-178 add.1: Remove from dashboard keeps a project's answer to the
+/// Overview's publish question, as it keeps the project's notes for a re-add of the same
+/// folder, and a Delete everything forgets the answer with the project's records.
+#[test]
+fn delete_everything_forgets_the_publish_question_answer_and_remove_from_dashboard_keeps_it() {
+    let root = tempfile::tempdir().unwrap();
+    let engine = root.path().canonicalize().unwrap();
+    let mut connection = Connection::open(engine.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let (kept, gone) = (
+        ProjectId::new("kept").unwrap(),
+        ProjectId::new("gone").unwrap(),
+    );
+    for project in [&kept, &gone] {
+        let body = serde_json::to_string(&crate::protocol::StoredProject {
+            project_id: project.clone(),
+            spec: crate::protocol::ProjectSpec {
+                name: project.as_str().into(),
+                repositories: vec![],
+            },
+        })
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects(id, body) VALUES (?1, ?2)",
+                params![project.as_str(), body],
+            )
+            .unwrap();
+        crate::github::keep_prompt_answer(
+            &engine,
+            project,
+            crate::github::GitHubPromptAnswer::Never,
+        );
+        assert!(crate::github::kept_prompt_answer(&engine, project));
+    }
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    let tx = connection.transaction().unwrap();
+    let removed = crate::project_setup::execute(
+        &tx,
+        &config,
+        &crate::project_setup::SetupAction::Remove {
+            project_id: kept.clone(),
+        },
+        2,
+    )
+    .unwrap();
+    assert!(matches!(removed, crate::protocol::Outcome::Applied));
+    let deleted = crate::project_setup::record_delete(
+        &tx,
+        &crate::project_setup::SetupAction::Delete {
+            project_id: gone.clone(),
+            name: "gone".into(),
+        },
+        &Ok(Vec::new()),
+        3,
+    )
+    .unwrap();
+    assert!(matches!(deleted, crate::protocol::Outcome::Applied));
+    tx.commit().unwrap();
+    assert!(
+        crate::github::kept_prompt_answer(&engine, &kept),
+        "Remove from dashboard keeps Don't ask again"
+    );
+    assert!(
+        !crate::github::kept_prompt_answer(&engine, &gone),
+        "Delete everything forgets it"
+    );
+}
+
 /// A Delete everything moves nothing while an agent of the project runs: past the wait it
 /// refuses `delete_agents_running`, and once the agent stops every move sees the Stop all row
 /// and no running agent of the project. A first failed move refuses `home_trash_failed`, a
