@@ -1039,6 +1039,20 @@ pub(super) fn own_replaced(
     save()
 }
 
+/// Ends a connector's sign-in at the owner's ask, whichever client made it, and drops every
+/// sign-in begun for it, under its renewal lock; its "Sign in again" is cleared, since the
+/// owner chose this. Inputs: database, engine root and connector. Output: Ok, or the key
+/// store's or database's refusal.
+pub(super) fn signed_out(db: &Connection, root: &Path, name: &str) -> Result<(), OAuthError> {
+    let lock = renewal_lock(root, name);
+    let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    flows().retain(|flow| !(flow.root == root && flow.connector == name));
+    if let Some(record) = record_of(root, name)? {
+        ended(root, name, &record.issuer)?;
+    }
+    signed_in(db, name)
+}
+
 fn record_ref(name: &str) -> Result<CredentialRef, OAuthError> {
     CredentialRef::new(format!("connector-signin-{name}")).map_err(|_| key_store())
 }
