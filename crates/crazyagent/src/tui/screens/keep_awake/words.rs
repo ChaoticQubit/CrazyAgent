@@ -235,7 +235,11 @@ pub(in crate::tui) fn lid_reason(lid: &LidSupport) -> Option<String> {
         LidSupport::NotAvailable { reason } => {
             return Some(reason.chars().take(REASON_CHARS_MAX).collect());
         }
-        LidSupport::Held | LidSupport::Off | LidSupport::IdleOnlyOnBattery => return None,
+        LidSupport::Held
+        | LidSupport::Off
+        | LidSupport::IdleOnlyOnBattery
+        | LidSupport::NotTurnedOn
+        | LidSupport::RemoveHelper { .. } => return None,
     };
     Some(reason.into())
 }

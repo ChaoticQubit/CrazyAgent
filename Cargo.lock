@@ -779,6 +779,7 @@ dependencies = [
  "async-io",
  "async-trait",
  "base64 0.22.1",
+ "crazyagent-mac-power",
  "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",

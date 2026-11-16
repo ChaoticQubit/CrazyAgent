@@ -27,6 +27,13 @@ fn enter() -> Entered {
     Entered(guard)
 }
 
+/// Tells a row whether this thread holds the gate right now. Output: true inside
+/// `guarded` and the spawns that use it.
+#[cfg(test)]
+pub(crate) fn held() -> bool {
+    HELD.get()
+}
+
 /// Runs a call that creates file descriptors while no other thread of this
 /// process starts a child, for sockets and anything else the platform cannot
 /// create close-on-exec in one step. Input: the call, which must not enter the

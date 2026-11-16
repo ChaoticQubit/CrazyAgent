@@ -1,5 +1,7 @@
 use super::*;
-use crate::keep_awake::power::{LID_REFUSED, PowerReading, READ_MS, Reader};
+use crate::keep_awake::power::{
+    LID_REFUSED, LidAsk, LidReader, PowerReading, READ_MS, Reader, Sensing,
+};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -376,6 +378,123 @@ fn the_sensor_thread_ends_with_the_keeper() {
         until(|| Arc::strong_count(&fake.reads) == 1),
         "the sensor thread dropped its reader"
     );
+}
+
+/// Steps the sensor line at one engine time until a reading comes back. Inputs: the
+/// line, the time and the lid ask. Output: the reading; the row fails after `WAIT`.
+fn answered(sensing: &mut Sensing, now_ms: i64, ask: LidAsk) -> PowerReading {
+    let mut reading = None;
+    assert!(until(|| {
+        reading = sensing.step(now_ms, ask);
+        reading.is_some()
+    }));
+    reading.expect("a reading came back")
+}
+
+/// A lid line that records every ask with its time and answers with the support given.
+fn heard_lid(support: LidSupport) -> (LidReader, Arc<Mutex<Vec<(LidAsk, i64)>>>) {
+    let asks = Arc::new(Mutex::new(Vec::new()));
+    let heard = asks.clone();
+    let lid: LidReader = Box::new(move |ask, now_ms| {
+        assert!(now_ms > 0);
+        heard.lock().unwrap().push((ask, now_ms));
+        support.clone()
+    });
+    (lid, asks)
+}
+
+#[test]
+fn a_changed_lid_ask_reaches_the_lid_line_at_once_and_an_unchanged_one_waits() {
+    let fake = Fake::new(on_ac());
+    let (lid, asks) = heard_lid(LidSupport::NeedsApproval);
+    let mut sensing = Sensing::start(fake.reader(), Some(lid)).unwrap();
+    let resting = LidAsk {
+        rule_on: true,
+        wanted: false,
+    };
+    let wanted = LidAsk {
+        rule_on: true,
+        wanted: true,
+    };
+    let count = || asks.lock().unwrap().len();
+
+    assert_eq!(sensing.step(NOW_MS, resting), None);
+    let first = answered(&mut sensing, NOW_MS + SECOND_MS, resting);
+    assert_eq!(
+        first.lid_support,
+        LidSupport::NeedsApproval,
+        "the lid line's support stands in for the reader's"
+    );
+    assert_eq!(*asks.lock().unwrap(), [(resting, NOW_MS)]);
+
+    let changed_ms = NOW_MS + 2 * SECOND_MS;
+    assert_eq!(sensing.step(changed_ms, wanted), None);
+    assert!(until(|| count() == 2), "a changed ask goes out at once");
+    assert_eq!(asks.lock().unwrap()[1], (wanted, changed_ms));
+    answered(&mut sensing, changed_ms + SECOND_MS, wanted);
+
+    for second in 4..30 {
+        assert_eq!(sensing.step(NOW_MS + second * SECOND_MS, wanted), None);
+    }
+    let due_ms = changed_ms + READ_MS;
+    assert_eq!(sensing.step(due_ms, wanted), None);
+    assert!(until(|| count() == 3));
+    assert_eq!(
+        asks.lock().unwrap()[2],
+        (wanted, due_ms),
+        "an unchanged ask waits for the next reading"
+    );
+    assert!(until(|| fake.reads() == 3));
+}
+
+#[test]
+fn the_keeper_hands_the_lid_line_what_the_lid_wants_and_leaves_the_lid_to_it() {
+    let (_folder, connection) = engine();
+    let fake = Fake::new(PowerReading {
+        lid_support: LidSupport::HelperMissing,
+        ..on_ac()
+    });
+    let (lid, asks) = heard_lid(LidSupport::Held);
+    let hold = NoLid::default();
+    let asked = hold.asked.clone();
+    let mut keeper = Keeper::with_hold(Box::new(hold)).with_sensors(fake.reader(), Some(lid));
+    let mut now_ms = NOW_MS;
+    agent(&connection, "working");
+    let last = || asks.lock().unwrap().last().map(|(ask, _)| *ask);
+    let off = LidAsk {
+        rule_on: false,
+        wanted: false,
+    };
+
+    keeper.tick(&connection, now_ms).unwrap();
+    assert!(until(|| last().is_some()), "the first reading reaches the lid line");
+    assert_eq!(last(), Some(off), "nothing is asked of the helper before an evaluation");
+
+    let wanted = LidAsk {
+        rule_on: true,
+        wanted: true,
+    };
+    let view = step_until(&mut keeper, &connection, &mut now_ms, |view| {
+        view.state.want == IDLE_AND_LID && last() == Some(wanted)
+    });
+    assert_eq!(view.lid_support, LidSupport::Held);
+    let later = steps(&mut keeper, &connection, &mut now_ms, 65).unwrap();
+    assert_eq!(
+        later.state.want, IDLE_AND_LID,
+        "an idle hold that never takes the lid is no refusal while the lid line holds it"
+    );
+    assert_eq!(later.lid_support, LidSupport::Held);
+    assert!(asked.lock().unwrap().contains(&IDLE_AND_LID));
+
+    let settings = KeepAwakeSettings {
+        lid: LidRule::Off,
+        ..KeepAwakeSettings::default()
+    };
+    let outcome = act(&connection, KeepAwakeAction::Set { settings }, now_ms);
+    assert_eq!(outcome, Outcome::Applied);
+    let ruled_off = step_until(&mut keeper, &connection, &mut now_ms, |_| last() == Some(off));
+    assert_eq!(ruled_off.lid_support, LidSupport::Off);
+    assert_eq!(ruled_off.state.want, IDLE);
 }
 
 #[test]

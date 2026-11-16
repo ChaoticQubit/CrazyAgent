@@ -293,6 +293,21 @@ fn the_lid_line_says_what_a_closed_lid_does_now() {
     let reason = "r".repeat(300);
     let cut = words::lid_now(&limited(LidSupport::NotAvailable { reason }));
     assert_eq!(cut.chars().count(), 200, "a long reason is cut");
+    assert_eq!(
+        words::lid_now(&limited(LidSupport::NotTurnedOn)),
+        "Not turned on yet"
+    );
+    let reason = "The lid helper belongs to another account on this Mac".to_string();
+    assert_eq!(
+        words::lid_now(&limited(LidSupport::RemoveHelper {
+            reason: reason.clone()
+        })),
+        reason,
+        "a helper to remove says why"
+    );
+    let reason = "r".repeat(300);
+    let cut = words::lid_now(&limited(LidSupport::RemoveHelper { reason }));
+    assert_eq!(cut.chars().count(), 200, "a long remove reason is cut");
 }
 
 #[test]

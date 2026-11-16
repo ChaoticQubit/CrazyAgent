@@ -1,9 +1,120 @@
 use super::hold::{Held, Hold, HoldError, wanted};
-use super::state::Want;
+use super::power::LidAsk;
+use super::state::{LidSupport, Want};
+use crazyagent_mac_power::client::CallError;
+use crazyagent_mac_power::protocol::{Reply, Request};
+use crazyagent_mac_power::service::Service;
+use std::io;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
 const CAFFEINATE: &str = "/usr/bin/caffeinate";
+
+/// The lease each `Hold` asks the lid helper for: four readings, so a renewal or two that
+/// fail still hold, and an engine that stops lets the lid go within two minutes.
+pub(super) const LEASE_S: u16 = 120;
+
+/// With no hold, the lid helper is read at most this often, so it can exit idle between.
+pub(super) const READ_EVERY_MS: i64 = 300_000;
+
+/// macOS major versions where the lid-closed hold is withheld (QUESTION 31c A: a W1 or W3
+/// writer can swap the helper there). Empty until live row L16 names one.
+pub(super) const LID_WITHHELD_MACOS: &[u32] = &[];
+
+/// The lid words when the daemon's status could not be read.
+pub(super) const STATUS_UNREAD: &str = "The lid helper's state could not be read";
+/// The lid words when the macOS version could not be read.
+pub(super) const VERSION_UNREAD: &str = "The macOS version could not be read";
+/// The lid words when the helper gave no reply, or one that does not fit the call.
+pub(super) const HELPER_UNANSWERED: &str = "The lid helper did not answer";
+/// The lid words while the helper cannot read its journal (threat model section 8).
+pub(super) const SLEEP_NOT_RESTORED: &str =
+    "Sleep not restored: the lid helper cannot read its journal";
+/// The lid words while the helper's last-resort floor holds (threat model section 10).
+pub(super) const ENDED_TO_PROTECT: &str = "Ended to protect this Mac";
+/// The Remove lid helper reason when another account's uid is pinned.
+pub(super) const PIN_OTHER: &str = "The lid helper belongs to another account on this Mac";
+/// The Remove lid helper reason when the helper pinned no account.
+pub(super) const PIN_NONE: &str = "The lid helper was approved with no account at the screen";
+/// The lid words while the rule is Off and the helper was never read.
+pub(super) const LID_UNREAD: &str = "The lid helper is read once the lid rule is on";
+
+/// The engine's line to the lid helper: one request, one reply.
+pub(super) trait HelperLine: Send + std::fmt::Debug {
+    fn call(&mut self, request: &Request) -> Result<Reply, CallError>;
+}
+
+/// What this Mac offers the lid line before any call: its macOS major version, none when
+/// it could not be read; whether the helper and its plist are in the app bundle; and the
+/// versions where the lid hold is withheld.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LidPlatform {
+    pub(super) macos: Option<u32>,
+    pub(super) bundled: bool,
+    pub(super) withheld: &'static [u32],
+}
+
+impl LidPlatform {
+    /// Reads this Mac: `sw_vers -productVersion`, and the helper and its plist where the
+    /// app bundle puts them next to the running engine. Output: what it found.
+    pub(super) fn this_mac() -> Self {
+        Self {
+            macos: None,
+            bundled: true,
+            withheld: LID_WITHHELD_MACOS,
+        }
+    }
+}
+
+/// Reads the major version from `sw_vers -productVersion` text such as `15.4.1`. Input:
+/// the text. Output: the major version, or none for text that is not one version.
+pub(super) fn macos_major(text: &str) -> Option<u32> {
+    let _ = text;
+    None
+}
+
+/// Runs the helper socket's connect inside the engine's spawn gate (threat model C9), so
+/// no child the engine starts meanwhile inherits it. Input: the connect. Output: what it
+/// returned.
+pub(super) fn gate(connect: &mut dyn FnMut() -> io::Result<UnixStream>) -> io::Result<UnixStream> {
+    connect()
+}
+
+/// The lid hold on the sensor thread (DEC-167 addendum 18, QUESTION 35b-35d, 35f-35h).
+#[derive(Debug)]
+pub(super) struct LidLine {
+    service: Box<dyn Service>,
+    helper: Box<dyn HelperLine>,
+    platform: LidPlatform,
+}
+
+impl LidLine {
+    /// Inputs: the daemon's registration, the line to the helper and this Mac. Output: a
+    /// line that holds nothing and has read nothing yet.
+    pub(super) fn new(
+        service: Box<dyn Service>,
+        helper: Box<dyn HelperLine>,
+        platform: LidPlatform,
+    ) -> Self {
+        Self {
+            service,
+            helper,
+            platform,
+        }
+    }
+
+    /// Takes one step at a reading. Inputs: the keeper's lid ask and the engine time.
+    /// Output: the lid support.
+    pub(super) fn step(&mut self, ask: LidAsk, now_ms: i64) -> LidSupport {
+        assert!(now_ms > 0);
+        assert!(ask.rule_on || !ask.wanted);
+        let _ = (&self.service, &self.helper, self.platform);
+        LidSupport::NotAvailable {
+            reason: "not built yet".into(),
+        }
+    }
+}
 
 /// The macOS idle hold: one `caffeinate -i -w <engine pid>` child (with `-d` while the
 /// display stays on) in its own process group. The system drops the assertion when the

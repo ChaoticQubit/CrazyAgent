@@ -44,6 +44,25 @@ impl PowerReading {
 /// is unknown in the reading it returns.
 pub type Reader = Box<dyn FnMut() -> PowerReading + Send>;
 
+/// What the keeper tells the lid line with each ask: whether the lid rule is on, and
+/// whether the decision holds the closed lid, which only a rule that is on allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LidAsk {
+    pub rule_on: bool,
+    pub wanted: bool,
+}
+
+/// The lid line on the sensor thread (DEC-167 addendum 18): handed the keeper's lid ask
+/// and the engine time with each reading, it holds or lets go of the closed lid and
+/// returns the lid support, which stands in for the reader's.
+pub type LidReader = Box<dyn FnMut(LidAsk, i64) -> LidSupport + Send>;
+
+/// Builds this platform's lid line: the macOS lid helper, and none elsewhere, where the
+/// reader's own lid support stands. Output: the lid line, if this platform has one.
+pub fn platform_lid() -> Option<LidReader> {
+    None
+}
+
 /// Builds this platform's reader: system tools on macOS, files below `/sys`, `/proc` and
 /// `/run` on Linux (no bus connection), the system power status on Windows. Output: the
 /// reader.
@@ -127,9 +146,10 @@ pub(super) struct Sensing {
 }
 
 impl Sensing {
-    /// Starts the sensor thread around a reader. Input: the reader, which the thread
-    /// owns from here on. Output: the line to the thread, or the error of starting it.
-    pub(super) fn start(mut reader: Reader) -> std::io::Result<Self> {
+    /// Starts the sensor thread around a reader and, where there is one, the lid line.
+    /// Inputs: the reader and the lid line, which the thread owns from here on. Output:
+    /// the line to the thread, or the error of starting it.
+    pub(super) fn start(mut reader: Reader, _lid: Option<LidReader>) -> std::io::Result<Self> {
         let (ask, asked) = sync_channel::<()>(1);
         let (answer, answers) = sync_channel::<PowerReading>(1);
         std::thread::Builder::new()
@@ -165,9 +185,9 @@ impl Sensing {
 
     /// Takes one step: hands over a reading that came back, and asks for the next one
     /// when `READ_MS` passed since the last ask and none is under way. A reading that
-    /// takes longer than two periods is logged once. Input: the engine time. Output: the
-    /// reading that came back since the last step, if any.
-    pub(super) fn step(&mut self, now_ms: i64) -> Option<PowerReading> {
+    /// takes longer than two periods is logged once. Inputs: the engine time and the lid
+    /// ask. Output: the reading that came back since the last step, if any.
+    pub(super) fn step(&mut self, now_ms: i64, _lid_ask: LidAsk) -> Option<PowerReading> {
         assert!(now_ms > 0);
         let answer = match self.answers.try_recv() {
             Ok(reading) => {

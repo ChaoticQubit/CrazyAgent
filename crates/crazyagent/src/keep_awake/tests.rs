@@ -891,6 +891,8 @@ fn a_failed_step_drops_the_platform_hold_and_the_next_good_step_takes_it_again()
     assert_eq!(released(), 2);
 }
 
+#[cfg(target_os = "macos")]
+mod lid_macos;
 mod notices;
 mod sensing;
 

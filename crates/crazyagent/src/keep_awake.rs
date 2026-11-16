@@ -536,11 +536,18 @@ impl Keeper {
     /// built without a reader does.
     pub fn with_reader(mut self, reader: power::Reader) -> Self {
         assert!(self.sensing.is_none());
-        match power::Sensing::start(reader) {
+        match power::Sensing::start(reader, None) {
             Ok(sensing) => self.sensing = Some(sensing),
             Err(problem) => eprintln!("keep awake: no sensor thread: {problem}"),
         }
         self
+    }
+
+    /// Gives the keeper platform readings and, where the platform has one, the lid line,
+    /// both run on the sensor thread. Inputs: the reader and the lid line. Output: the
+    /// keeper.
+    pub fn with_sensors(self, reader: power::Reader, _lid: Option<power::LidReader>) -> Self {
+        self.with_reader(reader)
     }
 
     /// Gives the keeper what the engine start's undo left, which its next step writes to
@@ -582,7 +589,10 @@ impl Keeper {
     /// before it was unread too. Input: the time. Output: the new sensors, or none when
     /// no reading came back.
     fn sense(&mut self, now_ms: i64) -> Option<Sensors> {
-        let reading = self.sensing.as_mut()?.step(now_ms)?;
+        let reading = self
+            .sensing
+            .as_mut()?
+            .step(now_ms, power::LidAsk::default())?;
         let unread = reading.source == PowerSource::Battery && reading.battery_pct.is_none();
         self.battery_unread_twice = unread && self.battery_unread;
         self.battery_unread = unread;
