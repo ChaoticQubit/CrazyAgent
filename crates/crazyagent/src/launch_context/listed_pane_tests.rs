@@ -74,13 +74,12 @@ fn a_listed_pane_takes_its_team_context_only_when_its_manifest_renders_mcp_serve
 }
 
 /// DEC-180 T20 M8 (T19b 19b-2): a live master's pane on a terminal-only listed harness is
-/// handed its keyless account as its piped launch is: the account's address and the local
-/// placeholder under the names its manifest's accounts entry lists, the placeholder the one
-/// exception to the variable guard. A hand-over made for another address is refused.
+/// handed its keyless account as its piped launch is: the account's address in its
+/// variables, and the local placeholder under the names its manifest's accounts entry lists
+/// through the pane's bridge, never its variables. A hand-over for another address is refused.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_listed_pane_is_handed_its_keyless_account_and_refuses_one_for_another_address() {
-    use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
     let (_folder, home) = harness_home("standin-jsonl-append");
     let scratch = tempfile::tempdir().unwrap();
     let work = scratch.path().canonicalize().unwrap();
@@ -111,7 +110,7 @@ fn a_listed_pane_is_handed_its_keyless_account_and_refuses_one_for_another_addre
         found.map(|pair| pair.1.as_str())
     };
     assert_eq!(value("OPENAI_BASE_URL"), Some(KEYLESS_URL));
-    assert_eq!(value("OPENAI_API_KEY"), Some(LOCAL_PLACEHOLDER));
+    assert_eq!(value("OPENAI_API_KEY"), None);
     let mut other = pane_request("standin-jsonl-append", &home, &work, &profile);
     other.account = AccountBinding::Url {
         home: home.clone(),
@@ -232,7 +231,8 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
     let built = built.unwrap();
     for (name, value) in &built.env {
         let (name, value) = (OsStr::new(name), OsStr::new(value));
-        assert!(crate::sandbox::agent_variable_allowed(name, value), "{name:?}");
+        let allowed = crate::sandbox::agent_variable_allowed(name, value);
+        assert!(allowed, "{name:?}");
     }
     let at = built.argv.iter().position(|word| word == "-c").unwrap();
     assert_eq!(built.argv[at - 1], "/bin/sh");
@@ -245,5 +245,6 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
         .output()
         .unwrap();
     assert!(shown.status.success(), "{shown:?}");
-    assert_eq!(String::from_utf8_lossy(&shown.stdout).trim(), LOCAL_PLACEHOLDER);
+    let printed = String::from_utf8_lossy(&shown.stdout);
+    assert_eq!(printed.trim(), LOCAL_PLACEHOLDER);
 }
