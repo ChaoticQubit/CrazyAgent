@@ -971,3 +971,26 @@ fn a_manifest_pane_record_is_found_again_only_through_its_own_harness_s_settings
     assert_eq!(codex.transcript(Some(&append)), unsupported);
     assert!(codex.transcript(None).is_ok());
 }
+
+/// DEC-180 Task 16: an adoption reads a manifest record on past a read that takes only part
+/// of a long line and finds no object, so it sees the turn left open after that line and
+/// leaves none of the record for the session's polls.
+#[test]
+fn an_adoption_reads_a_manifest_record_on_past_a_read_that_finds_no_object() {
+    use crate::harnesses::records::json_files::tests::{Home, NEW, SESSION_ID};
+    let home = Home::new();
+    let text = include_str!("../../../../tests/fixtures/harness/standin-jsonl-append.yaml");
+    let manifest = crate::harnesses::manifest::parse(text.as_bytes()).unwrap();
+    let settings = TerminalSettings::read(&manifest).unwrap();
+    let records = settings.records(&home.path(), SESSION_ID);
+    assert!(records.is_ok(), "{records:?}");
+    let long = format!("\"{}\"\n", "x".repeat(2 * READ_BYTES_MAX));
+    let open = "{\"type\":\"started\"}\n{\"type\":\"text\",\"delta\":\"a\"}\n";
+    let below = format!("standin/records/{SESSION_ID}.jsonl");
+    home.write(&below, &format!("{long}{open}"), NEW);
+    let source = Transcript::Records(records.unwrap());
+    let mut reader = TranscriptReader::adopted(source, &home.path(), SystemTime::now());
+    let until = Instant::now() + REPLAY_WAIT;
+    assert_eq!(replay(&mut reader, until), Ok(Replayed::Open));
+    assert_eq!(reader.read(), Ok(Vec::new()));
+}
