@@ -2324,8 +2324,10 @@ fn the_remove_ask_fits_80_by_24_with_the_owners_words_and_a_long_preview() {
     for words in [
         "( ) Remove from dashboard (keep files)",
         "(*) Delete everything",
-        "Moves to the Trash",
-        "/Users/owner/CrazyAgent/gone-app-worktrees/agent-1",
+        "Your notes, imports and saved selections go too.",
+        "Moves to the Trash (5 folders):",
+        "\u{2026}",
+        "gone-app-worktrees/agent-1-a-long-branch-name",
         "Builder 1 is running and will be stopped",
         "Type the project name",
         "[ Delete everything ]",
@@ -2376,6 +2378,34 @@ fn a_tall_remove_ask_wraps_a_long_folder_and_loss_instead_of_cutting_them() {
     assert!(
         shown.contains("never landed"),
         "what would be lost shows: {shown}"
+    );
+    for words in [
+        "Your notes, imports and saved selections go too.",
+        "Moves to the Trash (1 folder):",
+    ] {
+        assert!(shown.contains(words), "{words:?} missing: {shown}");
+    }
+}
+
+/// rv-ds241 S2 r1 N2: with almost no rows the folder list has none to show, so the header
+/// still counts the folders that go to the Trash.
+#[test]
+fn a_tiny_remove_ask_still_counts_the_folders_it_trashes() {
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    let read = screen.next_query(30).unwrap();
+    let mut preview = removal(true);
+    preview.folders = (1..=4)
+        .map(|n| format!("/Users/owner/CrazyAgent/gone-app-{n}"))
+        .collect();
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(preview))));
+    assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+    let shown = text(&project_screen(&mut screen, 80, 14, &Look::plain()).rows);
+    assert!(
+        shown.contains("Moves to the Trash (4 folders):"),
+        "the header counts the folders: {shown}"
     );
 }
 
