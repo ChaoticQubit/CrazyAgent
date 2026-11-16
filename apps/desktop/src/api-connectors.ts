@@ -98,22 +98,25 @@ export const PROJECT_CONNECTORS = {
   none: "No connectors yet. Add one in Settings, Connectors.",
   notFound: "Not found",
   notChanged: "The connector was not changed.",
+  writes: "Allowed writes",
+  writesAbout: "Connectors that may change things in this project without asking again.",
+  writesNone: "No connector may change things here without asking.",
+  writesFailed: "Couldn't load the allowed writes.",
+  revoke: "Revoke",
 } as const;
 
 /** The connectors a project may write with without asking again, each with the title of the
  * first listed connector of that name, else its name. Inputs: the page read and the allowed
  * writes. Output: the rows, in the allowed writes' order. */
 export function writeRows(page: ConnectorsView, writes: AllowedWrites): { name: string; title: string }[] {
-  void page;
-  void writes;
-  return [];
+  if (writes.project !== page.project) throw new Error("the allowed writes are for the project the page read");
+  return writes.connectors.map((name) => ({ name, title: page.connectors.find((listed) => listed.name === name)?.title ?? name }));
 }
 
 /** The toast after a Revoke, the same in the TUI. Input: the connector's title. Output: the
  * sentence. */
 export function writesRevoked(title: string): string {
-  void title;
-  return "";
+  return `${title} asks again before its next write.`;
 }
 
 /** The line naming the connectors a project cannot switch yet, the same in the TUI. Input:
@@ -173,6 +176,10 @@ export const CONNECTORS_PAGE = {
   oauthNotYet: "Signs in with OAuth, which this build does not have.",
   refusedFile: "Fix its file, or remove it on the App plugins page.",
   settings: "Connector settings",
+  write: "Write actions",
+  writeHelp: "What happens when an agent calls a connector tool that changes something: each call waits for your Allow, your first Allow in a project lets later calls run, or those tools stay hidden.",
+  wait: "Approval wait",
+  waitHelp: "How long a call that changes something waits for your answer before it fails.",
   native: "Harness-native connectors",
   nativeHelp: "Connectors from the harness's own account (claude.ai connectors in Claude Code, ChatGPT apps in Codex). The engine neither filters nor logs them.",
   sizeCap: "Tool result size cap",
@@ -197,9 +204,13 @@ export const CONNECTORS_PAGE = {
 } as const;
 
 /** The write action choices in the order both apps list them, the default first. */
-export const WRITE_CHOICES: { choice: WritePolicy; label: string }[] = [];
+export const WRITE_CHOICES: { choice: WritePolicy; label: string }[] = [
+  { choice: "ask_every_time", label: "Ask every time" }, { choice: "ask_once_per_project", label: "Ask once per project and connector" }, { choice: "read_only", label: "Read-only" },
+];
 /** The approval wait choices in the order both apps list them; 10 min is the default. */
-export const WAIT_CHOICES: { choice: Wait; label: string }[] = [];
+export const WAIT_CHOICES: { choice: Wait; label: string }[] = [
+  { choice: "minutes2", label: "2 min" }, { choice: "minutes10", label: "10 min" }, { choice: "minutes30", label: "30 min" },
+];
 /** The harness-native choices in the order both apps list them, the default first. */
 export const NATIVE_CHOICES: { choice: NativeConnectors; label: string }[] = [{ choice: "off", label: "Off" }, { choice: "on", label: "On" }];
 /** The size cap choices in the order both apps list them; 256 KiB is the default. */
@@ -220,9 +231,15 @@ export type SettingPicks = { write: WritePolicy | null; wait: Wait | null; nativ
  * settings read and the picks. Output: the settings to save, or null when no pick differs
  * from what was read. */
 export function settingsToSave(read: ConnectorSettings, picks: SettingPicks): ConnectorSettings | null {
-  void read;
-  void picks;
-  return null;
+  const next: ConnectorSettings = {
+    ...read,
+    write: picks.write ?? read.write,
+    wait: picks.wait ?? read.wait,
+    native: picks.native ?? read.native,
+    size_cap: picks.size_cap ?? read.size_cap,
+  };
+  const changed = next.write !== read.write || next.wait !== read.wait || next.native !== read.native || next.size_cap !== read.size_cap;
+  return changed ? next : null;
 }
 
 /** A connector's state word with its tone and the line under it, checked in a fixed order:

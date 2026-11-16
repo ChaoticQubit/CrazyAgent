@@ -2,9 +2,10 @@ import { useEffect, useRef, useState, type FormEvent, type RefObject } from "rea
 import type { Result } from "../../api";
 import { pickAppPluginFile, problemText, type Problem } from "../../api-app-plugins";
 import {
-  CONNECTOR_DEFAULTS, CONNECTORS_PAGE, NATIVE_CHOICES, SIZE_CHOICES, addConnector, clearConnectorKey, connectorState, keyLine, loadConnectorReach, loadConnectors,
+  CONNECTOR_DEFAULTS, CONNECTORS_PAGE, NATIVE_CHOICES, SIZE_CHOICES, WAIT_CHOICES, WRITE_CHOICES, addConnector, clearConnectorKey, connectorState, keyLine, loadConnectorReach, loadConnectors,
   originLine, reachesLine, removeConnector, reviewConnector, previewConnector, saveConnectorSettings, setConnectorKey, settingsToSave, trustConnector, trustLines,
-  type ConnectorPreview, type ConnectorView, type ConnectorsView, type ConnectorTrustView, type NativeConnectors, type SizeCap,
+  type ConnectorPreview, type ConnectorView, type ConnectorsView, type ConnectorTrustView, type NativeConnectors, type SettingPicks, type SizeCap,
+  type Wait, type WritePolicy,
 } from "../../api-connectors";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, SecretField, SettingLine, SettingSection, Skeleton, StatusBadge, TextArea, formatRoute, navigate } from "../../ui";
@@ -41,6 +42,8 @@ export interface ConnectorActions {
   onSetKey: (connector: ConnectorView, secret: string) => void;
   onSaveKey: () => void;
   onClearKey: (name: string, secret: string) => void;
+  onPickWrite: (write: WritePolicy) => void;
+  onPickWait: (wait: Wait) => void;
   onPickNative: (native: NativeConnectors) => void;
   onPickSize: (sizeCap: SizeCap) => void;
   onSave: () => void;
@@ -144,47 +147,59 @@ function ConnectorDialogs({ dialog, busy, failure, keyRef, actions }: {
   return null;
 }
 
-/** The two connector settings this page owns as radio fieldsets, marked when away from the
- * default, the locked line with its reason, and Save changes, enabled only after a change.
- * Inputs: the page read, the picked values, a saving flag, the last problem and the
- * actions. Output: the form. */
-function SettingsForm({ page, native, sizeCap, saving, problem, actions }: {
+/** One connector setting as a radio fieldset, marked when away from its default. Inputs: its
+ * label, help, setting key and input name, the choices, the value shown, the default, a
+ * saving flag and the pick handler. Output: the setting line. */
+function SettingChoices<T extends string>({ label, help, setting, name, choices, shown, fallback, saving, onPick }: {
+  label: string;
+  help: string;
+  setting: string;
+  name: string;
+  choices: { choice: T; label: string }[];
+  shown: T;
+  fallback: T;
+  saving: boolean;
+  onPick: (choice: T) => void;
+}) {
+  assert(choices.some((option) => option.choice === shown), `no ${setting} choice ${shown}`);
+  return <SettingLine wide label={label} changed={shown !== fallback} help={help}>
+    <fieldset className="notice-choices" disabled={saving} data-setting={setting}>
+      <legend className="visually-hidden">{label}</legend>
+      {choices.map((option) => <label key={option.choice} className={option.choice === shown ? "on" : undefined}>
+        <input type="radio" name={name} value={option.choice} checked={option.choice === shown} onChange={() => onPick(option.choice)} />
+        {option.label}
+      </label>)}
+    </fieldset>
+  </SettingLine>;
+}
+
+/** The four connector settings this page owns as radio fieldsets, marked when away from the
+ * default, the locked line with its reason, and Save changes, enabled only while a pick
+ * differs from the settings read. Inputs: the page read, the picks, a saving flag, the last
+ * problem and the actions. Output: the form. */
+function SettingsForm({ page, picks, saving, problem, actions }: {
   page: ConnectorsView;
-  native: NativeConnectors | null;
-  sizeCap: SizeCap | null;
+  picks: SettingPicks;
   saving: boolean;
   problem: string;
   actions: ConnectorActions;
 }) {
-  const shownNative = native ?? page.settings.native;
-  const shownSize = sizeCap ?? page.settings.size_cap;
-  assert(NATIVE_CHOICES.some((option) => option.choice === shownNative), `no native choice ${shownNative}`);
-  assert(SIZE_CHOICES.some((option) => option.choice === shownSize), `no size cap choice ${shownSize}`);
-  const changed = shownNative !== page.settings.native || shownSize !== page.settings.size_cap;
+  const read = page.settings;
+  const changed = settingsToSave(read, picks) !== null;
   function submit(event: FormEvent) {
     event.preventDefault();
     if (changed && !saving) actions.onSave();
   }
   return <form className="pj set-groups" aria-label={CONNECTORS_PAGE.settings} noValidate onSubmit={submit}>
     <SettingSection title={CONNECTORS_PAGE.settings}>
-      <SettingLine wide label={CONNECTORS_PAGE.native} changed={shownNative !== CONNECTOR_DEFAULTS.native} help={CONNECTORS_PAGE.nativeHelp}>
-        <fieldset className="notice-choices" disabled={saving} data-setting="native">
-          <legend className="visually-hidden">{CONNECTORS_PAGE.native}</legend>
-          {NATIVE_CHOICES.map((option) => <label key={option.choice} className={option.choice === shownNative ? "on" : undefined}>
-            <input type="radio" name="connector-native" value={option.choice} checked={option.choice === shownNative} onChange={() => actions.onPickNative(option.choice)} />
-            {option.label}
-          </label>)}
-        </fieldset>
-      </SettingLine>
-      <SettingLine wide label={CONNECTORS_PAGE.sizeCap} changed={shownSize !== CONNECTOR_DEFAULTS.size_cap} help={CONNECTORS_PAGE.sizeCapHelp}>
-        <fieldset className="notice-choices" disabled={saving} data-setting="size_cap">
-          <legend className="visually-hidden">{CONNECTORS_PAGE.sizeCap}</legend>
-          {SIZE_CHOICES.map((option) => <label key={option.choice} className={option.choice === shownSize ? "on" : undefined}>
-            <input type="radio" name="connector-size-cap" value={option.choice} checked={option.choice === shownSize} onChange={() => actions.onPickSize(option.choice)} />
-            {option.label}
-          </label>)}
-        </fieldset>
-      </SettingLine>
+      <SettingChoices label={CONNECTORS_PAGE.write} help={CONNECTORS_PAGE.writeHelp} setting="write" name="connector-write" choices={WRITE_CHOICES}
+        shown={picks.write ?? read.write} fallback={CONNECTOR_DEFAULTS.write} saving={saving} onPick={actions.onPickWrite} />
+      <SettingChoices label={CONNECTORS_PAGE.wait} help={CONNECTORS_PAGE.waitHelp} setting="wait" name="connector-wait" choices={WAIT_CHOICES}
+        shown={picks.wait ?? read.wait} fallback={CONNECTOR_DEFAULTS.wait} saving={saving} onPick={actions.onPickWait} />
+      <SettingChoices label={CONNECTORS_PAGE.native} help={CONNECTORS_PAGE.nativeHelp} setting="native" name="connector-native" choices={NATIVE_CHOICES}
+        shown={picks.native ?? read.native} fallback={CONNECTOR_DEFAULTS.native} saving={saving} onPick={actions.onPickNative} />
+      <SettingChoices label={CONNECTORS_PAGE.sizeCap} help={CONNECTORS_PAGE.sizeCapHelp} setting="size_cap" name="connector-size-cap" choices={SIZE_CHOICES}
+        shown={picks.size_cap ?? read.size_cap} fallback={CONNECTOR_DEFAULTS.size_cap} saving={saving} onPick={actions.onPickSize} />
       <SettingLine label={CONNECTORS_PAGE.locked} help={CONNECTORS_PAGE.lockedReason}>
         <span data-setting="locked">{CONNECTORS_PAGE.lockedValue}</span>
       </SettingLine>
@@ -202,11 +217,13 @@ function SettingsForm({ page, native, sizeCap, saving, problem, actions }: {
  * Inputs: the page read, the harness rows, the connector the route opened, the open dialog, the picked
  * settings, busy and saving flags, the last failure and save problem, the key field and
  * the actions. Output: the tab. */
-export function ConnectorsSettingsView({ view, reach, open, dialog, native, sizeCap, busy, saving, failure, problem, keyRef, actions }: {
+export function ConnectorsSettingsView({ view, reach, open, dialog, write, wait, native, sizeCap, busy, saving, failure, problem, keyRef, actions }: {
   view: Loaded<ConnectorsView>;
   reach: Loaded<string[]>;
   open: string | null;
   dialog: ConnectorDialog;
+  write: WritePolicy | null;
+  wait: Wait | null;
   native: NativeConnectors | null;
   sizeCap: SizeCap | null;
   busy: boolean;
@@ -245,14 +262,14 @@ export function ConnectorsSettingsView({ view, reach, open, dialog, native, size
         <ul className="set-body" aria-label={CONNECTORS_PAGE.harnesses}>{reach.value.map((row) => <li key={row}>{row}</li>)}</ul>
       </SettingSection>
     </div>}
-    <SettingsForm page={page} native={native} sizeCap={sizeCap} saving={saving} problem={problem} actions={actions} />
+    <SettingsForm page={page} picks={{ write, wait, native, size_cap: sizeCap }} saving={saving} problem={problem} actions={actions} />
     {dialogs}
   </>;
 }
 
 /** Settings, Connectors: reads the page, adds a pasted or picked manifest only after its
  * trust screen is confirmed, reviews a changed file, removes the owner's own, sets and
- * clears each secret's key, and saves the two connector settings at the version read. A
+ * clears each secret's key, and saves the four connector settings at the version read. A
  * change reads the page again, so the version a save names is always the last read, and
  * removing the connector whose page is open goes back to the catalog.
  * Input: the connector whose page the route opened, if any. Output: the tab. */
@@ -263,6 +280,8 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
   const [dialog, setDialog] = useState<ConnectorDialog>({ kind: "none" });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
+  const [write, setWrite] = useState<WritePolicy | null>(null);
+  const [wait, setWait] = useState<Wait | null>(null);
   const [native, setNative] = useState<NativeConnectors | null>(null);
   const [sizeCap, setSizeCap] = useState<SizeCap | null>(null);
   const [saving, setSaving] = useState(false);
@@ -272,9 +291,11 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
   useEffect(() => { setReading(false); }, [view]);
   useEffect(() => {
     if (view.kind !== "ok") return;
+    if (write === view.value.settings.write) setWrite(null);
+    if (wait === view.value.settings.wait) setWait(null);
     if (native === view.value.settings.native) setNative(null);
     if (sizeCap === view.value.settings.size_cap) setSizeCap(null);
-  }, [view, native, sizeCap]);
+  }, [view, write, wait, native, sizeCap]);
 
   async function attempt<T>(work: () => Promise<Result<T>>): Promise<T | undefined> {
     setBusy(true);
@@ -344,7 +365,7 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
   async function save() {
     if (view.kind !== "ok") return;
     const read = view.value.settings;
-    const settings = settingsToSave(read, { write: null, wait: null, native, size_cap: sizeCap });
+    const settings = settingsToSave(read, { write, wait, native, size_cap: sizeCap });
     if (settings === null) return;
     setSaving(true);
     setProblem("");
@@ -353,7 +374,7 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     if (result.kind === "error") { setProblem(`${CONNECTORS_PAGE.notSaved} ${result.message}`); return; }
     if (result.kind === "not_ready") { setProblem(NOT_READY); return; }
     setReading(true);
-    if (result.value.kind === "stale") { setNative(null); setSizeCap(null); setProblem(CONNECTORS_PAGE.stale); reload(); return; }
+    if (result.value.kind === "stale") { setWrite(null); setWait(null); setNative(null); setSizeCap(null); setProblem(CONNECTORS_PAGE.stale); reload(); return; }
     session.showToast(CONNECTORS_PAGE.saved);
     reload();
   }
@@ -382,6 +403,8 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     },
     onSaveKey: () => { if (!busy) void saveKey(); },
     onClearKey: (name, secret) => { if (!busy) void changed(() => clearConnectorKey(name, secret), `${secret} no longer has a key.`); },
+    onPickWrite: (choice) => { setWrite(choice); setProblem(""); },
+    onPickWait: (choice) => { setWait(choice); setProblem(""); },
     onPickNative: (choice) => { setNative(choice); setProblem(""); },
     onPickSize: (choice) => { setSizeCap(choice); setProblem(""); },
     onSave: () => { if (!saving && !reading) void save(); },
@@ -389,7 +412,7 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
   };
 
   return <div className="stack">
-    <ConnectorsSettingsView view={view} reach={reach} open={connector ?? null} dialog={dialog} native={native} sizeCap={sizeCap} busy={busy} saving={saving || reading}
+    <ConnectorsSettingsView view={view} reach={reach} open={connector ?? null} dialog={dialog} write={write} wait={wait} native={native} sizeCap={sizeCap} busy={busy} saving={saving || reading}
       failure={failure} problem={problem} keyRef={keyRef} actions={actions} />
   </div>;
 }
