@@ -420,7 +420,7 @@ const copy: Record<string, string> = {
   master_scope_or_budget_denied: "The master's limits aren't allowed by your settings. Check the project's pool.",
   master_pool_missing: "This project needs a pool before the master can reply.",
   master_backend_account_denied: "The project's pool has no account the master can use. Check the pool's accounts.",
-  rcli_profile_identity_changed: "The local model's profile changed while the master started. Try again.",
+  rcli_profile_identity_changed: "The local model's config file changed since this conversation started, so the master can't use it. End the conversation, then send again.",
   stale_master: "The conversation changed. It was reloaded; send again.",
   resync_required: "The conversation changed while it loaded. Try again.",
   conversation_text_bounds: "Messages can be up to 8192 bytes.",

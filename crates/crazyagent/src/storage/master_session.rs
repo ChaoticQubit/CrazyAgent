@@ -3612,6 +3612,7 @@ fn registration_session(
     Ok(session)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn produce_rcli_profile(
     db: &Connection,
     custody: &mut Result<NativeProfileCustody, EngineError>,
@@ -3620,14 +3621,22 @@ fn produce_rcli_profile(
     connection: ModelConnection,
     configured_home: &Path,
     at_revision: Cursor,
+    undone: bool,
 ) -> Result<RcliConfiguredProfileProof, EngineError> {
     assert!(db.is_autocommit());
     let profile = rcli_profile(session, &connection)
         .ok_or_else(|| error("rcli_profile_configuration_required"))?;
-    let metadata = custody
-        .as_mut()
-        .map_err(|failure| failure.clone())?
-        .register_configured_rcli_profile(host, &connection, &profile, configured_home)?;
+    let custody = custody.as_mut().map_err(|failure| failure.clone())?;
+    let metadata = if undone {
+        custody.register_undone_configured_rcli_profile(
+            host,
+            &connection,
+            &profile,
+            configured_home,
+        )?
+    } else {
+        custody.register_configured_rcli_profile(host, &connection, &profile, configured_home)?
+    };
     configured_proof(host, session, connection, &profile, metadata, at_revision)
 }
 
@@ -3902,6 +3911,7 @@ struct RcliRegistration<'a> {
     session_id: &'a SessionId,
     member: Option<&'a ModelConnection>,
     configured_home: &'a Path,
+    undone: bool,
 }
 
 fn register_rcli_profile(
@@ -3936,6 +3946,7 @@ fn register_rcli_profile(
         connection,
         registration.configured_home,
         revision,
+        registration.undone,
     )?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3948,9 +3959,9 @@ fn register_rcli_profile(
 /// Registers the configured RCLI members of a session about to prepare a turn (PA-6):
 /// each member without a registration whose engine-generated SDK home exists, each member
 /// whose registration was made under an older binding, from custody's unchanged profile,
-/// and each member whose pinned home custody no longer loads, such as a config an undone
-/// account save put back with a new change time, on the home its slot pins, which
-/// registration re-pins only when it differs in its times alone. Inputs: the actor
+/// and each member whose pinned home custody no longer loads, on the home its slot pins,
+/// which registration re-pins only for the config an undone account save put back with a
+/// new change time this engine run (rv-sec3 G4 r2 F1). Inputs: the actor
 /// database, settings, custody, host and the session. Output: Ok; a member that cannot
 /// register is left for its turn check to name, except the owner's chosen member with an
 /// unchanged home, whose failure stops the preparation as before.
@@ -4012,6 +4023,7 @@ fn register_generated_rcli_profile(
     drop(tx);
     assert!(pending.len() <= crate::config::POOL_MEMBERS_MAX);
     for (member, account, stale, chosen, pinned) in pending {
+        let undone = pinned.is_some();
         let home = match pinned {
             Some(pinned) => pinned,
             None => custody
@@ -4026,6 +4038,7 @@ fn register_generated_rcli_profile(
                 session_id,
                 member: Some(&member),
                 configured_home: &home,
+                undone,
             };
             let repaired = custody
                 .as_mut()
@@ -4309,6 +4322,7 @@ pub(super) fn apply_rcli_profile_registration(
         connection,
         &registration.configured_home,
         Cursor::new(revision),
+        false,
     )?;
 
     let tx = db
@@ -4420,6 +4434,7 @@ pub(super) fn runtime(
             session_id: &session_id,
             member: None,
             configured_home: &configured_home,
+            undone: false,
         };
         return register_rcli_profile(db, config, sources, custody, registration)
             .map(|proof| MasterRuntimeResult::ConfiguredProfile(Box::new(proof)));

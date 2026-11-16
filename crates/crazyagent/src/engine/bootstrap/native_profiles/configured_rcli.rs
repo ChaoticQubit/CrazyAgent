@@ -460,6 +460,42 @@ impl NativeProfileCustody {
         self.verify()?;
         self.validate_configured_home_path(configured_home)?;
         let captured = ConfiguredRcliUse::capture(configured_home, connection)?;
+        self.register_captured(host, connection, target_profile_ref, captured)
+    }
+
+    /// Registers a configured RCLI home again for a master turn whose slot no longer loads,
+    /// re-pinning a change in the config's times only when an account save this engine run
+    /// undid put that very config back: same file, same change time (rv-sec3 G4 r2 F1). A
+    /// config written and restored any other way, as a confined master can, stays refused.
+    /// Inputs: host, connection, profile reference and the home the slot pins. Output: the
+    /// slot metadata, or rcli_profile_identity_changed.
+    pub(crate) fn register_undone_configured_rcli_profile(
+        &mut self,
+        host: &HostStamp,
+        connection: &ModelConnection,
+        target_profile_ref: &CredentialRef,
+        configured_home: &Path,
+    ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
+        self.verify()?;
+        self.validate_configured_home_path(configured_home)?;
+        let captured = ConfiguredRcliUse::capture(configured_home, connection)?;
+        let config = &captured.1.identity.config;
+        if self.undone.get(configured_home) != Some(&(config.identity, config.changed)) {
+            return Err(failure("rcli_profile_identity_changed"));
+        }
+        self.register_captured(host, connection, target_profile_ref, captured)
+    }
+
+    /// Registers a captured configured home under the profile root's lock. Inputs: host,
+    /// connection, profile reference and the captured home. Output: the slot metadata, or
+    /// the refusal `register_locked` gives.
+    fn register_captured(
+        &mut self,
+        host: &HostStamp,
+        connection: &ModelConnection,
+        target_profile_ref: &CredentialRef,
+        captured: (Directory, ConfiguredRcliUse),
+    ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
         let (root, root_manifest, root_identity) = self.root(host)?;
         let _root_lock = lock(&root_manifest.file)?;
         let locked = LockedRoot {
@@ -469,20 +505,6 @@ impl NativeProfileCustody {
             held: &[],
         };
         self.register_locked(host, connection, target_profile_ref, captured, &locked)
-    }
-
-    /// Registers a configured RCLI home again for a master turn whose slot no longer loads,
-    /// re-pinning a change in the config's times only when an account save this engine run
-    /// undid put that config back (rv-sec3 G4 r2 F1). Inputs: host, connection, profile
-    /// reference and the home the slot pins. Output: the slot metadata, or the refusal.
-    pub(crate) fn register_undone_configured_rcli_profile(
-        &mut self,
-        host: &HostStamp,
-        connection: &ModelConnection,
-        target_profile_ref: &CredentialRef,
-        configured_home: &Path,
-    ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
-        self.register_configured_rcli_profile(host, connection, target_profile_ref, configured_home)
     }
 
     pub(super) fn register_locked(

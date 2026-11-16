@@ -487,3 +487,53 @@ fn a_config_written_and_restored_outside_a_save_is_never_re_pinned_for_a_master(
         .unwrap();
     assert_eq!(owner.profile_generation, first.profile_generation + 1);
 }
+
+/// rv-sec3 G4 r2 F1 (RV-DS241-50 r1): a master slot on an account's generated SDK home
+/// re-pins, at its next turn, the config an account save stopped after its swap put back,
+/// the same file with a new change time, at the next generation.
+#[test]
+fn a_config_an_undone_save_put_back_is_re_pinned_for_a_master_slot_on_that_home() {
+    use std::os::unix::fs::MetadataExt;
+    let mut undone = 0;
+    for point in 1..=64 {
+        let mut case = ConfiguredCase::new(false, false);
+        case.custody
+            .prepare_configured_rcli_profile(&case.host, &case.connection, &case.profile, None)
+            .unwrap();
+        let home = case.custody.generated_configured_home(&case.profile);
+        let master = reference("master-target-profile");
+        let first = case
+            .custody
+            .register_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+            .unwrap();
+        let config = home.join(".backboard/config.json");
+        let bytes = std::fs::read(&config).unwrap();
+        let before = std::fs::symlink_metadata(&config).unwrap();
+        let mut changed = case.connection.clone();
+        changed.model.id = "another-local-model".into();
+        staging::INTERRUPT.set(point);
+        let saved =
+            case.custody
+                .prepare_configured_rcli_profile(&case.host, &changed, &case.profile, None);
+        staging::INTERRUPT.set(0);
+        if saved.is_ok() {
+            break;
+        }
+        let after = std::fs::symlink_metadata(&config).unwrap();
+        if std::fs::read(&config).unwrap() != bytes
+            || (after.ctime(), after.ctime_nsec()) == (before.ctime(), before.ctime_nsec())
+        {
+            continue;
+        }
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        undone += 1;
+
+        let repinned = case
+            .custody
+            .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+            .unwrap_or_else(|error| panic!("step {point}: the put-back is refused: {}", error.0));
+
+        assert_eq!(repinned.profile_generation, first.profile_generation + 1);
+    }
+    assert!(undone > 0, "no stopped save put the old config back");
+}
