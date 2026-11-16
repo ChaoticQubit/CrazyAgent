@@ -5,7 +5,8 @@ use crate::agent_home::TEXT_BYTES_MAX;
 use crate::coord::adoption::AgentAdoption;
 use crate::coord::settings::Nudges;
 use crate::engine::owner::{
-    Adoption, AppInstructionSettings, InstructionSettings, InstructionView, ProcessText, SavedText,
+    Adoption, AppInstructionSettings, InstructionSettings, InstructionSource, InstructionView,
+    ProcessText, SavedText,
 };
 use crate::instruction_check::{Finding, lines_label};
 use crate::instruction_files::{EditDelivery, Mode, Repeated};
@@ -327,6 +328,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "process_project_unknown" => "This project has no setup yet, so it can't hold instructions.".into(),
         "process_import_missing" => "That file doesn't exist. Check the path.".into(),
         "process_import_unsafe" => "That file isn't a plain file you own, so CrazyAgent won't read it.".into(),
+        "process_import_agents_can_write" => "That file, or a link on its way, sits where agents can write, so CrazyAgent won't import it.".into(),
         "process_import_unreadable" => "That file couldn't be read. Check it, then try again.".into(),
         "process_instructions_would_be_empty" => "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first.".into(),
         "process_import_outside" => "That file links outside the project folder, so it stays where it is.".into(),
@@ -587,6 +589,51 @@ fn skill_words(skills: &[String], agent: &AgentAdoption) -> String {
     words.join("  ")
 }
 
+/// The rows under the import field for the harness instruction files the engine offered:
+/// one per file with its harness, its path under the home and its size, the picked one
+/// marked, or one line saying there is none; nothing before Ctrl-O asks. Names and paths are
+/// drawn through [`shown`]. Inputs: the offered files and the picked one, the width and the
+/// theme. Output: the rows.
+fn source_rows(
+    sources: Option<&(Vec<InstructionSource>, usize)>,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let Some((offered, picked)) = sources else {
+        return Vec::new();
+    };
+    if offered.is_empty() {
+        return wrap("No harness you use keeps an instructions file to import.", width)
+            .into_iter()
+            .map(|text| styled(text, Role::Muted, theme))
+            .collect();
+    }
+    assert!(*picked < offered.len());
+    offered
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let marker = if index == *picked { ">" } else { " " };
+            let text: String = format!(
+                "{marker} {}  ~/{}  {:.1} KB",
+                source.name,
+                source.path,
+                source.bytes as f64 / 1024.0
+            )
+            .chars()
+            .map(shown)
+            .collect();
+            let row = wrap(&text, width).into_iter().next().unwrap_or_default();
+            let role = if index == *picked {
+                Role::Heading
+            } else {
+                Role::Muted
+            };
+            styled(row, role, theme)
+        })
+        .collect()
+}
+
 /// The character the editor draws for one text character: a tab as a space, and a
 /// control, escape or zero-width character as `?`, so stored text never reaches the
 /// terminal as a command. Input: the character. Output: a printable character.
@@ -770,22 +817,22 @@ impl Editor {
     }
 }
 
-/// The Process page: the owner's instructions every agent gets, app-wide in Settings or
-/// for one project. Reads the saved text on opening, edits it in place and saves it only on
-/// Ctrl-S. At app level Ctrl-G reads the owner's global instructions and Ctrl-D the default
-/// process, each into a preview first. For one project it also shows the agent settings:
-/// Ctrl-F picks the instruction files its agents get, Ctrl-T whether headless Claude runs
-/// keep their transcript, Ctrl-R how an instruction edit reaches running agents and Ctrl-L
-/// whether project lines the app instructions already have are left out, each
-/// saved at once at the version read; one refused because the settings changed since reads
-/// them again. A stale save of the text shows the conflict and keeps the draft until the
-/// owner reloads the saved text (Ctrl-R, which reloads while the conflict shows) or keeps
-/// their own (Ctrl-Y). Ctrl-P is Edit with AI: a model with tools off proposes a cleaned
-/// text of the saved instructions, shown with its changed lines marked; y saves it at the
-/// version it was made from, so a save that landed since shows the conflict, and Esc drops
-/// it. The app text asks which pool runs each edit and keeps no pick; a project runs on its
-/// own pool. Ctrl-B turns Edit with AI on or off, per project or for the app text, and Off
-/// sends nothing to a model. One request runs at a time.
+/// The Process page: the owner's instructions every agent gets, app-wide in Settings or for one
+/// project. Reads the saved text on opening, edits it in place and saves it only on Ctrl-S. At app
+/// level Ctrl-G reads the owner's global instructions and Ctrl-D the default process, each into a
+/// preview first; in Ctrl-G's field Ctrl-O lists the harness instruction files the engine offers,
+/// read by harness id. For one project it also shows the agent settings: Ctrl-F picks the
+/// instruction files its agents get, Ctrl-T whether headless Claude runs keep their transcript,
+/// Ctrl-R how an instruction edit reaches running agents and Ctrl-L whether project lines the app
+/// instructions already have are left out, each saved at once at the version read; one refused
+/// because the settings changed since reads them again. A stale save of the text shows the conflict
+/// and keeps the draft until the owner reloads the saved text (Ctrl-R, which reloads while the
+/// conflict shows) or keeps their own (Ctrl-Y). Ctrl-P is Edit with AI: a model with tools off
+/// proposes a cleaned text of the saved instructions, shown with its changed lines marked; y saves
+/// it at the version it was made from, so a save that landed since shows the conflict, and Esc
+/// drops it. The app text asks which pool runs each edit and keeps no pick; a project runs on its
+/// own pool. Ctrl-B turns Edit with AI on or off, per project or for the app text, and Off sends
+/// nothing to a model. One request runs at a time.
 pub(in crate::tui) struct ProcessPage {
     scope: Scope,
     state: State,
@@ -798,6 +845,7 @@ pub(in crate::tui) struct ProcessPage {
     preview: Option<(Seed, String)>,
     preview_top: usize,
     path: Option<String>,
+    sources: Option<(Vec<InstructionSource>, usize)>,
     skills: Vec<Skill>,
     cleanup: Option<Cleanup>,
     cleanup_top: usize,
@@ -821,6 +869,7 @@ impl ProcessPage {
             preview: None,
             preview_top: 0,
             path: None,
+            sources: None,
             skills: Vec::new(),
             cleanup: None,
             cleanup_top: 0,
@@ -1355,13 +1404,29 @@ impl ProcessPage {
                 });
             }
             (ProcessQuery::Save { .. }, Err(code)) => self.problem = Some(message(code)),
-            (ProcessQuery::ReadFile { .. }, Ok(ProcessReply::Text(text))) => {
+            (
+                ProcessQuery::ReadFile { .. } | ProcessQuery::ReadSource { .. },
+                Ok(ProcessReply::Text(text)),
+            ) => {
                 self.open_preview(Seed::Import, text);
+            }
+            (ProcessQuery::Sources, result) if self.path.is_some() => {
+                let offered = match result {
+                    Ok(ProcessReply::Sources(offered)) => offered.clone(),
+                    _ => Vec::new(),
+                };
+                assert!(offered.len() <= crate::harnesses::registry::HARNESSES_MAX);
+                self.sources = Some((offered, 0));
             }
             (ProcessQuery::Default, Ok(ProcessReply::Text(text))) => {
                 self.open_preview(Seed::Default, text);
             }
-            (ProcessQuery::ReadFile { .. } | ProcessQuery::Default, Err(code)) => {
+            (
+                ProcessQuery::ReadFile { .. }
+                | ProcessQuery::ReadSource { .. }
+                | ProcessQuery::Default,
+                Err(code),
+            ) => {
                 ctx.say(Message::error(&message(code), ""));
             }
             (ProcessQuery::Settings { .. }, Ok(ProcessReply::Settings(settings))) => {
@@ -1465,23 +1530,63 @@ impl ProcessPage {
 
     /// Edits the path of the file to import while its field is open: typed characters up to
     /// `PATH_BYTES_MAX` bytes, Backspace, Enter to read the file as a preview (a leading `~/`
-    /// is the owner's home folder) and Esc to close the field. Inputs: the key and the
-    /// context. Output: handled, so no key reaches the editor meanwhile.
+    /// is the owner's home folder) and Esc to close the field. Ctrl-O asks the engine for the
+    /// harness instruction files it offers; Up and Down pick one, and Enter with no path
+    /// typed reads the picked one by its harness id. While a request is on its way, Enter
+    /// leaves the field and its path as they are. Inputs: the key and the context. Output:
+    /// handled, so no key reaches the editor meanwhile.
     fn path_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let Some(path) = self.path.as_mut() else {
             return Flow::Ignored;
         };
+        let typed_none = path.trim().is_empty();
+        if let Some((offered, picked)) = self
+            .sources
+            .as_mut()
+            .filter(|(offered, _)| !offered.is_empty())
+        {
+            assert!(*picked < offered.len());
+            match key {
+                Key::Up => {
+                    *picked = picked.saturating_sub(1);
+                    return Flow::Handled;
+                }
+                Key::Down => {
+                    *picked = (*picked + 1).min(offered.len() - 1);
+                    return Flow::Handled;
+                }
+                Key::Enter if typed_none && self.pending.is_none() => {
+                    let harness = offered[*picked].harness.clone();
+                    self.path = None;
+                    self.sources = None;
+                    self.send(ProcessQuery::ReadSource { harness }, ctx);
+                    return Flow::Handled;
+                }
+                _ => {}
+            }
+        }
+        let Some(path) = self.path.as_mut() else {
+            return Flow::Ignored;
+        };
         match key {
+            Key::Ctrl('o') => {
+                self.sources = None;
+                self.send(ProcessQuery::Sources, ctx);
+            }
             Key::Char(character) if path.len() + character.len_utf8() <= PATH_BYTES_MAX => {
                 path.push(*character);
             }
             Key::Backspace => {
                 path.pop();
             }
-            Key::Esc => self.path = None,
-            Key::Enter if !path.trim().is_empty() => {
+            Key::Esc => {
+                self.path = None;
+                self.sources = None;
+            }
+            Key::Enter if !path.trim().is_empty() && self.pending.is_none() => {
                 let typed = path.trim().to_owned();
                 self.path = None;
+                self.sources = None;
                 let path = match typed.strip_prefix("~/") {
                     Some(rest) => crate::projects_home::owner_home()
                         .map(|home| home.join(rest))
@@ -1623,6 +1728,11 @@ impl ProcessPage {
                     .into_iter()
                     .map(|text| styled(text, Role::Muted, theme)),
             );
+            lines.extend(
+                wrap("Ctrl-O lists the instructions files of harnesses you use; Up and Down pick one, Enter reads it.", width)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
             let room = width.saturating_sub(3).max(1);
             let mut used = 0;
             let mut tail: Vec<char> = path
@@ -1643,6 +1753,7 @@ impl ProcessPage {
                 Span::styled(format!("{} ", ctx.glyphs.vline), theme.accent),
                 Span::raw(tail),
             ]));
+            lines.extend(source_rows(self.sources.as_ref(), width, theme));
             return (lines, Some(Position::new(column as u16, at as u16)));
         }
         if let Some((seed, text)) = &self.preview {
@@ -2008,6 +2119,7 @@ impl Screen for ProcessPage {
             (State::Ready { .. }, Key::Ctrl('g')) if self.scope == Scope::App => {
                 if self.pending.is_none() {
                     self.path = Some(String::new());
+                    self.sources = None;
                 }
                 Flow::Handled
             }

@@ -34,6 +34,7 @@ const REFUSALS: Record<string, string> = {
   process_project_unknown: "This project has no setup yet, so it can't hold instructions.",
   process_import_missing: "That file no longer exists. Pick another one.",
   process_import_unsafe: "That file isn't a plain file you own, so CrazyAgent won't read it.",
+  process_import_agents_can_write: "That file, or a link on its way, sits where agents can write, so CrazyAgent won't import it.",
   process_import_unreadable: "That file couldn't be read. Check it, then try again.",
   process_instructions_would_be_empty: "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first.",
   process_import_outside: "That file links outside the project folder, so it stays where it is.",
@@ -157,6 +158,24 @@ export function savedMessage(saved: ProcessSaved | null): string {
  * Output: the text, or null when the owner closed the chooser. */
 export function importInstructionsFile(): Promise<Result<string | null>> {
   return call<string | null>("desktop_import_instructions_file");
+}
+
+/** One harness's own instructions file in the owner's home the app-wide import may read: the
+ * harness's catalog id and name, the file under the home as its manifest names it, and its
+ * size in bytes. */
+export type InstructionSource = { harness: string; name: string; path: string; bytes: number };
+
+/** Lists each harness's own instructions file the engine offers for the app-wide import; reads
+ * no file. Output: the sources in catalog order, empty when none is there. */
+export function loadInstructionSources(): Promise<Result<InstructionSource[]>> {
+  return call<InstructionSource[]>("desktop_instruction_sources");
+}
+
+/** Reads one harness's own instructions file for a preview, by the harness's id; the engine
+ * takes the path from the harness's manifest. Only the owner's click calls this; nothing is
+ * saved until the owner saves. Input: the harness id. Output: the text. */
+export function importInstructionSource(harness: string): Promise<Result<string>> {
+  return call<string>("desktop_import_instruction_source", { harness });
 }
 
 /** Lists a project's own instruction files an import would copy into its instructions and

@@ -279,6 +279,8 @@ fn main() {
         "desktop_process_text",
         "desktop_save_process_text",
         "desktop_import_instructions_file",
+        "desktop_instruction_sources",
+        "desktop_import_instruction_source",
         "desktop_instruction_import",
         "desktop_confirm_instruction_import",
         "desktop_uncommitted_instruction_import",

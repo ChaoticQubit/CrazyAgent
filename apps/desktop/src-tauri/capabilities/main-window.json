@@ -291,6 +291,8 @@
     "allow-desktop-process-text",
     "allow-desktop-save-process-text",
     "allow-desktop-import-instructions-file",
+    "allow-desktop-instruction-sources",
+    "allow-desktop-import-instruction-source",
     "allow-desktop-instruction-import",
     "allow-desktop-confirm-instruction-import",
     "allow-desktop-uncommitted-instruction-import",
