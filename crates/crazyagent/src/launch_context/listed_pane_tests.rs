@@ -196,3 +196,54 @@ fn a_listed_context_of_one_harness_under_another_s_settings_trips_its_assert() {
 fn a_listed_pane_for_another_harness_than_its_settings_trips_its_assert() {
     crossed(APPEND, APPEND, "standin-json-rewrite");
 }
+
+/// DEC-180 T20 M8: every variable a listed pane with an account hand-over is built with
+/// passes the terminal host's variable guard, which refuses a key name even holding the
+/// local placeholder, so the names the hand-over lists reach the harness only through the
+/// bridge its sandboxed command starts with, which exports them as the harness starts.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
+    use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    use std::ffi::OsStr;
+    let (_folder, home) = harness_home("standin-jsonl-append");
+    let scratch = tempfile::tempdir().unwrap();
+    let work = scratch.path().canonicalize().unwrap();
+    let profile = work.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let run = Run {
+        session_id: "standin-1",
+        key_file: None,
+        resume: false,
+    };
+    let appended = parse(APPEND.as_bytes()).unwrap();
+    let settings = TerminalSettings::read(&appended).unwrap();
+    let registry = crate::harnesses::registry::registry();
+    let harness = registry.get("standin-jsonl-append").unwrap();
+    let connection = openai_chat(KEYLESS_URL, false);
+    let handover = crate::harnesses::accounts::handover(harness, &connection, None);
+    let context = context().with_handover(handover.unwrap());
+    let installed = context.install_listed(&appended, &home, true).unwrap();
+    let request = pane_request("standin-jsonl-append", &home, &work, &profile);
+
+    let built = command_with(&request, Some(&installed), &run, Some(&settings));
+
+    assert!(built.is_ok(), "{:?}", built.as_ref().err());
+    let built = built.unwrap();
+    for (name, value) in &built.env {
+        let (name, value) = (OsStr::new(name), OsStr::new(value));
+        assert!(crate::sandbox::agent_variable_allowed(name, value), "{name:?}");
+    }
+    let at = built.argv.iter().position(|word| word == "-c").unwrap();
+    assert_eq!(built.argv[at - 1], "/bin/sh");
+    let bridge = &built.argv[at + 1..at + 5];
+    let shown = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .args(bridge)
+        .args(["/usr/bin/printenv", "OPENAI_API_KEY"])
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(shown.status.success(), "{shown:?}");
+    assert_eq!(String::from_utf8_lossy(&shown.stdout).trim(), LOCAL_PLACEHOLDER);
+}
