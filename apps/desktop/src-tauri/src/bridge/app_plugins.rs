@@ -79,7 +79,7 @@ pub async fn read_picked(path: String) -> Result<String, BridgeError> {
 
 /// Turns the key the owner typed into the engine's secret type, refusing an empty one.
 /// Input: the typed key. Output: the secret, or `app_plugin_key_invalid`.
-fn entered_key(key: String) -> Result<AccountSecret, BridgeError> {
+pub(super) fn entered_key(key: String) -> Result<AccountSecret, BridgeError> {
     if key.is_empty() {
         return Err(failure("app_plugin_key_invalid"));
     }

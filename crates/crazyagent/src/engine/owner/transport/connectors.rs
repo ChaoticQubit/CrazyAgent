@@ -1,5 +1,6 @@
 use super::*;
 use crate::app_plugins::{PluginKind, Preview, store};
+use crate::connectors::approvals::{self, AllowedWrites, ApprovalView};
 use crate::connectors::audit::{self, ActivityView};
 use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
 use crate::engine::owner::AccountSecret;
@@ -28,6 +29,8 @@ pub const CONNECTORS_CODES: &[&str] = &[
     "app_plugin_refused",
     "app_plugin_secret_not_declared",
     "app_plugins_unavailable",
+    "connector_approval_closed",
+    "connector_approval_unknown",
     "connector_outcome_unknown",
     "connector_project_unknown",
     "connector_request_bounds",
@@ -47,10 +50,10 @@ pub const CONNECTORS_CODES: &[&str] = &[
     "questions_unavailable",
 ];
 
-/// One Connectors request. Reads: `view` (the page, with one project's switches),
-/// `preview` (a pasted manifest's trust screen), `review` (the trust screen of a listed
-/// connector) and `activity` (the activity log with its filters). Changes: add, trust, remove, save a key sent in the frame after the
-/// request, clear a key, turn a connector on or off for a project, and save the settings.
+/// One Connectors request. Reads: the page, a manifest's trust screen, the activity log,
+/// one write approval and a project's standing write allows. Changes: add, trust, remove,
+/// save a key sent in the frame after the request, clear a key, turn a connector on or off
+/// for a project, save the settings, answer a waiting write and take back a standing allow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
@@ -97,6 +100,20 @@ enum Action {
         connector: Option<String>,
         project: Option<String>,
     },
+    Approval {
+        id: i64,
+    },
+    Answer {
+        id: i64,
+        allow: bool,
+    },
+    Writes {
+        project: String,
+    },
+    RevokeWrites {
+        project: String,
+        connector: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -112,6 +129,8 @@ enum Reply {
     Connectors { view: Box<ConnectorsView> },
     Preview { preview: Box<Preview> },
     Activity { view: Box<ActivityView> },
+    Approval { approval: Box<ApprovalView> },
+    Writes { writes: AllowedWrites },
     Stale { current: u64 },
     Rejected { code: String },
 }
@@ -265,6 +284,54 @@ impl OwnerClient {
         }
     }
 
+    /// Reads one connector write that waits for, or had, the owner's answer. Input: the
+    /// approval id from its notice. Output: the approval, or `connector_approval_unknown`.
+    pub async fn connector_approval(&self, id: i64) -> Result<ApprovalView, EngineError> {
+        self.approval_reply(Action::Approval { id }).await
+    }
+
+    /// Answers one waiting connector write once. Inputs: the approval id and whether the
+    /// owner allows it. Output: the approval after the answer, or
+    /// `connector_approval_closed` when it was answered or its wait ran out first.
+    pub async fn answer_connector_write(
+        &self,
+        id: i64,
+        allow: bool,
+    ) -> Result<ApprovalView, EngineError> {
+        self.approval_reply(Action::Answer { id, allow }).await
+    }
+
+    /// Reads the connectors a project may write with without asking again. Input: the
+    /// project. Output: them by name, or `connector_project_unknown`.
+    pub async fn connector_writes(&self, project: String) -> Result<AllowedWrites, EngineError> {
+        self.writes_reply(Action::Writes { project }).await
+    }
+
+    /// Takes back a project's standing allow for one connector, so its next write asks
+    /// again. Inputs: the project and the connector. Output: the standing allows left.
+    pub async fn revoke_connector_writes(
+        &self,
+        project: String,
+        connector: String,
+    ) -> Result<AllowedWrites, EngineError> {
+        self.writes_reply(Action::RevokeWrites { project, connector })
+            .await
+    }
+
+    async fn approval_reply(&self, action: Action) -> Result<ApprovalView, EngineError> {
+        match self.connectors_exchange(action, None).await? {
+            Reply::Approval { approval } => Ok(*approval),
+            _ => Err(unknown()),
+        }
+    }
+
+    async fn writes_reply(&self, action: Action) -> Result<AllowedWrites, EngineError> {
+        match self.connectors_exchange(action, None).await? {
+            Reply::Writes { writes } => Ok(writes),
+            _ => Err(unknown()),
+        }
+    }
+
     async fn connectors_view(
         &self,
         action: Action,
@@ -401,9 +468,10 @@ async fn handle(
 }
 
 /// Reads one Connectors request from an owner frame body: the action and whether a key
-/// frame follows, which only `set_key` may announce and must announce. Names and project
-/// ids are bounded here; the store checks them fully. Input: the body. Output: the action
-/// and the flag, or `connector_request_bounds` or `connector_request_invalid`.
+/// frame follows, which only `set_key` may announce and must announce. Names, project ids
+/// and approval ids are bounded here; the store checks them fully. Input: the body.
+/// Output: the action and the flag, or `connector_request_bounds` or
+/// `connector_request_invalid`.
 fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
     if bytes.len() > REQUEST_BYTES_MAX {
         return Err(failure("connector_request_bounds"));
@@ -423,6 +491,7 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
             &[name.as_str(), secret.as_str()]
         }
         Action::Grant { connector, .. }
+        | Action::RevokeWrites { connector, .. }
         | Action::Activity {
             connector: Some(connector),
             ..
@@ -431,13 +500,18 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         | Action::Preview { .. }
         | Action::Add { .. }
         | Action::Set { .. }
+        | Action::Approval { .. }
+        | Action::Answer { .. }
+        | Action::Writes { .. }
         | Action::Activity {
             connector: None, ..
         } => &[],
     };
     let project = match &connectors {
         Action::View { project } | Action::Activity { project, .. } => project.as_deref(),
-        Action::Grant { project, .. } => Some(project.as_str()),
+        Action::Grant { project, .. }
+        | Action::Writes { project }
+        | Action::RevokeWrites { project, .. } => Some(project.as_str()),
         Action::Preview { .. }
         | Action::Review { .. }
         | Action::Add { .. }
@@ -445,11 +519,18 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         | Action::Remove { .. }
         | Action::SetKey { .. }
         | Action::ClearKey { .. }
-        | Action::Set { .. } => None,
+        | Action::Set { .. }
+        | Action::Approval { .. }
+        | Action::Answer { .. } => None,
     };
-    if names
-        .iter()
-        .any(|name| name.is_empty() || name.len() > NAME_BYTES_MAX)
+    let id_invalid = matches!(
+        connectors,
+        Action::Approval { id } | Action::Answer { id, .. } if id <= 0
+    );
+    if id_invalid
+        || names
+            .iter()
+            .any(|name| name.is_empty() || name.len() > NAME_BYTES_MAX)
         || project.is_some_and(|project| project.is_empty() || project.len() > PROJECT_BYTES_MAX)
     {
         return Err(failure("connector_request_invalid"));
@@ -464,6 +545,26 @@ fn connector(root: &Path, name: &str) -> Result<(), EngineError> {
         Some(PluginKind::Connector) => Ok(()),
         _ => Err(failure("app_plugin_not_found")),
     }
+}
+
+/// One write approval as the owner's screen shows it. Inputs: the engine database and the
+/// approval id. Output: the reply, or `connector_approval_unknown`.
+fn approval(db: &rusqlite::Connection, id: i64) -> Result<Reply, EngineError> {
+    match approvals::get(db, id)? {
+        Some(approval) => Ok(Reply::Approval {
+            approval: Box::new(approval),
+        }),
+        None => Err(failure(approvals::UNKNOWN)),
+    }
+}
+
+/// Refuses a project the engine no longer knows. Inputs: the engine database and the
+/// project id. Output: Ok, or `connector_project_unknown`.
+fn known(db: &rusqlite::Connection, project: &str) -> Result<(), EngineError> {
+    if !crate::connectors::project_known(db, project)? {
+        return Err(failure(crate::connectors::PROJECT_UNKNOWN));
+    }
+    Ok(())
 }
 
 /// Runs one authenticated Connectors request against the engine database and folders in
@@ -544,6 +645,30 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
         Action::Activity { connector, project } => Ok(Reply::Activity {
             view: Box::new(audit::view(&db, connector.as_deref(), project.as_deref())?),
         }),
+        Action::Approval { id } => approval(&db, id),
+        Action::Answer { id, allow } => {
+            let (settings, _) = crate::connectors::settings::load(&db)?;
+            let said = if allow {
+                approvals::Answer::Allow
+            } else {
+                approvals::Answer::Deny
+            };
+            approvals::answer(&db, id, said, settings.write, now)?;
+            approval(&db, id)
+        }
+        Action::Writes { project } => {
+            known(&db, &project)?;
+            Ok(Reply::Writes {
+                writes: approvals::allowed_writes(&db, &project)?,
+            })
+        }
+        Action::RevokeWrites { project, connector } => {
+            known(&db, &project)?;
+            approvals::revoke_writes(&db, &project, &connector)?;
+            Ok(Reply::Writes {
+                writes: approvals::allowed_writes(&db, &project)?,
+            })
+        }
     }
 }
 

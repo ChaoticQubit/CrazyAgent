@@ -89,11 +89,15 @@ pub enum Bound {
     Key(CredentialRef),
 }
 
+/// One plugin as read: its name, where it is from, the manifest or the problem refusing
+/// it, the SHA-256 of its bytes, and the kind its text declares, which a refused file keeps
+/// when its `kind` still reads, so it is listed on that kind's page.
 struct Found {
     name: String,
     origin: Origin,
     parsed: Result<Manifest, Problem>,
     sha256: String,
+    declared: Option<PluginKind>,
 }
 
 fn error(code: &'static str) -> EngineError {
@@ -159,6 +163,7 @@ fn bundled_found(name: &str, text: &str) -> Found {
         name: name.to_owned(),
         origin: Origin::Bundled,
         sha256: manifest.sha256.clone(),
+        declared: Some(manifest.kind),
         parsed: Ok(manifest),
     }
 }
@@ -172,9 +177,16 @@ fn parse_file(bytes: &[u8]) -> Result<Manifest, Problem> {
     }
 }
 
+fn declared_file_kind(bytes: &[u8]) -> Option<PluginKind> {
+    if bytes.len() > yaml::BYTES_MAX {
+        return None;
+    }
+    manifest::declared_kind(std::str::from_utf8(bytes).ok()?)
+}
+
 fn user_found(stem: String, read: Result<Vec<u8>, Problem>) -> Found {
-    let (parsed, sha256) = match read {
-        Err(problem) => (Err(problem), String::new()),
+    let (parsed, sha256, declared) = match read {
+        Err(problem) => (Err(problem), String::new(), None),
         Ok(bytes) => {
             let sha256 = crate::semantic::sha256_hex(&bytes);
             let parsed = parse_file(&bytes).and_then(|manifest| {
@@ -190,7 +202,11 @@ fn user_found(stem: String, read: Result<Vec<u8>, Problem>) -> Found {
                     Ok(manifest)
                 }
             });
-            (parsed, sha256)
+            let declared = match &parsed {
+                Ok(manifest) => Some(manifest.kind),
+                Err(_) => declared_file_kind(&bytes),
+            };
+            (parsed, sha256, declared)
         }
     };
     Found {
@@ -198,6 +214,7 @@ fn user_found(stem: String, read: Result<Vec<u8>, Problem>) -> Found {
         origin: Origin::User,
         parsed,
         sha256,
+        declared,
     }
 }
 
@@ -226,6 +243,7 @@ fn outside_handed_out(found: Found, handed: Option<&RangeInclusive<u16>>) -> Fou
         origin,
         parsed,
         sha256,
+        declared,
     } = found;
     let parsed = parsed.and_then(|manifest| match handed_problem(&manifest, handed) {
         Some(problem) => Err(problem),
@@ -236,6 +254,7 @@ fn outside_handed_out(found: Found, handed: Option<&RangeInclusive<u16>>) -> Fou
         origin,
         parsed,
         sha256,
+        declared,
     }
 }
 
@@ -433,7 +452,7 @@ fn view(db: &Connection, root: &Path, found: Found) -> Result<PluginView, Engine
                 name: found.name,
                 version: String::new(),
                 description: String::new(),
-                kind: PluginKind::Embedding,
+                kind: found.declared.unwrap_or(PluginKind::Embedding),
                 origin: found.origin,
                 status: PluginStatus::Refused { problem },
                 enabled: false,

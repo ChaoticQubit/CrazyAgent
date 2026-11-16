@@ -5,9 +5,10 @@ import { isAbsolute, join, normalize } from "node:path";
 import { Writable } from "node:stream";
 import type { AgentEvent, TurnStatus } from "../../.local-state/tools/rcli-source/src/core/bus/events.ts";
 import { BoundedEventWriter, identifier, readControls, type Control, type EventBody } from "./host.codec.ts";
+import { checkGateway, type Gateway } from "./host.mcp.ts";
 import { SdkTurnProjection, type HostAction } from "./host.turns.ts";
 
-export type Launch = { sessionId: string; instanceId: string; homeDir: string; cwd: string; instructionsFile?: string; model?: string };
+export type Launch = { sessionId: string; instanceId: string; homeDir: string; cwd: string; instructionsFile?: string; model?: string; gateway?: Gateway };
 
 const MODEL_REFERENCE = /^[a-z0-9][a-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,255}$/;
 
@@ -15,10 +16,10 @@ const INSTRUCTIONS_BYTES_MAX = 131_539;
 
 export function parseLaunch(argv: string[]): Launch {
   try {
-    if (!Array.isArray(argv) || argv.length < 8 || argv.length > 12 || argv.length % 2 !== 0 || argv.some((value) => typeof value !== "string")) throw new Error();
+    if (!Array.isArray(argv) || argv.length < 8 || argv.length > 16 || argv.length % 2 !== 0 || argv.some((value) => typeof value !== "string")) throw new Error();
     const fields = new Map<string, string>();
     const required = ["--session-id", "--instance-id", "--home-dir", "--cwd"];
-    const names = [...required, "--instructions-file", "--model"];
+    const names = [...required, "--instructions-file", "--model", "--gateway-engine", "--gateway-folder"];
     for (let index = 0; index < argv.length; index += 2) {
       const key = argv[index]!;
       if (!names.includes(key) || fields.has(key)) throw new Error();
@@ -42,6 +43,13 @@ export function parseLaunch(argv: string[]): Launch {
       launch.instructionsFile = instructionsFile;
     }
     if (model !== undefined) launch.model = model;
+    const engine = fields.get("--gateway-engine");
+    const folder = fields.get("--gateway-folder");
+    if ((engine === undefined) !== (folder === undefined)) throw new Error();
+    if (engine !== undefined && folder !== undefined) {
+      if (instructionsFile !== undefined && [engine, folder].includes(instructionsFile)) throw new Error();
+      launch.gateway = checkGateway(engine, folder, homeDir, cwd);
+    }
     return launch;
   } catch { throw new Error("host_launch_rejected"); }
 }
@@ -75,6 +83,12 @@ export async function admitLaunch(launch: Launch, environmentHome: string | unde
     }
     const anchor = await lstat(join(launch.cwd, ".git"));
     if (anchor.isSymbolicLink() || anchor.uid !== process.getuid() || !anchor.isDirectory() && !anchor.isFile()) throw new Error();
+    if (launch.gateway !== undefined) {
+      const folder = await lstat(launch.gateway.folder);
+      if (!folder.isDirectory() || folder.isSymbolicLink() || folder.uid !== process.getuid() || (folder.mode & 0o077) !== 0 || await realpath(launch.gateway.folder) !== launch.gateway.folder) throw new Error();
+      const engine = await lstat(launch.gateway.engine);
+      if (!engine.isFile() || engine.isSymbolicLink() || await realpath(launch.gateway.engine) !== launch.gateway.engine) throw new Error();
+    }
   } catch { throw new Error("host_launch_rejected"); }
 }
 
@@ -149,6 +163,16 @@ export class HostChannel {
     try {
       this.check();
       this.publish(this.turns.event(event));
+    } catch { this.fail("host_callback_failed"); }
+  }
+
+  /** Writes one plain line of the host's own into the running turn's reply. Input: the line.
+   * Output: none; a refused line fails the channel as a refused observation does. */
+  note(text: string): void {
+    if (this.closed || this.signal.aborted) return;
+    try {
+      this.check();
+      this.publish(this.turns.note(text));
     } catch { this.fail("host_callback_failed"); }
   }
 
@@ -243,7 +267,8 @@ export async function runExecutable(argv: string[]): Promise<void> {
   const client = createAgentClient(config);
   const permissions = buildPermissionContext(config.cwd, "manual", false);
   if (permissions.mode !== "manual" || permissions.interactive || permissions.rules.allow.length !== 0) throw new Error("host_startup_failed");
-  const { controller, bus } = assembleClosedController({ config, client, permissions, sessionId: launch.sessionId, cwd: launch.cwd, homeDir: launch.homeDir, startupEnvironmentPrompt });
+  const { controller, bus, gateway } = assembleClosedController({ config, client, permissions, sessionId: launch.sessionId, cwd: launch.cwd, homeDir: launch.homeDir, startupEnvironmentPrompt, ...(launch.gateway === undefined ? {} : { gateway: launch.gateway, notice: (text: string) => channel.note(text) }) });
+  assert((gateway === null) === (launch.gateway === undefined), "host_gateway_invariant");
   const channel = new HostChannel(process.stdout, launch.sessionId, launch.instanceId);
   const runs = new Set<Promise<void>>();
   let stopping = false;
@@ -291,6 +316,8 @@ export async function runExecutable(argv: string[]): Promise<void> {
     if (controller.hasActiveWork) failure ??= new Error("host_work_active");
     try { await within(Promise.allSettled([...runs]), 500); }
     catch { failure ??= new Error("host_deadline"); }
+    try { await within(gateway?.close() ?? Promise.resolve(), 3000); }
+    catch { failure ??= new Error("host_cleanup_failed"); }
     detach();
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);

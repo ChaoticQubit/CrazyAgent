@@ -3,7 +3,7 @@ use crate::app_plugins::store;
 use crate::connectors::gateway;
 use crate::connectors::grants::{self, Role, Who};
 use crate::connectors::mcp_client::tests::{BOARD, KEY};
-use crate::connectors::settings;
+use crate::connectors::settings::{self, Wait};
 use crate::connectors::tests::{Case, add, case};
 use crate::launch_context::{AgentContext, Installed};
 use crate::plugins::LaunchPlugins;
@@ -129,9 +129,16 @@ fn a_granted_project_launch_has_the_one_gateway_entry_and_an_ungranted_one_has_n
     let mcp = claude_mcp(&installed);
     let servers = mcp["mcpServers"].as_object().unwrap();
     assert_eq!(servers.keys().collect::<Vec<_>>(), [SERVER_NAME]);
+    let timeout = u64::try_from(HARNESS_WAIT.as_millis()).unwrap();
     assert_eq!(
         servers[SERVER_NAME],
-        json!({"type": "stdio", "command": ENGINE, "args": ["connector-mcp", folder], "env": {}})
+        json!({
+            "type": "stdio",
+            "command": ENGINE,
+            "args": ["connector-mcp", folder],
+            "env": {},
+            "timeout": timeout,
+        })
     );
     drop(installed);
 
@@ -148,6 +155,44 @@ fn a_granted_project_launch_has_the_one_gateway_entry_and_an_ungranted_one_has_n
         "launch_context_connectors_taken",
         "a second entry under the same name is refused"
     );
+}
+
+/// DEC-168 addendum 14 Q2: the connector entry tells each harness to wait past the longest
+/// approval, Codex by `tool_timeout_sec` and `startup_timeout_sec` and Claude Code by its
+/// per-server `timeout` in milliseconds, so a held write is answered before either gives up.
+#[test]
+fn the_connector_entry_waits_past_the_longest_approval_in_both_harnesses() {
+    let case = granted();
+    let launch = gateway::prepare(&case.db, &case.root, PROJECT, AGENT_ROLE, AGENT)
+        .unwrap()
+        .unwrap();
+    let context = AgentContext::for_tests(LaunchPlugins::default())
+        .with_connectors(entry(Path::new(ENGINE), &launch).unwrap())
+        .unwrap();
+    let (_kept, base) = homes();
+    let longest = Wait::ALL.iter().map(|wait| wait.minutes()).max().unwrap();
+    assert!(HARNESS_WAIT.as_secs() > u64::from(longest) * 60);
+
+    let codex = home(&base, "codex");
+    let installed = context.install("codex", &codex, true).unwrap();
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let server = config["mcp_servers"][SERVER_NAME].as_table().unwrap();
+    let seconds = |key: &str| server.get(key).and_then(toml::Value::as_integer);
+    let tool = i64::try_from(HARNESS_WAIT.as_secs()).unwrap();
+    assert_eq!(seconds("tool_timeout_sec"), Some(tool));
+    let startup = i64::try_from(STARTUP_WAIT.as_secs()).unwrap();
+    assert_eq!(seconds("startup_timeout_sec"), Some(startup));
+    drop(installed);
+
+    let claude = home(&base, "claude");
+    let installed = context.install("claude-code", &claude, true).unwrap();
+    let mcp = claude_mcp(&installed);
+    let timeout = u64::try_from(HARNESS_WAIT.as_millis()).unwrap();
+    assert_eq!(mcp["mcpServers"][SERVER_NAME]["timeout"], json!(timeout));
+    drop(installed);
 }
 
 #[test]
@@ -330,5 +375,83 @@ fn a_cleared_key_or_a_grant_turned_off_is_gone_at_the_next_launch() {
     assert!(
         first.folder.is_dir(),
         "a running launch keeps its folder until its run ends"
+    );
+}
+
+/// With no gateway serving the engine root, a granted agent or master launch gets no
+/// connector launch and no folder, so its harness is handed no connector server that nobody
+/// answers; once a gateway serves the root the same launch gets one.
+#[test]
+fn a_launch_in_an_engine_with_no_gateway_gets_no_connector_and_a_served_one_does() {
+    let case = granted();
+    assert!(!gateway::serving(&case.root));
+    for (role, agent) in [(AGENT_ROLE, AGENT), (Role::Master, "Master")] {
+        assert_eq!(
+            gateway::prepare_if_served(&case.db, &case.root, PROJECT, role, agent).unwrap(),
+            None,
+            "{agent} gets no connector while no gateway serves its engine"
+        );
+    }
+    assert!(
+        !case.root.join(gateway::LAUNCHES_FOLDER).exists(),
+        "and no launch folder is made"
+    );
+    assert_eq!(
+        gateway::unserved_line(AGENT_ROLE),
+        "connectors are not available to this agent run: this engine runs no connector gateway"
+    );
+    assert_eq!(
+        gateway::unserved_line(Role::Master),
+        "connectors are not available to this master turn: this engine runs no connector gateway"
+    );
+    let running = gateway::start(&case.root).unwrap();
+    let launch = gateway::prepare_if_served(&case.db, &case.root, PROJECT, AGENT_ROLE, AGENT)
+        .unwrap()
+        .expect("a served engine readies the granted launch");
+    assert!(launch.folder.is_dir());
+    let name = launch.folder.file_name().unwrap().to_str().unwrap();
+    gateway::end(&case.db, &case.root, name).unwrap();
+    running.stop();
+}
+
+/// Both engine paths that ready a launch, a team agent's run and a master turn, go through
+/// the served gate, so neither hands a harness a connector server while no gateway runs.
+#[test]
+fn every_engine_launch_readies_its_connectors_through_the_served_gate() {
+    for (path, source) in [
+        ("team/runtime.rs", include_str!("../team/runtime.rs")),
+        (
+            "engine/owner/transport/master_host_launch.rs",
+            include_str!("../engine/owner/transport/master_host_launch.rs"),
+        ),
+    ] {
+        assert!(
+            source.contains("connectors::gateway::prepare_if_served("),
+            "{path} readies its launch through the served gate"
+        );
+        assert!(
+            !source.contains("connectors::gateway::prepare("),
+            "{path} never readies a launch around the gate"
+        );
+    }
+}
+
+/// The engine starts its gateway before its team, whose first tick can launch a run: a run
+/// launched before the gateway served the root would go without connectors for its whole
+/// life under the served gate.
+#[test]
+fn the_engine_starts_its_gateway_before_its_team() {
+    let boot = include_str!("../bin/crazyagent.rs");
+    let gateway = boot
+        .find("connectors::gateway::start(")
+        .expect("the engine starts a gateway");
+    let team = boot
+        .find("team::runtime::start_for_engine(")
+        .expect("the engine starts a team");
+    assert!(gateway < team, "the gateway serves before the team ticks");
+    assert_eq!(
+        boot.matches("connectors::gateway::start(").count(),
+        1,
+        "one gateway per engine"
     );
 }

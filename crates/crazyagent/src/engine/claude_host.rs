@@ -343,12 +343,14 @@ fn delegate_config(tools: MasterTools<'_>) -> Result<String, EngineError> {
         let Some(folder) = plain_path(folder) else {
             return Err(failure("claude_host_invalid_launch"));
         };
+        let wait = crate::connectors::launch::HARNESS_WAIT.as_millis();
         servers.insert(
             crate::connectors::launch::SERVER_NAME.into(),
             serde_json::json!({
                 "type": "stdio",
                 "command": engine,
                 "args": [crate::connectors::shim::SERVER_COMMAND, folder],
+                "timeout": u64::try_from(wait).unwrap_or(u64::MAX),
             }),
         );
     }

@@ -52,6 +52,7 @@ impl OwnerRuntimeHandle {
             instructions: None,
             model: prepared.model.clone(),
             model_provider: prepared.model_provider.clone(),
+            gateway: None,
         })
     }
 }
@@ -1203,6 +1204,133 @@ printf '%s' "$ack"
             "rcli_profile_config_changed"
         );
         assert_eq!(case.names(), before);
+        case.close().await;
+    }
+
+    /// Registers private stand-ins for the RCLI host and the engine executable, outside the
+    /// project and the profile home, as the engine registers its own at start. Input: the
+    /// fixture. Output: the engine stand-in's path.
+    fn connector_standins(case: &Fixture) -> PathBuf {
+        let rcli = case.root.path().join("synthetic-rcli");
+        let engine = case.root.path().join("synthetic-engine");
+        for path in [&rcli, &engine] {
+            std::fs::write(path, b"#!/bin/sh\nexit 3\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let capture = |path: &Path| crate::engine::RegisteredNativeAuthHost::capture(path).unwrap();
+        case.host
+            .register_rcli_master_executable(capture(&rcli))
+            .unwrap();
+        case.host
+            .register_native_auth_host(capture(&engine))
+            .unwrap();
+        assert!(engine.is_absolute());
+        assert!(!engine.starts_with(&case.home));
+        engine
+    }
+
+    /// Adds the Board connector with its key to the engine root and grants it to the
+    /// fixture project's master, as the owner's page does. Input: the engine root. Output:
+    /// none.
+    fn grant_board(root: &Path) {
+        use crate::connectors::grants::{self, Who};
+        use crate::connectors::mcp_client::tests::{BOARD, KEY};
+        let db = crate::questions::open(root).unwrap();
+        let sha256 = crate::semantic::sha256_hex(BOARD.as_bytes());
+        crate::app_plugins::store::add(&db, root, BOARD, &sha256, false, 1).unwrap();
+        crate::app_plugins::store::set_key(&db, root, "board", "api_key", KEY.as_bytes().to_vec())
+            .unwrap();
+        grants::set(&db, root, "rcli-project", "board", true, Who::Master, 2).unwrap();
+    }
+
+    /// The launch folders in the engine root's launches folder. Input: the engine root.
+    /// Output: their paths, none when the folder was never made.
+    fn launch_folders(root: &Path) -> Vec<PathBuf> {
+        let launches = root.join(crate::connectors::gateway::LAUNCHES_FOLDER);
+        let Ok(entries) = std::fs::read_dir(launches) else {
+            return Vec::new();
+        };
+        entries.map(|entry| entry.unwrap().path()).collect()
+    }
+
+    /// Connectors Task 14 (conn-t14 r1 F1): the turn's own wiring names the gateway, not a
+    /// launch built by hand. In an engine whose gateway serves, a project whose master is
+    /// granted Board gets one launch the turn holds; the RCLI argv and the boundary name
+    /// exactly that folder and the registered engine, and the folder goes with the hold.
+    #[tokio::test]
+    async fn a_granted_rcli_master_turn_names_the_launch_it_holds_and_the_registered_engine() {
+        use crate::rcli_host::RcliGateway;
+        let case = Fixture::start().await;
+        let engine = connector_standins(&case);
+        let root = super::super::changes::engine_root(&case.host.authority).unwrap();
+        grant_board(&root);
+        let served = crate::connectors::gateway::start(&root).unwrap();
+        assert!(crate::connectors::gateway::serving(&root));
+        let mut launch = case
+            .host
+            .prepare_rcli_master_host(&case.prepared, &case.profile)
+            .unwrap();
+        let held = case
+            .host
+            .connect_rcli_launch(&case.prepared, &mut launch)
+            .unwrap()
+            .expect("a master granted a connector holds a launch for its turn");
+        let folder = held.folder().to_path_buf();
+        assert!(folder.is_dir());
+        assert_eq!(launch_folders(&root), [folder.clone()]);
+        let gateway = RcliGateway {
+            engine: engine.clone(),
+            folder: folder.clone(),
+        };
+        assert_eq!(launch.gateway, Some(gateway));
+        let args: Vec<std::ffi::OsString> = launch
+            .command()
+            .unwrap()
+            .get_args()
+            .map(|arg| arg.to_owned())
+            .collect();
+        assert_eq!(args[8], "--gateway-engine");
+        assert_eq!(args[9], engine.as_os_str());
+        assert_eq!(args[10], "--gateway-folder");
+        assert_eq!(args[11], folder.as_os_str());
+        let turn = super::super::master_rcli::connector_turn(&launch)
+            .expect("the boundary runs the gateway the argv names");
+        assert_eq!(turn.engine, engine.as_path());
+        assert_eq!(turn.folder, folder.as_path());
+        drop(held);
+        assert!(!folder.exists(), "the launch ends when the turn lets go of it");
+        assert!(launch_folders(&root).is_empty());
+        served.stop();
+        case.close().await;
+    }
+
+    /// Connectors Task 14 (conn-t14 r1 F1), the other leg: with a serving gateway but no
+    /// connector granted to the project's master the turn holds no launch, makes no launch
+    /// folder, and neither the argv nor the boundary names a gateway.
+    #[tokio::test]
+    async fn an_rcli_master_turn_with_no_grant_holds_no_launch_and_names_no_gateway() {
+        let case = Fixture::start().await;
+        connector_standins(&case);
+        let root = super::super::changes::engine_root(&case.host.authority).unwrap();
+        let served = crate::connectors::gateway::start(&root).unwrap();
+        assert!(crate::connectors::gateway::serving(&root));
+        let mut launch = case
+            .host
+            .prepare_rcli_master_host(&case.prepared, &case.profile)
+            .unwrap();
+        let held = case
+            .host
+            .connect_rcli_launch(&case.prepared, &mut launch)
+            .unwrap();
+        assert!(held.is_none(), "no grant, no launch");
+        assert_eq!(launch.gateway, None);
+        let command = launch.command().unwrap();
+        let named = |flag: &str| command.get_args().any(|arg| arg == flag);
+        assert!(!named("--gateway-engine"));
+        assert!(!named("--gateway-folder"));
+        assert!(super::super::master_rcli::connector_turn(&launch).is_none());
+        assert!(launch_folders(&root).is_empty());
+        served.stop();
         case.close().await;
     }
 }
