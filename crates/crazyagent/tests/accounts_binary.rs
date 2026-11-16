@@ -424,6 +424,7 @@ async fn finished_turn(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "live qualification: needs CRAZYAGENT_RCLI and a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
 async fn project_masters_reach_models_with_saved_keys_and_local_accounts_through_rcli() {
     let bundle = rcli_bundle();
     let root = tempfile::Builder::new()

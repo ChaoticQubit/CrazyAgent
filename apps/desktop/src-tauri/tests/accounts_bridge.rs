@@ -153,6 +153,38 @@ async fn desktop_accounts_commands_reach_the_real_engine() -> TestResult<()> {
             .code,
         "account_local_url_required"
     );
+    let checked = bridge.check_account(claude.id.as_str()).await.unwrap();
+    assert_eq!(checked.account.status_label, "Not signed in");
+
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    Ok(())
+}
+
+/// The desktop local model command lists the models the real local Ollama serves, through
+/// the real engine. The live half of the wiring row above, run with `--ignored`.
+/// Input: none. Output: the test's result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
+async fn desktop_local_models_lists_the_real_ollama_models() -> TestResult<()> {
+    let root = tempfile::Builder::new()
+        .prefix("ca-dlocal-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+    let global = root.path().join("global.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n")?;
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600))?;
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root.path(),
+        "e.sock",
+        &global,
+        &root.path().join("project.toml"),
+        &stopped,
+    )
+    .await?;
+    let mut bridge = NativeBridge::new(Some(root.path().join("e.sock")));
+    bridge.connect().await?;
     let models = bridge
         .local_models("http://127.0.0.1:11434/v1".into())
         .await
@@ -161,8 +193,6 @@ async fn desktop_accounts_commands_reach_the_real_engine() -> TestResult<()> {
         models.iter().any(|model| model == "qwen2.5:0.5b"),
         "{models:?}"
     );
-    let checked = bridge.check_account(claude.id.as_str()).await.unwrap();
-    assert_eq!(checked.account.status_label, "Not signed in");
 
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
     assert!(matches!(cleanup, Ok(Ok(()))));
