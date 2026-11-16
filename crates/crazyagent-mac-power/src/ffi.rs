@@ -1,11 +1,13 @@
 //! Every call into macOS the helper makes that Rust cannot make safely: the peer's audit token,
 //! signing information, launchd's socket, the thermal pressure key, the lid, the monotonic
-//! clock, signals, `poll` and syslog. The one file of this crate allowed `unsafe`.
+//! clock, signals, `poll` and syslog; and for the engine's client, the peer's uid and the
+//! `SMAppService` calls. The one file of this crate allowed `unsafe`.
 
 use crate::caller::Entitlements;
 use core_foundation::base::{CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+use core_foundation::error::CFError;
 use core_foundation::number::CFNumber;
 use core_foundation::string::{CFString, CFStringRef};
 use security_framework::os::macos::code_signing::SecCode;
@@ -48,6 +50,18 @@ unsafe extern "C" {
     ) -> CFTypeRef;
     fn IOObjectRelease(object: u32) -> i32;
 }
+
+#[link(name = "objc")]
+unsafe extern "C" {
+    fn objc_getClass(name: *const c_char) -> *mut c_void;
+    fn sel_registerName(name: *const c_char) -> *mut c_void;
+    fn objc_msgSend();
+    fn objc_autoreleasePoolPush() -> *mut c_void;
+    fn objc_autoreleasePoolPop(pool: *mut c_void);
+}
+
+#[link(name = "ServiceManagement", kind = "framework")]
+unsafe extern "C" {}
 
 unsafe extern "C" {
     fn notify_register_check(name: *const c_char, token: *mut c_int) -> u32;
@@ -303,4 +317,116 @@ pub fn log(message: &str) {
         .collect();
     let text = CString::new(text).expect("NUL bytes were dropped");
     unsafe { libc::syslog(libc::LOG_NOTICE, c"%s".as_ptr(), text.as_ptr()) };
+}
+
+/// The uid of the peer of a connected local socket (`getpeereid`): for a client, the uid that
+/// made the listening socket, which for the helper is launchd's root. Input: the socket.
+/// Output: the uid, or the system error.
+pub fn peer_uid(socket: BorrowedFd<'_>) -> io::Result<u32> {
+    let mut uid: libc::uid_t = libc::uid_t::MAX;
+    let mut gid: libc::gid_t = libc::gid_t::MAX;
+    let status = unsafe { libc::getpeereid(socket.as_raw_fd(), &mut uid, &mut gid) };
+    if status != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
+/// `objc_msgSend` as a plain function pointer, which each call site casts to the exact
+/// signature of the method it sends, as the Objective-C runtime requires on arm64.
+fn msg_send() -> unsafe extern "C" fn() {
+    objc_msgSend
+}
+
+type SendObjectWith =unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void) -> *mut c_void;
+type SendInteger = unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize;
+type SendWithError = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut *mut c_void) -> i8;
+type SendNothing = unsafe extern "C" fn(*mut c_void, *mut c_void);
+
+/// A registration change `SMAppService` makes for the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    Register,
+    Unregister,
+}
+
+/// An autorelease pool around a few Objective-C calls on a thread that has none, popped when
+/// dropped, so the objects those calls hand back are freed.
+struct Pool(*mut c_void);
+
+impl Pool {
+    fn push() -> Self {
+        let pool = unsafe { objc_autoreleasePoolPush() };
+        assert!(!pool.is_null());
+        Self(pool)
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        unsafe { objc_autoreleasePoolPop(self.0) };
+    }
+}
+
+/// The `SMAppService` class, or none on a system without it (before macOS 13).
+fn app_service_class() -> Option<*mut c_void> {
+    let class = unsafe { objc_getClass(c"SMAppService".as_ptr()) };
+    (!class.is_null()).then_some(class)
+}
+
+/// The `SMAppService` daemon object for a plist of this app bundle, alive until the pool pops.
+/// Inputs: the pool and the plist name. Output: the object, or none without `SMAppService`.
+fn daemon(_pool: &Pool, plist: &str) -> Option<*mut c_void> {
+    assert!(plist.ends_with(".plist"));
+    assert!(!plist.contains('/'));
+    let class = app_service_class()?;
+    let select = unsafe { sel_registerName(c"daemonServiceWithPlistName:".as_ptr()) };
+    let name = CFString::new(plist);
+    let send: SendObjectWith = unsafe { std::mem::transmute(msg_send()) };
+    let service = unsafe { send(class, select, name.as_concrete_TypeRef().cast()) };
+    (!service.is_null()).then_some(service)
+}
+
+/// The daemon's raw `SMAppServiceStatus`. Input: the plist name. Output: the value, or none
+/// without `SMAppService`.
+pub fn app_service_status(plist: &str) -> Option<isize> {
+    let pool = Pool::push();
+    let service = daemon(&pool, plist)?;
+    let select = unsafe { sel_registerName(c"status".as_ptr()) };
+    let send: SendInteger = unsafe { std::mem::transmute(msg_send()) };
+    Some(unsafe { send(service, select) })
+}
+
+/// Registers or unregisters the daemon (`registerAndReturnError:`, `unregisterAndReturnError:`).
+/// Inputs: the plist name and the change. Output: done, or the system's reason, cut at
+/// `LOG_CHARS_MAX` characters.
+pub fn app_service_change(plist: &str, change: Change) -> Result<(), String> {
+    let pool = Pool::push();
+    let service = daemon(&pool, plist).ok_or_else(|| "SMAppService is not available".to_string())?;
+    let name = match change {
+        Change::Register => c"registerAndReturnError:",
+        Change::Unregister => c"unregisterAndReturnError:",
+    };
+    let select = unsafe { sel_registerName(name.as_ptr()) };
+    let send: SendWithError = unsafe { std::mem::transmute(msg_send()) };
+    let mut error: *mut c_void = std::ptr::null_mut();
+    if unsafe { send(service, select, &mut error) } != 0 {
+        return Ok(());
+    }
+    if error.is_null() {
+        return Err("no reason given".to_string());
+    }
+    let error = unsafe { CFError::wrap_under_get_rule(error.cast()) };
+    Err(error.description().to_string().chars().take(LOG_CHARS_MAX).collect())
+}
+
+/// Opens System Settings > Login Items (`openSystemSettingsLoginItems`). Output: done, or why
+/// not.
+pub fn open_login_items() -> Result<(), String> {
+    let _pool = Pool::push();
+    let class = app_service_class().ok_or_else(|| "SMAppService is not available".to_string())?;
+    let select = unsafe { sel_registerName(c"openSystemSettingsLoginItems".as_ptr()) };
+    let send: SendNothing = unsafe { std::mem::transmute(msg_send()) };
+    unsafe { send(class, select) };
+    Ok(())
 }

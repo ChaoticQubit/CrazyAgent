@@ -152,6 +152,19 @@ pub fn write_reply(writer: &mut impl Write, reply: &Reply) -> io::Result<()> {
     writer.flush()
 }
 
+/// Reads one reply line as a client: at most `REPLY_BYTES_MAX` bytes ending in their only
+/// newline. Input: the line. Output: the reply, or none for anything else.
+pub fn decode_reply(line: &[u8]) -> Option<Reply> {
+    if line.len() > REPLY_BYTES_MAX || line.last() != Some(&b'\n') {
+        return None;
+    }
+    if line.iter().filter(|byte| **byte == b'\n').count() != 1 {
+        return None;
+    }
+    let reply: Reply = serde_json::from_slice(line).ok()?;
+    Some(reply)
+}
+
 /// The bytes a client sends for a request, newline included. Input: the request. Output: the
 /// line.
 pub fn encode_request(request: &Request) -> Vec<u8> {
