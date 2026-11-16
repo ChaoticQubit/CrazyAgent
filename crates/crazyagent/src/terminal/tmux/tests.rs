@@ -1624,6 +1624,34 @@ fn a_pane_view_types_keys_into_its_attached_pane_with_no_pane_listing() {
         !seen.contains("stale-serial") && !seen.contains(&typed),
         "no key of the view reached another agent's pane: {seen}"
     );
+
+    let chain = crate::terminal::tmux_host(home.path(), Some(tmux.clone()));
+    let routed = crate::terminal::pane_view(chain, &teammate).unwrap();
+    let through = routed
+        .attach(&lead)
+        .unwrap()
+        .at
+        .expect("a pane view on the engine's host chain names the pane it was attached to");
+    assert_eq!(through.pane, teammate);
+    assert_ne!(
+        through.serial, at.serial,
+        "each host keeps its own control client"
+    );
+    assert_eq!(
+        routed
+            .input_at(&lead, &through, b"chain-typed\r")
+            .map_err(|problem| problem.0),
+        Ok(true),
+        "the engine's host chain types straight into the attached pane"
+    );
+    shows(&*view, &lead, "chain-typed");
+    assert_eq!(
+        routed
+            .input_at(&lead, &at, b"other-client\r")
+            .map_err(|problem| problem.0),
+        Ok(false),
+        "a pane found by another control client is refused on the fast path"
+    );
 }
 
 /// Says whether a host still holds a control connection that reads. Input: the host.
