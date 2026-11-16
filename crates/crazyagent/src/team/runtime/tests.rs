@@ -9192,6 +9192,7 @@ fn an_idle_stopped_live_master_starts_again_on_the_same_conversation() {
         fixture.status().live_idle_stopped,
         "the idle stop is told apart"
     );
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::Off);
     start_again(&fixture);
     fixture.until(&mut team, "the master runs again", |f| {
         live_agent(&f.connection) == Some(id) && f.agent_status(id).0 == AgentStatus::Idle
@@ -9246,6 +9247,7 @@ fn an_idle_stopped_live_master_with_no_owner_turn_starts_again() {
         fixture.status().live_idle_stopped,
         "the idle stop is told apart"
     );
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::Off);
     start_again(&fixture);
     fixture.until(&mut team, "the master runs again", |f| {
         live_agent(&f.connection) == Some(id) && f.agent_status(id).0 == AgentStatus::Idle
