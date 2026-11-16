@@ -689,7 +689,7 @@ export function AddServerDialog({ open, scope, onClose, onAdded }: {
         options={[{ value: "stdio", label: "Command on this Mac", icon: "terminal" }, { value: "http", label: "URL", icon: "link" }]} />
       {form.kind === "stdio" ? <>
         <TextField id="server-command" label="Command" value={form.command} onValue={(command) => setForm({ ...form, command })} error={errors.command}
-          spellCheck={false} autoComplete="off" helper="The full path, such as /opt/homebrew/bin/npx." />
+          spellCheck={false} autoComplete="off" helper={isWindows() ? "The full path, such as C:\\Program Files\\nodejs\\npx.cmd." : "The full path, such as /opt/homebrew/bin/npx."} />
         <TextArea id="server-args" label="Arguments" value={form.args} onValue={(args) => setForm({ ...form, args })} error={errors.args} rows={3}
           helper="One per line." />
       </> : <TextField id="server-url" label="URL" type="url" value={form.url} onValue={(url) => setForm({ ...form, url })} error={errors.url}
