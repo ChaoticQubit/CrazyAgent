@@ -2547,7 +2547,9 @@ mod tests {
         let git = project.join(".git");
         let admin = git.join("worktrees").join("agent-1");
         let objects = git.join("objects");
-        let grants = Grants::of(&confined).unwrap();
+        let granted = Grants::of(&confined);
+        assert!(granted.is_ok(), "{:?}", granted.as_ref().err());
+        let grants = granted.unwrap();
         assert!(grants.write.contains(&worktree));
         assert_eq!(grants.git_write, vec![admin.clone()]);
         assert!(
@@ -2574,6 +2576,25 @@ mod tests {
             grants.guarded,
             vec![admin.join("modules")],
             "the admin folder's submodule store is left to the supervisor and the binds"
+        );
+    }
+
+    #[test]
+    fn a_launch_whose_git_grant_covers_a_protected_path_nothing_holds_is_refused() {
+        let (_temp, _project, sandbox, worktree) = linked();
+        let launch = LinuxSandbox {
+            sandbox: sandbox.confine_to_worktree(&worktree).unwrap(),
+            backend: LinuxBackend::Landlock { helper: helper() },
+            supervision: None,
+            routed: None,
+        };
+        let mut harness = Command::new("/bin/true");
+        harness.current_dir(&worktree);
+        let refused = launch.wrap(&harness).err();
+        assert!(
+            matches!(&refused, Some(SandboxError::Unavailable(reason))
+                if reason == CONFINED_UNAVAILABLE),
+            "{refused:?}"
         );
     }
 
