@@ -68,7 +68,7 @@ const REFUSALS: Record<string, string> = {
   instructions_cleanup_too_large: "The model's file is over 64 KB, so nothing changed. Try again.",
   instructions_cleanup_off: "Edit with AI is off for these instructions, so nothing was sent. Turn it on first.",
   instructions_cleanup_unavailable: "Edit with AI can't run in this engine, so nothing was sent.",
-  instructions_cleanup_master_harness: "Edit with AI runs on this project's master harness, and it can't run on that one yet, so nothing was sent.",
+  instructions_cleanup_master_harness: "Edit with AI runs on a Codex or Claude Code master, and this project's master is neither, so nothing was sent.",
   process_outcome_unknown: "CrazyAgent couldn't confirm what happened. Reload before you try again.",
   process_agent_unknown: "This agent isn't part of this project's team.",
   process_agent_unsupported: "CrazyAgent doesn't write instructions for this agent's harness.",

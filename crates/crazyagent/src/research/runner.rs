@@ -2,18 +2,18 @@ use super::accounts::PROFILE_BUSY;
 use super::jobs::{JobError, ResearchJob, ResearchJobs, ResearchStatus, valid_kind};
 use crate::agents::{Agents, Hold, Holder};
 use crate::config::ModelConnection;
-use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::bootstrap::{AgentCredential, NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
     AccountBinding, CLAUDE_TOOLS_OFF, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
-    rate_limited,
+    Session, rate_limited,
 };
 #[cfg(unix)]
 use crate::harnesses::launch::{await_group_exit, kill_group};
 use crate::harnesses::leftovers::{self, Unstopped};
 use crate::harnesses::manifest::DriverKind;
-use crate::harnesses::terminal_session::{TerminalSession, end_left_pane};
+use crate::harnesses::terminal_session::{AgentSession, TerminalSession, end_left_pane};
 use crate::launch_context::AgentContext;
 use crate::project_setup::ResearchKind;
 use crate::project_setup::links::LinkedText;
@@ -183,21 +183,32 @@ pub const LISTED_RESEARCH_WORDS: &str = "Research jobs only. Edit with AI, proje
 /// listed-research words for a listed harness whose manifest names research. Inputs: the
 /// harness id and whether it names research. Output: the words, none for any other.
 pub fn listed_research_words(id: &str, research: bool) -> Option<&'static str> {
-    let _ = (id, research);
-    None
+    let listed = matches!(ResearchHarness::of(id), Some(ResearchHarness::Listed(_)));
+    (research && listed).then_some(LISTED_RESEARCH_WORDS)
 }
 
-/// The coding agents research can run on, named by a job's harness id.
+/// The line a research job on a listed harness ends with at Full access (T19b 19b-4,
+/// QUESTION-0100 Q6): its account goes over through the sandbox, which Full access has none
+/// of, so the job ends at once and spends no second attempt.
+const LISTED_FULL_ACCESS: &str = "This harness gets its account inside the sandbox, so its research can't run at Full access. Pick another access level for this project, or run research on Codex or Claude Code.";
+
+/// The line a read-only run on a listed harness ends with (T19b 19b-4, QUESTION-0100 Q5):
+/// project mapping, roadmap status checks and the Overview run on Codex or Claude Code only.
+const LISTED_READ_ONLY: &str = "This harness runs research jobs only. Project mapping, roadmap status checks and the Overview run on Codex or Claude Code.";
+
+/// The coding agents research can run on, named by a job's harness id: Codex, Claude Code,
+/// or a listed ACP harness by its manifest id (T19b 19b-4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResearchHarness {
     Codex,
     ClaudeCode,
+    Listed(&'static str),
 }
 
 impl ResearchHarness {
     /// Maps a team plan or connection harness id to a research harness: one the registry
-    /// names for research, run by the piped driver the registry names for it. A driver
-    /// kind research has no runner for is listed here by name.
+    /// names for research, run by the piped driver the registry names for it, an ACP one as
+    /// a listed harness. A driver kind research has no runner for is listed here by name.
     /// Takes the id, such as `codex`, `claude` or `claude-code`.
     /// Returns `None` for a harness research cannot run on.
     pub fn of(id: &str) -> Option<Self> {
@@ -208,8 +219,8 @@ impl ResearchHarness {
         match harness.piped()? {
             DriverKind::CodexAppServer => Some(Self::Codex),
             DriverKind::ClaudeStreamJson => Some(Self::ClaudeCode),
+            DriverKind::Acp => Some(Self::Listed(harness.id())),
             DriverKind::Rcli
-            | DriverKind::Acp
             | DriverKind::JsonlTurn
             | DriverKind::JsonlRpc
             | DriverKind::TextTurn => None,
@@ -221,14 +232,18 @@ impl ResearchHarness {
         match self {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude-code",
+            Self::Listed(id) => id,
         }
     }
 
-    /// The plain product name written into reports.
+    /// The plain product name written into reports: a listed harness's manifest name.
     pub fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
             Self::ClaudeCode => "Claude Code",
+            Self::Listed(id) => crate::harnesses::registry::registry()
+                .get(id)
+                .map_or(id, |harness| harness.manifest().name.as_str()),
         }
     }
 }
@@ -263,6 +278,16 @@ pub enum ResearchAccount {
         connection: ModelConnection,
         model: Option<String>,
     },
+    /// An endpoint for a listed harness, of a wire format its manifest hands over (T19b
+    /// 19b-4): the harness id, the stored connection its hand-over is filled from, and the
+    /// address, model and key reference as [`ResearchAccount::Endpoint`] holds them.
+    Listed {
+        harness: &'static str,
+        connection: ModelConnection,
+        base_url: String,
+        model: String,
+        key: Option<CredentialRef>,
+    },
 }
 
 impl ResearchAccount {
@@ -273,6 +298,7 @@ impl ResearchAccount {
             Self::AnthropicEndpoint { .. } | Self::ManagedClaude { .. } => {
                 ResearchHarness::ClaudeCode
             }
+            Self::Listed { harness, .. } => ResearchHarness::Listed(*harness),
         }
     }
 }
@@ -695,12 +721,12 @@ impl ResearchRunner {
     /// harness that is not installed.
     fn harness(&self, harness: ResearchHarness) -> Option<PathBuf> {
         let given = match harness {
-            ResearchHarness::Codex => &self.codex,
-            ResearchHarness::ClaudeCode => &self.claude,
+            ResearchHarness::Codex => self.codex.clone(),
+            ResearchHarness::ClaudeCode => self.claude.clone(),
+            ResearchHarness::Listed(_) => None,
         };
-        let entry = given
-            .clone()
-            .or_else(|| self.lookup.as_ref().and_then(|lookup| lookup(harness.id())))?;
+        let entry =
+            given.or_else(|| self.lookup.as_ref().and_then(|lookup| lookup(harness.id())))?;
         assert!(entry.is_absolute());
         Some(entry)
     }
@@ -953,7 +979,9 @@ impl ResearchRunner {
                 })?;
                 Some(self.held_lease(&host, &fact.binding, &place.name, &place.project, job)?)
             }
-            ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
+            ResearchAccount::Endpoint { .. }
+            | ResearchAccount::AnthropicEndpoint { .. }
+            | ResearchAccount::Listed { .. } => None,
         };
         let (account, relay) = relayed(self.engine_folder()?, account)?;
         self.launch_leased(jobs, job, &account, place, lease, relay.as_ref())
@@ -1017,9 +1045,9 @@ impl ResearchRunner {
             account: match account {
                 ResearchAccount::ManagedCodex { connection, .. }
                 | ResearchAccount::ManagedClaude { connection, .. } => Some(connection.id.clone()),
-                ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => {
-                    None
-                }
+                ResearchAccount::Endpoint { .. }
+                | ResearchAccount::AnthropicEndpoint { .. }
+                | ResearchAccount::Listed { .. } => None,
             },
             agent: agent.to_owned(),
             harness: account.harness().id().to_owned(),
@@ -1038,7 +1066,8 @@ impl ResearchRunner {
     }
 
     /// Runs a claimed job's agent once its account is taken: the managed credential copy
-    /// in the agent's home, the project context, the sandboxed worktree and the harness.
+    /// in the agent's home, the project context, the sandboxed worktree and the harness; a
+    /// listed harness runs headless in its private home there (T19b 19b-4).
     /// Inputs: the job store, the job, its account, where it runs, the held lease, none for
     /// an endpoint account, and the key relay a keyed endpoint account runs behind, which
     /// outlives this call. Output: how the agent ended, its process group and output.
@@ -1074,6 +1103,7 @@ impl ResearchRunner {
             RunError::Invalid(match harness {
                 ResearchHarness::Codex => "codex executable missing".into(),
                 ResearchHarness::ClaudeCode => "claude executable missing".into(),
+                ResearchHarness::Listed(id) => format!("{id} executable missing"),
             })
         })?;
         let credential = match &lease {
@@ -1093,6 +1123,9 @@ impl ResearchRunner {
         if let Some(reason) = policy.access.unavailable() {
             return Err(RunError::Invalid(reason.into()));
         }
+        if matches!(harness, ResearchHarness::Listed(_)) && policy.access == AgentAccess::Full {
+            return Err(RunError::Invalid(LISTED_FULL_ACCESS.into()));
+        }
         let kept = job_kept_ports(self.settings.as_ref(), job.tools)?;
         let (network, proxy) = job_reach(&policy, job.tools, account, job.id, &kept)?;
         let display = jobs
@@ -1103,15 +1136,20 @@ impl ResearchRunner {
             Some(proxy) => context.with_model_proxy(proxy.port()),
             None => context,
         };
-        let installed = context
-            .install(harness.id(), &home, job.tools)
-            .map_err(|problem| {
-                if problem.0 == CONTEXT_BUSY {
-                    RunError::Busy
-                } else {
-                    RunError::Context(problem)
-                }
-            })?;
+        let installed = match harness {
+            ResearchHarness::Listed(_) => None,
+            ResearchHarness::Codex | ResearchHarness::ClaudeCode => Some(
+                context
+                    .install(harness.id(), &home, job.tools)
+                    .map_err(|problem| {
+                        if problem.0 == CONTEXT_BUSY {
+                            RunError::Busy
+                        } else {
+                            RunError::Context(problem)
+                        }
+                    })?,
+            ),
+        };
         private_directory(&agent)?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
@@ -1172,13 +1210,9 @@ impl ResearchRunner {
         let linked = self.linked_research(job, &root)?;
         let prompt = research_prompt(&root, &job.kind, &linked)?;
         write_private(&agent, &agent.join("prompt.md"), prompt.as_bytes())?;
-        if let Some(host) = self.terminal() {
-            let output = match harness {
-                ResearchHarness::Codex => tmp.join("report.md"),
-                ResearchHarness::ClaudeCode => agent.join("output.md"),
-            };
-            let (binding, model) = pane_account(account, &home, relay)?;
-            let request = LaunchRequest {
+        let request = |own: &Path| -> Result<LaunchRequest, RunError> {
+            let (binding, model) = pane_account(account, own, relay)?;
+            Ok(LaunchRequest {
                 harness: harness.id().to_owned(),
                 executable: program.clone(),
                 working_dir: worktree.clone(),
@@ -1193,51 +1227,41 @@ impl ResearchRunner {
                     provider_retry: crate::provider_retry::for_launch_at(&self.database),
                     ..LaunchLimits::default()
                 },
+            })
+        };
+        let Some(installed) = installed else {
+            let session = listed_session(account, &home, relay, context, request)?;
+            let output = agent.join("output.md");
+            let session = AgentSession::Piped(Box::new(session));
+            return self.follow(
+                jobs, job, &granted, session, &prompt, harness, output, credential, lease,
+            );
+        };
+        if let Some(host) = self.terminal() {
+            let output = match harness {
+                ResearchHarness::Codex => tmp.join("report.md"),
+                ResearchHarness::ClaudeCode | ResearchHarness::Listed(_) => agent.join("output.md"),
             };
             let pane = AgentId::new(&format!("{PANE_PREFIX}{name}"))
                 .map_err(|problem| RunError::Invalid(problem.0))?;
-            let mut session =
-                TerminalSession::start_installed(host.clone(), pane, request, installed, &context)
-                    .map_err(|problem| {
-                        if problem.1.is_some() {
-                            RunError::Context(problem)
-                        } else {
-                            RunError::Invalid(format!("agent terminal: {}", problem.0))
-                        }
-                    })?;
-            let group = session.process_group();
-            #[cfg(unix)]
-            let mut lifeline = Lifeline::watch(group)?;
-            let ending =
-                self.supervise_pane(jobs, job, &granted, &mut session, &prompt, harness, &output);
-            let stopped = session.stop();
-            #[cfg(unix)]
-            lifeline.release();
-            match stopped {
-                Ok(_) => {}
-                Err(Unstopped::Uncertain) => {
-                    if let Some(credential) = credential {
-                        credential.retain();
-                    }
-                    std::mem::forget(lease);
-                    return Err(RunError::Uncertain(leftovers::UNCERTAIN));
+            let session = TerminalSession::start_installed(
+                host.clone(),
+                pane,
+                request(&home)?,
+                installed,
+                &context,
+            )
+            .map_err(|problem| {
+                if problem.1.is_some() {
+                    RunError::Context(problem)
+                } else {
+                    RunError::Invalid(format!("agent terminal: {}", problem.0))
                 }
-                Err(Unstopped::Left(left)) => {
-                    let code = left.code();
-                    drop(credential);
-                    let account = lease.as_ref().map(|(profile, _)| profile.account().clone());
-                    let by = leftovers::HoldBy {
-                        project: Some(job.project.clone()),
-                        who: format!("research job {}", job.id),
-                    };
-                    let mode = jobs.leftover_mode(&job.project);
-                    left.hold(account, lease, by, mode);
-                    return Err(RunError::Uncertain(code));
-                }
-            }
-            drop(credential);
-            drop(lease);
-            return Ok((ending?, group, output));
+            })?;
+            let session = AgentSession::Terminal(Box::new(session));
+            return self.follow(
+                jobs, job, &granted, session, &prompt, harness, output, credential, lease,
+            );
         }
         if let Some(relay) = relay {
             write_relay_token(&home, relay)?;
@@ -1483,7 +1507,62 @@ impl ResearchRunner {
         Ok(ending)
     }
 
-    /// Types the research prompt into the agent's pane and follows its session record until
+    /// Follows a research agent's started session through its turn by
+    /// [`Self::supervise_pane`] and stops it, keeping the account's credential and lease past a
+    /// stop that is not confirmed, as a pane run always has (T19b 19b-4: a listed harness's
+    /// headless session too). Inputs: the job store, the job, its grants, the session, the prompt, the harness,
+    /// where the report goes, and the credential and lease. Output: how the agent ended, its
+    /// process group and the report path, or the stop's refusal.
+    #[allow(clippy::too_many_arguments)]
+    fn follow(
+        &self,
+        jobs: &ResearchJobs,
+        job: &ResearchJob,
+        granted: &Granted,
+        mut session: AgentSession,
+        prompt: &str,
+        harness: ResearchHarness,
+        output: PathBuf,
+        credential: Option<AgentCredential>,
+        lease: Option<(NativeProfileUse, Option<Hold>)>,
+    ) -> Result<(Ending, u32, PathBuf), RunError> {
+        let group = session.process_group();
+        #[cfg(unix)]
+        let mut lifeline = Lifeline::watch(group)?;
+        let ending =
+            self.supervise_pane(jobs, job, granted, &mut session, prompt, harness, &output);
+        let stopped = session.stop();
+        #[cfg(unix)]
+        lifeline.release();
+        match stopped {
+            Ok(_) => {}
+            Err(Unstopped::Uncertain) => {
+                if let Some(credential) = credential {
+                    credential.retain();
+                }
+                std::mem::forget(lease);
+                return Err(RunError::Uncertain(leftovers::UNCERTAIN));
+            }
+            Err(Unstopped::Left(left)) => {
+                let code = left.code();
+                drop(credential);
+                let account = lease.as_ref().map(|(profile, _)| profile.account().clone());
+                let by = leftovers::HoldBy {
+                    project: Some(job.project.clone()),
+                    who: format!("research job {}", job.id),
+                };
+                let mode = jobs.leftover_mode(&job.project);
+                left.hold(account, lease, by, mode);
+                return Err(RunError::Uncertain(code));
+            }
+        }
+        drop(credential);
+        drop(lease);
+        Ok((ending?, group, output))
+    }
+
+    /// Types the research prompt into the agent's pane, or sends it to a listed harness's
+    /// headless session, and follows its session record until
     /// the turn ends or reports a rate or usage limit, the job is cancelled, the saved policy
     /// no longer covers what it was granted, the runner stops or a limit passes. The agent's
     /// [`Reply`] becomes the report at `output`. Returns how the run ended.
@@ -1493,7 +1572,7 @@ impl ResearchRunner {
         jobs: &ResearchJobs,
         job: &ResearchJob,
         granted: &Granted,
-        session: &mut TerminalSession,
+        session: &mut AgentSession,
         prompt: &str,
         harness: ResearchHarness,
         output: &Path,
@@ -1749,7 +1828,9 @@ impl ResearchRunner {
                 })?;
                 Some(self.lease(&host, &fact.binding, run.name, 1)?)
             }
-            ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
+            ResearchAccount::Endpoint { .. }
+            | ResearchAccount::AnthropicEndpoint { .. }
+            | ResearchAccount::Listed { .. } => None,
         };
         self.run_read_only_leased(run, lease, stop)
     }
@@ -1766,6 +1847,9 @@ impl ResearchRunner {
     ) -> Result<ReadOnlyEnding, RunError> {
         if !valid_run_name(run.name) || run.wall_time.is_zero() {
             return Err(RunError::Invalid("read-only run name or limit".into()));
+        }
+        if let ResearchAccount::Listed { .. } = run.account {
+            return Ok(ReadOnlyEnding::Failed(LISTED_READ_ONLY.into()));
         }
         let managed = matches!(
             run.account,
@@ -1806,6 +1890,7 @@ impl ResearchRunner {
             RunError::Invalid(match harness {
                 ResearchHarness::Codex => "codex executable missing".into(),
                 ResearchHarness::ClaudeCode => "claude executable missing".into(),
+                ResearchHarness::Listed(id) => format!("{id} executable missing"),
             })
         })?;
         let credential = match &lease {
@@ -1889,6 +1974,9 @@ impl ResearchRunner {
                     retry,
                 )?;
                 (agent.join(EVENTS_LOG), EVENTS_LOG)
+            }
+            ResearchHarness::Listed(_) => {
+                return Ok(ReadOnlyEnding::Failed(LISTED_READ_ONLY.into()));
             }
         };
         command
@@ -1976,6 +2064,7 @@ impl ResearchRunner {
             .and_then(|text| match harness {
                 ResearchHarness::Codex => Some(text),
                 ResearchHarness::ClaudeCode => claude_answer(&text),
+                ResearchHarness::Listed(_) => None,
             })
             .map(|text| text.trim().to_owned())
             .unwrap_or_default();
@@ -2115,7 +2204,8 @@ pub(crate) fn job_reach(
         ResearchAccount::ManagedCodex { .. } => fixed(CODEX_MODEL_HOSTS),
         ResearchAccount::ManagedClaude { .. } => fixed(CLAUDE_MODEL_HOSTS),
         ResearchAccount::Endpoint { base_url, .. }
-        | ResearchAccount::AnthropicEndpoint { base_url, .. } => {
+        | ResearchAccount::AnthropicEndpoint { base_url, .. }
+        | ResearchAccount::Listed { base_url, .. } => {
             endpoint_model_host(base_url).into_iter().collect()
         }
     };
@@ -2148,6 +2238,11 @@ fn relayed(
             base_url,
             key: Some(key),
             ..
+        }
+        | ResearchAccount::Listed {
+            base_url,
+            key: Some(key),
+            ..
         } => (base_url, key),
         _ => return Ok((account.clone(), None)),
     };
@@ -2155,7 +2250,8 @@ fn relayed(
         .map_err(|problem| RunError::Account(problem.0))?;
     let mut behind = account.clone();
     if let ResearchAccount::Endpoint { base_url, .. }
-    | ResearchAccount::AnthropicEndpoint { base_url, .. } = &mut behind
+    | ResearchAccount::AnthropicEndpoint { base_url, .. }
+    | ResearchAccount::Listed { base_url, .. } = &mut behind
     {
         *base_url = relay.base_url();
     }
@@ -2201,7 +2297,8 @@ pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, R
             Ok(SandboxRemote::AnyHost(443))
         }
         ResearchAccount::Endpoint { base_url, .. }
-        | ResearchAccount::AnthropicEndpoint { base_url, .. } => {
+        | ResearchAccount::AnthropicEndpoint { base_url, .. }
+        | ResearchAccount::Listed { base_url, .. } => {
             let url = endpoint_url(base_url)?;
             let port = url
                 .port_or_known_default()
@@ -2254,7 +2351,8 @@ pub(crate) fn unreached_provider(
         ResearchAccount::ManagedCodex { .. } => return offline(reach, CODEX_MODEL_HOSTS),
         ResearchAccount::ManagedClaude { .. } => return offline(reach, CLAUDE_MODEL_HOSTS),
         ResearchAccount::Endpoint { base_url, .. }
-        | ResearchAccount::AnthropicEndpoint { base_url, .. } => base_url,
+        | ResearchAccount::AnthropicEndpoint { base_url, .. }
+        | ResearchAccount::Listed { base_url, .. } => base_url,
     };
     let url = endpoint_url(base_url).ok()?;
     let host = url.host_str()?;
@@ -2465,7 +2563,9 @@ fn codex_arguments(
                 command.arg("-m").arg(model);
             }
         }
-        ResearchAccount::AnthropicEndpoint { .. } | ResearchAccount::ManagedClaude { .. } => {
+        ResearchAccount::AnthropicEndpoint { .. }
+        | ResearchAccount::ManagedClaude { .. }
+        | ResearchAccount::Listed { .. } => {
             return Err(RunError::Invalid("account does not fit Codex".into()));
         }
     }
@@ -2474,7 +2574,9 @@ fn codex_arguments(
             crate::provider_retry::CodexProvider::Custom("crazyagent_endpoint")
         }
         ResearchAccount::ManagedCodex { .. } => crate::provider_retry::CodexProvider::BuiltIn,
-        ResearchAccount::AnthropicEndpoint { .. } | ResearchAccount::ManagedClaude { .. } => {
+        ResearchAccount::AnthropicEndpoint { .. }
+        | ResearchAccount::ManagedClaude { .. }
+        | ResearchAccount::Listed { .. } => {
             return Err(RunError::Invalid("account does not fit Codex".into()));
         }
     };
@@ -2576,11 +2678,54 @@ fn claude_arguments(
                 command.arg("--model").arg(model);
             }
         }
-        ResearchAccount::Endpoint { .. } | ResearchAccount::ManagedCodex { .. } => {
+        ResearchAccount::Endpoint { .. }
+        | ResearchAccount::ManagedCodex { .. }
+        | ResearchAccount::Listed { .. } => {
             return Err(RunError::Invalid("account does not fit Claude Code".into()));
         }
     }
     Ok(())
+}
+
+/// Starts a research job's turn on a listed ACP harness, headless on pipes (T19b 19b-4,
+/// QUESTION-0100 Q3 and Q4): in its private home `<agent home>/<id>/<account>`, with the agent
+/// home as its tool home and the pool account handed over by the manifest's `accounts` entry
+/// for the account's wire format. Inputs: the account, the agent home, the key relay of a
+/// keyed account, the project context and the request for a binding home. Output: the
+/// running session, or the refusal.
+fn listed_session(
+    account: &ResearchAccount,
+    home: &Path,
+    relay: Option<&crate::model_gateway::relay::Relay>,
+    context: AgentContext,
+    request: impl FnOnce(&Path) -> Result<LaunchRequest, RunError>,
+) -> Result<Session, RunError> {
+    let ResearchAccount::Listed {
+        harness,
+        connection,
+        ..
+    } = account
+    else {
+        return Err(RunError::Invalid(
+            "account does not fit this harness".into(),
+        ));
+    };
+    let listed = crate::harnesses::registry::registry()
+        .get(harness)
+        .ok_or_else(|| RunError::Invalid("listed harness missing".into()))?;
+    let own = crate::harnesses::home::prepare(home, harness, &connection.id)
+        .map_err(RunError::Context)?;
+    assert!(own.starts_with(home) && own != home);
+    let handover = crate::harnesses::accounts::handover(listed, connection, relay)
+        .map_err(|problem| RunError::Invalid(problem.0))?;
+    let context = context.with_tool_home(home).with_handover(handover);
+    Session::start_with_context(request(&own)?, context).map_err(|problem| {
+        if problem.1.is_some() {
+            RunError::Context(problem)
+        } else {
+            RunError::Invalid(format!("listed harness: {}", problem.0))
+        }
+    })
 }
 
 /// Names the account and model a research pane launches on, in the agent's home.
@@ -2603,6 +2748,12 @@ fn pane_account(
             base_url,
             model,
             key,
+        }
+        | ResearchAccount::Listed {
+            base_url,
+            model,
+            key,
+            ..
         } => {
             let token = match (key, relay) {
                 (None, None) => None,
@@ -2780,7 +2931,7 @@ const HOOK_REFUSAL_START: &str = "The project's Git config sets ";
 /// meets again. Takes the refusal's line, the engine's own words with at most a hook key
 /// `listed_hook` bounded. Returns true for those two refusals only.
 fn owner_refusal(line: &str) -> bool {
-    line.starts_with(HOOK_REFUSAL_START) || line == NOT_A_REPOSITORY
+    line.starts_with(HOOK_REFUSAL_START) || line == NOT_A_REPOSITORY || line == LISTED_FULL_ACCESS
 }
 
 /// Makes a project folder the engine created a git repository with one empty start commit,
@@ -3688,6 +3839,7 @@ fn refused_for_limit(
             rate_limited(&agent_failure(&agent.join(EVENTS_LOG), harness, max))
         }
         ResearchHarness::ClaudeCode => followed.is_some_and(ClaudeStream::limited),
+        ResearchHarness::Listed(_) => false,
     }
 }
 
@@ -3717,7 +3869,8 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
 
 /// The reply a research agent ends its turn with, kept as its words arrive: for Claude Code
 /// every part it said since its last tool call, joined, as it goes on with an answer cut at
-/// the output cap in a new message; for Codex its last message. A reply that outgrows
+/// the output cap in a new message, and so for a listed harness, whose words come in parts;
+/// for Codex its last message. A reply that outgrows
 /// `bytes_max` is none, as a report that long is refused, until a tool call starts over.
 struct Reply {
     harness: ResearchHarness,
@@ -3753,9 +3906,10 @@ impl Reply {
         assert!(!self.over || self.text.is_empty());
     }
 
-    /// Takes a tool call the agent made: a Claude Code reply starts over. Output: none.
+    /// Takes a tool call the agent made: a Claude Code or listed harness reply starts over.
+    /// Output: none.
     fn tool(&mut self) {
-        if self.harness == ResearchHarness::ClaudeCode {
+        if self.harness != ResearchHarness::Codex {
             self.start_over();
         }
         assert!(self.text.len() <= self.bytes_max);

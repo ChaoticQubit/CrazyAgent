@@ -373,7 +373,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "instructions_cleanup_too_large" => "The model's file is over 64 KB, so nothing changed. Try again.".into(),
         "instructions_cleanup_off" => "Edit with AI is off for these instructions, so nothing was sent. Turn it on first.".into(),
         "instructions_cleanup_unavailable" => "Edit with AI can't run in this engine, so nothing was sent.".into(),
-        "instructions_cleanup_master_harness" => "Edit with AI runs on this project's master harness, and it can't run on that one yet, so nothing was sent.".into(),
+        "instructions_cleanup_master_harness" => "Edit with AI runs on a Codex or Claude Code master, and this project's master is neither, so nothing was sent.".into(),
         other => coded("CrazyAgent couldn't finish that.", other),
     }
 }
