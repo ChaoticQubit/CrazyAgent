@@ -76,9 +76,9 @@ const SECRET = /secrets\.|\bsecrets\b/i;
 
 /**
  * Whether a YAML line leaves a quoted scalar open, so it runs on into the next lines: a quote
- * opens a scalar only where a node starts, after the indent, `- `, `: `, `? `, `[`, `{` or `,`,
- * and a `#` after a space outside one starts a comment. Input: one line outside a block scalar.
- * Output: the answer.
+ * opens a scalar only where a node starts, after the indent, `- `, `: `, `? `, `[`, `{` or `,`
+ * and any anchor (`&a`) or tag (`!!str`) in front of it, and a `#` after a space outside one
+ * starts a comment. Input: one line outside a block scalar. Output: the answer.
  */
 function leftOpen(line) {
   let quote = "";
@@ -90,7 +90,7 @@ function leftOpen(line) {
       else quote = "";
     } else if (char === "#" && /(?:^|\s)$/.test(line.slice(0, index))) {
       return false;
-    } else if ((char === "'" || char === '"') && /(?:^\s*|[-:?]\s+|[[{,]\s*)$/.test(line.slice(0, index))) {
+    } else if ((char === "'" || char === '"') && /(?:^\s*|[-:?]\s+|[[{,]\s*)(?:[&!]\S*\s+)*$/.test(line.slice(0, index))) {
       quote = char;
     }
   }
