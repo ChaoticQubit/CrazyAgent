@@ -1254,9 +1254,9 @@ printf '%s' "$ack"
     }
 
     /// Connectors Task 14 (conn-t14 r1 F1): the turn's own wiring names the gateway, not a
-    /// launch built by hand. A project whose master is granted Board gets one launch the
-    /// turn holds; the RCLI argv and the boundary name exactly that folder and the registered
-    /// engine, and the folder lives while the turn holds it and goes with it.
+    /// launch built by hand. In an engine whose gateway serves, a project whose master is
+    /// granted Board gets one launch the turn holds; the RCLI argv and the boundary name
+    /// exactly that folder and the registered engine, and the folder goes with the hold.
     #[tokio::test]
     async fn a_granted_rcli_master_turn_names_the_launch_it_holds_and_the_registered_engine() {
         use crate::rcli_host::RcliGateway;
@@ -1264,6 +1264,8 @@ printf '%s' "$ack"
         let engine = connector_standins(&case);
         let root = super::super::changes::engine_root(&case.host.authority).unwrap();
         grant_board(&root);
+        let served = crate::connectors::gateway::start(&root).unwrap();
+        assert!(crate::connectors::gateway::serving(&root));
         let mut launch = case
             .host
             .prepare_rcli_master_host(&case.prepared, &case.profile)
@@ -1298,17 +1300,20 @@ printf '%s' "$ack"
         drop(held);
         assert!(!folder.exists(), "the launch ends when the turn lets go of it");
         assert!(launch_folders(&root).is_empty());
+        served.stop();
         case.close().await;
     }
 
-    /// Connectors Task 14 (conn-t14 r1 F1), the other leg: with no connector granted to the
-    /// project's master the turn holds no launch, makes no launch folder, and neither the
-    /// argv nor the boundary names a gateway.
+    /// Connectors Task 14 (conn-t14 r1 F1), the other leg: with a serving gateway but no
+    /// connector granted to the project's master the turn holds no launch, makes no launch
+    /// folder, and neither the argv nor the boundary names a gateway.
     #[tokio::test]
     async fn an_rcli_master_turn_with_no_grant_holds_no_launch_and_names_no_gateway() {
         let case = Fixture::start().await;
         connector_standins(&case);
         let root = super::super::changes::engine_root(&case.host.authority).unwrap();
+        let served = crate::connectors::gateway::start(&root).unwrap();
+        assert!(crate::connectors::gateway::serving(&root));
         let mut launch = case
             .host
             .prepare_rcli_master_host(&case.prepared, &case.profile)
@@ -1325,6 +1330,7 @@ printf '%s' "$ack"
         assert!(!named("--gateway-folder"));
         assert!(super::super::master_rcli::connector_turn(&launch).is_none());
         assert!(launch_folders(&root).is_empty());
+        served.stop();
         case.close().await;
     }
 }
