@@ -70,7 +70,7 @@ test("postinst installs and loads the profile only on configure where AppArmor r
     assert.match(script, /^dst=\/etc\/apparmor\.d\/crazyagent-landlock$/m, name);
   }
   assert.match(postinst, new RegExp(`^src=${STAGED_PROFILE.replaceAll("/", "\\/")}$`, "m"));
-  for (const guard of ['[ "$1" = configure ]', "[ -d /sys/kernel/security/apparmor ]", "[ ! -e /etc/apparmor.d/disable/crazyagent-landlock ]", "command -v apparmor_parser", '"$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1', 'apparmor_parser -QT "$src"']) {
+  for (const guard of ['[ "$1" = configure ]', "[ -d /sys/kernel/security/apparmor ]", "[ ! -e /etc/apparmor.d/disable/crazyagent-landlock ]", "[ ! -L /etc/apparmor.d/disable/crazyagent-landlock ]", "command -v apparmor_parser", '"$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1', 'apparmor_parser -QT "$src"']) {
     assert.ok(postinst.includes(guard), guard);
   }
   const steps = ['apparmor_parser -QT "$src"', 'install -m 0644 "$src" "$dst"', 'apparmor_parser -r -T -W "$dst" || true'].map((step) => postinst.indexOf(step));
