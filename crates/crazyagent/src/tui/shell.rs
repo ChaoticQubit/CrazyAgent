@@ -325,7 +325,16 @@ impl Shell {
     /// New Project page that follows its job sees the end soon, as the desktop's one-second
     /// read does. Input: none. Output: whether it asked.
     pub fn read_running_job(&mut self) -> bool {
-        false
+        let running = self
+            .ctx
+            .store
+            .intake
+            .as_ref()
+            .is_some_and(intake_job::running);
+        if running {
+            intake::ask(&mut self.ctx, IntakeQuery::JobStatus);
+        }
+        running
     }
 
     /// Keeps the engine's intake job in the store from a status read or a start, says once on

@@ -1861,7 +1861,7 @@ fn allowed(path: &Path) -> bool {
 
 fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) {
     match code {
-        "project_folder_exists" | "project_exists" => (
+        "project_folder_exists" | "project_exists" | "home_destination_exists" => (
             "Could not create the folder.",
             "A folder for this project already exists. Press Enter, then create the project again."
                 .into(),
@@ -1920,6 +1920,17 @@ fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) 
             "CrazyAgent could not confirm the new project.",
             "Check Home for it before you create it again. Your draft is kept.".into(),
             Step::Review,
+        ),
+        "home_add_cancelled" => (
+            "Setting up the project stopped.",
+            "Nothing was kept. Press Enter to go back, then create the project again.".into(),
+            Step::Review,
+        ),
+        "project_folder_unavailable" => (
+            "Could not copy a document.",
+            "Documents can't be copied into a project on this computer yet. Remove them in Documents to create the project without documents."
+                .into(),
+            Step::Documents,
         ),
         "creation_not_ready" => (
             "Creating projects is not ready yet.",

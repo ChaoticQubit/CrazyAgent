@@ -115,10 +115,6 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         .shell(ShellRequest::EditPool { change, generation })
                         .unwrap();
                 }
-                Request::Creation(job) => {
-                    sent.push("create");
-                    connection.creation(*job).unwrap();
-                }
                 Request::Master(job) => {
                     sent.push("master");
                     connection.master(*job).unwrap();
@@ -160,6 +156,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push(match job.query() {
                         IntakeQuery::JobStart { .. } => "job start",
                         IntakeQuery::JobStatus => "job status",
+                        IntakeQuery::JobDismiss { .. } => "job dismiss",
                         IntakeQuery::Found => "found",
                         _ => "intake",
                     });
@@ -3068,9 +3065,15 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     assert!(shown.contains("Tidepool"), "{shown}");
     assert!(shown.contains("Main"), "{shown}");
     shell.key(Key::Enter);
-    let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(&sent[..2], ["create", "projects"], "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
+    assert!(sent.contains(&"projects"), "{sent:?}");
     assert!(sent.contains(&"edit pool"), "{sent:?}");
+    assert_eq!(
+        sent.iter().filter(|sent| **sent == "job dismiss").count(),
+        1,
+        "{sent:?}"
+    );
     let Some(Place::Project { id, name, tab }) = shell.place() else {
         panic!("the new project opens, got {:?}", shell.place());
     };
@@ -3091,6 +3094,24 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
             .any(|line| line.starts_with("  Tidepool  ") && line.trim_end().ends_with(&folder)),
         "the title row shows the name and the folder in the projects home: {shown}"
     );
+}
+
+/// Pumps the shell until the engine's job it keeps no longer runs, reading it again between
+/// pumps as the run loop does, so a New Project's start, its end and its follow-ups all go
+/// out. Takes the shell and its connection. Returns every request sent, oldest first.
+async fn pump_job(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut sent = pump(shell, connection).await;
+    while shell.read_running_job() {
+        assert!(
+            Instant::now() < deadline,
+            "the job never ended: {:?}",
+            shell.ctx.store.intake
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        sent.extend(pump(shell, connection).await);
+    }
+    sent
 }
 
 fn go_to(shell: &mut Shell, query: &str) {
@@ -3124,8 +3145,8 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
     assert_eq!(shell.place(), Some(Place::Home));
 
-    let sent = pump(&mut shell, &mut connection).await;
-    assert!(sent.contains(&"create"), "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"job start"), "{sent:?}");
     assert!(
         sent.contains(&"edit pool"),
         "the picked pool is assigned without the page: {sent:?}"
@@ -3167,8 +3188,8 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     shell.key(Key::Esc);
     go_to(&mut shell, "home");
     assert_eq!(shell.depth(), 1);
-    let sent = pump(&mut shell, &mut connection).await;
-    assert!(sent.contains(&"create"), "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"job start"), "{sent:?}");
     assert!(!sent.contains(&"edit pool"), "{sent:?}");
     let refused = shell.ctx.message().expect("the refusal is shown");
     assert!(
@@ -3199,7 +3220,7 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     shell.key(Key::Enter);
     shell.key(Key::Esc);
     go_to(&mut shell, "home");
-    pump(&mut shell, &mut connection).await;
+    pump_job(&mut shell, &mut connection).await;
     assert_eq!(
         shell.ctx.message().map(|message| message.lead.as_str()),
         Some("Tidepool is ready.")
@@ -3220,8 +3241,8 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     for character in "Harbor".chars() {
         shell.key(Key::Char(character));
     }
-    let sent = pump(&mut shell, &mut connection).await;
-    assert!(sent.contains(&"create"), "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"job start"), "{sent:?}");
     let refused = shell.ctx.message().expect("the refusal is shown");
     assert!(
         refused.lead.starts_with("Could not create"),
@@ -3908,9 +3929,9 @@ async fn a_project_folder_the_engine_cannot_make_says_why_in_the_wizard() {
     assert!(shown.contains("Tidepool"), "{shown}");
     std::fs::set_permissions(engine.home.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
     shell.key(Key::Enter);
-    let sent = pump(&mut shell, &mut connection).await;
+    let sent = pump_job(&mut shell, &mut connection).await;
     std::fs::set_permissions(engine.home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(sent.first(), Some(&"create"), "{sent:?}");
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
     assert_eq!(shell.place(), Some(Place::NewProject));
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Could not create the project."), "{shown}");
@@ -6261,256 +6282,6 @@ async fn shift_arrows_walk_the_project_tabs_across_the_master_view() {
     until_place(&mut shell, &mut connection, &master).await;
     shell.key(Key::ShiftLeft);
     assert_eq!(shell.place(), Some(tab(ProjectTab::Overview)));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_creation_reconcile_the_full_queue_refuses_keeps_the_submission_and_reconciles_again() {
-    use crate::tui::client::{CreationEvent, MutationDelivery};
-    let engine = Engine::start().await;
-    let mut connection = engine.connect();
-    let mut ctx = ctx(80, 24);
-    ctx.store.pools = Load::Ready(Vec::new());
-    let screen = open(&Place::NewProject, &mut ctx);
-    let mut shell = Shell::with(ctx, screen);
-    pump(&mut shell, &mut connection).await;
-    for character in "Tidepool".chars() {
-        shell.key(Key::Char(character));
-    }
-    shell.key(Key::ShiftLeft);
-    shell.key(Key::Enter);
-    let submission = std::iter::from_fn(|| shell.ctx.next_request())
-        .find_map(|request| match request {
-            Request::Creation(job) => Some(job.submission),
-            _ => None,
-        })
-        .expect("Enter sends the creation");
-    let mut filled = 0;
-    while filled < 64
-        && shell.ctx.try_request(Request::EditPool {
-            change: crate::tui::seam::PoolChange::Remove {
-                id: CredentialRef::new("pool-a").unwrap(),
-                opened_projects: 0,
-            },
-        })
-    {
-        filled += 1;
-    }
-    assert!(filled < 64, "the request queue is bounded");
-
-    shell.arrive(owner_arrival(OwnerEvent::Creation(Box::new(
-        CreationEvent {
-            submission: submission.clone(),
-            operation: None,
-            result: Err("trusted_owner_connection_failed".into()),
-            retained: true,
-        },
-    ))));
-    assert_eq!(shell.place(), Some(Place::NewProject));
-    let shown = render(&mut shell, 80, 24);
-    assert!(
-        !shown.contains("create the project again"),
-        "a creation whose outcome is unknown is never offered as a fresh create: {shown}"
-    );
-
-    while shell.ctx.next_request().is_some() {}
-    shell.tick();
-    let reconciles = std::iter::from_fn(|| shell.ctx.next_request())
-        .filter_map(|request| match request {
-            Request::Creation(job) => Some(*job),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        reconciles.len(),
-        1,
-        "the refused reconcile goes out once the queue has room"
-    );
-    assert!(matches!(
-        reconciles[0].delivery,
-        MutationDelivery::Reconcile
-    ));
-    assert_eq!(
-        reconciles[0].submission, submission,
-        "the same submission and project id, never a second one"
-    );
-}
-
-/// Opens New project on a real engine, names the project Tidepool and presses Enter on
-/// Review, then takes every request that event made. Takes the engine. Returns the shell,
-/// its connection and the submission the creation sent.
-async fn submitted_creation(
-    engine: &Engine,
-) -> (Shell, Connection, crate::tui::client::CreationSubmission) {
-    let mut connection = engine.connect();
-    let mut ctx = ctx(80, 24);
-    ctx.store.pools = Load::Ready(Vec::new());
-    let screen = open(&Place::NewProject, &mut ctx);
-    let mut shell = Shell::with(ctx, screen);
-    pump(&mut shell, &mut connection).await;
-    for character in "Tidepool".chars() {
-        shell.key(Key::Char(character));
-    }
-    shell.key(Key::ShiftLeft);
-    shell.key(Key::Enter);
-    let submission = std::iter::from_fn(|| shell.ctx.next_request())
-        .find_map(|request| match request {
-            Request::Creation(job) => Some(job.submission),
-            _ => None,
-        })
-        .expect("Enter sends the creation");
-    while shell.ctx.next_request().is_some() {}
-    (shell, connection, submission)
-}
-
-/// Hands the page one creation reply from the engine worker. Takes the shell, the
-/// submission, the result and whether the worker still holds the submission. Returns the
-/// creation requests the page sent in answer, oldest first.
-fn creation_reply(
-    shell: &mut Shell,
-    submission: &crate::tui::client::CreationSubmission,
-    result: Result<Box<OwnerResponse>, String>,
-    retained: bool,
-) -> Vec<crate::tui::client::CreationJob> {
-    shell.arrive(owner_arrival(OwnerEvent::Creation(Box::new(
-        crate::tui::client::CreationEvent {
-            submission: submission.clone(),
-            operation: None,
-            result,
-            retained,
-        },
-    ))));
-    std::iter::from_fn(|| shell.ctx.next_request())
-        .filter_map(|request| match request {
-            Request::Creation(job) => Some(*job),
-            _ => None,
-        })
-        .collect()
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reconcile_that_finds_the_creation_unrecorded_retries_it_and_a_busy_retry_the_engine_dropped_says_busy()
- {
-    use crate::tui::client::MutationDelivery;
-    let engine = Engine::start().await;
-    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
-
-    let sent = creation_reply(
-        &mut shell,
-        &submission,
-        Err("trusted_owner_connection_failed".into()),
-        true,
-    );
-    assert_eq!(sent.len(), 1, "a lost reply is reconciled once");
-    assert!(matches!(sent[0].delivery, MutationDelivery::Reconcile));
-
-    let sent = creation_reply(
-        &mut shell,
-        &submission,
-        Ok(Box::new(OwnerResponse::NotRecordedAtBarrier {
-            revision: crate::protocol::Cursor::new(0),
-        })),
-        true,
-    );
-    assert_eq!(
-        sent.len(),
-        1,
-        "a creation the engine never recorded is sent again as the same request: {}",
-        render(&mut shell, 160, 24)
-    );
-    assert!(matches!(sent[0].delivery, MutationDelivery::Retry));
-    assert_eq!(
-        sent[0].submission, submission,
-        "the same submission and project id, never a second one"
-    );
-
-    let sent = creation_reply(
-        &mut shell,
-        &submission,
-        Ok(Box::new(OwnerResponse::Rejected {
-            code: crate::tui::seam::OWNER_BUSY.to_owned(),
-        })),
-        false,
-    );
-    assert!(sent.is_empty());
-    let shown = render(&mut shell, 160, 24);
-    assert!(
-        shown.contains("CrazyAgent is busy with other windows."),
-        "a busy retry the engine dropped changed nothing, so the page says busy: {shown}"
-    );
-    shell.tick();
-    assert!(
-        std::iter::from_fn(|| shell.ctx.next_request())
-            .all(|request| !matches!(request, Request::Creation(_))),
-        "nothing is held for the busy retry, so nothing is sent again"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_second_lost_reply_on_a_recovering_creation_says_the_project_is_unconfirmed() {
-    let engine = Engine::start().await;
-    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
-    let lost = || Err("trusted_owner_connection_failed".to_owned());
-
-    let sent = creation_reply(&mut shell, &submission, lost(), true);
-    assert_eq!(sent.len(), 1, "a lost reply is reconciled once");
-    let sent = creation_reply(&mut shell, &submission, lost(), true);
-    assert!(sent.is_empty(), "recovery runs once");
-    let shown = render(&mut shell, 160, 24);
-    assert!(
-        shown.contains("CrazyAgent could not confirm the new project."),
-        "the reconcile's reply was lost too, so the outcome is still unknown: {shown}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_creation_the_engine_still_runs_is_checked_again_on_each_tick_until_it_answers() {
-    use crate::tui::client::MutationDelivery;
-    let engine = Engine::start().await;
-    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
-    let late = || Err("owner_outcome_unknown_reconcile_same_identity".to_owned());
-    let running = || {
-        Ok(Box::new(OwnerResponse::InProgress {
-            operation_id: crate::protocol::RequestId::new("late-creation").unwrap(),
-        }))
-    };
-
-    let sent = creation_reply(&mut shell, &submission, late(), true);
-    assert_eq!(sent.len(), 1, "a late answer is reconciled once");
-    assert!(matches!(sent[0].delivery, MutationDelivery::Reconcile));
-
-    for _ in 0..2 {
-        let sent = creation_reply(&mut shell, &submission, running(), true);
-        assert!(
-            sent.is_empty(),
-            "a running creation waits for the next tick"
-        );
-        let shown = render(&mut shell, 160, 24);
-        assert!(
-            !shown.contains("could not confirm"),
-            "the engine still runs the creation, so it is not unconfirmed: {shown}"
-        );
-        assert_eq!(
-            shell.ctx.message().map(|message| message.lead.clone()),
-            Some("Still creating the project.".to_owned())
-        );
-        shell.tick();
-        let checks = std::iter::from_fn(|| shell.ctx.next_request())
-            .filter_map(|request| match request {
-                Request::Creation(job) => Some(*job),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            checks.len(),
-            1,
-            "each tick checks the running creation once"
-        );
-        assert!(matches!(checks[0].delivery, MutationDelivery::Reconcile));
-        assert_eq!(
-            checks[0].submission, submission,
-            "the same submission and project id, never a second one"
-        );
-    }
 }
 
 /// While the uncommitted-move banner takes rows above the tabs, the Changes tab offers

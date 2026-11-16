@@ -4,21 +4,22 @@ use super::project::plain_problem;
 use super::project_page::ProjectPage;
 use super::settings_accounts::{plain, settings_event};
 use super::settings_harnesses::{control_sentence, control_word};
-use super::{Flow, Place, ProjectTab, Screen};
-use crate::engine::owner::{OwnerResponse, OwnerResult, random_id};
+use super::{Flow, Place, ProjectTab, Screen, intake, intake_job};
+use crate::engine::owner::random_id;
 use crate::harnesses::{HarnessEntry, HarnessStatus, TeamUse};
 use crate::pools::{MemberKind, PoolSummary};
 use crate::project_setup::{ProjectSetup, SetupQuery, SetupView};
-use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crate::projects_home::AddMode;
+use crate::projects_home::job::{JobKind, JobState, JobSubject, JobView};
+use crate::protocol::{CredentialRef, ProjectId, ProjectSpec, RequestId};
 use crate::sandbox::policy::AgentAccess;
+use crate::tui::client::OwnerEvent;
+use crate::tui::client::intake::{IntakeEvent, IntakeQuery, IntakeView, start_id};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
-use crate::tui::client::{
-    CreationEvent, CreationJob, CreationSubmission, MutationDelivery, OwnerEvent,
-};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
-use crate::tui::seam::{Arrival, OWNER_BUSY, PoolChange, Request};
+use crate::tui::seam::{Arrival, PoolChange, Request};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -38,9 +39,9 @@ thread_local! {
 }
 
 /// Carries New project creations whose page the shell closed, such as after Run in
-/// background and then Home, through the engine's reply and the pool assignment.
-/// Takes every shell arrival and the context; each page takes only its own creation reply,
-/// and one waiting assignment takes a pool edit reply.
+/// background and then Home, through the engine's New Project job and the pool assignment.
+/// Takes every shell arrival and the context; every page reads each job read, only one page
+/// takes the reply to its own start, and one waiting assignment takes a pool edit reply.
 /// Returns nothing; a made project is announced and assigned, a refused one keeps its draft.
 pub(in crate::tui) fn carry_background(arrival: &Arrival, ctx: &mut Ctx) {
     if !matches!(arrival, Arrival::Owner(_) | Arrival::PoolEdited(_)) {
@@ -58,7 +59,7 @@ pub(in crate::tui) fn carry_background(arrival: &Arrival, ctx: &mut Ctx) {
     let (settled, waiting): (Vec<_>, Vec<_>) = running.into_iter().partition(|page| {
         page.creation
             .as_ref()
-            .is_none_or(|creation| creation.finished)
+            .is_none_or(|creation| creation.stage == Stage::Finished)
     });
     RUNNING.with_borrow_mut(|running| running.extend(waiting));
     drop(settled);
@@ -206,7 +207,7 @@ pub(in crate::tui) fn harness_choices_from(entries: &[HarnessEntry]) -> Vec<Harn
 
 /// The New project wizard as a shell screen.
 /// Holds the wizard, its last drawn view and the catalog read it waits for.
-/// Engine reads go through the shell queue; creation waits for the owner connection identity.
+/// Engine reads go through the shell queue; creation runs as the engine's New Project job.
 pub(in crate::tui) struct NewProjectPage {
     wizard: Wizard,
     view: View,
@@ -215,91 +216,61 @@ pub(in crate::tui) struct NewProjectPage {
     asked: bool,
 }
 
+/// One New Project this page started as the engine's job (DEC-177 step 3b): the start's
+/// id, the project it makes, its name, the pool and agent access to set once it is made,
+/// and where it stands.
 struct Creation {
-    submission: CreationSubmission,
+    id: RequestId,
+    project_id: ProjectId,
+    name: String,
     pool: Option<CredentialRef>,
     access: AgentAccess,
-    recovered: bool,
-    delivery: MutationDelivery,
-    again: bool,
-    assigning: bool,
-    finished: bool,
+    stage: Stage,
+}
+
+/// Where one New Project stands: its start is out; its start failed or went unanswered, so
+/// the next job read decides it with the code kept; the engine runs it; it is made and its
+/// pool is being assigned; it is made and its follow-ups are due; it is finished.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Stage {
+    Starting,
+    Checking(String),
+    Following,
+    Assigning,
+    Made,
+    Finished,
 }
 
 impl Creation {
-    /// Sends the submission with this delivery and remembers it, so a busy reply can send the
-    /// same delivery again. Takes the delivery and the context. Returns nothing.
-    fn send(&mut self, delivery: MutationDelivery, ctx: &mut Ctx) {
-        self.delivery = delivery;
-        self.again = false;
-        send_creation(&self.submission, delivery, ctx);
+    /// Whether an intake reply answers this creation's own start. Takes the reply. Returns
+    /// true only for the reply to its start while that start is out.
+    fn started_by(&self, event: &IntakeEvent) -> bool {
+        self.stage == Stage::Starting
+            && matches!(&event.query, IntakeQuery::JobStart { id, .. } if *id == self.id)
     }
 
-    /// Reads one reply to this creation: sends the follow-up a kept creation needs, or checks
-    /// one the engine still runs again on the next tick, or gives the outcome. Takes the reply
-    /// and the context. Returns none while a follow-up is out or due, else Ok for a made
-    /// project or the code it ended with.
-    fn outcome(&mut self, event: &CreationEvent, ctx: &mut Ctx) -> Option<Result<(), String>> {
-        assert!(
-            self.submission == event.submission,
-            "a page reads only its own reply"
-        );
-        let recover = event.retained && !self.recovered;
-        let outcome = match &event.result {
-            Ok(response) => match response.as_ref() {
-                OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
-                    match &operation.result {
-                        OwnerResult::Applied => Ok(()),
-                        OwnerResult::Rejected { code } => Err(code.clone()),
-                        _ => Err("creation_outcome_unknown".to_owned()),
-                    }
-                }
-                OwnerResponse::NotRecordedAtBarrier { .. }
-                    if event.retained && !matches!(self.delivery, MutationDelivery::Retry) =>
-                {
-                    self.recovered = true;
-                    self.send(MutationDelivery::Retry, ctx);
-                    return None;
-                }
-                OwnerResponse::OutcomeUnknown { .. } | OwnerResponse::InProgress { .. }
-                    if recover =>
-                {
-                    self.recovered = true;
-                    self.send(MutationDelivery::Reconcile, ctx);
-                    return None;
-                }
-                OwnerResponse::InProgress { .. } if event.retained => {
-                    self.delivery = MutationDelivery::Reconcile;
-                    self.again = true;
-                    ctx.say(Message::warning(
-                        "Still creating the project.",
-                        "CrazyAgent is still setting it up. It checks again in a moment.",
-                    ));
-                    return None;
-                }
-                OwnerResponse::Rejected { code } => Err(code.clone()),
-                _ => Err("creation_outcome_unknown".to_owned()),
-            },
-            Err(_) if recover => {
-                self.recovered = true;
-                self.send(MutationDelivery::Reconcile, ctx);
-                return None;
-            }
-            Err(problem) if event.retained && problem != OWNER_BUSY => {
-                Err("creation_outcome_unknown".to_owned())
-            }
-            Err(problem) => Err(problem.clone()),
+    /// How the engine's job ended for this creation, read from the job the shell keeps. A
+    /// job read comes over the wire, so a state a New Project never ends in, a project that
+    /// is not this one or a job that is gone reads as unconfirmed. Takes the job read.
+    /// Returns none while it runs, else Ok for a made project or the code it ended with.
+    fn ended(&self, job: Option<&JobView>) -> Option<Result<(), String>> {
+        let unknown = || Err("creation_outcome_unknown".to_owned());
+        let Some(job) = job.filter(|job| job.id == self.id) else {
+            return Some(unknown());
         };
-        assert!(outcome.as_ref().err().is_none_or(|code| !code.is_empty()));
-        Some(outcome)
+        if intake_job::running(job) {
+            return None;
+        }
+        let ours = job.kind == JobKind::Setup && job.project_id.as_ref() == Some(&self.project_id);
+        let ended = match &job.state {
+            JobState::Done if ours => Ok(()),
+            JobState::Failed { code, .. } if ours && !code.is_empty() => Err(code.clone()),
+            JobState::Cancelled { .. } if ours => Err("home_add_cancelled".to_owned()),
+            _ => unknown(),
+        };
+        assert!(ended.as_ref().err().is_none_or(|code| !code.is_empty()));
+        Some(ended)
     }
-}
-
-fn send_creation(submission: &CreationSubmission, delivery: MutationDelivery, ctx: &mut Ctx) {
-    ctx.request(Request::Creation(Box::new(CreationJob {
-        submission: submission.clone(),
-        delivery,
-    })));
 }
 
 impl NewProjectPage {
@@ -398,12 +369,12 @@ impl NewProjectPage {
         flow
     }
 
+    /// Starts the engine's New Project job for the answers under a fresh id and a new project
+    /// id, as a move with no overrides (DEC-177 step 3b); the reply and the job reads arrive
+    /// later. Takes the spec, the setup and the context. Returns nothing; a start that could
+    /// not be made says why in the wizard.
     fn create(&mut self, spec: ProjectSpec, setup: ProjectSetup, ctx: &mut Ctx) {
         assert!(self.creation.is_none());
-        let Some(identity) = ctx.identity.clone() else {
-            self.wizard.failed("trusted_connection_unavailable");
-            return;
-        };
         let project_id = random_id()
             .ok()
             .and_then(|id| ProjectId::new(format!("project-{id}")).ok());
@@ -411,74 +382,132 @@ impl NewProjectPage {
             self.wizard.failed("creation_not_ready");
             return;
         };
-        let pool = setup.pool.clone();
-        let submission = CreationSubmission {
-            identity,
-            generation: ctx.next_generation(),
-            navigation: 0,
-            project_id,
-            spec,
-            setup: Some(setup),
+        let id = match start_id() {
+            Ok(id) => id,
+            Err(code) => {
+                self.wizard.failed(&code);
+                return;
+            }
         };
-        send_creation(&submission, MutationDelivery::Submit, ctx);
+        let name = spec.name.clone();
+        let pool = setup.pool.clone();
+        intake::ask(
+            ctx,
+            IntakeQuery::JobStart {
+                id: id.clone(),
+                subject: JobSubject::Setup {
+                    project_id: project_id.clone(),
+                    spec,
+                    setup,
+                },
+                mode: AddMode::Move,
+                overrides: Vec::new(),
+            },
+        );
         self.creation = Some(Creation {
-            submission,
+            id,
+            project_id,
+            name,
             pool,
             access: self.wizard.access,
-            recovered: false,
-            delivery: MutationDelivery::Submit,
-            again: false,
-            assigning: false,
-            finished: false,
+            stage: Stage::Starting,
         });
     }
 
-    fn created(&mut self, event: &CreationEvent, ctx: &mut Ctx) -> Flow {
-        let Some(creation) = self
-            .creation
-            .as_mut()
-            .filter(|creation| creation.submission == event.submission)
-        else {
+    /// Takes one intake reply for this page's New Project: the reply to its start, which
+    /// follows the job it started or, failed or unanswered, reads the job before saying why,
+    /// since the start may have reached the engine; then each read of the job the shell keeps.
+    /// A start is never sent twice. Takes the reply and the context. Returns the flow.
+    fn intake_arrived(&mut self, event: &IntakeEvent, ctx: &mut Ctx) -> Flow {
+        let Some(creation) = self.creation.as_mut() else {
             return Flow::Handled;
         };
-        let Some(outcome) = creation.outcome(event, ctx) else {
-            return Flow::Handled;
-        };
-        if let Err(code) = outcome {
-            if creation.recovered && event.retained && code == OWNER_BUSY {
-                creation.again = true;
-                ctx.say(Message::warning(
-                    "Still checking whether the project was created.",
-                    "CrazyAgent is busy with other requests. It checks again in a moment.",
-                ));
+        if creation.started_by(event) {
+            creation.stage = match &event.result {
+                Ok(IntakeView::Job(Some(job))) if job.id == creation.id => Stage::Following,
+                Ok(_) => Stage::Checking("creation_outcome_unknown".to_owned()),
+                Err(code) => Stage::Checking(code.clone()),
+            };
+            if matches!(creation.stage, Stage::Checking(_)) {
+                intake::ask(ctx, IntakeQuery::JobStatus);
+            }
+        } else if let Stage::Checking(code) = &creation.stage
+            && event.query == IntakeQuery::JobStatus
+            && matches!(event.result, Ok(IntakeView::Job(_)))
+        {
+            let code = code.clone();
+            let found = ctx
+                .store
+                .intake
+                .as_ref()
+                .is_some_and(|job| job.id == creation.id);
+            if !found {
+                self.creation = None;
+                self.wizard.failed(&code);
                 return Flow::Handled;
             }
+            creation.stage = Stage::Following;
+        }
+        if creation.stage == Stage::Following {
+            return self.follow(ctx);
+        }
+        Flow::Handled
+    }
+
+    /// Follows this page's New Project in the job the shell keeps, by its id. Once it ended,
+    /// the page takes it over and dismisses it before anything else, so the empty read after
+    /// that dismiss is never a lost job; a made project then gets its pool and agent access
+    /// and opens, any other end keeps the draft with its code. Takes the context. Returns the
+    /// flow.
+    fn follow(&mut self, ctx: &mut Ctx) -> Flow {
+        let creation = self
+            .creation
+            .as_mut()
+            .expect("only a started creation follows its job");
+        assert_eq!(creation.stage, Stage::Following);
+        let job = ctx.store.intake.as_ref();
+        let Some(ended) = creation.ended(job) else {
+            return Flow::Handled;
+        };
+        let seen = job.is_some_and(|job| job.id == creation.id);
+        creation.stage = Stage::Made;
+        if seen {
+            intake::ask(
+                ctx,
+                IntakeQuery::JobDismiss {
+                    id: creation.id.clone(),
+                },
+            );
+        }
+        if let Err(code) = ended {
             self.creation = None;
             self.wizard.failed(&code);
             return Flow::Handled;
         }
         self.wizard.created();
         ctx.request(Request::Projects);
-        match creation.pool.clone() {
-            Some(pool) => {
-                creation.assigning = true;
-                ctx.request(Request::EditPool {
-                    change: PoolChange::Assign {
-                        pool: Some(pool),
-                        project: creation.submission.project_id.clone(),
-                    },
-                });
-                Flow::Handled
-            }
-            None => self.finish(ctx),
-        }
+        let Some(pool) = creation.pool.clone() else {
+            return self.finish(ctx);
+        };
+        creation.stage = Stage::Assigning;
+        ctx.request(Request::EditPool {
+            change: PoolChange::Assign {
+                pool: Some(pool),
+                project: creation.project_id.clone(),
+            },
+        });
+        Flow::Handled
     }
 
     fn assigned(&mut self, result: &Result<(), String>, ctx: &mut Ctx) -> Flow {
-        let Some(creation) = self.creation.as_mut().filter(|creation| creation.assigning) else {
+        let Some(creation) = self
+            .creation
+            .as_mut()
+            .filter(|creation| creation.stage == Stage::Assigning)
+        else {
             return Flow::Handled;
         };
-        creation.assigning = false;
+        creation.stage = Stage::Made;
         match result {
             Ok(()) => ctx.request(Request::PoolProjects),
             Err(code) => ctx.say(Message::error(
@@ -496,19 +525,20 @@ impl NewProjectPage {
         let creation = self
             .creation
             .as_mut()
-            .expect("only a finished creation opens its project");
-        assert!(!creation.assigning);
-        if !creation.finished {
+            .expect("only a made project opens its project");
+        assert!(matches!(creation.stage, Stage::Made | Stage::Finished));
+        let first = creation.stage == Stage::Made;
+        if first {
             ctx.say(Message::success(
-                &format!("{} is ready.", creation.submission.spec.name),
+                &format!("{} is ready.", creation.name),
                 "",
             ));
         }
-        let saves_access = !creation.finished && creation.access != AgentAccess::Sandboxed;
-        creation.finished = true;
+        let saves_access = first && creation.access != AgentAccess::Sandboxed;
+        creation.stage = Stage::Finished;
         let mut page = ProjectPage::new(
-            creation.submission.project_id.clone(),
-            creation.submission.spec.name.clone(),
+            creation.project_id.clone(),
+            creation.name.clone(),
             ProjectTab::Overview,
             ctx,
         );
@@ -518,35 +548,24 @@ impl NewProjectPage {
         Flow::Replace(Box::new(page))
     }
 
-    /// Sends a recovering creation's last delivery again after a busy reply: its first
-    /// outcome is unknown, so it is never dropped and never sent as a new project.
-    /// Takes the context. Returns nothing.
-    fn again(&mut self, ctx: &mut Ctx) {
-        if let Some(creation) = self.creation.as_mut().filter(|creation| creation.again) {
-            let delivery = creation.delivery;
-            creation.send(delivery, ctx);
-        }
-    }
-
+    /// Carries one arrival for a page the shell closed. Takes the arrival and the context.
+    /// Returns true only when the arrival was this page's alone: the reply to its own start
+    /// or the pool edit its assignment waits for. A job read is every page's, so it returns
+    /// false for one.
     fn carry(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> bool {
-        if matches!(arrival, Arrival::Owner(_)) {
-            self.again(ctx);
-        }
         let Some(creation) = &self.creation else {
             return false;
         };
+        if let Some(event) = intake::event(arrival) {
+            let own = creation.started_by(event);
+            self.intake_arrived(event, ctx);
+            if self.creation.is_none() {
+                self.refused(ctx);
+            }
+            return own;
+        }
         match arrival {
-            Arrival::Owner(event) => match event.as_ref() {
-                OwnerEvent::Creation(event) if event.submission == creation.submission => {
-                    self.created(event, ctx);
-                    if self.creation.is_none() {
-                        self.refused(ctx);
-                    }
-                    true
-                }
-                _ => false,
-            },
-            Arrival::PoolEdited(result) if creation.assigning => {
+            Arrival::PoolEdited(result) if creation.stage == Stage::Assigning => {
                 self.assigned(result, ctx);
                 true
             }
@@ -586,7 +605,7 @@ impl Drop for NewProjectPage {
         if self
             .creation
             .as_ref()
-            .is_some_and(|creation| !creation.finished)
+            .is_some_and(|creation| creation.stage != Stage::Finished)
         {
             let mut page = Some(Self {
                 wizard: std::mem::replace(&mut self.wizard, Wizard::new(Vec::new(), None)),
@@ -601,7 +620,7 @@ impl Drop for NewProjectPage {
                 }
             });
             if let Some(creation) = page.as_mut().and_then(|page| page.creation.as_mut()) {
-                creation.finished = true;
+                creation.stage = Stage::Finished;
             }
             return;
         }
@@ -633,7 +652,7 @@ impl Screen for NewProjectPage {
         if self
             .creation
             .as_ref()
-            .is_some_and(|creation| creation.finished)
+            .is_some_and(|creation| creation.stage == Stage::Finished)
         {
             return self.finish(ctx);
         }
@@ -676,8 +695,8 @@ impl Screen for NewProjectPage {
                 return flow;
             }
             Arrival::Owner(event) => match event.as_ref() {
-                OwnerEvent::Creation(event) => {
-                    let flow = self.created(event, ctx);
+                OwnerEvent::Intake(event) => {
+                    let flow = self.intake_arrived(event, ctx);
                     self.redraw(ctx);
                     return flow;
                 }
@@ -702,7 +721,6 @@ impl Screen for NewProjectPage {
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
-        self.again(ctx);
         ctx.request(Request::Pools);
         if self.wizard.harnesses.is_none() {
             self.ask_harnesses(false, ctx);

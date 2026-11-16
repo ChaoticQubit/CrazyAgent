@@ -521,13 +521,15 @@ impl Home {
     /// Does what Enter or d asks of the engine's job: stop it, start it again as the same kind
     /// of job (an add of its folder, a move of its project) with its mode and overrides, open
     /// the project's remove ask for a delete, where the exact name is typed again (DEC-177
-    /// add.1), answer its soft refusal in Add folder, or forget it. The request is kept so a
-    /// failure is said.
+    /// add.1), open New project for a New Project, whose job keeps no answers (add.2 Q3 A),
+    /// answer its soft refusal in Add folder, or forget it. The request is kept so a failure
+    /// is said.
     /// Inputs: the job, an action it offers and the context. Output: the flow.
     fn job_action(&mut self, job: &JobView, action: JobAction, ctx: &mut Ctx) -> Flow {
         assert!(intake_job::actions(job).contains(&action));
         let query = match action {
             JobAction::Stop => IntakeQuery::JobStop { id: job.id.clone() },
+            JobAction::Retry if job.kind == JobKind::Setup => return Flow::Open(Place::NewProject),
             JobAction::Retry if job.kind == JobKind::Delete => {
                 let Some(id) = job.project_id.clone() else {
                     ctx.say(Message::error(
