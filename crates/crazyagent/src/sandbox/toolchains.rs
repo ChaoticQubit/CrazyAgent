@@ -40,10 +40,10 @@ const DEVELOPER_TOOLS: &str = "/Library/Developer/CommandLineTools";
 const SYSTEM_BIN: &str = "/usr/bin";
 /// The system temp folder by its real path, which the agent short temp folders sit in.
 #[cfg(target_os = "macos")]
-const TMP_PARENT: &str = "/private/tmp";
+pub(crate) const TMP_PARENT: &str = "/private/tmp";
 /// The system temp folder, which the agent short temp folders sit in.
 #[cfg(not(target_os = "macos"))]
-const TMP_PARENT: &str = "/tmp";
+pub(crate) const TMP_PARENT: &str = "/tmp";
 const TMP_PREFIX: &str = "ca-";
 const TMP_HASH_BYTES: usize = 8;
 /// The folder of a native lead's short temp folder that is the lead's own temp folder.
