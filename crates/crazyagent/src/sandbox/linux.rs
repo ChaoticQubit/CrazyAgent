@@ -191,9 +191,9 @@ const CONFINED_UNAVAILABLE: &str = "an agent confined to its own worktree cannot
      neither Landlock nor bubblewrap can keep the worktree's git links and the existing git \
      objects read-only inside the git folders it must write";
 
-const CONFINED_NEEDS_HELPER: &str = "an agent confined to its own worktree needs the Landlock \
-     helper on Linux, and this computer has only the bubblewrap backend, which cannot give \
-     the git folders their own rights";
+const CONFINED_NEEDS_LANDLOCK: &str = "an agent confined to its own worktree or clone needs \
+     Landlock file rules on Linux (Linux 6.2 or newer), and this Linux runs agents under \
+     bubblewrap alone, which cannot give the git folders their own rights";
 
 /// The entries of a linked worktree's admin folder that Seatbelt keeps out of agent hands by
 /// name (the admin `HEAD` deny and `git_link_denies`) and that Landlock cannot carve out of
@@ -2075,7 +2075,7 @@ impl Sandbox for LinuxSandbox {
         }
         let grants = Grants::of(&self.sandbox)?;
         if !grants.git_write.is_empty() && matches!(self.backend, LinuxBackend::Bubblewrap { .. }) {
-            return Err(SandboxError::Unavailable(CONFINED_NEEDS_HELPER.into()));
+            return Err(SandboxError::Unavailable(CONFINED_NEEDS_LANDLOCK.into()));
         }
         if !grants.guarded.is_empty() {
             return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
@@ -2662,7 +2662,7 @@ mod tests {
         let refused = launch.wrap(&harness).err();
         assert!(
             matches!(&refused, Some(SandboxError::Unavailable(reason))
-                if reason == CONFINED_NEEDS_HELPER),
+                if reason == CONFINED_NEEDS_LANDLOCK),
             "{refused:?}"
         );
     }
@@ -2696,9 +2696,38 @@ mod tests {
         let grants = Grants::of(&confined).unwrap();
         assert!(grants.write.contains(&clone));
         assert!(grants.git_write.is_empty());
-        assert!(grants.guarded.is_empty());
+        assert_eq!(
+            grants.guarded,
+            vec![clone.join(".git")],
+            "a clone's git folder stays guarded whole until the supervisor holds its store"
+        );
         let git = project.join(".git");
         assert!(grants.write.iter().all(|path| !path.starts_with(&git)));
+    }
+
+    #[test]
+    fn a_clone_on_the_bubblewrap_backend_is_refused_with_the_landlock_line() {
+        let (_temp, project, sandbox, _) = linked();
+        let clone = project.join("worktrees").join("agent-2");
+        fs::create_dir(&clone).unwrap();
+        git(&clone, &["init", "-q"]);
+        let launch = LinuxSandbox {
+            sandbox: sandbox.confine_to_clone(&clone).unwrap(),
+            backend: LinuxBackend::Bubblewrap {
+                bwrap: PathBuf::from(BWRAP_PATHS[0]),
+                helper: helper(),
+            },
+            supervision: None,
+            routed: None,
+        };
+        let mut harness = Command::new("/bin/true");
+        harness.current_dir(&clone);
+        let refused = launch.wrap(&harness).err();
+        assert!(
+            matches!(&refused, Some(SandboxError::Unavailable(reason))
+                if reason == CONFINED_NEEDS_LANDLOCK),
+            "{refused:?}"
+        );
     }
 
     #[test]
