@@ -24,6 +24,8 @@ pub(crate) use sign::begin_with;
 use sign::finish_trusted;
 #[cfg(all(test, unix))]
 pub(crate) use sign::finish_with;
+#[cfg(all(test, unix))]
+pub(crate) use sign::finish_with_between;
 #[cfg(unix)]
 use sign::forget_keys;
 #[cfg(unix)]
