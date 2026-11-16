@@ -1,7 +1,7 @@
 use crate::app_plugins::{
     Binding, Origin, PluginStatus, ReadOnlyTrust, RunsView, SecretView, TrustView,
 };
-use crate::connectors::{ConnectorView, NativeConnectors, SignIn, SizeCap};
+use crate::connectors::{ConnectorView, NativeConnectors, SignIn, SizeCap, Wait, WritePolicy};
 use crate::tui::screens::settings::app_plugins::{problem_text, safe};
 use crate::tui::screens::settings::connector_activity::problem_words;
 use crate::tui::theme::Role;
@@ -21,6 +21,30 @@ pub(in crate::tui) const HARNESSES_ABOUT: &str =
     "Which harnesses reach connectors through the engine.";
 /// The settings section's title (WORDS r4).
 pub(in crate::tui) const SETTINGS: &str = "Connector settings";
+/// The write actions setting's label (WORDS r6).
+pub(in crate::tui) const WRITE_LABEL: &str = "Write actions";
+/// The write actions setting's help (WORDS r6).
+pub(in crate::tui) const WRITE_HELP: &str = "What happens when an agent calls a connector tool that changes something: each call waits for your Allow, your first Allow in a project lets later calls run, or those tools stay hidden.";
+/// The write actions choices in the desktop's order with their words (WORDS r6).
+pub(in crate::tui) const WRITE_CHOICES: [(WritePolicy, &str); 3] = [
+    (WritePolicy::AskEveryTime, "Ask every time"),
+    (
+        WritePolicy::AskOncePerProject,
+        "Ask once per project and connector",
+    ),
+    (WritePolicy::ReadOnly, "Read-only"),
+];
+/// The approval wait setting's label (WORDS r6).
+pub(in crate::tui) const WAIT_LABEL: &str = "Approval wait";
+/// The approval wait setting's help (WORDS r6).
+pub(in crate::tui) const WAIT_HELP: &str =
+    "How long a call that changes something waits for your answer before it fails.";
+/// The approval wait choices in the desktop's order with their words (WORDS r6).
+pub(in crate::tui) const WAIT_CHOICES: [(Wait, &str); 3] = [
+    (Wait::Minutes2, "2 min"),
+    (Wait::Minutes10, "10 min"),
+    (Wait::Minutes30, "30 min"),
+];
 /// The harness-native setting's label (WORDS r1).
 pub(in crate::tui) const NATIVE_LABEL: &str = "Harness-native connectors";
 /// The harness-native setting's help (WORDS r1).

@@ -2,7 +2,8 @@ use super::words::{
     ADD_HELP, ADD_TITLE, CATALOG, CATALOG_ABOUT, HARNESSES, HARNESSES_ABOUT, KEY_HELP,
     LOCKED_LABEL, LOCKED_REASON, LOCKED_VALUE, NATIVE_CHOICES, NATIVE_HELP, NATIVE_LABEL, PURPOSE,
     REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS, SIZE_CHOICES, SIZE_HELP,
-    SIZE_LABEL, origin_line, reaches_line, refusal, secret_line, state, trust_lines,
+    SIZE_LABEL, WAIT_CHOICES, WAIT_HELP, WAIT_LABEL, WRITE_CHOICES, WRITE_HELP, WRITE_LABEL,
+    origin_line, reaches_line, refusal, secret_line, state, trust_lines,
 };
 use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, Row, TITLE, refused};
 use crate::app_plugins::{RunsView, TrustView};
@@ -22,6 +23,8 @@ const UNDER: &str = "    ";
 const LABEL_WIDTH: usize = NATIVE_LABEL.len();
 
 const _: () = assert!(NATIVE_LABEL.len() >= SIZE_LABEL.len());
+const _: () = assert!(NATIVE_LABEL.len() >= WRITE_LABEL.len());
+const _: () = assert!(NATIVE_LABEL.len() >= WAIT_LABEL.len());
 
 /// The page's lines, the first and last line the cursor's part needs in view, and where
 /// a typing cursor sits.
@@ -85,23 +88,41 @@ fn under(text: &str, room: usize, ctx: &Ctx) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// A setting's label and its choices, the pick in brackets. Choices that do not fit in the
+/// room go on further lines, lined up under the first choice. Inputs: the label, the
+/// choices, the pick, the room in cells and the context. Output: the label line and any
+/// further choice lines.
 fn choices<T: Copy + PartialEq>(
     label: &str,
     options: &[(T, &str)],
     now: T,
+    room: usize,
     ctx: &Ctx,
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
     assert!(label.len() <= LABEL_WIDTH);
     assert!(options.iter().any(|(choice, _)| *choice == now), "the pick is offered");
+    let indent = LABEL_WIDTH + 2;
+    let mut lines = Vec::new();
     let mut spans = vec![Span::raw(format!("{label:<LABEL_WIDTH$}  "))];
+    let mut used = indent;
     for (choice, word) in options {
-        if *choice == now {
-            spans.push(Span::styled(format!("[{word}] "), ctx.theme.heading));
+        let (text, style) = if *choice == now {
+            (format!("[{word}] "), ctx.theme.heading)
         } else {
-            spans.push(Span::styled(format!(" {word}  "), ctx.theme.muted));
+            (format!(" {word}  "), ctx.theme.muted)
+        };
+        let cells = crate::tui::text::width(&text);
+        if used > indent && used + cells > room {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            spans.push(Span::raw(" ".repeat(indent)));
+            used = indent;
         }
+        used += cells;
+        spans.push(Span::styled(text, style));
     }
-    Line::from(spans)
+    lines.push(Line::from(spans));
+    assert!(lines.len() <= options.len(), "each line holds a choice");
+    lines
 }
 
 impl ConnectorsPage {
@@ -230,19 +251,44 @@ impl ConnectorsPage {
         let current = self.rows()[self.selected];
         let heading = lines.len();
         lines.push(styled(SETTINGS, Role::Heading, theme));
-        let native = choices(NATIVE_LABEL, &NATIVE_CHOICES, self.native, ctx);
-        let native_row = current == Row::Native;
-        lines.push(list_row(native, width, native_row, true, theme, ctx.glyphs));
-        lines.extend(under(NATIVE_HELP, width, ctx));
-        let native_span = (heading, lines.len() - 1);
-        let size_first = lines.len();
-        let size = choices(SIZE_LABEL, &SIZE_CHOICES, self.size_cap, ctx);
-        let size_row = current == Row::Size;
-        lines.push(list_row(size, width, size_row, true, theme, ctx.glyphs));
-        lines.extend(under(SIZE_HELP, width, ctx));
-        lines.push(Line::raw(format!("  {LOCKED_LABEL}  {LOCKED_VALUE}")));
-        lines.extend(under(LOCKED_REASON, width, ctx));
-        let spans = vec![native_span, (size_first, lines.len() - 1)];
+        let room = width.saturating_sub(2);
+        let settings = [
+            (
+                Row::Write,
+                choices(WRITE_LABEL, &WRITE_CHOICES, self.write, room, ctx),
+                WRITE_HELP,
+            ),
+            (
+                Row::Wait,
+                choices(WAIT_LABEL, &WAIT_CHOICES, self.wait, room, ctx),
+                WAIT_HELP,
+            ),
+            (
+                Row::Native,
+                choices(NATIVE_LABEL, &NATIVE_CHOICES, self.native, room, ctx),
+                NATIVE_HELP,
+            ),
+            (
+                Row::Size,
+                choices(SIZE_LABEL, &SIZE_CHOICES, self.size_cap, room, ctx),
+                SIZE_HELP,
+            ),
+        ];
+        let last = settings.len() - 1;
+        let mut spans = Vec::new();
+        for (at, (row, picks, help)) in settings.into_iter().enumerate() {
+            let first = if at == 0 { heading } else { lines.len() };
+            for (index, line) in picks.into_iter().enumerate() {
+                let selected = index == 0 && current == row;
+                lines.push(list_row(line, width, selected, true, theme, ctx.glyphs));
+            }
+            lines.extend(under(help, width, ctx));
+            if at == last {
+                lines.push(Line::raw(format!("  {LOCKED_LABEL}  {LOCKED_VALUE}")));
+                lines.extend(under(LOCKED_REASON, width, ctx));
+            }
+            spans.push((first, lines.len() - 1));
+        }
         assert_eq!(spans.len(), super::SETTING_ROWS);
         spans
     }

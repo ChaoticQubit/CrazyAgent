@@ -1,6 +1,7 @@
 use crate::app_plugins::{Binding, Origin, PluginStatus, Preview, Problem, TrustView};
 use crate::connectors::{
-    ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, SignIn, SizeCap,
+    ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, SignIn, SizeCap, Wait,
+    WritePolicy,
 };
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
 use crate::tui::client::app_plugins::MANIFEST_BYTES_MAX;
@@ -34,15 +35,17 @@ pub(in crate::tui) const TITLE: &str = "Connectors";
 const GUTTER: u16 = 2;
 const KEY_CHARS_MAX: usize = 1024;
 const PATH_CHARS_MAX: usize = 1024;
-const SETTING_ROWS: usize = 2;
+const SETTING_ROWS: usize = 4;
 const NOT_READ: &str = "Couldn't load the connectors.";
 const NOT_SAVED: &str = "The connector settings were not saved.";
 const ABSOLUTE: &str = "Type the full path of a .yaml file, starting with /.";
 
-/// Which catalog line the cursor rests on: a connector or one of the two settings.
+/// Which catalog line the cursor rests on: a connector or one of the four settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Row {
     Connector(usize),
+    Write,
+    Wait,
     Native,
     Size,
 }
@@ -97,8 +100,8 @@ enum Open {
     Key(Box<KeyForm>),
 }
 
-/// Settings, Connectors (DEC-168 addenda 18 and 27): the catalog of every connector with
-/// its state, the harnesses that reach connectors and the two connector settings beside the
+/// Settings, Connectors (DEC-168 addenda 18, 27 and 32): the catalog of every connector with
+/// its state, the harnesses that reach connectors and the four connector settings beside the
 /// locked line. Enter opens a connector's page with its address and secrets, where `k` sets
 /// a key typed once, `u` clears it, Enter reviews a changed file and `x` removes the
 /// owner's own; `a` adds a manifest only after its trust screen, scrolled to its end, is
@@ -106,6 +109,8 @@ enum Open {
 /// request at a time, and Esc waits for it.
 pub(in crate::tui) struct ConnectorsPage {
     stored: Load<ConnectorsView>,
+    write: WritePolicy,
+    wait: Wait,
     native: NativeConnectors,
     size_cap: SizeCap,
     selected: usize,
@@ -127,6 +132,8 @@ impl ConnectorsPage {
     pub fn new() -> Self {
         Self {
             stored: Load::Idle,
+            write: ConnectorSettings::DEFAULT.write,
+            wait: ConnectorSettings::DEFAULT.wait,
             native: ConnectorSettings::DEFAULT.native,
             size_cap: ConnectorSettings::DEFAULT.size_cap,
             selected: 0,
@@ -180,14 +187,17 @@ impl ConnectorsPage {
 
     fn edited(&self) -> bool {
         self.stored.ready().is_some_and(|view| {
-            view.settings.native != self.native || view.settings.size_cap != self.size_cap
+            view.settings.write != self.write
+                || view.settings.wait != self.wait
+                || view.settings.native != self.native
+                || view.settings.size_cap != self.size_cap
         })
     }
 
     fn rows(&self) -> Vec<Row> {
         let count = self.connectors().len();
         let mut rows: Vec<Row> = (0..count).map(Row::Connector).collect();
-        rows.extend([Row::Native, Row::Size]);
+        rows.extend([Row::Write, Row::Wait, Row::Native, Row::Size]);
         assert_eq!(rows.len(), count + SETTING_ROWS);
         rows
     }
@@ -200,6 +210,8 @@ impl ConnectorsPage {
 
     fn discard(&mut self) {
         if let Some(view) = self.stored.ready() {
+            self.write = view.settings.write;
+            self.wait = view.settings.wait;
             self.native = view.settings.native;
             self.size_cap = view.settings.size_cap;
         }
@@ -208,6 +220,14 @@ impl ConnectorsPage {
 
     fn change(&mut self, forward: bool) {
         match self.rows()[self.selected] {
+            Row::Write => {
+                let options = words::WRITE_CHOICES.map(|(choice, _)| choice);
+                self.write = turn(&options, &self.write, forward);
+            }
+            Row::Wait => {
+                let options = words::WAIT_CHOICES.map(|(choice, _)| choice);
+                self.wait = turn(&options, &self.wait, forward);
+            }
             Row::Native => {
                 let options = words::NATIVE_CHOICES.map(|(choice, _)| choice);
                 self.native = turn(&options, &self.native, forward);
@@ -227,6 +247,8 @@ impl ConnectorsPage {
         if self.edited() {
             let job = ConnectorsJob::SaveSettings {
                 settings: ConnectorSettings {
+                    write: self.write,
+                    wait: self.wait,
                     native: self.native,
                     size_cap: self.size_cap,
                     ..view.settings
@@ -429,6 +451,8 @@ impl ConnectorsPage {
 
     fn store(&mut self, view: &ConnectorsView) {
         if !self.edited() {
+            self.write = view.settings.write;
+            self.wait = view.settings.wait;
             self.native = view.settings.native;
             self.size_cap = view.settings.size_cap;
         }
@@ -686,7 +710,7 @@ impl ConnectorsPage {
             "Move",
         )];
         let row = self.rows()[self.selected];
-        if row == Row::Native || row == Row::Size {
+        if matches!(row, Row::Write | Row::Wait | Row::Native | Row::Size) {
             hints.push(hint(
                 &format!("{}{}", ctx.glyphs.left, ctx.glyphs.right),
                 "Change",
