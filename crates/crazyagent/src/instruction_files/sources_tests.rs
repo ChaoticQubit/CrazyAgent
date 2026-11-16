@@ -1,4 +1,4 @@
-use super::{Source, read, sources};
+use super::{Source, read, read_between, sources};
 use crate::harnesses::registry::Registry;
 use crate::tools::Places;
 use std::fs;
@@ -233,6 +233,80 @@ fn a_source_that_leads_into_a_place_agents_can_write_is_refused() {
     assert_eq!(
         read(&home, registry, &places, "standin-pi").err().map(|refused| refused.0),
         Some("process_import_agents_can_write".to_owned())
+    );
+}
+
+/// H-import F1 (rv-sec3 21:00, leader 21:06): the file read is the one the checks judged.
+/// A project file reached by a link and swapped for a link to an owner secret after it was
+/// found is still refused as agent-writable; a safe file swapped the same way is still read
+/// as the file that was found; a file missing when looked for is missing, even when a link
+/// appears there afterwards. The secret never reaches the preview.
+#[test]
+fn the_file_read_is_the_file_checked_when_a_link_is_swapped_between_the_two() {
+    let secret = |home: &Path| {
+        let key = home.join(".ssh/key");
+        write(&key, "OWNER-SECRET\n");
+        key
+    };
+    let registry = registry();
+
+    let (_directory, home, dotfiles) = owner_home();
+    let places = Places::new(Vec::new(), Some(home.clone()));
+    let key = secret(&home);
+    let project = dotfiles.parent().unwrap().join("project");
+    fs::create_dir_all(project.join(".crazyagent")).unwrap();
+    let planted = project.join("rules/RULES.md");
+    write(&planted, "AGENT-WRITTEN\n");
+    fs::remove_file(home.join(".two/RULES.md")).unwrap();
+    std::os::unix::fs::symlink(&planted, home.join(".two/RULES.md")).unwrap();
+    let mut swapped = false;
+
+    let read = read_between(&home, registry, &places, "standin-two", || {
+        fs::remove_file(&planted).unwrap();
+        std::os::unix::fs::symlink(&key, &planted).unwrap();
+        swapped = true;
+    });
+
+    assert!(swapped);
+    assert_eq!(
+        read.map_err(|refused| refused.0),
+        Err("process_import_agents_can_write".to_owned()),
+        "a project file found on the way is refused, whatever it leads to by the read"
+    );
+
+    let (_directory, home, dotfiles) = owner_home();
+    let places = Places::new(Vec::new(), Some(home.clone()));
+    let key = secret(&home);
+    let rules = dotfiles.join("RULES.md");
+    let mut swapped = false;
+
+    let read = read_between(&home, registry, &places, "standin-two", || {
+        fs::remove_file(&rules).unwrap();
+        std::os::unix::fs::symlink(&key, &rules).unwrap();
+        swapped = true;
+    });
+
+    assert!(swapped);
+    assert_eq!(
+        read.map_err(|refused| refused.0),
+        Ok("LINKED-RULE\n".to_owned()),
+        "the text is the file that was found, never the one a later link names"
+    );
+
+    let (_directory, home, _dotfiles) = owner_home();
+    let places = Places::new(Vec::new(), Some(home.clone()));
+    let key = secret(&home);
+    let gone = home.join(".gone/AGENTS.md");
+
+    let read = read_between(&home, registry, &places, "standin-gone", || {
+        fs::create_dir_all(gone.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&key, &gone).unwrap();
+    });
+
+    assert_eq!(
+        read.map_err(|refused| refused.0),
+        Err("process_import_missing".to_owned()),
+        "a file missing when looked for is never read later"
     );
 }
 

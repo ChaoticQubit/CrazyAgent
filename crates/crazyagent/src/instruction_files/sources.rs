@@ -67,11 +67,26 @@ pub fn read(
     places: &Places,
     harness: &str,
 ) -> Result<String, EngineError> {
+    read_between(home, registry, places, harness, || {})
+}
+
+/// [`read`], with a step run after the file is found and before it is checked and read, so
+/// a row can swap a link in that window. Inputs: as [`read`] and the step. Output: as
+/// [`read`].
+fn read_between(
+    home: &Path,
+    registry: &Registry,
+    places: &Places,
+    harness: &str,
+    between: impl FnOnce(),
+) -> Result<String, EngineError> {
     let Some(relative) = file_of(registry, harness) else {
         return Err(EngineError("process_request_invalid".into()));
     };
     let path = home.join(relative);
-    let Some(hops) = crate::harnesses::finding::link_hops(&path) else {
+    let found = crate::harnesses::finding::link_hops(&path);
+    between();
+    let Some(hops) = found else {
         return match fs::canonicalize(&path) {
             Ok(_) => Err(EngineError("process_import_unsafe".into())),
             Err(_) => super::read_picked(&path),
