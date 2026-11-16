@@ -2,7 +2,9 @@ use super::{
     OAuthError, OWN_ID_BYTES_MAX, Pending, key_store, mark_sign_in, not_offered, now_ms,
     own_issuer_ref, own_ref, own_secret_ref, signed_in, visible,
 };
-use crate::app_plugins::connector::{ConnectorSpec, OAuthSpec, Registration};
+use crate::app_plugins::connector::{
+    ConnectorSpec, McpEndpoint, OAuthSpec, ReadOnly, Registration,
+};
 use crate::app_plugins::http::{self, Config, Ended};
 use crate::app_plugins::store;
 use crate::connectors::mcp_client::{Credential, McpError, guard, wire};
@@ -355,6 +357,17 @@ fn at(base: &url::Url, path: &str) -> url::Url {
 
 /// Whether a resource identifier names the MCP server: same scheme, host and port, no
 /// user, query or fragment, and a path the server's path equals or sits under.
+/// Whether a token for `resource` may go to every address of an MCP endpoint: its URL and,
+/// when it has one, its read-only URL. Inputs: the resource and the endpoint. Output: true
+/// when the resource covers each.
+fn reaches(resource: &str, endpoint: &McpEndpoint) -> bool {
+    let read_only = match &endpoint.read_only {
+        ReadOnly::Url(url) => covers(resource, url),
+        ReadOnly::None | ReadOnly::Header { .. } => true,
+    };
+    covers(resource, &endpoint.url) && read_only
+}
+
 fn covers(resource: &str, mcp: &url::Url) -> bool {
     let Ok(resource) = url::Url::parse(resource) else {
         return false;
@@ -429,7 +442,7 @@ fn protected_resource(
     let resource = metadata
         .get("resource")
         .and_then(Value::as_str)
-        .filter(|resource| covers(resource, &mcp.url))
+        .filter(|resource| reaches(resource, mcp))
         .ok_or_else(metadata_invalid)?;
     let issuer = metadata
         .get("authorization_servers")
@@ -1187,7 +1200,7 @@ fn current(
     let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
     let usable = |record: Option<Record>| {
         record
-            .filter(|record| covers(&record.resource, &spec.mcp.url))
+            .filter(|record| reaches(&record.resource, &spec.mcp))
             .ok_or_else(sign_in_needed)
     };
     let ends_soon = |record: &Record| now_ms.saturating_add(RENEW_EARLY_MS) >= record.expires_ms;
