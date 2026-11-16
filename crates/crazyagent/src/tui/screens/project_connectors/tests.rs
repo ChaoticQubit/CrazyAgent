@@ -1,6 +1,9 @@
 use super::*;
 use crate::app_plugins::{Binding, Origin, PluginStatus, Problem, RunsView, SecretView};
-use crate::connectors::{ConnectorSettings, ConnectorView, ConnectorsView, Grant, SignIn, Who};
+use crate::connectors::approvals::AllowedWrites;
+use crate::connectors::{
+    ConnectorSettings, ConnectorView, ConnectorsView, Grant, SignIn, Who, WritePolicy,
+};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::connectors::{ConnectorsEvent, ConnectorsJob};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
@@ -349,4 +352,114 @@ fn a_failed_read_wraps_a_long_sentence() {
     );
     assert!(shows(&mut shell, "Your plugins folder isn't private to you"));
     assert!(shows(&mut shell, "yours alone and try again."), "the end is on the next line");
+}
+
+fn allowed(project: &str, connectors: &[&str]) -> AllowedWrites {
+    AllowedWrites {
+        project: project.into(),
+        connectors: connectors.iter().map(|name| (*name).to_owned()).collect(),
+    }
+}
+
+fn reads_writes(job: &ConnectorsJob) -> bool {
+    matches!(job, ConnectorsJob::Writes { project } if project == PROJECT)
+}
+
+/// The page under Ask once per project and connector, read with `grants`; the allowed
+/// writes read goes out after the page lands and has not arrived yet.
+fn ask_once(grants: Vec<Grant>) -> Shell {
+    let mut read = view(grants);
+    read.settings.write = WritePolicy::AskOncePerProject;
+    let mut shell = page(read);
+    assert!(
+        reads_writes(&one(&mut shell)),
+        "the allowed writes are read after the page"
+    );
+    shell
+}
+
+#[test]
+fn allowed_writes_show_only_under_ask_once_and_x_revokes_one_at_a_time() {
+    let mut every = page(view(vec![]));
+    assert!(
+        requests(&mut every).is_empty(),
+        "no writes read outside ask once"
+    );
+    assert!(!shows(&mut every, "Allowed writes"));
+    let mut shell = ask_once(vec![grant("linear", true, Who::Both)]);
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Writes(Ok(allowed(PROJECT, &["linear", "gone"]))),
+    );
+    assert!(shows(&mut shell, "Allowed writes"));
+    assert!(shows(
+        &mut shell,
+        "Connectors that may change things in this project without asking again."
+    ));
+    assert!(
+        shows(&mut shell, "gone"),
+        "a connector no longer listed shows its name"
+    );
+    keys(&mut shell, &[Key::End]);
+    assert!(shows(&mut shell, "x Revoke"));
+    keys(&mut shell, &[Key::Char('x')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::Revoke { project, connector } if project == PROJECT && connector == "gone"
+    ));
+    keys(&mut shell, &[Key::Up, Key::Char('x'), Key::Char(' ')]);
+    assert!(requests(&mut shell).is_empty(), "one request at a time");
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Writes(Ok(allowed("beta", &["notion"]))),
+    );
+    assert!(
+        !shows(&mut shell, "notion"),
+        "another project's writes are not this page's"
+    );
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Writes(Ok(allowed(PROJECT, &["linear"]))),
+    );
+    assert!(said(&shell).contains("gone asks again before its next write."));
+    assert!(!shows(&mut shell, "gone"));
+    keys(&mut shell, &[Key::End, Key::Char('x')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::Revoke { connector, .. } if connector == "linear"
+    ));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Writes(Err("connectors_unavailable".into())),
+    );
+    assert!(said(&shell).contains("The connector was not changed."));
+    keys(&mut shell, &[Key::Char('x')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::Revoke { connector, .. } if connector == "linear"
+    ));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Writes(Ok(allowed(PROJECT, &[]))),
+    );
+    assert!(shows(
+        &mut shell,
+        "No connector may change things here without asking."
+    ));
+}
+
+#[test]
+fn allowed_writes_say_when_they_are_read_and_when_the_read_failed() {
+    let mut shell = ask_once(Vec::new());
+    assert!(shows(&mut shell, "Reading allowed writes"));
+    arrive(
+        &mut shell,
+        ConnectorsEvent::Writes(Err("connectors_unavailable".into())),
+    );
+    assert!(shows(&mut shell, "Couldn't load the allowed writes."));
+    keys(&mut shell, &[Key::Char('r')]);
+    assert!(
+        reads_project(&one(&mut shell)),
+        "r reads the page again first"
+    );
 }
