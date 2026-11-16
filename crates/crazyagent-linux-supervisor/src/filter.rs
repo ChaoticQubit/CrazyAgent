@@ -66,6 +66,22 @@ pub enum Call {
     Rmdir,
     Truncate,
     OpenByHandleAt,
+    Chmod,
+    Fchmod,
+    Fchmodat,
+    Fchmodat2,
+    Chown,
+    Fchown,
+    Lchown,
+    Fchownat,
+    Setxattr,
+    Lsetxattr,
+    Fsetxattr,
+    Removexattr,
+    Lremovexattr,
+    Fremovexattr,
+    Setxattrat,
+    Removexattrat,
     Kill,
     Tkill,
     Tgkill,
@@ -95,6 +111,32 @@ pub const CREATING: [Call; 12] = [
 /// The calls that remove an entry or cut a file by its name, which a held entry never
 /// allows (DEC-185 S2).
 pub const REMOVING: [Call; 4] = [Call::Unlink, Call::Unlinkat, Call::Rmdir, Call::Truncate];
+
+/// The calls that change a file's mode or owner, which the supervisor makes itself on a
+/// file it judged (DEC-185 S2a). `fchmodat2` is refused instead, so the C library falls
+/// back to these.
+pub const CHANGING: [Call; 7] = [
+    Call::Chmod,
+    Call::Fchmod,
+    Call::Fchmodat,
+    Call::Chown,
+    Call::Fchown,
+    Call::Lchown,
+    Call::Fchownat,
+];
+
+/// The calls that set or remove an extended attribute, refused whole under the held guard
+/// with the answer a filesystem without extended attributes gives (DEC-185 S2a).
+pub const MARKING: [Call; 8] = [
+    Call::Setxattr,
+    Call::Lsetxattr,
+    Call::Fsetxattr,
+    Call::Removexattr,
+    Call::Lremovexattr,
+    Call::Fremovexattr,
+    Call::Setxattrat,
+    Call::Removexattrat,
+];
 
 /// The calls that send a signal to a process, a thread or a process group.
 pub const SIGNALLING: [Call; 6] = [
@@ -136,23 +178,39 @@ impl Calls {
             (Call::Link, 86),
             (Call::Unlink, 87),
             (Call::Symlink, 88),
+            (Call::Chmod, 90),
+            (Call::Fchmod, 91),
+            (Call::Chown, 92),
+            (Call::Fchown, 93),
+            (Call::Lchown, 94),
             (Call::RtSigqueueinfo, 129),
             (Call::Mknod, 133),
+            (Call::Setxattr, 188),
+            (Call::Lsetxattr, 189),
+            (Call::Fsetxattr, 190),
+            (Call::Removexattr, 197),
+            (Call::Lremovexattr, 198),
+            (Call::Fremovexattr, 199),
             (Call::Tkill, 200),
             (Call::Tgkill, 234),
             (Call::Openat, 257),
             (Call::Mkdirat, 258),
             (Call::Mknodat, 259),
+            (Call::Fchownat, 260),
             (Call::Unlinkat, 263),
             (Call::Renameat, 264),
             (Call::Linkat, 265),
             (Call::Symlinkat, 266),
+            (Call::Fchmodat, 268),
             (Call::RtTgsigqueueinfo, 297),
             (Call::OpenByHandleAt, 304),
             (Call::Sendmmsg, 307),
             (Call::Renameat2, 316),
             (Call::PidfdSendSignal, 424),
             (Call::Openat2, 437),
+            (Call::Fchmodat2, 452),
+            (Call::Setxattrat, 463),
+            (Call::Removexattrat, 466),
         ],
     };
 
@@ -160,6 +218,12 @@ impl Calls {
         arch: ARCH_AARCH64,
         x32: false,
         numbers: &[
+            (Call::Setxattr, 5),
+            (Call::Lsetxattr, 6),
+            (Call::Fsetxattr, 7),
+            (Call::Removexattr, 14),
+            (Call::Lremovexattr, 15),
+            (Call::Fremovexattr, 16),
             (Call::Fcntl, 25),
             (Call::Ioctl, 29),
             (Call::Mknodat, 33),
@@ -169,6 +233,10 @@ impl Calls {
             (Call::Linkat, 37),
             (Call::Renameat, 38),
             (Call::Truncate, 45),
+            (Call::Fchmod, 52),
+            (Call::Fchmodat, 53),
+            (Call::Fchownat, 54),
+            (Call::Fchown, 55),
             (Call::Openat, 56),
             (Call::Kill, 129),
             (Call::Tkill, 130),
@@ -183,6 +251,9 @@ impl Calls {
             (Call::Renameat2, 276),
             (Call::PidfdSendSignal, 424),
             (Call::Openat2, 437),
+            (Call::Fchmodat2, 452),
+            (Call::Setxattrat, 463),
+            (Call::Removexattrat, 466),
         ],
     };
 
@@ -471,6 +542,9 @@ mod tests {
                         Call::OpenByHandleAt => on(guards.held, ERRNO | EPERM),
                         call if CREATING.contains(call) => on(names, NOTIFY),
                         call if REMOVING.contains(call) => on(guards.held, NOTIFY),
+                        Call::Fchmodat2 => on(guards.held, ERRNO | ENOSYS),
+                        call if CHANGING.contains(call) => on(guards.held, NOTIFY),
+                        call if MARKING.contains(call) => on(guards.held, ERRNO | EOPNOTSUPP),
                         call if SIGNALLING.contains(call) => on(guards.signal, NOTIFY),
                         _ => ALLOW,
                     };
@@ -604,10 +678,50 @@ mod tests {
             (Call::Rmdir, Some(84), None),
             (Call::Truncate, Some(76), Some(45)),
             (Call::OpenByHandleAt, Some(304), Some(265)),
+            (Call::Chmod, Some(90), None),
+            (Call::Fchmod, Some(91), Some(52)),
+            (Call::Fchmodat, Some(268), Some(53)),
+            (Call::Fchmodat2, Some(452), Some(452)),
+            (Call::Chown, Some(92), None),
+            (Call::Fchown, Some(93), Some(55)),
+            (Call::Lchown, Some(94), None),
+            (Call::Fchownat, Some(260), Some(54)),
+            (Call::Setxattr, Some(188), Some(5)),
+            (Call::Lsetxattr, Some(189), Some(6)),
+            (Call::Fsetxattr, Some(190), Some(7)),
+            (Call::Removexattr, Some(197), Some(14)),
+            (Call::Lremovexattr, Some(198), Some(15)),
+            (Call::Fremovexattr, Some(199), Some(16)),
+            (Call::Setxattrat, Some(463), Some(463)),
+            (Call::Removexattrat, Some(466), Some(466)),
         ];
         for (call, x86, arm) in pinned {
             assert_eq!(Calls::X86_64.number(call), x86, "{call:?}");
             assert_eq!(Calls::AARCH64.number(call), arm, "{call:?}");
+        }
+    }
+
+    #[test]
+    fn a_held_guard_traps_mode_and_owner_changes_and_refuses_extended_attributes() {
+        for calls in [Calls::X86_64, Calls::AARCH64] {
+            for call in CHANGING {
+                if let Some(nr) = calls.number(call) {
+                    assert_eq!(told(&calls, HELD, nr, [0; 6]), NOTIFY, "{call:?}");
+                    assert_eq!(told(&calls, ALL, nr, [0; 6]), ALLOW, "{call:?}");
+                }
+            }
+            for call in MARKING {
+                let nr = calls.number(call).unwrap();
+                assert_eq!(
+                    told(&calls, HELD, nr, [0; 6]),
+                    ERRNO | EOPNOTSUPP,
+                    "{call:?}"
+                );
+                assert_eq!(told(&calls, ALL, nr, [0; 6]), ALLOW, "{call:?}");
+            }
+            let two = calls.number(Call::Fchmodat2).unwrap();
+            assert_eq!(told(&calls, HELD, two, [0; 6]), ERRNO | ENOSYS);
+            assert_eq!(told(&calls, ALL, two, [0; 6]), ALLOW);
         }
     }
 
@@ -681,6 +795,9 @@ mod tests {
             Call::Rename,
             Call::Unlink,
             Call::Rmdir,
+            Call::Chmod,
+            Call::Chown,
+            Call::Lchown,
         ];
         for call in absent {
             assert_eq!(arm.number(call), None, "{call:?}");
