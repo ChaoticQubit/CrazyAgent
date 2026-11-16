@@ -23,7 +23,6 @@ fn main() {
         "desktop_project_list",
         "desktop_create_project",
         "desktop_project_catalog",
-        "desktop_setup_project",
         "desktop_project_setup",
         "desktop_research_jobs",
         "desktop_project_activity",

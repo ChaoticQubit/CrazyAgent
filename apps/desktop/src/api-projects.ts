@@ -480,10 +480,6 @@ export function loadProjectCatalog(pool: string | null, research: ResearchKind[]
   return call<ProjectCatalog>("desktop_project_catalog", { pool, research });
 }
 
-export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
-}
-
 /** Whether a New Project receipt gets one automatic reconcile, as the TUI does: the engine
  * answered OutcomeUnknown or the reply was lost, and the bridge still keeps the intent.
  * Input: the receipt from Create project. Output: true when it should reconcile once. */

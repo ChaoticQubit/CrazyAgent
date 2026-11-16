@@ -555,21 +555,6 @@ async fn desktop_project_catalog(
 }
 
 #[tauri::command]
-async fn desktop_setup_project(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    spec: ProjectSpec,
-    setup: ProjectSetup,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
-    main_window(&webview)?;
-    lock(&state)
-        .await?
-        .setup_project(spec, setup, generation)
-        .await
-}
-
-#[tauri::command]
 async fn desktop_project_setup(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5044,7 +5029,6 @@ native_commands! {
     desktop_project_list,
     desktop_create_project,
     desktop_project_catalog,
-    desktop_setup_project,
     desktop_project_setup,
     desktop_research_jobs,
     desktop_project_activity,

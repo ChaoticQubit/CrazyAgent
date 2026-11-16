@@ -557,10 +557,6 @@ export function projectCatalog(pool: string | null, research: ResearchKind[]): P
   return invoke<ProjectCatalog>("desktop_project_catalog", { pool, research });
 }
 
-export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
-}
-
 export function projectSetup(id: string): Promise<StoredSetup | null> {
   return invoke<StoredSetup | null>("desktop_project_setup", { id });
 }
