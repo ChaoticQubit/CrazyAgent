@@ -1734,6 +1734,37 @@ fn a_relayed_claude_launch_allows_hooks_and_a_plain_one_disables_them() {
     drop(relayed);
 }
 
+/// Task 3r: a pane Claude Code launch follows the owner's Native connectors setting as a
+/// headless one does: the project context's default Off puts `disableClaudeAiConnectors` in
+/// its `--settings`, and a launch with no saved setting leaves the key out.
+#[test]
+fn a_pane_claude_launch_turns_claude_ai_connectors_off_by_default() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), false);
+    let off = project_context(&case, "data-native")
+        .install("claude-code", &case.home(), false)
+        .unwrap();
+    assert!(off.native_connectors_off());
+    let built = command(&request, Some(&off), &run(None)).unwrap();
+    assert_eq!(
+        claude_settings(&built)["disableClaudeAiConnectors"],
+        serde_json::Value::Bool(true)
+    );
+    drop(off);
+
+    let unset = crate::launch_context::AgentContext::empty()
+        .install("claude-code", &case.home(), false)
+        .unwrap();
+    assert!(!unset.native_connectors_off());
+    let built = command(&request, Some(&unset), &run(None)).unwrap();
+    let settings = claude_settings(&built);
+    assert!(
+        settings.get("disableClaudeAiConnectors").is_none(),
+        "{settings}"
+    );
+    drop(unset);
+}
+
 #[test]
 fn the_tmux_folder_is_added_to_path_once_and_a_folder_with_a_colon_is_refused() {
     let tmux = Path::new("/opt/homebrew/bin/tmux");
