@@ -8087,6 +8087,75 @@ fn a_refused_publish_from_the_question_keeps_the_form_with_what_was_typed_and_sa
     );
 }
 
+/// RV-DS241 S5b TUI nit 2: the Overview's publish question and a refused publish form, its
+/// three-line reason included, fit an 80x24 window with every key in the bar.
+#[test]
+fn the_publish_question_and_a_refused_form_fit_an_80_by_24_window() {
+    let (mut shell, project) = offered();
+    shell.ctx.width = 80;
+    shell.ctx.height = 24;
+    shell.key(Key::Char('G'));
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains(super::project_publish::PROMPT_LINE),
+        "{shown}"
+    );
+    let bar = shown.lines().last().unwrap_or_default().to_owned();
+    for key in [
+        "Enter Publish",
+        "n Not now",
+        "x Don't ask again",
+        "Esc Close",
+    ] {
+        assert!(bar.contains(key), "{key}: {bar}");
+    }
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    publish_reply(
+        &mut shell,
+        start,
+        Err("github_publish_secret_in_history".into()),
+    );
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
+    let shown = render(&mut shell, 80, 24);
+    for text in [
+        "Visibility",
+        "Repository",
+        "[ Publish ]",
+        "Publishing on GitHub didn't start.",
+        "then check again.",
+    ] {
+        assert!(shown.contains(text), "{text}: {shown}");
+    }
+    let bar = shown.lines().last().unwrap_or_default().to_owned();
+    for key in ["Enter Publish", "Esc Cancel"] {
+        assert!(bar.contains(key), "{key}: {bar}");
+    }
+}
+
 #[test]
 fn a_refused_publish_whose_read_finds_a_publish_closes_the_form_and_says_why_on_the_message_line() {
     let (mut shell, project) = offered();
