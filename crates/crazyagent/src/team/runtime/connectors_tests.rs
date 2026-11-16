@@ -75,6 +75,38 @@ fn sub_agent(runtime: &TeamRuntime, fixture: &Fixture, id: i64, account: &TeamAc
     plan
 }
 
+/// Trusts the `board` connector, binds its key and turns it on for the fixture's project,
+/// for every agent. Input: the fixture.
+fn grant_board(fixture: &Fixture) {
+    crate::app_plugins::store::add(
+        &fixture.connection,
+        &fixture.base,
+        BOARD,
+        &crate::semantic::sha256_hex(BOARD.as_bytes()),
+        false,
+        1,
+    )
+    .unwrap();
+    crate::app_plugins::store::set_key(
+        &fixture.connection,
+        &fixture.base,
+        "board",
+        "api_key",
+        KEY.as_bytes().to_vec(),
+    )
+    .unwrap();
+    grants::set(
+        &fixture.connection,
+        &fixture.base,
+        PROJECT,
+        "board",
+        true,
+        Who::Both,
+        2,
+    )
+    .unwrap();
+}
+
 /// The network lines of a launch's installed profile, its agent folder and model proxy
 /// port named the same for every agent, so two agents' remotes compare. Inputs: the
 /// runtime, the plan and the agent id. Output: the lines.
@@ -128,33 +160,7 @@ fn an_only_network_project_gets_connectors_and_its_remotes_are_unchanged() {
         );
         assert!(!has_entry(1), "{network:?}");
 
-        crate::app_plugins::store::add(
-            &fixture.connection,
-            &fixture.base,
-            BOARD,
-            &crate::semantic::sha256_hex(BOARD.as_bytes()),
-            false,
-            1,
-        )
-        .unwrap();
-        crate::app_plugins::store::set_key(
-            &fixture.connection,
-            &fixture.base,
-            "board",
-            "api_key",
-            KEY.as_bytes().to_vec(),
-        )
-        .unwrap();
-        grants::set(
-            &fixture.connection,
-            &fixture.base,
-            PROJECT,
-            "board",
-            true,
-            Who::Both,
-            2,
-        )
-        .unwrap();
+        grant_board(&fixture);
 
         let granted = sub_agent(&runtime, &fixture, 2, &account);
         let launch = runtime
@@ -201,4 +207,25 @@ fn an_only_network_project_gets_connectors_and_its_remotes_are_unchanged() {
             "{network:?}: an ended run's turn has no entry"
         );
     }
+}
+
+/// Task 3r: the engine's shutdown ends every connector launch whose run it does not leave
+/// running for the next engine, record and folder, as a run's own end does; no launch of
+/// a stopped run waits for the leftover bound.
+#[test]
+fn an_engine_shutdown_ends_the_launch_of_every_run_it_stops() {
+    let fixture = Fixture::new(1);
+    let mut runtime = connector_runtime(&fixture);
+    grant_board(&fixture);
+    let project = ProjectId::new(PROJECT).unwrap();
+    runtime
+        .open_connector_launch(&project, 7, AgentRole::Sub, true)
+        .unwrap();
+    let folder = runtime.connector_launches.lock().unwrap()[&7]
+        .folder
+        .clone();
+    assert!(folder.is_dir());
+    assert_eq!(runtime.shutdown().unwrap(), Vec::<AgentId>::new());
+    assert!(runtime.connector_launches.lock().unwrap().is_empty());
+    assert!(!folder.exists(), "the stopped run's launch folder is gone");
 }
