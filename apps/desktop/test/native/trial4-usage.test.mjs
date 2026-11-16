@@ -6,7 +6,7 @@ import { limitsVerdict, orderVerdict, sameOrder } from "./trial4-usage.mjs";
 import { checks as usage } from "./trial4/n-d16-usage-limits.mjs";
 
 const HOUR = 3600000;
-const window = (label, fields = {}) => ({ label, used: "42% used", meter: true, reset: "Resets in 2 h 14 min", ...fields });
+const window = (label, fields = {}) => ({ label, used: "42% used", meter: true, reset: "Resets at 14:30, in 2 h 14 min", ...fields });
 const card = (five = {}, weekly = {}) => ({ windows: [window("5-hour", five), window("Weekly", weekly)] });
 const next = (connection, weekly_resets_ms, fields = {}) => ({ connection, standing: { kind: "next", weekly_resets_ms, weekly_left_percent: 40, use_last: false, ...fields } });
 const pool = (accounts, strategy = "use_it_or_lose_it") => ({ pool: "pool-main", strategy, accounts });
@@ -22,7 +22,7 @@ test("the usage check holds one check of the trial 4 shape, run at the end", () 
 });
 
 test("every account showing its 5-hour and weekly use, meter and reset passes and any gap names its place", () => {
-  assert.equal(limitsVerdict([card(), card({ reset: "Resets in 3 d 4 h (your time)" }, { used: "100% used", reset: "Resets in under a minute" })]),
+  assert.equal(limitsVerdict([card(), card({ reset: "Resets at Mon 09:00, in 3 d 4 h (your time)" }, { used: "100% used", reset: "Resets at 09:00, in under a minute" })]),
     "2 accounts each show their 5-hour and weekly use and reset time");
   assert.throws(() => limitsVerdict([]), /Metrics shows no account limits/);
   assert.throws(() => limitsVerdict([card(), card({}, { used: "Not reported", reset: "The provider hasn't reported this window." })]),
@@ -30,6 +30,15 @@ test("every account showing its 5-hour and weekly use, meter and reset passes an
   assert.throws(() => limitsVerdict([card({ reset: "Next reset not known yet" })]), /account 1 of 1 5-hour: shows "Next reset not known yet", not when it resets/);
   assert.throws(() => limitsVerdict([card({ meter: false })]), /account 1 of 1 5-hour: shows no use meter/);
   assert.throws(() => limitsVerdict([{ windows: [window("Weekly")] }]), /account 1 of 1 shows the windows \["Weekly"\], not 5-hour and Weekly/);
+});
+
+test("a reset reads as the Metrics card words it, a time on the clock and a countdown (N-D16 since a794f6112)", () => {
+  assert.equal(limitsVerdict([card({ reset: "Resets at 09:14, in 14 min" }, { reset: "Resets at Sat 13:00, in 6 d 4 h" })]),
+    "1 accounts each show their 5-hour and weekly use and reset time");
+  assert.throws(() => limitsVerdict([card({ reset: "Resets in 2 h 14 min" })]),
+    /account 1 of 1 5-hour: shows "Resets in 2 h 14 min", not when it resets/);
+  assert.throws(() => limitsVerdict([card({}, { reset: "Resets at 14:30" })]),
+    /account 1 of 1 Weekly: shows "Resets at 14:30", not when it resets/);
 });
 
 test("an API-key account's card is a valid reading, while an unreadable sign-in or only API-key accounts are not", async () => {
