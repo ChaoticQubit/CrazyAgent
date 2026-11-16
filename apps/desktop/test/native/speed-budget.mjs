@@ -326,11 +326,16 @@ export function privateFolder(folder) {
  * address is usable: the clicked link or button marked current, selected or expanded, a heading
  * in main, no skeleton left in main, and `want` elements matching `extra` when given. A
  * MutationObserver and a 4 ms check both look. Inputs: the selector, the extra condition, the
- * count, the limit in ms and WebDriver's callback. Output: `done` with the ms or an error. */
+ * count, the limit in ms and WebDriver's callback. Output: `done` with the ms, or an error
+ * at once for a missing or disabled target, which a click could not reach. */
 export function clickUntilUsable(selector, extra, want, limitMs, done) {
   const target = document.querySelector(selector);
   if (!target) {
     done({ error: `nothing matches ${selector}` });
+    return;
+  }
+  if (target.disabled) {
+    done({ error: `${selector} is disabled, so a click would do nothing` });
     return;
   }
   const hash = target.getAttribute("href") ?? location.hash;

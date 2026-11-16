@@ -102,6 +102,7 @@ describe("speed rows on the real desktop app and the real engine (DEC-169)", () 
     assert.ok(others >= 1, "the big project has sessions besides the live one");
     result.big.open_ms = await timedClick(PROJECT_LINK);
     result.big.conversation_ms = await timedClick("a#tab-conversation", '[data-testid="sessions-toggle"]', 1);
+    await browser.waitUntil(() => browser.execute(() => document.querySelector('[data-testid="sessions-toggle"]')?.disabled === false), { timeout: USABLE_MS_MAX, interval: LOOK_MS, timeoutMsg: "the Sessions button never became enabled" });
     result.big.sessions_ms = await timedClick('[data-testid="sessions-toggle"]', '[data-testid="resume-session"]', others);
     await timedClick('.sidebar nav.app-nav a[href="#/home"]');
     await pause(SETTLE_MS);
