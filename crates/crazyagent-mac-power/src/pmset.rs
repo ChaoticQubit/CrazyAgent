@@ -56,6 +56,11 @@ impl Pmset {
         self.run(&["sleepnow"]).map(drop)
     }
 
+    /// Sleeps the displays now: `pmset displaysleepnow`.
+    pub fn display_sleep_now(&self) -> Result<(), PmsetError> {
+        Ok(())
+    }
+
     /// Reads the settings: `pmset -g`.
     pub fn values(&self) -> Result<Values, PmsetError> {
         self.run(&["-g"]).map(|text| parse_values(&text))

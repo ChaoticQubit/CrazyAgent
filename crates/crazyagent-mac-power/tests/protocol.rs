@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
 
 use crazyagent_mac_power::protocol::{
-    REQUEST_BYTES_MAX, Refusal, Reply, Request, encode_request, read_request, write_reply,
+    LidDisplay, REQUEST_BYTES_MAX, Refusal, Reply, Request, encode_request, read_request,
+    write_reply,
 };
 use std::io::Cursor;
 
@@ -9,14 +10,53 @@ fn read(bytes: &[u8]) -> Result<Request, Refusal> {
     read_request(&mut Cursor::new(bytes.to_vec()))
 }
 
+/// One request line: the text and its newline.
+fn lined(text: &[u8]) -> Vec<u8> {
+    let mut line = text.to_vec();
+    line.push(b'\n');
+    line
+}
+
+#[test]
+fn a_hold_names_its_lid_display_and_no_other_call_does() {
+    let unnamed = br#"{"version":1,"call":"hold","lease_s":120}"#;
+    assert_eq!(read(&lined(unnamed)), Err(Refusal::Malformed), "Hold names it (Task 12)");
+    let null = br#"{"version":1,"call":"hold","lease_s":120,"lid_display":null}"#;
+    assert_eq!(read(&lined(null)), Err(Refusal::Malformed));
+    let unknown = br#"{"version":1,"call":"hold","lease_s":120,"lid_display":"dim"}"#;
+    assert_eq!(read(&lined(unknown)), Err(Refusal::Malformed));
+    let asks = [
+        (&br#""sleep""#[..], LidDisplay::Sleep),
+        (&br#""leave_on""#[..], LidDisplay::LeaveOn),
+    ];
+    for (word, lid_display) in asks {
+        let mut text = br#"{"version":1,"call":"hold","lease_s":120,"lid_display":"#.to_vec();
+        text.extend_from_slice(word);
+        text.push(b'}');
+        let held = Request::Hold {
+            lease_s: 120,
+            lid_display,
+        };
+        assert_eq!(read(&lined(&text)), Ok(held));
+    }
+    for call in ["release", "read", "forget"] {
+        let text = format!(r#"{{"version":1,"call":"{call}","lid_display":"sleep"}}"#);
+        assert_eq!(read(&lined(text.as_bytes())), Err(Refusal::Malformed), "{call}");
+    }
+}
+
 #[test]
 fn a_request_over_one_kibibyte_or_with_an_unknown_field_is_refused() {
-    let hold = br#"{"version":1,"call":"hold","lease_s":120}"#;
+    let hold = br#"{"version":1,"call":"hold","lease_s":120,"lid_display":"leave_on"}"#;
     let mut padded = hold.to_vec();
     padded.resize(REQUEST_BYTES_MAX - 1, b' ');
     padded.push(b'\n');
     assert_eq!(padded.len(), REQUEST_BYTES_MAX);
-    assert_eq!(read(&padded), Ok(Request::Hold { lease_s: 120 }));
+    let held = Request::Hold {
+        lease_s: 120,
+        lid_display: LidDisplay::LeaveOn,
+    };
+    assert_eq!(read(&padded), Ok(held));
 
     let mut over = hold.to_vec();
     over.resize(REQUEST_BYTES_MAX, b' ');
@@ -50,33 +90,44 @@ fn a_request_with_another_version_is_refused() {
 
 #[test]
 fn a_hold_lease_outside_thirty_to_three_hundred_seconds_is_refused() {
-    let short = b"{\"version\":1,\"call\":\"hold\",\"lease_s\":29}\n";
-    assert_eq!(read(short), Err(Refusal::LeaseOutOfRange));
-    let long = b"{\"version\":1,\"call\":\"hold\",\"lease_s\":301}\n";
-    assert_eq!(read(long), Err(Refusal::LeaseOutOfRange));
-    let missing = b"{\"version\":1,\"call\":\"hold\"}\n";
-    assert_eq!(read(missing), Err(Refusal::LeaseOutOfRange));
+    let short = br#"{"version":1,"call":"hold","lease_s":29,"lid_display":"sleep"}"#;
+    assert_eq!(read(&lined(short)), Err(Refusal::LeaseOutOfRange));
+    let long = br#"{"version":1,"call":"hold","lease_s":301,"lid_display":"sleep"}"#;
+    assert_eq!(read(&lined(long)), Err(Refusal::LeaseOutOfRange));
+    let missing = br#"{"version":1,"call":"hold","lid_display":"sleep"}"#;
+    assert_eq!(read(&lined(missing)), Err(Refusal::LeaseOutOfRange));
     let on_release = b"{\"version\":1,\"call\":\"release\",\"lease_s\":30}\n";
     assert_eq!(read(on_release), Err(Refusal::Malformed));
     let edges = [
         (
             30,
-            b"{\"version\":1,\"call\":\"hold\",\"lease_s\":30}\n".to_vec(),
+            lined(br#"{"version":1,"call":"hold","lease_s":30,"lid_display":"sleep"}"#),
         ),
         (
             300,
-            b"{\"version\":1,\"call\":\"hold\",\"lease_s\":300}\n".to_vec(),
+            lined(br#"{"version":1,"call":"hold","lease_s":300,"lid_display":"sleep"}"#),
         ),
     ];
     for (lease_s, bytes) in edges {
-        assert_eq!(read(&bytes), Ok(Request::Hold { lease_s }));
+        let held = Request::Hold {
+            lease_s,
+            lid_display: LidDisplay::Sleep,
+        };
+        assert_eq!(read(&bytes), Ok(held));
     }
 }
 
 #[test]
 fn every_request_the_client_encodes_reads_back_as_itself() {
     let requests = [
-        Request::Hold { lease_s: 120 },
+        Request::Hold {
+            lease_s: 120,
+            lid_display: LidDisplay::Sleep,
+        },
+        Request::Hold {
+            lease_s: 120,
+            lid_display: LidDisplay::LeaveOn,
+        },
         Request::Release,
         Request::Read,
         Request::Forget,

@@ -828,6 +828,7 @@ impl Keeper {
         self.lid_ask = power::LidAsk {
             rule_on: view.settings.lid != LidRule::Off,
             wanted: matches!(view.state.want, Want::IdleAndLid { .. }),
+            sleep_display: false,
         };
         assert!(self.lid_ask.rule_on || !self.lid_ask.wanted);
         assert!(view.work <= work::WORK_MAX);

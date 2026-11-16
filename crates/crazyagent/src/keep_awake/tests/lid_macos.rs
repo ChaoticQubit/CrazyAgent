@@ -11,7 +11,9 @@ use crate::keep_awake::power::{
     LID_REFUSED, LidAsk, LidCommand, LidReader, PowerReading, READ_MS, Reader,
 };
 use crazyagent_mac_power::client::CallError;
-use crazyagent_mac_power::protocol::{FloorView, PinView, Refusal, Reply, Request, View};
+use crazyagent_mac_power::protocol::{
+    FloorView, LidDisplay, PinView, Refusal, Reply, Request, View,
+};
 use crazyagent_mac_power::service::{Service, Status};
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -19,14 +21,17 @@ use std::sync::{Arc, Mutex};
 const OFF: LidAsk = LidAsk {
     rule_on: false,
     wanted: false,
+    sleep_display: false,
 };
 const RESTING: LidAsk = LidAsk {
     rule_on: true,
     wanted: false,
+    sleep_display: false,
 };
 const WANTED: LidAsk = LidAsk {
     rule_on: true,
     wanted: true,
+    sleep_display: true,
 };
 const READING_MS: i64 = 30 * SECOND_MS;
 
@@ -226,7 +231,10 @@ impl Rig {
     }
 }
 
-const HOLD: Request = Request::Hold { lease_s: LEASE_S };
+const HOLD: Request = Request::Hold {
+    lease_s: LEASE_S,
+    lid_display: LidDisplay::Sleep,
+};
 
 #[test]
 fn below_macos_13_the_lid_support_says_needs_macos_13() {
@@ -944,4 +952,20 @@ fn uninstall_says_what_it_could_not_remove() {
     sleep.answer(Ok(held()), Ok(unreadable));
     assert_eq!(sleep.line.uninstall(NOW_MS), Some(UNINSTALL_SLEEP_KEPT.into()));
     assert!(!sleep.seen().contains(&Seen::Unregister), "the helper stays to put sleep back");
+}
+
+#[test]
+fn every_hold_names_the_display_the_owner_picked() {
+    let mut rig = Rig::enabled();
+    assert_eq!(rig.line.step(WANTED, NOW_MS), LidSupport::Held);
+    let left_on = LidAsk {
+        sleep_display: false,
+        ..WANTED
+    };
+    assert_eq!(rig.line.step(left_on, NOW_MS + READING_MS), LidSupport::Held);
+    let leave_on = Request::Hold {
+        lease_s: LEASE_S,
+        lid_display: LidDisplay::LeaveOn,
+    };
+    assert_eq!(rig.calls(), [HOLD, leave_on], "the owner's pick rides on each Hold (Task 12)");
 }

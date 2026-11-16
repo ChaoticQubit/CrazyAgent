@@ -1,6 +1,7 @@
 //! Leases per holder (threat model section 6, C1): each verified caller's hold runs out unless
 //! renewed, at most `HOLDERS_MAX` at once, and one caller never touches another's.
 
+use crate::protocol::LidDisplay;
 use std::collections::BTreeMap;
 
 pub const HOLDERS_MAX: usize = 4;
@@ -54,26 +55,41 @@ impl Lease {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Full;
 
-/// Every live lease, keyed by holder.
+/// Every live lease, keyed by holder, with what its holder asked of the display last.
 #[derive(Debug, Default)]
 pub struct Leases {
-    held: BTreeMap<Holder, Lease>,
+    held: BTreeMap<Holder, (Lease, LidDisplay)>,
 }
 
 impl Leases {
-    /// Starts or renews `holder`'s lease. Output: `Full` for a new holder past `HOLDERS_MAX`.
-    pub fn hold(&mut self, holder: Holder, now_ms: u64, secs: u16) -> Result<(), Full> {
+    /// Starts or renews `holder`'s lease and keeps its display ask. Output: `Full` for a new
+    /// holder past `HOLDERS_MAX`.
+    pub fn hold(
+        &mut self,
+        holder: Holder,
+        now_ms: u64,
+        secs: u16,
+        lid_display: LidDisplay,
+    ) -> Result<(), Full> {
         assert!(self.held.len() <= HOLDERS_MAX);
-        if let Some(lease) = self.held.get_mut(&holder) {
+        if let Some((lease, asked)) = self.held.get_mut(&holder) {
             lease.extend(now_ms, secs);
+            *asked = lid_display;
             return Ok(());
         }
         if self.held.len() == HOLDERS_MAX {
             return Err(Full);
         }
-        self.held.insert(holder, Lease::new(now_ms, secs));
+        self.held.insert(holder, (Lease::new(now_ms, secs), lid_display));
         assert!(self.held.len() <= HOLDERS_MAX);
         Ok(())
+    }
+
+    /// Whether any live lease asks for the display to sleep while the lid is closed.
+    pub fn asks_display_sleep(&self) -> bool {
+        let asks = self.held.values().any(|(_, asked)| *asked == LidDisplay::Sleep);
+        assert!(!asks || !self.held.is_empty());
+        asks
     }
 
     /// Whether `holder` has a live lease.
@@ -91,8 +107,8 @@ impl Leases {
     /// Ends every lease that ran out at `now_ms`. Output: how many ended.
     pub fn expire(&mut self, now_ms: u64) -> usize {
         let before = self.held.len();
-        self.held.retain(|_, lease| !lease.expired(now_ms));
-        assert!(self.held.values().all(|lease| !lease.expired(now_ms)));
+        self.held.retain(|_, (lease, _)| !lease.expired(now_ms));
+        assert!(self.held.values().all(|(lease, _)| !lease.expired(now_ms)));
         before - self.held.len()
     }
 
@@ -114,12 +130,12 @@ impl Leases {
 
     /// The most seconds any lease has left at `now_ms`.
     pub fn left_s(&self, now_ms: u64) -> u16 {
-        let left = self.held.values().map(|lease| lease.left_s(now_ms));
+        let left = self.held.values().map(|(lease, _)| lease.left_s(now_ms));
         left.max().unwrap_or(0)
     }
 
     /// When the next lease runs out, if any lives.
     pub fn next_expiry_ms(&self) -> Option<u64> {
-        self.held.values().map(|lease| lease.until_ms).min()
+        self.held.values().map(|(lease, _)| lease.until_ms).min()
     }
 }

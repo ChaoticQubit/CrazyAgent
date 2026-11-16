@@ -1,5 +1,5 @@
 use super::{CallError, Endpoint, PRODUCTION, call};
-use crate::protocol::{REPLY_BYTES_MAX, Reply, Request, encode_request, write_reply};
+use crate::protocol::{LidDisplay, REPLY_BYTES_MAX, Reply, Request, encode_request, write_reply};
 use crate::server;
 use std::cell::Cell;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 const WAIT: Duration = Duration::from_millis(500);
 const LATE_MAX: Duration = Duration::from_millis(1_500);
 const STAND_IN_READ_MAX: u64 = 4096;
-const HOLD: Request = Request::Hold { lease_s: 120 };
+const HOLD: Request = Request::Hold {
+    lease_s: 120,
+    lid_display: LidDisplay::Sleep,
+};
 
 /// A temp folder with the path of a stand-in helper socket in it, and our own uid.
 struct Place {

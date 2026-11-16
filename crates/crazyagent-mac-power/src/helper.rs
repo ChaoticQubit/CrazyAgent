@@ -10,7 +10,7 @@ use crate::lid::Lid;
 use crate::pin::{self, Pin};
 use crate::pmset::{Pmset, Values};
 use crate::protocol::{
-    FloorView, LEASE_S_MAX, LEASE_S_MIN, PinView, Refusal, Reply, Request, View,
+    FloorView, LEASE_S_MAX, LEASE_S_MIN, LidDisplay, PinView, Refusal, Reply, Request, View,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -101,7 +101,10 @@ impl Helper {
         lid: Option<Lid>,
     ) -> Reply {
         let reply = match request {
-            Request::Hold { lease_s } => self.hold(holder, lease_s, now_ms, lid),
+            Request::Hold {
+                lease_s,
+                lid_display,
+            } => self.hold(holder, lease_s, lid_display, now_ms, lid),
             Request::Release => self.release(holder, lid),
             Request::Read => Reply::State(self.view(holder, now_ms, lid)),
             Request::Forget => self.forget(holder, lid),
@@ -177,7 +180,14 @@ impl Helper {
     /// Starts or renews `holder`'s lease once the pin, the floor and the journal allow it and
     /// `SleepDisabled` is 1. When that fails, a renewal keeps the lease it had, to run out and
     /// put sleep back on its own; a new hold changes nothing. Output: `Held`, or the refusal.
-    fn hold(&mut self, holder: Holder, lease_s: u16, now_ms: u64, lid: Option<Lid>) -> Reply {
+    fn hold(
+        &mut self,
+        holder: Holder,
+        lease_s: u16,
+        lid_display: LidDisplay,
+        now_ms: u64,
+        lid: Option<Lid>,
+    ) -> Reply {
         assert!(lease_s >= LEASE_S_MIN);
         assert!(lease_s <= LEASE_S_MAX);
         let renewing = self.leases.holds(&holder);
@@ -202,7 +212,7 @@ impl Helper {
             assert_eq!(self.leases.holds(&holder), renewing);
             return Reply::Refused { reason };
         }
-        let held = self.leases.hold(holder, now_ms, lease_s);
+        let held = self.leases.hold(holder, now_ms, lease_s, lid_display);
         assert!(held.is_ok(), "room for a new holder was checked before pmset ran");
         self.sleep_owed = false;
         Reply::Held {

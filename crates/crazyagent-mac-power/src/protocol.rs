@@ -10,11 +10,21 @@ pub const REPLY_BYTES_MAX: usize = 1024;
 pub const LEASE_S_MIN: u16 = 30;
 pub const LEASE_S_MAX: u16 = 300;
 
-/// A request after its bounds were checked: a hold with its lease, a release of the caller's
-/// own lease, a read of the state, or forgetting the pin (Remove lid helper).
+/// What a holder asks of the display while the lid is closed during its hold (Task 12): sleep
+/// it once per close, or leave it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LidDisplay {
+    Sleep,
+    LeaveOn,
+}
+
+/// A request after its bounds were checked: a hold with its lease and its display ask, a
+/// release of the caller's own lease, a read of the state, or forgetting the pin (Remove lid
+/// helper).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
-    Hold { lease_s: u16 },
+    Hold { lease_s: u16, lid_display: LidDisplay },
     Release,
     Read,
     Forget,
@@ -90,7 +100,8 @@ enum Call {
     Forget,
 }
 
-/// A request line as it travels: the protocol version, the call and, for a hold only, its lease.
+/// A request line as it travels: the protocol version, the call and, for a hold only, its lease
+/// and its display ask.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Wire {
@@ -98,6 +109,8 @@ struct Wire {
     call: Call,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lease_s: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lid_display: Option<LidDisplay>,
 }
 
 /// Reads one request: at most `REQUEST_BYTES_MAX` bytes up to and including its newline.
@@ -127,7 +140,11 @@ fn checked(wire: Wire) -> Result<Request, Refusal> {
     }
     let request = match (wire.call, wire.lease_s) {
         (Call::Hold, Some(lease_s)) if (LEASE_S_MIN..=LEASE_S_MAX).contains(&lease_s) => {
-            Request::Hold { lease_s }
+            let lid_display = wire.lid_display.unwrap_or(LidDisplay::LeaveOn);
+            Request::Hold {
+                lease_s,
+                lid_display,
+            }
         }
         (Call::Hold, _) => return Err(Refusal::LeaseOutOfRange),
         (_, Some(_)) => return Err(Refusal::Malformed),
@@ -135,7 +152,7 @@ fn checked(wire: Wire) -> Result<Request, Refusal> {
         (Call::Read, None) => Request::Read,
         (Call::Forget, None) => Request::Forget,
     };
-    if let Request::Hold { lease_s } = request {
+    if let Request::Hold { lease_s, .. } = request {
         assert!(lease_s >= LEASE_S_MIN);
         assert!(lease_s <= LEASE_S_MAX);
     }
@@ -169,7 +186,7 @@ pub fn decode_reply(line: &[u8]) -> Option<Reply> {
 /// line.
 pub fn encode_request(request: &Request) -> Vec<u8> {
     let (call, lease_s) = match *request {
-        Request::Hold { lease_s } => (Call::Hold, Some(lease_s)),
+        Request::Hold { lease_s, .. } => (Call::Hold, Some(lease_s)),
         Request::Release => (Call::Release, None),
         Request::Read => (Call::Read, None),
         Request::Forget => (Call::Forget, None),
@@ -178,6 +195,7 @@ pub fn encode_request(request: &Request) -> Vec<u8> {
         version: VERSION,
         call,
         lease_s,
+        lid_display: None,
     };
     let mut line = serde_json::to_vec(&wire).expect("a request always serializes");
     line.push(b'\n');

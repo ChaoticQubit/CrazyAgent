@@ -417,10 +417,12 @@ fn a_changed_lid_ask_reaches_the_lid_line_at_once_and_an_unchanged_one_waits() {
     let resting = LidAsk {
         rule_on: true,
         wanted: false,
+        sleep_display: false,
     };
     let wanted = LidAsk {
         rule_on: true,
         wanted: true,
+        sleep_display: true,
     };
     let count = || asks.lock().unwrap().len();
 
@@ -470,6 +472,7 @@ fn the_keeper_hands_the_lid_line_what_the_lid_wants_and_leaves_the_lid_to_it() {
     let off = LidAsk {
         rule_on: false,
         wanted: false,
+        sleep_display: false,
     };
 
     keeper.tick(&connection, now_ms).unwrap();
@@ -479,6 +482,7 @@ fn the_keeper_hands_the_lid_line_what_the_lid_wants_and_leaves_the_lid_to_it() {
     let wanted = LidAsk {
         rule_on: true,
         wanted: true,
+        sleep_display: true,
     };
     let view = step_until(&mut keeper, &connection, &mut now_ms, |view| {
         view.state.want == IDLE_AND_LID && last() == Some(wanted)
@@ -501,6 +505,44 @@ fn the_keeper_hands_the_lid_line_what_the_lid_wants_and_leaves_the_lid_to_it() {
     let ruled_off = step_until(&mut keeper, &connection, &mut now_ms, |_| last() == Some(off));
     assert_eq!(ruled_off.lid_support, LidSupport::Off);
     assert_eq!(ruled_off.state.want, IDLE);
+}
+
+#[test]
+fn the_keeper_asks_the_lid_line_to_sleep_the_display_only_as_the_setting_says() {
+    let (_folder, connection) = engine();
+    let fake = Fake::new(PowerReading {
+        lid_support: LidSupport::HelperMissing,
+        ..on_ac()
+    });
+    let (lid, asks, _) = heard_lid(LidSupport::Held);
+    let hold = Box::new(NoLid::default());
+    let mut keeper = Keeper::with_hold(hold).with_sensors(fake.reader(), Some(lid));
+    let mut now_ms = NOW_MS;
+    agent(&connection, "working");
+    let last = || asks.lock().unwrap().last().map(|(ask, _, _)| *ask);
+    let sleeping = LidAsk {
+        rule_on: true,
+        wanted: true,
+        sleep_display: true,
+    };
+    step_until(&mut keeper, &connection, &mut now_ms, |_| last() == Some(sleeping));
+
+    let settings = KeepAwakeSettings {
+        lid_display: LidDisplay::LeaveOn,
+        ..KeepAwakeSettings::default()
+    };
+    let outcome = act(&connection, KeepAwakeAction::Set { settings }, now_ms);
+    assert_eq!(outcome, Outcome::Applied);
+    let left_on = LidAsk {
+        sleep_display: false,
+        ..sleeping
+    };
+    step_until(&mut keeper, &connection, &mut now_ms, |_| last() == Some(left_on));
+    let heard = asks.lock().unwrap().clone();
+    assert!(
+        heard.iter().all(|(ask, _, _)| ask.wanted || !ask.sleep_display),
+        "only a wanted ask carries the display ask (QUESTION 38)"
+    );
 }
 
 #[test]
@@ -547,6 +589,7 @@ fn a_lid_command_reaches_the_lid_line_once_and_at_once() {
     let resting = LidAsk {
         rule_on: true,
         wanted: false,
+        sleep_display: false,
     };
     assert_eq!(sensing.step(NOW_MS, resting), None);
     sensing.order(LidCommand::Remove);
@@ -658,6 +701,7 @@ fn stop_hands_the_lid_line_a_last_not_wanted_ask_before_it_returns() {
     let wanted = LidAsk {
         rule_on: true,
         wanted: true,
+        sleep_display: true,
     };
     until_stepped(&mut keeper, &connection, &mut now_ms, || last() == Some(wanted));
 
@@ -665,6 +709,7 @@ fn stop_hands_the_lid_line_a_last_not_wanted_ask_before_it_returns() {
     let let_go = LidAsk {
         rule_on: true,
         wanted: false,
+        sleep_display: false,
     };
     assert_eq!(last(), Some(let_go), "the lid line heard the last ask before stop returned");
 }

@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 
 use crazyagent_mac_power::lease::{Full, HOLDERS_MAX, Holder, Lease, Leases};
+use crazyagent_mac_power::protocol::LidDisplay;
 
 const NOW_MS: u64 = 1_000_000;
 
@@ -27,7 +28,7 @@ fn a_lease_runs_its_seconds_and_a_renewal_starts_it_again_from_now() {
 #[test]
 fn a_release_from_another_caller_leaves_the_first_lease_running() {
     let mut leases = Leases::default();
-    assert_eq!(leases.hold(holder(10), NOW_MS, 120), Ok(()));
+    assert_eq!(leases.hold(holder(10), NOW_MS, 120, LidDisplay::LeaveOn), Ok(()));
     assert!(!leases.release(&holder(11)));
     let reused_pid = Holder {
         pid_version: 8,
@@ -44,19 +45,19 @@ fn a_release_from_another_caller_leaves_the_first_lease_running() {
 fn a_fifth_holder_is_refused() {
     let mut leases = Leases::default();
     for pid in 0..HOLDERS_MAX as i32 {
-        assert_eq!(leases.hold(holder(pid), NOW_MS, 60), Ok(()));
+        assert_eq!(leases.hold(holder(pid), NOW_MS, 60, LidDisplay::LeaveOn), Ok(()));
     }
-    assert_eq!(leases.hold(holder(99), NOW_MS, 60), Err(Full));
+    assert_eq!(leases.hold(holder(99), NOW_MS, 60, LidDisplay::LeaveOn), Err(Full));
     assert_eq!(leases.len(), HOLDERS_MAX);
-    assert_eq!(leases.hold(holder(0), NOW_MS + 10_000, 120), Ok(()));
+    assert_eq!(leases.hold(holder(0), NOW_MS + 10_000, 120, LidDisplay::LeaveOn), Ok(()));
     assert_eq!(leases.len(), HOLDERS_MAX);
 }
 
 #[test]
 fn expiry_ends_only_the_leases_whose_time_ran_out() {
     let mut leases = Leases::default();
-    assert_eq!(leases.hold(holder(1), NOW_MS, 30), Ok(()));
-    assert_eq!(leases.hold(holder(2), NOW_MS, 300), Ok(()));
+    assert_eq!(leases.hold(holder(1), NOW_MS, 30, LidDisplay::LeaveOn), Ok(()));
+    assert_eq!(leases.hold(holder(2), NOW_MS, 300, LidDisplay::LeaveOn), Ok(()));
     assert_eq!(leases.next_expiry_ms(), Some(NOW_MS + 30_000));
     assert_eq!(leases.expire(NOW_MS + 29_999), 0);
     assert_eq!(leases.expire(NOW_MS + 30_000), 1);

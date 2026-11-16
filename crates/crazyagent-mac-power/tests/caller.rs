@@ -6,7 +6,7 @@ use crazyagent_mac_power::caller::{
     Entitlements, PRODUCTION, Policy, REQUIREMENT, Refused, judge_entitlements,
 };
 use crazyagent_mac_power::helper::{Config, Helper};
-use crazyagent_mac_power::protocol::{Refusal, Reply, Request, encode_request};
+use crazyagent_mac_power::protocol::{LidDisplay, Refusal, Reply, Request, encode_request};
 use crazyagent_mac_power::server::{self, Accepted};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
@@ -256,7 +256,11 @@ fn a_term_signal_puts_every_journaled_value_back() {
     let ready = lines.find(|line| matches!(line.as_deref().map(str::trim), Ok("ready")));
     assert!(ready.is_some(), "the server child never said ready");
     let mut stream = UnixStream::connect(&path).unwrap();
-    let held = ask(&mut stream, &Request::Hold { lease_s: 120 });
+    let hold = Request::Hold {
+        lease_s: 120,
+        lid_display: LidDisplay::LeaveOn,
+    };
+    let held = ask(&mut stream, &hold);
     assert!(held.starts_with("{\"reply\":\"held\""), "{held}");
     assert_eq!(stand_in.sleep_disabled(), 1);
     let pid = server.id().to_string();

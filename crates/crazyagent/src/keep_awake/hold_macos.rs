@@ -3,7 +3,9 @@ use super::power::{LID_REFUSED, LidAsk, LidCommand, LidReader};
 pub(super) use super::power::TURN_ON_FAILED;
 use super::state::{LidSupport, Want};
 use crazyagent_mac_power::client::{self, CallError};
-use crazyagent_mac_power::protocol::{FloorView, PinView, Refusal, Reply, Request, View};
+use crazyagent_mac_power::protocol::{
+    FloorView, LidDisplay, PinView, Refusal, Reply, Request, View,
+};
 use crazyagent_mac_power::service::{Daemon, PLIST_NAME, Service, Status};
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -386,7 +388,11 @@ impl LidLine {
     /// no answer counts as the last read. Input: the time. Output: the lid support.
     fn hold(&mut self, now_ms: i64) -> LidSupport {
         let running = self.lease_until_ms.is_some_and(|until| now_ms < until);
-        let support = match self.helper.call(&Request::Hold { lease_s: LEASE_S }) {
+        let request = Request::Hold {
+            lease_s: LEASE_S,
+            lid_display: LidDisplay::LeaveOn,
+        };
+        let support = match self.helper.call(&request) {
             Ok(Reply::Held { lease_left_s }) if lease_left_s > 0 => {
                 let left_ms = i64::from(lease_left_s.min(LEASE_S)) * 1000;
                 self.lease_until_ms = Some(now_ms + left_ms);
@@ -505,6 +511,7 @@ impl LidLine {
         let ask = LidAsk {
             rule_on: true,
             wanted: false,
+            sleep_display: false,
         };
         let refused = self.platform.refusal();
         let support = self.step(ask, now_ms);
