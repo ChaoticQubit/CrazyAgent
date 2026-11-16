@@ -254,6 +254,27 @@ pub fn cancel(root: &Path, name: &str) -> SignInState {
         .map_or(SignInState::Idle, stopped)
 }
 
+/// Saves the owner's own OAuth app for a connector that allows one, which then signs in
+/// with that app alone; a waiting sign-in is cancelled, since it began with another client.
+/// Inputs: the engine database and root, the connector, the client id and the client
+/// secret of a confidential app. Output: Ok, or the refusal.
+pub fn save_own_app(
+    _db: &Connection,
+    _root: &Path,
+    _name: &str,
+    _client_id: &str,
+    _secret: Option<&[u8]>,
+) -> Result<(), EngineError> {
+    Err(EngineError("own_app_not_built".into()))
+}
+
+/// Removes the owner's own OAuth app for a connector, which then signs in the automatic
+/// way; a waiting sign-in is cancelled. Inputs: the engine database and root and the
+/// connector. Output: Ok, or the refusal.
+pub fn clear_own_app(_db: &Connection, _root: &Path, _name: &str) -> Result<(), EngineError> {
+    Err(EngineError("own_app_not_built".into()))
+}
+
 #[cfg(test)]
 #[path = "sign_in_tests.rs"]
 mod tests;

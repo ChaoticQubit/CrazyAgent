@@ -24,6 +24,21 @@ key:
   scheme: Bearer
 ";
 
+const BOARD_OAUTH: &str = "schema: 1
+kind: connector
+name: board
+title: Board
+version: 1
+mcp:
+  url: https://mcp.board.example/mcp
+  hosts: [mcp.board.example]
+oauth:
+  hosts: [auth.board.example]
+  registration: [own, dcr]
+  scopes_read: [read]
+  scopes_write: [write]
+";
+
 const NEAR: &str = "schema: 1
 kind: embedding
 name: near
@@ -764,4 +779,100 @@ fn the_owner_starts_reads_and_cancels_a_sign_in_through_the_protocol() {
     ] {
         assert!(oauth.contains(&code), "{code}");
     }
+}
+
+/// The key saved under `name` in the engine's plugin key store, as text.
+fn plugin_key(root: &Path, name: &str) -> Option<String> {
+    let reference = crate::protocol::CredentialRef::new(name.to_owned()).unwrap();
+    let keys = crate::storage::accounts::PLUGIN_KEYS;
+    let read = crate::storage::accounts::read_key_in(root, keys, &reference).unwrap();
+    read.map(|key| key.expose().to_owned())
+}
+
+/// Sends a `set_own_app` for `board`, with the client secret as the frame after it when
+/// given. Inputs: the root, the client id and the secret. Output: the reply or refusal.
+fn own_app(root: &Path, id: &str, secret: Option<&[u8]>) -> Result<Reply, EngineError> {
+    send(
+        root,
+        json!({
+            "connectors": {"kind": "set_own_app", "name": "board", "client_id": id},
+            "secret_present": secret.is_some()
+        }),
+        secret,
+    )
+}
+
+/// A sign-in of `board` waiting for the browser, started with stand-in steps. Input: the
+/// root.
+fn waiting_sign_in(root: &Path) {
+    let pending = crate::connectors::oauth::Pending {
+        authorize_url: url::Url::parse("https://auth.board.example/authorize").unwrap(),
+        state: "state-0123456789abcdef".to_owned(),
+    };
+    let begin = move |_: &url::Url| Ok(pending);
+    let finish = |_: &str, _: &str, _: Option<&str>| Ok(());
+    let limit = std::time::Duration::from_secs(30);
+    sign_in::start_with(root, "board", limit, begin, finish).unwrap();
+    assert_eq!(sign_in::state_of(root, "board"), SignInState::Waiting);
+}
+
+/// DEC-168 addendum 30 decision 4 and its update 23:19: the owner saves an own OAuth app for
+/// a connector that allows one, with or without a client secret sent in the frame after the
+/// request, and removes it; no reply carries the secret, and a save or a remove cancels a
+/// waiting sign-in, which began with another client. A connector that allows no own app
+/// refuses one, and the client id and the second frame are bounded.
+#[test]
+fn the_owner_saves_and_removes_an_own_oauth_app_through_the_protocol() {
+    let (_tmp, root) = engine();
+    let sha256 = sha(BOARD_OAUTH);
+    ask(
+        &root,
+        json!({"kind": "add", "yaml": BOARD_OAUTH, "sha256": sha256, "replace": false}),
+    );
+    let id = "connector-client-board-own";
+    let secret = "connector-secret-board-own";
+    let issuer = "connector-issuer-board-own";
+    let saved = page(own_app(&root, "app-0001", Some(b"cs-secret-0001")).unwrap());
+    let shown = serde_json::to_string(&saved).unwrap();
+    assert!(!shown.contains("cs-secret-0001"), "{shown}");
+    assert_eq!(plugin_key(&root, id).as_deref(), Some("app-0001"));
+    assert_eq!(plugin_key(&root, secret).as_deref(), Some("cs-secret-0001"));
+
+    waiting_sign_in(&root);
+    page(own_app(&root, "app-0002", None).unwrap());
+    assert_eq!(plugin_key(&root, id).as_deref(), Some("app-0002"));
+    assert_eq!(plugin_key(&root, secret), None);
+    assert_eq!(sign_in::state_of(&root, "board"), SignInState::Cancelled);
+
+    waiting_sign_in(&root);
+    ask(&root, json!({"kind": "clear_own_app", "name": "board"}));
+    assert_eq!(sign_in::state_of(&root, "board"), SignInState::Cancelled);
+    for key in [id, secret, issuer] {
+        assert_eq!(plugin_key(&root, key), None, "{key}");
+    }
+
+    let spaced = own_app(&root, "app 0003", None).unwrap_err().0;
+    assert_eq!(spaced, "connector_oauth_client_invalid");
+    let ghost = json!({"kind": "clear_own_app", "name": "ghost"});
+    assert_eq!(refused(&root, ghost), "app_plugin_not_found");
+    let (_plain_tmp, plain) = engine();
+    let sha256 = sha(BOARD);
+    ask(
+        &plain,
+        json!({"kind": "add", "yaml": BOARD, "sha256": sha256, "replace": false}),
+    );
+    let offered = own_app(&plain, "app-0004", None).unwrap_err().0;
+    assert_eq!(offered, "connector_oauth_not_offered");
+
+    for client_id in [String::new(), "i".repeat(CLIENT_ID_BYTES_MAX + 1)] {
+        let action = json!({"kind": "set_own_app", "name": "board", "client_id": client_id});
+        let bytes = serde_json::to_vec(&request(action)).unwrap();
+        assert_eq!(parse(&bytes).unwrap_err().0, "connector_request_invalid");
+    }
+    let framed = json!({
+        "connectors": {"kind": "clear_own_app", "name": "board"},
+        "secret_present": true
+    });
+    let bytes = serde_json::to_vec(&framed).unwrap();
+    assert_eq!(parse(&bytes).unwrap_err().0, "connector_request_invalid");
 }
