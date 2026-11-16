@@ -106,7 +106,7 @@ fn turn_instruction_text(
     Ok(instruction_file_text(instructions, given))
 }
 
-fn cleanup_uncertain(error: &EngineError) -> bool {
+pub(super) fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
         || error.0.split(';').any(|part| {
             matches!(

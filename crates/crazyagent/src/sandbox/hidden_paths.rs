@@ -832,8 +832,8 @@ mod tests {
         assert!(runs_seeing(project, &saved).is_empty(), "a return");
 
         let refused = || -> Result<(), &'static str> {
-            let _run = starting(RunKind::Lockfiles, project).ok_or("full")?;
-            _run.hid(&[]);
+            let run = starting(RunKind::Lockfiles, project).ok_or("full")?;
+            run.hid(&[]);
             assert_eq!(runs_seeing(project, &saved), vec![RunKind::Lockfiles]);
             Err("sandbox_refused")?;
             Ok(())
