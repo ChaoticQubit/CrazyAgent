@@ -100,7 +100,7 @@ fn main_window<R: Runtime>(webview: &Webview<R>) -> Result<(), BridgeError> {
 /// Admits the main window and the terminal wall windows to the terminal, graph, stop and
 /// Terminals per window commands; any other window gets `window_denied`. Takes the calling
 /// page. Returns unit or the refusal.
-fn terminal_window(webview: &Webview) -> Result<(), BridgeError> {
+fn terminal_window<R: Runtime>(webview: &Webview<R>) -> Result<(), BridgeError> {
     if !bridge::terminal::window_label_valid(webview.label()) {
         return Err(engine_failure("window_denied"));
     }
@@ -111,7 +111,7 @@ fn terminal_window(webview: &Webview) -> Result<(), BridgeError> {
 /// terminal wall window only for the project its label was made for; any other window or
 /// project gets `window_denied`. Takes the calling page and the project id. Returns unit or
 /// the refusal.
-fn terminal_window_for(webview: &Webview, id: &str) -> Result<(), BridgeError> {
+fn terminal_window_for<R: Runtime>(webview: &Webview<R>, id: &str) -> Result<(), BridgeError> {
     terminal_window(webview)?;
     let label = webview.label();
     let admitted = label == "main"
@@ -2036,9 +2036,9 @@ fn desktop_focus_terminal_window(
 /// Inputs: the calling window, the app and the project id. Output: unit, `window_denied`
 /// from any other window or a wall window of another project, or `invalid_project`.
 #[tauri::command]
-fn desktop_close_project_walls(
-    webview: Webview,
-    app: AppHandle,
+fn desktop_close_project_walls<R: Runtime>(
+    webview: Webview<R>,
+    app: AppHandle<R>,
     id: String,
 ) -> Result<(), BridgeError> {
     terminal_window_for(&webview, &id)?;
@@ -2049,14 +2049,19 @@ fn desktop_close_project_walls(
 }
 
 /// Closes the terminal wall windows: every one, or only one project's. Inputs: the app and
-/// the project, if any. Output: none; a window that refuses to close stays open.
-fn close_walls(app: &AppHandle, project: Option<&ProjectId>) {
+/// the project, if any. Output: the labels of the walls asked to close and accepting it; a
+/// window that refuses to close stays open and is not listed.
+fn close_walls<R: Runtime>(app: &AppHandle<R>, project: Option<&ProjectId>) -> Vec<String> {
     let open = app.webview_windows();
+    let mut closed = Vec::new();
     for label in bridge::terminal::walls_to_close(open.keys().map(String::as_str), project) {
-        if let Some(wall) = open.get(label) {
-            let _ = wall.close();
+        if let Some(wall) = open.get(label)
+            && wall.close().is_ok()
+        {
+            closed.push(label.to_owned());
         }
     }
+    closed
 }
 
 /// Whether a webview may load a URL: the app's own pages only, and the dev server in a
