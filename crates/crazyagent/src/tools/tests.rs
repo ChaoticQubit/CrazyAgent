@@ -588,13 +588,26 @@ fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
 /// rv-sec2 B11 r2 F2: a first line whose interpreter is a system launcher that looks the
 /// program it is given up by name in the child's PATH, such as nice, arch or nohup, starts a
 /// copy the resolver never judged, so it is refused as [`Refusal::FirstLine`]: the launcher
-/// named by path, through a link of another name, or asked of `env` by name.
+/// named by path, through a link of another name, or asked of `env` by name. A multi-call
+/// binary picks its tool by the name the line runs it as (rv-code4 B18 F1), so a `nice` link
+/// to a single-binary coreutils, as nix lays it out, is refused by that name, and a link of
+/// another name to it by the real file's.
 #[test]
 fn a_first_line_whose_interpreter_looks_its_program_up_by_name_is_refused() {
     let (_folder, home) = scratch();
     program(&home.join(".local/bin/node"), NODE);
     std::os::unix::fs::symlink("/usr/bin/nice", home.join(".local/bin/nice")).unwrap();
     std::os::unix::fs::symlink("/usr/bin/nohup", home.join(".local/bin/n")).unwrap();
+    let multi = home.join("nix/bin");
+    std::fs::create_dir_all(&multi).unwrap();
+    std::fs::copy("/bin/echo", multi.join("coreutils")).unwrap();
+    std::fs::set_permissions(
+        multi.join("coreutils"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("coreutils", multi.join("nice")).unwrap();
+    std::os::unix::fs::symlink("coreutils", multi.join("stamp")).unwrap();
     let places = home_only(&home);
     let lines: Vec<(&str, String)> = vec![
         ("nice", "#!/usr/bin/nice node\n".to_owned()),
@@ -605,6 +618,14 @@ fn a_first_line_whose_interpreter_looks_its_program_up_by_name_is_refused() {
             format!("#!{}/n node\n", home.join(".local/bin").display()),
         ),
         ("env-nice", "#!/usr/bin/env nice node\n".to_owned()),
+        (
+            "multi-call-nice",
+            format!("#!{}/nice node\n", multi.display()),
+        ),
+        (
+            "multi-call-other",
+            format!("#!{}/stamp node\n", multi.display()),
+        ),
     ];
     for (name, line) in lines {
         let script = script(&home, name, line.as_bytes(), 0o755);
