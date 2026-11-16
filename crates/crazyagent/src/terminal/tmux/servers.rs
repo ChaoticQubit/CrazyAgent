@@ -951,5 +951,9 @@ impl Host for Servers {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-#[path = "servers/mates_tests.rs"]
-mod mates_tests;
+#[path = "servers/tests.rs"]
+mod tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "servers/refused_tests.rs"]
+mod refused_tests;

@@ -1,10 +1,9 @@
 use super::*;
 
-/// A host on a fresh engine root, as an engine that started no server holds, with a lead
-/// whose start named its teammates' socket and that socket's folder made. Output: the root
-/// folder, which removes the engine's files once dropped, the host, the lead and the socket.
-fn lead_with_teammates_socket() -> (tempfile::TempDir, Servers, AgentId, PathBuf) {
-    use std::os::unix::fs::DirBuilderExt;
+/// A host on a fresh engine root, as an engine that started no server holds, and lead 7.
+/// Output: the root folder, which removes the engine's files once dropped, the host and the
+/// lead.
+fn fresh_host() -> (tempfile::TempDir, Servers, AgentId) {
     let root = tempfile::tempdir().unwrap();
     let base = root.path().canonicalize().unwrap();
     let program = PathBuf::from("/usr/bin/false");
@@ -18,24 +17,53 @@ fn lead_with_teammates_socket() -> (tempfile::TempDir, Servers, AgentId, PathBuf
         host.root, base,
         "the host keeps the root the row names sockets by"
     );
-    let lead = AgentId::team(7).unwrap();
-    let record = crate::team::runtime::agent_teammates_socket_name(&base.join("team"), 7);
+    (root, host, AgentId::team(7).unwrap())
+}
+
+/// Makes a private folder and any folder above it. Takes the folder.
+fn private_folder(folder: &Path) {
+    use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(record.parent().unwrap())
+        .create(folder)
         .unwrap();
-    let socket = crate::terminal::renew_teammates_socket(&base, &lead).unwrap();
+}
+
+/// A lead on a fresh host whose start named its teammates' socket, with that socket's folder
+/// made. Output: the root folder, the host, the lead and the socket.
+fn lead_with_teammates_socket() -> (tempfile::TempDir, Servers, AgentId, PathBuf) {
+    let (root, host, lead) = fresh_host();
+    let record = crate::team::runtime::agent_teammates_socket_name(&host.root.join("team"), 7);
+    private_folder(record.parent().unwrap());
+    let socket = crate::terminal::renew_teammates_socket(&host.root, &lead).unwrap();
     assert_eq!(
         teammates_socket(&host.root, &lead),
         Ok(socket.clone()),
         "the host reads the teammates' socket the lead's start named"
     );
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(socket.parent().unwrap())
+    private_folder(socket.parent().unwrap());
+    (root, host, lead, socket)
+}
+
+/// A lead on a fresh host with its profile installed and its agent folder made, so the host
+/// opens its own server and lists it while its own socket is a socket file, with that
+/// socket's folder made. Output: the root folder, the host, the lead and its own socket.
+fn lead_with_own_socket() -> (tempfile::TempDir, Servers, AgentId, PathBuf) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let (root, host, lead) = fresh_host();
+    let team = host.root.join("team");
+    let profile = crate::team::runtime::agent_profile(&team, 7);
+    private_folder(profile.parent().unwrap());
+    private_folder(&crate::team::runtime::agent_home(&team, 7));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&profile)
         .unwrap();
+    let socket = harness_socket(&host.root, &lead).unwrap();
+    private_folder(socket.parent().unwrap());
     (root, host, lead, socket)
 }
 
@@ -178,6 +206,101 @@ fn an_earlier_engines_lead_whose_teammates_server_ended_is_killed_as_unknown() {
             .join(super::super::SOCKET)
             .exists(),
         "the kill started the engine's server"
+    );
+    std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+}
+
+/// v242 (gb67 flag 23:05): a listing of the live agents that finds a lead's own socket
+/// refused unlinks it, and on macOS a live server whose accept queue is full refuses too
+/// while a lead can stop the server it runs under, so a gone socket proves no end either.
+/// While this engine holds the keeper of that server and it has not exited cleanly, the
+/// lead's own server is `terminal_own_server_unavailable`, so a call on the lead fails
+/// rather than finding it gone; once the keeper ended cleanly, or with no keeper held, a
+/// gone socket is no own server. No case starts a server.
+#[test]
+fn an_unlinked_own_socket_is_no_server_only_once_its_held_keeper_ended_cleanly() {
+    let (_root, host, lead, socket) = lead_with_own_socket();
+    let found = || host.own(&lead).map(|server| server.is_some());
+    let unavailable = || failure(OWN_SERVER_UNAVAILABLE);
+
+    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    assert_eq!(
+        host.leads_listening(),
+        vec![lead.clone()],
+        "the host does not list the lead"
+    );
+    assert_eq!(
+        found(),
+        Ok(true),
+        "a listening own socket is not the lead's own server"
+    );
+    drop(listener);
+    host.keepers
+        .lock()
+        .unwrap()
+        .insert(lead.clone(), running_keeper());
+    assert_eq!(
+        found(),
+        Ok(true),
+        "a refused own socket whose keeper still runs was taken as no server"
+    );
+    assert_eq!(
+        host.alive().map(|alive| alive.contains(&lead)),
+        Ok(false),
+        "a refused own server was listed as running its lead"
+    );
+    assert!(
+        !socket_file(&socket),
+        "the listing kept the refused own socket, so the row reaches no unlinked one"
+    );
+    assert_eq!(
+        found(),
+        Err(unavailable()),
+        "an unlinked own socket whose keeper still runs was taken as no server"
+    );
+    assert_eq!(
+        host.pane_pid(&lead),
+        Err(unavailable()),
+        "the lead of an unlinked own socket whose keeper still runs was found gone"
+    );
+
+    let mut keeper = host.keepers.lock().unwrap().remove(&lead).unwrap();
+    keeper.kill().unwrap();
+    assert!(!keeper.wait().unwrap().success());
+    host.keepers.lock().unwrap().insert(lead.clone(), keeper);
+    assert_eq!(
+        found(),
+        Err(unavailable()),
+        "an unlinked own socket whose keeper exited without confirming the end was taken as no server"
+    );
+
+    let mut keeper = crate::spawn_gate::spawn(
+        std::process::Command::new("/usr/bin/true")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(keeper.wait().unwrap().success());
+    host.keepers.lock().unwrap().insert(lead.clone(), keeper);
+    assert_eq!(
+        host.pane_pid(&lead),
+        Err(failure("terminal_agent_unknown")),
+        "the lead of an unlinked own socket whose keeper ended cleanly was not found gone"
+    );
+    host.keepers.lock().unwrap().remove(&lead);
+    assert_eq!(
+        found(),
+        Ok(false),
+        "an unlinked own socket this engine holds no keeper for was kept"
+    );
+    assert!(
+        !host
+            .root
+            .join(crate::terminal::FOLDER)
+            .join(super::super::SOCKET)
+            .exists(),
+        "a call started the engine's server"
     );
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
