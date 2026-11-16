@@ -5379,3 +5379,20 @@ fn a_listed_harness_kind_says_what_its_delivery_choices_do() {
     );
     assert!(!said.contains('\u{2014}'), "{said}");
 }
+
+/// Task 21 (DEC-141): a harness kind with no native sub-agents and no reason of its own reads
+/// the engine's general reason, the desktop's words too: in a refusal of Native and for a kind
+/// this build runs natively whose engine row has none.
+#[test]
+fn a_kind_without_native_sub_agents_reads_the_engines_general_reason() {
+    assert_eq!(
+        team_plain("coord_native_unsupported"),
+        crate::coord::settings::LISTED_NATIVE_UNAVAILABLE
+    );
+    for kind in [HarnessKind::ClaudeCode, HarnessKind::Codex] {
+        assert_eq!(
+            native_unavailable(kind),
+            crate::coord::settings::LISTED_NATIVE_UNAVAILABLE
+        );
+    }
+}

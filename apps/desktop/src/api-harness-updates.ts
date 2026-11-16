@@ -6,7 +6,7 @@ export interface LastUpdate { ok: boolean; code: string | null; output: string; 
 /** What an installed harness lacks before it can run, as the engine's tool resolver reads it: the
  * program its first line asks for, such as node, and the resolver's one owner line. */
 export interface HarnessNeeds { program: string | null; line: string }
-export interface HarnessVersions { id: string; method: UpdateMethod; installed: string | null; latest: LatestVersion; command: string | null; install: string | null; refusal: string | null; guide: string | null; running: boolean; last: LastUpdate | null; needs?: HarnessNeeds | null; sign_in_min?: string | null }
+export interface HarnessVersions { id: string; method: UpdateMethod; installed: string | null; latest: LatestVersion; command: string | null; install: string | null; refusal: string | null; guide: string | null; running: boolean; last: LastUpdate | null; needs?: HarnessNeeds | null; sign_in_min?: string | null; run_min?: string | null }
 export type UpdateMode = "check_and_update" | "check_only" | "off";
 export type CheckWhen = "on_button" | "on_open";
 export type OnlineLookup = "on" | "off";
@@ -129,6 +129,32 @@ export function versionLine(versions: HarnessVersions): string {
   if (latest.kind === "no_check") return `${installed} This install updates itself. Update asks it to look now.`;
   if (latest.kind === "failed") return `${installed} ${COPY.harness_update_lookup_failed}`;
   return installed;
+}
+
+export const PLAIN_VERSION = /^\d+(\.\d+){1,5}$/;
+
+/** Tells whether an installed version reads lower than a minimum, number by number with a
+ * missing number counting as zero; a version that is not two to six numbers is unknown, so never
+ * below. Inputs: the installed version and the minimum. Output: the answer. */
+export function versionBelow(installed: string, minimum: string): boolean {
+  if (!PLAIN_VERSION.test(installed) || !PLAIN_VERSION.test(minimum)) return false;
+  const one = installed.split(".").map(Number);
+  const other = minimum.split(".").map(Number);
+  for (let index = 0; index < Math.max(one.length, other.length); index += 1) {
+    const [mine, theirs] = [one[index] ?? 0, other[index] ?? 0];
+    if (mine !== theirs) return mine < theirs;
+  }
+  return false;
+}
+
+/** The line beside Update for a harness older than the oldest version CrazyAgent drives
+ * (DEC-166, Task 21), the engine's words that the TUI shows. Inputs: the harness name and its
+ * versions. Output: the line, or null without a plain floor or an installed version known to be
+ * below it. */
+export function needsNewerLine(harness: string, versions: HarnessVersions): string | null {
+  const [minimum, installed] = [versions.run_min, versions.installed];
+  if (!minimum || !installed || !versionBelow(installed, minimum)) return null;
+  return `${harness} ${installed} is too old for CrazyAgent; it needs ${minimum} or newer.`;
 }
 
 /** The line a job would run for a harness. Inputs: the versions and the job. Output: the line,

@@ -14,8 +14,8 @@ pub const READ_BYTES_MAX: usize = 1024 * 1024;
 /// The code of a record path that is a link, a folder or anything but a plain file.
 pub const UNSAFE: &str = "record_history_unsafe";
 
-const SESSION_HEADER: &str = "# aider chat started at";
-const USER_HEADING: &str = "####";
+pub(super) const SESSION_HEADER: &str = "# aider chat started at";
+pub(super) const USER_HEADING: &str = "####";
 
 /// Where the current turn stands: none open, a prompt with no reply yet, or reply text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

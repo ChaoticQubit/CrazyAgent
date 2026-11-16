@@ -132,6 +132,10 @@ export const NATIVE_UNAVAILABLE: Record<CoordHarness, string | null> = {
   rcli: "RCLI runs without tools, so it has no native sub-agents yet; its sub-agents are CrazyAgent workers.",
 };
 
+/** Why a harness kind has no native sub-agents when it has no reason of its own, in the engine's
+ * words (Task 21), the ones the TUI and a refusal of Native show. */
+export const LISTED_NATIVE_UNAVAILABLE = "This harness has no native sub-agents, so its sub-agents are CrazyAgent workers.";
+
 /** What the app cannot show of Codex's own sub-agents, in the engine's words (PA-7 r1): they show
  * only in the lead's terminal, the graph, counts and Stop act on the lead, and No limit is 15. */
 export const CODEX_NATIVE_SCOPE = "Codex sub-agents show only in the lead's terminal, where Codex lists each one: the app's graph, counts and Stop act on the lead, their team tool calls count as the lead's, and Codex holds them to Max teammates at once, 15 under No limit because Codex needs a number.";
@@ -146,17 +150,16 @@ const NATIVE_HELPERS: Record<CoordHarness, string> = {
 
 /** The Sub-agent mode choices in the mockup's words, native first for every harness kind; a kind
  * without native sub-agents lists it unavailable with its reason, so nothing is hidden per harness.
- * Inputs: the harness kind, whether it has them and how the catalog names it. Output: the options. */
-export function modeOptions(harness: CoordHarness, native: boolean, name: HarnessName): SelectOption[] {
-  const reason = native ? undefined : NATIVE_UNAVAILABLE[harness] ?? `${name(harness)} has no native sub-agents, so its sub-agents are CrazyAgent workers.`;
+ * Inputs: the harness kind and whether it has them. Output: the options. */
+export function modeOptions(harness: CoordHarness, native: boolean): SelectOption[] {
+  const reason = native ? undefined : NATIVE_UNAVAILABLE[harness] ?? LISTED_NATIVE_UNAVAILABLE;
   return [{ value: "native", label: NATIVE_LABELS[harness], ...(reason ? { disabledReason: reason } : {}) }, { value: "app_spawned", label: "CrazyAgent workers" }];
 }
 
 /** The helper line under a harness kind's Sub-agent mode: what native sub-agents are on it, or why
- * it has none. Inputs: the harness kind, whether it has them and how the catalog names it.
- * Output: the line. */
-export function modeHelper(harness: CoordHarness, native: boolean, name: HarnessName): string {
-  const reason = modeOptions(harness, native, name)[0].disabledReason;
+ * it has none. Inputs: the harness kind and whether it has them. Output: the line. */
+export function modeHelper(harness: CoordHarness, native: boolean): string {
+  const reason = modeOptions(harness, native)[0].disabledReason;
   return reason ?? NATIVE_HELPERS[harness];
 }
 
@@ -391,9 +394,9 @@ function SubAgentModeSetting({ projectId, row, status, reload, name }: { project
   const label = `${name(row.harness)} sub-agents`;
   if (unavailable) return <UnavailableRow label={label} reason={unavailable} />;
   return <SettingRow label={label}>
-    <Select id={`tg-mode-${row.harness}-${projectId}`} label={label} value={mode} options={modeOptions(row.harness, row.native, name)}
+    <Select id={`tg-mode-${row.harness}-${projectId}`} label={label} value={mode} options={modeOptions(row.harness, row.native)}
       onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void change(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode", () => hold(value as SubagentMode)); }}
-      helper={modeHelper(row.harness, row.native, name)} />
+      helper={modeHelper(row.harness, row.native)} />
     <ChangeNote note={note} />
   </SettingRow>;
 }

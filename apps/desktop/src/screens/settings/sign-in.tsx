@@ -6,7 +6,7 @@ import {
   signInMethodFor, signInWay, signInWayUnavailable, validateClaudeAuthCode,
   type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView, type SignInWay,
 } from "../../native-auth";
-import { harnessVersions, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, updateHarness, type HarnessVersions, type UpdateMode } from "../../api-harness-updates";
+import { harnessVersions, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, updateHarness, versionBelow, PLAIN_VERSION, type HarnessVersions, type UpdateMode } from "../../api-harness-updates";
 import { useAppSession } from "../../state";
 import { Button, Icon, Notice, SecretField } from "../../ui";
 import { HarnessFile, lastLine, refusalLine, UpdateConfirm } from "./harnesses";
@@ -67,22 +67,6 @@ const SIGN_IN_TEXT: Record<string, string> = {
   native_profile_identity_changed: "This account's sign-in folder no longer matches what CrazyAgent recorded, so CrazyAgent stopped. Delete the account, then add it again.",
 };
 export const POLL_MS = 2000;
-
-const PLAIN_VERSION = /^\d+(\.\d+){1,5}$/;
-
-/** Tells whether an installed version reads lower than a minimum, number by number with a
- * missing number counting as zero; a version that is not two to six numbers is unknown, so never
- * below. Inputs: the installed version and the minimum. Output: the answer. */
-export function versionBelow(installed: string, minimum: string): boolean {
-  if (!PLAIN_VERSION.test(installed) || !PLAIN_VERSION.test(minimum)) return false;
-  const one = installed.split(".").map(Number);
-  const other = minimum.split(".").map(Number);
-  for (let index = 0; index < Math.max(one.length, other.length); index += 1) {
-    const [mine, theirs] = [one[index] ?? 0, other[index] ?? 0];
-    if (mine !== theirs) return mine < theirs;
-  }
-  return false;
-}
 
 /** The line for a sign-in refused because the harness is older than its sign-in minimum
  * (DEC-166): its version and the minimum when known, else how to fix it. Inputs: the harness
