@@ -59,6 +59,7 @@ const view = (state = {}, extra = {}) => ({
   lid_platform: extra.lid_platform ?? { kind: "helper_missing" },
   platform: extra.platform ?? "mac_os",
   work: extra.work ?? 0,
+  version: extra.version ?? 0,
 });
 const working = (count, extra = {}) => view({ want: HELD, reason: "work" }, { work: count, ...extra });
 const timer = (left, extra = {}) => view({ want: HELD, reason: "timer", ends_at_ms: NOW + left }, extra);
@@ -522,8 +523,77 @@ test("a Settings save keeps what changed elsewhere while the page was open", () 
   assert.match(SETTINGS_PAGE, /window\.addEventListener\(KEEP_AWAKE_CHANGED, /, "the page reads again after a change made in the panel");
   assert.match(SETTINGS_PAGE, /window\.removeEventListener\(KEEP_AWAKE_CHANGED, /);
   assert.doesNotMatch(SETTINGS_PAGE, /\[view\]\)/, "a read never drops the picks");
-  assert.match(SETTINGS_PAGE, /const fresh = await loadKeepAwake\(\);/, "a save reads the engine's settings first");
-  assert.match(SETTINGS_PAGE, /savedKeepAwake\(fresh\.value\.settings, picks\)/, "and sends the picks over those");
+  assert.match(SETTINGS_PAGE, /saveKeepAwake\(\(stored\) => savedKeepAwake\(stored, picks\)\)/, "a save lays the picks over the engine's settings at that moment");
+  assert.doesNotMatch(SETTINGS_PAGE, /sendKeepAwake\(\{ set:/, "and never sends settings of an older read");
+});
+
+test("the panel's mode pick lays only the mode over the engine's settings at that moment", () => {
+  assert.match(PANEL_PAGE, /saveKeepAwake\(\(stored\) => \(\{ \.\.\.stored, mode: picked \}\)\)/);
+  assert.doesNotMatch(PANEL_PAGE, /\.\.\.view\.value\.settings/, "never the settings the panel read up to 5 s ago");
+});
+
+const APPLIED = { outcome: "applied", pending: false, rejection: null };
+const BEATEN = { outcome: "rejected", pending: false, rejection: "stale_revision" };
+const keepAwakeBridge = (views, receipts) => {
+  const seen = [];
+  const before = globalThis.window;
+  globalThis.window = { dispatchEvent: () => true, __TAURI_INTERNALS__: { async invoke(command, args) {
+    seen.push({ command, action: args?.action });
+    if (command === "desktop_keep_awake_read") return views.shift();
+    assert.equal(command, "desktop_keep_awake_act");
+    return receipts.shift();
+  } } };
+  return { seen, restore: () => { globalThis.window = before; } };
+};
+
+test("a save another window beat reads again and lays the same picks over the newer settings", async () => {
+  const first = view({}, { settings: { grace: "min5" }, version: 4 });
+  first.settings.low_power = "off";
+  const newer = view({}, { settings: { grace: "min5", lid: "always" }, version: 5 });
+  newer.settings.low_power = "off";
+  const fake = keepAwakeBridge([first, newer], [BEATEN, APPLIED]);
+  try {
+    const result = await api.saveKeepAwake((stored) => settings.savedKeepAwake(stored, { cap: "h4" }));
+    assert.deepEqual(result, { kind: "ok", value: undefined });
+    assert.deepEqual(fake.seen.map(({ command }) => command), ["desktop_keep_awake_read", "desktop_keep_awake_act", "desktop_keep_awake_read", "desktop_keep_awake_act"]);
+    const [, beaten, , landed] = fake.seen;
+    assert.equal(beaten.action.set.version, 4);
+    assert.equal(landed.action.set.version, 5, "the version of the newer read");
+    assert.deepEqual(landed.action.set.settings, { ...newer.settings, cap: "h4" }, "the other window's change is kept and the pick lands");
+    assert.equal(landed.action.set.settings.low_power, "off", "a setting this window does not list stays as read");
+  } finally {
+    fake.restore();
+  }
+});
+
+test("a save beaten every time stops after three with the engine's sentence, and no other refusal is tried again", async () => {
+  const read = () => view({}, { version: 7 });
+  const beaten = keepAwakeBridge([read(), read(), read(), read()], [BEATEN, BEATEN, BEATEN, BEATEN]);
+  try {
+    const result = await api.saveKeepAwake((stored) => stored);
+    assert.equal(api.SAVE_ATTEMPTS, 3);
+    assert.equal(beaten.seen.filter(({ command }) => command === "desktop_keep_awake_act").length, 3);
+    assert.deepEqual(result, { kind: "error", code: "stale_revision", message: api.KEEP_AWAKE_STALE });
+    assert.ok(ENGINE.includes(`"${api.KEEP_AWAKE_STALE}"`), "the engine has the same words");
+  } finally {
+    beaten.restore();
+  }
+  const off = keepAwakeBridge([read(), read()], [{ outcome: "rejected", pending: false, rejection: "keep_awake_off" }, APPLIED]);
+  try {
+    const result = await api.saveKeepAwake((stored) => stored);
+    assert.equal(result.code, "keep_awake_off");
+    assert.equal(off.seen.length, 2, "one read, one change");
+  } finally {
+    off.restore();
+  }
+  const unsure = keepAwakeBridge([read(), read()], [{ outcome: "applied", pending: true, rejection: null }, APPLIED]);
+  try {
+    const result = await api.saveKeepAwake((stored) => stored);
+    assert.equal(result.code, "uncertain");
+    assert.equal(unsure.seen.length, 2, "a save that may have landed is never sent again");
+  } finally {
+    unsure.restore();
+  }
 });
 
 test("Settings shows the reason on a setting this computer cannot honour and keeps it editable", () => {
@@ -556,7 +626,7 @@ test("the window reads and changes Keep awake through two commands the app regis
   const sent = (action) => api.keepAwakeArgs(action, 7);
   assert.deepEqual(sent({ start: { minutes: 60 } }), { action: { start: { minutes: 60 } }, generation: 7 });
   assert.deepEqual(sent("end"), { action: "end", generation: 7 });
-  assert.deepEqual(sent({ set: { settings: api.KEEP_AWAKE_DEFAULTS } }).action.set.settings, api.KEEP_AWAKE_DEFAULTS);
+  assert.deepEqual(sent({ set: { settings: api.KEEP_AWAKE_DEFAULTS, version: 3 } }).action.set, { settings: api.KEEP_AWAKE_DEFAULTS, version: 3 });
   assert.throws(() => api.keepAwakeArgs({ start: { minutes: 0 } }, 7), /minutes/);
   assert.throws(() => api.keepAwakeArgs({ extend: { minutes: 1441 } }, 7), /minutes/);
   assert.throws(() => api.keepAwakeArgs("end", 0), /generation/);

@@ -86,8 +86,17 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
+/// The save a client sends after reading: the settings over the version it read. Inputs:
+/// the engine connection and the settings. Output: the change.
+fn saved(connection: &Connection, settings: KeepAwakeSettings) -> KeepAwakeAction {
+    KeepAwakeAction::Set {
+        settings,
+        version: view(connection).unwrap().version,
+    }
+}
+
 fn set(connection: &Connection, settings: KeepAwakeSettings) {
-    let outcome = act(connection, KeepAwakeAction::Set { settings }, NOW_MS);
+    let outcome = act(connection, saved(connection, settings), NOW_MS);
     assert_eq!(outcome, Outcome::Applied);
 }
 
@@ -373,12 +382,13 @@ fn a_cap_end_names_the_cap_the_hold_ran_with_after_the_setting_changes() {
         for later in [Cap::H4, Cap::H8, Cap::H24, Cap::None] {
             let outcome = act(
                 &connection,
-                KeepAwakeAction::Set {
-                    settings: KeepAwakeSettings {
+                saved(
+                    &connection,
+                    KeepAwakeSettings {
                         cap: later,
                         ..ran_with
                     },
-                },
+                ),
                 end_ms + SECOND_MS,
             );
             assert_eq!(outcome, Outcome::Applied);
@@ -442,6 +452,10 @@ fn every_refusal_of_an_owner_change_has_plain_words() {
         (
             "keep_awake_no_lid_helper",
             "Lid-closed hold is set up only on macOS.",
+        ),
+        (
+            crate::storage::versioned::STALE_CODE,
+            "Keep awake changed in another window meanwhile. Try again.",
         ),
     ];
     for (code, sentence) in words {
@@ -767,7 +781,7 @@ fn every_setting_option_round_trips_through_the_owner_protocol() {
     assert_eq!(all.len(), 1 + 3 + 4 + 4 + 3 + 4 + 3 + 2 + 2 + 2 + 3);
     for settings in all {
         let mutation = OwnerMutation::KeepAwake {
-            action: KeepAwakeAction::Set { settings },
+            action: saved(&connection, settings),
         };
         let wire = serde_json::to_string(&mutation).unwrap();
         let sent: OwnerMutation = serde_json::from_str(&wire).unwrap();
@@ -1002,6 +1016,91 @@ fn a_failed_step_drops_the_platform_hold_and_the_next_good_step_takes_it_again()
     );
     assert_eq!(*held.lock().unwrap(), Some(IDLE), "the hold is taken again");
     assert_eq!(released(), 2);
+}
+
+#[test]
+fn a_settings_save_from_an_older_read_is_refused_and_keeps_the_newer_save() {
+    let (_folder, connection) = engine();
+    let read = view(&connection).unwrap();
+    assert_eq!(read.version, 0, "settings never saved are version 0");
+    let first = KeepAwakeSettings {
+        grace: Grace::Min30,
+        ..read.settings
+    };
+    let second = KeepAwakeSettings {
+        cap: Cap::H4,
+        ..read.settings
+    };
+    let first_save = KeepAwakeAction::Set {
+        settings: first,
+        version: read.version,
+    };
+    assert_eq!(act(&connection, first_save, NOW_MS), Outcome::Applied);
+    let after_first = view(&connection).unwrap();
+    assert_eq!(after_first.settings, first);
+    assert_eq!(
+        after_first.version,
+        read.version + 1,
+        "one save, one version"
+    );
+
+    let late_save = KeepAwakeAction::Set {
+        settings: second,
+        version: read.version,
+    };
+    assert_eq!(
+        act(&connection, late_save, NOW_MS + SECOND_MS),
+        rejected(crate::storage::versioned::STALE_CODE),
+        "a save built on the read before the first save is refused"
+    );
+    let kept = view(&connection).unwrap();
+    assert_eq!(kept.settings, first, "the newer save is kept");
+    assert_eq!(
+        kept.version, after_first.version,
+        "a refused save bumps nothing"
+    );
+
+    let laid_again = KeepAwakeAction::Set {
+        settings: KeepAwakeSettings {
+            cap: Cap::H4,
+            ..kept.settings
+        },
+        version: kept.version,
+    };
+    assert_eq!(
+        act(&connection, laid_again, NOW_MS + 2 * SECOND_MS),
+        Outcome::Applied
+    );
+    let both = view(&connection).unwrap();
+    assert_eq!(both.settings.grace, Grace::Min30, "the first save survives");
+    assert_eq!(both.settings.cap, Cap::H4, "the pick laid again lands");
+    assert_eq!(both.version, kept.version + 1);
+}
+
+#[test]
+fn a_timer_change_leaves_the_settings_version_and_every_read_shows_it() {
+    let (_folder, connection) = engine();
+    set(
+        &connection,
+        KeepAwakeSettings {
+            mode: Mode::Manual,
+            ..KeepAwakeSettings::DEFAULT
+        },
+    );
+    assert_eq!(view(&connection).unwrap().version, 1);
+    let start = KeepAwakeAction::Start { minutes: 60 };
+    assert_eq!(act(&connection, start, NOW_MS), Outcome::Applied);
+    assert_eq!(
+        act(&connection, KeepAwakeAction::End, NOW_MS),
+        Outcome::Applied
+    );
+    assert_eq!(view(&connection).unwrap().version, 1, "a timer is no save");
+    let evaluated = evaluate(&connection, NOW_MS + SECOND_MS, None).unwrap();
+    assert_eq!(evaluated.version, 1, "an evaluation shows the version too");
+    let OwnerData::KeepAwake { view: owned } = read(&connection).unwrap() else {
+        panic!("the owner read of Keep awake is its view");
+    };
+    assert_eq!(owned.version, 1, "the owner read carries the version");
 }
 
 #[cfg(target_os = "macos")]

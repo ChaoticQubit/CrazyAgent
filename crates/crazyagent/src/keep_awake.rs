@@ -64,15 +64,19 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS keep_awake_state (
 )";
 
 /// One owner change to Keep awake: start a manual timer of 1 to 1440 minutes, move a
-/// running timer later, end the hold now, save the settings, or a macOS lid helper
-/// command: Turn on lid-closed hold, or Remove lid helper (QUESTION 35i, 35j, 36a).
+/// running timer later, end the hold now, save the settings over the settings version the
+/// client read, or a macOS lid helper command: Turn on lid-closed hold, or Remove lid helper
+/// (QUESTION 35i, 35j, 36a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum KeepAwakeAction {
     Start { minutes: u16 },
     Extend { minutes: u16 },
     End,
-    Set { settings: KeepAwakeSettings },
+    Set {
+        settings: KeepAwakeSettings,
+        version: u64,
+    },
     TurnOnLidHold,
     RemoveLidHelper,
 }
@@ -110,11 +114,13 @@ pub fn refusal_words(code: &str) -> Option<&'static str> {
 /// What the owner sees of Keep awake: the settings, the last decision (with the reason the
 /// last hold ended until a new one starts), whether the lid is covered, what the platform
 /// itself says of the lid whatever the rule (QUESTION 36c: Settings offers Turn on and
-/// Remove lid helper from it), the platform and the running work count.
+/// Remove lid helper from it), the platform, the running work count and the settings
+/// version a save sends back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeepAwakeView {
     pub settings: KeepAwakeSettings,
+    pub version: u64,
     pub state: Decision,
     pub lid_support: LidSupport,
     pub lid_platform: LidSupport,
@@ -315,7 +321,9 @@ fn change(
             stored.stood_down = true;
             stored.decision.ended = Some(EndReason::Manual);
         }
-        KeepAwakeAction::Set { settings: chosen } => {
+        KeepAwakeAction::Set {
+            settings: chosen, ..
+        } => {
             if chosen.mode != settings.mode {
                 stored.stood_down = false;
                 stored.decision.ended = None;
@@ -347,6 +355,7 @@ fn change(
 fn view_of(settings: KeepAwakeSettings, stored: &Stored) -> KeepAwakeView {
     KeepAwakeView {
         settings,
+        version: 0,
         state: stored.decision,
         lid_support: lid_status(&settings, &stored.sensors),
         lid_platform: stored.sensors.lid_support.clone(),
