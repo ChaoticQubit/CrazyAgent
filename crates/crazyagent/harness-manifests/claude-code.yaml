@@ -51,3 +51,5 @@ piped:
 terminal:
   record:
     reader: "claude-session"
+import:
+  conversations: ".claude/projects/*/*.jsonl"

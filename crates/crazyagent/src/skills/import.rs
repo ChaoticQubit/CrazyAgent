@@ -14,7 +14,11 @@ pub const LIST_BYTES_MAX: usize = 48 * 1024;
 pub const FOLDER_NAME_BYTES_MAX: usize = 255;
 const ROOT_ENTRIES_MAX: usize = 1024;
 const DIGEST_ENTRIES_MAX: usize = 4096;
-const IMPORT_KEYS: [(&str, &str); 2] = [("skills", "folder"), ("instructions", "file")];
+const IMPORT_KEYS: [(&str, &str); 3] = [
+    ("skills", "folder"),
+    ("instructions", "file"),
+    ("conversations", "pattern"),
+];
 
 /// Where a found skill lives: the owner's Claude Code or Codex skills folder, or the skills
 /// folder a listed harness's manifest names in `import.skills`, with that harness's catalog
@@ -134,10 +138,10 @@ impl<'de> Deserialize<'de> for ImportFrom {
     }
 }
 
-/// Checks a manifest's `import` block: only its two keys, `import.skills` (the skills folder
-/// the skills import reads) and `import.instructions` (the harness's own instruction file),
-/// each a path inside one of the same manifest's `home.owner_folders`, so a manifest never
-/// points an import at another harness's folders or anything else in the owner's home.
+/// Checks a manifest's `import` block: only `import.skills` (the skills folder),
+/// `import.instructions` (the harness's instruction file) and `import.conversations` (the
+/// pattern of its past conversation records), each inside one of the manifest's own
+/// `home.owner_folders`, never another harness's folders or anything else in the home.
 /// Input: a parsed manifest. Output: Ok, or a refusal that names the setting.
 pub fn check(manifest: &Manifest) -> Result<(), Refused> {
     let Some(import) = manifest.block("import") else {
@@ -996,6 +1000,48 @@ mod tests {
             Some((
                 manifest::TYPE,
                 "standin-skills: import.instructions: this must be text in quotes.".to_owned()
+            ))
+        );
+    }
+
+    /// DEC-180 Task 25a on the Task 19 check: `import.conversations` names the pattern of a
+    /// harness's past conversation records inside its own owner folders, with the same
+    /// lexical check as the other import keys.
+    #[test]
+    fn a_manifest_import_block_names_its_conversations_inside_its_own_owner_folders() {
+        use crate::harnesses::manifest;
+        let refused = |import: &str| -> Option<(&'static str, String)> {
+            let text = listed("standin-skills", "Stand-in skills", ".standin", import);
+            Registry::build(&[("standin-skills", text.as_str())])
+                .err()
+                .map(|refused| (refused.code, refused.message))
+        };
+        let pattern = |path: &str| refused(&format!("import:\n  conversations: \"{path}\"\n"));
+        for kept in [
+            ".standin/sessions/*.jsonl",
+            ".standin/sessions/**/rollout-*.jsonl",
+        ] {
+            assert_eq!(pattern(kept), None, "{kept}");
+        }
+        let outside = Some((
+            manifest::VALUE,
+            "standin-skills: import.conversations: this must be inside one of home.owner_folders."
+                .to_owned(),
+        ));
+        for path in [
+            ".other/*.jsonl",
+            "*/sessions/*.jsonl",
+            ".claude/projects/*/*.jsonl",
+        ] {
+            assert_eq!(pattern(path), outside, "{path}");
+        }
+        assert_eq!(
+            pattern("/home/mira/.standin/*.jsonl"),
+            Some((
+                manifest::VALUE,
+                "standin-skills: import.conversations: this must be a pattern under the home \
+                 folder, written without ~, . or .. parts or a leading /."
+                    .to_owned()
             ))
         );
     }

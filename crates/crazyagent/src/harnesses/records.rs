@@ -6,6 +6,7 @@ pub mod json_files;
 pub mod json_rewrite;
 pub mod jsonl_append;
 pub mod markdown_history;
+pub mod past;
 pub mod screen;
 pub mod sqlite_poll;
 
