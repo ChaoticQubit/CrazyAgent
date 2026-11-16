@@ -627,7 +627,7 @@ impl AgentContext {
         let claude = match drivers::piped(harness).ok()? {
             Piped::Codex => false,
             Piped::Claude => true,
-            Piped::Acp | Piped::JsonlTurn | Piped::TextTurn => return None,
+            Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => return None,
         };
         let names = context_mode_names(claude, &self.off_tools);
         let context_mode = !names.is_empty()
@@ -1074,6 +1074,7 @@ impl AgentContext {
                     .ok_or_else(|| failure("launch_harness_unsupported"))?;
                 return self.install_listed(listed.manifest(), home, tools);
             }
+            Piped::JsonlRpc => return Err(failure("launch_harness_unsupported")),
         };
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
