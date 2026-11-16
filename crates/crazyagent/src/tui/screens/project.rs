@@ -2629,6 +2629,11 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
+            KeyCode::Char('h') if !self.hidden_seers().is_empty() => {
+                ProjectReply::TeamChange(Box::new(crate::team::TeamAction::RestartHiddenSeers {
+                    project_id: self.project.clone(),
+                }))
+            }
             KeyCode::Char('k') => {
                 match &self.hidden_paths {
                     Some(saved) => {
@@ -2742,6 +2747,25 @@ impl ProjectScreen {
             .iter()
             .find(|entry| entry.id.as_str() == self.project.as_str())
             .map(|entry| entry.strategy)
+    }
+
+    /// The running agents the team graph names as able to open a folder hidden after they
+    /// started (SA-VID14-A), while the project hides any folder. Takes the screen. Returns
+    /// their labels in graph order, none while nothing is hidden or the graph loads.
+    pub fn hidden_seers(&self) -> Vec<&str> {
+        let hides = self
+            .hidden_paths
+            .as_ref()
+            .is_some_and(|saved| !saved.paths.is_empty());
+        match self.team.ready() {
+            Some(graph) if hides => graph
+                .nodes
+                .iter()
+                .filter(|node| node.sees_hidden)
+                .map(|node| node.label.as_str())
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// The project's account order for its Settings tab: its own strategy, or the one it
@@ -3125,6 +3149,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "context_item_protected" => "The project brief can't be deleted.",
         "read_path_not_absolute" => "Type the full path of each folder, starting with /.",
+        "team_no_hidden_seers" => "No running agent can still open a hidden folder.",
         "agent_access_unavailable" => "That access level can't run agents on this computer.",
         crate::setup::AGENT_GIT_NEEDS_TOOLS => crate::setup::plain_reason(code),
         "agent_policy_invalid" => {

@@ -1005,13 +1005,20 @@ impl ProjectPage {
         )
     }
 
-    /// Reads the team graph for the panel beside the master, while this page is on top on
-    /// the Conversation tab, and once on any tab while no read stands, at the first read and
-    /// each time the page comes back on top off that tab, so the next entry to that tab knows
-    /// Live terminal: at most one read out at a time, at most one every
+    /// Reads the team graph while this page is on top: on the Conversation tab for the panel
+    /// beside the master, on the Settings tab while folders are hidden to name the agents
+    /// that can still open one (SA-VID14-A), and once on any tab while no read stands, so the
+    /// next entry knows Live terminal. At most one read is out, at most one every
     /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
     fn ask_team(&mut self, ctx: &mut Ctx) {
-        let wanted = self.screen.tab == Tab::Conversation || matches!(self.screen.team, Load::Idle);
+        let hides = self.screen.tab == Tab::Settings
+            && self
+                .screen
+                .hidden_paths
+                .as_ref()
+                .is_some_and(|saved| !saved.paths.is_empty());
+        let wanted =
+            self.screen.tab == Tab::Conversation || hides || matches!(self.screen.team, Load::Idle);
         if self.covered || !wanted || ctx.link != Link::Ready {
             return;
         }
