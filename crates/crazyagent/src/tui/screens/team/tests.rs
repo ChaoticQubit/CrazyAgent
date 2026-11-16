@@ -1010,6 +1010,27 @@ fn an_attach_refused_for_a_dead_agent_says_it_stopped() {
     assert!(requests(&mut shell).is_empty());
 }
 
+/// v242 MRR2-2 (rv-code2 r2): an attach refused because the teammates' server a native
+/// lead's team panes were on ended, as once both of that lead's servers ended, reads as the
+/// agent's end, as `terminal_agent_unknown` does, not as a terminal that only closed.
+#[test]
+fn an_attach_refused_as_its_teammates_server_ended_says_it_stopped() {
+    let mut shell = team();
+    shell.key(Key::Enter);
+    requests(&mut shell);
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Rejected {
+            code: crate::terminal::TEAMMATES_SERVER_ENDED.into(),
+        },
+    });
+    let rows = render(&mut shell);
+    assert_eq!(pane_row(&rows, 3), padded("This agent has stopped."));
+    assert_eq!(pane_row(&rows, 4), padded("Its terminal is closed."));
+    shell.key(Key::Char('x'));
+    assert!(requests(&mut shell).is_empty());
+}
+
 #[test]
 fn a_team_read_showing_the_agent_stopped_detaches_and_keeps_the_last_screen() {
     let mut shell = team();

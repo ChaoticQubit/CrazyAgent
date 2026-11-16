@@ -1533,26 +1533,61 @@ async fn a_delete_whose_agents_never_stop_fails_on_home_with_the_reason() {
     );
 }
 
+/// Gives a projects folder made read-only back its owner write bit when it is dropped, also
+/// when a row panics first, so the temp folder's own drop can still remove what it holds.
+/// Holds the folder.
+#[cfg(target_os = "macos")]
+struct Writable(std::path::PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Writable {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Counts the entries of the owner's own Trash, never listing them. The folder comes from the
+/// account's home in the user database, since a Trash move from the system volume goes there
+/// whatever HOME says. Takes nothing. Returns the count; a Trash that cannot be read stops the
+/// row with what it needs.
+#[cfg(target_os = "macos")]
+fn owner_trash_count() -> usize {
+    let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .unwrap()
+        .expect("the account has a user record");
+    let trash = user.dir.join(".Trash");
+    match std::fs::read_dir(&trash) {
+        Ok(entries) => entries.count(),
+        Err(error) => panic!(
+            "PREREQUISITE: this row counts the entries of {trash:?} to prove it moves nothing there, and reading it failed: {error}; give the terminal Full Disk Access and rerun"
+        ),
+    }
+}
+
 /// DEC-177 add.1: a delete whose folder cannot be moved to the Trash ends failed on Home with
 /// the reason and the project kept; Enter there is Try again, which opens the project's remove
 /// ask and sends no delete. The projects folder is made read-only so nothing reaches the
-/// owner's Trash. Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+/// owner's Trash, its write bit comes back even when the row panics, and the owner's Trash
+/// holds as many entries after the row as before. Runs on macOS only, the one platform that
+/// offers Delete everything (DEC-118).
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delete_whose_trash_move_fails_says_why_on_home_and_enter_reopens_the_remove_ask() {
+    let trash_before = owner_trash_count();
     let mut engine = Engine::start().await;
     let (notes, folder) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
     let home = std::fs::canonicalize(engine.home.path()).unwrap();
     let mut connection = engine.connect();
     let mut shell = project_shell(&notes, "Notes CLI");
     delete_typed(&mut shell, &mut connection, "Notes CLI").await;
+    let writable = Writable(home.clone());
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555)).unwrap();
     delete_entered(&mut shell, &mut connection).await;
     let (ended, _) = job_until(&mut shell, &mut connection, |job| {
         !super::intake_job::running(job)
     })
     .await;
-    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    drop(writable);
     assert_eq!(
         ended.state,
         JobState::Failed {
@@ -1586,6 +1621,11 @@ async fn a_delete_whose_trash_move_fails_says_why_on_home_and_enter_reopens_the_
         "nothing deletes in one click: {sent:?}"
     );
     assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
+    assert_eq!(
+        owner_trash_count(),
+        trash_before,
+        "the failed Trash move put nothing in the owner's own Trash"
+    );
 }
 
 /// DEC-177 add.1: a delete ends done on Home with the project's name and its records gone, and

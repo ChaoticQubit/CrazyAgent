@@ -196,6 +196,7 @@ fn attach_failure(code: &str) -> BridgeError {
         "terminal_unavailable" => "terminal_unavailable",
         "terminal_pane_unknown" => "terminal_pane_unknown",
         "terminal_agent_unknown" => "terminal_agent_unknown",
+        "terminal_teammates_server_ended" => "terminal_teammates_server_ended",
         "terminal_agent_invalid" => "terminal_agent_invalid",
         "terminal_viewers_full" => "terminal_viewers_full",
         "terminal_attach_timeout" => "terminal_attach_timeout",
@@ -1169,5 +1170,19 @@ mod tests {
             "terminal_attach_failed"
         );
         assert_eq!(attach_failure("Not A Code").code, "terminal_attach_failed");
+    }
+
+    /// v242 MRR2-2 (rv-code2 r2): a pane attach refused because the teammates' server a native
+    /// lead's team panes were on ended, as once both of that lead's servers ended, keeps its
+    /// code, as one refused for an agent no server holds does, so the view says why its
+    /// terminal ended rather than that the attach failed.
+    #[test]
+    fn a_pane_attach_refused_as_its_teammates_server_ended_keeps_its_code_for_the_view() {
+        for ended in [
+            "terminal_agent_unknown",
+            crazyagent::terminal::TEAMMATES_SERVER_ENDED,
+        ] {
+            assert_eq!(attach_failure(ended).code, ended);
+        }
     }
 }

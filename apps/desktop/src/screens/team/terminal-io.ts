@@ -287,6 +287,7 @@ export type TerminalEvent =
 
 const END_COPY: Record<string, string> = {
   terminal_agent_unknown: "This agent's terminal isn't running. It may have finished or not started yet.",
+  terminal_teammates_server_ended: "The terminal server this lead's teammates ran on ended, so its team panes are closed.",
   terminal_ended: "This run finished. Its last screen stays above.",
   terminal_unavailable: "Terminals need tmux, and it isn't ready on this Mac. Run setup again from Settings.",
   terminal_viewers_full: "Terminal limit reached. Close a terminal or a terminal window, then open this one again.",
