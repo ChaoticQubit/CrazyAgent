@@ -16,7 +16,7 @@ const NOW_MS: i64 = 1_800_000_000_000;
 const MINUTE_MS: i64 = 60_000;
 
 /// Keep awake in mode Auto with nothing running and nothing held, on a Mac whose lid rule
-/// is off. Input: none. Output: the view.
+/// is off and whose low power mode is ready. Input: none. Output: the view.
 pub(in crate::tui) fn resting() -> KeepAwakeView {
     KeepAwakeView {
         settings: KeepAwakeSettings::DEFAULT,
@@ -32,6 +32,7 @@ pub(in crate::tui) fn resting() -> KeepAwakeView {
         platform: Platform::MacOs,
         work: 0,
         freeze_apps: Vec::new(),
+        low_power: crate::keep_awake::LowPowerSupport::Ready,
     }
 }
 
@@ -663,7 +664,11 @@ fn the_lid_helper_keys_follow_what_this_mac_says_of_the_lid_on_macos_only() {
     let failed = "Lid-closed hold could not be turned on: Invalid argument".to_string();
     let none = offers(None, false);
     let cases = [
-        (LidSupport::NotTurnedOn, offers(Some(TURN_ON), false), offers(Some(TURN_ON), false)),
+        (
+            LidSupport::NotTurnedOn,
+            offers(Some(TURN_ON), false),
+            offers(Some(TURN_ON), false),
+        ),
         (
             LidSupport::NeedsApproval,
             offers(Some(LOGIN_ITEMS), true),
@@ -696,7 +701,11 @@ fn the_lid_helper_keys_follow_what_this_mac_says_of_the_lid_on_macos_only() {
     ];
     for (lid, settings, screen) in cases {
         let mac = on_mac(lid.clone());
-        assert_eq!(words::lid_offers(&mac, LidPlace::Settings), settings, "{lid:?}");
+        assert_eq!(
+            words::lid_offers(&mac, LidPlace::Settings),
+            settings,
+            "{lid:?}"
+        );
         assert_eq!(words::lid_offers(&mac, LidPlace::Screen), screen, "{lid:?}");
         let mut ruled_off = mac.clone();
         ruled_off.settings.lid = LidRule::Off;
@@ -709,7 +718,11 @@ fn the_lid_helper_keys_follow_what_this_mac_says_of_the_lid_on_macos_only() {
             let mut other = mac.clone();
             other.platform = platform;
             for place in [LidPlace::Screen, LidPlace::Settings] {
-                assert_eq!(words::lid_offers(&other, place), none, "{platform:?} {lid:?}");
+                assert_eq!(
+                    words::lid_offers(&other, place),
+                    none,
+                    "{platform:?} {lid:?}"
+                );
             }
         }
     }
@@ -721,7 +734,10 @@ fn the_lid_helper_line_has_the_approval_line_while_it_waits() {
     assert_eq!(line(LidSupport::NeedsApproval), APPROVAL);
     assert_eq!(line(LidSupport::Held), "Turned on");
     assert_eq!(line(LidSupport::NotTurnedOn), "Not turned on yet");
-    assert_eq!(line(LidSupport::HelperMissing), "Not set up on this computer yet");
+    assert_eq!(
+        line(LidSupport::HelperMissing),
+        "Not set up on this computer yet"
+    );
     assert_eq!(
         line(LidSupport::SleepNotRestored),
         "Sleep not restored: see Notifications"
@@ -761,14 +777,21 @@ fn t_turns_on_the_lid_hold_then_opens_login_items_with_the_approval_line() {
     let mut shell = screen(on_mac(LidSupport::NeedsApproval));
     let text = shown(&mut shell);
     assert!(text.contains("t  Open Login Items"), "{text}");
-    assert!(text.contains(APPROVAL), "the approval screen's line: {text}");
+    assert!(
+        text.contains(APPROVAL),
+        "the approval screen's line: {text}"
+    );
     assert_eq!(
         action(pressed(&mut shell, 't')),
         KeepAwakeAction::TurnOnLidHold,
         "pressed while approval waits it opens Login Items again (QUESTION 35j)"
     );
     shell.key(Key::Char('d'));
-    assert_eq!(changes(&mut shell), Vec::new(), "the screen offers Remove only for a pin");
+    assert_eq!(
+        changes(&mut shell),
+        Vec::new(),
+        "the screen offers Remove only for a pin"
+    );
 }
 
 #[test]
@@ -811,10 +834,17 @@ fn a_refused_lid_command_says_why_and_the_next_key_is_taken() {
     shell.key(Key::Char('t'));
     let sent = changes(&mut shell);
     assert_eq!(sent.len(), 1, "{sent:?}");
-    answer(&mut shell, sent[0].clone(), Err("keep_awake_no_lid_helper".into()));
+    answer(
+        &mut shell,
+        sent[0].clone(),
+        Err("keep_awake_no_lid_helper".into()),
+    );
     let text = shown(&mut shell);
     assert!(text.contains("Keep awake was not changed."), "{text}");
-    assert!(text.contains("Lid-closed hold is set up only on macOS."), "{text}");
+    assert!(
+        text.contains("Lid-closed hold is set up only on macOS."),
+        "{text}"
+    );
     shell.key(Key::Char('t'));
     assert_eq!(changes(&mut shell).len(), 1, "the next key is taken");
 }

@@ -1,6 +1,7 @@
 use crate::keep_awake::{
     BatteryFloor, Cap, DisplayAwake, Freeze, FreezeApp, Grace, HeatEnd, HeatNotice,
-    KeepAwakeAction, KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, LidSupport, Mode, Mute,
+    KeepAwakeAction, KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, LidSupport, LowPower,
+    LowPowerSupport, Mode, Mute,
 };
 use crate::paths::Platform;
 use crate::tui::client::OwnerEvent;
@@ -71,7 +72,7 @@ fn after_arrow(row: usize, arrow: Key) -> KeepAwakeSettings {
 }
 
 #[test]
-fn the_page_lists_the_eleven_settings_in_the_desktops_sections_and_words() {
+fn the_page_lists_the_twelve_settings_in_the_desktops_sections_and_words() {
     let text = shown(&mut page(resting()));
     let in_order = [
         "Keep awake",
@@ -109,6 +110,11 @@ fn the_page_lists_the_eleven_settings_in_the_desktops_sections_and_words() {
         "Display awake with the lid open",
         "[Off]  While holding",
         "Whether a hold also keeps the display on. While it does, the screen stays unlocked.",
+        "Power",
+        "What a hold does to save the battery.",
+        "Low Power Mode",
+        "[On battery below 40 %]  Whenever on battery   Off",
+        "During a hold on battery, turns on the computer's low power mode to save charge,",
         "While the lid is closed",
         "What a hold quiets while the lid is closed.",
         "Freeze apps while the lid is closed",
@@ -171,6 +177,10 @@ fn right_picks_the_next_option_of_each_setting() {
             ..DEFAULT
         },
         KeepAwakeSettings {
+            low_power: LowPower::OnBattery,
+            ..DEFAULT
+        },
+        KeepAwakeSettings {
             freeze: Freeze::On,
             ..DEFAULT
         },
@@ -224,6 +234,10 @@ fn left_picks_the_option_before_and_wraps_at_the_first() {
             ..DEFAULT
         },
         KeepAwakeSettings {
+            low_power: LowPower::Off,
+            ..DEFAULT
+        },
+        KeepAwakeSettings {
             freeze: Freeze::On,
             ..DEFAULT
         },
@@ -239,7 +253,7 @@ fn left_picks_the_option_before_and_wraps_at_the_first() {
 
 #[test]
 fn every_option_of_every_setting_is_reachable_and_a_full_turn_saves_nothing() {
-    let counts = [3, 4, 4, 3, 2, 4, 3, 2, 2, 2, 2];
+    let counts = [3, 4, 4, 3, 2, 4, 3, 2, 2, 3, 2, 2];
     for (row, count) in counts.into_iter().enumerate() {
         let mut seen = vec![DEFAULT];
         for presses in 1..count {
@@ -394,6 +408,123 @@ fn a_setting_this_computer_cannot_honour_says_why() {
     let text = shown(&mut page(linux));
     assert!(!text.contains("Not available on Windows"), "{text}");
     assert_eq!(text.matches("Only on macOS").count(), 1, "{text}");
+}
+
+const LOW_POWER_ROW: usize = 9;
+const LOW_POWER_HELD: &str = "On now for this hold";
+const LOW_POWER_LEFT: &str = "Left as you set it for this hold";
+const NEEDS_HELPER: &str = "Needs the lid helper";
+
+/// DEC-167 addendum 42 (QUESTION 43b): under the Low Power Mode row the page says where it
+/// stands for this hold, on now or left as the owner set it, and the engine's reason when it
+/// cannot run; unread and ready say nothing.
+#[test]
+fn the_low_power_row_says_where_low_power_mode_stands() {
+    let linux = "Not available: power-profiles-daemon is not running";
+    let cases = [
+        (LowPowerSupport::Unread, None),
+        (LowPowerSupport::Ready, None),
+        (LowPowerSupport::Held, Some(LOW_POWER_HELD)),
+        (LowPowerSupport::OwnerChanged, Some(LOW_POWER_LEFT)),
+        (
+            LowPowerSupport::NotAvailable {
+                reason: linux.into(),
+            },
+            Some(linux),
+        ),
+    ];
+    for (support, words) in cases {
+        let mut view = resting();
+        view.low_power = support.clone();
+        let text = shown(&mut page(view));
+        for other in [LOW_POWER_HELD, LOW_POWER_LEFT, linux] {
+            let want = words == Some(other);
+            assert_eq!(text.contains(other), want, "{support:?}, {other}: {text}");
+        }
+        if let Some(words) = words {
+            let row = text.find("Low Power Mode").expect("the row");
+            let at = text.find(words).expect("the words");
+            let next = text
+                .find("While the lid is closed")
+                .expect("the next section");
+            assert!(
+                row < at && at < next,
+                "{support:?} sits under its row: {text}"
+            );
+        }
+    }
+    let mut windows = on_windows(LidSupport::HelperMissing);
+    windows.low_power = LowPowerSupport::at_start(Platform::Windows);
+    let text = shown(&mut page(windows));
+    assert_eq!(
+        text.matches("Not available on Windows").count(),
+        5,
+        "heat end, heat notice, low power, freeze and mute: {text}"
+    );
+}
+
+/// QUESTION 39d A, DEC-167 addendum 42 (43c): low power that needs the lid helper says so
+/// under its row, and t turns on lid-closed hold from that row as from any other; with no
+/// Turn on to offer, the row only says why.
+#[test]
+fn low_power_that_needs_the_lid_helper_offers_the_same_turn_on() {
+    let needs = LowPowerSupport::NotAvailable {
+        reason: NEEDS_HELPER.into(),
+    };
+    let mut view = on_mac(LidSupport::NotTurnedOn);
+    view.low_power = needs.clone();
+    let mut shell = page(view);
+    for _ in 0..LOW_POWER_ROW {
+        shell.key(Key::Down);
+    }
+    let text = shown(&mut shell);
+    let row = text.find("> Low Power Mode").expect("the row is selected");
+    let next = text
+        .find("While the lid is closed")
+        .expect("the next section");
+    assert!(text[row..next].contains(NEEDS_HELPER), "{text}");
+    assert!(
+        text.contains("Turn on lid-closed hold"),
+        "the hint for t: {text}"
+    );
+    assert_eq!(lid_key(&mut shell, 't'), KeepAwakeAction::TurnOnLidHold);
+
+    let mut view = on_mac(LidSupport::HelperMissing);
+    view.low_power = needs;
+    let mut shell = page(view);
+    let text = shown(&mut shell);
+    assert!(text.contains(NEEDS_HELPER), "{text}");
+    assert!(!text.contains("Turn on lid-closed hold"), "{text}");
+    shell.key(Key::Char('t'));
+    assert_eq!(saves(&mut shell), Vec::new(), "nothing to turn on");
+}
+
+/// Every Low Power Mode option is a working setting in the TUI (owner rule): Right on its
+/// row picks each in turn and Enter sends that pick alone.
+#[test]
+fn each_low_power_option_saves_as_the_pick() {
+    let wanted = [LowPower::OnBattery, LowPower::Off, LowPower::BatteryBelow40];
+    for (presses, want) in (1..).zip(wanted) {
+        let mut shell = page(resting());
+        for _ in 0..LOW_POWER_ROW {
+            shell.key(Key::Down);
+        }
+        for _ in 0..presses {
+            shell.key(Key::Right);
+        }
+        if want == DEFAULT.low_power {
+            shell.key(Key::Enter);
+            assert_eq!(saves(&mut shell), Vec::new(), "a full turn saves nothing");
+            continue;
+        }
+        let (picks, _) = saved(&mut shell);
+        let pick = Picks {
+            low_power: Some(want),
+            ..Picks::default()
+        };
+        assert_eq!(picks, pick, "{presses} presses");
+        assert_eq!(picks.over(DEFAULT).low_power, want);
+    }
 }
 
 #[test]
@@ -555,7 +686,7 @@ fn app(name: &str, id: &str) -> FreezeApp {
     }
 }
 
-const FREEZE_ROW: usize = 9;
+const FREEZE_ROW: usize = 10;
 
 /// Opens the settings page on `view`, moves to the Freeze row, presses a and answers the
 /// app list with `running`. Inputs: the view and the running apps. Output: the shell with

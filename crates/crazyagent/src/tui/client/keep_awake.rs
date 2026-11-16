@@ -2,7 +2,7 @@ use super::settings::{applied, problem};
 use super::*;
 use crate::keep_awake::{
     BatteryFloor, Cap, DisplayAwake, Freeze, FreezeApp, Grace, HeatEnd, HeatNotice,
-    KeepAwakeAction, KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode, Mute,
+    KeepAwakeAction, KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, LowPower, Mode, Mute,
 };
 use crate::storage::versioned::STALE_CODE;
 
@@ -20,6 +20,7 @@ pub(in crate::tui) struct Picks {
     pub heat_end: Option<HeatEnd>,
     pub heat_notice: Option<HeatNotice>,
     pub display_awake: Option<DisplayAwake>,
+    pub low_power: Option<LowPower>,
     pub freeze: Option<Freeze>,
     pub mute: Option<Mute>,
 }
@@ -38,7 +39,7 @@ impl Picks {
             heat_notice: self.heat_notice.unwrap_or(stored.heat_notice),
             lid_display: self.lid_display.unwrap_or(stored.lid_display),
             display_awake: self.display_awake.unwrap_or(stored.display_awake),
-            low_power: stored.low_power,
+            low_power: self.low_power.unwrap_or(stored.low_power),
             freeze: self.freeze.unwrap_or(stored.freeze),
             mute: self.mute.unwrap_or(stored.mute),
         };

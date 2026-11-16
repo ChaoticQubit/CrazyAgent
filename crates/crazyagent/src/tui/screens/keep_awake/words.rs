@@ -1,7 +1,7 @@
 use crate::keep_awake::power::TURN_ON_FAILED;
 use crate::keep_awake::{
     BatteryFloor, Cap, EndReason, HeatEnd, KeepAwakeSettings, KeepAwakeView, LidRule, LidSupport,
-    MINUTES_MAX, Mode, Reason, Want,
+    LowPowerSupport, MINUTES_MAX, Mode, Reason, Want,
 };
 use crate::paths::Platform;
 
@@ -15,6 +15,8 @@ const REASON_CHARS_MAX: usize = 200;
 const TURN_ON: &str = "Turn on lid-closed hold";
 const LOGIN_ITEMS: &str = "Open Login Items";
 const TURNED_ON: &str = "Turned on";
+const LOW_POWER_HELD: &str = "On now for this hold";
+const LOW_POWER_LEFT: &str = "Left as you set it for this hold";
 
 /// The line the lid helper's approval screen and notice say while macOS waits for it.
 pub(in crate::tui) const APPROVAL_LINE: &str =
@@ -329,6 +331,7 @@ pub(in crate::tui) enum Setting {
     HeatEnd,
     HeatNotice,
     DisplayAwake,
+    LowPower,
     Freeze,
     Mute,
 }
@@ -342,11 +345,33 @@ pub(in crate::tui) fn unavailable(setting: Setting, view: &KeepAwakeView) -> Opt
         }
         Setting::LidDisplay if view.platform != Platform::MacOs => Some("Only on macOS".into()),
         Setting::Lid => lid_reason(&view.lid_support),
+        Setting::LowPower => match &view.low_power {
+            LowPowerSupport::NotAvailable { reason } => {
+                Some(reason.chars().take(REASON_CHARS_MAX).collect())
+            }
+            _ => None,
+        },
         Setting::Freeze | Setting::Mute if view.platform == Platform::Windows => {
             Some("Not available on Windows".into())
         }
         _ => None,
     }
+}
+
+/// What the Low Power Mode line says of where it stands for this hold (DEC-167 addendum 42,
+/// QUESTION 43b): on now, or left as the owner set it; nothing while it is unread or ready,
+/// and a reason it cannot run comes from `unavailable`. Input: the view. Output: the words,
+/// or none.
+pub(in crate::tui) fn low_power_now(view: &KeepAwakeView) -> Option<&'static str> {
+    let words = match view.low_power {
+        LowPowerSupport::Held => Some(LOW_POWER_HELD),
+        LowPowerSupport::OwnerChanged => Some(LOW_POWER_LEFT),
+        LowPowerSupport::Unread | LowPowerSupport::Ready | LowPowerSupport::NotAvailable { .. } => {
+            None
+        }
+    };
+    assert!(words.is_none() || unavailable(Setting::LowPower, view).is_none());
+    words
 }
 
 /// What a closed lid does on this computer right now: why it cannot hold when there is a
