@@ -143,7 +143,7 @@ pub(crate) fn read_key_file(
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     let read = file.take(KEY_BYTES_MAX + 1).read_to_end(&mut bytes);
     if read.is_err() || bytes.len() as u64 > KEY_BYTES_MAX {
-        bytes.fill(0);
+        crate::credentials::wipe(&mut bytes);
         return Err(error("account_key_store_unavailable"));
     }
     crate::credentials::SecretString::new(bytes)

@@ -2330,7 +2330,8 @@ fn plain_file(file: &File) -> bool {
 /// launches that find the same entry one clears it and makes the lock and the other is
 /// refused, never removing the lock the first made. Input: the home. Output: the home's
 /// locked folder, `launch_context_unsafe` for a home that does not open or an entry that
-/// stays, or `launch_home_busy` while another launch clears the name.
+/// stays, `cleanup_walk_too_long` for an entry whose removal ran past its walk budget
+/// (RESET-WALK-CODE), or `launch_home_busy` while another launch clears the name.
 #[cfg(unix)]
 fn clear_lock_name(home: &Path) -> Result<LockedHome, LaunchError> {
     use rustix::fs::{AtFlags, FileType};
@@ -2352,8 +2353,12 @@ fn clear_lock_name(home: &Path) -> Result<LockedHome, LaunchError> {
         found => found.map_err(|_| failure("launch_context_unsafe"))?,
     };
     if FileType::from_raw_mode(found.st_mode) != FileType::RegularFile {
-        crate::team::cleanup::remove_home_entry(&folder.0, LOCK)
-            .map_err(|_| failure("launch_context_unsafe"))?;
+        crate::team::cleanup::remove_home_entry(&folder.0, LOCK).map_err(|problem| {
+            failure(crate::team::cleanup::home_code(
+                &problem,
+                "launch_context_unsafe",
+            ))
+        })?;
     } else if lock_kept(&found) {
         let _ = restore_lock_mode(&folder.0);
     }
@@ -2886,7 +2891,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), LaunchError> {
 fn write_secret(path: &Path, text: String) -> Result<(), LaunchError> {
     let mut bytes = text.into_bytes();
     let written = write_private(path, &bytes);
-    bytes.fill(0);
+    crate::credentials::wipe(&mut bytes);
     written
 }
 

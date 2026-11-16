@@ -155,15 +155,17 @@ export async function roundTrips(bridge, calls) {
   return times;
 }
 
-/** The reads row T5 times: the project and master reads the project page makes on open. Inputs:
- * the seeded side and the project ticket. Output: the calls. */
+/** The reads row T5 times: the project and master reads the project page makes on open, the
+ * master reads on the ticket first and the project open last, as every open renews the
+ * selection and leaves the ticket stale for a read after it. Inputs: the seeded side and the
+ * project ticket. Output: the calls, in the order they are timed. */
 export function speedReads(seeded, ticket) {
   assert.match(seeded.project, /\S/, "a seeded project");
   assert.match(ticket, /\S/, "a project ticket");
   return [
-    { cmd: "desktop_open_project", args: { id: seeded.project } },
     { cmd: "desktop_master_state", args: { ticket } },
     { cmd: "desktop_master_sessions", args: { ticket } },
+    { cmd: "desktop_open_project", args: { id: seeded.project } },
   ];
 }
 

@@ -751,7 +751,7 @@ pub fn cli_token(gh: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Result<SecretSt
     };
     let (read, mut bytes) = reader.join().map_err(|_| unavailable())?;
     if read.is_err() || !status.success() {
-        bytes.fill(0);
+        crate::credentials::wipe(&mut bytes);
         return Err(unavailable());
     }
     while bytes.last().is_some_and(u8::is_ascii_whitespace) {

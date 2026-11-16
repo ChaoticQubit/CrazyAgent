@@ -407,6 +407,44 @@ fn an_updating_set_whose_resolve_task_is_still_under_way_is_refused_as_stale() {
     }
 }
 
+/// LAND-UPDATING-RACE: two owner asks for a set whose resolve task ended both read no resolve
+/// under way before either admits one. The second reaches hand_over once the first's task is
+/// queued, waits for a pool or runs, and is refused as stale inside the transaction that would
+/// admit it, as an ask made after the first is, so no second resolve task joins the first.
+#[test]
+fn an_ask_that_raced_past_another_ask_s_resolve_task_is_refused_inside_the_admission() {
+    for under_way in [
+        crate::team::TaskStatus::Queued,
+        crate::team::TaskStatus::NeedsPool,
+        crate::team::TaskStatus::Running,
+    ] {
+        let case = Case::new(true);
+        assert!(update(&case.db, &case.id).unwrap());
+        resolve_status(&case.db, crate::team::TaskStatus::Failed);
+        assert_eq!(queued_resolves(&case.db), 0);
+        hand_over(&case.db, &case.id, Asker::Owner).unwrap();
+        case.db
+            .execute(
+                "UPDATE team_tasks SET status=?1
+                 WHERE id=(SELECT MAX(task) FROM team_task_pins WHERE resolve=1)",
+                [under_way.name()],
+            )
+            .unwrap();
+        let tasks = case.resolve_tasks();
+
+        let raced = hand_over(&case.db, &case.id, Asker::Owner).map_err(|problem| problem.0);
+
+        assert_eq!(raced, Err("changes_stale".to_owned()), "{under_way:?}");
+        assert_eq!(case.resolve_tasks(), tasks, "{under_way:?}");
+        let set = case.set();
+        assert_eq!(
+            (set.state, set.waiting),
+            (ChangeState::Updating, false),
+            "{under_way:?}"
+        );
+    }
+}
+
 #[test]
 fn change_sets_the_listed_32_leave_out_are_still_found_by_their_id() {
     let case = Case::new(true);

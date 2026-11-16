@@ -808,6 +808,7 @@ dependencies = [
  "vt100",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
+ "zeroize",
 ]
 
 [[package]]
