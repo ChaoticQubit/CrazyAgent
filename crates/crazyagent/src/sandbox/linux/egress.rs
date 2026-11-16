@@ -64,6 +64,10 @@ const LOOPBACK_NETWORK: &str = "127.0.0.0/8";
 /// The link-local addresses, where a cloud VM answers its metadata service: no route port
 /// reaches them, even 80 or 443 on any host (rv-sa241 NOTE-1).
 const LINK_LOCAL_NETWORK: &str = "169.254.0.0/16";
+/// Alibaba Cloud ECS's metadata service, the one a major cloud serves outside the
+/// link-local range: no route port reaches it either (rv-sa241 SBX-2-R2 NOTE-A). Only this
+/// address, so the rest of the shared range, such as Tailscale's 100.100.100.100, stays.
+const ECS_METADATA: &str = "100.100.100.200/32";
 const TAP: &str = "tap0";
 const CHILD_PID_KEY: &[u8] = b"\"child-pid\":";
 const INFO_BYTES_MAX: usize = 4096;
@@ -668,8 +672,9 @@ fn stop(parent: u32, child: u32) {
 /// The IPv4 rules inside the agent's network, as `iptables-restore` reads them and in the
 /// form `iptables-save` prints them: loopback for the bridged ports, TCP 53 to slirp's
 /// resolver alone, then nothing to slirp's network ([`SLIRP_NETWORK`]), a loopback address
-/// off `lo` ([`LOOPBACK_NETWORK`]) or a link-local one ([`LINK_LOCAL_NETWORK`]), then out
-/// through `tap0` to each port. Input: the ports on any host. Output: the rules.
+/// off `lo` ([`LOOPBACK_NETWORK`]), a link-local one ([`LINK_LOCAL_NETWORK`]) or Alibaba's
+/// metadata ([`ECS_METADATA`]), then out through `tap0` to each port. Input: the ports on
+/// any host. Output: the rules.
 fn egress_rules(any: &[u16]) -> String {
     assert!(!any.is_empty() && any.len() <= REMOTES_MAX);
     assert!(!any.contains(&0));
@@ -681,8 +686,9 @@ fn egress_rules(any: &[u16]) -> String {
     let _ = writeln!(rules, "-A OUTPUT -d {SLIRP_NETWORK} -j DROP");
     let _ = writeln!(rules, "-A OUTPUT -d {LOOPBACK_NETWORK} -j DROP");
     let _ = writeln!(rules, "-A OUTPUT -d {LINK_LOCAL_NETWORK} -j DROP");
+    let _ = writeln!(rules, "-A OUTPUT -d {ECS_METADATA} -j DROP");
     assert_eq!(rules.matches(" -j ACCEPT\n").count(), 2);
-    assert_eq!(rules.matches(" -j DROP\n").count(), 3);
+    assert_eq!(rules.matches(" -j DROP\n").count(), 4);
     assert_eq!(rules.matches(SANDBOX_RESOLVER).count(), 1);
     for port in any {
         let _ = writeln!(
