@@ -216,6 +216,7 @@ impl Bench {
             &[],
             crate::provider_retry::ProviderRetry::RetryBriefly,
             connector,
+            false,
         )
     }
 }
@@ -456,6 +457,7 @@ fn a_tools_on_codex_turn_with_its_connector_runs_that_server_and_uses_only_its_f
             Some(&registered),
             &[],
             connector,
+            false,
         )
         .map_err(|error| error.0)
     };

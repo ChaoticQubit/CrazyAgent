@@ -68,7 +68,7 @@ const MASTER_CONFIG: [&str; 16] = [
     "features.view_image=false",
     "features.multi_agent=false",
     "features.code_mode=false",
-    "features.apps=false",
+    crate::harnesses::launch::CODEX_APPS_OFF,
     "features.plugins=false",
     "features.goals=false",
     "web_search=\"disabled\"",
@@ -80,7 +80,7 @@ const MASTER_TOOLS_CONFIG: [&str; 10] = [
     "cli_auth_credentials_store=\"file\"",
     "sandbox_mode=\"danger-full-access\"",
     "approval_policy=\"never\"",
-    "features.apps=false",
+    crate::harnesses::launch::CODEX_APPS_OFF,
     "features.plugins=false",
     "features.goals=false",
     "features.multi_agent=false",
@@ -247,6 +247,7 @@ impl OwnerRuntimeHandle {
                 &settings,
                 prepared.provider_retry,
                 held,
+                prepared.native_connectors_on,
             )?
         } else {
             codex_master_turn(
@@ -259,6 +260,7 @@ impl OwnerRuntimeHandle {
                 &prepared.tools_off,
                 prepared.provider_retry,
                 held,
+                prepared.native_connectors_on,
             )?
         };
         require_master_delegate(
@@ -267,6 +269,7 @@ impl OwnerRuntimeHandle {
             engine.as_deref(),
             &prepared.tools_off,
             held,
+            prepared.native_connectors_on,
         )?;
         let harness = if claude {
             crate::agent_home::Harness::Claude
@@ -468,7 +471,8 @@ pub(super) struct MasterTurnLaunch {
 /// (OB-5b), and the connection-retry choice, set as the agents' Claude Code variable
 /// (DEC-163 Q7). Output: the launch parts with the copy, or the refusal of the part that failed,
 /// `native_profile_renewal_failed`, a transient refusal, when the token still lapses within a
-/// minute after a renewal. The owner's Claude Code settings go into its `--settings`.
+/// minute after a renewal. The owner's Claude Code settings go into its `--settings`, with the
+/// account's claude.ai connectors off unless a tools-on turn read the Native setting as On.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn claude_master_turn(
     place: &MasterTurnPlace<'_>,
@@ -483,10 +487,15 @@ pub(super) fn claude_master_turn(
     settings: &crate::harness_settings::apply::Applied,
     retry: crate::provider_retry::ProviderRetry,
     connector: Option<&Path>,
+    native_on: bool,
 ) -> Result<MasterTurnLaunch, EngineError> {
     assert!(
         engine.is_some() || connector.is_none(),
         "a connector server runs only beside the tools it serves"
+    );
+    assert!(
+        engine.is_some() || !native_on,
+        "the Native setting reaches only a master with tools on"
     );
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
@@ -547,7 +556,7 @@ pub(super) fn claude_master_turn(
                     mailbox: &mailbox,
                     off: tools_off,
                     connector,
-                    native_on: false,
+                    native_on,
                 },
                 settings,
             )?;
@@ -586,8 +595,9 @@ fn master_connection(connection: &ModelConnection, model: Option<&str>) -> Model
 /// and the turn's own folders, and only the engine's team server, as for Claude Code. Inputs: where
 /// the turn runs, the account lease, the registered executable, the attempt's connection, the
 /// turn's time limit (none for no limit), the engine executable for tools on, the team tools
-/// switched off and the owner's connection-retry choice (DEC-163 Q7). Output: the launch parts
-/// with the copy, or the refusal of the part that failed.
+/// switched off, the owner's connection-retry choice (DEC-163 Q7), the connector folder and
+/// whether a tools-on turn read the Native setting as On, which keeps Codex's own apps on.
+/// Output: the launch parts with the copy, or the refusal of the part that failed.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn codex_master_turn(
     place: &MasterTurnPlace<'_>,
@@ -599,10 +609,15 @@ pub(super) fn codex_master_turn(
     tools_off: &[String],
     retry: crate::provider_retry::ProviderRetry,
     connector: Option<&Path>,
+    native_on: bool,
 ) -> Result<MasterTurnLaunch, EngineError> {
     assert!(
         engine.is_some() || connector.is_none(),
         "a connector server runs only beside the tools it serves"
+    );
+    assert!(
+        engine.is_some() || !native_on,
+        "the Native setting reaches only a master with tools on"
     );
     let model = &connection.model.id;
     let home = master_turn_home(place.root, place.runtime_ref)?;
@@ -657,7 +672,7 @@ pub(super) fn codex_master_turn(
             mailbox: &mailbox,
             off: tools_off,
             connector,
-            native_on: false,
+            native_on,
         }),
         retry,
     )?;
@@ -844,11 +859,13 @@ fn require_master_tool_policy(
             PROJECT_DOCS_OFF,
         ]
     };
-    let fixed: &[&str] = if tools.is_some() {
-        &MASTER_TOOLS_CONFIG
-    } else {
-        &MASTER_CONFIG
-    };
+    let native_on = tools.is_some_and(|tools| tools.native_on);
+    let required: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|setting| !(native_on && *setting == crate::harnesses::launch::CODEX_APPS_OFF))
+        .collect();
+    let fixed = master_fixed(tools);
     let args = command
         .get_args()
         .map(|arg| arg.to_str())
@@ -888,6 +905,26 @@ fn require_master_tool_policy(
     }
     assert!(settings.len() >= fixed.len());
     Ok(())
+}
+
+/// The fixed `-c` settings of a Codex master turn: read-only with no tools, or the tools-on set,
+/// less the apps switch when the turn read the owner's Native setting as On (DEC-168
+/// addendum 16). Input: the tools-on parts, if any. Output: the settings, in order.
+fn master_fixed(tools: Option<crate::engine::claude_host::MasterTools<'_>>) -> Vec<&'static str> {
+    let fixed: Vec<&'static str> = match tools {
+        None => MASTER_CONFIG.to_vec(),
+        Some(tools) => MASTER_TOOLS_CONFIG
+            .into_iter()
+            .filter(|setting| {
+                !(tools.native_on && *setting == crate::harnesses::launch::CODEX_APPS_OFF)
+            })
+            .collect(),
+    };
+    assert_eq!(
+        fixed.contains(&crate::harnesses::launch::CODEX_APPS_OFF),
+        !tools.is_some_and(|tools| tools.native_on)
+    );
+    fixed
 }
 
 /// Whether a Codex `ca-connectors` entry waits exactly as the engine's agent entries do:
@@ -973,6 +1010,7 @@ fn require_master_delegate(
     engine: Option<&crate::engine::native_auth_host::RegisteredNativeAuthHost>,
     tools_off: &[String],
     connector: Option<&Path>,
+    native_on: bool,
 ) -> Result<(), EngineError> {
     let tmp = turn.sandbox.sandbox().agent_tmp();
     let drop = tmp.join(crate::team::tool::DROP_FILE);
@@ -984,7 +1022,7 @@ fn require_master_delegate(
             mailbox: &mailbox,
             off: tools_off,
             connector,
-            native_on: false,
+            native_on,
         }),
         (None, None) => None,
         (None, Some(_)) => return Err(failure("master_delegate_unverified")),
@@ -1093,11 +1131,7 @@ fn master_command(
     if model != ACCOUNT_DEFAULT_MODEL {
         command.arg("-c").arg(format!("model=\"{model}\""));
     }
-    let fixed: &[&str] = match tools {
-        None => &MASTER_CONFIG,
-        Some(_) => &MASTER_TOOLS_CONFIG,
-    };
-    for config in fixed {
+    for config in master_fixed(tools) {
         command.arg("-c").arg(config);
     }
     for setting in retry.codex_settings(crate::provider_retry::CodexProvider::BuiltIn) {

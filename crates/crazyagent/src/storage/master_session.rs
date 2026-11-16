@@ -185,6 +185,7 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) model: Option<String>,
     pub(crate) model_provider: Option<String>,
     pub(crate) provider_retry: crate::provider_retry::ProviderRetry,
+    pub(crate) native_connectors_on: bool,
 }
 
 impl PreparedMasterTurn {
@@ -3163,6 +3164,7 @@ fn bundle(
         },
         model: record.model,
         provider_retry: crate::provider_retry::for_launch(tx),
+        native_connectors_on: tools && crate::connectors::settings::native_on(tx),
     };
     assert_eq!(
         prepared.attempt.request.task_id,

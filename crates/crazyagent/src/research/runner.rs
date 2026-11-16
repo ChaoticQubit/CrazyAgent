@@ -141,8 +141,8 @@ const CLAUDE_PARENT_KEY: &[u8] = b"\"parent_tool_use_id\":";
 /// The model name Claude Code gives the messages it writes itself, such as its API errors.
 const CLAUDE_OWN_MODEL: &str = "<synthetic>";
 /// The `--settings` every research Claude Code gets: hooks off and the account's claude.ai
-/// connectors off, as no Native switch reaches a research run; a keyed run adds its
-/// `apiKeyHelper`.
+/// connectors off, which a tools-on run that read the owner's Native setting as On leaves
+/// out; a keyed run adds its `apiKeyHelper`.
 const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true,\"disableClaudeAiConnectors\":true}";
 
 /// The most bytes of one research report: the runner takes no longer report from an agent,
@@ -1244,7 +1244,7 @@ impl ResearchRunner {
                     &output,
                     &home,
                     job.tools,
-                    false,
+                    installed.native_connectors_on(),
                     trust,
                     account,
                     retry,
@@ -1258,7 +1258,7 @@ impl ResearchRunner {
                     &home,
                     &tmp,
                     job.tools,
-                    false,
+                    installed.native_connectors_on(),
                     None,
                     account,
                     retry,
@@ -2519,14 +2519,11 @@ fn codex_arguments(
             command.arg("-m").arg(model);
         }
         ResearchAccount::ManagedCodex { model, .. } => {
-            command.args([
-                "-c",
-                "cli_auth_credentials_store=\"file\"",
-                "-c",
-                "features.apps=false",
-                "-c",
-                "features.plugins=false",
-            ]);
+            command.args(["-c", "cli_auth_credentials_store=\"file\""]);
+            if !native_on {
+                command.args(["-c", crate::harnesses::launch::CODEX_APPS_OFF]);
+            }
+            command.args(["-c", "features.plugins=false"]);
             if let Some(model) = model {
                 if !valid_model(model) {
                     return Err(RunError::Invalid("managed model name".into()));
@@ -2558,12 +2555,12 @@ fn codex_arguments(
 }
 
 /// Adds Claude Code's print-mode arguments and environment for one research
-/// run: no MCP servers, claude.ai connectors, settings sources, hooks or saved
-/// sessions, tools on, or off with the no-tools system prompt and one model
-/// turn; the account as
+/// run: no MCP servers, settings sources, hooks or saved sessions, no claude.ai
+/// connectors unless `native_on` (tools on and the owner's Native setting read as On),
+/// tools on, or off with the no-tools system prompt and one model turn; the account as
 /// either a managed config directory or a keyless Anthropic endpoint in bare
 /// mode that never reads the keychain.
-/// Takes the command, the agent home and temp dir, the tools switch, the most
+/// Takes the command, the agent home and temp dir, the tools switch, `native_on`, the most
 /// output tokens of each request (`None` for Claude Code's own limit), the
 /// account and the owner's retry option (DEC-163). Returns an error for an account
 /// that does not fit Claude Code.
@@ -2592,15 +2589,18 @@ fn claude_arguments(
         } => Some(relay_key_file(home, &endpoint_url(base_url)?)?),
         _ => None,
     };
-    let settings = match &key_file {
-        Some(file) => {
-            let mut settings: serde_json::Value =
-                serde_json::from_str(CLAUDE_SETTINGS).expect("fixed Claude settings are JSON");
-            settings["apiKeyHelper"] = format!("/bin/cat '{file}'").into();
-            settings.to_string()
-        }
-        None => CLAUDE_SETTINGS.to_owned(),
-    };
+    let mut settings: serde_json::Value =
+        serde_json::from_str(CLAUDE_SETTINGS).expect("fixed Claude settings are JSON");
+    if let Some(file) = &key_file {
+        settings["apiKeyHelper"] = format!("/bin/cat '{file}'").into();
+    }
+    if native_on {
+        let removed = settings
+            .as_object_mut()
+            .and_then(|fields| fields.remove("disableClaudeAiConnectors"));
+        assert_eq!(removed, Some(serde_json::Value::Bool(true)));
+    }
+    let settings = settings.to_string();
     command
         .args(CLAUDE_ARGUMENTS)
         .args(CLAUDE_EVENTS)

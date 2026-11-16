@@ -174,6 +174,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         &[],
         crate::provider_retry::ProviderRetry::RetryBriefly,
         None,
+        false,
     )
     .unwrap();
     let off_turn = runtime.join(format!("master-runtime-{}", off_ref.as_str()));
@@ -256,6 +257,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         &[crate::team::tool::RECALL_TOOL.to_owned()],
         crate::provider_retry::ProviderRetry::RetryBriefly,
         None,
+        false,
     )
     .unwrap();
     let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));
@@ -551,7 +553,8 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     };
     let checked_off = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>, off: &[String]| {
         let engine = engine.map(registered);
-        require_master_delegate(backend, turn, engine.as_ref(), off, None).map_err(|error| error.0)
+        require_master_delegate(backend, turn, engine.as_ref(), off, None, false)
+            .map_err(|error| error.0)
     };
     let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
         checked_off(backend, turn, engine, &off)

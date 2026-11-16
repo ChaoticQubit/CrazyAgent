@@ -210,6 +210,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         &crate::harness_settings::apply::Applied::default(),
         crate::provider_retry::ProviderRetry::StopAtOnce,
         None,
+        false,
     )
     .unwrap();
     assert_eq!(
@@ -293,6 +294,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         &crate::harness_settings::apply::Applied::default(),
         crate::provider_retry::ProviderRetry::HarnessDefault,
         None,
+        false,
     );
     assert_eq!(
         refused.err().map(|error| error.0),
@@ -338,6 +340,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         &crate::harness_settings::apply::Applied::default(),
         crate::provider_retry::ProviderRetry::StopAtOnce,
         None,
+        false,
     )
     .unwrap();
     assert_eq!(
@@ -646,7 +649,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
     };
     let checked_off = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>, off: &[String]| {
         let engine = engine.map(registered);
-        require_master_delegate(backend, turn, engine.as_ref(), off, None).map_err(|error| error.0)
+        require_master_delegate(backend, turn, engine.as_ref(), off, None, false)
+            .map_err(|error| error.0)
     };
     let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
         checked_off(backend, turn, engine, &off)

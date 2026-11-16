@@ -156,6 +156,13 @@ pub fn load(db: &Connection) -> Result<(ConnectorSettings, u64), EngineError> {
     ))
 }
 
+/// Tells whether the owner's Native connectors setting reads On for a launch the engine builds
+/// outside install(): masters (DEC-168 addendum 16). Input: the engine database. Output: the
+/// answer; a read error counts as Off, so the harness's own connectors stay off.
+pub fn native_on(db: &Connection) -> bool {
+    load(db).is_ok_and(|(settings, _)| settings.native == NativeConnectors::On)
+}
+
 /// Saves the connector settings when the owner's screen read the current version.
 /// Inputs: the engine database, the settings and the version read. Output: the new
 /// version, or the current version when the screen was stale, or `connectors_unavailable`.
