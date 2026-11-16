@@ -63,6 +63,7 @@ const view = (state = {}, extra = {}) => ({
   work: extra.work ?? 0,
   version: extra.version ?? 0,
   freeze_apps: extra.freeze_apps ?? [],
+  low_power: extra.low_power ?? { kind: "ready" },
 });
 const working = (count, extra = {}) => view({ want: HELD, reason: "work" }, { work: count, ...extra });
 const timer = (left, extra = {}) => view({ want: HELD, reason: "timer", ends_at_ms: NOW + left }, extra);
@@ -556,6 +557,69 @@ test("Settings shows Low Power Mode in its own Power section after Display", () 
   assert.ok(display > 0 && power > display, "Power comes after Display");
   assert.ok(markup.indexOf('data-setting="low_power"') > power, "the row sits in Power");
   assert.ok(text(markup).includes("What a hold does to save the battery."));
+});
+
+const LOW_POWER_HELD = "On now for this hold";
+const LOW_POWER_LEFT = "Left as you set it for this hold";
+const buttonsNamed = (markup, label) => [...markup.matchAll(/<button[^>]*>.*?<\/button>/g)].filter(([tag]) => text(tag) === label).length;
+
+test("the window reads the engine's low power support on its view, with the TUI's words (DEC-167 addendum 42)", () => {
+  assert.deepEqual(variants(ENGINE_STATE, "LowPowerSupport"), ["unread", "ready", "held", "owner_changed", "not_available"]);
+  const fields = [...ENGINE.slice(ENGINE.indexOf("pub struct KeepAwakeView {")).split("\n}")[0].matchAll(/pub (\w+): /g)].map(([, field]) => field);
+  assert.deepEqual([...fields].sort(), Object.keys(view()).sort(), "the window's view has every engine field");
+  assert.match(ENGINE, /low_power: stored\.sensors\.low_power\.clone\(\),/, "the view's low power is the last reading's");
+  assert.equal(model.LOW_POWER_NEEDS_HELPER, engineWords("LOW_POWER_NEEDS_HELPER"));
+  for (const words of [LOW_POWER_HELD, LOW_POWER_LEFT]) assert.ok(TUI_WORDS.includes(JSON.stringify(words)), `the TUI says ${words}`);
+  const help = api.KEEP_AWAKE_SETTINGS.find((setting) => setting.id === "low_power").help;
+  assert.ok(TUI_SETTINGS.includes(JSON.stringify(help)), "the TUI says the same help");
+  assert.ok(TUI_SETTINGS.includes('"Power",\n        "What a hold does to save the battery."'), "the TUI has the same Power section");
+});
+
+test("the Low Power Mode line says where low power mode stands, and the engine's reason when it cannot run (DEC-167 addendum 42)", () => {
+  const linux = "Not available: power-profiles-daemon is not running";
+  const windows = "Not available on Windows";
+  const cases = [
+    [{ kind: "unread" }, null, null],
+    [{ kind: "ready" }, null, null],
+    [{ kind: "held" }, LOW_POWER_HELD, null],
+    [{ kind: "owner_changed" }, LOW_POWER_LEFT, null],
+    [{ kind: "not_available", reason: linux }, null, linux],
+    [{ kind: "not_available", reason: windows }, null, windows],
+  ];
+  for (const [low_power, now, reason] of cases) {
+    const shown = view({}, { low_power });
+    assert.equal(model.lowPowerNow(shown), now, low_power.kind);
+    assert.equal(model.unavailable("low_power", shown), reason, low_power.kind);
+    const line = text(lineOf(settingsView(ok(shown)), "low_power"));
+    for (const words of [LOW_POWER_HELD, LOW_POWER_LEFT, linux, windows]) assert.equal(line.includes(words), words === now || words === reason, `${low_power.kind}: ${words}`);
+  }
+  const long = view({}, { low_power: { kind: "not_available", reason: "x".repeat(300) } });
+  assert.equal(model.unavailable("low_power", long).length, 200, "a reason is cut to 200 characters");
+  assert.match(lineOf(settingsView(ok(view({}, { low_power: { kind: "not_available", reason: linux } }))), "low_power"), /<span class="keep-awake-reason">Not available: power-profiles-daemon is not running<\/span>/, "a reason is warning-styled");
+  assert.match(lineOf(settingsView(ok(view({}, { low_power: { kind: "held" } }))), "low_power"), /<span class="keep-awake-now">On now for this hold<\/span>/, "the words are plain");
+});
+
+test("Low Power Mode that needs the lid helper offers the lid helper's own Turn on on its row, never Remove (QUESTION 39d A, DEC-167 addendum 42)", () => {
+  const needs = { kind: "not_available", reason: model.LOW_POWER_NEEDS_HELPER };
+  const turnOn = (lid, extra = {}) => model.lowPowerTurnOn(view({}, { lid_platform: lid, low_power: needs, ...extra }));
+  assert.equal(turnOn({ kind: "not_turned_on" }), "Turn on lid-closed hold");
+  assert.equal(turnOn({ kind: "needs_approval" }), "Open Login Items", "the lid helper line's own button while approval waits");
+  assert.equal(turnOn({ kind: "helper_missing" }), null, "nothing to turn on in a build with no helper");
+  assert.equal(turnOn({ kind: "held" }), null, "a helper that runs needs no Turn on");
+  assert.equal(turnOn({ kind: "not_turned_on" }, { platform: "linux" }), null, "only on macOS");
+  const other = view({}, { lid_platform: { kind: "not_turned_on" }, low_power: { kind: "not_available", reason: "Not available on this Mac" } });
+  assert.equal(model.lowPowerTurnOn(other), null, "only for the lid helper's reason");
+  assert.equal(model.lowPowerTurnOn(view({}, { lid_platform: { kind: "not_turned_on" }, low_power: { kind: "held" } })), null);
+  const needsHelper = view({}, { lid_platform: { kind: "not_turned_on" }, low_power: needs });
+  const markup = settingsView(ok(needsHelper));
+  const row = lineOf(markup, "low_power");
+  assert.ok(text(row).includes(model.LOW_POWER_NEEDS_HELPER), text(row));
+  assert.equal(disabled(row, "Turn on lid-closed hold"), false, "the row has the Turn on");
+  assert.equal(button(row, "Remove lid helper"), undefined, "never Remove on this row");
+  assert.equal(buttonsNamed(markup, "Turn on lid-closed hold"), 2, "the lid helper line and the Low Power Mode row");
+  assert.equal(buttonsNamed(settingsView(ok(view({}, { lid_platform: { kind: "not_turned_on" } }))), "Turn on lid-closed hold"), 1, "a ready low power adds none");
+  assert.equal(disabled(lineOf(settingsView(ok(needsHelper), { saving: true }), "low_power"), "Turn on lid-closed hold"), true, "one change at a time");
+  assert.match(SETTINGS_PAGE, /\{turnOn !== null && <Button disabled=\{saving\} onClick=\{\(\) => onLid\("turn_on_lid_hold"\)\}>\{turnOn\}<\/Button>\}/, "a press sends the lid helper's Turn on by its engine name");
 });
 
 test("a Settings save keeps what changed elsewhere while the page was open", () => {

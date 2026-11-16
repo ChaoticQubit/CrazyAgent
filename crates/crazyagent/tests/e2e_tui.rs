@@ -2517,7 +2517,7 @@ mod keep_awake {
     use super::*;
     use crazyagent::keep_awake::{
         BatteryFloor, Cap, DisplayAwake, Freeze, Grace, HeatEnd, HeatNotice, KeepAwakeAction,
-        KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode, Mute, Reason, Want,
+        KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, LowPower, Mode, Mute, Reason, Want,
     };
 
     const KEEP_AWAKE_PROJECT: &str = "e2e-keep-awake";
@@ -2650,7 +2650,7 @@ mod keep_awake {
     /// Inputs: the settings stored first and the setting's place on the page. Output: the
     /// settings after the save; panics when the page or the save never shows.
     fn saved_after(seed: KeepAwakeSettings, row: usize) -> KeepAwakeSettings {
-        assert!(row < 11);
+        assert!(row < 12);
         let first = KeepAwakeAction::Set {
             settings: seed,
             version: 0,
@@ -2936,9 +2936,36 @@ mod keep_awake {
     }
 
     #[test]
-    fn the_tui_saves_keep_awake_freeze_off() {
+    fn the_tui_saves_keep_awake_low_power_on_battery_below_forty() {
         option_row(
             9,
+            |settings| settings.low_power = LowPower::Off,
+            |settings| settings.low_power = LowPower::BatteryBelow40,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_low_power_whenever_on_battery() {
+        option_row(
+            9,
+            |settings| settings.low_power = LowPower::BatteryBelow40,
+            |settings| settings.low_power = LowPower::OnBattery,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_low_power_off() {
+        option_row(
+            9,
+            |settings| settings.low_power = LowPower::OnBattery,
+            |settings| settings.low_power = LowPower::Off,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_freeze_off() {
+        option_row(
+            10,
             |settings| settings.freeze = Freeze::On,
             |settings| settings.freeze = Freeze::Off,
         );
@@ -2947,7 +2974,7 @@ mod keep_awake {
     #[test]
     fn the_tui_saves_keep_awake_freeze_on() {
         option_row(
-            9,
+            10,
             |settings| settings.freeze = Freeze::Off,
             |settings| settings.freeze = Freeze::On,
         );
@@ -2956,7 +2983,7 @@ mod keep_awake {
     #[test]
     fn the_tui_saves_keep_awake_mute_off() {
         option_row(
-            10,
+            11,
             |settings| settings.mute = Mute::On,
             |settings| settings.mute = Mute::Off,
         );
@@ -2965,7 +2992,7 @@ mod keep_awake {
     #[test]
     fn the_tui_saves_keep_awake_mute_on() {
         option_row(
-            10,
+            11,
             |settings| settings.mute = Mute::Off,
             |settings| settings.mute = Mute::On,
         );
@@ -2983,7 +3010,7 @@ mod keep_awake {
                 header_row(screen).contains("Settings  /  Keep awake")
                     && screen.contains("When it holds")
             });
-            for _ in 0..9 {
+            for _ in 0..10 {
                 pty.keys(&["Down"]);
             }
             pty.until("the Freeze row offers a", |screen| {
@@ -3222,7 +3249,11 @@ mod keep_awake {
     /// it presses can reach the real daemon registration (35k).
     #[test]
     fn the_tui_offers_no_lid_helper_key_on_an_engine_with_no_helper_in_its_bundle() {
-        let offers = ["Turn on lid-closed hold", "Open Login Items", "Remove lid helper"];
+        let offers = [
+            "Turn on lid-closed hold",
+            "Open Login Items",
+            "Remove lid helper",
+        ];
         let after = on_screen(&[], |pty, runtime, engine| {
             let first = settled(runtime, engine, "the lid line read the bundle", |view| {
                 view.platform != crazyagent::paths::Platform::MacOs
@@ -3244,6 +3275,50 @@ mod keep_awake {
             }
             let later = view(runtime, engine);
             assert_eq!(later.lid_platform, first.lid_platform, "nothing was sent");
+        });
+        assert_eq!(after.settings, KeepAwakeSettings::DEFAULT);
+    }
+
+    /// Task 16c row (DEC-167 addendum 42): the Low Power Mode row says what the engine's own
+    /// read says of low power mode on this computer. On a Mac the test engine has no helper
+    /// in its bundle, so the row says "Needs the lid helper" and no Turn on is offered.
+    #[test]
+    fn the_tui_low_power_row_says_what_the_engine_read() {
+        use crazyagent::keep_awake::LowPowerSupport;
+        let after = on_screen(&[], |pty, runtime, engine| {
+            let first = settled(runtime, engine, "the lid line read the bundle", |view| {
+                view.platform != crazyagent::paths::Platform::MacOs
+                    || view.low_power
+                        == LowPowerSupport::NotAvailable {
+                            reason: "Needs the lid helper".into(),
+                        }
+            });
+            let words = match &first.low_power {
+                LowPowerSupport::NotAvailable { reason } => Some(reason.clone()),
+                LowPowerSupport::Held => Some("On now for this hold".to_owned()),
+                LowPowerSupport::OwnerChanged => Some("Left as you set it for this hold".into()),
+                LowPowerSupport::Unread | LowPowerSupport::Ready => None,
+            };
+            pty.keys(&["s"]);
+            pty.until("s opens Settings / Keep awake", |screen| {
+                header_row(screen).contains("Settings  /  Keep awake")
+                    && screen.contains("When it holds")
+            });
+            for _ in 0..9 {
+                pty.keys(&["Down"]);
+            }
+            pty.until("the Low Power Mode row is in view", |screen| {
+                screen.contains("Low Power Mode") && screen.contains("Whenever on battery")
+            });
+            if let Some(words) = &words {
+                pty.until("the row says what the engine read", |screen| {
+                    screen.contains(words.as_str())
+                });
+            }
+            if first.platform == crazyagent::paths::Platform::MacOs {
+                let screen = pty.screen();
+                assert!(!screen.contains("Turn on lid-closed hold"), "{screen}");
+            }
         });
         assert_eq!(after.settings, KeepAwakeSettings::DEFAULT);
     }

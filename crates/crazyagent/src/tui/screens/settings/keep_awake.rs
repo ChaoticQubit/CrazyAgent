@@ -1,7 +1,7 @@
 use crate::keep_awake::freeze::APPS_MAX;
 use crate::keep_awake::{
     BatteryFloor, Cap, DisplayAwake, Freeze, FreezeApp, Grace, HeatEnd, HeatNotice,
-    KeepAwakeAction, KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode, Mute,
+    KeepAwakeAction, KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, LowPower, Mode, Mute,
 };
 use crate::paths::Platform;
 use crate::tui::client::OwnerEvent;
@@ -11,7 +11,7 @@ use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::keep_awake::refusal;
 use crate::tui::screens::keep_awake::words::{
-    LidOffers, LidPlace, Setting, lid_helper_line, lid_offers, unavailable,
+    LidOffers, LidPlace, Setting, lid_helper_line, lid_offers, low_power_now, unavailable,
 };
 use crate::tui::screens::settings_accounts::plain;
 use crate::tui::screens::{Flow, Place, Screen};
@@ -24,15 +24,16 @@ use ratatui::text::{Line, Span};
 const GUTTER: u16 = 2;
 const TITLE: &str = "Keep awake";
 const PURPOSE: &str = "When the computer stays awake for your agents, and when that ends.";
-const ROWS: usize = 11;
+const ROWS: usize = 12;
 const OPTIONS_MAX: usize = 4;
 const DISPLAY_AWAKE_HELP: &str =
     "Whether a hold also keeps the display on. While it does, the screen stays unlocked.";
+const LOW_POWER_HELP: &str = "During a hold on battery, turns on the computer's low power mode to save charge, and puts it back when the hold ends.";
 const FREEZE_HELP: &str = "The listed apps pause while a hold runs with the lid closed and go on when the lid opens. Not while an external display is in use. If one stays paused, run crazyagent keep-awake restore; the next start also puts it back.";
 const MUTE_HELP: &str = "The sound goes off while a hold runs with the lid closed and comes back as it was when the lid opens. Not while an external display is in use.";
 const CHOOSER_ROWS: usize = 12;
 const CHOOSER_WIDTH: u16 = 64;
-const SECTIONS: [(&str, &str, &[Setting]); 5] = [
+const SECTIONS: [(&str, &str, &[Setting]); 6] = [
     (
         "When it holds",
         "What keeps the computer awake and for how long.",
@@ -52,6 +53,11 @@ const SECTIONS: [(&str, &str, &[Setting]); 5] = [
         "Display",
         "What a hold does with the display.",
         &[Setting::DisplayAwake],
+    ),
+    (
+        "Power",
+        "What a hold does to save the battery.",
+        &[Setting::LowPower],
     ),
     (
         "While the lid is closed",
@@ -103,6 +109,11 @@ const HEAT_NOTICE: [(HeatNotice, &str); 2] = [
 const DISPLAY_AWAKE: [(DisplayAwake, &str); 2] = [
     (DisplayAwake::Off, "Off"),
     (DisplayAwake::WhileHolding, "While holding"),
+];
+const LOW_POWER: [(LowPower, &str); 3] = [
+    (LowPower::BatteryBelow40, "On battery below 40 %"),
+    (LowPower::OnBattery, "Whenever on battery"),
+    (LowPower::Off, "Off"),
 ];
 const FREEZE: [(Freeze, &str); 2] = [(Freeze::Off, "Off"), (Freeze::On, "On for the listed apps")];
 const MUTE: [(Mute, &str); 2] = [(Mute::Off, "Off"), (Mute::On, "On")];
@@ -156,12 +167,13 @@ fn words(setting: Setting) -> (&'static str, &'static str) {
             "Tells you when the computer gets hot during a hold.",
         ),
         Setting::DisplayAwake => ("Display awake with the lid open", DISPLAY_AWAKE_HELP),
+        Setting::LowPower => ("Low Power Mode", LOW_POWER_HELP),
         Setting::Freeze => ("Freeze apps while the lid is closed", FREEZE_HELP),
         Setting::Mute => ("Mute audio while the lid is closed", MUTE_HELP),
     }
 }
 
-/// The settings in page order: the five sections' settings, one after the other. Input:
+/// The settings in page order: the six sections' settings, one after the other. Input:
 /// none. Output: the settings, `ROWS` of them.
 fn rows() -> Vec<Setting> {
     let rows: Vec<Setting> = SECTIONS
@@ -194,6 +206,7 @@ fn labels(setting: Setting) -> Vec<&'static str> {
         Setting::HeatEnd => names(&HEAT_END),
         Setting::HeatNotice => names(&HEAT_NOTICE),
         Setting::DisplayAwake => names(&DISPLAY_AWAKE),
+        Setting::LowPower => names(&LOW_POWER),
         Setting::Freeze => names(&FREEZE),
         Setting::Mute => names(&MUTE),
     };
@@ -214,6 +227,7 @@ fn chosen(setting: Setting, settings: &KeepAwakeSettings) -> usize {
         Setting::HeatEnd => index(&HEAT_END, settings.heat_end),
         Setting::HeatNotice => index(&HEAT_NOTICE, settings.heat_notice),
         Setting::DisplayAwake => index(&DISPLAY_AWAKE, settings.display_awake),
+        Setting::LowPower => index(&LOW_POWER, settings.low_power),
         Setting::Freeze => index(&FREEZE, settings.freeze),
         Setting::Mute => index(&MUTE, settings.mute),
     }
@@ -233,6 +247,7 @@ fn pick(setting: Setting, at: usize, picks: &mut Picks) {
         Setting::HeatEnd => picks.heat_end = Some(HEAT_END[at].0),
         Setting::HeatNotice => picks.heat_notice = Some(HEAT_NOTICE[at].0),
         Setting::DisplayAwake => picks.display_awake = Some(DISPLAY_AWAKE[at].0),
+        Setting::LowPower => picks.low_power = Some(LOW_POWER[at].0),
         Setting::Freeze => picks.freeze = Some(FREEZE[at].0),
         Setting::Mute => picks.mute = Some(MUTE[at].0),
     }
@@ -300,11 +315,12 @@ impl Chooser {
     }
 }
 
-/// Settings, Keep awake (DEC-167 addendum 7): the eleven settings in the desktop's five
+/// Settings, Keep awake (DEC-167 addendum 7): the twelve settings in the desktop's six
 /// sections, with its labels, help, options and reasons, on macOS the lid helper's line
 /// under the lid rule with t and d as it offers them, whatever the rule (QUESTION 36c), on
-/// Windows the lid setting's line with p (DEC-167 addendum 32), and the listed apps under
-/// the Freeze row with a to choose them. Left and Right pick; the picks stay unsaved until
+/// Windows the lid setting's line with p (DEC-167 addendum 32), where Low Power Mode stands
+/// under its row (addendum 42), and the listed apps under the Freeze row with a to choose
+/// them. Left and Right pick; the picks stay unsaved until
 /// Enter saves them over the settings the engine holds at that moment, and Esc drops them
 /// first. Opened by Go to and by s on the Keep awake screen.
 pub(in crate::tui) struct KeepAwakeSettingsPage {
@@ -559,40 +575,65 @@ impl KeepAwakeSettingsPage {
             for setting in settings {
                 lines.push(self.row_line(*setting, &shown, width, ctx));
                 about(&mut lines, words(*setting).1, "  ");
-                if let Some(reason) = unavailable(*setting, view) {
-                    lines.push(Line::styled(format!("  {reason}"), theme.warning));
-                }
-                if *setting == Setting::Freeze && unavailable(*setting, view).is_none() {
-                    let names: Vec<&str> = view
-                        .freeze_apps
-                        .iter()
-                        .map(|app| app.name.as_str())
-                        .collect();
-                    let listed = if names.is_empty() {
-                        NO_APPS.to_owned()
-                    } else {
-                        names.join(", ")
-                    };
-                    for part in wrap(&format!("Apps  {listed}"), width.saturating_sub(2).max(8)) {
-                        lines.push(Line::raw(format!("  {part}")));
-                    }
-                }
-                if *setting == Setting::Lid && !lid_line.is_empty() {
-                    let room = width.saturating_sub(2).max(8);
-                    if lid_line.chars().count() <= room {
-                        lines.push(Line::raw(format!("  {lid_line}")));
-                    } else {
-                        for part in wrap(&lid_line, room) {
-                            lines.push(Line::raw(format!("  {part}")));
-                        }
-                    }
-                }
+                lines.extend(Self::extras(*setting, view, width, &lid_line, ctx));
                 spans.push((start, lines.len() - 1));
                 start = lines.len();
             }
         }
         assert_eq!(spans.len(), ROWS);
         (lines, spans)
+    }
+
+    /// The lines under one row after its help: the reason this computer cannot honour the
+    /// setting, the listed apps under Freeze, the lid helper's or the lid setting's line
+    /// under the lid rule, and where Low Power Mode stands under its row (DEC-167 addendum
+    /// 42). Inputs: the setting, the view, the width, the lid line and the context.
+    /// Output: the lines.
+    fn extras(
+        setting: Setting,
+        view: &KeepAwakeView,
+        width: usize,
+        lid_line: &str,
+        ctx: &Ctx,
+    ) -> Vec<Line<'static>> {
+        let room = width.saturating_sub(2).max(8);
+        let reason = unavailable(setting, view);
+        let mut lines = Vec::new();
+        if let Some(reason) = &reason {
+            lines.push(Line::styled(format!("  {reason}"), ctx.theme.warning));
+        }
+        if setting == Setting::Freeze && reason.is_none() {
+            let names: Vec<&str> = view
+                .freeze_apps
+                .iter()
+                .map(|app| app.name.as_str())
+                .collect();
+            let listed = if names.is_empty() {
+                NO_APPS.to_owned()
+            } else {
+                names.join(", ")
+            };
+            for part in wrap(&format!("Apps  {listed}"), room) {
+                lines.push(Line::raw(format!("  {part}")));
+            }
+        }
+        if setting == Setting::Lid && !lid_line.is_empty() {
+            if lid_line.chars().count() <= room {
+                lines.push(Line::raw(format!("  {lid_line}")));
+            } else {
+                for part in wrap(lid_line, room) {
+                    lines.push(Line::raw(format!("  {part}")));
+                }
+            }
+        }
+        if setting == Setting::LowPower
+            && let Some(now) = low_power_now(view)
+        {
+            lines.push(Line::raw(format!("  {now}")));
+        }
+        assert!(room >= 8);
+        assert!(matches!(setting, Setting::Freeze | Setting::Lid) || lines.len() <= 1);
+        lines
     }
 
     fn moved(&mut self, to: usize) {
@@ -670,8 +711,8 @@ impl Screen for KeepAwakeSettingsPage {
         };
         let offers = (ctx.store.keep_awake.as_ref())
             .map_or(none, |view| lid_offers(view, LidPlace::Settings));
-        let windows = (ctx.store.keep_awake.as_ref())
-            .is_some_and(|view| view.platform == Platform::Windows);
+        let windows =
+            (ctx.store.keep_awake.as_ref()).is_some_and(|view| view.platform == Platform::Windows);
         if self.choosing.is_some() {
             return self.choose_key(key, ctx);
         }

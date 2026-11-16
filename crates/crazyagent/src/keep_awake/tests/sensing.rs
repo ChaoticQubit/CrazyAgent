@@ -725,6 +725,47 @@ fn the_view_shows_the_platform_lid_support_whatever_the_lid_rule() {
     assert_eq!(read.lid_platform, LidSupport::NeedsApproval);
 }
 
+/// Task 16c (QUESTION 43a): the owner's view carries the low power support of the last
+/// reading, starting from the platform's own, and a later read shows the same.
+#[test]
+fn the_view_shows_the_low_power_support_of_the_last_reading() {
+    let (_folder, connection) = engine();
+    let fake = Fake::new(PowerReading {
+        low_power: LowPowerSupport::OwnerChanged,
+        ..on_battery(Some(30))
+    });
+    let mut keeper = Keeper::default().with_reader(fake.reader());
+    let mut now_ms = NOW_MS;
+
+    let first = keeper.tick(&connection, now_ms).unwrap().unwrap();
+    assert_eq!(
+        first.low_power,
+        LowPowerSupport::at_start(crate::paths::Platform::CURRENT),
+        "before a reading the view says what the platform starts with"
+    );
+    let changed = step_until(&mut keeper, &connection, &mut now_ms, |view| {
+        view.low_power == LowPowerSupport::OwnerChanged
+    });
+    assert_eq!(
+        changed.lid_support,
+        LidSupport::IdleOnlyOnBattery,
+        "the default lid rule AC only still holds only idle on battery"
+    );
+    assert_eq!(changed.lid_platform, LidSupport::Held);
+    let unavailable = LowPowerSupport::NotAvailable {
+        reason: "Not available: power-profiles-daemon is not running".into(),
+    };
+    fake.set(PowerReading {
+        low_power: unavailable.clone(),
+        ..on_battery(Some(30))
+    });
+    step_until(&mut keeper, &connection, &mut now_ms, |view| {
+        view.low_power == unavailable
+    });
+    let read = crate::keep_awake::view(&connection).unwrap();
+    assert_eq!(read.low_power, unavailable, "a later read says the same");
+}
+
 #[test]
 fn stop_hands_the_lid_line_a_last_not_wanted_ask_before_it_returns() {
     let (_folder, connection) = engine();

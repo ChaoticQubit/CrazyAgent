@@ -35,8 +35,8 @@ pub use settings::{
     LidDisplay, LidRule, LowPower, Mode, Mute,
 };
 pub use state::{
-    Decision, EndReason, Heat, Inputs, LidSupport, LowPowerSupport, PowerSource, Reason,
-    Sensors, Want, decide, heat_notice, lid_status, low_power_wanted,
+    Decision, EndReason, Heat, Inputs, LidSupport, LowPowerSupport, PowerSource, Reason, Sensors,
+    Want, decide, heat_notice, lid_status, low_power_wanted,
 };
 
 use crate::engine::EngineError;
@@ -138,7 +138,8 @@ pub fn refusal_words(code: &str) -> Option<&'static str> {
 /// last hold ended until a new one starts), whether the lid is covered, what the platform
 /// itself says of the lid whatever the rule (QUESTION 36c: Settings offers Turn on and
 /// Remove lid helper from it), the platform, the running work count, the settings version
-/// a save sends back and the apps frozen while the lid is closed.
+/// a save sends back, the apps frozen while the lid is closed and whether a hold can turn
+/// on low power mode, as the platform's last reading said (Task 16c, QUESTION 43a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeepAwakeView {
@@ -150,6 +151,7 @@ pub struct KeepAwakeView {
     pub platform: Platform,
     pub work: u32,
     pub freeze_apps: Vec<FreezeApp>,
+    pub low_power: LowPowerSupport,
 }
 
 /// The run state the engine keeps between evaluations, gone at every engine start: the
@@ -395,7 +397,7 @@ fn lid_order(stored: &mut Stored, command: power::LidCommand) {
 }
 
 /// Builds the owner's view from the settings, their version, the chosen apps and the run
-/// state.
+/// state; the lid and low power support are the last reading's.
 fn view_of(
     settings: KeepAwakeSettings,
     version: u64,
@@ -412,6 +414,7 @@ fn view_of(
         platform: Platform::CURRENT,
         work: stored.work,
         freeze_apps,
+        low_power: stored.sensors.low_power.clone(),
     }
 }
 

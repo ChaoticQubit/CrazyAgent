@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState, type FormEvent } from "react";
 import { FREEZE_APPS_MAX, KEEP_AWAKE_CHANGED, KEEP_AWAKE_DEFAULTS, KEEP_AWAKE_POLL_MS, KEEP_AWAKE_SETTINGS, loadKeepAwake, loadKeepAwakeApps, saveKeepAwake, sendKeepAwake, type FreezeApp, type KeepAwakeSettingId, type KeepAwakeSettings as Stored, type KeepAwakeView, type LidAction } from "../../api-keep-awake";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, NotReady, Notice, SettingLine, SettingSection, Skeleton } from "../../ui";
-import { lidHelperLine, unavailable } from "../keep-awake/model";
+import { lidHelperLine, lowPowerNow, lowPowerTurnOn, unavailable } from "../keep-awake/model";
 import { LidHelperButtons } from "../keep-awake/panel";
 import "../keep-awake/keep-awake.css";
 import "../notifications/notifications.css";
@@ -47,15 +47,18 @@ export function savedKeepAwake(stored: Stored, picks: KeepAwakePicks): Stored {
 }
 
 /** One setting's line: its label with the changed mark, its help and, when this computer
- * cannot honour it, the reason, then its options as segments, each a real radio. Inputs:
- * the setting's id, the view, the shown option, a lock flag and the pick handler. Output:
- * the line. */
-function OptionLine({ id, view, value, saving, onPick }: { id: KeepAwakeSettingId; view: KeepAwakeView; value: string; saving: boolean; onPick: (id: KeepAwakeSettingId, value: string) => void }) {
+ * cannot honour it, the reason, then its options as segments, each a real radio. Low Power
+ * Mode also says where it stands for this hold and, while it needs the lid helper, offers
+ * the lid helper's own Turn on (DEC-167 addendum 42). Inputs: the setting's id, the view,
+ * the shown option, a lock flag and the pick and lid command handlers. Output: the line. */
+function OptionLine({ id, view, value, saving, onPick, onLid }: { id: KeepAwakeSettingId; view: KeepAwakeView; value: string; saving: boolean; onPick: (id: KeepAwakeSettingId, value: string) => void; onLid: (action: LidAction) => void }) {
   const setting = KEEP_AWAKE_SETTINGS.find((entry) => entry.id === id);
   assert(setting !== undefined, `Keep awake has no setting ${id}`);
   assert(setting.options.some((option) => option.value === value), `${id} has no option ${value}`);
   const reason = unavailable(id, view);
-  const help = <>{setting.help}{reason !== null && <span className="keep-awake-reason">{reason}</span>}</>;
+  const now = id === "low_power" ? lowPowerNow(view) : null;
+  const turnOn = id === "low_power" ? lowPowerTurnOn(view) : null;
+  const help = <>{setting.help}{reason !== null && <span className="keep-awake-reason">{reason}</span>}{now !== null && <span className="keep-awake-now">{now}</span>}</>;
   return <SettingLine label={setting.label} help={help} changed={value !== KEEP_AWAKE_DEFAULTS[id]}>
     <fieldset className="notice-choices" data-setting={id} disabled={saving}>
       <legend className="visually-hidden">{setting.label}</legend>
@@ -64,6 +67,7 @@ function OptionLine({ id, view, value, saving, onPick }: { id: KeepAwakeSettingI
         {option.label}
       </label>)}
     </fieldset>
+    {turnOn !== null && <Button disabled={saving} onClick={() => onLid("turn_on_lid_hold")}>{turnOn}</Button>}
   </SettingLine>;
 }
 
@@ -178,7 +182,7 @@ export function KeepAwakeSettingsView({ view, picks, running = null, saving, pro
     <form className="pj set-groups" aria-label="Keep awake" noValidate onSubmit={submit}>
       {SECTIONS.map((section) => <SettingSection key={section.title} title={section.title} about={section.about}>
         {section.ids.map((id) => <Fragment key={id}>
-          <OptionLine id={id} view={view.value} value={sent[id]} saving={saving} onPick={onPick} />
+          <OptionLine id={id} view={view.value} value={sent[id]} saving={saving} onPick={onPick} onLid={onLid} />
           {id === "lid" && <LidHelperLine view={view.value} saving={saving} onLid={onLid} />}
           {id === "lid" && <LidSettingLine view={view.value} saving={saving} onLid={onLid} />}
           {id === "freeze" && <FreezeAppsLine view={view.value} running={running} saving={saving} onChoose={onChoose} onApps={onApps} onClose={onClose} />}

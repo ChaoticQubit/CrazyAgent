@@ -252,6 +252,18 @@ test("Keep awake: an engine with no lid helper in its bundle offers no lid helpe
   assert.deepEqual(await lidButtons(page), []);
 }));
 
+test("Keep awake: the Low Power Mode row says what the engine read of low power mode, and with no lid helper in the bundle it offers no Turn on (DEC-167 addendum 42)", { timeout: 600000 }, (t) => onEngine(t, "ca-ka-low-power-", async ({ bridge, me, page, open }) => {
+  const shown = (low) => low.kind === "not_available" ? low.reason : low.kind;
+  const first = await engineView(bridge);
+  if (first.platform === "mac_os") await until("the lid line said low power needs the lid helper", "Needs the lid helper", async () => shown((await engineView(bridge)).low_power));
+  const low = (await engineView(bridge)).low_power;
+  const words = { held: "On now for this hold", owner_changed: "Left as you set it for this hold", not_available: shown(low) }[low.kind] ?? null;
+  await settingsPage(me, open);
+  await me.waitFor("the Low Power Mode row", (text) => text.includes("Low Power Mode") && text.includes("Whenever on battery"));
+  if (words !== null) await me.waitFor("the row says what the engine read", (text) => text.includes(words));
+  if (first.platform === "mac_os") assert.deepEqual(await lidButtons(page), [], "no Turn on on an engine with no lid helper");
+}));
+
 const TICKED = ".keep-awake-apps input[type=checkbox]:checked";
 
 /** The names of the apps the chooser shows ticked. Input: the page. Output: the names. */

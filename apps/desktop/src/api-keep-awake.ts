@@ -59,10 +59,17 @@ export type LidSupport =
 
 export type KeepAwakePlatform = "mac_os" | "linux" | "windows";
 
+/** Whether a hold can turn on the computer's low power mode (Task 16): not read yet, ready,
+ * on now for the running hold, left as the owner set it during this hold, or not available
+ * with the engine's plain reason. */
+export type LowPowerSupport =
+  | { kind: "unread" | "ready" | "held" | "owner_changed" }
+  | { kind: "not_available"; reason: string };
+
 /** Keep awake as the engine last evaluated it: the settings, the settings version a save
  * sends back, the decision, the lid support, what this computer itself says of the lid
- * whatever the rule, the platform, how many agents work and the apps frozen while the lid
- * is closed. */
+ * whatever the rule, the platform, how many agents work, the apps frozen while the lid is
+ * closed and where low power mode stands (DEC-167 addendum 42). */
 export interface KeepAwakeView {
   settings: KeepAwakeSettings;
   version: number;
@@ -72,6 +79,7 @@ export interface KeepAwakeView {
   platform: KeepAwakePlatform;
   work: number;
   freeze_apps: FreezeApp[];
+  low_power: LowPowerSupport;
 }
 
 /** One change the owner makes: start a timer, move the running one later, end the hold,
