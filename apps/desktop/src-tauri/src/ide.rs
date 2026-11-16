@@ -507,14 +507,8 @@ fn ide_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     if let Some(kept) = app.try_state::<IdeMenu<R>>() {
         return Ok(kept.0.clone());
     }
-    let menu = build_ide_menu(app)?;
-    app.manage(IdeMenu(menu.clone()));
-    Ok(menu)
-}
-
-fn build_ide_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let name = app.package_info().name.clone();
-    Menu::with_items(
+    let menu = Menu::with_items(
         app,
         &[
             &Submenu::with_items(
@@ -551,7 +545,9 @@ fn build_ide_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
                 ],
             )?,
         ],
-    )
+    )?;
+    app.manage(IdeMenu(menu.clone()));
+    Ok(menu)
 }
 
 fn restore_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(), BridgeError> {
