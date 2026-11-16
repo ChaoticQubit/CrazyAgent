@@ -77,7 +77,7 @@ test("the hidden folders section names the running agents that can still open a 
   assert.match(hidden, /!fullAccess && seers\.length > 0/, "Full access hides nothing, so it lists no one");
   assert.match(hidden, /\{!fullAccess && <p className="pj-secondary">\{HIDDEN_SEERS_COVER\}<\/p>\}/, "an empty list never reads as nothing can open it");
   assert.match(settings.HIDDEN_SEERS_COVER, /^Team agents that started before you hid a folder, including ones CrazyAgent took over/);
-  assert.match(settings.HIDDEN_SEERS_COVER, /A research, overview, roadmap or onboarding run that started before keeps its access until it ends\.$/);
+  assert.match(settings.HIDDEN_SEERS_COVER, /A research, overview, roadmap, onboarding or lockfile rebuild run that started before keeps its access until it ends\.$/);
   const api = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
   assert.match(api, /call<IntentReceipt>\("desktop_team_restart_hidden_seers", \{ id, generation \}\)/);
   assert.equal(projects.failureCopy("team_no_hidden_seers"), "No running agent can still open a hidden folder.");

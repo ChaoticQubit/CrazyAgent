@@ -5267,7 +5267,8 @@ fn a_folder_cut_to_its_tail_fits_its_cells() {
 /// SA-VID14-A: on the Settings tab the running agents that can still open a folder hidden
 /// after they started are named under the hidden folders, with h to restart them, which
 /// sends Restart them for the project; with none listed h sends nothing. The editor says the
-/// list covers team agents and not research, overview, roadmap or onboarding runs (r1).
+/// list covers team agents and not research, overview, roadmap, onboarding or lockfile
+/// rebuild runs (r1, SA-VID14-R2-N1).
 #[test]
 fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them() {
     use crate::team::{GraphNode, NodeKind, TeamAction, TeamGraph};
@@ -5351,8 +5352,9 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them(
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     for line in [
         "Team agents that started before you hid a folder,",
-        "research, overview, roadmap or onboarding run that",
-        "started before keeps its access until it ends.",
+        "research, overview, roadmap, onboarding or lockfile",
+        "rebuild run that started before keeps its access until",
+        "it ends.",
     ] {
         assert!(
             shown.contains(line),
