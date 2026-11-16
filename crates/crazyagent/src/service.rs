@@ -1887,15 +1887,34 @@ pub async fn wait_started(
     bound: Duration,
     since: u64,
 ) -> Result<(), ServiceError> {
+    match wait_start(layout, service, bound, since).await? {
+        Started::Answered => Ok(()),
+        Started::StillStarting => Err(unanswered(layout, START_TIMEOUT)),
+    }
+}
+
+/// Waits like [`wait_started`], but a wait that reaches [`START_TIMEOUT`] looks at the
+/// service manager once more and, when it still runs the process first seen running, ends
+/// as [`Started::StillStarting`] instead of failing. Inputs: the layout, the service, the
+/// bound and the log length before the start. Output: how the wait ended, or an error
+/// naming the engine log when the engine stopped, was relaunched or never ran.
+pub async fn wait_start(
+    layout: &Layout,
+    service: &Service,
+    bound: Duration,
+    since: u64,
+) -> Result<Started, ServiceError> {
     assert!(bound <= START_TIMEOUT);
     let started = Instant::now();
+    let limit = |seen: Option<u32>| if seen.is_some() { START_TIMEOUT } else { bound };
     let mut seen: Option<u32> = None;
     let mut looked: Option<Instant> = None;
     loop {
         if answered(layout, since, PROBE_TIMEOUT.min(bound.max(POLL))).await {
-            return Ok(());
+            return Ok(Started::Answered);
         }
-        if looked.is_none_or(|at| at.elapsed() >= LIVENESS_EVERY) {
+        let due = started.elapsed() >= limit(seen);
+        if due || looked.is_none_or(|at| at.elapsed() >= LIVENESS_EVERY) {
             looked = Some(Instant::now());
             let status = service.status()?;
             let running = status.pid.filter(|_| status.running);
@@ -1911,9 +1930,11 @@ pub async fn wait_started(
                 }
             }
         }
-        let limit = if seen.is_some() { START_TIMEOUT } else { bound };
-        if started.elapsed() >= limit {
-            return Err(unanswered(layout, limit));
+        if started.elapsed() >= limit(seen) {
+            return match seen {
+                Some(_) => Ok(Started::StillStarting),
+                None => Err(unanswered(layout, bound)),
+            };
         }
         tokio::time::sleep(POLL).await;
     }

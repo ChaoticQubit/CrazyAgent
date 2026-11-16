@@ -68,7 +68,8 @@ pub enum EngineAfterUpdate {
 fn engine_after(waited: Option<Started>) -> EngineAfterUpdate {
     match waited {
         Some(Started::Answered) => EngineAfterUpdate::Ready,
-        _ => EngineAfterUpdate::Starting,
+        Some(Started::StillStarting) => EngineAfterUpdate::Starting,
+        None => EngineAfterUpdate::Failed,
     }
 }
 
@@ -285,20 +286,15 @@ async fn start_engine(sidecar: PathBuf, events: &Events<UpdateProgress>) -> Engi
     let begun = Instant::now();
     let started = async {
         let _ = service(sidecar, "start").await;
-        crazyagent::service::wait_started(
-            &layout,
-            &engine,
-            crazyagent::service::READY_TIMEOUT,
-            since,
-        )
-        .await
-        .is_ok()
+        crazyagent::service::wait_start(&layout, &engine, crazyagent::service::READY_TIMEOUT, since)
+            .await
+            .ok()
     };
     tokio::pin!(started);
     let mut tick = tokio::time::interval(STARTING_TICK);
-    let answered = loop {
+    let waited = loop {
         tokio::select! {
-            answered = &mut started => break answered,
+            waited = &mut started => break waited,
             _ = tick.tick() => {
                 let _ = events.send(UpdateProgress::StartingEngine {
                     waited_s: begun.elapsed().as_secs(),
@@ -307,14 +303,7 @@ async fn start_engine(sidecar: PathBuf, events: &Events<UpdateProgress>) -> Engi
             }
         }
     };
-    let running = engine.status().is_ok_and(|status| status.running);
-    engine_after(if answered {
-        Some(Started::Answered)
-    } else if running {
-        Some(Started::StillStarting)
-    } else {
-        None
-    })
+    engine_after(waited)
 }
 
 /// Links the bundled `crazyagent`, or its private copy when the app runs from an AppImage
