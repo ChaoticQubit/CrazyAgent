@@ -23,7 +23,8 @@ pub(crate) enum Command {
     Remove(CredentialRef),
     List(Option<CredentialRef>, usize),
     Get(CredentialRef),
-    KeyReplaced(CredentialRef),
+    /// A new key replaced an account's key: the account and its key reference.
+    KeyReplaced(CredentialRef, CredentialRef),
     Held,
 }
 
@@ -269,13 +270,23 @@ pub(super) fn execute(
                 &tx, admission, connection, details,
             )?)))
         }
-        Command::KeyReplaced(id) => {
+        Command::KeyReplaced(id, credential) => {
             let tx = db
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(error)?;
             check_owner_admission(&tx, admission)?;
-            let (connection, details) =
-                find(&tx, config, &id)?.ok_or_else(|| error("account_not_found"))?;
+            let Some((connection, details)) = find(&tx, config, &id)? else {
+                super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential.as_str())?;
+                tx.commit().map_err(error)?;
+                #[cfg(unix)]
+                settle_removed(
+                    db,
+                    config.settings.model_access.as_ref(),
+                    super::trash::ACCOUNT_KEY,
+                    credential.as_str(),
+                );
+                return Err(error("account_not_found"));
+            };
             if !matches!(connection.auth, ModelAuthentication::ApiKey { .. }) {
                 return Err(error("account_key_not_allowed"));
             }
@@ -382,8 +393,19 @@ pub(super) fn execute(
             }
             tx.commit().map_err(error)?;
             #[cfg(unix)]
-            if let Some((kind, name)) = left {
-                settle_removed(db, config.settings.model_access.as_ref(), kind, name);
+            {
+                let catalog = config.settings.model_access.as_ref();
+                if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
+                    settle_removed(
+                        db,
+                        catalog,
+                        super::trash::ACCOUNT_KEY,
+                        credential_ref.as_str(),
+                    );
+                }
+                if let Some((kind, name)) = left {
+                    settle_removed(db, catalog, kind, name);
+                }
             }
             Ok(ResultValue::Removed(Box::new(connection)))
         }

@@ -700,14 +700,9 @@ async fn a_key_replaced_after_its_account_was_removed_leaves_no_key_on_disk() {
     );
 
     let (swept, sweep) = busy.occupy_storage();
-    let replaced = super::accounts::key_replaced(
-        &handle.engine,
-        &admission,
-        &handle.authority,
-        added.id.clone(),
-        credential_ref,
-    )
-    .await;
+    let replaced =
+        super::accounts::key_replaced(&handle.engine, &admission, added.id.clone(), credential_ref)
+            .await;
     outlasted_the_owner_wait(
         replaced.map(|_| ()),
         "native_auth_outcome_unknown_read_same_operation",
@@ -886,9 +881,7 @@ async fn a_key_replaced_after_its_connection_was_removed_stays_for_the_other_on_
         AccountSecret::new(after.as_bytes().to_vec()).unwrap(),
     )
     .unwrap();
-    let replaced =
-        super::accounts::key_replaced(&handle.engine, &admission, &handle.authority, first, shared)
-            .await;
+    let replaced = super::accounts::key_replaced(&handle.engine, &admission, first, shared).await;
     assert_eq!(
         replaced.err().map(|error| error.0).as_deref(),
         Some("account_not_found")

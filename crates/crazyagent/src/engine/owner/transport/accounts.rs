@@ -389,22 +389,8 @@ async fn handle(
             }
         }
         Action::Remove { id } => {
-            let keys = authority.clone();
-            let removed = engine
-                .settled_job(
-                    |reply| Job::Accounts(admission.clone(), Command::Remove(id), reply),
-                    move |result| match result {
-                        Ok(ResultValue::Removed(connection)) => match &connection.auth {
-                            ModelAuthentication::ApiKey { credential_ref } => {
-                                remove_key(&keys.root, credential_ref)
-                            }
-                            _ => Ok(()),
-                        },
-                        _ => Ok(()),
-                    },
-                )
-                .await?;
-            let ResultValue::Removed(_) = removed else {
+            let ResultValue::Removed(_) = actor(engine, admission, Command::Remove(id)).await?
+            else {
                 return Err(unknown());
             };
             Reply::Removed
@@ -423,15 +409,7 @@ async fn handle(
                 return Err(failure("account_key_not_allowed"));
             };
             replace_key(root, credential_ref, key)?;
-            let listed = match key_replaced(
-                engine,
-                admission,
-                authority,
-                id,
-                credential_ref.clone(),
-            )
-            .await
-            {
+            let listed = match key_replaced(engine, admission, id, credential_ref.clone()).await {
                 Ok(ResultValue::Account(current)) => current,
                 Err(gone) if gone.0 == "account_not_found" => return Err(gone),
                 Err(problem) if problem.0.starts_with("account_key") => return Err(problem),
@@ -470,28 +448,18 @@ async fn actor(
         .await
 }
 
-/// Tells storage that a new key replaced an account's key, and deletes that key file once
-/// storage answers that the account is gone, even after the owner's wait ended, so a key
-/// replace racing a Remove leaves no key behind. Inputs: the engine, the admission, the
-/// authority, the account and its key reference. Output: storage's answer, or the error
-/// of a key file that could not be deleted.
+/// Tells storage that a new key replaced an account's key. Storage deletes that key file
+/// itself when the account is gone, even after the owner's wait ended, unless another
+/// connection still names the key, so a key replace racing a Remove leaves no key behind
+/// and takes none a sibling uses. Inputs: the engine, the admission, the account and its
+/// key reference. Output: storage's answer.
 pub(super) async fn key_replaced(
     engine: &Engine,
     admission: &Admission,
-    authority: &Arc<Authority>,
     id: CredentialRef,
     credential: CredentialRef,
 ) -> Result<ResultValue, EngineError> {
-    let keys = authority.clone();
-    engine
-        .settled_job(
-            |reply| Job::Accounts(admission.clone(), Command::KeyReplaced(id), reply),
-            move |result| match result {
-                Err(gone) if gone.0 == "account_not_found" => remove_key(&keys.root, &credential),
-                _ => Ok(()),
-            },
-        )
-        .await
+    actor(engine, admission, Command::KeyReplaced(id, credential)).await
 }
 
 async fn authenticate(
