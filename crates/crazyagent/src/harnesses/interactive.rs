@@ -13,7 +13,7 @@ use std::ffi::OsStr;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub const KEY_FILE: &str = ".crazyagent-key";
@@ -873,36 +873,57 @@ pub fn claude_project_folder(cwd: &Path) -> Option<String> {
     (name.chars().count() <= CLAUDE_PROJECT_NAME_MAX).then_some(name)
 }
 
-/// Writes a keyed account's key into `<home>/.crazyagent-key`, readable only by this user,
-/// replacing an earlier one, so the key reaches the harness without argv or environment.
-/// Inputs: the account home, already checked by the launch, and the key. Output: the path.
+/// Writes a keyed account's key into `<home>/.crazyagent-key`, private to this user and
+/// replacing an earlier one, so the key reaches the harness without argv or environment. Every
+/// step goes through the home folder opened once without following a link, so a home swapped
+/// after its check cannot redirect them; a failed or unsafe write is removed. Inputs: the
+/// account home and the key. Output: the path.
 #[cfg(unix)]
 pub fn write_key(home: &Path, key: &Secret) -> Result<PathBuf, LaunchError> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     super::launch::validate_home(home)?;
     let path = home.join(KEY_FILE);
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            std::fs::remove_file(&path).map_err(|_| failure("launch_key_file_unavailable"))?;
+    let unavailable = |_| failure("launch_key_file_unavailable");
+    let folder = rustix::fs::open(
+        home,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(unavailable)?;
+    match rustix::fs::statat(&folder, KEY_FILE, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => {
+            rustix::fs::unlinkat(&folder, KEY_FILE, AtFlags::empty()).map_err(unavailable)?;
         }
         Ok(_) => return Err(failure("launch_key_file_unsafe")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(rustix::io::Errno::NOENT) => {}
         Err(_) => return Err(failure("launch_key_file_unavailable")),
     }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|_| failure("launch_key_file_unavailable"))?;
-    file.write_all(key.reveal().as_bytes())
+    let mut file = std::fs::File::from(
+        rustix::fs::openat(
+            &folder,
+            KEY_FILE,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(unavailable)?,
+    );
+    let written = file
+        .set_permissions(std::fs::Permissions::from_mode(0o600))
+        .and_then(|()| file.write_all(key.reveal().as_bytes()))
         .and_then(|()| file.sync_all())
-        .map_err(|_| failure("launch_key_file_unavailable"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| failure("launch_key_file_unavailable"))?;
-    assert_eq!(metadata.mode() & 0o777, 0o600);
-    assert_eq!(metadata.len(), key.reveal().len() as u64);
-    Ok(path)
+        .and_then(|()| file.metadata());
+    let refusal = match written {
+        Ok(metadata)
+            if metadata.mode() & 0o777 == 0o600 && metadata.len() == key.reveal().len() as u64 =>
+        {
+            return Ok(path);
+        }
+        Ok(_) => "launch_key_file_unsafe",
+        Err(_) => "launch_key_file_unavailable",
+    };
+    drop(file);
+    let _ = rustix::fs::unlinkat(&folder, KEY_FILE, AtFlags::empty());
+    Err(failure(refusal))
 }
 
 /// Puts the folder of the tmux program a native-team lead splits teammate panes with at the
@@ -1017,15 +1038,20 @@ pub fn write_teammate_command(
         .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32)
         .open(&path)
         .map_err(|_| failure("launch_teammate_command_unavailable"))?;
-    file.write_all(script.as_bytes())
+    let written = file
+        .set_permissions(std::fs::Permissions::from_mode(0o700))
+        .and_then(|()| file.write_all(script.as_bytes()))
         .and_then(|()| file.sync_all())
-        .map_err(|_| failure("launch_teammate_command_unavailable"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| failure("launch_teammate_command_unavailable"))?;
-    assert_eq!(metadata.mode() & 0o777, 0o700);
-    assert_eq!(metadata.len(), script.len() as u64);
-    Ok(())
+        .and_then(|()| file.metadata());
+    if let Ok(metadata) = &written
+        && metadata.mode() & 0o777 == 0o700
+        && metadata.len() == script.len() as u64
+    {
+        return Ok(());
+    }
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+    Err(failure("launch_teammate_command_unavailable"))
 }
 
 /// Refuses a native-team lead where no tmux teammate panes exist. Takes the agent home,

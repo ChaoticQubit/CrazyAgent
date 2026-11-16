@@ -3,7 +3,10 @@ use super::{NativeProfileUse, failure};
 use crate::engine::{EngineError, off_worker};
 use base64::Engine;
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
-use serde_json::{Map, Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use serde_json::value::RawValue;
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -104,9 +107,16 @@ impl Harness {
 }
 
 /// An agent's copy of the account's credential and the moment its access token lapses.
+/// Dropping it wipes the copy, so no path frees the token unwiped.
 pub(super) struct Record {
     pub(super) copy: Vec<u8>,
     pub(super) expires: Duration,
+}
+
+impl Drop for Record {
+    fn drop(&mut self) {
+        crate::credentials::wipe(&mut self.copy);
+    }
 }
 
 /// An account credential copied into one agent's own home for one turn, with the keeper
@@ -273,10 +283,16 @@ pub(super) fn account_record(
     home: &File,
     path: &Path,
 ) -> Result<Record, EngineError> {
-    match harness {
-        Harness::Codex => codex_copy(&read_record(home, CODEX_RECORD)?),
-        Harness::Claude => claude_copy(&claude_source(home, path)?),
-    }
+    let mut bytes = match harness {
+        Harness::Codex => read_record(home, CODEX_RECORD)?,
+        Harness::Claude => claude_source(home, path)?,
+    };
+    let record = match harness {
+        Harness::Codex => codex_copy(&bytes),
+        Harness::Claude => claude_copy(&bytes),
+    };
+    crate::credentials::wipe(&mut bytes);
+    record
 }
 
 /// The keychain item name Claude Code files a sign-in under for the secure storage folder
@@ -429,16 +445,13 @@ impl NativeProfileUse {
             let renewal = self.renewal(harness, executable)?;
             record = off_worker(|| renewal.renew(record.expires))?;
             if record.expires <= since_epoch()? + USABLE_MIN {
-                record.copy.fill(0);
                 return Err(match harness {
                     Harness::Codex => codex_expired(),
                     Harness::Claude => renewal_failed(),
                 });
             }
         }
-        let credential = poll_credential(harness, &record.copy);
-        record.copy.fill(0);
-        credential
+        poll_credential(harness, &record.copy)
     }
 
     /// When this Claude Code account's access token lapses, read from the record exactly as
@@ -491,11 +504,10 @@ fn read_record(folder: &File, name: &str) -> Result<Vec<u8>, EngineError> {
     {
         return Err(unavailable());
     }
-    let mut bytes = Vec::new();
-    file.take(RECORD_BYTES_MAX + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| unavailable())?;
-    if bytes.len() as u64 > RECORD_BYTES_MAX {
+    let mut bytes = Vec::with_capacity(RECORD_BYTES_MAX as usize + 1);
+    let read = file.take(RECORD_BYTES_MAX + 1).read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() as u64 > RECORD_BYTES_MAX {
+        crate::credentials::wipe(&mut bytes);
         return Err(unavailable());
     }
     Ok(bytes)
@@ -535,6 +547,95 @@ pub(super) fn place(home: &File, name: &str, bytes: &[u8]) -> Result<(u64, u64),
     written
 }
 
+/// A text field of a credential record, borrowed from the record's bytes, which the reader
+/// wipes; a field written with escapes is decoded into its own copy, zeroed when dropped.
+#[derive(Deserialize)]
+struct RecordText<'a>(#[serde(borrow)] Cow<'a, str>);
+
+impl RecordText<'_> {
+    fn text(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for RecordText<'_> {
+    fn drop(&mut self) {
+        if let Cow::Owned(text) = &mut self.0 {
+            crate::credentials::wipe(&mut std::mem::take(text).into_bytes());
+        }
+    }
+}
+
+/// A record's text field when it holds text that is not empty. Input: the field.
+/// Output: the text, or none.
+fn filled<'a>(field: Option<&'a RecordText<'_>>) -> Option<&'a str> {
+    field.map(RecordText::text).filter(|text| !text.is_empty())
+}
+
+/// Whether JSON text is an object, as a record and its tables must be; a struct reader on
+/// its own would also take an array. Input: the text. Output: true for an object.
+fn object(text: &[u8]) -> bool {
+    text.trim_ascii_start().first() == Some(&b'{')
+}
+
+/// The account's Codex `auth.json` as far as a copy reads it. The tokens table and the API
+/// key stay raw, borrowed from the record, so whatever stands in their place keeps its
+/// refusal; the refresh token and every other field are skipped, never decoded.
+#[derive(Deserialize)]
+struct CodexRecord<'a> {
+    #[serde(rename = "OPENAI_API_KEY", borrow)]
+    api_key: Option<&'a RawValue>,
+    #[serde(borrow)]
+    tokens: Option<&'a RawValue>,
+    last_refresh: Option<Value>,
+}
+
+/// The tokens table of a Codex `auth.json`, or of an agent's copy of it.
+#[derive(Deserialize)]
+struct CodexTokens<'a> {
+    #[serde(borrow)]
+    id_token: Option<RecordText<'a>>,
+    #[serde(borrow)]
+    access_token: Option<RecordText<'a>>,
+    account_id: Option<Value>,
+}
+
+/// The agent's Codex `auth.json`, its fields in the sorted order serde_json gave the map
+/// the copy was built from before, so the copy keeps its bytes.
+#[derive(Serialize)]
+struct CodexCopy<'a> {
+    #[serde(rename = "OPENAI_API_KEY")]
+    api_key: (),
+    last_refresh: &'a Value,
+    tokens: CodexCopyTokens<'a>,
+}
+
+/// The tokens table of the agent's Codex copy, which holds no refresh token.
+#[derive(Serialize)]
+struct CodexCopyTokens<'a> {
+    access_token: &'a str,
+    account_id: &'a Value,
+    id_token: ClaimsOnly<'a>,
+    refresh_token: &'static str,
+}
+
+/// An id token's header and payload with [`AGENT_ID_TOKEN_SIGNATURE`] in place of its
+/// signature, written as one JSON string straight into the copy, so no separate string
+/// holds the token.
+struct ClaimsOnly<'a> {
+    header: &'a str,
+    payload: &'a str,
+}
+
+impl Serialize for ClaimsOnly<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&format_args!(
+            "{}.{}.{AGENT_ID_TOKEN_SIGNATURE}",
+            self.header, self.payload
+        ))
+    }
+}
+
 /// Builds the agent's Codex `auth.json` from the account's: the ChatGPT tokens with the
 /// refresh token emptied, no API key, and the id token's signature dropped so the agent
 /// reads its claims but cannot exchange it for a durable API key. Input: the account's
@@ -542,42 +643,40 @@ pub(super) fn place(home: &File, name: &str, bytes: &[u8]) -> Result<(u64, u64),
 /// for an API-key sign-in without ChatGPT tokens, `native_profile_codex_token_unreadable`
 /// for a malformed record or token, or the unavailable refusal.
 fn codex_copy(record: &[u8]) -> Result<Record, EngineError> {
-    let record: Value = serde_json::from_slice(record).map_err(|_| codex_unreadable())?;
-    let tokens = record
-        .get("tokens")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            let keyed = record
-                .get("OPENAI_API_KEY")
-                .and_then(Value::as_str)
-                .is_some_and(|key| !key.is_empty());
-            if keyed {
-                codex_api_key()
-            } else {
-                codex_unreadable()
-            }
-        })?;
-    let text = |key: &str| {
-        tokens
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(codex_unreadable)
+    if !object(record) {
+        return Err(codex_unreadable());
+    }
+    let record: CodexRecord<'_> = serde_json::from_slice(record).map_err(|_| codex_unreadable())?;
+    let Some(tokens) = record
+        .tokens
+        .filter(|tokens| object(tokens.get().as_bytes()))
+    else {
+        let keyed = record
+            .api_key
+            .is_some_and(|key| key.get().starts_with('"') && key.get() != "\"\"");
+        return Err(if keyed {
+            codex_api_key()
+        } else {
+            codex_unreadable()
+        });
     };
-    let access = text("access_token")?;
-    let identity = claims_only(text("id_token")?)?;
+    let tokens: CodexTokens<'_> =
+        serde_json::from_str(tokens.get()).map_err(|_| codex_unreadable())?;
+    let access = filled(tokens.access_token.as_ref()).ok_or_else(codex_unreadable)?;
+    let identity = claims_only(filled(tokens.id_token.as_ref()).ok_or_else(codex_unreadable)?)?;
     let expires = Duration::from_secs(token_expiry(access)?);
-    let copy = json!({
-        "OPENAI_API_KEY": null,
-        "tokens": {
-            "id_token": identity,
-            "access_token": access,
-            "refresh_token": "",
-            "account_id": tokens.get("account_id").cloned().unwrap_or(Value::Null)
+    let null = Value::Null;
+    let copy = crate::credentials::sized_json(&CodexCopy {
+        api_key: (),
+        last_refresh: record.last_refresh.as_ref().unwrap_or(&null),
+        tokens: CodexCopyTokens {
+            access_token: access,
+            account_id: tokens.account_id.as_ref().unwrap_or(&null),
+            id_token: identity,
+            refresh_token: "",
         },
-        "last_refresh": record.get("last_refresh").cloned().unwrap_or(Value::Null)
-    });
-    let copy = serde_json::to_vec(&copy).map_err(|_| unavailable())?;
+    })
+    .map_err(|_| unavailable())?;
     assert!(!copy.is_empty());
     Ok(Record { copy, expires })
 }
@@ -594,7 +693,7 @@ const AGENT_ID_TOKEN_SIGNATURE: &str = "unexchangeable";
 /// signature, so a parser that rejects an empty part still loads it. Input: the account's
 /// id token. Output: the claims-only token, or `native_profile_codex_token_unreadable`
 /// when the input is not a three-part JWT.
-fn claims_only(token: &str) -> Result<String, EngineError> {
+fn claims_only(token: &str) -> Result<ClaimsOnly<'_>, EngineError> {
     let mut parts = token.split('.');
     let header = parts.next().filter(|part| !part.is_empty());
     let payload = parts.next().filter(|part| !part.is_empty());
@@ -603,9 +702,8 @@ fn claims_only(token: &str) -> Result<String, EngineError> {
         (Some(header), Some(payload), Some(_), None) => (header, payload),
         _ => return Err(codex_unreadable()),
     };
-    let stripped = format!("{header}.{payload}.{AGENT_ID_TOKEN_SIGNATURE}");
-    assert!(stripped.matches('.').count() == 2 && !stripped.ends_with('.'));
-    Ok(stripped)
+    assert!(!header.contains('.') && !payload.contains('.'));
+    Ok(ClaimsOnly { header, payload })
 }
 
 /// Takes what a usage poll sends from an agent's copy of the account's credential: the
@@ -617,36 +715,67 @@ fn poll_credential(
     harness: Harness,
     copy: &[u8],
 ) -> Result<crate::usage::poll::PollCredential, EngineError> {
-    let record: Value = serde_json::from_slice(copy).map_err(|_| unavailable())?;
-    let (token, account_id, plan) = match harness {
+    match harness {
         Harness::Codex => {
-            let tokens = &record["tokens"];
-            (
-                tokens["access_token"].as_str(),
-                tokens["account_id"].as_str(),
+            let read: CodexCopyRead<'_> =
+                serde_json::from_slice(copy).map_err(|_| unavailable())?;
+            let tokens = read.tokens.as_ref();
+            polled(
+                filled(tokens.and_then(|tokens| tokens.access_token.as_ref()))
+                    .ok_or_else(codex_unreadable)?,
+                tokens.and_then(|tokens| tokens.account_id.as_ref()),
                 None,
             )
         }
         Harness::Claude => {
-            let oauth = &record["claudeAiOauth"];
-            (
-                oauth["accessToken"].as_str(),
+            let read: ClaudeCopyRead<'_> =
+                serde_json::from_slice(copy).map_err(|_| unavailable())?;
+            let oauth = read.oauth.as_ref();
+            polled(
+                filled(oauth.and_then(|oauth| oauth.access_token.as_ref()))
+                    .ok_or_else(unavailable)?,
                 None,
-                oauth["subscriptionType"].as_str(),
+                oauth.and_then(|oauth| oauth.subscription_type.as_ref()),
             )
         }
-    };
-    let token = token
-        .filter(|token| !token.is_empty())
-        .ok_or_else(|| match harness {
-            Harness::Codex => codex_unreadable(),
-            Harness::Claude => unavailable(),
-        })?;
+    }
+}
+
+/// An agent's Codex copy, as a usage poll reads it.
+#[derive(Deserialize)]
+struct CodexCopyRead<'a> {
+    #[serde(borrow)]
+    tokens: Option<CodexTokens<'a>>,
+}
+
+/// An agent's Claude Code copy, as a usage poll reads it.
+#[derive(Deserialize)]
+struct ClaudeCopyRead<'a> {
+    #[serde(rename = "claudeAiOauth", borrow)]
+    oauth: Option<ClaudeCopyReadOauth<'a>>,
+}
+
+/// The OAuth table of an agent's Claude Code copy, as a usage poll reads it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeCopyReadOauth<'a> {
+    #[serde(borrow)]
+    access_token: Option<RecordText<'a>>,
+    subscription_type: Option<Value>,
+}
+
+/// The poll credential for a token read from a copy. Inputs: the token, and the ChatGPT
+/// account id and plan as the copy holds them. Output: the credential, or unavailable.
+fn polled(
+    token: &str,
+    account_id: Option<&Value>,
+    plan: Option<&Value>,
+) -> Result<crate::usage::poll::PollCredential, EngineError> {
     Ok(crate::usage::poll::PollCredential {
         token: crate::credentials::SecretString::bearer(token.as_bytes().to_vec())
             .map_err(|_| unavailable())?,
-        account_id: account_id.map(str::to_owned),
-        plan: plan.map(str::to_owned),
+        account_id: account_id.and_then(Value::as_str).map(str::to_owned),
+        plan: plan.and_then(Value::as_str).map(str::to_owned),
     })
 }
 
@@ -664,6 +793,56 @@ fn token_expiry(token: &str) -> Result<u64, EngineError> {
         .ok_or_else(codex_unreadable)
 }
 
+/// The account's Claude Code record as far as a copy reads it: only the OAuth table, raw
+/// and borrowed; the MCP sign-ins and every other record are skipped, never decoded.
+#[derive(Deserialize)]
+struct ClaudeRecord<'a> {
+    #[serde(rename = "claudeAiOauth", borrow)]
+    oauth: Option<&'a RawValue>,
+}
+
+/// The OAuth table of a Claude Code record. Both tokens stay raw, borrowed from the record,
+/// so a token that is not text keeps the refusal it had and the refresh token is never
+/// decoded.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeOauth<'a> {
+    #[serde(borrow)]
+    access_token: Option<&'a RawValue>,
+    #[serde(borrow)]
+    refresh_token: Option<&'a RawValue>,
+    scopes: Option<Value>,
+    expires_at: Option<Value>,
+    #[serde(default, deserialize_with = "present")]
+    subscription_type: Option<Value>,
+}
+
+/// The agent's Claude Code copy, its fields in the sorted order serde_json gave the map
+/// the copy was built from before, so the copy keeps its bytes.
+#[derive(Serialize)]
+struct ClaudeCopy<'a> {
+    #[serde(rename = "claudeAiOauth")]
+    oauth: ClaudeCopyOauth<'a>,
+}
+
+/// The OAuth table of the agent's Claude Code copy, which holds no refresh token.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeCopyOauth<'a> {
+    access_token: &'a str,
+    expires_at: u64,
+    refresh_token: (),
+    scopes: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscription_type: Option<&'a Value>,
+}
+
+/// Reads a field that is present, null included, so the copy keeps a null it was given.
+/// Input: the field's deserializer. Output: the value.
+fn present<'de, D: serde::Deserializer<'de>>(field: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(field).map(Some)
+}
+
 /// Builds the agent's Claude Code `.credentials.json`: only the fields Claude Code reads
 /// from the account's OAuth record, with no refresh token and none of the other records
 /// the account keeps. Claude Code empties both tokens when its provider refuses a refresh.
@@ -676,22 +855,27 @@ fn token_expiry(token: &str) -> Result<u64, EngineError> {
 /// `native_profile_sign_in_revoked` for emptied tokens, `native_profile_scope_too_wide`
 /// for an org, empty, non-string or inference-less scope set, or the unavailable refusal.
 fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
-    let record: Value = serde_json::from_slice(record).map_err(|_| unavailable())?;
-    let oauth: &Map<String, Value> = record
-        .get("claudeAiOauth")
-        .and_then(Value::as_object)
-        .ok_or_else(unavailable)?;
-    let token = |name: &str| oauth.get(name).and_then(Value::as_str);
-    if token("accessToken") == Some("") && token("refreshToken") == Some("") {
-        return Err(revoked());
-    }
-    if !token("accessToken").is_some_and(|token| !token.is_empty()) {
+    if !object(record) {
         return Err(unavailable());
     }
-    let scopes = oauth
-        .get("scopes")
-        .and_then(Value::as_array)
+    let record: ClaudeRecord<'_> = serde_json::from_slice(record).map_err(|_| unavailable())?;
+    let oauth = record
+        .oauth
+        .filter(|oauth| object(oauth.get().as_bytes()))
         .ok_or_else(unavailable)?;
+    let oauth: ClaudeOauth<'_> = serde_json::from_str(oauth.get()).map_err(|_| unavailable())?;
+    let emptied = |token: Option<&RawValue>| token.is_some_and(|token| token.get() == "\"\"");
+    if emptied(oauth.access_token) && emptied(oauth.refresh_token) {
+        return Err(revoked());
+    }
+    let text = oauth
+        .access_token
+        .filter(|token| token.get().starts_with('"'))
+        .and_then(|token| serde_json::from_str::<RecordText<'_>>(token.get()).ok())
+        .ok_or_else(unavailable)?;
+    let access = filled(Some(&text)).ok_or_else(unavailable)?;
+    let listed = oauth.scopes.as_ref().ok_or_else(unavailable)?;
+    let scopes = listed.as_array().ok_or_else(unavailable)?;
     let mut has_required = false;
     for scope in scopes {
         let scope = scope
@@ -710,21 +894,20 @@ fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
         return Err(wide_scope());
     }
     let expires_ms = oauth
-        .get("expiresAt")
+        .expires_at
+        .as_ref()
         .and_then(Value::as_u64)
         .ok_or_else(unavailable)?;
-    let mut kept = Map::new();
-    kept.insert(
-        "accessToken".to_owned(),
-        oauth.get("accessToken").cloned().unwrap_or(Value::Null),
-    );
-    kept.insert("refreshToken".to_owned(), Value::Null);
-    kept.insert("expiresAt".to_owned(), Value::from(expires_ms));
-    kept.insert("scopes".to_owned(), Value::Array(scopes.clone()));
-    if let Some(subscription) = oauth.get("subscriptionType") {
-        kept.insert("subscriptionType".to_owned(), subscription.clone());
-    }
-    let copy = serde_json::to_vec(&json!({ "claudeAiOauth": kept })).map_err(|_| unavailable())?;
+    let copy = crate::credentials::sized_json(&ClaudeCopy {
+        oauth: ClaudeCopyOauth {
+            access_token: access,
+            expires_at: expires_ms,
+            refresh_token: (),
+            scopes: listed,
+            subscription_type: oauth.subscription_type.as_ref(),
+        },
+    })
+    .map_err(|_| unavailable())?;
     assert!(!copy.is_empty());
     Ok(Record {
         copy,
@@ -782,14 +965,13 @@ fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
             }
         }
     };
-    let mut bytes = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        stdout
-            .take(RECORD_BYTES_MAX + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| unavailable())?;
-    }
-    if !status.success() || bytes.len() as u64 > RECORD_BYTES_MAX {
+    let mut bytes = Vec::with_capacity(RECORD_BYTES_MAX as usize + 1);
+    let read = match child.stdout.take() {
+        Some(stdout) => stdout.take(RECORD_BYTES_MAX + 1).read_to_end(&mut bytes),
+        None => Ok(0),
+    };
+    if read.is_err() || !status.success() || bytes.len() as u64 > RECORD_BYTES_MAX {
+        crate::credentials::wipe(&mut bytes);
         return Err(unavailable());
     }
     while bytes.last() == Some(&b'\n') {

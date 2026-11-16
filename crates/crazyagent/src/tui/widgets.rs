@@ -46,7 +46,7 @@ impl Drop for TextField {
 
 fn wipe(text: &mut String) {
     let mut bytes = std::mem::take(text).into_bytes();
-    bytes.fill(0);
+    crate::credentials::wipe(&mut bytes);
     std::hint::black_box(&bytes);
 }
 

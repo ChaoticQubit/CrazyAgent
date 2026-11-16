@@ -5,22 +5,35 @@ use crate::protocol::{ConfigId, CredentialRef, RequestId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// One account's API key or sign-in secret on its way to storage; never shown by Debug and
+/// zeroed when it is dropped.
 pub struct AccountSecret(Vec<u8>);
 
 impl AccountSecret {
-    pub fn new(bytes: Vec<u8>) -> Result<Self, EngineError> {
+    /// Takes the secret's bytes after bounds checks; refused bytes are zeroed. Input: the
+    /// bytes. Output: the secret, or `account_secret_invalid` when they are empty, longer than
+    /// 8192 bytes, not UTF-8 or hold a NUL or line break.
+    pub fn new(mut bytes: Vec<u8>) -> Result<Self, EngineError> {
         if bytes.is_empty()
             || bytes.len() > 8192
             || bytes.iter().any(|byte| matches!(byte, 0 | b'\r' | b'\n'))
             || std::str::from_utf8(&bytes).is_err()
         {
+            crate::credentials::wipe(&mut bytes);
             return Err(EngineError("account_secret_invalid".into()));
         }
         Ok(Self(bytes))
     }
 
-    pub(in crate::engine) fn into_bytes(self) -> Vec<u8> {
-        self.0
+    /// Hands the bytes to a caller that wipes them after use, leaving this value empty.
+    pub(in crate::engine) fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for AccountSecret {
+    fn drop(&mut self) {
+        crate::credentials::wipe(&mut self.0);
     }
 }
 

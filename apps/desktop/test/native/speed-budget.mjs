@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { lstatSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync } from "node:fs";
+import { userInfo } from "node:os";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
 /** Exit code of a speed run the Mac was too busy to judge: EX_TEMPFAIL, so a gate reads it as
  * not run, never as a pass or a failure. */
@@ -19,6 +20,17 @@ export const QUIET_LIMITS = { load1_max: 2, memory_level_min: 50 };
 /** Processes whose presence means a build is running and timings are noise. */
 export const COMPILERS = ["rustc", "cargo", "clang", "ld", "ld64", "swift-frontend", "xcodebuild"];
 const COUNT_SLACK = 1;
+/** A speed run's kept engine state folder, as speed-run.mjs makes it: new, private and short
+ * enough for the engine's socket address. */
+export const SPEED_STATE = /^\/private\/tmp\/cas-(noise|compare)-(base|candidate)-[0-9a-f]{8}-[A-Za-z0-9]{6}$/;
+/** Most runs in a row the Mac may get busy through before a speed run is refused. */
+const TAINTED_MAX = 3;
+/** Most characters of a failed run's error its record keeps: the tail, where run.mjs puts the
+ * child's stderr. */
+export const FAILURE_TEXT_MAX = 4000;
+/** The macOS keychain tool, and the longest one call of it may take. */
+const SECURITY = "/usr/bin/security";
+const SECURITY_MS_MAX = 30_000;
 
 const round = (value) => Number(value.toFixed(2));
 
@@ -155,17 +167,25 @@ export function readQuiet() {
   return { load1, compilers, memoryLevel, onAC, screenLocked, busy };
 }
 
+/** The kinds of WebKit helper process the speed rows read, as their process names end. */
+export const WEBKIT_KINDS = ["WebContent", "Networking", "GPU"];
+
+/** Finds the WebKit helpers in a `ps -axo pid=,comm=` listing. Input: the listing. Output:
+ * `[{ pid, kind }]` for every WebContent, Networking and GPU process, in listing order. */
+export function webkitHelpersIn(listing) {
+  const helpers = listing.split("\n").flatMap((line) => {
+    const found = line.trim().match(/^(\d+)\s+(?:.*\/)?com\.apple\.WebKit\.(WebContent|Networking|GPU)$/);
+    return found ? [{ pid: Number(found[1]), kind: found[2] }] : [];
+  });
+  assert.ok(helpers.every(({ pid, kind }) => Number.isInteger(pid) && pid > 1 && WEBKIT_KINDS.includes(kind)));
+  return helpers;
+}
+
 /** WebKit helper processes run under launchd, not under the app, and their command lines name
  * no client; the speed rows find the ones the app started as the pids new since its launch.
- * Input: none. Output: the pids of every WebKit WebContent, Networking and GPU process. */
+ * Input: none. Output: `[{ pid, kind }]` for every WebKit helper running now. */
 export function webkitHelpers() {
-  const listed = output("/bin/ps", ["-axo", "pid=,comm="]).split("\n");
-  const pids = listed.flatMap((line) => {
-    const found = line.trim().match(/^(\d+)\s+(?:.*\/)?com\.apple\.WebKit\.(WebContent|Networking|GPU)$/);
-    return found ? [Number(found[1])] : [];
-  });
-  assert.ok(pids.every((pid) => Number.isInteger(pid) && pid > 1));
-  return pids;
+  return webkitHelpersIn(output("/bin/ps", ["-axo", "pid=,comm="]));
 }
 
 /** Reads one process's memory footprint, the number Activity Monitor shows as Memory.
@@ -182,7 +202,8 @@ export function footprintMb(pid) {
 /** Fewest valid samples per side a metric needs to be judged (DEC-169 keeps 10). */
 export const KEPT_MIN = 8;
 /** Metrics read and shown but never failing a run until their reading is proven (DEC-169 Q9). */
-export const REPORT_ONLY = new Set(["memory_webkit_mb"]);
+export const REPORT_ONLY = new Set(["memory_webkit_mb", "memory_webkit_idle_mb", "memory_app_idle_mb",
+  ...WEBKIT_KINDS.flatMap((kind) => [`memory_webkit_${kind.toLowerCase()}_mb`, `memory_webkit_${kind.toLowerCase()}_idle_mb`])]);
 /** Metrics a run may lack: the launch is only timed when the spec's first look comes before
  * Home is usable; `launch_webview_ms` and `reload_home_ms` always time the launch path. */
 const OPTIONAL = new Set(["launch_ms"]);
@@ -212,7 +233,18 @@ export function sampleMetrics(engine, app) {
   for (const [cmd, times] of Object.entries(engine.round_trip_ms)) metrics[`round_trip_${cmd}_ms`] = summary(times).median;
   metrics.memory_engine_mb = app.memory.engine_mb;
   metrics.memory_app_mb = app.memory.app_mb;
-  metrics.memory_webkit_mb = round(app.memory.webkit_mb.reduce((total, mb) => total + mb, 0));
+  const { webkit_mb: webkit, webkit_kinds: kinds, idle } = app.memory;
+  assert.ok(Array.isArray(kinds) && kinds.length === webkit.length, "a kind for each WebKit helper");
+  assert.ok(idle && Array.isArray(idle.webkit_mb) && idle.webkit_mb.length === webkit.length, "an idle reading for each WebKit helper");
+  metrics.memory_webkit_mb = round(webkit.reduce((total, mb) => total + mb, 0));
+  metrics.memory_app_idle_mb = idle.app_mb;
+  metrics.memory_webkit_idle_mb = round(idle.webkit_mb.reduce((total, mb) => total + mb, 0));
+  for (const [index, kind] of kinds.entries()) {
+    assert.ok(WEBKIT_KINDS.includes(kind), `a WebKit helper kind: ${kind}`);
+    const name = `memory_webkit_${kind.toLowerCase()}`;
+    metrics[`${name}_mb`] = round((metrics[`${name}_mb`] ?? 0) + webkit[index]);
+    metrics[`${name}_idle_mb`] = round((metrics[`${name}_idle_mb`] ?? 0) + idle.webkit_mb[index]);
+  }
   for (const [metric, value] of Object.entries(metrics)) assert.ok(Number.isFinite(value) && value >= 0, `${metric} is a reading: ${value}`);
   return metrics;
 }
@@ -226,6 +258,115 @@ export function schedule(kept) {
   for (let index = 0; index < kept; index += 1) order.push({ side: "base", warm: false }, { side: "candidate", warm: false });
   assert.equal(order.length, 2 * kept + 2);
   return order;
+}
+
+/** Runs every scheduled launch (`schedule`), each only once the Mac is quiet and kept only when
+ * the Mac stayed quiet through it; a run it got busy through, failed or not, runs again, and
+ * `TAINTED_MAX` in a row refuse. A launch that fails on a quiet Mac is recorded with its error,
+ * counted for its side and not run again, and the schedule goes on, so the medians come from the
+ * good runs; once a side can no longer reach `KEPT_MIN` good runs the schedule ends, as no
+ * verdict could come. Every record keeps the Mac reading after its run. Inputs: kept
+ * runs per side, `{ quietBefore, launch, quietAfter }` (null or the busy reasons; `{ run,
+ * sample }` for a side and whether it is a warm-up; `{ quiet, reasons }`) and the progress it
+ * fills: `{ samples, failed, runs }`. Output: null, or the refusal's reasons. */
+export async function runSchedule(kept, { quietBefore, launch, quietAfter }, progress) {
+  assert.ok(Number.isInteger(kept) && kept >= KEPT_MIN, `at least ${KEPT_MIN} kept runs per side`);
+  const { samples, failed, runs } = progress;
+  const order = schedule(kept);
+  for (const [at, { side, warm }] of order.entries()) {
+    for (let tainted = 0; ; tainted += 1) {
+      if (tainted >= TAINTED_MAX) return [`${TAINTED_MAX} runs in a row saw the Mac get busy`];
+      const busy = await quietBefore();
+      if (busy) return busy;
+      let done;
+      try {
+        done = await launch(side, warm);
+      } catch (error) {
+        const after = quietAfter();
+        runs.push({ side, warm, failed: failureText(error), quiet_after: after.quiet, reasons: after.reasons });
+        if (!after.quiet) continue;
+        failed[side] += 1;
+        break;
+      }
+      const after = quietAfter();
+      runs.push({ side, warm, ...done.run, quiet_after: after.quiet, reasons: after.reasons });
+      if (!after.quiet) continue;
+      if (!warm) samples[side].push(done.sample);
+      break;
+    }
+    const left = order.slice(at + 1).filter((slot) => slot.side === side && !slot.warm).length;
+    if (samples[side].length + left < KEPT_MIN) return null;
+  }
+  for (const side of ["base", "candidate"]) {
+    assert.ok(samples[side].length <= kept && samples[side].length + failed[side] <= kept + 1, `${side}: one result a slot`);
+  }
+  return null;
+}
+
+/** The text a failed run's record keeps: the error's message, its last `FAILURE_TEXT_MAX`
+ * characters. Input: what the launch threw. Output: the text. */
+function failureText(error) {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.slice(-FAILURE_TEXT_MAX);
+}
+
+/** Runs the keychain tool for a speed state home with only that HOME and the system PATH, as the
+ * gate's kc-state.sh did, so it reads and writes that home's keychain settings. Inputs: the home
+ * and the tool's arguments. Output: what the tool printed. */
+export function securityIn(home, args) {
+  return execFileSync(SECURITY, args, {
+    cwd: home, env: { HOME: home, PATH: "/usr/bin:/bin" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: SECURITY_MS_MAX,
+  });
+}
+
+/** The paths a keychain tool listing names, one a line, without its indent and quotes. Input:
+ * the listing. Output: the paths. */
+function listedPaths(text) {
+  return text.split("\n").map((line) => line.trim()).filter((line) => line !== "").map((line) => line.replace(/^"(.*)"$/, "$1"));
+}
+
+/** Checks the owner has no keychain settings file, as the gate's kc-state.sh did before and
+ * after each step: a keychain tool that wrote the owner's settings instead of the home's would
+ * leave one. Input: the owner's home. Output: none. */
+function ownerSettingsAbsent(realHome) {
+  const settings = join(realHome, "Library", "Preferences", "com.apple.security.plist");
+  assert.ok(!existsSync(settings), `the owner's keychain settings file stays absent: ${settings}`);
+}
+
+/** The owner's own keychain view: the search list and the default keychain the tool prints for
+ * the owner's home. Inputs: the owner's home and the keychain tool. Output: `{ list, chosen }`. */
+function ownerKeychains(realHome, security) {
+  return {
+    list: listedPaths(security(realHome, ["list-keychains", "-d", "user"])),
+    chosen: listedPaths(security(realHome, ["default-keychain", "-d", "user"])),
+  };
+}
+
+/** Gives a new speed state home its own empty login keychain as its default and its only
+ * search-list entry, as the gate's kc-state.sh prep did by hand (DEC-146), so an app and a TUI
+ * run on that home never reach the owner's keychain. Refuses a folder that is not a new speed
+ * state home, stops while the owner has a keychain settings file, and reads the owner's search
+ * list and default keychain before and after, stopping when either changed. Inputs: the home,
+ * the owner's home and the keychain tool. Output: the keychain's path. */
+export function prepareKeychain(home, realHome = userInfo().homedir, security = securityIn) {
+  assert.ok(basename(home) === "home" && SPEED_STATE.test(dirname(home)), `a speed state home: ${home}`);
+  privateFolder(home);
+  ownerSettingsAbsent(realHome);
+  assert.ok(!existsSync(join(home, "Library")), `a new speed state home holds no Library yet: ${home}`);
+  const owner = ownerKeychains(realHome, security);
+  for (const folder of ["Library", "Library/Keychains", "Library/Preferences"]) mkdirSync(join(home, folder), { mode: 0o700 });
+  const keychain = join(home, "Library", "Keychains", "login.keychain-db");
+  security(home, ["create-keychain", "-p", "", keychain]);
+  security(home, ["set-keychain-settings", keychain]);
+  security(home, ["list-keychains", "-d", "user", "-s", keychain]);
+  security(home, ["default-keychain", "-d", "user", "-s", keychain]);
+  assert.deepEqual(listedPaths(security(home, ["list-keychains", "-d", "user"])), [keychain], "the home's search list holds only its own keychain");
+  assert.deepEqual(listedPaths(security(home, ["default-keychain", "-d", "user"])), [keychain], "the home's default keychain is its own");
+  ownerSettingsAbsent(realHome);
+  const after = ownerKeychains(realHome, security);
+  assert.deepEqual(after.list, owner.list, "the owner's search list is unchanged");
+  assert.deepEqual(after.chosen, owner.chosen, "the owner's default keychain is unchanged");
+  return keychain;
 }
 
 /** The values one metric has across a side's samples. Inputs: the samples and the metric.
@@ -301,6 +442,15 @@ export function joinSample(sample, tui) {
   return joined;
 }
 
+/** The exit of a compare run: 1 when a metric failed or could not be judged, or when the
+ * candidate failed more runs than the base, since a failure only the candidate has is a finding
+ * and one both sides met is the Mac's; else 0. Inputs: judge's rows, `incomplete`'s metrics and
+ * the failed runs per side. Output: the exit code. */
+export function compareExit(rows, gaps, failed) {
+  assert.ok(Number.isInteger(failed.base) && Number.isInteger(failed.candidate), "failed runs are counted per side");
+  return rows.some((row) => row.status === "fail") || gaps.length > 0 || failed.candidate > failed.base ? 1 : 0;
+}
+
 /** The floor a metric's gap must pass to fail. Input: the metric. Output: the floor. */
 function floorFor(metric) {
   assert.match(metric, /_(ms|mb)$/, `a metric with a unit: ${metric}`);
@@ -320,4 +470,49 @@ export function privateFolder(folder) {
   assert.equal(info.uid, process.getuid(), `${folder} is this user's own`);
   assert.equal(info.mode & 0o022, 0, `${folder}: no group or other user can write it`);
   return folder;
+}
+
+/** Runs in the page: clicks an element and times, with the page's clock, until the page at its
+ * address is usable: the clicked link or button marked current, selected or expanded, a heading
+ * in main, no skeleton left in main, and `want` elements matching `extra` when given. A
+ * MutationObserver and a 4 ms check both look. Inputs: the selector, the extra condition, the
+ * count, the limit in ms and WebDriver's callback. Output: `done` with the ms, or an error
+ * at once for a missing or disabled target, which a click could not reach. */
+export function clickUntilUsable(selector, extra, want, limitMs, done) {
+  const target = document.querySelector(selector);
+  if (!target) {
+    done({ error: `nothing matches ${selector}` });
+    return;
+  }
+  if (target.disabled) {
+    done({ error: `${selector} is disabled, so a click would do nothing` });
+    return;
+  }
+  const hash = target.getAttribute("href") ?? location.hash;
+  const marked = () => {
+    const now = document.querySelector(selector);
+    return Boolean(now) && (now.getAttribute("aria-current") === "page" || now.getAttribute("aria-selected") === "true"
+      || now.getAttribute("aria-expanded") === "true");
+  };
+  const ready = () => location.hash === hash && marked() && Boolean(document.querySelector("main h1"))
+    && !document.querySelector("main .skeleton") && (extra === null || document.querySelectorAll(extra).length >= want);
+  let ended = false;
+  let timer = 0;
+  let limit = 0;
+  const observer = new MutationObserver(() => finish());
+  const end = (value) => {
+    if (ended) return;
+    ended = true;
+    observer.disconnect();
+    clearInterval(timer);
+    clearTimeout(limit);
+    done(value);
+  };
+  const began = performance.now();
+  const finish = () => { if (ready()) end({ ms: performance.now() - began }); };
+  target.click();
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
+  timer = setInterval(finish, 4);
+  limit = setTimeout(() => end({ error: `not usable in ${limitMs} ms`, text: document.body.innerText.slice(0, 1500) }), limitMs);
+  finish();
 }

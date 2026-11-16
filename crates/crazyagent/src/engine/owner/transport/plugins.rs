@@ -793,9 +793,9 @@ impl OwnerClient {
                 let mut bytes = secret.into_bytes();
                 let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
                 framed.extend_from_slice(&bytes);
-                bytes.fill(0);
+                crate::credentials::wipe(&mut bytes);
                 let sent = stream.write_all(&framed).await;
-                framed.fill(0);
+                crate::credentials::wipe(&mut framed);
                 sent.map_err(|_| failure("plugins_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
@@ -1453,7 +1453,7 @@ async fn start_check(
             Ok(value) => values.push((secret.name.clone(), value)),
             Err(problem) => {
                 for (_, value) in values.iter_mut() {
-                    value.fill(0);
+                    crate::credentials::wipe(value);
                 }
                 return Err(problem);
             }
@@ -1475,7 +1475,7 @@ async fn start_check(
                     boundary_check(&root, &folder, &command, &args, &values, &kept, network)
                 });
             for (_, value) in values.iter_mut() {
-                value.fill(0);
+                crate::credentials::wipe(value);
             }
             outcome
         })
@@ -1680,7 +1680,7 @@ async fn receive_secret(stream: &mut UnixStream) -> Result<AccountSecret, Engine
         }
         let mut bytes = vec![0; size];
         if stream.read_exact(&mut bytes).await.is_err() {
-            bytes.fill(0);
+            crate::credentials::wipe(&mut bytes);
             return Err(invalid());
         }
         AccountSecret::new(bytes).map_err(|_| invalid())

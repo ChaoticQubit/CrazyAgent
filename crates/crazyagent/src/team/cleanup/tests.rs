@@ -2562,3 +2562,15 @@ fn a_reset_walk_spends_one_unit_per_listed_name_and_a_budget_of_exactly_those_cl
     assert_eq!(left, 0);
     assert!(std::fs::symlink_metadata(home.join("tree")).is_err());
 }
+
+/// RESET-WALK-CODE: a caller of a home removal keeps `cleanup_walk_too_long` as it is, so the
+/// owner learns another try gets further, and gives every other error its own code.
+#[cfg(unix)]
+#[test]
+fn a_home_removal_caller_keeps_the_walk_code_and_gives_any_other_error_its_own() {
+    let walked = home_code(&walk_too_long(), "agent_home_unwritable");
+    let failed = home_code(&folder_failed(), "agent_home_unwritable");
+
+    assert_eq!(walked, "cleanup_walk_too_long");
+    assert_eq!(failed, "agent_home_unwritable");
+}

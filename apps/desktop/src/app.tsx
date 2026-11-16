@@ -363,8 +363,8 @@ export function pageUnder(route: Route, hash: string, kept: PageUnder): PageUnde
  * notification and question watch, the new free reset notice and the TUI's "open in IDE"
  * focus. */
 export function App() {
-  const session = useSession();
   const route = useRoute();
+  const session = useSession(route.name === "home");
   const under = useRef<PageUnder>({ route: { name: "home" } });
   under.current = pageUnder(route, typeof window === "undefined" ? "" : window.location.hash, under.current);
   useShortcuts();

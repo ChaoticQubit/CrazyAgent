@@ -143,12 +143,14 @@ pub(crate) const CLAUDE_TOOLS_OFF: [&str; 5] = [
 ];
 
 /// Holds an API key or token in memory for one launch; it never appears in Debug,
-/// serialization, arguments or reports and is handed to the child only as an environment value.
+/// serialization, arguments or reports, is handed to the child only as an environment value,
+/// and is zeroed when it is dropped.
 pub struct Secret(String);
 
 impl Secret {
-    /// Wraps a key after bounds checks. Input: the key text. Output: the secret, or
-    /// `launch_secret_invalid` when it is empty, oversized or contains whitespace or controls.
+    /// Wraps a key after bounds checks; a refused key is zeroed. Input: the key text. Output:
+    /// the secret, or `launch_secret_invalid` when it is empty, oversized or contains
+    /// whitespace or controls.
     pub fn new(value: String) -> Result<Self, LaunchError> {
         if value.is_empty()
             || value.len() > 4096
@@ -156,6 +158,7 @@ impl Secret {
                 .chars()
                 .any(|character| character.is_control() || character.is_whitespace())
         {
+            crate::credentials::wipe(&mut value.into_bytes());
             return Err(failure("launch_secret_invalid"));
         }
         Ok(Self(value))
@@ -167,6 +170,12 @@ impl Secret {
 
     pub(super) fn reveal(&self) -> &str {
         &self.0
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        crate::credentials::wipe(&mut std::mem::take(&mut self.0).into_bytes());
     }
 }
 

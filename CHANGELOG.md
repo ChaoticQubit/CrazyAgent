@@ -90,6 +90,7 @@ Status of each version:
 - Wall windows check a question's length before reading it, and a terminal attach interrupted by a page load gives its place back.
 - The TUI turns its keyboard mode back on after an external editor closes.
 - On Linux the engine's login service writes its environment lines with the right quoting, and on Windows adding the command line tool to your Path keeps %VAR% entries as they were.
+- The Linux x86_64 release build stopped at its bundled tmux: tmux's configure linked a plain ncurses that the build does not make. It now links the wide ncurses it builds, and a failed tmux build step prints the end of its log.
 
 ### Security
 

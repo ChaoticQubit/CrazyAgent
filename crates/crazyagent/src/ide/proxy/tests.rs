@@ -839,7 +839,7 @@ async fn a_wildcard_listener_beside_the_server_fails_no_request() {
     assert!(!flagged(&refused), "the launch is kept");
     beside.set_nonblocking(true).unwrap();
     assert!(
-        beside.accept().is_err(),
+        crate::spawn_gate::accept_tcp_std(&beside).is_err(),
         "the wildcard listener got nothing"
     );
 }

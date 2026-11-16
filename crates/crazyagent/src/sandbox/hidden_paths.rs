@@ -745,14 +745,14 @@ mod tests {
         let built = vec![digest(&secrets)];
         assert!(digest_plain(&built[0]), "{}", built[0]);
         assert_ne!(digest(&secrets), digest(&vendor));
-        assert!(covers(Some(&built), &[secrets.clone()]));
+        assert!(covers(Some(&built), std::slice::from_ref(&secrets)));
         assert!(
-            covers(Some(&built), &[inner.clone()]),
+            covers(Some(&built), std::slice::from_ref(&inner)),
             "a folder above it was hidden"
         );
         assert!(!covers(Some(&built), &[secrets.clone(), vendor.clone()]));
         assert!(
-            !covers(Some(&[]), &[secrets.clone()]),
+            !covers(Some(&[]), std::slice::from_ref(&secrets)),
             "started before the hide"
         );
         assert!(

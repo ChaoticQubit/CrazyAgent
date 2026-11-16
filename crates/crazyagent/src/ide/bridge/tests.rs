@@ -2030,3 +2030,51 @@ fn revoking_every_capability_keeps_going_past_a_replaced_file() {
     );
     assert!(grants.revoke_all().is_ok(), "nothing is left to revoke");
 }
+
+/// Runs only in the process the row below starts, under a file size limit of zero with
+/// SIGXFSZ ignored, so the capability write fails after the file was made. Input: the
+/// folder named in `ROW_FOLDER`; without it, nothing.
+#[test]
+#[ignore]
+fn an_ide_capability_write_cut_short_in_its_own_process() {
+    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+        return;
+    };
+    let written = write_capability(&Path::new(&folder).join("capability"), &[7; 32]);
+    assert_eq!(written.unwrap_err().0, "ide_capability_unavailable");
+}
+
+/// UMASK-MODE-ASSERTS: an IDE capability write that fails part way leaves no capability
+/// file, where it used to leave the partial file behind.
+#[test]
+fn an_ide_capability_write_cut_short_leaves_no_capability_file() {
+    let folder = tempfile::tempdir().unwrap();
+    let status = crate::spawn_gate::row_alone(
+        "ide::bridge::tests::an_ide_capability_write_cut_short_in_its_own_process",
+        "trap '' XFSZ; ulimit -f 0",
+        folder.path(),
+    );
+    assert!(
+        status.success(),
+        "the cut capability write ended in {status}"
+    );
+    assert!(std::fs::symlink_metadata(folder.path().join("capability")).is_err());
+}
+
+/// RESET-WALK-CODE code r1 F1: an IDE terminal whose cargo home could not be made because
+/// removing a cargo name ran past its walk budget stops with `cleanup_walk_too_long`, which
+/// the terminal shows, and any other sandbox failure keeps its own code.
+#[test]
+fn an_ide_terminal_whose_cargo_name_walk_ran_past_its_budget_stops_with_the_walk_code() {
+    use crate::sandbox::SandboxError;
+    let refused = |error| terminal::shell_refusal(error).0;
+    let walked = std::io::Error::other(crate::team::cleanup::WALK_TOO_LONG);
+    let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+    assert_eq!(refused(SandboxError::Io(walked)), "cleanup_walk_too_long");
+    assert_eq!(refused(SandboxError::Io(missing)), "ide_terminal_refused");
+    assert_eq!(
+        refused(SandboxError::Unavailable("no sandbox".into())),
+        "ide_terminal_unavailable"
+    );
+}
