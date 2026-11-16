@@ -273,8 +273,15 @@ pub fn prepare(
 
 /// The plain line the engine prints when a launch granted a connector gets none because no
 /// gateway serves its engine. Input: the launch's role. Output: the line.
-pub fn unserved_line(_role: Role) -> &'static str {
-    ""
+pub fn unserved_line(role: Role) -> &'static str {
+    match role {
+        Role::Master => {
+            "connectors are not available to this master turn: this engine runs no connector gateway"
+        }
+        Role::Agent { .. } => {
+            "connectors are not available to this agent run: this engine runs no connector gateway"
+        }
+    }
 }
 
 /// [`prepare`] for a real launch: none while no gateway serves `root` in this process, with
@@ -291,11 +298,7 @@ pub fn prepare_if_served(
         return prepare(db, root, project, role, agent);
     }
     if !grants::for_launch(db, root, project, role)?.is_empty() {
-        let whom = match role {
-            Role::Master => "this master turn",
-            Role::Agent { .. } => "this agent run",
-        };
-        eprintln!("connectors are not available to {whom}: this engine runs no connector gateway");
+        eprintln!("{}", unserved_line(role));
     }
     Ok(None)
 }
