@@ -77,6 +77,14 @@ impl JsonlAppend {
         held.taken - pending
     }
 
+    /// Counts the bytes this reader took from its record, lines passed over and a half line
+    /// still waiting for its newline included, so a caller can tell a read moved on though
+    /// it found no object. Output: the count; before the record is found, the position this
+    /// reader starts from.
+    pub fn taken(&self) -> u64 {
+        self.held.as_ref().map_or(self.start, |held| held.taken)
+    }
+
     /// Looks for the record now without reading it, as a resumed run checks the record it
     /// was handed. Output: the record's full path, or none while there is none.
     pub fn find(&mut self) -> Option<PathBuf> {

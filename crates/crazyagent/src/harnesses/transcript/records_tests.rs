@@ -176,3 +176,24 @@ fn a_manifest_record_skipped_to_its_end_restarts_a_turn_with_the_model_s_work() 
     let facts = [STARTED, text("new"), finished(true)];
     assert_eq!(reader.read().unwrap(), facts);
 }
+
+/// DEC-180 Task 16: a manifest record resumed from the position a pane record kept, as an
+/// adoption of a resumed pane does, reads on from there: the turns written after it only.
+#[test]
+fn a_manifest_record_resumed_from_a_kept_position_reads_on_from_it() {
+    let home = Home::new();
+    let one = [json!({"type": "started"}), json!({"type": "done"})];
+    let record = home.write(&below("jsonl"), &jsonl(&one), NEW);
+    let kept = jsonl(&one).len() as u64;
+    let two = [
+        json!({"type": "started"}),
+        json!({"type": "text", "delta": "b"}),
+    ];
+    appended(&record, &two);
+    let cwd = home.path();
+    let resumed = TranscriptReader::resumed(source(APPEND, &home), &cwd, &record, Some(kept));
+    assert!(resumed.is_ok());
+    let mut resumed = resumed.unwrap();
+    assert_eq!(resumed.start(), kept);
+    assert_eq!(resumed.read().unwrap(), [STARTED, text("b")]);
+}

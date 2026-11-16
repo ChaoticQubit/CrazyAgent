@@ -161,11 +161,21 @@ impl Follow {
         Some(followed)
     }
 
-    fn read(&mut self) -> Result<Vec<Value>, LaunchError> {
-        match self {
-            Self::Lines(reader) => reader.read(),
-            Self::List(reader) => reader.read(),
-        }
+    /// Reads what the record holds past this reader, with how far the read moved it: the
+    /// objects read, plus the bytes a jsonl-append record gave, so a read that took only
+    /// lines passed over or half a line still shows it moved. Output: the objects and the
+    /// count, or a plain code when the record cannot be read.
+    fn read(&mut self) -> Result<(Vec<Value>, u64), LaunchError> {
+        let (objects, taken) = match self {
+            Self::Lines(reader) => {
+                let before = reader.taken();
+                let objects = reader.read()?;
+                (objects, reader.taken().saturating_sub(before))
+            }
+            Self::List(reader) => (reader.read()?, 0),
+        };
+        let moved = taken + objects.len() as u64;
+        Ok((objects, moved))
     }
 
     fn record(&self) -> Option<PathBuf> {
@@ -345,8 +355,8 @@ impl TranscriptReader {
     }
 
     /// Counts the bytes read from the record so far, the lines passed over included, so a
-    /// caller can tell the record grew; for a manifest record, the objects read. Output:
-    /// the total since the reader started.
+    /// caller can tell the record grew; for a manifest record, the objects read plus the
+    /// bytes a jsonl-append record gave. Output: the total since the reader started.
     pub fn bytes(&self) -> u64 {
         self.consumed
     }
@@ -518,7 +528,7 @@ impl TranscriptReader {
         let Some(followed) = self.followed.as_mut() else {
             return Ok(Vec::new());
         };
-        let objects = followed.read()?;
+        let (objects, moved) = followed.read()?;
         if let Some(path) = followed.record() {
             self.found = Some((records.session.clone(), path));
         }
@@ -526,7 +536,7 @@ impl TranscriptReader {
             .iter()
             .filter_map(|object| record_fact(&records.rules, object))
             .collect();
-        self.consumed += objects.len() as u64;
+        self.consumed += moved;
         let mut events = Vec::new();
         for fact in facts {
             self.take(fact, &mut events);
