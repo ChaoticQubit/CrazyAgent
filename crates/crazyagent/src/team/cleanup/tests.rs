@@ -1443,11 +1443,11 @@ fn removing_a_large_agent_tree_one_read_only_folder_holds_starts_no_child() {
     );
 }
 
-/// RV-DS241-182: removing an agent's tree whose files all carry a deny-delete ACL clears
-/// them in a few batched children, never one per entry, and the tree goes.
+/// RV-DS241-182, ds181 N3: removing an agent's tree whose files all carry a deny-delete ACL
+/// clears them through the walk's own handles, starting no child, and the tree goes.
 #[cfg(target_os = "macos")]
 #[test]
-fn removing_an_agent_tree_of_acl_pinned_files_clears_them_in_a_few_children() {
+fn removing_an_agent_tree_of_acl_pinned_files_clears_them_without_a_child() {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let tree = root.join("tree");
@@ -1466,8 +1466,9 @@ fn removing_an_agent_tree_of_acl_pinned_files_clears_them_in_a_few_children() {
     let started = crate::spawn_gate::spawned() - before;
     assert_eq!(outcome, Ok(()));
     assert!(!tree.exists(), "the tree stayed");
-    assert!(
-        started <= 8,
+    assert_eq!(
+        started,
+        0,
         "{started} children for {} entries",
         files.len()
     );
@@ -1527,6 +1528,40 @@ fn removing_an_agent_tree_reaches_below_a_folder_that_denies_only_searching_it()
     assert!(!tree.exists(), "the tree stayed");
 }
 
+/// ds181 N3 (rv-sec3 B12 r2): a folder whose ACL denies listing it has that ACL cleared
+/// through its parent's open handle alone, with no path walked above that parent, so a
+/// folder above it that a process swaps for a link inside the clear is never followed. The
+/// row shuts a folder above the walk's top just before the clear: a clear that walks a
+/// path, as a `/.vol` name does, is refused there, while one through the handle is not.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_that_denies_listing_has_its_acl_cleared_through_its_parents_handle_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let above = root.join("above");
+    let tree = above.join("tree");
+    let denied = tree.join("a");
+    write(&denied.join("f"), b"the agent's\n");
+    let _cleared = AclCleared(denied.clone());
+    add_acl("everyone deny list,search", std::slice::from_ref(&denied));
+    let shut = above.clone();
+    BEFORE_ACL_CLEAR.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }));
+    });
+
+    writable(&tree, Flags::Kept, Acls::Stuck);
+
+    std::fs::set_permissions(&above, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        BEFORE_ACL_CLEAR.with(|step| step.borrow().is_none()),
+        "no ACL clear ran"
+    );
+    assert!(!denies(&denied), "the folder kept its ACL");
+}
+
 /// ds181 r2 (rv-code4 F2): removing an agent's tree of 300 folders that each hold one folder
 /// whose ACL denies listing never holds more than a few dozen of them waiting for their ACL
 /// clear at once, each with its parent's open handle, and the tree still goes.
@@ -1554,13 +1589,12 @@ fn removing_a_wide_tree_of_folders_that_deny_listing_holds_few_handles_at_once()
     assert!(peak <= 64, "{peak} stuck folders held at once");
 }
 
-/// ds181 r2 (rv-sec3 F1): removing an agent's tree that is one long chain of folders, each
-/// with an ACL that denies listing it, starts no more `/bin/chmod` children than the walk's
-/// flush cap allows, and the removal fails closed past the cap instead of clearing one more
-/// folder per child.
+/// ds181 r2 (rv-sec3 F1), ds181 N3: removing an agent's tree that is one long chain of
+/// folders, each with an ACL that denies listing it, clears each through the walk's own
+/// handles, so the chain goes and no child starts however long it is.
 #[cfg(target_os = "macos")]
 #[test]
-fn removing_a_long_chain_of_folders_that_deny_listing_starts_a_bounded_number_of_children() {
+fn removing_a_long_chain_of_folders_that_deny_listing_goes_without_a_child() {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let tree = root.join("tree");
@@ -1574,16 +1608,16 @@ fn removing_a_long_chain_of_folders_that_deny_listing_starts_a_bounded_number_of
     let _cleared = AclsCleared(levels.clone());
     let deepest_first: Vec<PathBuf> = levels.iter().rev().cloned().collect();
     add_acl("everyone deny list,search,delete_child", &deepest_first);
-    ACL_FLUSHES_CAP.set(Some(16));
     let before = crate::spawn_gate::spawned();
 
     let outcome = remove_agent_tree(&tree);
 
     let started = crate::spawn_gate::spawned() - before;
-    ACL_FLUSHES_CAP.set(None);
-    assert!(outcome.is_err(), "the chain went past the cap: {outcome:?}");
-    assert!(
-        started <= 4 * 16 + 8,
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+    assert_eq!(
+        started,
+        0,
         "{started} children for a chain of {}",
         levels.len()
     );

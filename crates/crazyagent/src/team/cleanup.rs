@@ -1401,6 +1401,10 @@ impl AclClears {
         }
         assert!(self.flushes_left > 0);
         self.flushes_left -= 1;
+        #[cfg(test)]
+        if let Some(step) = BEFORE_ACL_CLEAR.with(|step| step.borrow_mut().take()) {
+            step();
+        }
         self.cleared.extend(self.waiting.drain());
         let batches = [
             (&["-f", "-N"][..], &mut self.named),
@@ -1740,6 +1744,12 @@ thread_local! {
     /// for a process an agent left that swaps a folder meanwhile. Runs once; None runs
     /// nothing.
     pub(super) static BEFORE_HOME_ENTRY_FLAGS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// A step a cleanup test runs in [`AclClears`] just before it clears an ACL, standing in
+    /// for a process an agent left that swaps a folder above the entry meanwhile. Runs once;
+    /// None runs nothing.
+    pub(super) static BEFORE_ACL_CLEAR: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
