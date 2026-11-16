@@ -20,7 +20,7 @@ export function assembleClosedController(input: Pick<AgentControllerDeps, "confi
   const skillController = new SkillController({ cwd: input.cwd, homeDir: input.homeDir, bus });
   assert((input.gateway === undefined) === (input.notice === undefined), "host_gateway_invariant");
   const notice = input.notice;
-  const gateway = input.gateway === undefined ? null : new GatewayTools(input.gateway, input.cwd, registry, bus);
+  const gateway = input.gateway === undefined ? null : new GatewayTools(input.gateway, input.cwd, registry, bus, input.permissions);
   const syncDynamicTools = gateway === null || notice === undefined ? {} : { syncDynamicTools: async (signal: AbortSignal) => {
     await gateway.sync(signal);
     const line = gateway.takeNotice();

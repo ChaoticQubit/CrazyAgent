@@ -10,6 +10,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub mod approvals;
 pub mod audit;
 pub mod gateway;
 pub mod grants;
@@ -99,6 +100,27 @@ const PLAIN: &[(&str, &str)] = &[
     (
         "connector_writes_not_yet",
         "this tool can change things at the vendor; writes arrive with the approval step.",
+    ),
+    (
+        "connector_writes_off",
+        "connector writes are set to Read-only, so this tool cannot run.",
+    ),
+    (
+        "connector_write_denied",
+        "the owner denied this call, so nothing was sent to the vendor.",
+    ),
+    (
+        "connector_write_expired",
+        "nobody answered this call in time, so nothing was sent to the vendor.",
+    ),
+    (
+        approvals::WAITING_FULL,
+        "too many connector writes are waiting for the owner; try again later.",
+    ),
+    (approvals::UNKNOWN, "that approval is not here."),
+    (
+        approvals::CLOSED,
+        "that approval was already answered or ended.",
     ),
     (
         audit::QUIET_CAP_REACHED,
