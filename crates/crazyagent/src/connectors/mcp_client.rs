@@ -13,11 +13,11 @@ use std::path::Path;
 #[cfg(unix)]
 mod clean;
 #[cfg(unix)]
-mod guard;
+pub(in crate::connectors) mod guard;
 #[cfg(unix)]
 mod live;
 #[cfg(unix)]
-mod wire;
+pub(in crate::connectors) mod wire;
 
 /// The most tools one connector may list; a longer list is refused, never cut.
 pub const TOOLS_MAX: usize = 512;

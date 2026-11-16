@@ -1,5 +1,5 @@
 use super::*;
-use crate::app_plugins::connector::{OAuthSpec, Registration};
+use crate::app_plugins::connector::{ConnectorSpec, OAuthSpec, Registration};
 use crate::connectors::mcp_client::tests::{Seen, Vendor, empty, json_reply, no_lookup, send};
 use crate::connectors::tests::{Case, add, case};
 use crate::storage::accounts::PLUGIN_KEYS;

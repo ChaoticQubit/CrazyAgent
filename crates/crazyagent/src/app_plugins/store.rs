@@ -916,6 +916,27 @@ pub fn connector_ready(db: &Connection, root: &Path, name: &str) -> Result<Loade
     load(db, root, name, true)
 }
 
+/// Loads a connector's file as trusted now, whatever its keys and sign-in, for the OAuth
+/// sign-in that runs before any token exists. Inputs: database, engine root and name.
+/// Output: the manifest, or `app_plugin_not_found` (also for a plugin of another kind),
+/// `_refused`, `_needs_review`.
+pub fn trusted_connector(
+    db: &Connection,
+    root: &Path,
+    name: &str,
+) -> Result<Manifest, EngineError> {
+    prepare(db, root)?;
+    let found = found(root, name)?;
+    let manifest = found.parsed.map_err(|_| error("app_plugin_refused"))?;
+    if manifest.kind != PluginKind::Connector {
+        return Err(error("app_plugin_not_found"));
+    }
+    if !reviewed(db, found.origin, &manifest)? {
+        return Err(error("app_plugin_needs_review"));
+    }
+    Ok(manifest)
+}
+
 /// Reads one bound secret's key into engine memory for a single request. Inputs: the
 /// engine root and the binding from `ready`. Output: the key, `app_plugin_needs_key` when
 /// it is gone, or `app_plugin_key_store_unavailable`.

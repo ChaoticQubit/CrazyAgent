@@ -14,7 +14,7 @@ const CONFIG_BYTES: usize = 48 * 1024;
 const HEAD_BYTES_MAX: usize = 64 * 1024;
 const CHALLENGES_MAX: usize = 8;
 const SCOPE_BYTES_MAX: usize = 1024;
-const CURL_TIMED_OUT: i32 = 28;
+pub(in crate::connectors) const CURL_TIMED_OUT: i32 = 28;
 
 fn failed() -> McpError {
     McpError::Refused("connector_call_failed")
@@ -66,7 +66,7 @@ pub(super) struct Reply {
 /// no proxy, unbuffered output with the reply's headers first, bounded time and a cleared
 /// environment. Its arguments and environment hold no URL, header or key. Input: the one
 /// scheme it may speak, as curl's `--proto` value. Output: the command.
-pub(super) fn command(scheme: &str) -> Command {
+pub(in crate::connectors) fn command(scheme: &str) -> Command {
     let mut command = Command::new(http::CURL);
     command
         .arg("-q")
@@ -221,7 +221,7 @@ struct Reader {
     found: Option<Value>,
 }
 
-fn head_end(bytes: &[u8]) -> Option<(usize, usize)> {
+pub(in crate::connectors) fn head_end(bytes: &[u8]) -> Option<(usize, usize)> {
     (0..bytes.len()).find_map(|at| {
         if bytes[at..].starts_with(b"\r\n\r\n") {
             Some((at, 4))
@@ -233,7 +233,7 @@ fn head_end(bytes: &[u8]) -> Option<(usize, usize)> {
     })
 }
 
-fn status_of(line: &[u8]) -> Option<u16> {
+pub(in crate::connectors) fn status_of(line: &[u8]) -> Option<u16> {
     let text = std::str::from_utf8(line).ok()?;
     let mut parts = text.split(' ');
     if !parts.next()?.starts_with("HTTP/") {
@@ -502,7 +502,7 @@ fn unquoted(value: &str) -> String {
 /// Reads the Bearer parameters out of one `WWW-Authenticate` value, which may hold more
 /// than one challenge. Input: the header value. Output: each Bearer parameter, its name
 /// in lowercase and its value unquoted.
-fn bearer(value: &str) -> Vec<(String, String)> {
+pub(in crate::connectors) fn bearer(value: &str) -> Vec<(String, String)> {
     let mut scheme = String::new();
     let mut found = Vec::new();
     for part in parts(value) {

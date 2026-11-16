@@ -26,7 +26,7 @@ pub(super) struct Target {
 /// that is a name, with no user, password, query, fragment or port 0. A test build also
 /// takes plain http to `127.0.0.1`. Inputs: the URL and the declared hosts. Output:
 /// whether it is that stand-in, or `connector_address_refused`.
-fn checked(url: &url::Url, hosts: &[String]) -> Result<bool, McpError> {
+pub(in crate::connectors) fn checked(url: &url::Url, hosts: &[String]) -> Result<bool, McpError> {
     if !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -154,7 +154,11 @@ pub(super) fn public(address: IpAddr) -> bool {
 /// up again and cannot be steered elsewhere between the check and the call. Every address
 /// must be public, also one past those pinned. Inputs: the host, the port and the lookup.
 /// Output: curl's `resolve` value, `connector_host_unknown` or `connector_host_private`.
-pub(super) fn pins(host: &str, port: u16, reach: &ProviderReach) -> Result<String, McpError> {
+pub(in crate::connectors) fn pins(
+    host: &str,
+    port: u16,
+    reach: &ProviderReach,
+) -> Result<String, McpError> {
     let unknown = || McpError::Refused("connector_host_unknown");
     let found = reach.addresses(host, port).map_err(|_| unknown())?;
     if found.is_empty() || found.len() > ADDRESSES_MAX {
