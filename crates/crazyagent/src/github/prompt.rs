@@ -114,6 +114,30 @@ fn keep_answer(
     Ok(())
 }
 
+/// Forgets a project's answer to the Overview's publish question, as a Delete everything
+/// forgets the project's records; Remove from dashboard keeps it for a re-add of the same
+/// folder (DEC-178 add.1). An engine that never kept an answer has no table, which stays
+/// as it is. Inputs: the database or transaction the delete writes and the project.
+/// Output: none, or `github_store_unavailable`.
+pub(crate) fn forget_prompt(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    let table: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+             WHERE type = 'table' AND name = 'github_publish_prompt')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if table {
+        db.execute(
+            "DELETE FROM github_publish_prompt WHERE project = ?1",
+            params![project.as_str()],
+        )
+        .map_err(unavailable)?;
+    }
+    Ok(())
+}
+
 /// Carries a moved project's publish job, if any, from its old folder to its new one, as
 /// both moves rewrite the project's folder, so the moved project keeps its publish and a
 /// recorded publish is still never asked. The engine root is the folder of the database
