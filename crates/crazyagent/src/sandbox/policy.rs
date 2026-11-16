@@ -826,7 +826,8 @@ pub struct NetworkView {
 /// What a network choice cannot hold on this Linux, for the Agent access page: a port agents
 /// may reach on this computer is open on every host. Under `TcpOnly` the call supervisor
 /// keeps those ports to this computer, though Https reaches port 53 on any host; without it
-/// a nesting host's bridge does under None, unless a granted port is below its lowest.
+/// a nesting host's bridge does under None, unless a granted port is below its lowest; a
+/// host that routes keeps Https to its ports in a network of its own (DEC-179 SBX-2).
 /// Inputs: the choice, the host under the setting, sockets, grants. Output: the line, or none.
 pub fn linux_network_gap(
     network: AgentNetwork,
@@ -836,6 +837,13 @@ pub fn linux_network_gap(
 ) -> Option<String> {
     let host = host?;
     let tcp = sockets == Some(crate::sandbox::LinuxSockets::TcpOnly);
+    let low = grants.iter().any(|grant| {
+        matches!(grant, AccessGrant::Port { port } if *port < crate::sandbox::BRIDGE_PORT_MIN)
+    });
+    if host.routed && tcp && network == AgentNetwork::Https && !low {
+        assert!(host.nested);
+        return None;
+    }
     if host.supervised && tcp && network != AgentNetwork::Open {
         return (network == AgentNetwork::Https)
             .then(|| crate::sandbox::LINUX_DNS_ANY_HOST_LINE.to_owned());
@@ -1720,6 +1728,7 @@ mod tests {
                 supervised: false,
                 root: false,
                 armored: false,
+                routed: false,
             })
         };
         let port = |port| AccessGrant::Port { port };
@@ -1777,6 +1786,7 @@ mod tests {
                 supervised: true,
                 root: false,
                 armored: false,
+                routed: false,
             })
         };
         let low = [
@@ -1804,6 +1814,67 @@ mod tests {
     }
 
     #[test]
+    fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
+        use crate::sandbox::{
+            LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets,
+        };
+        let host = |supervised, routed| {
+            Some(LinuxHost {
+                nested: true,
+                scoped: false,
+                supervised,
+                root: false,
+                armored: false,
+                routed,
+            })
+        };
+        let ports = Some(LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        let tcp = Some(LinuxSockets::TcpOnly);
+        let high = [AccessGrant::Port { port: 8080 }, AccessGrant::TempFolder];
+        let low = [
+            AccessGrant::Port { port: 8080 },
+            AccessGrant::Port { port: 80 },
+        ];
+        for supervised in [false, true] {
+            let gap = |routed, network, sockets, grants: &[AccessGrant]| {
+                linux_network_gap(network, host(supervised, routed), sockets, grants)
+            };
+            let https = AgentNetwork::Https;
+            assert_eq!(gap(true, https, tcp, &[]), None, "supervised {supervised}");
+            assert_eq!(
+                gap(true, https, tcp, &high),
+                None,
+                "supervised {supervised}"
+            );
+            assert_eq!(
+                gap(true, https, tcp, &low),
+                gap(false, https, tcp, &low),
+                "a port below 1024 keeps the shared network: supervised {supervised}"
+            );
+            for sockets in [
+                Some(LinuxSockets::TcpPorts),
+                Some(LinuxSockets::Refuse),
+                None,
+            ] {
+                assert_eq!(gap(true, https, sockets, &[]), ports, "{sockets:?}");
+            }
+            assert_eq!(gap(true, AgentNetwork::Open, tcp, &[]), ports);
+            assert_eq!(
+                gap(true, AgentNetwork::None, tcp, &high),
+                gap(false, AgentNetwork::None, tcp, &high)
+            );
+        }
+        let unrouted =
+            |supervised| linux_network_gap(AgentNetwork::Https, host(supervised, false), tcp, &[]);
+        assert_eq!(unrouted(false), ports, "today's line");
+        assert_eq!(
+            unrouted(true),
+            Some(LINUX_DNS_ANY_HOST_LINE.to_owned()),
+            "today's line"
+        );
+    }
+
+    #[test]
     fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
         use crate::sandbox::{
             LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE, LinuxHost,
@@ -1815,6 +1886,7 @@ mod tests {
                 supervised: false,
                 root: false,
                 armored: false,
+                routed: false,
             })
         };
         let gaps = |access, nested, scoped| linux_gaps(access, host(nested, scoped), false);
@@ -1861,6 +1933,7 @@ mod tests {
             supervised: true,
             root: false,
             armored: false,
+            routed: false,
         };
         let root = LinuxHost {
             nested: false,
@@ -1868,6 +1941,7 @@ mod tests {
             supervised: false,
             root: true,
             armored: false,
+            routed: false,
         };
         let sandboxed = |host, found| linux_gaps(AgentAccess::Sandboxed, Some(host), found);
         let (kept, said) = (LINUX_KEPT_GIT_LINE, LINUX_SUPERVISED_LINE);
@@ -1933,6 +2007,7 @@ mod tests {
             supervised,
             root,
             armored: true,
+            routed: false,
         };
         let (git, said, armor) = (
             LINUX_NESTED_GIT_LINE,
@@ -1997,6 +2072,7 @@ mod tests {
             supervised,
             root: false,
             armored: false,
+            routed: false,
         };
         assert!(LevelView::other_git(Some(host(true)), &project));
         assert!(LevelView::other_git(Some(host(true)), &missing));

@@ -135,3 +135,19 @@ test("the updater config holds only the release public key, never a secret key",
   assert.doesNotMatch(text, /secret key/i);
   assert.equal(text.trim().split("\n").length, 2);
 });
+
+test("the deb recommends slirp4netns and the nf_tables iptables, so where apt installs recommends a Port 443 only agent gets a network of its own, and a host without them still installs the app (DEC-179 SBX-2)", () => {
+  const { deb } = config("tauri.linux.conf.json").bundle.linux;
+  assert.deepEqual(deb.recommends, ["slirp4netns", "iptables"]);
+  assert.deepEqual(deb.depends, ["xdg-utils", "bubblewrap"], "neither is a hard dependency");
+});
+
+test("the helper runs itself, slirp4netns and the nf_tables iptables inside its own profile, so its setup child keeps the two network capabilities it raises and no agent gets them (DEC-179 SBX-2)", () => {
+  const profile = packagedText(PROFILE_SOURCE);
+  const block = (name) => profile.split(/^profile /m).find((part) => part.startsWith(`${name} `)) ?? "";
+  const lines = (name) => block(name).split("\n").map((line) => line.trim());
+  for (const rule of ["allow /usr/bin/crazyagent-landlock ix,", "allow /usr/bin/slirp4netns ix,", "allow /usr/sbin/xtables-nft-multi ix,"]) {
+    assert.ok(lines("crazyagent-landlock").includes(rule), `helper: ${rule}`);
+    assert.ok(!lines("crazyagent-agent").includes(rule), `agent: ${rule}`);
+  }
+});

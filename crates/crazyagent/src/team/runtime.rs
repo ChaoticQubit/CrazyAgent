@@ -9714,8 +9714,9 @@ impl TeamRuntime {
     /// Keeps in an agent's Messages timeline, once while it is kept, the engine's notice that
     /// this launch stays on this computer's network on a Linux that nests agents
     /// ([`crate::sandbox::linux_unbridged_notice`]). Takes the project, the agent, the
-    /// project's network choice and the agent's sandbox as launched. Returns nothing; a
-    /// notice that cannot be kept is logged, never a reason not to start.
+    /// project's network choice and the agent's sandbox as launched, under the owner's call
+    /// supervisor setting. Returns nothing; a notice that cannot be kept is logged, never a
+    /// reason not to start.
     fn note_unbridged(
         &self,
         project: &ProjectId,
@@ -9723,7 +9724,10 @@ impl TeamRuntime {
         choice: AgentNetwork,
         sandbox: &ProjectSandbox,
     ) {
-        let Some(text) = crate::sandbox::linux_unbridged_notice(choice, sandbox) else {
+        let calls = crate::sandbox_settings::load(&self.connection)
+            .ok()
+            .map(|settings| settings.linux_supervisor);
+        let Some(text) = crate::sandbox::linux_unbridged_notice(choice, sandbox, calls) else {
             return;
         };
         let kept = id > 0
