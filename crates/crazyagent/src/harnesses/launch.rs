@@ -580,7 +580,7 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     let default = match drivers::piped(&request.harness) {
         Ok(Piped::Codex) => CODEX_DEFAULT_BASE_URL,
         Ok(Piped::Claude) => CLAUDE_DEFAULT_BASE_URL,
-        Ok(Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc) | Err(_) => {
+        Ok(Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn) | Err(_) => {
             return Err(failure("launch_key_relay_unsupported"));
         }
     };
@@ -649,7 +649,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     let (arguments, environment) = match drivers::piped(&request.harness)? {
         Piped::Codex => codex_invocation(request, installed, key_file.as_deref())?,
         Piped::Claude => claude_invocation(request, installed, key_file.as_deref()),
-        Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc => {
+        Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
             return Err(failure("launch_harness_unsupported"));
         }
     };
@@ -1198,7 +1198,9 @@ impl Driver {
                 };
                 Ok((driver, vec![start]))
             }
-            Piped::JsonlTurn | Piped::JsonlRpc => Err(failure("launch_harness_unsupported")),
+            Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
+                Err(failure("launch_harness_unsupported"))
+            }
         }
     }
 

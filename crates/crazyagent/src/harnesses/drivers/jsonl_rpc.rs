@@ -1,8 +1,6 @@
 use super::super::launch::{LaunchError, LaunchEvent, PROMPT_BYTES_MAX, failure};
 use super::super::manifest::{self, DriverKind, Fact, Manifest, PLACEHOLDERS, Refused, Rule};
-use super::jsonl_turn::{
-    Phase, Turn, arguments, fill, inputs, plain_session, positional_start, refuse, rule_set,
-};
+use super::jsonl_turn::{Phase, Turn, arguments, inputs, plain_session, refuse, rule_set};
 use super::rules;
 use crate::adapters::LINE_BYTES_MAX;
 use crate::adapters::codex::FRAME_BYTES_MAX;
@@ -104,7 +102,8 @@ impl Config {
             );
         }
         let rules = rule_set(manifest, piped)?;
-        let positional = positional_start(&argv);
+        let positional =
+            super::positional(&argv, &resume, tools_off.as_deref().unwrap_or_default())?;
         assert!(positional <= argv.len());
         Ok(Self {
             argv,
@@ -174,13 +173,8 @@ impl JsonlRpc {
         } else {
             config.tools_off.as_deref().unwrap_or_default()
         };
-        let (options, rest) = config.argv.split_at(config.positional);
-        let argv = options
-            .iter()
-            .chain(resumed)
-            .chain(off)
-            .chain(rest)
-            .map(|argument| fill(argument, &value))
+        let argv = super::ordered(&config.argv, config.positional, resumed, off)
+            .map(|argument| super::fill(argument, &value))
             .collect::<Result<Vec<String>, LaunchError>>()?;
         assert_eq!(argv.len(), config.argv.len() + resumed.len() + off.len());
         let conversation = Self {

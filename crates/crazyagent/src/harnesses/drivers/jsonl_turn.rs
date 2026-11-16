@@ -1,5 +1,5 @@
 use super::super::launch::{LaunchError, LaunchEvent, PROMPT_BYTES_MAX, failure};
-use super::super::manifest::{self, DriverKind, Fact, Manifest, PLACEHOLDERS, Refused, Rule};
+use super::super::manifest::{self, DriverKind, Fact, Manifest, Refused, Rule};
 use super::rules;
 use crate::adapters::LINE_BYTES_MAX;
 use crate::app_plugins::yaml::Value as Yaml;
@@ -56,18 +56,6 @@ impl Config {
                 "piped.argv: {prompt} is needed, so each turn's prompt reaches the harness.".into(),
             );
         }
-        let positional = positional_start(&argv);
-        if argv[..positional]
-            .iter()
-            .any(|argument| argument.starts_with("{prompt}"))
-        {
-            return refuse(
-                manifest::VALUE,
-                "piped.argv: {prompt} begins an argument; write it after text such as \
-                 --prompt= or after a -- entry, so a prompt is never read as an option."
-                    .into(),
-            );
-        }
         let resume = arguments(piped, "resume")?.unwrap_or_default();
         if !resume.is_empty() && !resume.iter().any(|argument| argument.contains("{session}")) {
             return refuse(
@@ -76,20 +64,8 @@ impl Config {
             );
         }
         let tools_off = arguments(piped, "tools_off")?;
-        for (key, added) in [
-            ("resume", resume.as_slice()),
-            ("tools_off", tools_off.as_deref().unwrap_or_default()),
-        ] {
-            if added.iter().any(|argument| argument.contains("{prompt}")) {
-                return refuse(
-                    manifest::VALUE,
-                    format!(
-                        "piped.{key}: {{prompt}} belongs in piped.argv only, so a prompt is \
-                         never read as an option."
-                    ),
-                );
-            }
-        }
+        let positional =
+            super::positional(&argv, &resume, tools_off.as_deref().unwrap_or_default())?;
         let rules = rule_set(manifest, piped)?;
         assert!(positional <= argv.len());
         Ok(Self {
@@ -220,13 +196,8 @@ impl JsonlTurn {
         } else {
             self.config.tools_off.as_deref().unwrap_or_default()
         };
-        let (options, positional) = self.config.argv.split_at(self.config.positional);
-        let argv = options
-            .iter()
-            .chain(resume)
-            .chain(off)
-            .chain(positional)
-            .map(|argument| fill(argument, &|name| self.value(name, prompt)))
+        let argv = super::ordered(&self.config.argv, self.config.positional, resume, off)
+            .map(|argument| self.fill(argument, prompt))
             .collect::<Result<Vec<String>, LaunchError>>()?;
         assert_eq!(
             argv.len(),
@@ -344,6 +315,10 @@ impl JsonlTurn {
         Ok(events)
     }
 
+    fn fill(&self, argument: &str, prompt: &str) -> Result<String, LaunchError> {
+        super::fill(argument, |name| self.value(name, prompt))
+    }
+
     fn value<'a>(&'a self, name: &str, prompt: &'a str) -> Result<&'a str, LaunchError> {
         match name {
             "home" => Ok(&self.home),
@@ -399,45 +374,6 @@ pub(super) fn inputs(
         return Err(failure("launch_session_id_invalid"));
     }
     Ok((home, cwd))
-}
-
-/// Fills each placeholder of one argument once and never again inside a filled value; a
-/// brace that opens no placeholder stays text. Inputs: the argument and the value of each
-/// placeholder name. Output: the filled argument, or the first refused value's refusal.
-pub(super) fn fill<'a>(
-    argument: &str,
-    value: &dyn Fn(&str) -> Result<&'a str, LaunchError>,
-) -> Result<String, LaunchError> {
-    let mut filled = String::with_capacity(argument.len());
-    let mut rest = argument;
-    while let Some(open) = rest.find('{') {
-        filled.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
-        let name = after
-            .find('}')
-            .map(|close| &after[..close])
-            .filter(|name| PLACEHOLDERS.contains(name));
-        match name {
-            Some(name) => {
-                filled.push_str(value(name)?);
-                rest = &after[name.len() + 1..];
-            }
-            None => {
-                filled.push('{');
-                rest = after;
-            }
-        }
-    }
-    filled.push_str(rest);
-    Ok(filled)
-}
-
-/// Where the positional arguments of a manifest's argument list begin. Input: the list.
-/// Output: the index of its first `--` entry, or its length when it has none.
-pub(super) fn positional_start(argv: &[String]) -> usize {
-    argv.iter()
-        .position(|argument| argument == "--")
-        .unwrap_or(argv.len())
 }
 
 /// Reads the rule set `piped.rules` names. Inputs: the manifest and its piped block.

@@ -269,7 +269,7 @@ fn one(rule: &Yaml, place: &str) -> Result<Rule, Refused> {
     Ok(found)
 }
 
-fn path_of(rule: &Yaml, key: &str, place: &str) -> Result<Option<String>, Refused> {
+pub(super) fn path_of(rule: &Yaml, key: &str, place: &str) -> Result<Option<String>, Refused> {
     match rule.get(key) {
         None | Some(Yaml::Null) => Ok(None),
         Some(Yaml::Str(path)) => checked_path(path, place).map(|()| Some(path.clone())),
@@ -302,7 +302,7 @@ fn checked_path(path: &str, place: &str) -> Result<(), Refused> {
     }
 }
 
-fn at<'a>(object: &'a Value, path: &str) -> Option<&'a Value> {
+pub(super) fn at<'a>(object: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.').try_fold(object, |found, part| match found {
         Value::Object(members) => members.get(part),
         Value::Array(items) if part.bytes().all(|byte| byte.is_ascii_digit()) => part
