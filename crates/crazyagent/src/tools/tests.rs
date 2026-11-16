@@ -1,5 +1,5 @@
 use super::*;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::Command;
 
 /// A scratch HOME with no tools in it, its real path, so found files compare equal.

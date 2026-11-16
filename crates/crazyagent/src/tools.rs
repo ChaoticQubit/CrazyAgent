@@ -4,8 +4,6 @@ pub mod probe;
 mod tests;
 
 use std::ffi::{OsStr, OsString};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 const PLACES_MAX: usize = 160;
@@ -435,28 +433,6 @@ impl Places {
             && crate::service::changeable_past_sticky(folder).is_none()
             && !(self.temp_refused && in_temp_of(folder, &self.temps))
             && self.link_hops_kept(folder)
-    }
-
-    /// Whether a search for a program by name, as `env` makes with `execvp`, passes over this
-    /// entry for good: a file the run's user cannot execute, which `execvp` skips on EACCES,
-    /// in a place no agent or other user can change before the run ([`check_place`]), so its
-    /// mode stays as read (rv-sec2 B11 r2 F1). A dangling or looping link, a folder, a file
-    /// with no execute bit at all, or one a changeable place leads to is not, so the caller
-    /// takes it as it stands. Input: the entry. Output: the answer.
-    #[cfg(unix)]
-    pub(crate) fn passed_over_by_env(&self, entry: &Path) -> bool {
-        assert!(entry.is_absolute());
-        std::fs::metadata(entry).is_ok_and(|metadata| metadata.is_file())
-            && rustix::fs::access(entry, rustix::fs::Access::EXEC_OK)
-                == Err(rustix::io::Errno::ACCESS)
-            && check_place(self, entry) == Some(Ok(()))
-    }
-
-    /// Passes over no entry where the platform runs no `#!` search. Input unused.
-    /// Output: false.
-    #[cfg(not(unix))]
-    pub(crate) fn passed_over_by_env(&self, _entry: &Path) -> bool {
-        false
     }
 
     /// Whether a path run as written meets only links no one else can move: every link and
@@ -1496,20 +1472,19 @@ fn below(base: &Path, relative: &str) -> PathBuf {
         .fold(base.to_path_buf(), |at, part| at.join(part))
 }
 
-fn executable_file(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && runnable(&metadata))
-}
-
-/// Reports whether file metadata grants any execute permission.
-/// Takes the metadata. Returns true when any of the three execute bits is set.
+/// Whether a path is a file the run's user can execute, as the system decides at exec, so a
+/// candidate or interpreter the engine's user cannot start never resolves, and a copy `env`
+/// passes over is never one a walk takes and passes (rv-sec3 B18 F1). Input: the path.
+/// Output: the answer.
 #[cfg(unix)]
-fn runnable(metadata: &std::fs::Metadata) -> bool {
-    metadata.permissions().mode() & 0o111 != 0
+fn executable_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+        && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
 }
 
-/// Reports that a file may be run where the platform has no execute bit.
-/// Takes the metadata, unused. Returns true.
+/// Whether a path is a file, where the platform has no execute permission to test.
+/// Input: the path. Output: the answer.
 #[cfg(not(unix))]
-fn runnable(_metadata: &std::fs::Metadata) -> bool {
-    true
+fn executable_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
