@@ -23,6 +23,8 @@ const SETUP_MS = 120000;
 const BUILD_MS = 8 * 60 * 1000;
 const BACK_MS = 90000;
 const POLL_MS = 1000;
+const REAL_KEYS = process.platform !== "darwin" || process.env.E2E_REAL_KEYS === "1";
+const REAL_KEYS_OFF = "skipped on macOS without E2E_REAL_KEYS=1: its System Events keys go to whichever app is in front when they land, the owner's front app included, so Cmd+N, Cmd+W or typed text could reach the owner's window";
 const SHOWN_WIDTH = 1040;
 const SHOWN_HEIGHT = 720;
 const PANEL_SHIFT = "96px";
@@ -282,11 +284,26 @@ async function testAppInFront() {
   }
 }
 
-/** Sends one Command key combination to the front window of the test app, only when the test app
- * is the frontmost app. Input: the key. Output: once it was sent. */
-async function commandKey(key) {
+/** Sends one real System Events keystroke line once the test app is the frontmost app, and only
+ * when REAL_KEYS allows real keys, since the key goes to whichever app is in front when it lands.
+ * Input: the keystroke line. Output: once it was sent; throws with nothing sent otherwise. */
+async function realKey(line) {
+  assert.ok(REAL_KEYS, REAL_KEYS_OFF);
   await testAppInFront();
-  onApp(`keystroke "${key}" using command down`);
+  onApp(line);
+}
+
+/** Sends one Command key combination to the front window of the test app through realKey. Input:
+ * the key. Output: once it was sent. */
+async function commandKey(key) {
+  await realKey(`keystroke "${key}" using command down`);
+}
+
+/** Declares a row that sends real keys: it runs off macOS, or on macOS with E2E_REAL_KEYS=1, and
+ * is skipped otherwise with REAL_KEYS_OFF in its title. Inputs: the row's title and body. */
+function keysIt(title, body) {
+  if (REAL_KEYS) it(title, body);
+  else it.skip(`${title} (${REAL_KEYS_OFF})`, body);
 }
 
 /** Raises the app's window with this title. Input: the title's words. */
@@ -437,7 +454,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     }
   });
 
-  it("a saved level ends the IDE's own window, the tab opens it again, and the Save's words match what happens to an unsaved edit", async () => {
+  keysIt("a saved level ends the IDE's own window, the tab opens it again, and the Save's words match what happens to an unsaved edit", async () => {
     const project = await newProject("ide-own-level");
     await buildReady();
     await go(`#/projects/${encodeURIComponent(project)}/overview`);
@@ -449,8 +466,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     const before = focused.look.editors;
     await commandKey("n");
     await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.look?.editors === before + 1, "Cmd+N opened no editor in the IDE window", OWN_WINDOW_MS, focused.at);
-    await testAppInFront();
-    onApp(`keystroke "${UNSAVED}"`);
+    await realKey(`keystroke "${UNSAVED}"`);
     await pause(BACKUP_MS);
     await shot("unsaved-before-restart");
     await startPlan([[LEAVE_S, "go", "#/"]]);
@@ -485,7 +501,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     await until(() => walls() === 0, OWN_WINDOW_MS, "the wall stayed open after its project was removed");
   });
 
-  it("moves to its own window with no reload, comes back, and closes with its project and the main window", async () => {
+  keysIt("moves to its own window with no reload, comes back, and closes with its project and the main window", async () => {
     const first = await newProject("ide-own-one");
     const second = await newProject("ide-own-two");
     const third = await newProject("ide-own-three");
