@@ -687,6 +687,20 @@ impl Connection {
                                 break;
                             }
                         }
+                        Job::Intake(job)
+                            if native.is_some()
+                                && matches!(
+                                    job.as_ref(),
+                                    intake::IntakeJob::Query(
+                                        intake::IntakeQuery::GitHubRuleSet { .. }
+                                    )
+                                ) =>
+                        {
+                            let native = native.as_mut().expect("the guard saw the owner");
+                            if !native.rule_lane(*job, &owner_replies) {
+                                break;
+                            }
+                        }
                         Job::Intake(job) => {
                             let event = match native.as_mut() {
                                 Some(native) => {

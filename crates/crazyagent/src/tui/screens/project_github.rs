@@ -57,7 +57,9 @@ fn held(state: &GitHubRuleState) -> bool {
 /// Project > Settings > GitHub: the live rules of the repository a project was published
 /// to. Opening it only reads; each switch sends one change for the repository the page
 /// showed, one at a time, and a failed change reads the page again since it may have
-/// landed on GitHub. A rule that does not apply, or waits, never sends.
+/// landed on GitHub. The worker answers a switch at once as changing; the page keeps
+/// saying it sends until the switch's own result. A rule that does not apply, or waits,
+/// never sends.
 pub struct ProjectGitHub {
     project: ProjectId,
     name: String,
@@ -270,6 +272,9 @@ impl Screen for ProjectGitHub {
         self.pending = None;
         match (&reply.query, &reply.result) {
             (IntakeQuery::GitHubRules { .. }, Ok(IntakeView::Rules(page))) => self.arrived(page),
+            (IntakeQuery::GitHubRuleSet { .. }, Ok(IntakeView::RuleChanging)) => {
+                self.pending = Some(reply.query.clone());
+            }
             (IntakeQuery::GitHubRuleSet { .. }, Ok(IntakeView::Rules(page))) => {
                 self.problem = None;
                 self.arrived(page);
