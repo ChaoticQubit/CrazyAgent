@@ -628,4 +628,26 @@ mod tests {
             Err(crate::setup::program_not_found("tool"))
         );
     }
+
+    /// WIN-PACK-SEED: the uv a pack server is seeded with passes the tool resolver's place
+    /// checks, so a WinGet Links copy agents can write, here inside a `.crazyagent` folder,
+    /// is never stored as an approved server command.
+    #[test]
+    fn a_pack_server_is_never_seeded_with_a_uv_agents_can_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = crate::sandbox::canonical(temp.path()).unwrap();
+        let local = base.join(".crazyagent").join("local");
+        let links = local.join("Microsoft").join("WinGet").join("Links");
+        std::fs::create_dir_all(&links).unwrap();
+        let uv = links.join("uv.exe");
+        std::fs::write(&uv, b"uv").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let installer = WindowsInstaller::new(&base.join("app"), Some(&local), places()).unwrap();
+        assert_eq!(installer.uv_on(None), Some(uv));
+        assert_eq!(installer.program("uv"), None);
+    }
 }
