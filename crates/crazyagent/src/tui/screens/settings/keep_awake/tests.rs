@@ -427,6 +427,28 @@ fn a_setting_this_computer_cannot_honour_says_why() {
     assert_eq!(text.matches("Only on macOS").count(), 1, "{text}");
 }
 
+/// A reason wider than the page under a setting it cannot honour is wrapped, so every word
+/// of it is shown in order with nothing but line breaks and indents between them.
+#[test]
+fn a_long_reason_a_setting_cannot_be_honoured_is_read_whole() {
+    let reason = format!(
+        "The lid helper stopped:{}",
+        " it cannot reach the power service".repeat(5)
+    );
+    assert!((117..=200).contains(&reason.chars().count()));
+    let mut view = resting();
+    view.lid_support = LidSupport::NotAvailable {
+        reason: reason.clone(),
+    };
+    let text = shown(&mut page(view));
+    let squeezed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(squeezed.contains(&reason), "{text}");
+    assert!(
+        text.lines().all(|line| line.chars().count() <= 120),
+        "{text}"
+    );
+}
+
 const LOW_POWER_ROW: usize = 9;
 const LOW_POWER_HELD: &str = "On now for this hold";
 const LOW_POWER_LEFT: &str = "Left as you set it for this hold";
