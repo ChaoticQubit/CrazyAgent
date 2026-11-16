@@ -247,6 +247,8 @@ struct Engine {
     _stop: tokio::sync::watch::Sender<bool>,
     controller: OwnerController,
     _refusing: [std::net::TcpStream; 2],
+    #[cfg(target_os = "macos")]
+    _keychain: crate::credentials::test_keychain::TestKeychain,
 }
 
 impl Engine {
@@ -256,6 +258,12 @@ impl Engine {
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        #[cfg(target_os = "macos")]
+        let keychain = {
+            let mut keychain = crate::credentials::test_keychain::TestKeychain::temporary();
+            keychain.serve(&crate::github::namespace(root.path()));
+            keychain
+        };
         let (refusing, settings) = crate::tui::test_home::refusing_settings(SETTINGS);
         let global = root.path().join("global.toml");
         std::fs::write(&global, &settings).unwrap();
@@ -286,6 +294,8 @@ impl Engine {
             _stop: stop,
             controller,
             _refusing: refusing,
+            #[cfg(target_os = "macos")]
+            _keychain: keychain,
         }
     }
 
@@ -341,6 +351,7 @@ impl Engine {
             _stop: stop,
             controller,
             _refusing: refusing,
+            _keychain: keychain,
         } = self;
         drop(controller);
         service.shutdown().await.unwrap();
@@ -371,6 +382,7 @@ impl Engine {
             _stop: stop,
             controller,
             _refusing: refusing,
+            _keychain: keychain,
         }
     }
 
