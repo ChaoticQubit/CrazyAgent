@@ -1940,3 +1940,40 @@ fn a_listed_harness_on_its_own_relay_holds_the_engine_s_lifeline_and_a_keyless_o
         assert!(session.stop().is_ok());
     }
 }
+
+/// T20 r1 sec F1 follow-up: a write the harness can no longer take fails that call only, as
+/// it did before the session kept input for a harness: once the harness is gone, a prompt
+/// fails with `launch_input_closed`, and the session still reports the harness's exit.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_write_to_a_harness_that_is_gone_fails_once_and_its_exit_is_still_reported() {
+    use rustix::process::{Pid, Signal, kill_process_group};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+    let mut launch = team_launch("claude-code");
+    let harness = launch.work.parent().unwrap().join("gone-harness");
+    std::fs::write(&harness, "#!/bin/sh\nexec /bin/sleep 60\n").unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    launch.request.executable = harness;
+    launch.request.tools = false;
+    let mut session = super::Session::start(launch.request).unwrap();
+    let group = Pid::from_raw(i32::try_from(session.process_group()).unwrap()).unwrap();
+    kill_process_group(group, Signal::KILL).unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while session.child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < until, "the harness never ended");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let sent = session.send("Are you there?");
+
+    assert_eq!(sent.err(), Some(super::failure("launch_input_closed")));
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut exited = false;
+    while !exited {
+        assert!(Instant::now() < until, "its exit was never reported");
+        let next = session.next_event(Duration::from_millis(200));
+        assert!(next.is_ok(), "{:?}", next.as_ref().err());
+        exited = matches!(next.unwrap(), Some(LaunchEvent::Exited { .. }));
+    }
+}
