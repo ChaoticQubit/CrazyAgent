@@ -2347,6 +2347,16 @@ pub(crate) mod tests {
         };
         assert_eq!(pids(&lineage), [500, 600]);
 
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            row(600, 500, 500, FIRST),
+        ]);
+        assert_eq!(
+            pids(&lineage),
+            [500, 600],
+            "600 was listed, then exited before its ids were read"
+        );
+
         let orphan = forked(601, 1, 601, FIRST, 9_101, 9_100);
         let stranger = forked(602, 1, 602, FIRST, 9_102, 7_000);
         let unread = row(603, 1, 603, FIRST);
