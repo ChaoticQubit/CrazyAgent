@@ -896,31 +896,6 @@ impl OwnerRuntimeHandle {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn register_rcli_private_key_executable(
-        &self,
-        host: RegisteredNativeAuthHost,
-    ) -> Result<(), EngineError> {
-        if !self.authority.usable.load(Ordering::SeqCst) {
-            return Err(failure("owner_runtime_stale"));
-        }
-        self.native_auth_owner_runtime_dir()?;
-        host.verified_path()?;
-        let mut registration = self
-            .authority
-            .native_auth_host
-            .lock()
-            .map_err(|_| failure("native_auth_recovery_required"))?;
-        if registration.frozen
-            || registration.disabled
-            || registration.rcli_private_key_executable.is_some()
-        {
-            return Err(failure("native_auth_host_registration_frozen"));
-        }
-        registration.rcli_private_key_executable = Some(Arc::new(host));
-        Ok(())
-    }
-
     /// Registers the RCLI host for master turns and API-key writes from one capture: the one
     /// pinned host fills both roles under one lock, so the two can never be two files
     /// (rv-sec2 B1 N2). Input: the captured host. Output: Ok, or the refusal, which
