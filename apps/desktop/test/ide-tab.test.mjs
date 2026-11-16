@@ -445,14 +445,22 @@ test("a kept IDE shows from the page's last IDE state with one native call, no e
   await withPage(async ({ evaluate }) => {
     await evaluate(fixture);
     await evaluate("Fixture.seed()");
-    await evaluate(`Fixture.mount([], [], false, false, "node", true)`);
+    await evaluate(`Fixture.mount([], [], false, false, null, true)`);
     assert.equal(await evaluate(`Fixture.called("desktop_ide_show")`), true, "the kept IDE is shown");
     await evaluate("Fixture.frames()");
     const asked = await evaluate("Fixture.asked()");
     assert.equal(asked[0], "desktop_ide_show", `the show is the first call, before any engine read: ${JSON.stringify(asked)}`);
     assert.equal(asked.includes("desktop_ide_open"), false, "a kept IDE is not opened again");
     assert.equal(asked.includes("desktop_ide_place"), false, "the panel did not move, so nothing is placed and nothing lays out");
+  });
+  await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate("Fixture.seed()");
+    await evaluate(`Fixture.mount([], [], false, false, "node", true)`);
+    assert.equal(await evaluate(`Fixture.called("desktop_ide_show")`), true);
+    await evaluate("Fixture.frames()");
     assert.match((await evaluate("Fixture.tab()")).text, /Still running after this IDE stopped: node/, "the note a preload kept still shows once");
+    assert.equal(await evaluate(`Fixture.count("desktop_ide_open")`), 0, "a kept IDE is not opened again");
   });
   await withPage(async ({ evaluate }) => {
     await evaluate(fixture);
