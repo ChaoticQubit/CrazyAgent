@@ -74,6 +74,10 @@ pub enum Call {
     Fchown,
     Lchown,
     Fchownat,
+    Utime,
+    Utimes,
+    Futimesat,
+    Utimensat,
     Setxattr,
     Lsetxattr,
     Fsetxattr,
@@ -112,10 +116,10 @@ pub const CREATING: [Call; 12] = [
 /// allows (DEC-185 S2).
 pub const REMOVING: [Call; 4] = [Call::Unlink, Call::Unlinkat, Call::Rmdir, Call::Truncate];
 
-/// The calls that change a file's mode or owner, which the supervisor makes itself on a
-/// file it judged (DEC-185 S2a). `fchmodat2` is refused instead, so the C library falls
-/// back to these.
-pub const CHANGING: [Call; 7] = [
+/// The calls that change a file's mode, owner or times, which the supervisor makes itself
+/// on a file it judged (DEC-185 S2a, S2b). `fchmodat2` is refused instead, so the C
+/// library falls back to these.
+pub const CHANGING: [Call; 11] = [
     Call::Chmod,
     Call::Fchmod,
     Call::Fchmodat,
@@ -123,6 +127,10 @@ pub const CHANGING: [Call; 7] = [
     Call::Fchown,
     Call::Lchown,
     Call::Fchownat,
+    Call::Utime,
+    Call::Utimes,
+    Call::Futimesat,
+    Call::Utimensat,
 ];
 
 /// The calls that set or remove an extended attribute, refused whole under the held guard
@@ -184,6 +192,7 @@ impl Calls {
             (Call::Fchown, 93),
             (Call::Lchown, 94),
             (Call::RtSigqueueinfo, 129),
+            (Call::Utime, 132),
             (Call::Mknod, 133),
             (Call::Setxattr, 188),
             (Call::Lsetxattr, 189),
@@ -193,15 +202,18 @@ impl Calls {
             (Call::Fremovexattr, 199),
             (Call::Tkill, 200),
             (Call::Tgkill, 234),
+            (Call::Utimes, 235),
             (Call::Openat, 257),
             (Call::Mkdirat, 258),
             (Call::Mknodat, 259),
             (Call::Fchownat, 260),
+            (Call::Futimesat, 261),
             (Call::Unlinkat, 263),
             (Call::Renameat, 264),
             (Call::Linkat, 265),
             (Call::Symlinkat, 266),
             (Call::Fchmodat, 268),
+            (Call::Utimensat, 280),
             (Call::RtTgsigqueueinfo, 297),
             (Call::OpenByHandleAt, 304),
             (Call::Sendmmsg, 307),
@@ -238,6 +250,7 @@ impl Calls {
             (Call::Fchownat, 54),
             (Call::Fchown, 55),
             (Call::Openat, 56),
+            (Call::Utimensat, 88),
             (Call::Kill, 129),
             (Call::Tkill, 130),
             (Call::Tgkill, 131),
@@ -698,6 +711,10 @@ mod tests {
             (Call::Fremovexattr, Some(199), Some(16)),
             (Call::Setxattrat, Some(463), Some(463)),
             (Call::Removexattrat, Some(466), Some(466)),
+            (Call::Utime, Some(132), None),
+            (Call::Utimes, Some(235), None),
+            (Call::Futimesat, Some(261), None),
+            (Call::Utimensat, Some(280), Some(88)),
         ];
         for (call, x86, arm) in pinned {
             assert_eq!(Calls::X86_64.number(call), x86, "{call:?}");
@@ -726,6 +743,20 @@ mod tests {
             let two = calls.number(Call::Fchmodat2).unwrap();
             assert_eq!(told(&calls, HELD, two, [0; 6]), ERRNO | ENOSYS);
             assert_eq!(told(&calls, ALL, two, [0; 6]), ALLOW);
+        }
+    }
+
+    #[test]
+    fn a_held_guard_traps_every_call_that_sets_a_files_times() {
+        let times = [Call::Utime, Call::Utimes, Call::Futimesat, Call::Utimensat];
+        for calls in [Calls::X86_64, Calls::AARCH64] {
+            for call in times {
+                if let Some(nr) = calls.number(call) {
+                    assert_eq!(told(&calls, HELD, nr, [0; 6]), NOTIFY, "{call:?}");
+                    assert_eq!(told(&calls, ALL, nr, [0; 6]), ALLOW, "{call:?}");
+                }
+            }
+            assert!(calls.number(Call::Utimensat).is_some());
         }
     }
 
@@ -802,6 +833,9 @@ mod tests {
             Call::Chmod,
             Call::Chown,
             Call::Lchown,
+            Call::Utime,
+            Call::Utimes,
+            Call::Futimesat,
         ];
         for call in absent {
             assert_eq!(arm.number(call), None, "{call:?}");

@@ -249,15 +249,22 @@ impl GitOwn {
 }
 
 /// The entries an agent may not write, truncate, move, link or remove (DEC-185 S2): each
-/// path in `entries`, and each path in `trees` with everything below it. Paths are real and
-/// absolute, as the engine names them from the launch's guarded list.
+/// path in `entries`, and each path in `trees` with everything below it; and the `stores`,
+/// trees where no symlink is made and no symlink or folder is moved or linked in (S2b).
+/// Paths are real and absolute, as the engine names them from the launch's guarded list.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Held {
     pub entries: Vec<PathBuf>,
     pub trees: Vec<PathBuf>,
+    pub stores: Vec<PathBuf>,
 }
 
 impl Held {
+    /// Tells whether nothing is held. Output: true with no entry, tree or store.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.trees.is_empty() && self.stores.is_empty()
+    }
+
     /// Tells whether a path is held, each name compared as the loosest folder compares it
     /// ([`folded`]). Input: the real, absolute path of an entry, its folder resolved.
     /// Output: true for an entry, a path in a tree, and any path not in that form, and
@@ -280,6 +287,29 @@ impl Held {
         let below = |held: &PathBuf| folded_parts(held).is_none_or(|held| held.starts_with(&path));
         self.holds(real) || self.entries.iter().chain(&self.trees).any(below)
     }
+
+    /// Tells whether a path lies in a held store, where no symlink or folder may be put,
+    /// each name compared as [`Held::holds`] compares it. Input: the real, absolute path of
+    /// an entry. Output: true for a path in a store, and with any store held, for a path
+    /// not in that form and for every path while a store is itself not in that form.
+    pub fn stored(&self, real: &Path) -> bool {
+        if self.stores.is_empty() {
+            return false;
+        }
+        let Some(path) = folded_parts(real) else {
+            return true;
+        };
+        let store = |held: &PathBuf| folded_parts(held).is_none_or(|held| path.starts_with(&held));
+        self.stores.iter().any(store)
+    }
+}
+
+/// Tells whether a held store takes an entry of a kind (DEC-185 S2b): every kind but a
+/// symlink and a folder, either of which could carry git outside the store. Input: the
+/// entry's mode as `stat` gives it. Output: true when the entry may be put there.
+pub fn store_takes(mode: u32) -> bool {
+    let (kind, symlink, folder) = (mode & 0o170_000, 0o120_000, 0o040_000);
+    kind != symlink && kind != folder
 }
 
 /// One entry as the kernel knows it whatever its name: its device and inode numbers.
@@ -287,20 +317,23 @@ pub type Node = (u64, u64);
 
 /// The held entries as the kernel knows them, taken once before the harness starts
 /// (DEC-185 S2a): the node of each held entry and tree that exists, the node of each held
-/// tree, the node of every folder above a held path, and each held path's folder node with
-/// its last name, for a name that does not exist yet.
+/// tree, the node of every folder above a held path, each held path's folder node with its
+/// last name, for a name that does not exist yet, and the node of each held store that
+/// exists (S2b).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HeldNodes {
     pub nodes: Vec<Node>,
     pub trees: Vec<Node>,
     pub above: Vec<Node>,
     pub names: Vec<(Node, OsString)>,
+    pub stores: Vec<Node>,
 }
 
 impl HeldNodes {
     /// Takes the nodes of the held paths. Inputs: the held paths and a stat that does not
     /// follow a link, giving none for a path that does not exist. Output: the nodes, or an
-    /// error when a stat fails otherwise or the folder of a held path does not exist.
+    /// error when a path is not absolute, a stat fails otherwise or the folder of a held
+    /// entry or tree does not exist; a store that does not exist has no node.
     pub fn taken(
         held: &Held,
         stat: impl Fn(&Path) -> io::Result<Option<Node>>,
@@ -327,9 +360,16 @@ impl HeldNodes {
                 nodes.above.push(there(above)?);
             }
         }
+        for store in &held.stores {
+            if !store.is_absolute() || store.file_name().is_none() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            nodes.stores.extend(stat(store)?);
+        }
         nodes.above.sort_unstable();
         nodes.above.dedup();
         assert_eq!(nodes.names.len(), held.entries.len() + held.trees.len());
+        assert!(nodes.stores.len() <= held.stores.len());
         assert!(nodes.trees.iter().all(|tree| nodes.nodes.contains(tree)));
         Ok(nodes)
     }
@@ -353,6 +393,57 @@ impl HeldNodes {
     pub fn names_in(&self, folder: Node) -> Vec<&OsStr> {
         let here = self.names.iter().filter(|(parent, _)| *parent == folder);
         here.map(|(_, name)| name.as_os_str()).collect()
+    }
+
+    /// Tells whether a folder lies in a held store. Input: the nodes of the folder and of
+    /// each folder above it, nearest first. Output: true when one of them is a store.
+    pub fn stored(&self, chain: &[Node]) -> bool {
+        chain.iter().any(|folder| self.stores.contains(folder))
+    }
+}
+
+/// How a time-setting call lays out the access and modification times it names in the
+/// caller's memory, each count a 64-bit word: whole seconds (`utime`), seconds and
+/// microseconds (`utimes`, `futimesat`), or seconds and nanoseconds (`utimensat`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stamps {
+    Seconds,
+    Micros,
+    Nanos,
+}
+
+impl Stamps {
+    /// How many bytes the two times take in the caller's memory. Output: the count.
+    pub fn size(self) -> usize {
+        match self {
+            Self::Seconds => 16,
+            Self::Micros | Self::Nanos => 32,
+        }
+    }
+
+    /// Reads the two times as `utimensat` takes them, seconds and nanoseconds, leaving
+    /// the nanosecond counts for the kernel to check. Input: [`Stamps::size`] bytes.
+    /// Output: the access and modification times, or none for a microsecond count outside
+    /// 0..1_000_000, which the kernel refuses with `EINVAL`.
+    pub fn read(self, bytes: &[u8]) -> Option<[(i64, i64); 2]> {
+        assert_eq!(bytes.len(), self.size());
+        let words: Vec<i64> = bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|word| i64::from_ne_bytes(*word))
+            .collect();
+        let micros = |sec: i64, usec: i64| {
+            if !(0..1_000_000).contains(&usec) {
+                return None;
+            }
+            Some((sec, usec * 1000))
+        };
+        match self {
+            Self::Seconds => Some([(words[0], 0), (words[1], 0)]),
+            Self::Micros => Some([micros(words[0], words[1])?, micros(words[2], words[3])?]),
+            Self::Nanos => Some([(words[0], words[1]), (words[2], words[3])]),
+        }
     }
 }
 
@@ -838,6 +929,7 @@ mod tests {
                 PathBuf::from("/p/worktrees/a/.git"),
             ],
             trees: vec![PathBuf::from("/p/.git/worktrees/a/modules")],
+            stores: Vec::new(),
         }
     }
 
@@ -1030,6 +1122,117 @@ mod tests {
         let src = [(1, 21), (1, 20), (1, 10), (1, 2)];
         assert!(!nodes.pins(Some((1, 41)), &src), "a folder in the worktree");
         assert!(!nodes.pins(None, &src));
+    }
+
+    #[test]
+    fn the_times_a_time_call_names_are_read_as_seconds_and_nanoseconds() {
+        let bytes = |words: &[i64]| -> Vec<u8> {
+            words.iter().flat_map(|word| word.to_ne_bytes()).collect()
+        };
+        assert_eq!(Stamps::Seconds.size(), 16);
+        assert_eq!(Stamps::Micros.size(), 32);
+        assert_eq!(Stamps::Nanos.size(), 32);
+        let seconds = Stamps::Seconds.read(&bytes(&[7, 9]));
+        assert_eq!(seconds, Some([(7, 0), (9, 0)]));
+        let micros = Stamps::Micros.read(&bytes(&[7, 5, 9, 999_999]));
+        assert_eq!(micros, Some([(7, 5_000), (9, 999_999_000)]));
+        for bad in [[7, 1_000_000, 9, 0], [7, 0, 9, -1], [7, i64::MAX, 9, 0]] {
+            assert_eq!(Stamps::Micros.read(&bytes(&bad)), None, "{bad:?}");
+        }
+        let omit = (1 << 30) - 2;
+        let nanos = Stamps::Nanos.read(&bytes(&[7, 5, 9, omit]));
+        assert_eq!(nanos, Some([(7, 5), (9, omit)]));
+        let unchecked = Stamps::Nanos.read(&bytes(&[-1, 2_000_000_000, 0, 0]));
+        assert_eq!(
+            unchecked,
+            Some([(-1, 2_000_000_000), (0, 0)]),
+            "the kernel checks it"
+        );
+    }
+
+    #[test]
+    fn a_path_in_a_held_store_is_stored_by_name_and_a_neighbour_is_not() {
+        let held = Held {
+            stores: vec![PathBuf::from("/c/.git/objects")],
+            ..Held::default()
+        };
+        for path in [
+            "/c/.git/objects/ab/cd",
+            "/c/.git/OBJECTS/pack/x",
+            "/c/.git/objects",
+        ] {
+            assert!(held.stored(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/c/.git/refs/heads/x",
+            "/c/objects/ab",
+            "/c/.git/objects2/x",
+        ] {
+            assert!(!held.stored(Path::new(path)), "{path}");
+        }
+        assert!(
+            held.stored(Path::new("c/.git/objects/ab")),
+            "not a real path"
+        );
+        assert!(
+            !Held::default().stored(Path::new("c/.git/objects/ab")),
+            "no store held"
+        );
+        assert!(
+            !held.holds(Path::new("/c/.git/objects/ab/cd")),
+            "a store holds no entry"
+        );
+        assert!(!held.is_empty() && Held::default().is_empty());
+    }
+
+    #[test]
+    fn a_store_takes_every_kind_but_a_symlink_and_a_folder() {
+        for taken in [
+            0o100_644, 0o100_755, 0o010_600, 0o140_755, 0o020_600, 0o060_600,
+        ] {
+            assert!(store_takes(taken), "{taken:o}");
+        }
+        for refused in [0o120_777, 0o040_755, 0o041_777] {
+            assert!(!store_takes(refused), "{refused:o}");
+        }
+    }
+
+    #[test]
+    fn a_folder_whose_chain_runs_through_a_held_store_is_stored() {
+        let held = Held {
+            stores: vec![PathBuf::from("/c/.git/objects"), PathBuf::from("/c/gone")],
+            ..Held::default()
+        };
+        let map = [
+            ("/", (1, 2)),
+            ("/c", (1, 40)),
+            ("/c/.git", (1, 41)),
+            ("/c/.git/objects", (1, 50)),
+        ];
+        let stat = |path: &Path| {
+            let found = map.iter().find(|(at, _)| Path::new(at) == path);
+            Ok(found.map(|(_, node)| *node))
+        };
+        let nodes = HeldNodes::taken(&held, stat).unwrap();
+        assert_eq!(nodes.stores, vec![(1, 50)], "a store not there has no node");
+        assert!(
+            nodes.stored(&[(1, 51), (1, 50), (1, 41), (1, 40), (1, 2)]),
+            "a fan-out"
+        );
+        assert!(
+            nodes.stored(&[(1, 50), (1, 41), (1, 40), (1, 2)]),
+            "the store itself"
+        );
+        assert!(!nodes.stored(&[(1, 41), (1, 40), (1, 2)]), "the git folder");
+        assert!(
+            !nodes.holds(Some((1, 50)), &[(1, 41)]),
+            "a store is not held"
+        );
+        let relative = Held {
+            stores: vec![PathBuf::from("c/.git/objects")],
+            ..Held::default()
+        };
+        assert!(HeldNodes::taken(&relative, stat).is_err());
     }
 
     #[test]

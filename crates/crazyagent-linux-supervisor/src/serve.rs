@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
 use crate::filter::{self, Call, Calls, Guards};
-use crate::rules::{self, Dest, GitOwn, Held, HeldNodes, Node, Reach, Target};
+use crate::rules::{self, Dest, GitOwn, Held, HeldNodes, Node, Reach, Stamps, Target};
 use crate::sys::{self, Notice};
 use rustix::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, RenameFlags};
+use rustix::fs::{
+    AtFlags, CWD, FileType, Mode, OFlags, RenameFlags, Timespec, Timestamps, UTIME_NOW, UTIME_OMIT,
+};
 use rustix::io::Errno;
 use rustix::net::SocketAddrUnix;
 use rustix::process::{
@@ -19,7 +21,7 @@ use std::os::unix::net::UnixStream;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 pub const WORKERS: usize = 8;
 pub const STOPPED_EXIT: i32 = 125;
@@ -105,6 +107,7 @@ pub fn run(config: Supervised, command: &mut Command) -> io::Result<i32> {
         own,
         leads: place_of(own).is_some_and(|stat| stat.group == own),
         listener,
+        names: RwLock::new(()),
     });
     for _ in 0..WORKERS {
         let server = Arc::clone(&server);
@@ -196,12 +199,18 @@ fn chain_of(folder: BorrowedFd<'_>) -> Result<Vec<Node>, Errno> {
     Err(Errno::LOOP)
 }
 
-/// The chain [`HeldNodes::holds`] needs for a folder: the whole walk when a held tree sits
-/// on the folder's device, else the folder alone, since an agent under Landlock mounts
-/// nothing into a tree. Inputs: the nodes and the folder. Output: the chain.
+/// The chain [`HeldNodes::holds`] and [`HeldNodes::stored`] need for a folder: the whole
+/// walk when a held tree or store sits on the folder's device, else the folder alone, since
+/// an agent under Landlock mounts nothing into either. Inputs: the nodes and the folder.
+/// Output: the chain.
 fn chain_for(nodes: &HeldNodes, folder: BorrowedFd<'_>) -> Result<Vec<Node>, Errno> {
     let own = node_of(&rustix::fs::fstat(folder)?);
-    if nodes.trees.iter().any(|tree| tree.0 == own.0) {
+    if nodes
+        .trees
+        .iter()
+        .chain(&nodes.stores)
+        .any(|held| held.0 == own.0)
+    {
         return chain_of(folder);
     }
     Ok(vec![own])
@@ -215,6 +224,17 @@ fn writes(asked: OFlags) -> bool {
 /// Tells whether a name is there, a link itself and not what it points at.
 fn exists(place: &Place) -> bool {
     rustix::fs::statat(&place.folder, place.name(), AtFlags::SYMLINK_NOFOLLOW).is_ok()
+}
+
+/// Tells whether a held store refuses the entry at a place, read without following it:
+/// a symlink or a folder ([`rules::store_takes`], DEC-185 S2b). Input: the entry's place.
+/// Output: true for either kind, false for any other kind or no entry, or the read's error.
+fn store_refuses(place: &Place) -> Result<bool, Errno> {
+    match rustix::fs::statat(&place.folder, place.name(), AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => Ok(!rules::store_takes(stat.st_mode)),
+        Err(Errno::NOENT) => Ok(false),
+        Err(errno) => Err(errno),
+    }
 }
 
 /// The kind of entry `mknod` makes for a mode: a regular file when the mode names none.
@@ -294,10 +314,12 @@ enum Make {
     Link(Vec<u8>),
 }
 
-/// What a mode or owner call changes: the mode register, or the owner and group registers.
+/// What a mode, owner or time call changes: the mode register, the owner and group
+/// registers, or the access and modification times as seconds and nanoseconds.
 enum Change {
     Mode(u64),
     Owner(u64, u64),
+    Times([(i64, i64); 2]),
 }
 
 /// What a two-path creating call does, with its flags register: a hard link or a rename.
@@ -374,7 +396,9 @@ impl Caller {
 
 /// One agent's supervisor: what it holds, the nodes of its held entries, the
 /// architecture's call numbers, its own process id, whether it leads its process group,
-/// and the listener its workers share.
+/// the listener its workers share, and the names lock, which a move into a held store
+/// takes alone and every other symlink, folder, node or link it makes shares; an open
+/// makes only a plain file, which a store takes, so it never waits on it (DEC-185 S2b).
 struct Server {
     config: Supervised,
     nodes: Option<HeldNodes>,
@@ -382,6 +406,7 @@ struct Server {
     own: i32,
     leads: bool,
     listener: OwnedFd,
+    names: RwLock<()>,
 }
 
 impl Server {
@@ -723,6 +748,23 @@ impl Job<'_> {
         allowed.then_some(()).ok_or(Errno::ACCESS)
     }
 
+    /// Tells whether an entry lands in a held store (DEC-185 S2b): by its name, then by the
+    /// nodes of its folder and of each folder above it. Input: the place. Output: true in a
+    /// store, false with no held guard, or the error of the walk.
+    fn stored(&self, place: &Place) -> Result<bool, Errno> {
+        let (Some(held), Some(nodes)) = (&self.server.config.held, &self.server.nodes) else {
+            return Ok(false);
+        };
+        if held.stored(&place.entry()) {
+            return Ok(true);
+        }
+        if nodes.stores.is_empty() {
+            return Ok(false);
+        }
+        let chain = chain_for(nodes, place.folder.as_fd())?;
+        Ok(nodes.stored(&chain))
+    }
+
     /// Refuses a target the held guard keeps (DEC-185 S2a): by its name first, then by
     /// what the kernel knows of it and of its folders, so no spelling reaches a held entry.
     /// A held entry never gains or changes a name, so the target judged is the one acted
@@ -892,11 +934,11 @@ impl Job<'_> {
         Ok(Answer::Value(0))
     }
 
-    /// Changes a file's mode or owner for the caller once the held guard lets it: a path
-    /// form pins the file its call names ([`Job::pinned`]), a descriptor form takes a copy
-    /// of the caller's descriptor, the pin is judged ([`Job::kept_pin`]) and the change is
-    /// made on that pin. An owner or group of -1 stays as it is. Input: which call.
-    /// Output: zero, or the error.
+    /// Changes a file's mode, owner or times for the caller once the held guard lets it: a
+    /// path form pins the file its call names ([`Job::pinned`]), a descriptor form (a null
+    /// path on a time call) takes a copy of the caller's descriptor, the pin is judged
+    /// ([`Job::kept_pin`]) and the change is made on that pin. An owner or group of -1
+    /// stays as it is. Input: which call. Output: zero, or the error.
     fn change(&self, call: Call) -> Result<Answer, Errno> {
         let a = self.notice.args;
         let here = AT_FDCWD as u32 as u64;
@@ -915,6 +957,38 @@ impl Job<'_> {
                 Change::Owner(a[1], a[2]),
             ),
             Call::Fchownat => (self.owner_pin(a[0], a[1], a[4])?, Change::Owner(a[2], a[3])),
+            Call::Utime => {
+                let times = self.stamps(a[1], Stamps::Seconds)?;
+                (self.pinned(here, text(a[0])?, true)?, Change::Times(times))
+            }
+            Call::Utimes => {
+                let times = self.stamps(a[1], Stamps::Micros)?;
+                (self.pinned(here, text(a[0])?, true)?, Change::Times(times))
+            }
+            Call::Futimesat => {
+                let times = self.stamps(a[2], Stamps::Micros)?;
+                let pin = match a[1] {
+                    0 if !matches!(Base::of(a[0]), Base::Here) => self.taken(a[0])?,
+                    _ => self.pinned(a[0], text(a[1])?, true)?,
+                };
+                (pin, Change::Times(times))
+            }
+            Call::Utimensat => {
+                let times = self.stamps(a[2], Stamps::Nanos)?;
+                if times.iter().all(|(_, nsec)| *nsec == UTIME_OMIT) {
+                    return Ok(Answer::Value(0));
+                }
+                let pin = match a[1] {
+                    0 if !matches!(Base::of(a[0]), Base::Here) => {
+                        if a[3] as u32 != 0 {
+                            return Err(Errno::INVAL);
+                        }
+                        self.taken(a[0])?
+                    }
+                    _ => self.owner_pin(a[0], a[1], a[3])?,
+                };
+                (pin, Change::Times(times))
+            }
             _ => return Err(Errno::NOSYS),
         };
         self.kept_pin(pin.as_fd())?;
@@ -930,12 +1004,32 @@ impl Job<'_> {
                 let group = id(group).map(Gid::from_raw);
                 rustix::fs::chownat(&pin, "", owner, group, AtFlags::EMPTY_PATH)?;
             }
+            Change::Times([access, modified]) => {
+                let at = |(tv_sec, tv_nsec): (i64, i64)| Timespec { tv_sec, tv_nsec };
+                let times = Timestamps {
+                    last_access: at(access),
+                    last_modification: at(modified),
+                };
+                rustix::fs::utimensat(&pin, "", &times, AtFlags::EMPTY_PATH)?;
+            }
         }
         Ok(Answer::Value(0))
     }
 
-    /// Pins the file `fchownat` names: its flags take `AT_SYMLINK_NOFOLLOW` and
-    /// `AT_EMPTY_PATH` and no other, and an empty path with `AT_EMPTY_PATH` names the
+    /// Reads the times a time-setting call names, before its path, as the kernel does.
+    /// Inputs: the times register and their layout. Output: the access and modification
+    /// times, now twice for a null register; `EFAULT` when they cannot be read, `EINVAL`
+    /// for a microsecond count out of range.
+    fn stamps(&self, at: u64, kind: Stamps) -> Result<[(i64, i64); 2], Errno> {
+        if at == 0 {
+            return Ok([(0, UTIME_NOW); 2]);
+        }
+        let bytes = self.caller.bytes(at, kind.size())?;
+        kind.read(&bytes).ok_or(Errno::INVAL)
+    }
+
+    /// Pins the file `fchownat` or `utimensat` names: its flags take `AT_SYMLINK_NOFOLLOW`
+    /// and `AT_EMPTY_PATH` and no other, and an empty path with `AT_EMPTY_PATH` names the
     /// folder descriptor itself, or the working folder. Inputs: the folder, path and flags
     /// registers. Output: the pin.
     fn owner_pin(&self, base: u64, at: u64, flags: u64) -> Result<OwnedFd, Errno> {
@@ -1052,11 +1146,20 @@ impl Job<'_> {
     }
 
     /// Makes a folder, a node or a link for the caller in the resolved folder, with the
-    /// caller's file mode mask. Inputs: the folder register, the path and what to make.
+    /// caller's file mode mask, sharing the names lock; a symlink in a held store is
+    /// refused (DEC-185 S2b). Inputs: the folder register, the path and what to make.
     fn make(&self, base: u64, path: Vec<u8>, make: Make) -> Result<Answer, Errno> {
         let place = self.place(&Base::of(base), &path)?;
         self.judged(&place)?;
         self.kept(&place, false)?;
+        let _names = self
+            .server
+            .names
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        if matches!(make, Make::Link(_)) && self.stored(&place)? {
+            return Err(Errno::ACCESS);
+        }
         let umask = self.caller.umask;
         let mode = |raw: u64| Mode::from_bits_truncate(rules::mode_under(raw as u32, umask));
         let (folder, name) = (&place.folder, place.name());
@@ -1079,16 +1182,34 @@ impl Job<'_> {
         Ok(Answer::Value(0))
     }
 
-    /// Links or renames for the caller between two resolved folders. The new name is
-    /// judged as a new entry, and a rename also by what it moves away. Under the held
-    /// guard a link's source is judged as kept, after the kernel's link is followed when
-    /// asked, and the link is made from that pinned file; both sides of a rename are
-    /// judged as moved. Inputs: each path with its folder register, and which call with
-    /// its flags.
+    /// Links or renames between two resolved folders, the new name judged as a new entry;
+    /// under the held guard both sides of a rename as moved, a link's source as kept (by a
+    /// pin when followed), and no symlink or folder put in a held store, read by name under
+    /// the names lock alone or from the pin, which a symlink's descriptor can land on.
+    /// Inputs: each path with its folder register, and which call with its flags.
     fn pair(&self, old: (u64, Vec<u8>), new: (u64, Vec<u8>), pair: Pair) -> Result<Answer, Errno> {
         let from = self.place(&Base::of(old.0), &old.1)?;
         let to = self.place(&Base::of(new.0), &new.1)?;
         self.judged(&to)?;
+        let (follows, exchange) = match &pair {
+            Pair::Link(flags) => {
+                let flags = AtFlags::from_bits_retain(*flags as u32);
+                (flags.contains(AtFlags::SYMLINK_FOLLOW), false)
+            }
+            Pair::Rename(flags) => {
+                let flags = RenameFlags::from_bits_retain(*flags as u32);
+                (false, flags.contains(RenameFlags::EXCHANGE))
+            }
+        };
+        let (into, back) = (self.stored(&to)?, exchange && self.stored(&from)?);
+        let names = &self.server.names;
+        let alone = (into || back).then(|| names.write().unwrap_or_else(PoisonError::into_inner));
+        let _shared = alone
+            .is_none()
+            .then(|| names.read().unwrap_or_else(PoisonError::into_inner));
+        if (into && !follows && store_refuses(&from)?) || (back && store_refuses(&to)?) {
+            return Err(Errno::ACCESS);
+        }
         let fresh = !exists(&to);
         let (a, b) = ((&from.folder, from.name()), (&to.folder, to.name()));
         match pair {
@@ -1099,6 +1220,9 @@ impl Job<'_> {
                     let pin = OFlags::PATH | OFlags::CLOEXEC;
                     let pin = rustix::fs::openat(a.0, a.1, pin, Mode::empty())?;
                     self.kept_pin(pin.as_fd())?;
+                    if into && !rules::store_takes(rustix::fs::fstat(&pin)?.st_mode) {
+                        return Err(Errno::ACCESS);
+                    }
                     let own = format!("/proc/self/fd/{}", pin.as_raw_fd());
                     rustix::fs::linkat(CWD, own.as_str(), b.0, b.1, AtFlags::SYMLINK_FOLLOW)?;
                 } else {
