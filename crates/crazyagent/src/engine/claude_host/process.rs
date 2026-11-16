@@ -177,9 +177,7 @@ pub(super) fn run(
     };
     assert!(child.id() > 1);
     group.store(child.id(), Ordering::Release);
-    let follower = sandbox
-        .is_unconfined()
-        .then(|| Follower::start(child.id(), Some(token)));
+    let follower = Follower::start(child.id(), Some(token), sandbox.lineage_check());
     let mut process = Process {
         group: Pid::from_child(&child),
         group_absent: false,

@@ -1,4 +1,5 @@
 use crate::protocol::CredentialRef;
+use crate::sandbox::LineageCheck;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1123,11 +1124,19 @@ pub(crate) struct Follower {
 }
 
 impl Follower {
-    /// Starts following a Full access run from its first read on a thread of its own. When no
+    /// Starts following a headless run whose stop checks its lineage, a Full access run's or
+    /// a sandboxed one's as `check` says, from its first read on a thread of its own. When no
     /// thread starts, or no table is read here, the stop reads the lineage itself. Inputs: the
-    /// run's leader, whose id is also its session's, and the launch's token. Output: the
-    /// follower.
-    pub(crate) fn start(leader: u32, token: Option<LineageToken>) -> Self {
+    /// run's leader, whose id is also its session's, the launch's token and the check. Output:
+    /// the follower, or none where the run's boundary ends every process it started.
+    pub(crate) fn start(
+        leader: u32,
+        token: Option<LineageToken>,
+        check: LineageCheck,
+    ) -> Option<Self> {
+        if check == LineageCheck::Unneeded {
+            return None;
+        }
         let lineage = Arc::new(Mutex::new(Following::Reading));
         let (wake, woken) = std::sync::mpsc::channel();
         #[cfg(unix)]
@@ -1140,12 +1149,12 @@ impl Follower {
         }
         #[cfg(not(unix))]
         drop(woken);
-        Self {
+        Some(Self {
             leader,
             token,
             lineage,
             _wake: wake,
-        }
+        })
     }
 
     /// Follows, on a thread of its own, a lineage its owner already read, such as a pane's
@@ -2599,6 +2608,62 @@ pub(crate) mod tests {
         if let Some(pid) = rustix::process::Pid::from_raw(pid) {
             let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
         }
+    }
+
+    /// LINUX-KILL-GROUP: a headless run whose boundary leaves a process in a session of its
+    /// own running, as the plain Linux Landlock helper's does, follows a sandboxed lineage, so
+    /// the process its harness left outside the group is found once the harness is gone and
+    /// is named as a sandboxed run's leftover, never as a Full access one's.
+    #[test]
+    fn a_sandboxed_follower_names_what_its_run_left_outside_its_group_as_sandboxed() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut leader = crate::spawn_gate::spawn(
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(
+                    "/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30",
+                )
+                .current_dir(folder.path())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        let follower = Follower::start(leader.id(), None, LineageCheck::Sandboxed).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let child = loop {
+            if let Some(child) = std::fs::read_to_string(folder.path().join("child.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break child;
+            }
+            assert!(Instant::now() < deadline, "the stand-in never started");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        let lineage = follower.stop();
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+        let settled = lineage.and_then(Lineage::settle);
+        end_pid(child);
+
+        match settled {
+            Err(Unstopped::Left(left)) => {
+                assert_eq!(left.code(), SANDBOX_LEFT);
+                assert!(left.0.known.iter().any(|process| process.pid == child));
+            }
+            other => panic!("the leftover was not found: {other:?}"),
+        }
+    }
+
+    /// LINUX-KILL-GROUP guard: a run whose boundary ends every process it started, as the
+    /// warden, a process namespace or the job does, gets no follower.
+    #[test]
+    fn a_run_whose_boundary_ends_every_process_it_started_has_no_follower() {
+        let follower = Follower::start(std::process::id(), None, LineageCheck::Unneeded);
+
+        assert!(follower.is_none());
     }
 
     /// Leaves a hold as a sandboxed run's stop does, for another module's row: a process in

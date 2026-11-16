@@ -1630,6 +1630,14 @@ impl LinuxSandbox {
         &self.backend
     }
 
+    /// Whether stopping a run in this sandbox ends every process it started, those in a
+    /// session of their own included: bubblewrap's process namespace ends with its outer
+    /// process ([`NEST_ARGS`]), while under the plain Landlock helper such a process leaves
+    /// the group a stop kills and outlives the run (LINUX-KILL-GROUP). Output: the answer.
+    pub fn ends_every_session(&self) -> bool {
+        true
+    }
+
     /// The project policy this sandbox holds.
     pub fn sandbox(&self) -> &ProjectSandbox {
         &self.sandbox
@@ -2633,6 +2641,34 @@ mod tests {
                 if reason == CONFINED_UNAVAILABLE),
             "{refused:?}"
         );
+    }
+
+    /// LINUX-KILL-GROUP: only the plain Landlock backend leaves a process in a session of its
+    /// own running after a stop's group kill, so only its runs have their lineage checked;
+    /// both bubblewrap backends end every process with their process namespace.
+    #[test]
+    fn only_the_plain_landlock_backend_leaves_a_session_of_its_own_running() {
+        let (_temp, _project, sandbox, _worktree) = linked();
+        let ends = |backend: LinuxBackend| {
+            LinuxSandbox {
+                sandbox: sandbox.clone(),
+                backend,
+                supervision: None,
+                routed: None,
+            }
+            .ends_every_session()
+        };
+        let bwrap = PathBuf::from("/usr/bin/bwrap");
+
+        assert!(!ends(LinuxBackend::Landlock { helper: helper() }));
+        assert!(ends(LinuxBackend::Nested {
+            bwrap: bwrap.clone(),
+            helper: helper(),
+        }));
+        assert!(ends(LinuxBackend::Bubblewrap {
+            bwrap,
+            helper: helper(),
+        }));
     }
 
     #[test]
