@@ -238,6 +238,7 @@ fn every_variable_the_engine_sets_on_a_launch_is_owned() {
             "PATH",
             "SHELL",
             "SSL_CERT_FILE",
+            "SDKROOT",
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
             "CLAUDE_SECURESTORAGE_CONFIG_DIR",
@@ -410,4 +411,20 @@ fn the_package_index_module_proxy_and_openssl_families_are_owned_at_both_sites()
         home_refusal("  env_prefixes:\n    - \"PI_\"\n  env:\n    PI_HOME: \"{home}\"\n"),
         None
     );
+}
+
+/// Env-name rule, the pinned SDK (fix8 re-check at 4f66cf20e): `toolchains::agent_env` sets
+/// `SDKROOT` on every launch and a harness variable of the same name replaces it, so an
+/// account entry cannot set it and no home prefix can cover it, as for every name the engine
+/// sets.
+#[test]
+fn the_macos_sdk_the_engine_pins_is_owned_at_both_sites() {
+    let place = "rowharness: accounts.openai-chat.env";
+    let sentence = "SDKROOT is not a variable an account entry may set.";
+
+    let refused = account_refusal("      SDKROOT: \"/tmp/sdk\"\n");
+
+    assert_eq!(refused, Some((VALUE, format!("{place}: {sentence}"))));
+    assert!(owned("sdkroot"));
+    assert!(claims("SDK_"));
 }
