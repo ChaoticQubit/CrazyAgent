@@ -1222,13 +1222,10 @@ fn record_tmp(folder: &Path, tmp: &Path) {
     }
 }
 
-/// Removes the temp folder a project's last confined start recorded, then the record. Only
-/// one short temp folder this user owns privately is touched
-/// ([`crate::sandbox::toolchains::own_short_tmp`]); any other recorded path, the server data
-/// folder or a link included, is left as it is. The folder is moved aside with one rename,
-/// however much it holds, and removed on a thread of its own, so no stop, shutdown or start
-/// waits on it (RV-DS241-189). A folder that cannot be moved is logged and never stops a
-/// start. Input: the IDE folder.
+/// Moves the temp folder a project's last confined start recorded aside with one rename and
+/// removes it on a thread of its own, then the record, so no stop or start waits on it
+/// (RV-DS241-189). Only an own short temp folder is touched, never another recorded path; one
+/// that cannot be moved is logged. Input: the IDE folder.
 fn remove_recorded_tmp(folder: &Path) {
     let record = folder.join(TMP_RECORD);
     if let Some(tmp) = recorded_tmp(&record)
