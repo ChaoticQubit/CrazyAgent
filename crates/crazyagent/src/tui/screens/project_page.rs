@@ -386,7 +386,8 @@ impl ProjectPage {
 
     /// Starts publishing the project the owner just made on GitHub with the plan from New
     /// project (DEC-182). The engine answers once its checks pass and drafts the .gitignore
-    /// lines after, and the reply says the publish started or why not.
+    /// lines after, and the reply says the publish started or why not; a refused Start reads
+    /// the publish again, so the Overview's question comes back.
     /// Takes the plan and the context. Returns nothing; the reply arrives later.
     pub(in crate::tui) fn start_publish(&mut self, plan: GitHubPublishPlan, ctx: &mut Ctx) {
         assert!(self.publish_sent.is_none());
@@ -545,9 +546,10 @@ impl ProjectPage {
     }
 
     /// Handles a key while the Overview's publish question or its form is open: one answer
-    /// goes to the engine at a time, Esc closes the pane meanwhile, and Publish starts the
-    /// publish with the form's plan. Takes the key and the context. Returns the GitHub
-    /// sign-in to open, or handled, so no key reaches the page meanwhile.
+    /// goes to the engine at a time, Esc closes the pane meanwhile, Publish starts the
+    /// publish with the form's plan, and the sign-in closes the pane, so G reads the sign-in
+    /// again after it. Takes the key and the context. Returns the GitHub sign-in to open, or
+    /// handled, so no key reaches the page meanwhile.
     fn ask_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let Some(pane) = self.ask_pane.as_mut() else {
             return Flow::Handled;
@@ -575,7 +577,11 @@ impl ProjectPage {
                 super::intake::ask(ctx, sent);
             }
             AskKey::Read(read) => super::intake::ask(ctx, read),
-            AskKey::SignIn => return Flow::Open(Place::CloneRepo),
+            AskKey::SignIn => {
+                self.ask_pane = None;
+                self.covered = true;
+                return Flow::Open(Place::CloneRepo);
+            }
             AskKey::Start(plan) => {
                 self.ask_pane = None;
                 self.screen.github_notice = false;
@@ -1396,6 +1402,9 @@ impl ProjectPage {
                 result => Self::publish_start_said(&self.screen.name, result),
             };
             ctx.say(said);
+            if !matches!(event.result, Ok(IntakeView::Publish(_))) {
+                self.ask_publish(ctx);
+            }
             return true;
         }
         if self
@@ -2147,15 +2156,6 @@ impl Screen for ProjectPage {
                 reply => return self.plugins_reply(reply, ctx),
             }
         }
-        if *key == Key::Char('G')
-            && self.screen.tab == Tab::Overview
-            && asks_github(&self.screen)
-            && self.publish_sent.is_none()
-            && !self.typing()
-        {
-            self.ask_pane = Some(AskPane::default());
-            return Flow::Handled;
-        }
         let reply = match key {
             Key::Paste(text) => self.screen.paste(text),
             other => match key_event(other) {
@@ -2163,6 +2163,15 @@ impl Screen for ProjectPage {
                 None => ProjectReply::Ignored,
             },
         };
+        if reply == ProjectReply::Ignored
+            && *key == Key::Char('G')
+            && self.screen.tab == Tab::Overview
+            && asks_github(&self.screen)
+            && self.publish_sent.is_none()
+        {
+            self.ask_pane = Some(AskPane::default());
+            return Flow::Handled;
+        }
         let flow = self.reply(reply, ctx);
         let flow = self.entered(before, flow);
         self.covered = matches!(&flow, Flow::Open(place) if Some(place) != self.place().as_ref());
