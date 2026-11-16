@@ -2542,9 +2542,11 @@ fn a_project_id_with_a_removed_projects_knowledge_left_is_refused_so_none_attach
     );
     tx.commit().unwrap();
     let made: i64 = db
-        .query_row("SELECT COUNT(*) FROM projects WHERE id='mem-left'", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE id='mem-left'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(made, 0, "no project takes the removed project's id");
     let globals: i64 = db

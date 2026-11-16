@@ -13,13 +13,13 @@ mod message_timeline;
 /// One test per refusal and outcome of removing a project, Remove from dashboard or
 /// Delete everything, through a real engine and its owner connection (DEC-118).
 mod delete;
-/// One test per state and refusal of a New Project run as the engine's job, through a real
-/// engine and its owner connection (DEC-177 addendum 2).
-mod setup_job;
 /// One test per rule of removed projects' ids and notes (DEC-178 addendum 1): a project
 /// removed from the dashboard returns only from its own folder, and no other folder and no
 /// deleted project ever gets its id, through a real engine and its owner connection.
 mod removed_projects;
+/// One test per state and refusal of a New Project run as the engine's job, through a real
+/// engine and its owner connection (DEC-177 addendum 2).
+mod setup_job;
 
 /// How long these engine tests let the engine and its owner client wait for
 /// one answer. Every test engine in the lib test binary shares one

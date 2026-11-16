@@ -135,7 +135,10 @@ fn ids_with_rows_that_outlive_their_project_are_backfilled_as_held() {
             "{gone} has no recorded folder, so it never comes back"
         );
     }
-    assert!(!held(&db, &id("live-app")).unwrap(), "a live project's rows hold nothing");
+    assert!(
+        !held(&db, &id("live-app")).unwrap(),
+        "a live project's rows hold nothing"
+    );
     assert_eq!(
         free_id(&db, Path::new("/h/old-app")).unwrap(),
         Ok(id("old-app-2"))
@@ -165,15 +168,25 @@ fn the_backfill_runs_once_and_every_later_open_skips_it() {
     )
     .unwrap();
     assert!(matches!(hold_left(&db).unwrap(), Some(n) if n >= 1));
-    assert!(held(&db, &id("old-app")).unwrap(), "the first open holds old-app");
+    assert!(
+        held(&db, &id("old-app")).unwrap(),
+        "the first open holds old-app"
+    );
     db.execute_batch(
         "INSERT INTO memory_library(id,project,origin,text) VALUES
             ('m2','late-app','{\"kind\":\"written\"}','Written after the first open.');",
     )
     .unwrap();
     let recorded = count(&db, "SELECT count(*) FROM projects_removed");
-    assert_eq!(hold_left(&db).unwrap(), None, "a later open skips the backfill");
-    assert_eq!(count(&db, "SELECT count(*) FROM projects_removed"), recorded);
+    assert_eq!(
+        hold_left(&db).unwrap(),
+        None,
+        "a later open skips the backfill"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM projects_removed"),
+        recorded
+    );
     assert!(!held(&db, &id("late-app")).unwrap());
     assert_eq!(hold_left(&db).unwrap(), None);
 }
@@ -204,8 +217,14 @@ fn a_leftover_written_after_the_backfill_still_blocks_its_id() {
         free_id(&db, Path::new("/p/draft-app")).unwrap(),
         Ok(id("draft-app"))
     );
-    assert!(!held(&db, &id("late-app")).unwrap(), "the probe holds nothing itself");
-    assert_eq!(count(&db, "SELECT count(*) FROM projects_removed"), recorded);
+    assert!(
+        !held(&db, &id("late-app")).unwrap(),
+        "the probe holds nothing itself"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM projects_removed"),
+        recorded
+    );
 }
 
 /// rv-code4 r2 F2: the probe reads each table by the exact id first, through its index; it
@@ -250,7 +269,10 @@ fn the_case_pass_runs_only_where_a_row_under_another_case_can_exist() {
         free_id(&db, Path::new("/p/loud-app")).unwrap(),
         Ok(id("loud-app-2"))
     );
-    assert!(!left(&db, &id("shout-app")).unwrap(), "a live id's rows are its own");
+    assert!(
+        !left(&db, &id("shout-app")).unwrap(),
+        "a live id's rows are its own"
+    );
 }
 
 /// Leader 01:25 and 01:27: CreateProject goes through the probe too, so no create path gives
@@ -277,7 +299,10 @@ fn create_project_refuses_an_id_with_leftover_rows() {
     tx.commit().unwrap();
     assert_eq!(count(&db, "SELECT count(*) FROM projects"), 0);
     assert_eq!(
-        count(&db, "SELECT count(*) FROM memory_library WHERE project='left-app'"),
+        count(
+            &db,
+            "SELECT count(*) FROM memory_library WHERE project='left-app'"
+        ),
         1
     );
 }
@@ -312,7 +337,11 @@ fn the_backfill_stops_at_the_record_bound() {
         REMOVED_MAX,
         "the backfill fills the record up to its bound and no further"
     );
-    assert_eq!(hold_left(&db).unwrap(), None, "a bound backfill still runs once");
+    assert_eq!(
+        hold_left(&db).unwrap(),
+        None,
+        "a bound backfill still runs once"
+    );
 }
 
 #[test]
@@ -394,7 +423,10 @@ fn a_new_project_at_a_recorded_folder_ends_that_return() {
 
     record(&db, &id("our-app"), Some("/h/our-app"), true).unwrap();
     claim(&db, &id("our-app"), "/h/our-app").unwrap();
-    assert!(!held(&db, &id("our-app")).unwrap(), "a project back is held no more");
+    assert!(
+        !held(&db, &id("our-app")).unwrap(),
+        "a project back is held no more"
+    );
 
     record(&db, &id("first-app"), Some("/h/same"), true).unwrap();
     record(&db, &id("second-app"), Some("/h/same"), true).unwrap();

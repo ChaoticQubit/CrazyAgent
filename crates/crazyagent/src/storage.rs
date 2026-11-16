@@ -2629,7 +2629,10 @@ fn setup_plan(
     if let Some(code) = crate::demo::pool_unavailable(&tx, config, pool)? {
         return Ok(Err(code.into()));
     }
-    Ok(crate::project_setup::plan_new(&tx, config, path, &action, true)?.map_err(crate::demo::refusal))
+    Ok(
+        crate::project_setup::plan_new(&tx, config, path, &action, true)?
+            .map_err(crate::demo::refusal),
+    )
 }
 
 /// Applies one owner mutation, optionally with a disk effect already done.

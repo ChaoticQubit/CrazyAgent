@@ -1290,7 +1290,9 @@ fn settled(
         OwnerResult::OnboardingStarted { .. }
         | OwnerResult::DispatchPrepared { .. }
         | OwnerResult::RcliProfileRegistered { .. } => Err(failure("unexpected_reply")),
-        OwnerResult::Rejected { code } => Ok((ActionOutcome::Rejected, Some(rejection_code(&code)))),
+        OwnerResult::Rejected { code } => {
+            Ok((ActionOutcome::Rejected, Some(rejection_code(&code))))
+        }
         OwnerResult::VerificationUnavailable { .. } => Ok((ActionOutcome::Unavailable, None)),
     }
 }

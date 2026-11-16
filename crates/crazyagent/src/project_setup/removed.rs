@@ -103,7 +103,9 @@ pub(crate) fn hold_left(connection: &Connection) -> Result<Option<usize>, Engine
     let mut held = 0;
     for table in keyed_tables(&tx)? {
         let recorded: i64 = tx
-            .query_row("SELECT count(*) FROM projects_removed", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM projects_removed", [], |row| {
+                row.get(0)
+            })
             .map_err(error)?;
         let room = REMOVED_MAX - recorded;
         if room <= 0 {
@@ -141,7 +143,9 @@ pub(crate) fn hold_left(connection: &Connection) -> Result<Option<usize>, Engine
 /// `projects_removed_full` once `REMOVED_MAX` removals are recorded.
 pub(crate) fn room(connection: &Connection) -> Result<Result<(), &'static str>, EngineError> {
     let recorded: i64 = connection
-        .query_row("SELECT count(*) FROM projects_removed", [], |row| row.get(0))
+        .query_row("SELECT count(*) FROM projects_removed", [], |row| {
+            row.get(0)
+        })
         .map_err(error)?;
     assert!(recorded >= 0);
     Ok(if recorded >= REMOVED_MAX {

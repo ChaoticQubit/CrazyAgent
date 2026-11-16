@@ -84,14 +84,21 @@ async fn a_project_removed_from_the_dashboard_comes_back_with_its_notes_when_its
     note(&mut owner, &project, 2).await;
     let removed = owner.remove_project(project.clone(), 3).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
-    assert_eq!(notes(&engine, "my-app"), 1, "Remove from dashboard keeps the note");
+    assert_eq!(
+        notes(&engine, "my-app"),
+        1,
+        "Remove from dashboard keeps the note"
+    );
 
     assert_eq!(
         onboard(&mut owner, &path, 4).await,
         started("my-app"),
         "the same folder brings the same project back"
     );
-    assert!(has_note(&mut owner, "my-app").await, "its note comes back with it");
+    assert!(
+        has_note(&mut owner, "my-app").await,
+        "its note comes back with it"
+    );
     assert_eq!(
         engine.rows("SELECT count(*) FROM projects_removed WHERE project='my-app'"),
         0,
@@ -118,9 +125,16 @@ async fn another_folder_with_a_removed_projects_name_gets_a_new_id_and_none_of_i
         started("my-app-2"),
         "another folder with the same name is a new project"
     );
-    assert!(!has_note(&mut owner, "my-app-2").await, "the new project gets none of the notes");
+    assert!(
+        !has_note(&mut owner, "my-app-2").await,
+        "the new project gets none of the notes"
+    );
     assert_eq!(notes(&engine, "my-app-2"), 0);
-    assert_eq!(notes(&engine, "my-app"), 1, "the note stays with its own project");
+    assert_eq!(
+        notes(&engine, "my-app"),
+        1,
+        "the note stays with its own project"
+    );
     assert_eq!(
         onboard(&mut owner, &path, 5).await,
         started("my-app"),
@@ -156,7 +170,10 @@ async fn delete_everything_forgets_the_notes_and_the_id_never_comes_back() {
         .unwrap()
         .unwrap()
         .name;
-    let deleted = owner.delete_project(project.clone(), name, 3).await.unwrap();
+    let deleted = owner
+        .delete_project(project.clone(), name, 3)
+        .await
+        .unwrap();
     assert_eq!(result(deleted), OwnerResult::Applied);
     assert_eq!(
         notes(&engine, "my-app"),
@@ -226,14 +243,24 @@ async fn new_project_refuses_an_id_a_removal_holds() {
     let mut owner = engine.owner().await;
     let project = ProjectId::new("setup-pooled").unwrap();
     let created = owner
-        .setup_project(project.clone(), spec("Meal planner"), pooled_setup(vec![]), 1)
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
         .await
         .unwrap();
     assert_eq!(result(created), OwnerResult::Applied);
     let removed = owner.remove_project(project.clone(), 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     let again = owner
-        .setup_project(project.clone(), spec("Meal planner"), pooled_setup(vec![]), 3)
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            3,
+        )
         .await
         .unwrap();
     assert_eq!(result(again), rejected("project_id_removed"));
@@ -264,7 +291,11 @@ async fn new_project_refuses_an_id_a_removal_holds() {
         engine.rows("SELECT count(*) FROM projects_removed WHERE project='crazyagent-demo'"),
         1
     );
-    assert_eq!(notes(&engine, "crazyagent-demo"), 1, "a refused New Project clears nothing");
+    assert_eq!(
+        notes(&engine, "crazyagent-demo"),
+        1,
+        "a refused New Project clears nothing"
+    );
     drop(owner);
     engine.stop().await;
 }
@@ -294,7 +325,11 @@ async fn new_project_refuses_an_id_with_leftover_rows() {
         engine.rows("SELECT count(*) FROM projects WHERE id='left-over'"),
         0
     );
-    assert_eq!(notes(&engine, "left-over"), 1, "a refused New Project clears nothing");
+    assert_eq!(
+        notes(&engine, "left-over"),
+        1,
+        "a refused New Project clears nothing"
+    );
     drop(owner);
     engine.stop().await;
 }
@@ -308,7 +343,12 @@ async fn adding_a_live_new_projects_own_folder_is_refused() {
     let mut owner = engine.owner().await;
     let project = ProjectId::new("setup-pooled").unwrap();
     let created = owner
-        .setup_project(project.clone(), spec("Meal planner"), pooled_setup(vec![]), 1)
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
         .await
         .unwrap();
     assert_eq!(result(created), OwnerResult::Applied);
@@ -355,8 +395,15 @@ async fn a_full_record_refuses_a_removal_before_anything_is_removed() {
     );
     let removed = owner.remove_project(project.clone(), 3).await.unwrap();
     assert_eq!(result(removed), rejected("projects_removed_full"));
-    assert_eq!(engine.rows("SELECT count(*) FROM projects WHERE id='my-app'"), 1);
-    assert_eq!(notes(&engine, "my-app"), 1, "a refused removal keeps everything");
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects WHERE id='my-app'"),
+        1
+    );
+    assert_eq!(
+        notes(&engine, "my-app"),
+        1,
+        "a refused removal keeps everything"
+    );
     #[cfg(target_os = "macos")]
     {
         let name = owner
@@ -365,10 +412,19 @@ async fn a_full_record_refuses_a_removal_before_anything_is_removed() {
             .unwrap()
             .unwrap()
             .name;
-        let deleted = owner.delete_project(project.clone(), name, 4).await.unwrap();
+        let deleted = owner
+            .delete_project(project.clone(), name, 4)
+            .await
+            .unwrap();
         assert_eq!(result(deleted), rejected("projects_removed_full"));
-        assert!(path.is_dir(), "a refused Delete everything moves nothing to the Trash");
-        assert_eq!(engine.rows("SELECT count(*) FROM projects WHERE id='my-app'"), 1);
+        assert!(
+            path.is_dir(),
+            "a refused Delete everything moves nothing to the Trash"
+        );
+        assert_eq!(
+            engine.rows("SELECT count(*) FROM projects WHERE id='my-app'"),
+            1
+        );
     }
     drop(owner);
     engine.stop().await;

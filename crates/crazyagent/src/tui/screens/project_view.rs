@@ -752,7 +752,10 @@ fn delete_details(
         let more = losses.len() - shown;
         body.push(indented(&format!("and {more} more"), look.warning));
     }
-    body.push(indented(&format!("Type the project name: {typed}"), look.fg));
+    body.push(indented(
+        &format!("Type the project name: {typed}"),
+        look.fg,
+    ));
     assert!(body.len() <= rows.max(2));
     body
 }
@@ -794,7 +797,10 @@ fn wrapped_details(
         let more = losses.len() - REMOVE_LOSSES_SHOWN;
         body.push(indented(&format!("and {more} more"), look.warning));
     }
-    body.push(indented(&format!("Type the project name: {typed}"), look.fg));
+    body.push(indented(
+        &format!("Type the project name: {typed}"),
+        look.fg,
+    ));
     body
 }
 

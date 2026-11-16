@@ -949,9 +949,8 @@ async fn a_demo_made_again_inherits_nothing_of_the_old_one() {
             'codex','late-session','native-default',7001,0,0,0,0);",
     )
     .unwrap();
-    let removed_before = rows(
-        "SELECT coalesce(sum(input),0) FROM usage_tokens WHERE project='<removed>'",
-    );
+    let removed_before =
+        rows("SELECT coalesce(sum(input),0) FROM usage_tokens WHERE project='<removed>'");
     let response = owner.create_demo(pool, next()).await.unwrap();
     assert_eq!(
         result(response),
@@ -1090,7 +1089,9 @@ async fn adding_the_demos_own_folder_is_refused() {
     let folders: Vec<PathBuf> = fs::read_dir(&home)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.is_dir() && !path.file_name().unwrap().to_string_lossy().starts_with('.'))
+        .filter(|path| {
+            path.is_dir() && !path.file_name().unwrap().to_string_lossy().starts_with('.')
+        })
         .collect();
     assert_eq!(folders.len(), 1, "the demo's one folder: {folders:?}");
     let response = owner

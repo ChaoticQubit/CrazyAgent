@@ -2268,9 +2268,7 @@ fn the_remove_ask_fits_80_by_24_with_the_owners_words_and_a_long_preview() {
     let read = screen.next_query(30).unwrap();
     let mut preview = removal(true);
     preview.folders = (1..=5)
-        .map(|n| {
-            format!("/Users/owner/CrazyAgent/gone-app-worktrees/agent-{n}-a-long-branch-name")
-        })
+        .map(|n| format!("/Users/owner/CrazyAgent/gone-app-worktrees/agent-{n}-a-long-branch-name"))
         .collect();
     preview.running = (1..=4).map(|n| format!("Builder {n}")).collect();
     preview.open_change_sets = 3;
@@ -2299,7 +2297,10 @@ fn the_remove_ask_fits_80_by_24_with_the_owners_words_and_a_long_preview() {
     let drawn = project_screen(&mut screen, 80, 24, &look);
     assert_eq!(drawn.rows.len(), 20, "the ask never runs past the screen");
     let shown = text(&drawn.rows);
-    for line in wrapped(REMOVE_WORDS).iter().chain(wrapped(DELETE_WORDS).iter()) {
+    for line in wrapped(REMOVE_WORDS)
+        .iter()
+        .chain(wrapped(DELETE_WORDS).iter())
+    {
         assert!(shown.contains(line.as_str()), "{line:?} missing: {shown}");
     }
     for words in [
