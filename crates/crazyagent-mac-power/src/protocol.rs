@@ -133,24 +133,24 @@ pub fn read_request(reader: &mut impl Read) -> Result<Request, Refusal> {
     checked(wire)
 }
 
-/// Checks a parsed line's version and lease bounds. Input: the line. Output: the request.
+/// Checks a parsed line's version, its lease bounds and that only a hold names its lease and
+/// its display ask, which it must. Input: the line. Output: the request.
 fn checked(wire: Wire) -> Result<Request, Refusal> {
     if wire.version != VERSION {
         return Err(Refusal::Version);
     }
-    let request = match (wire.call, wire.lease_s) {
-        (Call::Hold, Some(lease_s)) if (LEASE_S_MIN..=LEASE_S_MAX).contains(&lease_s) => {
-            let lid_display = wire.lid_display.unwrap_or(LidDisplay::LeaveOn);
-            Request::Hold {
-                lease_s,
-                lid_display,
-            }
-        }
-        (Call::Hold, _) => return Err(Refusal::LeaseOutOfRange),
-        (_, Some(_)) => return Err(Refusal::Malformed),
-        (Call::Release, None) => Request::Release,
-        (Call::Read, None) => Request::Read,
-        (Call::Forget, None) => Request::Forget,
+    let in_range = |lease_s: u16| (LEASE_S_MIN..=LEASE_S_MAX).contains(&lease_s);
+    let request = match (wire.call, wire.lease_s, wire.lid_display) {
+        (Call::Hold, Some(lease_s), Some(lid_display)) if in_range(lease_s) => Request::Hold {
+            lease_s,
+            lid_display,
+        },
+        (Call::Hold, Some(lease_s), None) if in_range(lease_s) => return Err(Refusal::Malformed),
+        (Call::Hold, _, _) => return Err(Refusal::LeaseOutOfRange),
+        (_, Some(_), _) | (_, _, Some(_)) => return Err(Refusal::Malformed),
+        (Call::Release, None, None) => Request::Release,
+        (Call::Read, None, None) => Request::Read,
+        (Call::Forget, None, None) => Request::Forget,
     };
     if let Request::Hold { lease_s, .. } = request {
         assert!(lease_s >= LEASE_S_MIN);
@@ -185,17 +185,21 @@ pub fn decode_reply(line: &[u8]) -> Option<Reply> {
 /// The bytes a client sends for a request, newline included. Input: the request. Output: the
 /// line.
 pub fn encode_request(request: &Request) -> Vec<u8> {
-    let (call, lease_s) = match *request {
-        Request::Hold { lease_s, .. } => (Call::Hold, Some(lease_s)),
-        Request::Release => (Call::Release, None),
-        Request::Read => (Call::Read, None),
-        Request::Forget => (Call::Forget, None),
+    let (call, lease_s, lid_display) = match *request {
+        Request::Hold {
+            lease_s,
+            lid_display,
+        } => (Call::Hold, Some(lease_s), Some(lid_display)),
+        Request::Release => (Call::Release, None, None),
+        Request::Read => (Call::Read, None, None),
+        Request::Forget => (Call::Forget, None, None),
     };
+    assert_eq!(lease_s.is_some(), lid_display.is_some());
     let wire = Wire {
         version: VERSION,
         call,
         lease_s,
-        lid_display: None,
+        lid_display,
     };
     let mut line = serde_json::to_vec(&wire).expect("a request always serializes");
     line.push(b'\n');

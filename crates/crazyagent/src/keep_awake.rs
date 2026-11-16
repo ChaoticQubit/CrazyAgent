@@ -673,6 +673,7 @@ impl Keeper {
         }
         self.lost = false;
         self.lid_ask.wanted = false;
+        self.lid_ask.sleep_display = false;
     }
 
     /// Drops every hold as the engine stops (QUESTION 36d): the platform hold at once, and
@@ -825,12 +826,14 @@ impl Keeper {
         self.evaluated_ms = Some(now_ms);
         self.work = Some(view.work);
         self.hand_lid_order(lid_order);
+        let wanted = matches!(view.state.want, Want::IdleAndLid { .. });
         self.lid_ask = power::LidAsk {
             rule_on: view.settings.lid != LidRule::Off,
-            wanted: matches!(view.state.want, Want::IdleAndLid { .. }),
-            sleep_display: false,
+            wanted,
+            sleep_display: wanted && view.settings.lid_display == LidDisplay::Sleep,
         };
         assert!(self.lid_ask.rule_on || !self.lid_ask.wanted);
+        assert!(self.lid_ask.wanted || !self.lid_ask.sleep_display);
         assert!(view.work <= work::WORK_MAX);
         Ok(Some(view))
     }

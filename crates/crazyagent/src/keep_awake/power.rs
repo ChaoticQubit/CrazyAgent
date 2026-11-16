@@ -239,6 +239,7 @@ impl Sensing {
     /// without a lid line or before any ask. Inputs: the last ask and the longest wait.
     pub(super) fn finish(&mut self, last: LidAsk, wait: Duration) {
         assert!(!last.wanted);
+        assert!(!last.sleep_display);
         assert!(!wait.is_zero());
         let Some(asked_ms) = self.asked_ms.filter(|_| self.lid && !self.stopped) else {
             return;
@@ -283,6 +284,7 @@ impl Sensing {
     pub(super) fn step(&mut self, now_ms: i64, lid_ask: LidAsk) -> Option<PowerReading> {
         assert!(now_ms > 0);
         assert!(lid_ask.rule_on || !lid_ask.wanted);
+        assert!(lid_ask.wanted || !lid_ask.sleep_display);
         let answer = match self.answers.try_recv() {
             Ok(reading) => {
                 self.waiting = false;

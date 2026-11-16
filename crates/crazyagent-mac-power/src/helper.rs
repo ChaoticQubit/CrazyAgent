@@ -48,7 +48,9 @@ pub struct Readings {
     pub lid: Option<Lid>,
 }
 
-/// The running helper's state.
+/// The running helper's state. `display_slept` says `displaysleepnow` ran since the lid
+/// last read open or at a desk, or since no lease lived. `owed_at_start` says the start put
+/// back a `SleepDisabled` entry of ours and no hold was accepted since (QUESTION 38e).
 #[derive(Debug)]
 pub struct Helper {
     config: Config,
@@ -58,6 +60,8 @@ pub struct Helper {
     pin: Pin,
     floor: Option<Floor>,
     sleep_owed: bool,
+    display_slept: bool,
+    owed_at_start: bool,
 }
 
 /// Opens the journal in `config`'s folder, logging why when it cannot be used.
@@ -69,7 +73,10 @@ fn open_journal(config: &Config) -> Option<Journal> {
 
 impl Helper {
     /// Starts the helper: opens the journal, puts back every entry left in it, and reads or
-    /// writes the pin. Input: the configuration. Output: the helper.
+    /// writes the pin. A `SleepDisabled` of ours put back marks sleep as owed, never slept
+    /// here, since the request that started the helper is not served yet; one not put back
+    /// owes it through `sleep_owed` (QUESTION 38e). Input: the configuration. Output: the
+    /// helper.
     pub fn start(config: Config) -> Self {
         let pmset = Pmset::new(&config.pmset);
         let journal = open_journal(&config);
@@ -81,8 +88,10 @@ impl Helper {
             pin: Pin::None,
             floor: None,
             sleep_owed: false,
+            display_slept: false,
+            owed_at_start: false,
         };
-        helper.put_back(None, false);
+        helper.owed_at_start = helper.put_back(None, true);
         let config = &helper.config;
         helper.pin = pin::at_start(&config.folder, config.owner_uid, &config.console)
             .inspect_err(|error| ffi::log(&format!("pin unusable: {error:?}")))
@@ -109,9 +118,12 @@ impl Helper {
             Request::Read => Reply::State(self.view(holder, now_ms, lid)),
             Request::Forget => self.forget(holder, lid),
         };
+        self.sleep_display(lid);
         assert!(self.leases.len() <= HOLDERS_MAX);
         assert!(self.floor.is_none() || self.leases.is_empty());
         assert!(!self.sleep_owed || self.pending());
+        assert!(!self.owed_at_start || self.leases.is_empty());
+        assert!(!self.display_slept || !self.leases.is_empty());
         reply
     }
 
@@ -121,7 +133,9 @@ impl Helper {
         if ended > 0 && self.leases.is_empty() {
             self.put_back(lid, true);
         }
+        self.sleep_display(lid);
         assert!(!self.has_expired(now_ms));
+        assert!(!self.display_slept || !self.leases.is_empty());
     }
 
     /// Whether a lease ran out at `now_ms`, so the caller reads the lid before `expire`.
@@ -130,12 +144,24 @@ impl Helper {
         next.is_some_and(|until_ms| now_ms >= until_ms)
     }
 
-    /// Applies one reading: lease expiry, the floor, a value still to put back tried again,
-    /// and `SleepDisabled` set again if another tool reset it while a lease lives.
+    /// Applies one reading: lease expiry, the sleep a start owes, the floor, a value still to
+    /// put back tried again, `SleepDisabled` set again if another tool reset it while a lease
+    /// lives, and the display's sleep once per close.
     pub fn sense(&mut self, now_ms: u64, readings: Readings) {
         self.expire(now_ms, readings.lid);
-        if !self.wants_readings() {
-            return;
+        if self.wants_readings() {
+            self.apply(readings);
+        }
+        self.sleep_display(readings.lid);
+        assert!(!self.owed_at_start);
+        assert!(!self.display_slept || !self.leases.is_empty());
+    }
+
+    /// The part of `sense` that runs while readings are wanted. Input: the reading.
+    fn apply(&mut self, readings: Readings) {
+        if std::mem::take(&mut self.owed_at_start) {
+            assert!(self.leases.is_empty(), "an accepted hold clears the owed sleep");
+            self.sleep_owed_at_start(readings.lid);
         }
         if let Some(floor) = floor::judge(readings.battery, readings.pressure) {
             self.end_for_floor(floor, readings.lid);
@@ -156,19 +182,57 @@ impl Helper {
         let was_holding = !self.leases.is_empty();
         self.leases.clear();
         self.put_back(lid, was_holding);
+        self.sleep_display(lid);
         assert!(self.leases.is_empty());
+        assert!(!self.display_slept);
     }
 
-    /// Whether readings are due: a lease lives, the floor holds, or a value waits to be put
-    /// back.
+    /// Whether readings are due: a lease lives, the floor holds, a value waits to be put
+    /// back, or the start owes sleep.
     pub fn wants_readings(&self) -> bool {
-        !self.leases.is_empty() || self.floor.is_some() || self.pending()
+        !self.leases.is_empty() || self.floor.is_some() || self.pending() || self.owed_at_start
     }
 
-    /// Whether no lease lives and no value waits to be put back, so the helper may exit after
-    /// its idle time.
+    /// Whether no lease lives, no value waits to be put back and the start owes no sleep, so
+    /// the helper may exit after its idle time.
     pub fn idle(&self) -> bool {
-        self.leases.is_empty() && !self.pending()
+        self.leases.is_empty() && !self.pending() && !self.owed_at_start
+    }
+
+    /// Sleeps the Mac for the start, at the first reading with no lease: when the lid reads
+    /// closed with no external display. Input: the lid, none when unread.
+    fn sleep_owed_at_start(&self, lid: Option<Lid>) {
+        assert!(self.leases.is_empty());
+        if lid.is_some_and(Lid::sleeps_now)
+            && let Err(error) = self.pmset.sleep_now()
+        {
+            ffi::log(&format!("sleepnow owed at start failed: {error:?}"));
+        }
+    }
+
+    /// Runs `pmset displaysleepnow` once per close while a live lease asks for it and the
+    /// lid reads closed with no external display (QUESTION 38c, 38d). The count starts again
+    /// when the lid reads open or at a desk, and when no lease lives; an unread lid changes
+    /// nothing. A failed run is logged and waits for the next close. Input: the lid.
+    fn sleep_display(&mut self, lid: Option<Lid>) {
+        if self.leases.is_empty() {
+            self.display_slept = false;
+            return;
+        }
+        let Some(lid) = lid else {
+            return;
+        };
+        if !lid.sleeps_now() {
+            self.display_slept = false;
+            return;
+        }
+        if self.display_slept || !self.leases.asks_display_sleep() {
+            return;
+        }
+        self.display_slept = true;
+        if let Err(error) = self.pmset.display_sleep_now() {
+            ffi::log(&format!("displaysleepnow failed: {error:?}"));
+        }
     }
 
     /// Whether the journal holds an entry not yet put back.
@@ -177,9 +241,10 @@ impl Helper {
         journal.is_some_and(|journal| !journal.entries().is_empty())
     }
 
-    /// Starts or renews `holder`'s lease once the pin, the floor and the journal allow it and
-    /// `SleepDisabled` is 1. When that fails, a renewal keeps the lease it had, to run out and
-    /// put sleep back on its own; a new hold changes nothing. Output: `Held`, or the refusal.
+    /// Starts or renews `holder`'s lease, with its display ask, once the pin, the floor and
+    /// the journal allow it and `SleepDisabled` is 1; an accepted hold owes no sleep. When
+    /// that fails, a renewal keeps the lease it had, to run out and put sleep back on its
+    /// own; a new hold changes nothing. Output: `Held`, or the refusal.
     fn hold(
         &mut self,
         holder: Holder,
@@ -215,6 +280,7 @@ impl Helper {
         let held = self.leases.hold(holder, now_ms, lease_s, lid_display);
         assert!(held.is_ok(), "room for a new holder was checked before pmset ran");
         self.sleep_owed = false;
+        self.owed_at_start = false;
         Reply::Held {
             lease_left_s: lease_s,
         }
@@ -348,12 +414,13 @@ impl Helper {
 
     /// Puts every journaled value back, removing each entry only after `pmset` succeeded, and
     /// sleeps the Mac now when a hold ended (now, or earlier with its put-back failed, so sleep
-    /// is owed), sleep was put back and the lid sleeps alone.
-    fn put_back(&mut self, lid: Option<Lid>, was_holding: bool) {
+    /// is owed), sleep was put back and the lid sleeps alone. Output: whether a `SleepDisabled`
+    /// of ours was put back now.
+    fn put_back(&mut self, lid: Option<Lid>, was_holding: bool) -> bool {
         let owed = was_holding || self.sleep_owed;
         let Some(journal) = self.journal.as_mut() else {
             assert!(!self.sleep_owed);
-            return;
+            return false;
         };
         let entries = journal.entries().to_vec();
         let mut sleep_back = false;
@@ -373,6 +440,7 @@ impl Helper {
         if sleeps && let Err(error) = self.pmset.sleep_now() {
             ffi::log(&format!("sleepnow failed: {error:?}"));
         }
+        sleep_back
     }
 }
 

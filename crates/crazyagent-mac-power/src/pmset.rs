@@ -58,7 +58,7 @@ impl Pmset {
 
     /// Sleeps the displays now: `pmset displaysleepnow`.
     pub fn display_sleep_now(&self) -> Result<(), PmsetError> {
-        Ok(())
+        self.run(&["displaysleepnow"]).map(drop)
     }
 
     /// Reads the settings: `pmset -g`.

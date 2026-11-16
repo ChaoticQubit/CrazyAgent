@@ -319,6 +319,7 @@ impl LidLine {
     pub(super) fn step(&mut self, ask: LidAsk, now_ms: i64) -> LidSupport {
         assert!(now_ms > 0);
         assert!(ask.rule_on || !ask.wanted);
+        assert!(ask.wanted || !ask.sleep_display);
         let held_back = match self.platform.refusal() {
             Some(LidSupport::NotAvailable { reason }) if self.platform.bundled => Some(reason),
             Some(refused) => {
@@ -362,7 +363,7 @@ impl LidLine {
             self.lease_until_ms = None;
         }
         if ask.wanted {
-            return self.hold(now_ms);
+            return self.hold(ask.sleep_display, now_ms);
         }
         if self.lease_until_ms.is_some() {
             self.release();
@@ -380,17 +381,23 @@ impl LidLine {
         }
     }
 
-    /// Asks the helper for a lease of `LEASE_S`; a lease it gave counts as a read. While
-    /// the last lease still runs, a renewal refused for `pmset` or with no answer keeps
-    /// the lid held, and the next reading tries again (threat model sections 9 and 10).
-    /// Any other refusal, or one once the lease ran out, reads the helper once and says
-    /// why: the view's reason, or the refusal when the view shows none. A first hold with
-    /// no answer counts as the last read. Input: the time. Output: the lid support.
-    fn hold(&mut self, now_ms: i64) -> LidSupport {
+    /// Asks the helper for a lease of `LEASE_S`, naming the owner's display pick (Task 12);
+    /// a lease it gave counts as a read. While the last lease still runs, a renewal refused
+    /// for `pmset` or with no answer keeps the lid held, and the next reading tries again
+    /// (threat model sections 9 and 10). Any other refusal, or one once the lease ran out,
+    /// reads the helper once and says why: the view's reason, or the refusal when the view
+    /// shows none. A first hold with no answer counts as the last read. Inputs: whether the
+    /// display sleeps once per close, and the time. Output: the lid support.
+    fn hold(&mut self, sleep_display: bool, now_ms: i64) -> LidSupport {
         let running = self.lease_until_ms.is_some_and(|until| now_ms < until);
+        let lid_display = if sleep_display {
+            LidDisplay::Sleep
+        } else {
+            LidDisplay::LeaveOn
+        };
         let request = Request::Hold {
             lease_s: LEASE_S,
-            lid_display: LidDisplay::LeaveOn,
+            lid_display,
         };
         let support = match self.helper.call(&request) {
             Ok(Reply::Held { lease_left_s }) if lease_left_s > 0 => {
