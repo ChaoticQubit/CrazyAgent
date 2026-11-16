@@ -1,5 +1,6 @@
 #[cfg(target_os = "linux")]
 mod display_linux;
+pub mod freeze;
 pub mod hold;
 #[cfg(target_os = "linux")]
 mod hold_linux;
@@ -8,6 +9,7 @@ mod hold_macos;
 #[cfg(windows)]
 mod hold_windows;
 pub mod journal;
+pub mod mute;
 pub mod power;
 pub mod power_linux;
 pub mod power_macos;
@@ -496,7 +498,7 @@ pub fn remove_lid_helper() -> Option<String> {
 /// and says what it could not: the kinds of the entries still recorded, or a journal it
 /// could not open or read, which never counts as empty. A failure is logged by its code.
 /// Input: the engine root. Output: what was left.
-pub(crate) fn reconcile(root: &Path) -> Leftover {
+pub fn reconcile(root: &Path) -> Leftover {
     let mut found = match journal::Journal::open(root) {
         Ok(found) => found,
         Err(problem) => {
