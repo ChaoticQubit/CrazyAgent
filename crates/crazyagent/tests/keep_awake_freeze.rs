@@ -610,6 +610,11 @@ impl Made {
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
+
+    fn link(path: PathBuf, target: &Path) -> Self {
+        std::os::unix::fs::symlink(target, &path).unwrap();
+        Self(path)
+    }
 }
 
 impl Drop for Made {
@@ -689,6 +694,70 @@ fn a_socket_folder_that_cannot_be_read_refuses_every_freeze() {
     std::fs::set_permissions(&tmp.0, std::fs::Permissions::from_mode(0o000)).unwrap();
 
     assert!(freeze::servers(&root).is_err());
+}
+
+/// T17b code r1 F1, first site: an agent's short temp folder is its TMPDIR, so thousands
+/// of its own files can sit beside its server's socket. They never refuse the freeze, and
+/// the server is still a root.
+#[test]
+fn a_full_agent_temp_folder_never_refuses_the_freeze() {
+    let bin = Bin::new();
+    let (_disk, root, _terminal, tmp) = engine_root();
+    for file in 0..5000 {
+        std::fs::write(tmp.0.join(format!("left-{file}")), b"").unwrap();
+    }
+    let lead_socket = tmp.0.join(crazyagent::terminal::HARNESS_SOCKET);
+    let lead = StandIn::listening(&bin, "tmux", &lead_socket, &[]);
+
+    let roots = freeze::servers(&root);
+
+    assert!(roots.is_ok(), "{roots:?}");
+    assert_eq!(roots.unwrap(), BTreeSet::from([lead.pid()]));
+}
+
+/// T17b code r1 F1, second site: the folders of agents long gone stay in the team folder
+/// until their project is deleted. Thousands of them never refuse the freeze, and a live
+/// lead's server is still a root.
+#[test]
+fn old_agent_folders_never_refuse_the_freeze() {
+    let bin = Bin::new();
+    let (_disk, root, _terminal, tmp) = engine_root();
+    let agents = root.join("team").join("agents");
+    for id in 2..5000 {
+        std::fs::create_dir(agents.join(format!("agent-{id}"))).unwrap();
+    }
+    let lead_socket = tmp.0.join(crazyagent::terminal::HARNESS_SOCKET);
+    let lead = StandIn::listening(&bin, "tmux", &lead_socket, &[]);
+
+    let roots = freeze::servers(&root);
+
+    assert!(roots.is_ok(), "{roots:?}");
+    assert_eq!(roots.unwrap(), BTreeSet::from([lead.pid()]));
+}
+
+/// T17b code r1 F2: an agent's short temp folder sits in the shared temp folder under a
+/// name anyone can work out. One that is a link, or another user's, is not this engine's,
+/// which never makes its sockets there, so it is skipped and never refuses the freeze.
+#[test]
+fn an_agent_temp_folder_that_is_a_link_is_skipped_not_a_refusal() {
+    use std::os::unix::fs::PermissionsExt;
+    let disk = tempfile::tempdir().unwrap();
+    let root = disk.path().canonicalize().unwrap();
+    let home = root
+        .join("team")
+        .join("agents")
+        .join("agent-1")
+        .join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let _tmp = Made::link(crazyagent::sandbox::toolchains::tmp_path(&home), &elsewhere);
+
+    let roots = freeze::servers(&root);
+
+    assert!(roots.is_ok(), "{roots:?}");
+    assert!(roots.unwrap().is_empty());
 }
 
 /// rv-code T17 r2 F2: on Linux a journaled pid that another user's process now holds is
