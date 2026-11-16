@@ -1156,6 +1156,11 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
         "uninstall" => {
             service.uninstall().map_err(|e| e.to_string())?;
             println!("Removed {}", service.name);
+            if service.name == crazyagent::service::LAUNCHD_LABEL
+                && let Some(kept) = crazyagent::keep_awake::remove_lid_helper()
+            {
+                eprintln!("The lid helper was not removed: {kept}");
+            }
         }
         "start" if answering => println!("The engine is already running"),
         "start" => {

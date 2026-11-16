@@ -477,8 +477,24 @@ impl LidLine {
     /// SMAppService. Input: the time. Output: what could not be removed, in words; none
     /// when it was removed, nothing was there, or this Mac cannot hold the lid.
     pub(super) fn uninstall(&mut self, now_ms: i64) -> Option<String> {
-        let _ = now_ms;
-        Some(String::new())
+        assert!(now_ms > 0);
+        if self.platform.refusal().is_some() {
+            return None;
+        }
+        self.run(LidCommand::Remove, now_ms);
+        let ask = LidAsk {
+            rule_on: true,
+            wanted: false,
+        };
+        let kept = match self.step(ask, now_ms) {
+            LidSupport::NotTurnedOn | LidSupport::HelperMissing => return None,
+            LidSupport::RemoveHelper { reason } | LidSupport::NotAvailable { reason } => reason,
+            LidSupport::SleepNotRestored => UNINSTALL_SLEEP_KEPT.into(),
+            _ => UNINSTALL_KEPT.into(),
+        };
+        assert!(!kept.is_empty());
+        assert!(self.lease_until_ms.is_none());
+        Some(kept)
     }
 }
 
