@@ -1,5 +1,5 @@
 use crate::bridge::BridgeError;
-use crazyagent::service::Started;
+use crazyagent::service::StartWait;
 use crazyagent::update::{self, Channel, UpdateError};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -65,10 +65,10 @@ pub enum EngineAfterUpdate {
 /// Names where the engine stands after an install's wait. Input: how the wait ended, none
 /// when it failed. Output: Ready when it answered, Starting when it ran out while the
 /// service manager still ran its first process, else Failed.
-fn engine_after(waited: Option<Started>) -> EngineAfterUpdate {
+fn engine_after(waited: Option<StartWait>) -> EngineAfterUpdate {
     match waited {
-        Some(Started::Answered) => EngineAfterUpdate::Ready,
-        Some(Started::StillStarting) => EngineAfterUpdate::Starting,
+        Some(StartWait::Answered) => EngineAfterUpdate::Ready,
+        Some(StartWait::StillStarting) => EngineAfterUpdate::Starting,
         None => EngineAfterUpdate::Failed,
     }
 }
@@ -279,7 +279,7 @@ async fn start_engine(sidecar: PathBuf, events: &Events<UpdateProgress>) -> Engi
             service(sidecar, "start")
                 .await
                 .is_ok()
-                .then_some(Started::Answered),
+                .then_some(StartWait::Answered),
         );
     };
     let since = crazyagent::service::log_length(&layout);
@@ -334,11 +334,11 @@ mod tests {
     #[test]
     fn an_engine_its_service_manager_still_runs_past_the_wait_reads_starting_not_failed() {
         assert_eq!(
-            engine_after(Some(Started::Answered)),
+            engine_after(Some(StartWait::Answered)),
             EngineAfterUpdate::Ready
         );
         assert_eq!(
-            engine_after(Some(Started::StillStarting)),
+            engine_after(Some(StartWait::StillStarting)),
             EngineAfterUpdate::Starting
         );
     }

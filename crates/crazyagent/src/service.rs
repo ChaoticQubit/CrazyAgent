@@ -1871,7 +1871,7 @@ pub async fn wait_ready(
 /// [`START_TIMEOUT`] while the service manager still ran the process it was first seen
 /// running, so the engine is still starting rather than stopped or relaunched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Started {
+pub enum StartWait {
     Answered,
     StillStarting,
 }
@@ -1888,14 +1888,14 @@ pub async fn wait_started(
     since: u64,
 ) -> Result<(), ServiceError> {
     match wait_start(layout, service, bound, since).await? {
-        Started::Answered => Ok(()),
-        Started::StillStarting => Err(unanswered(layout, START_TIMEOUT)),
+        StartWait::Answered => Ok(()),
+        StartWait::StillStarting => Err(unanswered(layout, START_TIMEOUT)),
     }
 }
 
 /// Waits like [`wait_started`], but a wait that reaches [`START_TIMEOUT`] looks at the
 /// service manager once more and, when it still runs the process first seen running, ends
-/// as [`Started::StillStarting`] instead of failing. Inputs: the layout, the service, the
+/// as [`StartWait::StillStarting`] instead of failing. Inputs: the layout, the service, the
 /// bound and the log length before the start. Output: how the wait ended, or an error
 /// naming the engine log when the engine stopped, was relaunched or never ran.
 pub async fn wait_start(
@@ -1903,7 +1903,7 @@ pub async fn wait_start(
     service: &Service,
     bound: Duration,
     since: u64,
-) -> Result<Started, ServiceError> {
+) -> Result<StartWait, ServiceError> {
     assert!(bound <= START_TIMEOUT);
     let started = Instant::now();
     let limit = |seen: Option<u32>| if seen.is_some() { START_TIMEOUT } else { bound };
@@ -1911,7 +1911,7 @@ pub async fn wait_start(
     let mut looked: Option<Instant> = None;
     loop {
         if answered(layout, since, PROBE_TIMEOUT.min(bound.max(POLL))).await {
-            return Ok(Started::Answered);
+            return Ok(StartWait::Answered);
         }
         let due = started.elapsed() >= limit(seen);
         if due || looked.is_none_or(|at| at.elapsed() >= LIVENESS_EVERY) {
@@ -1932,7 +1932,7 @@ pub async fn wait_start(
         }
         if started.elapsed() >= limit(seen) {
             return match seen {
-                Some(_) => Ok(Started::StillStarting),
+                Some(_) => Ok(StartWait::StillStarting),
                 None => Err(unanswered(layout, bound)),
             };
         }
