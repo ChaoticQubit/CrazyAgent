@@ -248,3 +248,92 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
     let printed = String::from_utf8_lossy(&shown.stdout);
     assert_eq!(printed.trim(), LOCAL_PLACEHOLDER);
 }
+
+/// rv-ds241 t20keyed nit: a pane's bridge takes out of its variables only the names the
+/// account hand-over lists, so a home block variable that holds the same value stays one
+/// of the pane's own variables.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pane_s_bridge_takes_only_the_names_its_hand_over_lists() {
+    use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    let line = "    STANDIN_APPEND_CONFIG: \"{home}/config\"\n";
+    let both = format!("{line}    STANDIN_APPEND_MODE: \"{LOCAL_PLACEHOLDER}\"\n");
+    let text = APPEND.replacen(line, &both, 1);
+    assert_ne!(text, APPEND);
+    let (_folder, home) = harness_home("standin-jsonl-append");
+    let scratch = tempfile::tempdir().unwrap();
+    let work = scratch.path().canonicalize().unwrap();
+    let profile = work.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let run = Run {
+        session_id: "standin-1",
+        key_file: None,
+        resume: false,
+    };
+    let appended = parse(text.as_bytes()).unwrap();
+    let settings = TerminalSettings::read(&appended).unwrap();
+    let registry = crate::harnesses::registry::registry();
+    let harness = registry.get("standin-jsonl-append").unwrap();
+    let connection = openai_chat(KEYLESS_URL, false);
+    let handover = crate::harnesses::accounts::handover(harness, &connection, None);
+    let context = context().with_handover(handover.unwrap());
+    let installed = context.install_listed(&appended, &home, true).unwrap();
+    let request = pane_request("standin-jsonl-append", &home, &work, &profile);
+
+    let built = command_with(&request, Some(&installed), &run, Some(&settings));
+
+    assert!(built.is_ok(), "{:?}", built.as_ref().err());
+    let built = built.unwrap();
+    let name = "STANDIN_APPEND_MODE";
+    let mode = built.env.iter().find(|pair| pair.0 == name);
+    assert_eq!(mode.map(|pair| pair.1.as_str()), Some(LOCAL_PLACEHOLDER));
+    assert!(built.argv.iter().all(|word| !word.contains(name)));
+}
+
+/// fix9 T19b F7 for panes: a live master's pane on a listed harness takes its temp folder,
+/// agent `getconf` and cargo home from the agent home its context names as tool home, as
+/// its piped launch does, while its HOME stays the private home.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_listed_pane_takes_its_temp_folder_and_tools_from_its_tool_home() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let (folder, home) = harness_home("standin-jsonl-append");
+    let base = folder.path().canonicalize().unwrap();
+    let _removed = TmpRemoved(base.clone());
+    let made = crate::sandbox::toolchains::make_tmp(&base).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let work = scratch.path().canonicalize().unwrap();
+    let profile = work.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let run = Run {
+        session_id: "standin-1",
+        key_file: None,
+        resume: false,
+    };
+    let appended = parse(APPEND.as_bytes()).unwrap();
+    let settings = TerminalSettings::read(&appended).unwrap();
+    let context = context().with_tool_home(&base);
+    let installed = context.install_listed(&appended, &home, true).unwrap();
+    let request = pane_request("standin-jsonl-append", &home, &work, &profile);
+
+    let built = command_with(&request, Some(&installed), &run, Some(&settings));
+
+    assert!(built.is_ok(), "{:?}", built.as_ref().err());
+    let env = built.unwrap().env;
+    let value = |name: &str| {
+        let found = env.iter().find(|pair| pair.0 == name);
+        found.map(|pair| PathBuf::from(&pair.1))
+    };
+    assert_eq!(value("HOME"), Some(home.clone()));
+    assert_eq!(value("TMPDIR"), Some(made));
+    assert_eq!(value("CARGO_HOME"), Some(base.join(".cargo")));
+    let getconf = base.join(STATE).join("bin");
+    let path = env.iter().find(|pair| pair.0 == "PATH").unwrap();
+    let lead = format!("{}:", getconf.display());
+    assert!(path.1.starts_with(&lead), "{path:?}");
+}

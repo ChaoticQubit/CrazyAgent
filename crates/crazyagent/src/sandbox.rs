@@ -4675,6 +4675,20 @@ mod handed_tests {
             assert!(Handed::new(&NAMES, value).is_err(), "{value}");
         }
     }
+
+    /// rv-sa241 M8 host guard N1: a launch hands its value only under key-shaped names; a
+    /// name the variable guard refuses for another reason, a credential setting, a perl
+    /// setting, a GitHub prefix or an engine variable, is refused when the exception is made.
+    #[test]
+    fn a_launch_never_hands_its_value_under_a_name_refused_for_another_reason() {
+        let others = ["PERL5OPT", "GIT_ASKPASS", "GH_HOST", "CRAZYAGENT_LINEAGE"];
+        for name in others {
+            let names = [name];
+            assert!(Handed::new(&names, LOCAL_PLACEHOLDER).is_err(), "{name}");
+        }
+        let keys = ["OPENAI_API_KEY", "STANDIN_TOKEN"];
+        assert!(Handed::new(&keys, LOCAL_PLACEHOLDER).is_ok());
+    }
 }
 
 #[cfg(test)]
