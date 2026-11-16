@@ -4645,7 +4645,7 @@ fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
     }
 }
 
-/// The Settings key m asks before a project moves into the projects home: the ask says the
+/// The Settings key M asks before a project moves into the projects home: the ask says the
 /// team must be stopped and its work follows, m sends a Move, c a Copy, and n or Esc keeps the
 /// project where it is. A refused start of the move job shows as a plain line (DEC-177).
 #[test]
@@ -4655,8 +4655,8 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
     screen.open(Tab::Settings);
     let shown = text(&project_screen(&mut screen, 120, 30, &Look::plain()).rows);
-    assert!(shown.contains("m Move into CrazyAgent folder"), "{shown}");
-    assert_eq!(screen.key(key(KeyCode::Char('m'))), ProjectReply::Handled);
+    assert!(shown.contains("M Move into CrazyAgent folder"), "{shown}");
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::Handled);
     assert!(screen.confirm_move);
     let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
     let shown = text(&drawn.rows);
@@ -4679,16 +4679,16 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     assert!(screen.confirm_move);
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(!screen.confirm_move);
-    screen.key(key(KeyCode::Char('m')));
+    screen.key(key(KeyCode::Char('M')));
     assert_eq!(screen.key(key(KeyCode::Char('n'))), ProjectReply::Handled);
     assert!(!screen.confirm_move);
-    screen.key(key(KeyCode::Char('m')));
+    screen.key(key(KeyCode::Char('M')));
     assert_eq!(
         screen.key(key(KeyCode::Char('m'))),
         ProjectReply::MoveHome(AddMode::Move)
     );
     assert!(!screen.confirm_move);
-    screen.key(key(KeyCode::Char('m')));
+    screen.key(key(KeyCode::Char('M')));
     assert_eq!(
         screen.key(key(KeyCode::Char('c'))),
         ProjectReply::MoveHome(AddMode::Copy)
@@ -5272,12 +5272,12 @@ fn a_folder_cut_to_its_tail_fits_its_cells() {
 }
 
 /// SA-VID14-A: on the Settings tab the running agents that can still open a folder hidden
-/// after they started are named under the hidden folders, with h to restart them, which
-/// sends Restart them for the project; with none listed h sends nothing. The editor says the
+/// after they started are named under the hidden folders, with R to restart them, which
+/// sends Restart them for the project; with none listed R sends nothing. The editor says the
 /// list covers team agents, and that engine runs started before are named too (r1,
 /// SA-VID14-R2-N1, SA-VID14-R2-N2).
 #[test]
-fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them() {
+fn settings_name_agents_that_can_still_open_a_hidden_folder_and_r_restarts_them() {
     use crate::team::{GraphNode, NodeKind, TeamAction, TeamGraph};
     let look = Look::plain();
     let project = ProjectId::new("hidden").unwrap();
@@ -5331,7 +5331,7 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them(
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(!shown.contains("can still open"), "{shown}");
     assert!(!matches!(
-        screen.key(key(KeyCode::Char('h'))),
+        screen.key(key(KeyCode::Char('R'))),
         ProjectReply::TeamChange(_)
     ));
 
@@ -5346,11 +5346,11 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them(
         "{shown}"
     );
     assert!(
-        shown.contains("          Master, Ada can still open a hidden folder   h Restart them"),
+        shown.contains("          Master, Ada can still open a hidden folder   R Restart them"),
         "{shown}"
     );
     assert_eq!(
-        screen.key(key(KeyCode::Char('h'))),
+        screen.key(key(KeyCode::Char('R'))),
         ProjectReply::TeamChange(Box::new(TeamAction::RestartHiddenSeers {
             project_id: project.clone(),
         }))
@@ -5411,7 +5411,7 @@ fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
         "{shown}"
     );
     assert!(
-        !shown.contains("h Restart them"),
+        !shown.contains("R Restart them"),
         "a run has no restart key: {shown}"
     );
     screen.hidden_paths = Some(saved(Vec::new()));
