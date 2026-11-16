@@ -1,4 +1,5 @@
 use crate::bridge::BridgeError;
+use crazyagent::service::Started;
 use crazyagent::update::{self, Channel, UpdateError};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -61,14 +62,13 @@ pub enum EngineAfterUpdate {
     Failed,
 }
 
-/// Names where the engine stands after an install's wait. Inputs: whether the wait saw it
-/// answer and whether its service manager still runs it. Output: Ready when it answered,
-/// Starting while the manager still runs it past the wait, else Failed.
-fn engine_after(answered: bool, running: bool) -> EngineAfterUpdate {
-    match (answered, running) {
-        (true, _) => EngineAfterUpdate::Ready,
-        (false, true) => EngineAfterUpdate::Starting,
-        (false, false) => EngineAfterUpdate::Failed,
+/// Names where the engine stands after an install's wait. Input: how the wait ended, none
+/// when it failed. Output: Ready when it answered, Starting when it ran out while the
+/// service manager still ran its first process, else Failed.
+fn engine_after(waited: Option<Started>) -> EngineAfterUpdate {
+    match waited {
+        Some(Started::Answered) => EngineAfterUpdate::Ready,
+        _ => EngineAfterUpdate::Starting,
     }
 }
 
@@ -274,7 +274,12 @@ async fn start_engine(sidecar: PathBuf, events: &Events<UpdateProgress>) -> Engi
             .map(|engine| (layout, engine))
         });
     let Some((layout, engine)) = watched else {
-        return engine_after(service(sidecar, "start").await.is_ok(), false);
+        return engine_after(
+            service(sidecar, "start")
+                .await
+                .is_ok()
+                .then_some(Started::Answered),
+        );
     };
     let since = crazyagent::service::log_length(&layout);
     let begun = Instant::now();
@@ -303,7 +308,13 @@ async fn start_engine(sidecar: PathBuf, events: &Events<UpdateProgress>) -> Engi
         }
     };
     let running = engine.status().is_ok_and(|status| status.running);
-    engine_after(answered, running)
+    engine_after(if answered {
+        Some(Started::Answered)
+    } else if running {
+        Some(Started::StillStarting)
+    } else {
+        None
+    })
 }
 
 /// Links the bundled `crazyagent`, or its private copy when the app runs from an AppImage
@@ -333,10 +344,19 @@ mod tests {
 
     #[test]
     fn an_engine_its_service_manager_still_runs_past_the_wait_reads_starting_not_failed() {
-        assert_eq!(engine_after(true, true), EngineAfterUpdate::Ready);
-        assert_eq!(engine_after(true, false), EngineAfterUpdate::Ready);
-        assert_eq!(engine_after(false, true), EngineAfterUpdate::Starting);
-        assert_eq!(engine_after(false, false), EngineAfterUpdate::Failed);
+        assert_eq!(
+            engine_after(Some(Started::Answered)),
+            EngineAfterUpdate::Ready
+        );
+        assert_eq!(
+            engine_after(Some(Started::StillStarting)),
+            EngineAfterUpdate::Starting
+        );
+    }
+
+    #[test]
+    fn an_engine_that_stopped_or_was_relaunched_while_starting_reads_failed_not_starting() {
+        assert_eq!(engine_after(None), EngineAfterUpdate::Failed);
     }
 
     #[test]

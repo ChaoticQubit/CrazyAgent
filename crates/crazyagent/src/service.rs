@@ -1867,6 +1867,15 @@ pub async fn wait_ready(
     }
 }
 
+/// How a start wait that did not fail ended: the engine answered, or the wait reached
+/// [`START_TIMEOUT`] while the service manager still ran the process it was first seen
+/// running, so the engine is still starting rather than stopped or relaunched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Started {
+    Answered,
+    StillStarting,
+}
+
 /// Waits like [`wait_ready`] for an engine a service manager starts. Past `bound` it keeps
 /// waiting, up to [`START_TIMEOUT`], while the manager still runs the process it was first
 /// seen running, and it fails at once when that process stops or another one takes its
