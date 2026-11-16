@@ -47,7 +47,13 @@ pub const SETUP_NOT_CHILD: &str = "the setup child builds a network only for its
 /// What the setup child says when its parent is not one of the fixed bubblewraps.
 pub const SETUP_NOT_NEST: &str = "the setup child runs only under a fixed bubblewrap";
 const SANDBOX_RESOLVER: &str = "10.0.2.3";
-const SLIRP_GATEWAY: &str = "10.0.2.2";
+/// slirp4netns's own network: its gateway, which maps to this computer, and its resolver
+/// alias, which maps to this computer's DNS address on any port. No route-port rule reaches
+/// it (rv-sa241 LEAD-1).
+const SLIRP_NETWORK: &str = "10.0.2.0/24";
+/// The loopback addresses: dropped after the `lo` accept, so only the agent's own loopback,
+/// where its bridged ports listen, is ever reached at one (rv-sa241 LEAD-1).
+const LOOPBACK_NETWORK: &str = "127.0.0.0/8";
 const TAP: &str = "tap0";
 const CHILD_PID_KEY: &[u8] = b"\"child-pid\":";
 const INFO_BYTES_MAX: usize = 4096;
@@ -610,18 +616,22 @@ fn stop(parent: u32, child: u32) {
 }
 
 /// The IPv4 rules inside the agent's network, as `iptables-restore` reads them and in the
-/// form `iptables-save` prints them: out only through `tap0` to each port, TCP 53 only to
-/// slirp's resolver, never to slirp's gateway, and loopback for the bridged ports. Input:
-/// the ports on any host. Output: the rules.
+/// form `iptables-save` prints them: loopback for the bridged ports, TCP 53 to slirp's
+/// resolver alone, then nothing to slirp's network ([`SLIRP_NETWORK`]) or to a loopback
+/// address off `lo` ([`LOOPBACK_NETWORK`]), then out through `tap0` to each port. Input: the
+/// ports on any host. Output: the rules.
 fn egress_rules(any: &[u16]) -> String {
     assert!(!any.is_empty() && any.len() <= REMOTES_MAX);
     assert!(!any.contains(&0));
     let mut rules = String::from(CHAINS);
-    let _ = writeln!(rules, "-A OUTPUT -d {SLIRP_GATEWAY}/32 -j DROP");
     let _ = writeln!(
         rules,
         "-A OUTPUT -d {SANDBOX_RESOLVER}/32 -o {TAP} -p tcp -m tcp --dport 53 -j ACCEPT"
     );
+    let _ = writeln!(rules, "-A OUTPUT -d {SLIRP_NETWORK} -j DROP");
+    let _ = writeln!(rules, "-A OUTPUT -d {LOOPBACK_NETWORK} -j DROP");
+    assert_eq!(rules.matches(" -j ACCEPT\n").count(), 2);
+    assert_eq!(rules.matches(SANDBOX_RESOLVER).count(), 1);
     for port in any {
         let _ = writeln!(rules, "-A OUTPUT -o {TAP} -p tcp -m tcp --dport {port} -j ACCEPT");
     }
