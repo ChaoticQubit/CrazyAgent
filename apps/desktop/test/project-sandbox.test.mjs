@@ -77,7 +77,7 @@ test("the hidden folders section names the running agents that can still open a 
   assert.match(hidden, /!fullAccess && seers\.length > 0/, "Full access hides nothing, so it lists no one");
   assert.match(hidden, /\{!fullAccess && <p className="pj-secondary">\{HIDDEN_SEERS_COVER\}<\/p>\}/, "an empty list never reads as nothing can open it");
   assert.match(settings.HIDDEN_SEERS_COVER, /^Team agents that started before you hid a folder, including ones CrazyAgent took over/);
-  assert.match(settings.HIDDEN_SEERS_COVER, /Research jobs and overview, roadmap, onboarding, instructions cleanup, code graph and lockfile rebuild runs that started before are named here too, and keep their access until they end\.$/);
+  assert.match(settings.HIDDEN_SEERS_COVER, /Research jobs and overview, roadmap, onboarding, code graph and lockfile rebuild runs that started before are named here too, and keep their access until they end\.$/);
   const api = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
   assert.match(api, /call<IntentReceipt>\("desktop_team_restart_hidden_seers", \{ id, generation \}\)/);
   assert.equal(projects.failureCopy("team_no_hidden_seers"), "No running agent can still open a hidden folder.");
@@ -90,8 +90,8 @@ test("the hidden folders section names the engine runs that can still open a hid
   assert.equal(settings.hiddenRunsLine(saved([])), null);
   assert.equal(settings.hiddenRunsLine(saved(["research"])), "Runs that can still open a hidden folder until they end: research job.");
   assert.equal(
-    settings.hiddenRunsLine(saved(["research", "overview", "roadmap", "onboarding", "instructions_cleanup", "code_graph", "lockfiles"])),
-    "Runs that can still open a hidden folder until they end: research job, overview run, roadmap run, onboarding run, instructions cleanup run, code graph build, lockfile rebuild run.",
+    settings.hiddenRunsLine(saved(["research", "overview", "roadmap", "onboarding", "code_graph", "lockfiles"])),
+    "Runs that can still open a hidden folder until they end: research job, overview run, roadmap run, onboarding run, code graph build, lockfile rebuild run.",
   );
   assert.equal(settings.hiddenRunsLine(saved(["research", "later_kind"])), "Runs that can still open a hidden folder until they end: research job, another CrazyAgent run.", "a kind this app does not know is still named");
   const source = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
