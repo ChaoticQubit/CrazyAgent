@@ -2,12 +2,14 @@ pub mod accounts;
 pub(crate) mod codex_folder;
 pub mod drivers;
 pub mod finding;
+pub mod home;
 pub mod interactive;
 pub mod launch;
 pub mod leftovers;
 pub mod manifest;
 pub mod records;
 pub mod registry;
+pub mod render;
 pub mod terminal_session;
 pub mod transcript;
 pub mod update;
@@ -18,6 +20,8 @@ mod account_fit_tests;
 mod catalog_tests;
 #[cfg(all(test, unix))]
 mod finding_tests;
+#[cfg(test)]
+mod floor_tests;
 #[cfg(test)]
 mod probe_tests;
 
@@ -856,6 +860,25 @@ pub fn spec(id: &str) -> Option<&'static HarnessSpec> {
 /// Output: the plain minimum, or None for a harness that never signs in from CrazyAgent.
 pub fn sign_in_min(id: &str) -> Option<&'static str> {
     registry::registry().get(id)?.sign_in_minimum()
+}
+
+/// The oldest version of a harness CrazyAgent drives, from that harness's manifest
+/// (`version.minimum`). Input: a catalog id or a stored harness name. Output: the plain
+/// minimum, or None for a harness with no floor or an unknown name.
+pub fn run_min(id: &str) -> Option<&'static str> {
+    registry::registry().get(id)?.minimum_version()
+}
+
+/// Tells whether an installed harness is older than the oldest version CrazyAgent drives,
+/// the test a client's "needs X or newer" line and a launch that knows the installed
+/// version use. Inputs: the harness and the installed version, None when unknown. Output:
+/// true only for a known version below the manifest's floor; a version that is not plain
+/// numbers is never below.
+pub fn too_old(harness: &registry::Harness, installed: Option<&str>) -> bool {
+    match (harness.minimum_version(), installed) {
+        (Some(minimum), Some(installed)) => update::below(installed, minimum),
+        _ => false,
+    }
 }
 
 /// Tells whether a sign-in must be refused because the installed harness is older than its

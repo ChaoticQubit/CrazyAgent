@@ -19,6 +19,7 @@ pub const TYPED_DEPTH_MAX: usize = 16;
 /// The most values of one JSON object [`typed_at`] looks at.
 pub const TYPED_VALUES_MAX: usize = 4096;
 const SETTING: &str = "terminal.record.path";
+const OWNED: &str = "import.conversations";
 const HOME: &str = "{home}/";
 const SESSION: &str = "{session}";
 const DEEP: &str = "**";
@@ -59,10 +60,11 @@ struct Found {
     key: FileKey,
 }
 
-/// One search of a record path: the folder entries and names looked at so far and the
-/// files found.
+/// One search of a record path: the folder entries and names looked at so far, the most it
+/// may look at, and the files found.
 struct Search {
     scanned: usize,
+    limit: usize,
     found: Vec<Found>,
 }
 
@@ -161,6 +163,48 @@ impl Pattern {
         Ok(Self { home, parts, learn })
     }
 
+    /// Reads where a harness keeps its past conversation records below the owner's home,
+    /// as a manifest's `import.conversations` writes it, relative to that home: parts as
+    /// in [`Pattern::read`], with nothing filled in. Inputs: the absolute owner home and the
+    /// pattern. Output: the pattern, or a refusal that names the setting.
+    pub(super) fn owned(home: &Path, text: &str) -> Result<Self, Refused> {
+        assert!(home.is_absolute());
+        let mut parts = Vec::new();
+        for part in text.split('/') {
+            if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
+                return refused_owned("each part must be a plain name");
+            }
+            if part.contains(['{', '}']) {
+                return refused_owned("nothing is filled in here");
+            }
+            if part.contains(DEEP) && part != DEEP {
+                return refused_owned("** must be a whole part");
+            }
+            parts.push(if part == DEEP {
+                Part::Deep
+            } else if part.contains('*') {
+                Part::Glob(part.to_owned())
+            } else {
+                Part::Name(part.to_owned())
+            });
+        }
+        if parts.len() > DEPTH_MAX {
+            let most = format!("this must be at most {DEPTH_MAX} parts below the home folder");
+            return refused_owned(&most);
+        }
+        let deep = parts.iter().filter(|part| **part == Part::Deep).count();
+        if deep > 1 || parts.last() == Some(&Part::Deep) {
+            return refused_owned("** may stand once, and never for the file itself");
+        }
+        assert!(!parts.is_empty());
+        let home = home.to_path_buf();
+        Ok(Self {
+            home,
+            parts,
+            learn: None,
+        })
+    }
+
     /// Lists the files this record path matches, never following a link, looking at no more
     /// than `ENTRIES_SCANNED_MAX` folder entries and no deeper than `DEPTH_MAX` levels.
     /// Only regular files count. Output: each file's place below the home, last change and
@@ -168,12 +212,35 @@ impl Pattern {
     fn found(&self) -> Vec<Found> {
         let mut search = Search {
             scanned: 0,
+            limit: ENTRIES_SCANNED_MAX,
             found: Vec::new(),
         };
         self.walk(Path::new(""), 0, &mut search);
         assert!(search.scanned <= ENTRIES_SCANNED_MAX);
         assert!(search.found.len() <= search.scanned);
         search.found
+    }
+
+    /// Lists every file this pattern matches in order of place, never following a link,
+    /// looking at no more than `limit` folder entries and no deeper than `DEPTH_MAX` levels.
+    /// Input: the limit. Output: each file's place below the home and last change, and
+    /// whether the search reached the limit, so it may have passed files over.
+    pub(super) fn listed(&self, limit: usize) -> (Vec<(PathBuf, SystemTime)>, bool) {
+        let mut search = Search {
+            scanned: 0,
+            limit,
+            found: Vec::new(),
+        };
+        self.walk(Path::new(""), 0, &mut search);
+        assert!(search.scanned <= limit);
+        assert!(search.found.len() <= search.scanned);
+        let mut listed: Vec<(PathBuf, SystemTime)> = search
+            .found
+            .into_iter()
+            .map(|found| (found.below, found.modified))
+            .collect();
+        listed.sort();
+        (listed, search.scanned == limit)
     }
 
     /// Matches part `at` and those after it in one folder below the home. `**` matches the
@@ -195,7 +262,7 @@ impl Pattern {
                 }
             }
             Part::Name(name) => {
-                if search.scanned >= ENTRIES_SCANNED_MAX {
+                if search.scanned >= search.limit {
                     return;
                 }
                 search.scanned += 1;
@@ -236,15 +303,15 @@ impl Pattern {
     }
 
     /// Lists one folder below the home with each entry's own metadata, a link read as a
-    /// link, until the search has looked at `ENTRIES_SCANNED_MAX` entries. A name that is
-    /// not UTF-8 is passed over. Inputs: the folder and the search. Output: the entries.
+    /// link, until the search has looked at its limit of entries. A name that is not UTF-8
+    /// is passed over. Inputs: the folder and the search. Output: the entries.
     fn entries(&self, folder: &Path, search: &mut Search) -> Vec<(String, Metadata)> {
         let Ok(listing) = std::fs::read_dir(self.home.join(folder)) else {
             return Vec::new();
         };
         let mut entries = Vec::new();
         for entry in listing.flatten() {
-            if search.scanned >= ENTRIES_SCANNED_MAX {
+            if search.scanned >= search.limit {
                 break;
             }
             search.scanned += 1;
@@ -353,6 +420,14 @@ impl Pattern {
 fn refused<T>(code: &'static str, problem: &str) -> Result<T, Refused> {
     let message = format!("{SETTING}: {problem}.");
     Err(Refused { code, message })
+}
+
+fn refused_owned<T>(problem: &str) -> Result<T, Refused> {
+    let message = format!("{OWNED}: {problem}.");
+    Err(Refused {
+        code: VALUE,
+        message,
+    })
 }
 
 /// Tells whether a session id is safe in a record path and in a harness's arguments: 1 to

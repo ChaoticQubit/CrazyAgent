@@ -2604,6 +2604,47 @@ fn an_installed_version_is_below_a_sign_in_minimum_only_when_it_reads_lower() {
     }
 }
 
+/// Task 21 (DEC-166): the versions row of a harness below the oldest version CrazyAgent
+/// drives reads "needs X or newer" in the words both clients show; at or past the floor, with
+/// no floor or one that is not plain, or with an installed version unknown or not plain, it
+/// reads nothing.
+#[test]
+fn a_harness_below_the_floor_it_runs_at_reads_needs_x_or_newer() {
+    let row = |installed: Option<&str>, floor: Option<&str>| HarnessVersions {
+        id: "claude-code".into(),
+        method: Method::Unknown,
+        installed: installed.map(str::to_owned),
+        latest: Latest::NotChecked,
+        command: None,
+        install: None,
+        refusal: None,
+        guide: None,
+        running: false,
+        last: None,
+        needs: None,
+        sign_in_min: None,
+        run_min: floor.map(str::to_owned),
+    };
+    assert_eq!(
+        needs_newer_line("Claude Code", &row(Some("2.1.200"), Some("2.1.250"))).as_deref(),
+        Some("Claude Code 2.1.200 is too old for CrazyAgent; it needs 2.1.250 or newer.")
+    );
+    for (installed, floor) in [
+        (Some("2.1.250"), Some("2.1.250")),
+        (Some("2.1.325"), Some("2.1.250")),
+        (Some("garbage"), Some("2.1.250")),
+        (None, Some("2.1.250")),
+        (Some("2.1.200"), None),
+        (Some("2.1.200"), Some("2.1.x")),
+    ] {
+        assert_eq!(
+            needs_newer_line("Claude Code", &row(installed, floor)),
+            None,
+            "{installed:?} {floor:?}"
+        );
+    }
+}
+
 /// DEC-166: a sign-in is refused as too old only for a harness that has a minimum and a
 /// known installed version below it; an unknown version runs as before.
 #[test]
@@ -2653,6 +2694,17 @@ fn a_versions_row_names_the_sign_in_minimum_of_a_harness_that_signs_in() {
     let claude = machine.program("brew/bin/claude", 0o755);
     let installed = Case::new(machine, entry("claude-code", Some(claude)), None).versions(false);
     assert_eq!(installed.sign_in_min.as_deref(), Some("2.1.268"));
+}
+
+/// Task 18: the versions row of every bundled harness carries the floor its manifest names,
+/// so both clients can show "needs X or newer" beside the Update line.
+#[test]
+fn a_versions_row_names_the_manifest_floor_of_every_bundled_harness() {
+    for harness in crate::harnesses::registry::registry().all() {
+        let id = harness.id();
+        let row = Case::new(Machine::new(), entry(id, None), None).versions(false);
+        assert_eq!(row.run_min.as_deref(), harness.minimum_version(), "{id}");
+    }
 }
 
 /// RV-DS241-59: a check or update program is trusted only as the tool resolver trusts one:

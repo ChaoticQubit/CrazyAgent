@@ -1482,7 +1482,9 @@ fn capped(text: &str) -> String {
     format!("{}...", &text[..end])
 }
 
-fn codex_message(value: &Value) -> Option<(Speaker, String)> {
+/// The typed message or reply one Codex rollout line holds, without the context Codex
+/// injects. Takes the line. Returns who said what, or none for any other line.
+pub(crate) fn codex_message(value: &Value) -> Option<(Speaker, String)> {
     let payload = &value["payload"];
     if value["type"] != "response_item" || payload["type"] != "message" {
         return None;
@@ -1513,7 +1515,9 @@ fn codex_text(payload: &Value) -> Option<String> {
     )
 }
 
-fn claude_message(value: &Value) -> Option<(Speaker, String)> {
+/// The typed message or reply one Claude Code session line holds, without meta lines,
+/// compaction summaries or API errors. Takes the line. Returns who said what, or none.
+pub(crate) fn claude_message(value: &Value) -> Option<(Speaker, String)> {
     let speaker = match value["type"].as_str()? {
         "user" if value["isMeta"] != true && !claude_summary(value) => Speaker::Input,
         "assistant" if value["isApiErrorMessage"] != true => Speaker::Agent,

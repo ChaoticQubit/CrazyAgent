@@ -56,7 +56,7 @@ test("step 2 lists catalog methods in order with Recommended first, and no subsc
   const single = methodOptions(catalog[2]);
   assert.equal(single.length, 1);
   assert.equal(single[0].recommended, false);
-  for (const tile of ["openai", "anthropic", "openrouter", "openai_compatible", "local"]) assert.ok(TILE_LINES[tile]);
+  for (const tile of ["openai", "anthropic", "gemini", "openrouter", "openai_compatible", "local"]) assert.ok(TILE_LINES[tile], tile);
   assert.match(TILE_LINES.openai_compatible, /OpenAI API/);
   assert.match(TILE_LINES.local, /Ollama/);
   const claudeKey = methodOptions(catalog[1]).find((option) => option.entry.method === "api_key");
@@ -69,6 +69,7 @@ const engineCatalog = [
     { method: "subscription", label: "Sign in with ChatGPT", url_preset: null, ...field("hidden", "hidden", "hidden") }, keyed("https://api.openai.com/v1")] },
   { provider: "claude", name: "Claude", methods: [
     { method: "subscription", label: "Sign in with your Claude subscription", url_preset: null, ...field("hidden", "hidden", "hidden") }, keyed("https://api.anthropic.com/v1")] },
+  { provider: "gemini", name: "Gemini API", methods: [keyed("https://generativelanguage.googleapis.com")] },
   { provider: "openrouter", name: "OpenRouter", methods: [keyed("https://openrouter.ai/api/v1")] },
   { provider: "openai_api", name: "OpenAI API", methods: [keyed("https://api.openai.com/v1")] },
   { provider: "anthropic_api", name: "Anthropic API", methods: [keyed("https://api.anthropic.com/v1")] },
@@ -81,9 +82,9 @@ const engineCatalog = [
 test("Add account offers one OpenAI and one Anthropic entry, and each key method adds the company's API account", () => {
   const markup = renderToStaticMarkup(createElement(ProviderTiles, { catalog: engineCatalog, onPick: forbidden }));
   for (const gone of ["ChatGPT / Codex", "Claude", "OpenAI API", "Anthropic API"]) assert.ok(!markup.includes(`<span class="title">${gone}</span>`), gone);
-  assert.equal(markup.match(/<span class="title">/g).length, 5);
+  assert.equal(markup.match(/<span class="title">/g).length, 6);
   const tiles = providerTiles(engineCatalog);
-  assert.deepEqual(tiles.map((tile) => tile.name), ["OpenAI", "Anthropic", "OpenRouter", "Any OpenAI-compatible URL", "Local models (Ollama)"]);
+  assert.deepEqual(tiles.map((tile) => tile.name), ["OpenAI", "Anthropic", "Gemini API", "OpenRouter", "Any OpenAI-compatible URL", "Local models (Ollama)"]);
   for (const tile of tiles) assert.ok(markup.includes(`<span class="title">${tile.name}</span><span class="detail">${tile.line}</span>`), tile.name);
   const ways = (name) => tiles.find((tile) => tile.name === name).options
     .map((option) => [option.title, option.recommended, option.provider.provider, option.entry.method, option.native ?? null]);
@@ -357,6 +358,28 @@ test("Add account starts provider-first: managed sign-in, key and URL providers,
     assert.doesNotMatch(markup, claims);
     assert.ok(Buffer.byteLength(markup, "utf8") < 65536);
   }
+});
+
+test("Add account offers the Gemini API key right after Anthropic, in the TUI's words, with its mark, a masked key and a model (Task 21)", () => {
+  const tiles = providerTiles(engineCatalog);
+  const gemini = tiles[2];
+  assert.deepEqual([gemini.key, gemini.name, gemini.mark], ["gemini", "Gemini API", "gemini"]);
+  assert.equal(gemini.line, "Pay-as-you-go Google Gemini API key.");
+  assert.deepEqual(gemini.options.map((option) => [option.title, option.detail, option.recommended, option.provider.provider, option.entry.method, option.native ?? null]),
+    [["Use an API key", "Pay per use with a Gemini key.", false, "gemini", "api_key", null]]);
+  const tilesMarkup = renderToStaticMarkup(createElement(ProviderTiles, { catalog: engineCatalog, onPick: forbidden }));
+  assert.ok(tilesMarkup.includes('<span class="title">Gemini API</span><span class="detail">Pay-as-you-go Google Gemini API key.</span>'));
+  const menu = renderToStaticMarkup(createElement(MethodMenu, { tile: gemini, onPick: forbidden }));
+  assert.match(menu, /Pay per use with a Gemini key\./);
+  assert.doesNotMatch(menu, /Recommended/);
+  assert.equal(defaultAccountName(gemini.options[0].provider, []), "Gemini API 1");
+  const form = keyForm(engineCatalog[2]);
+  const key = form.match(/<input\b[^>]*id="account-key"[^>]*>/)?.[0];
+  assert.ok(key, "a Gemini key account shows the key field");
+  assert.match(key, /type="password"/);
+  assert.doesNotMatch(key, /\b(?:value|name)=/);
+  assert.match(form, /id="account-model"/);
+  assert.doesNotMatch(form, /id="account-url"/);
 });
 
 test("URL accounts show the base URL and model without routing identities; only the key field is masked", () => {

@@ -7,9 +7,9 @@ use super::project_time::{clock, duration};
 use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
-    HeavyLane, NativeSubAgents, Nudges, Overlaps, QuestionsTo, RESOURCE_NAME_BYTES_MAX,
-    ROLE_SKILLS_MAX, SHARED_RESOURCES_MAX, SharedResource, SkillRole, SubagentMode, TaskStart,
-    TerminalDisplay, native_scope, native_sub_agents,
+    HeavyLane, LISTED_NATIVE_UNAVAILABLE, NativeSubAgents, Nudges, Overlaps, QuestionsTo,
+    RESOURCE_NAME_BYTES_MAX, ROLE_SKILLS_MAX, SHARED_RESOURCES_MAX, SharedResource, SkillRole,
+    SubagentMode, TaskStart, TerminalDisplay, native_scope, native_sub_agents,
 };
 use crate::engine::owner::OwnerResult;
 use crate::harnesses::HarnessEntry;
@@ -4181,13 +4181,9 @@ fn mode_words(kind: HarnessKind, mode: SubagentMode) -> &'static str {
 fn native_unavailable(kind: HarnessKind) -> &'static str {
     match native_sub_agents(kind) {
         NativeSubAgents::Unavailable(reason) => reason,
-        NativeSubAgents::Teams | NativeSubAgents::Threads => NATIVE_UNSUPPORTED,
+        NativeSubAgents::Teams | NativeSubAgents::Threads => LISTED_NATIVE_UNAVAILABLE,
     }
 }
-
-/// The general reason a harness kind's sub-agents stay app-spawned (`coord_native_unsupported`).
-const NATIVE_UNSUPPORTED: &str =
-    "This harness has no native sub-agents, so its sub-agents are app-spawned.";
 
 fn delivery_words(delivery: Delivery) -> &'static str {
     match delivery {
@@ -4469,7 +4465,7 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         }
         "team_run_time_invalid" => "Pick a listed master run time, or No limit.".into(),
         "team_budget_invalid" => "Pick a listed token budget, or Off.".into(),
-        "coord_native_unsupported" => NATIVE_UNSUPPORTED.into(),
+        "coord_native_unsupported" => LISTED_NATIVE_UNAVAILABLE.into(),
         "coord_settings_invalid" => {
             "Count at most 32 tools, each named once with letters, digits, _, - or *.".into()
         }
