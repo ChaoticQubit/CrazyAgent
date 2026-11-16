@@ -87,7 +87,7 @@ function PluginRow({ plugin, busy, actions }: { plugin: PluginView; busy: boolea
         : <Button size="small" variant="quiet" aria-label={`Unbind ${secret.name} of ${plugin.title}`} disabled={busy} onClick={() => actions.onUnbind(plugin.name, secret.name)}>Unbind</Button>}
     </li>)}</ul>}
     <div className="pj-row">
-      <Switch id={`app-plugin-${plugin.name}`} label={`Use ${plugin.title}`} checked={plugin.enabled} disabledReason={blocked}
+      <Switch id={`app-plugin-${encodeURIComponent(plugin.name)}`} label={`Use ${plugin.title}`} checked={plugin.enabled} disabledReason={blocked}
         onChecked={(on) => { if (!busy) actions.onEnabled(plugin.name, on); }} />
       {plugin.status.kind === "needs_review" && <Button size="small" aria-label={`Review ${plugin.title}`} disabled={busy} onClick={() => actions.onReview(plugin.name)}>Review</Button>}
       {plugin.origin === "user" && <Button size="small" variant="danger-text" aria-label={`Remove ${plugin.title}`} disabled={busy} onClick={() => actions.onRemove(plugin)}>Remove</Button>}
