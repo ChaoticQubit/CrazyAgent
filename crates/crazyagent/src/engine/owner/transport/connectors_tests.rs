@@ -844,6 +844,15 @@ fn the_owner_saves_and_removes_an_own_oauth_app_through_the_protocol() {
     assert_eq!(plugin_key(&root, secret), None);
     assert_eq!(sign_in::state_of(&root, "board"), SignInState::Cancelled);
 
+    page(own_app(&root, "app-0003", Some(b"cs-secret-0003")).unwrap());
+    let bound = crate::protocol::CredentialRef::new(issuer.to_owned()).unwrap();
+    let keys = crate::storage::accounts::PLUGIN_KEYS;
+    let issued = b"https://auth.board.example".to_vec();
+    let saved = crate::storage::accounts::replace_key_in(&root, keys, &bound, issued);
+    saved.unwrap();
+    for key in [id, secret, issuer] {
+        assert!(plugin_key(&root, key).is_some(), "{key}");
+    }
     waiting_sign_in(&root);
     ask(&root, json!({"kind": "clear_own_app", "name": "board"}));
     assert_eq!(sign_in::state_of(&root, "board"), SignInState::Cancelled);
