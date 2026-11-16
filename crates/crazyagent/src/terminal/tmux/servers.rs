@@ -916,3 +916,7 @@ impl Host for Servers {
         first.map_or(Ok(()), Err)
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "servers/mates_tests.rs"]
+mod mates_tests;
