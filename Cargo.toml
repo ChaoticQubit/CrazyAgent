@@ -2,6 +2,7 @@
 members = [
     "crates/crazyagent",
     "crates/crazyagent-win-sandbox",
+    "crates/crazyagent-mac-power",
     "crates/trackwright-core",
     "crates/trackwright-mcp",
     "crates/trackwright-cli",

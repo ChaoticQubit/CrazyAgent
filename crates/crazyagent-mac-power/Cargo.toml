@@ -1,0 +1,23 @@
+[package]
+name = "crazyagent-mac-power"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "crazyagent-power-helper"
+path = "src/bin/crazyagent-power-helper.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "=0.10.1"
+libc = "=0.2.191"
+security-framework = "=3.7.0"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+
+[dev-dependencies]
+tempfile = "=3.27.0"

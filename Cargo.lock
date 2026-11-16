@@ -835,6 +835,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crazyagent-mac-power"
+version = "2.3.0"
+dependencies = [
+ "core-foundation 0.10.1",
+ "libc",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "crazyagent-win-sandbox"
 version = "2.3.0"
 dependencies = [
