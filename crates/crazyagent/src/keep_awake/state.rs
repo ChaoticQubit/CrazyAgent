@@ -69,12 +69,15 @@ impl LowPowerSupport {
     /// What a platform says before its low power line ran: not available on Windows, not
     /// read yet elsewhere. Input: the platform. Output: the support.
     pub fn at_start(platform: Platform) -> Self {
-        let red_stub = platform;
-        assert!(matches!(
-            red_stub,
-            Platform::MacOs | Platform::Linux | Platform::Windows
-        ));
-        Self::Unread
+        let start = match platform {
+            Platform::Windows => Self::NotAvailable {
+                reason: LOW_POWER_WINDOWS.into(),
+            },
+            Platform::MacOs | Platform::Linux => Self::Unread,
+        };
+        assert!(matches!(platform, Platform::Windows) || start == Self::Unread);
+        assert_ne!(start, Self::Held);
+        start
     }
 }
 

@@ -119,7 +119,11 @@ pub type PowerLine = Box<dyn FnMut(bool, i64) -> LowPowerSupport + Send>;
 /// where low power mode rides the lid line (macOS) or is not available (Windows). Output:
 /// the power line, if this platform has one.
 pub fn platform_power() -> Option<PowerLine> {
-    None
+    #[cfg(target_os = "linux")]
+    let power = Some(super::low_power_linux::power_line());
+    #[cfg(not(target_os = "linux"))]
+    let power = None;
+    power
 }
 
 /// Builds this platform's reader: system tools on macOS, files below `/sys`, `/proc` and
@@ -195,13 +199,14 @@ pub fn sensors(reading: &PowerReading, battery_unread_twice: bool, lid_refused: 
 /// The keeper's line to the sensor thread. The keeper asks for a reading and takes the
 /// answer on a later step, so a slow system tool, bus or lid helper never holds up the
 /// engine's team step. Each ask carries the keeper's lid ask, and an owner command when
-/// one waits, for the lid line, if the thread runs one. The thread ends when this value
-/// is dropped.
+/// one waits, for the lid line, and the low power ask for the power line, if the thread
+/// runs them. The thread ends when this value is dropped, and a power line's hold with it.
 #[derive(Debug)]
 pub(super) struct Sensing {
     ask: SyncSender<Ask>,
     answers: Receiver<PowerReading>,
     lid: bool,
+    power: bool,
     pending: Option<LidCommand>,
     asked_ms: Option<i64>,
     asked_with: Option<LidAsk>,
@@ -215,10 +220,22 @@ impl Sensing {
     /// whose lid support stands in for the reader's in every reading. Inputs: the reader
     /// and the lid line, which the thread owns from here on. Output: the line to the
     /// thread, or the error of starting it.
-    pub(super) fn start(mut reader: Reader, mut lid: Option<LidReader>) -> std::io::Result<Self> {
+    pub(super) fn start(reader: Reader, lid: Option<LidReader>) -> std::io::Result<Self> {
+        Self::start_lines(reader, lid, None)
+    }
+
+    /// Starts the sensor thread around a reader, the lid line and the power line, where
+    /// the platform has them; each line's support stands in for the reader's in every
+    /// reading. Inputs: the reader and both lines, which the thread owns from here on.
+    /// Output: the line to the thread, or the error of starting it.
+    pub(super) fn start_lines(
+        mut reader: Reader,
+        mut lid: Option<LidReader>,
+        mut power: Option<PowerLine>,
+    ) -> std::io::Result<Self> {
         let (ask, asked) = sync_channel::<Ask>(1);
         let (answer, answers) = sync_channel::<PowerReading>(1);
-        let has_lid = lid.is_some();
+        let (has_lid, has_power) = (lid.is_some(), power.is_some());
         std::thread::Builder::new()
             .name(THREAD_NAME.into())
             .spawn(move || {
@@ -226,6 +243,9 @@ impl Sensing {
                     let mut reading = reader();
                     if let Some(lid) = lid.as_mut() {
                         reading.lid_support = lid(lid_ask, command, now_ms);
+                    }
+                    if let Some(power) = power.as_mut() {
+                        reading.low_power = power(lid_ask.low_power, now_ms);
                     }
                     assert_ne!(reading.lid_support, LidSupport::Off);
                     if answer.send(reading).is_err() {
@@ -237,6 +257,7 @@ impl Sensing {
             ask,
             answers,
             lid: has_lid,
+            power: has_power,
             pending: None,
             asked_ms: None,
             asked_with: None,
@@ -244,19 +265,6 @@ impl Sensing {
             late: false,
             stopped: false,
         })
-    }
-
-    /// Starts the sensor thread around a reader, the lid line and the power line, where
-    /// the platform has them; each line's support stands in for the reader's in every
-    /// reading. Inputs: the reader and both lines, which the thread owns from here on.
-    /// Output: the line to the thread, or the error of starting it.
-    pub(super) fn start_lines(
-        reader: Reader,
-        lid: Option<LidReader>,
-        power: Option<PowerLine>,
-    ) -> std::io::Result<Self> {
-        drop(power);
-        Self::start(reader, lid)
     }
 
     /// Hands an owner command to the lid line with the next ask, which goes out at once
@@ -274,14 +282,15 @@ impl Sensing {
     /// Sends a last ask and waits for its answer, at most `wait` in all, so a lid or low
     /// power lease is released before the engine stops. A reading under way is waited for
     /// first; the last ask goes only when the ask sent before it wanted the lid or low power.
-    /// It does nothing without a lid line or before any ask. Inputs: the last ask and the
-    /// longest wait.
+    /// It does nothing without a lid or power line, or before any ask. Inputs: the last ask
+    /// and the longest wait.
     pub(super) fn finish(&mut self, last: LidAsk, wait: Duration) {
         assert!(!last.wanted);
         assert!(!last.sleep_display);
         assert!(!last.low_power);
         assert!(!wait.is_zero());
-        let Some(asked_ms) = self.asked_ms.filter(|_| self.lid && !self.stopped) else {
+        let lines = self.lid || self.power;
+        let Some(asked_ms) = self.asked_ms.filter(|_| lines && !self.stopped) else {
             return;
         };
         let until = Instant::now() + wait;
@@ -318,7 +327,8 @@ impl Sensing {
 
     /// Takes one step: hands over a reading that came back, and asks for the next one
     /// when `READ_MS` passed since the last ask, or at once when the thread runs a lid
-    /// line and the lid ask changed, while none is under way. A reading that takes longer
+    /// line and the lid ask changed, or a power line and the low power ask changed, while
+    /// none is under way. A reading that takes longer
     /// than two periods is logged once. Inputs: the engine time and the lid ask. Output:
     /// the reading that came back since the last step, if any.
     pub(super) fn step(&mut self, now_ms: i64, lid_ask: LidAsk) -> Option<PowerReading> {
@@ -338,7 +348,10 @@ impl Sensing {
             return answer;
         }
         let since = self.asked_ms.map(|asked| now_ms - asked);
-        let changed = self.lid && self.asked_with != Some(lid_ask);
+        let lid_changed = self.lid && self.asked_with != Some(lid_ask);
+        let low_power_asked = self.asked_with.map(|asked| asked.low_power);
+        let power_changed = self.power && low_power_asked != Some(lid_ask.low_power);
+        let changed = lid_changed || power_changed;
         let ordered = self.pending.is_some();
         let due = changed || ordered || since.is_none_or(|since| !(0..READ_MS).contains(&since));
         if due && !self.waiting {

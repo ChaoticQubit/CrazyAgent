@@ -15172,9 +15172,10 @@ pub fn start_for_engine(
     let mut runtime = runtime.with_events(super::events::HANDLERS);
     runtime.keep_awake =
         crate::keep_awake::Keeper::with_hold(crate::keep_awake::platform_hold(std::process::id()))
-            .with_sensors(
+            .with_lines(
                 crate::keep_awake::power::platform_reader(),
                 crate::keep_awake::power::platform_lid(),
+                crate::keep_awake::power::platform_power(),
             )
             .with_leftover(leftover);
     Ok(TeamService::start(runtime, Duration::from_millis(250)))

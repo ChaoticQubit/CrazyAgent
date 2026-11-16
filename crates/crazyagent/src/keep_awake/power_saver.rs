@@ -40,8 +40,9 @@ pub(super) trait Saver: Send {
     fn release(&mut self, cookie: u32);
 }
 
-/// The power line's state (QUESTION 39g): the hold it has, whether the owner picked a
-/// profile during this hold, and what a first look at the daemon found.
+/// The power line's state (QUESTION 39g): the cookie of the hold it has, whether the owner
+/// picked a profile during this hold, and what the daemon offers while the line rests,
+/// from a first look, the last hold, or the last failure.
 pub(super) struct PowerSaver {
     saver: Box<dyn Saver>,
     cookie: Option<u32>,
@@ -61,11 +62,101 @@ impl PowerSaver {
         }
     }
 
-    /// Brings the hold to the ask. Input: whether the running hold asks for low power mode.
-    /// Output: the low power support the line has now.
+    /// Brings the hold to the ask: holds power saver once while it is wanted, keeps a
+    /// profile the owner picked for the rest of that hold, and lets go when it is not.
+    /// Input: whether the running hold asks for low power mode. Output: the low power
+    /// support the line has now.
     pub(super) fn step(&mut self, wanted: bool) -> LowPowerSupport {
-        let red_stub = (wanted, self.cookie, self.owner_changed, self.looked.is_some());
-        assert!(red_stub.1.is_none() || !red_stub.2);
-        LowPowerSupport::Unread
+        assert!(self.cookie.is_none() || !self.owner_changed);
+        let support = if wanted { self.hold() } else { self.rest() };
+        assert!(wanted || self.cookie.is_none());
+        assert!(self.cookie.is_none() || support == LowPowerSupport::Held);
+        assert!(!self.owner_changed || support == LowPowerSupport::OwnerChanged);
+        support
     }
+
+    /// Holds power saver for a hold that asks for it, unless the owner picked a profile
+    /// during this hold. Output: held, owner changed, or not available with why.
+    fn hold(&mut self) -> LowPowerSupport {
+        if self.owner_changed {
+            assert!(self.cookie.is_none());
+            return LowPowerSupport::OwnerChanged;
+        }
+        if self.cookie.is_some() {
+            return self.check();
+        }
+        match self.saver.hold() {
+            Ok(cookie) => {
+                self.cookie = Some(cookie);
+                self.looked = Some(LowPowerSupport::Ready);
+                LowPowerSupport::Held
+            }
+            Err(problem) => {
+                let support = not_available(&problem);
+                self.looked = Some(support.clone());
+                support
+            }
+        }
+    }
+
+    /// Looks whether the daemon still lists the line's hold; one it dropped means the
+    /// owner picked a profile, which is kept. A look that fails counts as still held, and
+    /// the next reading looks again. Output: held or owner changed.
+    fn check(&mut self) -> LowPowerSupport {
+        assert!(self.cookie.is_some());
+        match self.saver.holds_ours() {
+            Ok(true) => LowPowerSupport::Held,
+            Ok(false) => {
+                self.cookie = None;
+                self.owner_changed = true;
+                LowPowerSupport::OwnerChanged
+            }
+            Err(problem) => {
+                let words = not_available(&problem);
+                eprintln!("keep awake: the power saver holds could not be read: {words:?}");
+                LowPowerSupport::Held
+            }
+        }
+    }
+
+    /// Lets go of the line's hold, if it has one, and says what the daemon offers, looking
+    /// once when nothing said so yet. Output: ready, or not available with why.
+    fn rest(&mut self) -> LowPowerSupport {
+        self.owner_changed = false;
+        if let Some(cookie) = self.cookie.take() {
+            self.saver.release(cookie);
+            self.looked = Some(LowPowerSupport::Ready);
+        }
+        let looked = match self.looked.clone() {
+            Some(looked) => looked,
+            None => {
+                let found = match self.saver.present() {
+                    Ok(()) => LowPowerSupport::Ready,
+                    Err(problem) => not_available(&problem),
+                };
+                self.looked = Some(found.clone());
+                found
+            }
+        };
+        assert_ne!(looked, LowPowerSupport::Held);
+        assert_ne!(looked, LowPowerSupport::OwnerChanged);
+        looked
+    }
+}
+
+/// The words the low power row shows for a daemon that did not answer as asked, with the
+/// daemon's own text cut to `REASON_CHARS_MAX` characters and no control character. Input:
+/// why. Output: not available with those words.
+fn not_available(problem: &SaverError) -> LowPowerSupport {
+    let reason = match problem {
+        SaverError::NotRunning => NOT_RUNNING.to_owned(),
+        SaverError::Refused => REFUSED.to_owned(),
+        SaverError::Failed(text) => {
+            let shown = text.chars().filter(|character| !character.is_control());
+            format!("{FAILED}{}", shown.take(REASON_CHARS_MAX).collect::<String>())
+        }
+    };
+    assert!(reason.starts_with("Not available: "));
+    assert!(reason.chars().count() <= FAILED.chars().count() + REASON_CHARS_MAX);
+    LowPowerSupport::NotAvailable { reason }
 }

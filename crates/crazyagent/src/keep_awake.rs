@@ -8,6 +8,8 @@ mod hold_macos;
 #[cfg(windows)]
 mod hold_windows;
 pub mod journal;
+#[cfg(target_os = "linux")]
+mod low_power_linux;
 pub mod power;
 pub mod power_linux;
 pub mod power_macos;
@@ -561,7 +563,8 @@ fn noted(
 /// one, in step with the decision. With a reader it asks a sensor thread for a reading
 /// every `power::READ_MS`; with a lid line there too, it hands the line what the lid
 /// wants with each ask, and at once when that changes, each owner lid command once, and
-/// notes a lid helper journal the line cannot read for the notification center.
+/// notes a lid helper journal the line cannot read for the notification center. With a
+/// power line, it hands the line the low power ask the same way (Task 16).
 #[derive(Debug, Default)]
 pub struct Keeper {
     looked_ms: Option<i64>,
@@ -571,6 +574,7 @@ pub struct Keeper {
     lost: bool,
     sensing: Option<power::Sensing>,
     lid_line: bool,
+    power_line: bool,
     lid_ask: power::LidAsk,
     low_power_under: Option<LowPower>,
     lid_order_sent: u32,
@@ -605,19 +609,8 @@ impl Keeper {
     /// it, so a platform hold that takes only idle sleep is no refused lid. Inputs: the
     /// reader and the lid line. Output: the keeper; when the thread cannot start that is
     /// logged and the keeper reads nothing and holds no lid.
-    pub fn with_sensors(mut self, reader: power::Reader, lid: Option<power::LidReader>) -> Self {
-        assert!(self.sensing.is_none());
-        assert!(!self.lid_line);
-        let has_lid = lid.is_some();
-        match power::Sensing::start(reader, lid) {
-            Ok(sensing) => {
-                self.sensing = Some(sensing);
-                self.lid_line = has_lid;
-            }
-            Err(problem) => eprintln!("keep awake: no sensor thread: {problem}"),
-        }
-        assert!(self.sensing.is_some() || !self.lid_line);
-        self
+    pub fn with_sensors(self, reader: power::Reader, lid: Option<power::LidReader>) -> Self {
+        self.with_lines(reader, lid, None)
     }
 
     /// Gives the keeper platform readings, the lid line and the power line, where the
@@ -626,13 +619,26 @@ impl Keeper {
     /// and both lines. Output: the keeper; when the thread cannot start that is logged and
     /// the keeper reads nothing and holds neither line.
     pub fn with_lines(
-        self,
+        mut self,
         reader: power::Reader,
         lid: Option<power::LidReader>,
-        power: Option<power::PowerLine>,
+        saver: Option<power::PowerLine>,
     ) -> Self {
-        drop(power);
-        self.with_sensors(reader, lid)
+        assert!(self.sensing.is_none());
+        assert!(!self.lid_line);
+        assert!(!self.power_line);
+        let (has_lid, has_saver) = (lid.is_some(), saver.is_some());
+        match power::Sensing::start_lines(reader, lid, saver) {
+            Ok(sensing) => {
+                self.sensing = Some(sensing);
+                self.lid_line = has_lid;
+                self.power_line = has_saver;
+            }
+            Err(problem) => eprintln!("keep awake: no sensor thread: {problem}"),
+        }
+        assert!(self.sensing.is_some() || !self.lid_line);
+        assert!(self.sensing.is_some() || !self.power_line);
+        self
     }
 
     /// Gives the keeper what the engine start's undo left, which its next step writes to
@@ -697,13 +703,13 @@ impl Keeper {
     }
 
     /// Drops every hold as the engine stops (QUESTION 36d): the platform hold at once, and
-    /// the lid lease through one last ask the sensor thread answers within `STOP_WAIT`, or
-    /// the lease runs out by itself.
+    /// the lid lease or the power saver hold through one last ask the sensor thread answers
+    /// within `STOP_WAIT`, or the lease runs out and the bus connection closes by itself.
     pub fn stop(&mut self) {
         self.release();
         assert!(!self.lid_ask.wanted);
         assert!(!self.lid_ask.low_power);
-        if !self.lid_line {
+        if !self.lid_line && !self.power_line {
             return;
         }
         if let Some(sensing) = self.sensing.as_mut() {
