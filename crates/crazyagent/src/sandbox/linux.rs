@@ -2099,10 +2099,15 @@ impl Sandbox for LinuxSandbox {
     }
 }
 
+/// What a launch's Landlock rules grant: folders read, folders written whole, git folders
+/// written with [`git_folder_rights`], and `guarded`, the protected paths inside a git
+/// folder grant that Landlock cannot keep read-only there, which the call supervisor and
+/// the nested backend's binds must hold before a confined launch starts (DEC-185 S1).
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
     git_write: Vec<PathBuf>,
+    guarded: Vec<PathBuf>,
 }
 
 impl Grants {
@@ -2173,6 +2178,7 @@ impl Grants {
             read,
             write,
             git_write: Vec::new(),
+            guarded: Vec::new(),
         })
     }
 }
@@ -2443,6 +2449,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: Vec::new(),
+            guarded: Vec::new(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -2460,6 +2467,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: Vec::new(),
+            guarded: Vec::new(),
         };
         let unshares = |network: SandboxNetwork| {
             bwrap_command(
@@ -2562,6 +2570,11 @@ mod tests {
             grants.read.contains(&project),
             "the object store is read through the project"
         );
+        assert_eq!(
+            grants.guarded,
+            vec![admin.join("modules")],
+            "the admin folder's submodule store is left to the supervisor and the binds"
+        );
     }
 
     #[test]
@@ -2574,6 +2587,7 @@ mod tests {
         let grants = Grants::of(&confined).unwrap();
         assert!(grants.write.contains(&clone));
         assert!(grants.git_write.is_empty());
+        assert!(grants.guarded.is_empty());
         let git = project.join(".git");
         assert!(grants.write.iter().all(|path| !path.starts_with(&git)));
     }
@@ -2644,6 +2658,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: vec![PathBuf::from("/p/.git/worktrees/agent-1")],
+            guarded: Vec::new(),
         };
         let _command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -2677,6 +2692,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: Vec::new(),
+            guarded: Vec::new(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(!policy.limit_network);
@@ -2787,6 +2803,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: Vec::new(),
+            guarded: Vec::new(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(policy.limit_network);
@@ -2907,6 +2924,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             git_write: Vec::new(),
+            guarded: Vec::new(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
