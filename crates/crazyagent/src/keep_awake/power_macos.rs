@@ -74,7 +74,7 @@ mod live {
     /// at most `RUN_WAIT` and reading at most `TEXT_BYTES_MAX`. Inputs: the program and its
     /// arguments. Output: the text, or none when the tool did not start, did not finish in
     /// time, failed, or printed something that is not text.
-    fn run(program: &str, arguments: &[&str]) -> Option<String> {
+    pub(crate) fn run(program: &str, arguments: &[&str]) -> Option<String> {
         assert!(program.starts_with('/'));
         let mut command = Command::new(program);
         command
@@ -126,4 +126,4 @@ mod live {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use live::read;
+pub(crate) use live::{read, run};

@@ -60,7 +60,11 @@ pub type LidReader = Box<dyn FnMut(LidAsk, i64) -> LidSupport + Send>;
 /// Builds this platform's lid line: the macOS lid helper, and none elsewhere, where the
 /// reader's own lid support stands. Output: the lid line, if this platform has one.
 pub fn platform_lid() -> Option<LidReader> {
-    None
+    #[cfg(target_os = "macos")]
+    let lid = Some(super::hold_macos::lid_reader());
+    #[cfg(not(target_os = "macos"))]
+    let lid = None;
+    lid
 }
 
 /// Builds this platform's reader: system tools on macOS, files below `/sys`, `/proc` and
@@ -133,30 +137,40 @@ pub fn sensors(reading: &PowerReading, battery_unread_twice: bool, lid_refused: 
 }
 
 /// The keeper's line to the sensor thread. The keeper asks for a reading and takes the
-/// answer on a later step, so a slow system tool or bus never holds up the engine's team
-/// step. The thread ends when this value is dropped.
+/// answer on a later step, so a slow system tool, bus or lid helper never holds up the
+/// engine's team step. Each ask carries the keeper's lid ask for the lid line, if the
+/// thread runs one. The thread ends when this value is dropped.
 #[derive(Debug)]
 pub(super) struct Sensing {
-    ask: SyncSender<()>,
+    ask: SyncSender<(LidAsk, i64)>,
     answers: Receiver<PowerReading>,
+    lid: bool,
     asked_ms: Option<i64>,
+    asked_with: Option<LidAsk>,
     waiting: bool,
     late: bool,
     stopped: bool,
 }
 
 impl Sensing {
-    /// Starts the sensor thread around a reader and, where there is one, the lid line.
-    /// Inputs: the reader and the lid line, which the thread owns from here on. Output:
-    /// the line to the thread, or the error of starting it.
-    pub(super) fn start(mut reader: Reader, _lid: Option<LidReader>) -> std::io::Result<Self> {
-        let (ask, asked) = sync_channel::<()>(1);
+    /// Starts the sensor thread around a reader and, where there is one, the lid line,
+    /// whose lid support stands in for the reader's in every reading. Inputs: the reader
+    /// and the lid line, which the thread owns from here on. Output: the line to the
+    /// thread, or the error of starting it.
+    pub(super) fn start(mut reader: Reader, mut lid: Option<LidReader>) -> std::io::Result<Self> {
+        let (ask, asked) = sync_channel::<(LidAsk, i64)>(1);
         let (answer, answers) = sync_channel::<PowerReading>(1);
+        let has_lid = lid.is_some();
         std::thread::Builder::new()
             .name(THREAD_NAME.into())
             .spawn(move || {
-                while asked.recv().is_ok() {
-                    if answer.send(reader()).is_err() {
+                while let Ok((lid_ask, now_ms)) = asked.recv() {
+                    let mut reading = reader();
+                    if let Some(lid) = lid.as_mut() {
+                        reading.lid_support = lid(lid_ask, now_ms);
+                    }
+                    assert_ne!(reading.lid_support, LidSupport::Off);
+                    if answer.send(reading).is_err() {
                         break;
                     }
                 }
@@ -164,7 +178,9 @@ impl Sensing {
         Ok(Self {
             ask,
             answers,
+            lid: has_lid,
             asked_ms: None,
+            asked_with: None,
             waiting: false,
             late: false,
             stopped: false,
@@ -184,11 +200,13 @@ impl Sensing {
     }
 
     /// Takes one step: hands over a reading that came back, and asks for the next one
-    /// when `READ_MS` passed since the last ask and none is under way. A reading that
-    /// takes longer than two periods is logged once. Inputs: the engine time and the lid
-    /// ask. Output: the reading that came back since the last step, if any.
-    pub(super) fn step(&mut self, now_ms: i64, _lid_ask: LidAsk) -> Option<PowerReading> {
+    /// when `READ_MS` passed since the last ask, or at once when the thread runs a lid
+    /// line and the lid ask changed, while none is under way. A reading that takes longer
+    /// than two periods is logged once. Inputs: the engine time and the lid ask. Output:
+    /// the reading that came back since the last step, if any.
+    pub(super) fn step(&mut self, now_ms: i64, lid_ask: LidAsk) -> Option<PowerReading> {
         assert!(now_ms > 0);
+        assert!(lid_ask.rule_on || !lid_ask.wanted);
         let answer = match self.answers.try_recv() {
             Ok(reading) => {
                 self.waiting = false;
@@ -202,20 +220,23 @@ impl Sensing {
             return answer;
         }
         let since = self.asked_ms.map(|asked| now_ms - asked);
-        let due = since.is_none_or(|since| !(0..READ_MS).contains(&since));
+        let changed = self.lid && self.asked_with != Some(lid_ask);
+        let due = changed || since.is_none_or(|since| !(0..READ_MS).contains(&since));
         if due && !self.waiting {
-            match self.ask.try_send(()) {
-                Ok(()) | Err(TrySendError::Full(())) => {
+            match self.ask.try_send((lid_ask, now_ms)) {
+                Ok(()) | Err(TrySendError::Full(_)) => {
                     self.waiting = true;
                     self.asked_ms = Some(now_ms);
+                    self.asked_with = Some(lid_ask);
                 }
-                Err(TrySendError::Disconnected(())) => return answer.or_else(|| self.stop()),
+                Err(TrySendError::Disconnected(_)) => return answer.or_else(|| self.stop()),
             }
         } else if self.waiting && !self.late && since.is_some_and(|s| s >= LATE_READS * READ_MS) {
             eprintln!("keep awake: a platform reading is taking long, the last one stays");
             self.late = true;
         }
         assert!(self.waiting || self.asked_ms.is_some());
+        assert_eq!(self.asked_with.is_some(), self.asked_ms.is_some());
         answer
     }
 }

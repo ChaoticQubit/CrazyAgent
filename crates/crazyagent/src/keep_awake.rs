@@ -504,7 +504,8 @@ fn noted(
 /// change or a new platform reading and evaluates at once when it finds one, and every
 /// `TICK_MS` otherwise. After every evaluation it brings the platform hold, when it has
 /// one, in step with the decision. With a reader it asks a sensor thread for a reading
-/// every `power::READ_MS`.
+/// every `power::READ_MS`; with a lid line there too, it hands the line what the lid
+/// wants with each ask, and at once when that changes.
 #[derive(Debug, Default)]
 pub struct Keeper {
     looked_ms: Option<i64>,
@@ -513,6 +514,8 @@ pub struct Keeper {
     hold: Option<Box<dyn Hold + Send>>,
     lost: bool,
     sensing: Option<power::Sensing>,
+    lid_line: bool,
+    lid_ask: power::LidAsk,
     reading: Option<power::PowerReading>,
     battery_unread: bool,
     battery_unread_twice: bool,
@@ -534,20 +537,28 @@ impl Keeper {
     /// the keeper then asks every `power::READ_MS`. Input: the reader. Output: the keeper;
     /// when the thread cannot start that is logged and the keeper reads nothing, as one
     /// built without a reader does.
-    pub fn with_reader(mut self, reader: power::Reader) -> Self {
-        assert!(self.sensing.is_none());
-        match power::Sensing::start(reader, None) {
-            Ok(sensing) => self.sensing = Some(sensing),
-            Err(problem) => eprintln!("keep awake: no sensor thread: {problem}"),
-        }
-        self
+    pub fn with_reader(self, reader: power::Reader) -> Self {
+        self.with_sensors(reader, None)
     }
 
     /// Gives the keeper platform readings and, where the platform has one, the lid line,
-    /// both run on the sensor thread. Inputs: the reader and the lid line. Output: the
-    /// keeper.
-    pub fn with_sensors(self, reader: power::Reader, _lid: Option<power::LidReader>) -> Self {
-        self.with_reader(reader)
+    /// both run on the sensor thread. A keeper with a lid line leaves the closed lid to
+    /// it, so a platform hold that takes only idle sleep is no refused lid. Inputs: the
+    /// reader and the lid line. Output: the keeper; when the thread cannot start that is
+    /// logged and the keeper reads nothing and holds no lid.
+    pub fn with_sensors(mut self, reader: power::Reader, lid: Option<power::LidReader>) -> Self {
+        assert!(self.sensing.is_none());
+        assert!(!self.lid_line);
+        let has_lid = lid.is_some();
+        match power::Sensing::start(reader, lid) {
+            Ok(sensing) => {
+                self.sensing = Some(sensing);
+                self.lid_line = has_lid;
+            }
+            Err(problem) => eprintln!("keep awake: no sensor thread: {problem}"),
+        }
+        assert!(self.sensing.is_some() || !self.lid_line);
+        self
     }
 
     /// Gives the keeper what the engine start's undo left, which its next step writes to
@@ -589,10 +600,7 @@ impl Keeper {
     /// before it was unread too. Input: the time. Output: the new sensors, or none when
     /// no reading came back.
     fn sense(&mut self, now_ms: i64) -> Option<Sensors> {
-        let reading = self
-            .sensing
-            .as_mut()?
-            .step(now_ms, power::LidAsk::default())?;
+        let reading = self.sensing.as_mut()?.step(now_ms, self.lid_ask)?;
         let unread = reading.source == PowerSource::Battery && reading.battery_pct.is_none();
         self.battery_unread_twice = unread && self.battery_unread;
         self.battery_unread = unread;
@@ -601,18 +609,21 @@ impl Keeper {
         self.sensors()
     }
 
-    /// Drops the platform hold, as the engine stops.
+    /// Drops the platform hold, as the engine stops or a step fails, and tells the lid
+    /// line at the next ask that the lid is not wanted.
     pub fn release(&mut self) {
         if let Some(hold) = self.hold.as_mut() {
             hold.release();
         }
         self.lost = false;
+        self.lid_ask.wanted = false;
     }
 
     /// Brings the platform hold in step with the wanted state. A hold found lost is logged
     /// and taken again at once; one lost twice in a row, or one that cannot be taken, is
     /// logged and counts as failed. A hold that came back without the lid it was asked for
-    /// marks the lid as refused for the rest of this engine run. Input: the wanted state.
+    /// marks the lid as refused for the rest of this engine run, unless a lid line holds
+    /// the lid, which reports its own refusals in its lid support. Input: the wanted state.
     /// Output: false when the hold is wanted and not in place.
     fn keep(&mut self, want: &Want) -> bool {
         let Some(hold) = self.hold.as_mut() else {
@@ -630,7 +641,8 @@ impl Keeper {
         };
         match held {
             Ok(held) => {
-                self.lid_refused |= matches!(want, Want::IdleAndLid { .. }) && !held.lid;
+                self.lid_refused |=
+                    !self.lid_line && matches!(want, Want::IdleAndLid { .. }) && !held.lid;
                 true
             }
             Err(problem) => {
@@ -702,6 +714,11 @@ impl Keeper {
         };
         self.evaluated_ms = Some(now_ms);
         self.work = Some(view.work);
+        self.lid_ask = power::LidAsk {
+            rule_on: view.settings.lid != LidRule::Off,
+            wanted: matches!(view.state.want, Want::IdleAndLid { .. }),
+        };
+        assert!(self.lid_ask.rule_on || !self.lid_ask.wanted);
         assert!(view.work <= work::WORK_MAX);
         Ok(Some(view))
     }
