@@ -4929,3 +4929,487 @@ fn a_connector_key_typed_on_its_page_is_saved_and_never_shown() {
     drop(pty);
     engine.stop();
 }
+
+#[test]
+fn connectors_write_ask_once() {
+    use crazyagent::connectors::{ConnectorSettings, WritePolicy};
+    let saved = connector_settings_after(
+        ConnectorSettings::DEFAULT,
+        &["End", "Up", "Up", "Up", "Right"],
+    );
+    let once = ConnectorSettings {
+        write: WritePolicy::AskOncePerProject,
+        ..ConnectorSettings::DEFAULT
+    };
+    assert_eq!(saved, once);
+}
+
+#[test]
+fn connectors_write_read_only() {
+    use crazyagent::connectors::{ConnectorSettings, WritePolicy};
+    let seed = ConnectorSettings {
+        write: WritePolicy::AskOncePerProject,
+        ..ConnectorSettings::DEFAULT
+    };
+    let saved = connector_settings_after(seed, &["End", "Up", "Up", "Up", "Right"]);
+    assert_eq!(saved.write, WritePolicy::ReadOnly);
+    assert_eq!(saved.wait, ConnectorSettings::DEFAULT.wait);
+}
+
+#[test]
+fn connectors_write_ask_every_time() {
+    use crazyagent::connectors::{ConnectorSettings, WritePolicy};
+    let seed = ConnectorSettings {
+        write: WritePolicy::AskOncePerProject,
+        ..ConnectorSettings::DEFAULT
+    };
+    let saved = connector_settings_after(seed, &["End", "Up", "Up", "Up", "Left"]);
+    assert_eq!(saved, ConnectorSettings::DEFAULT);
+}
+
+#[test]
+fn connectors_wait_2_min() {
+    use crazyagent::connectors::{ConnectorSettings, Wait};
+    let saved = connector_settings_after(ConnectorSettings::DEFAULT, &["End", "Up", "Up", "Left"]);
+    assert_eq!(saved.wait, Wait::Minutes2);
+    assert_eq!(saved.write, ConnectorSettings::DEFAULT.write);
+}
+
+#[test]
+fn connectors_wait_10_min() {
+    use crazyagent::connectors::{ConnectorSettings, Wait};
+    let seed = ConnectorSettings {
+        wait: Wait::Minutes30,
+        ..ConnectorSettings::DEFAULT
+    };
+    let saved = connector_settings_after(seed, &["End", "Up", "Up", "Left"]);
+    assert_eq!(saved, ConnectorSettings::DEFAULT);
+}
+
+#[test]
+fn connectors_wait_30_min() {
+    use crazyagent::connectors::{ConnectorSettings, Wait};
+    let saved = connector_settings_after(ConnectorSettings::DEFAULT, &["End", "Up", "Up", "Right"]);
+    assert_eq!(saved.wait, Wait::Minutes30);
+    assert_eq!(saved.native, ConnectorSettings::DEFAULT.native);
+}
+
+/// V3 Connectors matrix: the tool-list check and third-party label row is locked on and
+/// shows its reason under the settings that change.
+#[test]
+fn connectors_locked_line() {
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-conn-locked-");
+    go_to(&pty, "Settings / Connectors", "Settings / Connectors");
+    pty.until("Settings, Connectors lists the catalog", |screen| {
+        header_row(screen).contains("Settings  /  Connectors") && screen.contains("Catalog")
+    });
+    pty.keys(&["End"]);
+    pty.until("the locked line shows with its reason", |screen| {
+        screen.contains("Tool list check and third-party label  Always on")
+            && screen.contains("A connector whose vendor tools changed stops and shows a notice")
+    });
+    drop(pty);
+    engine.stop();
+}
+
+const BOARD_MANIFEST: &str = "schema: 1\nkind: connector\nname: board\ntitle: Board\nversion: 1\nmcp:\n  url: https://mcp.board.invalid/mcp\n  hosts: [mcp.board.invalid]\nkey:\n  secret: api_key\n  header: Authorization\n  scheme: Bearer\n";
+
+/// V3 Connectors matrix: adds the Board manifest from a file through Settings, Connectors:
+/// a opens the add form, Tab moves to the path field, Enter checks the file, End reads the
+/// trust screen to its end and y adds it. Input: the engine prefix. Output: the engine, the
+/// TUI on the catalog and the scratch disk holding the file; panics when a step never shows.
+fn board_added(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
+    let (engine, pty, disk) = tui_at_home(prefix);
+    let file = disk.path().join("board.yaml");
+    std::fs::write(&file, BOARD_MANIFEST).unwrap();
+    go_to(&pty, "Settings / Connectors", "Settings / Connectors");
+    pty.until("Settings, Connectors lists the catalog", |screen| {
+        header_row(screen).contains("Settings  /  Connectors") && screen.contains("Catalog")
+    });
+    pty.keys(&["a"]);
+    pty.until("a opens the add form", |screen| {
+        screen.contains("Connector manifest (YAML)")
+            && screen.contains("Or the path of a .yaml file")
+    });
+    pty.keys(&["Tab"]);
+    pty.text(file.to_str().expect("a scratch path is UTF-8"));
+    pty.keys(&["Enter"]);
+    let trust = pty.until("the file's trust screen", |screen| {
+        screen.contains("Trust Board?")
+    });
+    assert!(trust.contains("Reaches mcp.board.invalid"), "{trust}");
+    pty.keys(&["End", "y"]);
+    pty.until("Board is added", |screen| {
+        screen.contains("Board was added.")
+    });
+    (engine, pty, disk)
+}
+
+/// The engine's Connectors page, read through the owner protocol. Input: the engine.
+/// Output: the page.
+fn connectors_view(engine: &Engine) -> crazyagent::connectors::ConnectorsView {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(engine).await;
+            let view = owner.controller.connectors(None).await.unwrap();
+            owner.controller.detach();
+            view
+        })
+}
+
+#[test]
+fn connectors_add_file_and_trust() {
+    use crazyagent::app_plugins::{Origin, PluginStatus};
+    let (mut engine, pty, _disk) = board_added("ca-e2e-conn-add-");
+    let view = connectors_view(&engine);
+    let board = view
+        .connectors
+        .iter()
+        .find(|connector| connector.name == "board")
+        .expect("Board is listed");
+    assert_eq!(
+        (&board.origin, &board.status),
+        (&Origin::User, &PluginStatus::NeedsKey)
+    );
+    assert!(
+        engine
+            .path()
+            .join(crazyagent::app_plugins::FOLDER)
+            .join("board.yaml")
+            .is_file(),
+        "the manifest is in the owner's plugins folder"
+    );
+    drop(pty);
+    engine.stop();
+}
+
+#[test]
+fn connectors_clear_key() {
+    use crazyagent::app_plugins::Binding;
+    use crazyagent::engine::owner::AccountSecret;
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-conn-clear-");
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            let key = AccountSecret::new(b"lin_e2e_clear_key".to_vec()).unwrap();
+            owner
+                .controller
+                .connector_set_key("linear".into(), "api_key".into(), key)
+                .await
+                .unwrap();
+            owner.controller.detach();
+        });
+    go_to(&pty, "Settings / Connectors", "Settings / Connectors");
+    pty.until("the catalog lists Linear first", |screen| {
+        screen.contains("> Linear")
+    });
+    pty.keys(&["Enter"]);
+    pty.until("Linear's page shows the key", |screen| {
+        header_row(screen).contains("Connectors  /  Linear")
+            && screen.contains("api_key: Key you entered")
+    });
+    pty.keys(&["u"]);
+    let cleared = pty.until("the key is cleared", |screen| {
+        screen.contains("api_key no longer has a key.") && screen.contains("api_key: Not set")
+    });
+    assert!(
+        !cleared.contains("lin_e2e"),
+        "a key never shows:\n{cleared}"
+    );
+    let view = connectors_view(&engine);
+    let linear = view
+        .connectors
+        .iter()
+        .find(|connector| connector.name == "linear")
+        .expect("Linear is bundled");
+    assert!(
+        linear
+            .secrets
+            .iter()
+            .any(|secret| secret.name == "api_key" && secret.binding == Binding::None),
+        "{:?}",
+        linear.secrets
+    );
+    drop(pty);
+    engine.stop();
+}
+
+#[test]
+fn connectors_remove() {
+    let (mut engine, pty, _disk) = board_added("ca-e2e-conn-remove-");
+    for _ in 0..30 {
+        if pty.screen().contains("> Board") {
+            break;
+        }
+        pty.keys(&["Down"]);
+        std::thread::sleep(KEY_TIME);
+    }
+    pty.until("Board is picked in the catalog", |screen| {
+        screen.contains("> Board")
+    });
+    pty.keys(&["Enter"]);
+    pty.until("Enter opens Board's page", |screen| {
+        header_row(screen).contains("Connectors  /  Board")
+    });
+    pty.keys(&["x"]);
+    pty.until("x asks first", |screen| screen.contains("Remove Board?"));
+    pty.keys(&["y"]);
+    pty.until("Board is removed", |screen| {
+        screen.contains("Board was removed.")
+    });
+    let view = connectors_view(&engine);
+    assert!(
+        view.connectors
+            .iter()
+            .all(|connector| connector.name != "board"),
+        "Board is gone from the catalog"
+    );
+    assert!(
+        !engine
+            .path()
+            .join(crazyagent::app_plugins::FOLDER)
+            .join("board.yaml")
+            .exists(),
+        "its manifest is deleted"
+    );
+    drop(pty);
+    engine.stop();
+}
+
+const MATRIX_PROJECT: &str = "e2e-connectors-matrix";
+
+/// V3 Connectors matrix: an engine with one project, a key for the bundled Linear and
+/// `write` as the Write actions setting, and the TUI at Home. Inputs: the engine prefix
+/// and the setting. Output: the engine, the TUI, the scratch disk of the home folder and
+/// a runtime for owner reads.
+fn connector_project(
+    prefix: &str,
+    write: crazyagent::connectors::WritePolicy,
+) -> (Engine, Pty, tempfile::TempDir, tokio::runtime::Runtime) {
+    use crazyagent::connectors::ConnectorSettings;
+    use crazyagent::engine::owner::AccountSecret;
+    let engine = Engine::start(prefix);
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+        assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+        assert_eq!(
+            owner.create_project(MATRIX_PROJECT, PROJECT).await,
+            OwnerResult::Applied
+        );
+        let key = AccountSecret::new(b"lin_e2e_matrix_key".to_vec()).unwrap();
+        owner
+            .controller
+            .connector_set_key("linear".into(), "api_key".into(), key)
+            .await
+            .unwrap();
+        let version = owner.controller.connectors(None).await.unwrap().version;
+        let settings = ConnectorSettings {
+            write,
+            ..ConnectorSettings::DEFAULT
+        };
+        owner
+            .controller
+            .set_connector_settings(settings, version)
+            .await
+            .unwrap();
+        owner.controller.detach();
+    });
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, PROJECT));
+    setup_checked(&pty);
+    (engine, pty, disk, runtime)
+}
+
+/// Records one Linear write in the matrix project that waits for the owner, as the gateway
+/// does, asked at `asked_ms` with a 2 minute wait. Inputs: the engine, the vendor tool and
+/// when it asked. Output: the approval's id.
+fn ask_write(engine: &Engine, tool: &str, asked_ms: i64) -> i64 {
+    use crazyagent::connectors::Wait;
+    use crazyagent::connectors::approvals::{self, PendingWrite};
+    let db = questions::open(engine.path()).unwrap();
+    let write = PendingWrite {
+        launch: "e2e-launch".into(),
+        project: MATRIX_PROJECT.into(),
+        agent: "Agent 1".into(),
+        connector: "linear".into(),
+        title: "Linear".into(),
+        tool: tool.into(),
+        preview: format!("{tool} title=Ship it"),
+        arguments: "{\"title\":\"Ship it\"}".into(),
+        hidden: false,
+    };
+    approvals::ask(&db, &write, Wait::Minutes2, asked_ms).unwrap()
+}
+
+/// Opens the approval page of the newest waiting write through the notifications list: n,
+/// then Enter on the write's item. Inputs: the TUI and the vendor tool. Output: the page as
+/// it first shows; panics when the item or the page never shows.
+fn open_approval(pty: &Pty, tool: &str) -> String {
+    let notice = format!("Linear wants to run {tool}");
+    pty.keys(&["n"]);
+    pty.until("n lists the waiting write", |screen| {
+        header_row(screen).contains("Notifications") && screen.contains(&notice)
+    });
+    pty.keys(&["Enter"]);
+    let tool_line = format!("Tool: {tool}");
+    pty.until("Enter opens the write's approval page", |screen| {
+        header_row(screen).contains("Connector write") && screen.contains(&tool_line)
+    })
+}
+
+/// Where one approval stands and the matrix project's standing allows, read through the
+/// owner protocol. Inputs: the engine, the runtime and the id. Output: the state and the
+/// connectors allowed to write without asking.
+fn approval_after(
+    engine: &Engine,
+    runtime: &tokio::runtime::Runtime,
+    id: i64,
+) -> (crazyagent::connectors::approvals::State, Vec<String>) {
+    runtime.block_on(async {
+        let mut owner = Owner::attach(engine).await;
+        let view = owner.controller.connector_approval(id).await.unwrap();
+        let writes = owner
+            .controller
+            .connector_writes(MATRIX_PROJECT.into())
+            .await
+            .unwrap();
+        owner.controller.detach();
+        (view.state, writes.connectors)
+    })
+}
+
+#[test]
+fn connectors_approval_allow() {
+    use crazyagent::connectors::WritePolicy;
+    use crazyagent::connectors::approvals::State;
+    let (mut engine, pty, _disk, runtime) =
+        connector_project("ca-e2e-conn-allow-", WritePolicy::AskOncePerProject);
+    let id = ask_write(&engine, "create_issue", crazyagent::semantic::now_ms());
+    let shown = open_approval(&pty, "create_issue");
+    let project = format!("Project: {PROJECT}");
+    for words in [
+        "An agent wants a connector to change something.",
+        "Connector: Linear",
+        project.as_str(),
+        "Agent: Agent 1",
+        "Asked: ",
+        "What it sends: create_issue title=Ship it",
+        "Time left: ",
+        "a Allow",
+        "d Deny",
+    ] {
+        assert!(shown.contains(words), "the page shows {words}:\n{shown}");
+    }
+    pty.keys(&["a"]);
+    pty.until("the Allow is confirmed and kept", |screen| {
+        screen.contains("Write allowed.")
+            && screen.contains("Allowed ")
+            && !screen.contains("a Allow")
+    });
+    assert_eq!(
+        approval_after(&engine, &runtime, id),
+        (State::Allowed, vec!["linear".to_owned()]),
+        "an Allow under Ask once lets Linear write in this project without asking again"
+    );
+    drop(pty);
+    engine.stop();
+}
+
+#[test]
+fn connectors_approval_deny() {
+    use crazyagent::connectors::WritePolicy;
+    use crazyagent::connectors::approvals::State;
+    let (mut engine, pty, _disk, runtime) =
+        connector_project("ca-e2e-conn-deny-", WritePolicy::AskEveryTime);
+    let id = ask_write(&engine, "delete_issue", crazyagent::semantic::now_ms());
+    open_approval(&pty, "delete_issue");
+    pty.keys(&["d"]);
+    pty.until("the Deny is confirmed and kept", |screen| {
+        screen.contains("Write denied.") && screen.contains("Denied ") && !screen.contains("d Deny")
+    });
+    assert_eq!(
+        approval_after(&engine, &runtime, id),
+        (State::Denied, Vec::new())
+    );
+    drop(pty);
+    engine.stop();
+}
+
+#[test]
+fn connectors_approval_expired() {
+    use crazyagent::connectors::WritePolicy;
+    use crazyagent::connectors::approvals::State;
+    let (mut engine, pty, _disk, runtime) =
+        connector_project("ca-e2e-conn-expired-", WritePolicy::AskEveryTime);
+    let asked = crazyagent::semantic::now_ms() - 100_000;
+    let id = ask_write(&engine, "update_issue", asked);
+    let shown = open_approval(&pty, "update_issue");
+    assert!(shown.contains("Time left: 0:"), "{shown}");
+    pty.until_within("the wait runs out", Duration::from_secs(40), |screen| {
+        screen.contains("Expired") && !screen.contains("Time left") && !screen.contains("a Allow")
+    });
+    assert_eq!(
+        approval_after(&engine, &runtime, id),
+        (State::Expired, Vec::new())
+    );
+    drop(pty);
+    engine.stop();
+}
+
+#[test]
+fn connectors_allowed_writes_revoke() {
+    use crazyagent::connectors::WritePolicy;
+    use crazyagent::connectors::approvals::{self, Answer};
+    let (mut engine, pty, _disk, runtime) =
+        connector_project("ca-e2e-conn-revoke-", WritePolicy::AskOncePerProject);
+    let now = crazyagent::semantic::now_ms();
+    let id = ask_write(&engine, "create_issue", now);
+    let db = questions::open(engine.path()).unwrap();
+    approvals::answer(&db, id, Answer::Allow, WritePolicy::AskOncePerProject, now).unwrap();
+    drop(db);
+    assert_eq!(approval_after(&engine, &runtime, id).1, ["linear"]);
+    tab_until_enter(&pty, "Open");
+    pick_card(&pty, PROJECT);
+    pty.keys(&["Enter"]);
+    pty.until("the project screen opens with its tabs", |screen| {
+        screen.contains("Tabs") && in_project(screen, PROJECT)
+    });
+    to_tab(&pty, PROJECT, "Settings", &SHIFT_RIGHT);
+    pty.until("the Access row offers the project's connectors", |screen| {
+        screen.contains("b Connectors")
+    });
+    pty.keys(&["b"]);
+    pty.until("the page lists Linear under Allowed writes", |screen| {
+        header_row(screen).contains(&format!("{PROJECT}  /  Connectors"))
+            && screen.contains("Allowed writes")
+            && screen
+                .contains("Connectors that may change things in this project without asking again.")
+    });
+    pty.keys(&["End"]);
+    pty.until("Linear's allowed write offers x", |screen| {
+        screen.contains("x Revoke")
+    });
+    pty.keys(&["x"]);
+    pty.until("the revoke is confirmed", |screen| {
+        screen.contains("Linear asks again before its next write.")
+            && screen.contains("No connector may change things here without asking.")
+    });
+    assert!(approval_after(&engine, &runtime, id).1.is_empty());
+    drop(pty);
+    engine.stop();
+}
