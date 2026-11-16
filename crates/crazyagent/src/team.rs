@@ -2118,6 +2118,32 @@ pub fn admit_resolve(
     Ok(Ok(()))
 }
 
+/// Whether a team agent's resolve work [`admit_resolve`] started is still under way: a
+/// resolve task pinned to it that is queued, waits for a pool or runs. One the owner's stop
+/// failed, a crash cancelled or that ended leaves none, so the owner's Ask agent to update
+/// hands the set over again (LAND-UPDATING-STUCK). A team master's resolve is an engine
+/// message, never a task, so it has none. Takes the store, the project and the agent.
+/// Returns the answer.
+pub fn resolve_pending(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+         WHERE p.project=?1 AND p.agent=?2 AND p.resolve=1 AND t.status IN (?3,?4,?5))",
+        params![
+            project.as_str(),
+            agent,
+            TaskStatus::Queued.name(),
+            TaskStatus::NeedsPool.name(),
+            TaskStatus::Running.name()
+        ],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
 /// Wakes a finished sub-agent for its master (DEC-102): the message becomes a task pinned
 /// to that agent, so the runtime starts the same agent again under its own id and name, in
 /// its own worktree, with the message as its first input, and the master hears how it ends.
