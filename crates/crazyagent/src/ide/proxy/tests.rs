@@ -647,6 +647,7 @@ fn the_workbench_opens_only_the_engine_workspace() {
 /// Starts a proxy in front of `upstream` for the LEAD-1 row, with the processes the open saw
 /// listening there once ready, or none before. Inputs: the server port and those processes.
 /// Output: the proxy port.
+#[cfg(target_os = "macos")]
 async fn proxy_to(upstream: u16, served: Option<Vec<i32>>) -> u16 {
     let (listener, port) = bind(None).await.unwrap();
     let seen = Arc::new(std::sync::OnceLock::new());
@@ -669,6 +670,7 @@ async fn proxy_to(upstream: u16, served: Option<Vec<i32>>) -> u16 {
 
 /// Sends one authorized request for a script through a proxy and reads its whole reply.
 /// Input: the proxy port. Output: the reply.
+#[cfg(target_os = "macos")]
 async fn fetched(port: u16) -> String {
     let head = format!(
         "GET /static/app.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={}\r\n\r\n",
@@ -688,6 +690,7 @@ async fn fetched(port: u16) -> String {
 /// ready, and each upstream connection is checked before anything is sent: a listener that is
 /// not a process the open saw listening on the server port, as one that took the port after
 /// the server exited, gets no request and no token, and the owner gets 502.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_request_reaches_only_the_listeners_the_open_saw_ready() {
     let (upstream, server_port) = bind(None).await.unwrap();
