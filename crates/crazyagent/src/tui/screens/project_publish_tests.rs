@@ -322,3 +322,21 @@ fn each_pane_answer_goes_to_the_engine_as_its_own_publish_query() {
         IntakeQuery::GitHubPublishDiscard { project }
     );
 }
+
+#[test]
+fn a_discarded_publish_says_what_it_left_on_github() {
+    use crate::github::GitHubPublishLeft;
+    assert_eq!(left_line(None), "");
+    assert_eq!(
+        left_line(Some(&GitHubPublishLeft::Made {
+            full_name: "me/tool".into(),
+        })),
+        "The empty repository me/tool stays on GitHub. Delete it there if you don't want it."
+    );
+    assert_eq!(
+        left_line(Some(&GitHubPublishLeft::Maybe {
+            full_name: "me/tool".into(),
+        })),
+        "GitHub may have made me/tool. Check GitHub and delete it if you don't want it."
+    );
+}
