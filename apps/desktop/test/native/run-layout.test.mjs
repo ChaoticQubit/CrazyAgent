@@ -197,7 +197,7 @@ test("run.mjs never writes under the fixture engine's root, which owner_fixture 
   assert.ok(start > 0, "run.mjs builds the engine's environment in engineEnvironment");
   const environment = runner.slice(start, runner.indexOf("\n}\n", start));
   assert.doesNotMatch(environment, /engineRoot|mkdirSync|writeFileSync/, "owner_fixture serve refuses a root that is not empty");
-  assert.doesNotMatch(runner, /join\(engineRoot, "setup"|plantNodeCodex/, "the fixture's catalog never searches the engine prefix under /tmp");
+  assert.doesNotMatch(runner, /join\(engineRoot, "setup"|plantNodeCodex/, "run.mjs plants nothing under the fixture engine's prefix");
   assert.match(runner, /: suite === "first-run-harnesses-node" \? nodeSuiteHome\(\) :/);
 });
 

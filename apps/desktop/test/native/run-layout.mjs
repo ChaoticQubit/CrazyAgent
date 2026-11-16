@@ -265,5 +265,11 @@ function userTemp() {
  * Input: the parent folder, the user's temp folder by default. Output: the root's real path. */
 export function fixtureEngineRoot(parent = userTemp()) {
   assert.ok(isAbsolute(parent), parent);
-  return realpathSync(mkdtempSync("/tmp/cad-"));
+  const real = realpathSync(parent);
+  if (process.platform === "darwin") {
+    assert.ok(!/^\/(private\/)?tmp(\/|$)/.test(real), `the engine root's parent ${real} lies in /tmp`);
+  }
+  const root = realpathSync(mkdtempSync(join(real, "cad-")));
+  assert.ok(Buffer.byteLength(join(root, "e.sock")) < 104, `the engine socket under ${root} is past 104 bytes`);
+  return root;
 }
