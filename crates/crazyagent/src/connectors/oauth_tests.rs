@@ -1017,3 +1017,39 @@ fn step_up_asks_for_the_union_and_stops_after_two_tries() {
         "writes off keeps a write scope out of the union"
     );
 }
+
+/// Two sign-ins with the owner's own app begun at two issuers before either ends: the first
+/// to end binds the app, and the other is refused before its code or the app's secret is
+/// sent anywhere.
+#[test]
+fn the_owners_app_is_bound_once_when_two_sign_ins_race() {
+    let third = vendor(shape());
+    let elsewhere = format!("http://127.0.0.1:{}", third.port);
+    let moved = Arc::new(Mutex::new(None));
+    let own = prepared(
+        Shape {
+            moved: moved.clone(),
+            ..shape()
+        },
+        &["127.0.0.1"],
+        &[Registration::Own],
+        Some((CLIENT, Some(SECRET))),
+    );
+    let here = begun(&own, false);
+    *moved.lock().unwrap() = Some(elsewhere.clone());
+    let there = begun(&own, false);
+    assert!(there.authorize_url.as_str().starts_with(&elsewhere));
+    assert_eq!(finished(&own, &here.state, Some(&own.issuer())), Ok(()));
+    assert_eq!(
+        finished(&own, &there.state, Some(&elsewhere)),
+        Err(OAuthError("connector_oauth_issuer_mismatch"))
+    );
+    assert!(
+        token_calls(&third).is_empty(),
+        "the second issuer never gets the code or the secret"
+    );
+    assert_eq!(
+        saved(&own.case, "connector-token-board-"),
+        vec![ACCESS.to_owned()]
+    );
+}
