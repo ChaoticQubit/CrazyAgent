@@ -21,6 +21,7 @@ const SECTIONS: readonly { title: string; about: string; ids: readonly KeepAwake
   { title: "Lid closed", about: "Whether a hold goes on with the lid closed.", ids: ["lid", "lid_display"] },
   { title: "Ends by itself", about: "The limits that end a hold to protect the battery and the computer.", ids: ["battery_floor", "heat_end", "heat_notice"] },
   { title: "Display", about: "What a hold does with the display.", ids: ["display_awake"] },
+  { title: "Power", about: "What a hold does to save the battery.", ids: ["low_power"] },
 ];
 
 function assert(condition: boolean, message: string): asserts condition {
