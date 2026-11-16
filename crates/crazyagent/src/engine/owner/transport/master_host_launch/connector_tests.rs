@@ -216,6 +216,7 @@ impl Bench {
             &[],
             crate::provider_retry::ProviderRetry::RetryBriefly,
             connector,
+            false,
         )
     }
 }
@@ -239,6 +240,7 @@ fn a_codex_master_with_a_connector_names_exactly_that_second_server() {
         mailbox: &mailbox,
         off: &[],
         connector: None,
+        native_on: false,
     };
     let with = MasterTools {
         connector: Some(&folder),
@@ -455,6 +457,7 @@ fn a_tools_on_codex_turn_with_its_connector_runs_that_server_and_uses_only_its_f
             Some(&registered),
             &[],
             connector,
+            false,
         )
         .map_err(|error| error.0)
     };

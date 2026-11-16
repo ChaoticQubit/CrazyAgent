@@ -988,6 +988,7 @@ printf '%s' "$ack"
             model: prepared.model.clone(),
             model_provider: prepared.model_provider.clone(),
             provider_retry: prepared.provider_retry,
+            native_connectors_on: prepared.native_connectors_on,
         }
     }
 

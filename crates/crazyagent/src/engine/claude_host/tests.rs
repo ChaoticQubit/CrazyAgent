@@ -376,6 +376,7 @@ fn a_real_tools_on_claude_master_keeps_its_default_tools_but_no_built_in_sub_age
             mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
             connector: None,
+            native_on: false,
         },
         &crate::harness_settings::apply::Applied::default(),
     )
@@ -1029,6 +1030,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
                 mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
                 off: &[],
                 connector: None,
+                native_on: false,
             },
             &crate::harness_settings::apply::Applied::default(),
         )
@@ -1154,6 +1156,7 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
         mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
         off: &[],
         connector: None,
+        native_on: false,
     };
     let on = tools_launch_command(
         Path::new("/approved/claude"),
@@ -1237,6 +1240,7 @@ fn a_tools_on_master_names_its_connector_server_and_the_host_runs_it_only_as_bui
         mailbox: &mailbox,
         off: &[],
         connector: None,
+        native_on: false,
     };
     let with = MasterTools {
         connector: Some(&folder),
@@ -1413,6 +1417,7 @@ fn every_key_a_claude_master_sets_is_locked_in_the_shipped_catalog() {
             mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
             connector: None,
+            native_on: false,
         },
         &settings,
     )
@@ -1426,9 +1431,9 @@ fn every_key_a_claude_master_sets_is_locked_in_the_shipped_catalog() {
     }
 }
 
-/// A Claude Code master turn, tools off or on, starts with its account's claude.ai
-/// connectors off whatever the owner's Claude Code settings hold, as no Native switch
-/// reaches a master, and the host's read-back still finds exactly the owner's settings.
+/// A Claude Code master turn, tools off or on without the owner's Native setting read as On,
+/// starts with its account's claude.ai connectors off whatever the owner's Claude Code
+/// settings hold, and the host's read-back still finds exactly the owner's settings.
 #[test]
 fn a_claude_master_turn_starts_with_the_accounts_claude_ai_connectors_off() {
     use crate::harness_settings::{Stored, apply::Applied, catalog, resolve};
@@ -1464,6 +1469,7 @@ fn a_claude_master_turn_starts_with_the_accounts_claude_ai_connectors_off() {
                 mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
                 off: &[],
                 connector: None,
+                native_on: false,
             },
             &settings,
         )
@@ -1480,6 +1486,82 @@ fn a_claude_master_turn_starts_with_the_accounts_claude_ai_connectors_off() {
             assert_eq!(master_settings_of(&args[at]), Some(settings.clone()));
         }
     }
+}
+
+/// Native connectors (DEC-168 addendum 16 decision 4): a tools-on Claude Code master turn
+/// that read the owner's setting as On leaves `disableClaudeAiConnectors` out, every other
+/// turn keeps it; the host runs each as built, and the engine's delegate check refuses a
+/// command whose switch differs from the setting the turn read.
+#[test]
+fn a_tools_on_claude_master_follows_the_native_setting_and_a_mismatch_is_refused() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let profile = fixture.lease("claude-native-validate", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let engine = fixture.root.path().join("crazyagent");
+    let drop = home.join(crate::team::tool::DROP_FILE);
+    let mailbox = drop.with_file_name(crate::team::tool::MAILBOX_FOLDER);
+    let read_off = MasterTools {
+        engine: &engine,
+        drop: &drop,
+        mailbox: &mailbox,
+        off: &[],
+        connector: None,
+        native_on: false,
+    };
+    let read_on = MasterTools {
+        native_on: true,
+        ..read_off
+    };
+    let settings = crate::harness_settings::apply::Applied::default();
+    let build = |tools: MasterTools<'_>| {
+        tools_launch_command(
+            Path::new("/approved/claude"),
+            &fixture.project,
+            &home,
+            "native-default",
+            None,
+            tools,
+            &settings,
+        )
+        .unwrap()
+    };
+    let switch = |command: &std::process::Command| {
+        let args = arguments(command);
+        let at = args.iter().position(|arg| arg == "--settings").unwrap() + 1;
+        let document: serde_json::Value = serde_json::from_str(&args[at]).unwrap();
+        assert_eq!(
+            master_settings_of(&args[at]),
+            Some(settings.clone()),
+            "{document}"
+        );
+        document.get("disableClaudeAiConnectors").cloned()
+    };
+    let on = build(read_on);
+    let off = build(read_off);
+    let tools_off = launch_command(
+        Path::new("/approved/claude"),
+        &fixture.project,
+        &home,
+        "native-default",
+        None,
+        &settings,
+    )
+    .unwrap();
+    assert_eq!(switch(&on), None);
+    assert_eq!(switch(&off), Some(serde_json::json!(true)));
+    assert_eq!(switch(&tools_off), Some(serde_json::json!(true)));
+    assert_eq!(validate_command(&on, &profile, &home).ok(), Some(true));
+    assert_eq!(validate_command(&off, &profile, &home).ok(), Some(true));
+    assert_eq!(
+        validate_command(&tools_off, &profile, &home).ok(),
+        Some(false)
+    );
+    assert_eq!(require_delegate(&on, Some(read_on)), Ok(()));
+    assert_eq!(require_delegate(&off, Some(read_off)), Ok(()));
+    assert!(require_delegate(&on, Some(read_off)).is_err());
+    assert!(require_delegate(&off, Some(read_on)).is_err());
 }
 
 #[test]
@@ -1650,6 +1732,7 @@ fn the_host_runs_a_tools_on_master_under_each_step_limit_the_owner_can_pick() {
             mailbox: &mailbox,
             off: &[],
             connector: None,
+            native_on: false,
         };
         tools_launch_command(
             Path::new("/approved/claude"),
@@ -1738,6 +1821,7 @@ fn the_host_runs_a_master_under_each_retry_choice_and_no_other_variable() {
                 mailbox: &mailbox,
                 off: &[],
                 connector: None,
+                native_on: false,
             };
             tools_launch_command(
                 Path::new("/approved/claude"),
@@ -1837,6 +1921,7 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
             mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
             connector: None,
+            native_on: false,
         },
         &crate::harness_settings::apply::Applied::default(),
     )
@@ -1929,6 +2014,7 @@ async fn held_turn(
                 mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
                 off: &[],
                 connector: None,
+                native_on: false,
             },
             &crate::harness_settings::apply::Applied::default(),
         )
@@ -2274,6 +2360,7 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
             mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
             connector: None,
+            native_on: false,
         },
         &crate::harness_settings::apply::Applied::default(),
     )

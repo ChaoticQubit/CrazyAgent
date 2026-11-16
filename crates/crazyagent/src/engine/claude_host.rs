@@ -77,7 +77,8 @@ const DENY_FLAG_SPELLINGS: [&str; 2] = [CLAUDE_DENY_FLAG, "--disallowed-tools"];
 /// turn's private temporary folder where its `delegate` tool records each proposed task, the
 /// mailbox beside it where its `remember` and `recall` calls wait for the engine, the team
 /// tools the owner switched off, which the server leaves out, and the turn's connector launch
-/// folder, whose ca-connectors server the same engine executable runs.
+/// folder, whose ca-connectors server the same engine executable runs; `native_on` when the
+/// turn read the owner's Native connectors setting as On (DEC-168 addendum 16).
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct MasterTools<'a> {
     pub(in crate::engine) engine: &'a Path,
@@ -85,6 +86,7 @@ pub(in crate::engine) struct MasterTools<'a> {
     pub(in crate::engine) mailbox: &'a Path,
     pub(in crate::engine) off: &'a [String],
     pub(in crate::engine) connector: Option<&'a Path>,
+    pub(in crate::engine) native_on: bool,
 }
 
 impl MasterTools<'_> {
@@ -229,13 +231,14 @@ pub(in crate::engine) fn tools_launch_command(
     )
 }
 
-/// Claude Code's `--settings` for a master turn: hooks off, no commit attribution and the
-/// account's claude.ai connectors off, as no Native switch reaches a master, merged over
-/// the owner's Claude Code settings. Input: the settings. Output: the JSON text.
+/// Claude Code's `--settings` for a master turn: hooks off, no commit attribution and, unless
+/// the turn read the owner's Native setting as On, the account's claude.ai connectors off,
+/// merged over the owner's Claude Code settings. Input: the settings and whether the turn is
+/// On. Output: the JSON text.
 #[cfg(unix)]
-fn master_settings(settings: &Applied) -> String {
+fn master_settings(settings: &Applied, native_on: bool) -> String {
     crate::harness_settings::apply::json_settings(
-        &master_engine_settings(),
+        &master_engine_settings(native_on),
         settings,
         crate::harness_settings::Apply::ClaudeSettings,
         &crate::harnesses::launch::CLAUDE_ENGINE_KEYS,
@@ -243,25 +246,54 @@ fn master_settings(settings: &Applied) -> String {
     .to_string()
 }
 
+/// The key of a master's `--settings` that turns its account's claude.ai connectors off.
+const NATIVE_OFF_KEY: &str = "disableClaudeAiConnectors";
+
+/// The engine's own `--settings` keys of a master turn, with `disableClaudeAiConnectors`
+/// unless the turn read the owner's Native setting as On (DEC-168 addendum 16). Input:
+/// whether the turn is On. Output: the JSON value.
 #[cfg(unix)]
-fn master_engine_settings() -> serde_json::Value {
-    serde_json::json!({
+fn master_engine_settings(native_on: bool) -> serde_json::Value {
+    let mut settings = serde_json::json!({
         "attribution": {"commit": "", "pr": ""},
         "disableAllHooks": true,
         "disableClaudeAiConnectors": true,
         "includeCoAuthoredBy": false,
-    })
+    });
+    if native_on {
+        let removed = settings
+            .as_object_mut()
+            .and_then(|fields| fields.remove(NATIVE_OFF_KEY));
+        assert_eq!(removed, Some(serde_json::Value::Bool(true)));
+    }
+    assert_eq!(settings.get(NATIVE_OFF_KEY).is_none(), native_on);
+    settings
+}
+
+/// Tells whether a master command's `--settings` text is a turn's that read the owner's
+/// Native setting as On: JSON without `disableClaudeAiConnectors`. Input: the text.
+/// Output: the answer; text that is not a JSON object is not On.
+fn native_on_of(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|settings| {
+            settings
+                .as_object()
+                .map(|fields| !fields.contains_key(NATIVE_OFF_KEY))
+        })
+        .unwrap_or(false)
 }
 
 /// Reads back the owner's settings a master command's `--settings` text carries, against
-/// the shipped Claude Code catalog. Input: the text. Output: the settings, or none for
-/// text the engine would not build.
+/// the shipped Claude Code catalog and the engine keys of the switch the text carries; the
+/// exact rebuild then allows a text without the switch only for a tools-on turn. Input: the
+/// text. Output: the settings, or none for text the engine would not build.
 #[cfg(unix)]
 fn master_settings_of(text: &str) -> Option<Applied> {
     let catalog = crate::harness_settings::catalog::builtin("claude-code").ok()?;
     crate::harness_settings::apply::read_back(
         catalog.as_ref(),
-        &master_engine_settings(),
+        &master_engine_settings(native_on_of(text)),
         crate::harness_settings::Apply::ClaudeSettings,
         &crate::harnesses::launch::CLAUDE_ENGINE_KEYS,
         text,
@@ -435,7 +467,7 @@ fn command_for(
             .args(CLAUDE_BUILT_IN_AGENTS),
         None => command.args(["--tools", "", "--system-prompt", CLAUDE_NO_TOOLS_PROMPT]),
     };
-    let settings = master_settings(settings);
+    let settings = master_settings(settings, tools.is_some_and(|tools| tools.native_on));
     command.args([
         "--strict-mcp-config",
         MCP_CONFIG_FLAG,
@@ -935,6 +967,15 @@ pub(in crate::engine) fn require_delegate(
     };
     let expected: serde_json::Value = serde_json::from_str(&expected).map_err(|_| refused())?;
     let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
+    let native_on = args
+        .iter()
+        .position(|arg| *arg == std::ffi::OsStr::new("--settings"))
+        .and_then(|index| args.get(index + 1))
+        .and_then(|text| text.to_str())
+        .map(native_on_of);
+    if native_on != Some(tools.is_some_and(|tools| tools.native_on)) {
+        return Err(refused());
+    }
     let inline = format!("{MCP_CONFIG_FLAG}=");
     if args
         .iter()
@@ -1023,14 +1064,15 @@ fn validate_command(
         )),
         None => None,
     };
-    let settings = args
+    let text = args
         .iter()
         .position(|arg| *arg == OsStr::new("--settings"))
         .and_then(|index| args.get(index + 1))
         .and_then(|text| text.to_str())
-        .and_then(master_settings_of)
         .ok_or(Fault::Host("claude_host_unapproved_command"))?;
+    let settings = master_settings_of(text).ok_or(Fault::Host("claude_host_unapproved_command"))?;
     let tools = args.contains(&OsStr::new("--permission-mode"));
+    let native_on = tools && native_on_of(text);
     let named = if tools {
         let named = args
             .iter()
@@ -1065,6 +1107,7 @@ fn validate_command(
                 mailbox,
                 off,
                 connector: connector.as_deref(),
+                native_on,
             }),
         &settings,
     )
