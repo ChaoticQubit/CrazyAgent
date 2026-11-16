@@ -150,7 +150,8 @@ fn a_server_told_to_leave_wake_out_neither_lists_nor_records_it() {
             ASK_TOOL,
             RECORD_TOOL,
             WITHDRAW_TOOL,
-            REQUEST_ACCESS_TOOL
+            REQUEST_ACCESS_TOOL,
+            PROPOSE_RULE_TOOL
         ]
     );
     assert_eq!(answers["2"]["error"]["code"], -32602, "{}", answers["2"]);
@@ -263,14 +264,15 @@ fn the_delegate_tool_records_proposals_that_the_engine_takes_once() {
     assert_eq!(answers["1"]["result"]["serverInfo"]["name"], SERVER_NAME);
     assert!(answers["1"]["result"]["capabilities"]["tools"].is_object());
     let tools = answers["2"]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 7);
     assert_eq!(tools[0]["name"], TOOL_NAME);
     assert_eq!(tools[0]["inputSchema"]["required"], json!(["task"]));
     assert_eq!(tools[1], ask_tool());
     assert_eq!(tools[2], record_tool());
     assert_eq!(tools[3], withdraw_tool());
     assert_eq!(tools[4], request_access_tool());
-    assert_eq!(tools[5]["name"], WAKE_TOOL);
+    assert_eq!(tools[5], propose_rule_tool());
+    assert_eq!(tools[6]["name"], WAKE_TOOL);
     for id in ["3", "4"] {
         assert_eq!(answers[id]["result"]["isError"], false, "{id}");
         assert_eq!(answers[id]["result"]["content"][0]["text"], RECORDED);

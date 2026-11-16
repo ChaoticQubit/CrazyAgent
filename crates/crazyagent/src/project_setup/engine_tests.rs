@@ -1859,7 +1859,9 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             INSERT INTO team_agent_messages(project,agent,author,kind,text,created_ms)
             VALUES ('setup-pooled',1,'master','message','Start with the header',0);
             INSERT INTO team_message_settings(project,keep_master,kept,progress,results,owner_items,page_size)
-            VALUES ('setup-pooled',0,500,1,'full',1,25);",
+            VALUES ('setup-pooled',0,500,1,'full',1,25);
+            INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,created_ms)
+            VALUES ('setup-pooled','agent:1','wiki_off',1,'Docs live in the repository.','octo-cat/tool','approved',0);",
         )
         .unwrap();
     let questions = crate::questions::open(engine.root.path()).unwrap();
@@ -1910,6 +1912,11 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM questions_log WHERE project='setup-pooled'"),
         0,
         "its questions to the owner go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM github_rule_requests WHERE project='setup-pooled'"),
+        0,
+        "its agents' GitHub rule proposals go with it, so none is applied or told after it"
     );
     assert_eq!(
         engine.rows("SELECT count(*) FROM team_owner_turns WHERE project='setup-pooled'"),

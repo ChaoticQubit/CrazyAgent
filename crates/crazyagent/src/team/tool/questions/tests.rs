@@ -140,6 +140,7 @@ fn the_drop_file_server_records_checked_questions_that_the_engine_takes_once() {
             RECORD_TOOL,
             WITHDRAW_TOOL,
             REQUEST_ACCESS_TOOL,
+            super::super::PROPOSE_RULE_TOOL,
             super::super::WAKE_TOOL
         ]
     );
@@ -805,4 +806,90 @@ fn a_sub_agent_asks_its_own_question_again_but_never_withdraws_or_records_one() 
         open.iter()
             .any(|question| question.question == "Use port 8080?" && question.asker == agent.name())
     );
+}
+
+/// DEC-182 S7: a drop-file team master's server lists `propose_github_rule` and records
+/// the call, which the engine raises when the reply ends, here refused plainly since the
+/// project was never published; a console master's server, given `console_off`, neither
+/// lists nor takes it, and the engine refuses one a conversation master's record carries.
+#[test]
+fn a_drop_file_master_proposes_a_github_rule_and_a_console_master_cannot() {
+    let case = Case::new();
+    let drop = case.drop_file();
+    let listed = |off: &[String]| -> Vec<String> {
+        let mut output = Vec::new();
+        super::super::serve(
+            lines(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]),
+            &mut output,
+            &drop,
+            None,
+            off,
+        )
+        .unwrap();
+        answers(&output)[0]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let team = listed(&[]);
+    assert!(
+        team.iter()
+            .any(|name| name == super::super::PROPOSE_RULE_TOOL),
+        "{team:?}"
+    );
+    let mut console = super::super::console_off(Vec::new());
+    console.push(super::super::WAKE_TOOL.to_owned());
+    let conversing = listed(&console);
+    assert!(
+        conversing
+            .iter()
+            .all(|name| name != super::super::PROPOSE_RULE_TOOL),
+        "{conversing:?}"
+    );
+    let proposal = json!({"rule": "wiki_off", "on": true, "why": "Docs live in the repository."});
+    let mut output = Vec::new();
+    super::super::serve(
+        lines(&[ask_line(
+            1,
+            super::super::PROPOSE_RULE_TOOL,
+            proposal.clone(),
+        )]),
+        &mut output,
+        &drop,
+        None,
+        &console,
+    )
+    .unwrap();
+    assert_eq!(answers(&output)[0]["error"]["code"], -32602);
+    assert!(
+        take_asks(&drop).is_empty(),
+        "a console master's call is not recorded"
+    );
+    let params = json!({"name": super::super::PROPOSE_RULE_TOOL, "arguments": proposal});
+    let recorded = drop_call(Some(&params), &drop);
+    assert!(
+        recorded.as_ref().is_some_and(|(said, refused)| !refused
+            && said.starts_with("Recorded. When your reply ends, the engine checks the proposal")),
+        "{recorded:?}"
+    );
+    let refused = apply_master_calls(&case.db, &case.project, 41, &drop);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(
+        refused[0],
+        "Your GitHub rule proposal for wiki_off was not raised: this project has not been published to GitHub, so it has no repository rules to change."
+    );
+    assert!(open_ids(&case).is_empty());
+    let recorded = drop_call(Some(&params), &drop);
+    assert!(recorded.is_some_and(|(_, refused)| !refused));
+    let session = crate::protocol::SessionId::new("session-1").unwrap();
+    let refused = apply_session_calls(&case.db, &case.project, &session, None, &drop);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(
+        refused[0].ends_with("only a team agent of this project proposes GitHub rules."),
+        "{}",
+        refused[0]
+    );
+    assert!(open_ids(&case).is_empty());
 }
