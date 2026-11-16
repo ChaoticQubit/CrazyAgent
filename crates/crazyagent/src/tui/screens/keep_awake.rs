@@ -21,6 +21,7 @@ const GUTTER: u16 = 2;
 const LABEL_WIDTH: usize = 20;
 const KEY_WIDTH: usize = 3;
 const NAME_WIDTH: usize = 17;
+const VALUE_WIDTH_MIN: usize = 8;
 const ACTION_WIDTH: usize = 22;
 const HOUR_MINUTES: u16 = 60;
 const FOUR_HOURS_MINUTES: u16 = 240;
@@ -248,9 +249,33 @@ impl KeepAwakeScreen {
         ])
     }
 
-    /// The screen's lines for one view, in the approved board's order. Inputs: the view
-    /// and the context. Output: the lines, 12 or, in mode Off, 13.
-    fn body(&self, view: &KeepAwakeView, ctx: &Ctx) -> Vec<Line<'static>> {
+    /// The Lid closed line under State: the label, then what a closed lid does now, wrapped
+    /// under the value column so a reason of up to 200 characters is read whole. Inputs:
+    /// the view and the screen's inner width. Output: one line or more.
+    fn lid_now_lines(view: &KeepAwakeView, width: usize) -> Vec<Line<'static>> {
+        let words = words::lid_now(view);
+        let room = width.saturating_sub(LABEL_WIDTH).max(VALUE_WIDTH_MIN);
+        let mut parts = crate::tui::text::wrap(&words, room);
+        if parts.is_empty() {
+            parts.push(String::new());
+        }
+        assert!(parts.len() <= words.chars().count().max(1));
+        let lines: Vec<Line<'static>> = parts
+            .into_iter()
+            .enumerate()
+            .map(|(at, part)| {
+                let label = if at == 0 { "Lid closed" } else { "" };
+                Line::raw(format!("{label:<LABEL_WIDTH$}{part}"))
+            })
+            .collect();
+        assert!(!lines.is_empty());
+        lines
+    }
+
+    /// The screen's lines for one view, in the approved board's order. Inputs: the view,
+    /// the screen's inner width and the context. Output: the lines, 12 or, in mode Off, 13,
+    /// plus the lid helper's lines and the Lid closed words' wrapped lines.
+    fn body(&self, view: &KeepAwakeView, width: usize, ctx: &Ctx) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
         let state = words::label(view, clock::now_ms(), words::Form::Words);
         let tone = match words::tone(view) {
@@ -265,16 +290,14 @@ impl KeepAwakeScreen {
             Line::from(spans)
         };
         let start = words::can_start(view);
-        let mut lines = vec![
-            Line::from(vec![
-                Span::raw(format!("{:<LABEL_WIDTH$}", "State")),
-                Span::styled(state, tone),
-            ]),
-            Line::raw(format!(
-                "{:<LABEL_WIDTH$}{}",
-                "Lid closed",
-                words::lid_now(view)
-            )),
+        let lid_now = Self::lid_now_lines(view, width);
+        let wrapped = lid_now.len() - 1;
+        let mut lines = vec![Line::from(vec![
+            Span::raw(format!("{:<LABEL_WIDTH$}", "State")),
+            Span::styled(state, tone),
+        ])];
+        lines.extend(lid_now);
+        lines.extend([
             Line::default(),
             Self::pair(
                 ("1", "Start 1 h", start),
@@ -287,7 +310,7 @@ impl KeepAwakeScreen {
                 ctx,
             ),
             self.custom_line(start, ctx),
-        ];
+        ]);
         if !start {
             lines.push(Line::styled(OFF_FIRST, theme.muted));
         }
@@ -303,7 +326,7 @@ impl KeepAwakeScreen {
         lines.push(Line::default());
         lines.push(row("s", "All Keep awake settings", Vec::new()));
         assert!(added <= 3);
-        assert!(lines.len() == 12 + usize::from(!start) + added);
+        assert!(lines.len() == 12 + usize::from(!start) + added + wrapped);
         lines
     }
 
@@ -424,7 +447,7 @@ impl Screen for KeepAwakeScreen {
             ..area
         };
         let lines = match (&ctx.store.keep_awake, &self.problem) {
-            (Some(view), _) => self.body(view, ctx),
+            (Some(view), _) => self.body(view, usize::from(inner.width), ctx),
             (None, Some(code)) => vec![
                 Line::styled(NOT_READ, ctx.theme.warning),
                 Line::styled(plain(code), ctx.theme.muted),
