@@ -100,7 +100,8 @@ pub fn rule_name(rule: GitHubRule) -> String {
 /// Turns an agent's proposal into a real owner question (DEC-182 S7). The repository is
 /// the one the asker's own project was published to, read from its local publish record
 /// at Done with no sign-in and no GitHub call, and it is kept with the proposal so an
-/// Approve applies to it alone. The question's words come from the engine; the agent's
+/// Approve applies to it alone. The checks, the proposal and its question are written in
+/// one transaction, so a failure leaves neither (RV gh-s7 F1). The question's words come from the engine; the agent's
 /// reason is shown only as its own quoted words. Inputs: the engine connection, the
 /// project, who asked, the rule, whether it is to be on, and the reason. Output: the
 /// question id, or `github_rule_asker_invalid`, `github_rule_invalid`,
@@ -126,9 +127,11 @@ pub fn request(
     let repo = published(&root, &folder)
         .map_err(|_| UNAVAILABLE)?
         .ok_or("github_rules_not_published")?;
-    table(db).map_err(|_| UNAVAILABLE)?;
+    let tx =
+        Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(|_| UNAVAILABLE)?;
+    table(&tx).map_err(|_| UNAVAILABLE)?;
     let counted = |sql: &str, values: &[&dyn rusqlite::ToSql]| -> Result<i64, String> {
-        db.query_row(sql, values, |row| row.get(0))
+        tx.query_row(sql, values, |row| row.get(0))
             .map_err(|_| UNAVAILABLE.to_owned())
     };
     let name = rule_name(rule);
@@ -148,12 +151,12 @@ pub fn request(
     if open >= OPEN_PER_PROJECT_MAX {
         return Err("github_rule_requests_full".into());
     }
-    db.execute(
+    tx.execute(
         "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,created_ms) VALUES (?1,?2,?3,?4,?5,?6,?7)",
         params![project.as_str(), asker.name(), name, on, why, repo, crate::team::now_ms()],
     )
     .map_err(|_| UNAVAILABLE)?;
-    let id = db.last_insert_rowid();
+    let id = tx.last_insert_rowid();
     assert!(id > 0);
     let switch = if on { "on" } else { "off" };
     let ask = Ask {
@@ -170,20 +173,18 @@ pub fn request(
         )),
     };
     let source = EngineSource::GitHubRule(id.to_string());
-    match crate::questions::raise(db, project, &source, &ask) {
-        Ok(question) => {
-            db.execute(
-                "UPDATE github_rule_requests SET question=?2 WHERE id=?1",
-                params![id, i64::try_from(question).unwrap_or(i64::MAX)],
-            )
-            .map_err(|_| UNAVAILABLE)?;
-            Ok(question)
-        }
-        Err(problem) => {
-            let _ = db.execute("DELETE FROM github_rule_requests WHERE id=?1", [id]);
-            Err(problem.0)
-        }
-    }
+    let question =
+        crate::questions::raise_in(&tx, project, &source, &ask).map_err(|problem| problem.0)?;
+    let kept = tx
+        .execute(
+            "UPDATE github_rule_requests SET question=?2 WHERE id=?1",
+            params![id, i64::try_from(question).unwrap_or(i64::MAX)],
+        )
+        .map_err(|_| UNAVAILABLE)?;
+    assert_eq!(kept, 1);
+    tx.commit().map_err(|_| UNAVAILABLE)?;
+    crate::questions::refresh_page(db, project);
+    Ok(question)
 }
 
 /// Settles the proposal behind an engine question the owner answered or dismissed, in the
@@ -257,18 +258,36 @@ pub fn apply_approved(
 
 /// Ends every proposal an engine stop left approved or being applied as refused and tells
 /// its agent, as the engine starts. Nothing is sent: the owner may have changed that rule
-/// on the GitHub settings page since. Input: the start's transaction. Output: how many
-/// ended, or the store error.
+/// on the GitHub settings page since. A pending proposal whose question is no longer
+/// pending, or was never kept, ends refused too, so it holds no slot and never blocks its
+/// agent and rule (RV gh-s7 F1). Input: the start's transaction. Output: how many ended,
+/// or the store error.
 pub(crate) fn start(tx: &Transaction<'_>) -> Result<usize, EngineError> {
     table(tx).map_err(|_| failure(UNAVAILABLE))?;
-    let ended = tx
+    let stopped = tx
         .execute(
             "UPDATE github_rule_requests SET status='refused' WHERE status IN ('approved','applying')",
             [],
         )
         .map_err(|_| failure(UNAVAILABLE))?;
+    let pending: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM github_rule_requests WHERE status='pending'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| failure(UNAVAILABLE))?;
+    let orphaned = if pending == 0 {
+        0
+    } else {
+        tx.execute(
+            "UPDATE github_rule_requests SET status='refused' WHERE status='pending' AND (question IS NULL OR NOT EXISTS (SELECT 1 FROM questions_log WHERE questions_log.id=github_rule_requests.question AND questions_log.status='pending'))",
+            [],
+        )
+        .map_err(|_| failure(UNAVAILABLE))?
+    };
     tell_untold(tx)?;
-    Ok(ended)
+    Ok(stopped + orphaned)
 }
 
 /// Runs [`start`] in its own transaction as the engine's store opens. Input: the store's
