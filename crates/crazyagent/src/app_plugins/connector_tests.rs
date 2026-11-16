@@ -687,8 +687,8 @@ mod stored {
         let notion = plugin(&listing, "notion");
         assert_eq!(
             (notion.origin, &notion.status, notion.enabled),
-            (Origin::Bundled, &PluginStatus::Ready, false),
-            "an OAuth-only connector needs no key"
+            (Origin::Bundled, &PluginStatus::NeedsSignIn, false),
+            "an OAuth-only connector needs no key, and reads Needs sign-in until it signs in"
         );
         let view = serde_json::to_value(notion).unwrap();
         assert_eq!(view["runs"]["url"], "https://mcp.notion.com/mcp");
