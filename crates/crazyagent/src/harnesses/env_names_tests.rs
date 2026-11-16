@@ -79,6 +79,24 @@ const ENGINE_FAMILY_NAMES: &[&str] = &[
     "GOFLAGS",
     "CURL_CA_BUNDLE",
     "REQUESTS_CA_BUNDLE",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "PIP_TRUSTED_HOST",
+    "PIP_CONFIG_FILE",
+    "YARN_NPM_REGISTRY_SERVER",
+    "YARN_RC_FILENAME",
+    "BUN_CONFIG_REGISTRY",
+    "OPENSSL_CONF",
+    "OPENSSL_MODULES",
+    "GEM_HOME",
+    "GEM_PATH",
+    "GOPROXY",
+    "GOSUMDB",
+    "GONOSUMDB",
+    "GOINSECURE",
+    "GOPRIVATE",
+    "GONOPROXY",
+    "GOTOOLCHAIN",
 ];
 
 const ENGINE_FAMILY_PREFIXES: &[&str] = &[
@@ -123,6 +141,12 @@ const ENGINE_FAMILY_PREFIXES: &[&str] = &[
     "CURL_",
     "REQUESTS_",
     "ELECTRON_",
+    "PIP_",
+    "PIP_CONFIG_",
+    "YARN_",
+    "BUN_",
+    "OPENSSL_",
+    "GEM_",
 ];
 
 const HARNESS_NAMES: &[&str] = &[
@@ -337,4 +361,53 @@ fn a_home_block_cannot_claim_an_engine_family_or_set_one_of_its_names() {
     let xdg = "  env_prefixes:\n    - \"SAMPLE_\"\n  env:\n    XDG_CONFIG_HOME: \"{home}/config\"\n";
 
     assert_eq!(home_refusal(xdg), None);
+}
+
+/// Env-name rule, supply chain (rv-sec3 envrule F3): the package index, module proxy, gem
+/// path and OpenSSL families decide which server an install trusts or which code loads, so
+/// an account entry cannot set them and a home block cannot claim them; `PIP_` sits inside
+/// the open `PI_` prefix, which keeps its claim but cannot set a `PIP_` name under it.
+#[test]
+fn the_package_index_module_proxy_and_openssl_families_are_owned_at_both_sites() {
+    for name in [
+        "PIP_INDEX_URL",
+        "GOPROXY",
+        "GOSUMDB",
+        "YARN_NPM_REGISTRY_SERVER",
+        "BUN_CONFIG_REGISTRY",
+        "OPENSSL_CONF",
+        "GEM_PATH",
+    ] {
+        assert_eq!(
+            account_refusal(&format!("      {name}: \"https://mirror.example\"\n")),
+            Some((
+                VALUE,
+                format!(
+                    "rowharness: accounts.openai-chat.env: {name} is not a variable an account entry may set."
+                )
+            )),
+            "{name}"
+        );
+    }
+    for prefix in ["PIP_", "YARN_", "BUN_", "OPENSSL_", "GEM_"] {
+        assert_eq!(
+            home_refusal(&format!("  env_prefixes:\n    - \"{prefix}\"\n")),
+            Some((VALUE, format!("home.env_prefixes.{prefix}: {COVERS}"))),
+            "{prefix}"
+        );
+    }
+
+    let inside_pi = "  env_prefixes:\n    - \"PI_\"\n  env:\n    PIP_INDEX_URL: \"https://mirror.example\"\n";
+
+    assert_eq!(
+        home_refusal(inside_pi),
+        Some((
+            VALUE,
+            "home.env.PIP_INDEX_URL: CrazyAgent sets this itself, so a manifest cannot.".to_owned()
+        ))
+    );
+    assert_eq!(
+        home_refusal("  env_prefixes:\n    - \"PI_\"\n  env:\n    PI_HOME: \"{home}\"\n"),
+        None
+    );
 }
