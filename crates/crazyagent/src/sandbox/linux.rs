@@ -34,9 +34,7 @@ mod bridge;
 mod egress;
 
 pub use bridge::Bridge;
-pub use egress::{
-    NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS,
-};
+pub use egress::{NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS};
 
 /// The Landlock helper's file name. It ships next to the engine's own executable.
 pub const HELPER_NAME: &str = "crazyagent-landlock";
@@ -618,7 +616,12 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
 /// The bubblewrap options no caller names before the nest's `--`, beside stage 1's own
 /// descriptor flags: one reads more arguments from a descriptor, past every check here,
 /// and the others block on or write to a descriptor the caller holds (rv-code2 N5).
-const NEST_REFUSED: [&str; 4] = ["--args", "--userns-block-fd", "--sync-fd", "--json-status-fd"];
+const NEST_REFUSED: [&str; 4] = [
+    "--args",
+    "--userns-block-fd",
+    "--sync-fd",
+    "--json-status-fd",
+];
 
 /// Reads what follows `--nest --`: bubblewrap at one of its fixed places, then exactly
 /// [`NEST_ARGS`], then at least the command bubblewrap starts, so the helper starts nothing
@@ -653,7 +656,9 @@ fn nest_request(
             refused.any(|flag| arg == flag)
         });
     if named {
-        return Err(format!("{NEST} takes no descriptor flag; stage 1 writes its own"));
+        return Err(format!(
+            "{NEST} takes no descriptor flag; stage 1 writes its own"
+        ));
     }
     Ok(HelperRequest::Nest { bwrap, args })
 }
@@ -1260,8 +1265,9 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>, routes: &[u16]
             routes => egress::open(routes, args).map(|(ends, args)| (Some(ends), args)),
         })
         .and_then(|(ends, args)| match bridge {
-            Some(bridge) => bridge::open(&bridge.ports, &args)
-                .map(|(end, args)| (ends, Some(end), args)),
+            Some(bridge) => {
+                bridge::open(&bridge.ports, &args).map(|(end, args)| (ends, Some(end), args))
+            }
             None => Ok((ends, None, args)),
         })
         .and_then(|opened| {
@@ -2823,8 +2829,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_tcp_only_agent_with_a_port_on_any_host_and_loopback_ports_from_1024_up_is_routed()
-    {
+    fn only_a_tcp_only_agent_with_a_port_on_any_host_and_loopback_ports_from_1024_up_is_routed() {
         use SandboxRemote::{AnyHost, Loopback};
         let routed = |remotes: &[SandboxRemote], sockets: LinuxSockets| {
             let (_temp, sandbox) = project(SandboxNetwork::Only(remotes.to_vec()));
@@ -2845,7 +2850,11 @@ mod tests {
         );
         assert_eq!(routed(&[AnyHost(443), Loopback(1023)], default), None);
         assert_eq!(routed(&[AnyHost(443), Loopback(53)], default), None);
-        assert_eq!(routed(&[Loopback(8080)], default), None, "the bridge's case");
+        assert_eq!(
+            routed(&[Loopback(8080)], default),
+            None,
+            "the bridge's case"
+        );
         assert_eq!(routed(&[], default), None);
         assert_eq!(routed(&[AnyHost(443)], LinuxSockets::TcpPorts), None);
         assert_eq!(routed(&[AnyHost(443)], LinuxSockets::Refuse), None);
@@ -2892,7 +2901,10 @@ mod tests {
         assert_eq!(words(&[], &[443, 8443]), expected(&routes));
         for routed in [words(&[18080], &[443]), words(&[], &[443])] {
             for flag in egress::DESCRIPTOR_FLAGS {
-                assert!(!routed.iter().any(|word| word == flag), "{flag}: {routed:?}");
+                assert!(
+                    !routed.iter().any(|word| word == flag),
+                    "{flag}: {routed:?}"
+                );
             }
         }
     }
@@ -2923,8 +2935,14 @@ mod tests {
             Ok((vec![443, 8443], Some(vec![18080])))
         );
         assert_eq!(read(nest(&[], &[])), Ok((Vec::new(), None)));
-        assert!(read(nest(&route, &[])).is_err(), "a route needs --unshare-net");
-        assert!(read(nest(&[], &[UNSHARE_NET])).is_err(), "--unshare-net needs a port");
+        assert!(
+            read(nest(&route, &[])).is_err(),
+            "a route needs --unshare-net"
+        );
+        assert!(
+            read(nest(&[], &[UNSHARE_NET])).is_err(),
+            "--unshare-net needs a port"
+        );
         let mut probe: Vec<OsString> = route.iter().map(OsString::from).collect();
         probe.push(PROBE.into());
         assert!(read(probe).is_err(), "a route leads a nest only");
@@ -3116,12 +3134,24 @@ mod tests {
         let plain = Some(super::super::LINUX_PORTS_ANY_HOST_LINE.to_owned());
         let unrouted = Some(super::super::LINUX_UNROUTED_LINE.to_owned());
         let hosted = launched(&[AnyHost(443), Loopback(8080)]);
-        assert_eq!(said(true, &hosted), unrouted, "a model on a host, tools off");
-        assert_eq!(said(false, &hosted), None, "the page says it without a nest");
+        assert_eq!(
+            said(true, &hosted),
+            unrouted,
+            "a model on a host, tools off"
+        );
+        assert_eq!(
+            said(false, &hosted),
+            None,
+            "the page says it without a nest"
+        );
         let ports = launched(&[Loopback(8080)]).limit_sockets(LinuxSockets::TcpPorts);
         assert_eq!(said(true, &ports), plain);
         let any_host = Some(super::super::LINUX_UNROUTED_ANY_HOST_LINE.to_owned());
-        assert_eq!(said(true, &launched(&[AnyHost(443)])), any_host, "unrouted, any host");
+        assert_eq!(
+            said(true, &launched(&[AnyHost(443)])),
+            any_host,
+            "unrouted, any host"
+        );
         assert_eq!(said(true, &launched(&[])), None);
         for choice in [AgentNetwork::Https, AgentNetwork::Open] {
             let said = |sandbox| linux_unbridged_notice_on(host(true), choice, sandbox);
@@ -3160,8 +3190,16 @@ mod tests {
         let remote = launched(&[AnyHost(443)]);
         assert!(model.routed().is_some() && remote.routed().is_some());
         assert_eq!(said(host(false, false), &model), wide);
-        assert_eq!(said(host(false, true), &model), any_host, "loopback kept by the supervisor");
-        assert_eq!(said(host(false, false), &remote), any_host, "no loopback port");
+        assert_eq!(
+            said(host(false, true), &model),
+            any_host,
+            "loopback kept by the supervisor"
+        );
+        assert_eq!(
+            said(host(false, false), &remote),
+            any_host,
+            "no loopback port"
+        );
         assert_eq!(said(host(false, true), &remote), any_host);
         for supervised in [false, true] {
             assert_eq!(said(host(true, supervised), &model), None, "routed");
@@ -3170,16 +3208,27 @@ mod tests {
         for line in [LINUX_UNROUTED_LINE, LINUX_UNROUTED_ANY_HOST_LINE] {
             let why = "On this Linux, this agent has no network of its own: ";
             assert!(line.starts_with(why), "{line}");
-            assert!(line.contains("AppArmor") && line.contains("as root"), "{line}");
+            assert!(
+                line.contains("AppArmor") && line.contains("as root"),
+                "{line}"
+            );
         }
         assert!(LINUX_UNROUTED_LINE.contains("on every host, this computer included."));
         assert!(LINUX_UNROUTED_ANY_HOST_LINE.contains("on any host include this computer"));
         let low = launched(&[AnyHost(443), Loopback(18080), Loopback(80), Loopback(53)]);
         assert!(low.routed().is_none());
         let named = Some(linux_unbridged_line(53));
-        assert_eq!(said(host(true, false), &low), named, "the low port keeps it unrouted");
+        assert_eq!(
+            said(host(true, false), &low),
+            named,
+            "the low port keeps it unrouted"
+        );
         assert_eq!(said(host(true, true), &low), named);
-        assert_eq!(said(host(false, false), &low), None, "the page says it on this host");
+        assert_eq!(
+            said(host(false, false), &low),
+            None,
+            "the page says it on this host"
+        );
     }
 
     #[test]
@@ -3193,17 +3242,35 @@ mod tests {
             }
         };
         let (bwrap, helper) = (Path::new(BWRAP_PATHS[0]), helper());
-        assert!(!kept_route(&kept, bwrap, &helper, true, probe(true)), "as root");
+        assert!(
+            !kept_route(&kept, bwrap, &helper, true, probe(true)),
+            "as root"
+        );
         assert_eq!(probes.get(), 0, "a refusal starts no probe");
         assert!(kept_route(&kept, bwrap, &helper, false, probe(true)));
-        assert!(kept_route(&kept, bwrap, &helper, false, probe(false)), "kept");
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, probe(false)),
+            "kept"
+        );
         assert_eq!(probes.get(), 1, "page, notice and launch read one answer");
-        assert!(!kept_route(&kept, bwrap, &helper, true, probe(true)), "refused while kept");
-        assert!(kept_route(&kept, bwrap, &helper, false, probe(false)), "still kept");
+        assert!(
+            !kept_route(&kept, bwrap, &helper, true, probe(true)),
+            "refused while kept"
+        );
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, probe(false)),
+            "still kept"
+        );
         assert_eq!(probes.get(), 1);
         let other = Path::new("/usr/local/bin/bwrap");
-        assert!(!kept_route(&kept, other, &helper, false, probe(false)), "another bubblewrap");
-        assert!(!kept_route(&kept, other, &helper, false, probe(true)), "a failed answer too");
+        assert!(
+            !kept_route(&kept, other, &helper, false, probe(false)),
+            "another bubblewrap"
+        );
+        assert!(
+            !kept_route(&kept, other, &helper, false, probe(true)),
+            "a failed answer too"
+        );
         assert_eq!(probes.get(), 2);
     }
 
@@ -3222,8 +3289,7 @@ mod tests {
                 routed,
             })
         };
-        let (_temp, eligible) =
-            project(SandboxNetwork::Only(vec![AnyHost(443), Loopback(18080)]));
+        let (_temp, eligible) = project(SandboxNetwork::Only(vec![AnyHost(443), Loopback(18080)]));
         assert!(eligible.routed().is_some());
         let unrouted = Some(LINUX_UNROUTED_LINE.to_owned());
         for choice in AgentNetwork::ALL {

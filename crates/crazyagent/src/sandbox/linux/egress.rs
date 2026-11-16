@@ -118,7 +118,9 @@ pub(super) fn leading(args: Vec<OsString>) -> Result<(Vec<u16>, Vec<OsString>), 
             .and_then(route_port);
         let Some(port) = port.filter(|port| !ports.contains(port) && ports.len() < REMOTES_MAX)
         else {
-            return Err(format!("{ROUTE} takes 1 to {REMOTES_MAX} ports 1 to 65535, each once"));
+            return Err(format!(
+                "{ROUTE} takes 1 to {REMOTES_MAX} ports 1 to 65535, each once"
+            ));
         };
         ports.push(port);
     }
@@ -138,13 +140,17 @@ pub(super) fn fits(
 ) -> Result<(), String> {
     assert!(routes.len() <= REMOTES_MAX);
     if started.is_some() && !routes.is_empty() {
-        return Err(format!("{ROUTE_FD} takes no {ROUTE}; stage 1 writes it inside the nest"));
+        return Err(format!(
+            "{ROUTE_FD} takes no {ROUTE}; stage 1 writes it inside the nest"
+        ));
     }
     if started.is_some() {
         return match request {
             HelperRequest::Probe { .. } => Ok(()),
             HelperRequest::Run { policy, .. } if policy.nested => Ok(()),
-            _ => Err(format!("{ROUTE_FD} leads only a probe or a nested run in a routed nest")),
+            _ => Err(format!(
+                "{ROUTE_FD} leads only a probe or a nested run in a routed nest"
+            )),
         };
     }
     if routes.is_empty() {
@@ -152,7 +158,9 @@ pub(super) fn fits(
     }
     match request {
         HelperRequest::Nest { args, .. }
-            if args.get(NEST_ARGS.len()).is_some_and(|arg| arg == UNSHARE_NET) =>
+            if args
+                .get(NEST_ARGS.len())
+                .is_some_and(|arg| arg == UNSHARE_NET) =>
         {
             Ok(())
         }
@@ -168,9 +176,8 @@ pub(super) fn fits(
 /// the request, or the reason they are refused.
 pub(super) fn request(args: Vec<OsString>) -> Result<HelperRequest, String> {
     assert!(args.first().is_some_and(|flag| flag == EGRESS));
-    let refused = || {
-        format!("{EGRESS} takes a process id above 1, then 1 to {REMOTES_MAX} ports, each once")
-    };
+    let refused =
+        || format!("{EGRESS} takes a process id above 1, then 1 to {REMOTES_MAX} ports, each once");
     let words: Option<Vec<&str>> = args[1..].iter().map(|arg| arg.to_str()).collect();
     let Some((parent, ports)) = words.as_deref().and_then(<[&str]>::split_first) else {
         return Err(refused());
@@ -429,7 +436,10 @@ impl Drop for Slirp {
     fn drop(&mut self) {
         if self.process.kill().is_ok() {
             let reaped = self.process.wait();
-            assert!(reaped.is_ok(), "slirp4netns is this process's child to reap");
+            assert!(
+                reaped.is_ok(),
+                "slirp4netns is this process's child to reap"
+            );
         }
     }
 }
@@ -487,8 +497,8 @@ fn tools() -> Result<&'static str, String> {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let version = crate::spawn_gate::output(&mut asked)
-            .map_err(|error| format!("{restore}: {error}"))?;
+        let version =
+            crate::spawn_gate::output(&mut asked).map_err(|error| format!("{restore}: {error}"))?;
         if !version.status.success() || !nf_tables(&String::from_utf8_lossy(&version.stdout)) {
             return Err(format!("{restore} is not the nf_tables iptables"));
         }
@@ -573,7 +583,9 @@ fn ambient_held() -> Option<CapabilitySet> {
         .take(STATUS_BYTES_MAX)
         .read_to_string(&mut status)
         .ok()?;
-    let hex = status.lines().find_map(|line| line.strip_prefix("CapAmb:"))?;
+    let hex = status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapAmb:"))?;
     let bits = u64::from_str_radix(hex.trim(), 16).ok()?;
     Some(CapabilitySet::from_bits_retain(bits))
 }
@@ -673,7 +685,10 @@ fn egress_rules(any: &[u16]) -> String {
     assert_eq!(rules.matches(" -j DROP\n").count(), 3);
     assert_eq!(rules.matches(SANDBOX_RESOLVER).count(), 1);
     for port in any {
-        let _ = writeln!(rules, "-A OUTPUT -o {TAP} -p tcp -m tcp --dport {port} -j ACCEPT");
+        let _ = writeln!(
+            rules,
+            "-A OUTPUT -o {TAP} -p tcp -m tcp --dport {port} -j ACCEPT"
+        );
     }
     rules.push_str("COMMIT\n");
     rules
@@ -724,7 +739,9 @@ fn resolver_text(host: &str) -> String {
         .lines()
         .filter_map(|line| {
             let mut words = line.split_ascii_whitespace();
-            let key = words.next().filter(|key| *key == "search" || *key == "options")?;
+            let key = words
+                .next()
+                .filter(|key| *key == "search" || *key == "options")?;
             let values: Vec<&str> = words.collect();
             let line = format!("{key} {}", values.join(" "));
             (!values.is_empty() && line.len() <= RESOLVER_LINE_BYTES_MAX).then_some(line)
@@ -784,7 +801,10 @@ pub(super) fn placed(args: &[OsString]) -> Result<(), String> {
         return refused();
     }
     let mut fds: Vec<RawFd> = Vec::with_capacity(DESCRIPTOR_FLAGS.len());
-    for (pair, flag) in written[1..written.len() - 1].chunks_exact(2).zip(DESCRIPTOR_FLAGS) {
+    for (pair, flag) in written[1..written.len() - 1]
+        .chunks_exact(2)
+        .zip(DESCRIPTOR_FLAGS)
+    {
         let fd = pair[1]
             .to_str()
             .and_then(number::<RawFd>)
@@ -813,7 +833,9 @@ pub(super) fn placed(args: &[OsString]) -> Result<(), String> {
 pub(super) fn inner(args: &[OsString], fd: RawFd, helper: &Path) -> Result<Vec<OsString>, String> {
     assert!(fd > 2);
     let Some(at) = super::bridge::own_command(args, helper) else {
-        return Err(format!("{ROUTE_FD} needs this helper as the nest's command"));
+        return Err(format!(
+            "{ROUTE_FD} needs this helper as the nest's command"
+        ));
     };
     let mut written = args[..=at].to_vec();
     written.push(ROUTE_FD.into());
@@ -925,7 +947,11 @@ mod tests {
             ONE_PORT.replace("COMMIT\n", second)
         );
         assert_eq!(egress_rules_v6(), V6);
-        for rules in [egress_rules(&[443]), egress_rules(&[443, 8443]), egress_rules_v6()] {
+        for rules in [
+            egress_rules(&[443]),
+            egress_rules(&[443, 8443]),
+            egress_rules_v6(),
+        ] {
             assert!(rules.ends_with("COMMIT\n"), "{rules}");
             assert!(rules.contains("\n:OUTPUT DROP [0:0]\n"), "{rules}");
             assert!(!rules.contains("udp"), "{rules}");
@@ -942,7 +968,8 @@ mod tests {
     }
 
     #[test]
-    fn no_route_port_rule_reaches_the_slirp_network_or_loopback_and_only_dns_reaches_its_resolver() {
+    fn no_route_port_rule_reaches_the_slirp_network_or_loopback_and_only_dns_reaches_its_resolver()
+    {
         let dns = "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT";
         let fence = "-A OUTPUT -d 10.0.2.0/24 -j DROP";
         let belt = "-A OUTPUT -d 127.0.0.0/8 -j DROP";
@@ -967,7 +994,10 @@ mod tests {
                 let at = lines.iter().position(|kept| *kept == line);
                 assert!(at.is_some_and(|at| at > fenced + 2), "{port}: {rules}");
             }
-            assert!(!rules.contains("10.0.2.2"), "the fence covers the gateway: {rules}");
+            assert!(
+                !rules.contains("10.0.2.2"),
+                "the fence covers the gateway: {rules}"
+            );
             assert_eq!(rules.matches("10.0.2.3").count(), 1, "{rules}");
         }
     }
@@ -995,7 +1025,10 @@ mod tests {
         for changed in [widened, added, dropped] {
             assert_ne!(canonical_rules(&changed), canonical, "{changed}");
         }
-        assert_eq!(canonical_rules(V6), canonical_rules(&format!("# saved\n{V6}")));
+        assert_eq!(
+            canonical_rules(V6),
+            canonical_rules(&format!("# saved\n{V6}"))
+        );
     }
 
     #[test]
@@ -1032,10 +1065,18 @@ mod tests {
             "nameserver 10.0.2.3\nsearch a.example b.example\noptions use-vc\n"
         );
         let long = format!("search {}\n", "a".repeat(400));
-        assert_eq!(resolver_text(&long), "nameserver 10.0.2.3\noptions use-vc\n");
+        assert_eq!(
+            resolver_text(&long),
+            "nameserver 10.0.2.3\noptions use-vc\n"
+        );
         let many = "options ndots:1\n".repeat(64);
         let kept = resolver_text(&many);
-        assert_eq!(kept.lines().filter(|line| line.starts_with("nameserver")).count(), 1);
+        assert_eq!(
+            kept.lines()
+                .filter(|line| line.starts_with("nameserver"))
+                .count(),
+            1
+        );
         assert!(kept.lines().count() <= 10, "{kept}");
     }
 
@@ -1043,7 +1084,12 @@ mod tests {
     fn only_an_nf_tables_iptables_is_run() {
         assert!(nf_tables("iptables-restore v1.8.10 (nf_tables)\n"));
         assert!(nf_tables("ip6tables-restore v1.8.9 (nf_tables)"));
-        for refused in ["iptables-restore v1.8.7 (legacy)\n", "", "nf_tables", "v1.8.10\n"] {
+        for refused in [
+            "iptables-restore v1.8.7 (legacy)\n",
+            "",
+            "nf_tables",
+            "v1.8.10\n",
+        ] {
             assert!(!nf_tables(refused), "{refused:?}");
         }
     }
@@ -1084,11 +1130,26 @@ mod tests {
         assert_eq!(placed(&with(&right)), Ok(()));
         let swapped = [BLOCK_FD, "6", INFO_FD, "5", RO_BIND_DATA, "7", RESOLV_CONF];
         let elsewhere = [INFO_FD, "5", BLOCK_FD, "6", RO_BIND_DATA, "7", "/etc/hosts"];
-        let linked = [INFO_FD, "5", BLOCK_FD, "6", RO_BIND_DATA, "7", "/run/resolv.conf"];
+        let linked = [
+            INFO_FD,
+            "5",
+            BLOCK_FD,
+            "6",
+            RO_BIND_DATA,
+            "7",
+            "/run/resolv.conf",
+        ];
         let standard = [INFO_FD, "2", BLOCK_FD, "6", RO_BIND_DATA, "7", RESOLV_CONF];
         let shared = [INFO_FD, "5", BLOCK_FD, "5", RO_BIND_DATA, "7", RESOLV_CONF];
         let short = [INFO_FD, "5", BLOCK_FD, "6"];
-        for refused in [&swapped[..], &elsewhere, &linked, &standard, &shared, &short] {
+        for refused in [
+            &swapped[..],
+            &elsewhere,
+            &linked,
+            &standard,
+            &shared,
+            &short,
+        ] {
             assert!(placed(&with(refused)).is_err(), "{refused:?}");
         }
         let mut twice = with(&right);
@@ -1172,11 +1233,19 @@ mod tests {
         assert_eq!(started(fd), Ok(()));
         assert_eq!(closed(&mut write), broken, "the go descriptor is closed");
         let (fd, mut write) = handed(&[BLOCK]);
-        assert_eq!(started(fd), Err(ROUTE_NOT_BUILT.to_owned()), "a byte but the go byte");
+        assert_eq!(
+            started(fd),
+            Err(ROUTE_NOT_BUILT.to_owned()),
+            "a byte but the go byte"
+        );
         assert_eq!(closed(&mut write), broken);
         let (fd, write) = handed(&[]);
         drop(write);
-        assert_eq!(started(fd), Err(ROUTE_NOT_BUILT.to_owned()), "a setup child gone");
+        assert_eq!(
+            started(fd),
+            Err(ROUTE_NOT_BUILT.to_owned()),
+            "a setup child gone"
+        );
     }
 
     #[test]
@@ -1195,19 +1264,29 @@ mod tests {
         };
         let written = bridge::inner(&routed, 9, &[18080], &helper).unwrap();
         assert_eq!(placed(&written), Ok(()));
-        let named = written.iter().position(|word| word.as_os_str() == helper.as_os_str());
+        let named = written
+            .iter()
+            .position(|word| word.as_os_str() == helper.as_os_str());
         let at = named.unwrap() + 1;
         let inside = words(&[BRIDGE_FD, "9", BRIDGE, "18080", ROUTE_FD, "8", PROBE]);
         assert_eq!(written[at..], inside);
         let asked = |args: Vec<OsString>| {
             read_request(args).map(|(routes, bridge, started, request)| {
                 let probe = matches!(request, HelperRequest::Probe { .. });
-                (routes, bridge.map(|held| (held.fd, held.ports)), started, probe)
+                (
+                    routes,
+                    bridge.map(|held| (held.fd, held.ports)),
+                    started,
+                    probe,
+                )
             })
         };
         let bridged = Some((Some(9), vec![18080]));
         assert_eq!(asked(inside), Ok((Vec::new(), bridged, Some(8), true)));
-        assert_eq!(asked(words(&[ROUTE_FD, "8", PROBE])), Ok((Vec::new(), None, Some(8), true)));
+        assert_eq!(
+            asked(words(&[ROUTE_FD, "8", PROBE])),
+            Ok((Vec::new(), None, Some(8), true))
+        );
         let nested = asked(words(&[ROUTE_FD, "8", "--nested", "--", "/bin/true"]));
         assert_eq!(nested.map(|asked| (asked.2, asked.3)), Ok((Some(8), false)));
         let mut other = described.clone();

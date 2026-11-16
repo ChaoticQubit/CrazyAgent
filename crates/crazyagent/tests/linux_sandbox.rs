@@ -1,8 +1,7 @@
 #![cfg(target_os = "linux")]
 use crazyagent::sandbox::linux::{
     BWRAP_PATHS, HelperRequest, LOADER_REFUSED, LinuxBackend, LinuxSandbox, NEST_ARGS,
-    NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS,
-    loader_variable,
+    NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS, loader_variable,
 };
 
 use crazyagent::sandbox::{
@@ -2650,7 +2649,10 @@ fn routed(sandbox: ProjectSandbox) -> Option<LinuxSandbox> {
     }
     let data = tempfile::tempdir().unwrap();
     let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(data.path()));
-    assert!(host.routed, "this machine can route agents, so the report says so: {host:?}");
+    assert!(
+        host.routed,
+        "this machine can route agents, so the report says so: {host:?}"
+    );
     let sandbox = nested(sandbox)?;
     assert!(
         sandbox.routed().is_some(),
@@ -2818,7 +2820,11 @@ fn the_routed_network_ends_with_the_agent() {
     while route_processes(route) != none && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(route_processes(route), none, "the network ends with the agent");
+    assert_eq!(
+        route_processes(route),
+        none,
+        "the network ends with the agent"
+    );
 }
 
 /// Stage 1 as a shell stands in for it: it starts the setup child on two named pipes, then
@@ -2856,7 +2862,10 @@ fn a_failed_setup_never_starts_the_agent() {
         staged.wait().unwrap();
     }
     let said = fs::read_to_string(folder.join("said")).unwrap_or_default();
-    assert!(status.is_some_and(|status| !status.success()), "{status:?}: {said}");
+    assert!(
+        status.is_some_and(|status| !status.success()),
+        "{status:?}: {said}"
+    );
     assert!(said.contains(NETWORK_SHARED), "{said}");
     assert!(!folder.join("started").exists(), "the command ran: {said}");
 }

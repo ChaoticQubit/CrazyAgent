@@ -966,7 +966,11 @@ pub fn linux_unbridged_notice_on(
             return None;
         }
         let wide = reaches && !host.supervised;
-        let line = if wide { LINUX_UNROUTED_LINE } else { LINUX_UNROUTED_ANY_HOST_LINE };
+        let line = if wide {
+            LINUX_UNROUTED_LINE
+        } else {
+            LINUX_UNROUTED_ANY_HOST_LINE
+        };
         return Some(line.to_owned());
     }
     let low = remotes
