@@ -125,7 +125,6 @@ pub(super) fn check_frames(drawn: &[(String, String)]) {
 
 fn about() -> Wizard {
     let mut wizard = wizard();
-    wizard.linux = false;
     type_text(&mut wizard, "Tidepool");
     wizard.key(key(KeyCode::Tab));
     type_text(
@@ -283,7 +282,6 @@ fn state_frames(home: &std::path::Path) -> Vec<(String, String)> {
         pool_choices(&super::new_project_tests::config()),
         Some(home.to_path_buf()),
     );
-    wizard.linux = false;
     type_text(&mut wizard, "Tidepool");
     wizard.key(key(KeyCode::Tab));
     type_text(
@@ -491,12 +489,8 @@ fn an_empty_sub_agent_list_with_a_team_maximum_of_one_says_no_sub_agent_runs() {
 }
 
 #[test]
-fn only_on_linux_below_full_access_does_review_say_nested_git_is_not_blocked() {
+fn review_names_nested_git_once_and_only_as_the_engine_sends_it() {
     use crate::sandbox::LINUX_NESTED_GIT_LINE;
-    assert_eq!(
-        Wizard::new(Vec::new(), None).linux,
-        cfg!(target_os = "linux")
-    );
     let look = Look::plain();
     let shown = |wizard: &Wizard| {
         compose(&wizard_screen(wizard, 80, 120, &look), 80, 120, "", &look)
@@ -504,16 +498,68 @@ fn only_on_linux_below_full_access_does_review_say_nested_git_is_not_blocked() {
             .collect::<Vec<_>>()
             .join(" ")
     };
+    let told = |wizard: &mut Wizard, gaps: &[&str]| {
+        let levels = &mut wizard.catalog.as_mut().unwrap().agent_access;
+        for level in levels.iter_mut() {
+            level.gaps = gaps.iter().map(|gap| (*gap).to_owned()).collect();
+        }
+    };
     let mut wizard = about();
+    load_catalog(&mut wizard, &["c-codex"]);
     wizard.go(Step::Review);
     wizard.access = AgentAccess::Sandboxed;
-    let off = shown(&wizard);
-    assert!(off.contains("Agent access"), "{off}");
-    assert!(!off.contains(LINUX_NESTED_GIT_LINE), "{off}");
-    wizard.linux = true;
-    let on = shown(&wizard);
-    assert!(on.contains(LINUX_NESTED_GIT_LINE), "{on}");
+    told(&mut wizard, &[]);
+    let quiet = shown(&wizard);
+    assert!(quiet.contains("Agent access"), "{quiet}");
+    assert!(!quiet.contains(LINUX_NESTED_GIT_LINE), "{quiet}");
+    told(&mut wizard, &[LINUX_NESTED_GIT_LINE]);
+    let named = shown(&wizard);
+    assert_eq!(named.matches(LINUX_NESTED_GIT_LINE).count(), 1, "{named}");
+    told(&mut wizard, &[]);
     wizard.access = AgentAccess::Full;
     let full = shown(&wizard);
     assert!(!full.contains(LINUX_NESTED_GIT_LINE), "{full}");
+}
+
+#[test]
+fn review_says_what_this_linux_cannot_hold_for_the_chosen_level() {
+    use crate::sandbox::{LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE};
+    let look = Look::plain();
+    let shown = |wizard: &Wizard| {
+        compose(&wizard_screen(wizard, 80, 120, &look), 80, 120, "", &look)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let told = |wizard: &mut Wizard, gaps: &[&str]| {
+        let levels = &mut wizard.catalog.as_mut().unwrap().agent_access;
+        let level = levels
+            .iter_mut()
+            .find(|level| level.access == AgentAccess::Sandboxed)
+            .unwrap();
+        level.gaps = gaps.iter().map(|gap| (*gap).to_owned()).collect();
+    };
+    let mut wizard = about();
+    wizard.go(Step::Review);
+    wizard.access = AgentAccess::Sandboxed;
+    let before = shown(&wizard);
+    assert!(before.contains("Agent access"), "{before}");
+    assert!(!before.contains(LINUX_SIGNALS_LINE), "{before}");
+    load_catalog(&mut wizard, &["c-codex"]);
+    wizard.go(Step::Review);
+    wizard.access = AgentAccess::Sandboxed;
+    let held = shown(&wizard);
+    assert!(!held.contains(LINUX_SIGNALS_LINE), "{held}");
+    assert!(!held.contains(LINUX_PROCESS_LIST_LINE), "{held}");
+    told(&mut wizard, &[LINUX_SIGNALS_LINE]);
+    let open = shown(&wizard);
+    assert!(open.contains(LINUX_SIGNALS_LINE), "{open}");
+    told(&mut wizard, &[LINUX_PROCESS_LIST_LINE]);
+    let listed = shown(&wizard);
+    assert!(listed.contains(LINUX_PROCESS_LIST_LINE), "{listed}");
+    assert!(!listed.contains(LINUX_SIGNALS_LINE), "{listed}");
+    told(&mut wizard, &[LINUX_SIGNALS_LINE]);
+    wizard.access = AgentAccess::Full;
+    let full = shown(&wizard);
+    assert!(!full.contains(LINUX_SIGNALS_LINE), "{full}");
 }

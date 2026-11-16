@@ -1075,13 +1075,15 @@ const TECH_CATALOG: [(&str, &str, TechGroup); 30] = [
 ];
 
 /// Serves the curated New Project choices and the smart team defaults.
-/// Takes the configuration, the chosen pool, the research toggles and the signed-in connections.
+/// Takes the configuration, the chosen pool, the research toggles, the signed-in connections
+/// and the owner's Linux call supervisor setting, none when unreadable.
 /// Returns the catalog, or `pool_missing` for a pool that does not exist.
 pub fn catalog(
     config: &EffectiveConfig,
     pool: Option<&CredentialRef>,
     research: &[ResearchKind],
     signed_in: &BTreeSet<CredentialRef>,
+    calls: Option<crate::sandbox::LinuxSupervisor>,
 ) -> Result<ProjectCatalog, &'static str> {
     if pool.is_some_and(|pool| !pool_exists(config, pool)) {
         return Err("pool_missing");
@@ -1118,7 +1120,7 @@ pub fn catalog(
         project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
         default_team: default_team(config, pool, signed_in),
         default_team_status: default_team_status(config, pool, signed_in).map(str::to_owned),
-        agent_access: LevelView::all(),
+        agent_access: LevelView::all(calls),
     };
     assert!(catalog.default_team.validate().is_ok());
     Ok(catalog)

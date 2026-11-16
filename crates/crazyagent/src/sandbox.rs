@@ -869,6 +869,19 @@ pub enum LinuxSockets {
     TcpPorts,
 }
 
+/// Whether a Linux agent runs under the call supervisor where this Linux holds it, the
+/// owner's setting "Linux call supervisor" (DEC-179 addendum 2). `On` (the default) adds
+/// the guards a launch needs: ports on this computer only, no new `.git` outside the
+/// agent's own git folders, signals only to programs it started. `Off` keeps the launch
+/// and every line as they were before the supervisor. Other systems ignore it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinuxSupervisor {
+    #[default]
+    On,
+    Off,
+}
+
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
 pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
 
@@ -913,15 +926,171 @@ pub const GIT_STATE_FILES: [&str; 6] = [
     "config.worktree",
 ];
 
+/// The lowest port a loopback bridge carries on Linux: inside a network namespace of its
+/// own an agent's helper has no capability to listen below it.
+pub const BRIDGE_PORT_MIN: u16 = 1024;
+
+/// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
+/// computer's network on a Linux that could give them one of their own: on the project's
+/// Agent access page and in the agent's messages at its launch. Input: the port. Output:
+/// the sentences, the port named.
+pub fn linux_unbridged_line(port: u16) -> String {
+    format!(
+        "On this Linux, port {port} is below {BRIDGE_PORT_MIN}, so agents that may reach it share this computer's network: every port they may reach on this computer is open to them on every host. CrazyAgent keeps agents to this computer only for ports {BRIDGE_PORT_MIN} and up."
+    )
+}
+
+/// What a launch tells the owner in the agent's messages when a Linux that nests agents
+/// still leaves it, with a port on this computer, on this computer's network:
+/// [`linux_unbridged_line`] for a port below [`BRIDGE_PORT_MIN`], else under None, whose
+/// page drops it, [`LINUX_PORTS_ANY_HOST_LINE`]. Inputs: what this Linux holds, the
+/// project's network choice, the sandbox as launched. Output: the sentences, or none.
+pub fn linux_unbridged_notice_on(
+    host: Option<LinuxHost>,
+    choice: policy::AgentNetwork,
+    sandbox: &ProjectSandbox,
+) -> Option<String> {
+    if !host.is_some_and(|host| host.nested) {
+        return None;
+    }
+    if let Some(port) = sandbox.unbridged_port() {
+        assert!(port < BRIDGE_PORT_MIN);
+        return Some(linux_unbridged_line(port));
+    }
+    let reaches = matches!(&sandbox.network, SandboxNetwork::Only(remotes)
+        if remotes.iter().any(|remote| matches!(remote, SandboxRemote::Loopback(_))));
+    let unsaid = choice == policy::AgentNetwork::None && sandbox.bridged_ports().is_none();
+    (reaches && unsaid).then(|| LINUX_PORTS_ANY_HOST_LINE.to_owned())
+}
+
+/// [`linux_unbridged_notice_on`] for this computer as it was last read. Inputs: the
+/// project's network choice and the agent's sandbox as launched. Output: the sentences, or
+/// none.
+pub fn linux_unbridged_notice(
+    choice: policy::AgentNetwork,
+    sandbox: &ProjectSandbox,
+) -> Option<String> {
+    linux_unbridged_notice_on(linux_host_kept(), choice, sandbox)
+}
+
 /// What a limited network cannot hold on Linux, shown there only, under the network choice
 /// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
 /// host, so a port an agent may reach on this computer is open to it on every host.
 pub const LINUX_PORTS_ANY_HOST_LINE: &str = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";
 
-/// What a writable project folder cannot hold on Linux, shown there only, under the access
-/// level in the desktop and the TUI (RV-DS241-85): no Landlock rule stops an agent from
-/// making a git repository inside a folder it may change.
+/// What a writable project folder cannot hold on a Linux where no call supervisor runs,
+/// among the engine's lines under the access level in the desktop and the TUI (RV-DS241-85,
+/// DEC-179 T4c): no Landlock rule stops an agent from making a git repository inside a
+/// folder it may change.
 pub const LINUX_NESTED_GIT_LINE: &str = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
+
+/// What a Linux agent can still do to the owner's other programs where this machine gives
+/// it neither a process namespace of its own nor the Landlock signal scope (Linux before
+/// 6.12 without usable user namespaces), shown there only, under the access level in the
+/// desktop and the TUI (SA vid 4, DEC-089).
+pub const LINUX_SIGNALS_LINE: &str = "On this Linux, agents can see which programs you run and stop or signal them, such as a dev server or CrazyAgent itself. Linux 6.12 or newer stops the signals.";
+
+/// What a Linux agent can still see where the kernel scopes its signals but this machine
+/// gives it no process namespace of its own, shown there only, under the access level in
+/// the desktop and the TUI (RV-DS241-86).
+pub const LINUX_PROCESS_LIST_LINE: &str = "On this Linux, agents can see which programs you run and how they were started.";
+
+/// What a writable project folder still cannot hold where the call supervisor runs: it
+/// refuses every new `.git` entry but the agent's own, yet an agent may change a git
+/// repository already in the project. Shown under the access level when the project may
+/// hold one ([`linux_other_git`]) and in the New Project catalog (DEC-179 T4c).
+pub const LINUX_KEPT_GIT_LINE: &str = "On Linux, agents can change a git repository already inside a project folder they may change, and your own git or IDE runs its settings when you open that folder. Check folders with a .git inside the project before you open them.";
+
+/// What the call supervisor changes for agents where it runs (DEC-179 T4c): it makes the
+/// calls it guards for them, so a program's own Landlock limits do not hold for those
+/// (QUESTION-16:21), and it refuses a create, even of a file already there, under a `.git`
+/// the agent did not make (rv-sec3 N3).
+pub const LINUX_SUPERVISED_LINE: &str = "On this Linux, CrazyAgent makes some calls for agents, such as making a file or folder or connecting, so a program an agent starts can't narrow those with limits of its own. In a .git folder CrazyAgent didn't make, agents can't create files and some writes to files already there are refused, so git commands that write fail in a repository nested in the project.";
+
+/// Why no call supervisor runs where CrazyAgent runs as root (rv-sec3 N1): dumpability does
+/// not keep a root agent away from it, so none starts and the lines after this one hold.
+pub const LINUX_ROOT_LINE: &str = "CrazyAgent runs as root on this Linux, so it starts no call supervisor and agents can do what the lines below say. Run CrazyAgent as your own user to turn it on.";
+
+/// What a limited network that reaches websites still cannot hold where the call supervisor
+/// keeps ports on this computer to it (DEC-179 T4c): agents look up names over TCP, so port
+/// 53 is open to them on every host.
+pub const LINUX_DNS_ANY_HOST_LINE: &str = "On this Linux, agents can also reach port 53, used to look up names, on every host.";
+
+/// What this Linux holds for an agent beyond its Landlock file and network rules: `nested`
+/// when it starts agents in a process namespace of their own, `scoped` when the kernel
+/// keeps their signals inside their own Landlock domain (Linux 6.12 or newer),
+/// `supervised` when the call supervisor holds every guard here, as launches start it, and
+/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinuxHost {
+    pub nested: bool,
+    pub scoped: bool,
+    pub supervised: bool,
+    pub root: bool,
+}
+
+impl LinuxHost {
+    /// What this Linux holds under the owner's Linux call supervisor setting: supervised
+    /// only while it is On, and run as root only while it is not Off, so the root line says
+    /// why no supervisor runs. Input: the setting, none when it cannot be read, which shows
+    /// every line. Output: the facts the access lines read; what is kept is never changed.
+    pub fn under(self, calls: Option<LinuxSupervisor>) -> Self {
+        assert!(!(self.root && self.supervised));
+        let held = Self {
+            supervised: self.supervised && calls == Some(LinuxSupervisor::On),
+            root: self.root && calls != Some(LinuxSupervisor::Off),
+            ..self
+        };
+        assert!(self.supervised || !held.supervised);
+        assert!(!(held.root && held.supervised));
+        held
+    }
+}
+
+/// What this computer holds as [`LinuxHost`] says, read through the sandbox helper beside
+/// this executable, again once what is kept is a minute old. No input. Output: none on
+/// another system; on Linux the facts, each false when it cannot be read, so its gap line
+/// is shown.
+pub fn linux_host() -> Option<LinuxHost> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(linux::host_now())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// What this computer holds as [`linux_host`] last read it, however long ago, so a caller
+/// inside a database transaction starts no helper; it reads only when nothing was read
+/// yet. No input. Output: as [`linux_host`].
+pub fn linux_host_kept() -> Option<LinuxHost> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(linux::host_kept())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Tells whether a project may hold a git repository besides its own top-level `.git`,
+/// which an agent may still change under the call supervisor: on Linux what a bounded read
+/// of the folder finds; elsewhere yes, where no Linux line shows. Input: the project
+/// folder. Output: true when one may be there.
+pub fn linux_other_git(project: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::holds_other_git(project)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = project;
+        true
+    }
+}
 
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
@@ -2503,6 +2672,56 @@ impl ProjectSandbox {
         self.linux_sockets
     }
 
+    /// The loopback ports a Linux that nests agents carries for this one over a bridge, the
+    /// agent then having a network namespace of its own: the sockets setting is `TcpOnly`
+    /// and the limited network names loopback ports only, each [`BRIDGE_PORT_MIN`] or
+    /// higher. Output: the ports in rising order, or none when the agent keeps the shared
+    /// network.
+    pub fn bridged_ports(&self) -> Option<Vec<u16>> {
+        let SandboxNetwork::Only(remotes) = &self.network else {
+            return None;
+        };
+        if self.linux_sockets != LinuxSockets::TcpOnly || remotes.is_empty() {
+            return None;
+        }
+        let mut ports = Vec::with_capacity(remotes.len());
+        for remote in remotes {
+            match remote {
+                SandboxRemote::Loopback(port) if *port >= BRIDGE_PORT_MIN => ports.push(*port),
+                _ => return None,
+            }
+        }
+        ports.sort_unstable();
+        ports.dedup();
+        assert!(!ports.is_empty() && ports.len() <= REMOTES_MAX);
+        assert!(!self.resolves_over_tcp());
+        Some(ports)
+    }
+
+    /// The port that alone keeps this agent on this computer's network on a Linux that
+    /// nests agents: the sockets setting is `TcpOnly` and the limited network names
+    /// loopback ports only, but one lies below [`BRIDGE_PORT_MIN`]. Output: the lowest such
+    /// port, or none when the agent is bridged or shares the network for another reason.
+    pub fn unbridged_port(&self) -> Option<u16> {
+        let SandboxNetwork::Only(remotes) = &self.network else {
+            return None;
+        };
+        if self.linux_sockets != LinuxSockets::TcpOnly {
+            return None;
+        }
+        let mut lowest: Option<u16> = None;
+        for remote in remotes {
+            let SandboxRemote::Loopback(port) = remote else {
+                return None;
+            };
+            if *port < BRIDGE_PORT_MIN && lowest.is_none_or(|low| *port < low) {
+                lowest = Some(*port);
+            }
+        }
+        assert!(lowest.is_none() || self.bridged_ports().is_none());
+        lowest
+    }
+
     /// True when, on Linux, this agent looks host names up over TCP: the setting is
     /// `TcpOnly` and its limited network names a remote on any host. It then may reach TCP
     /// port 53 and gets `RES_OPTIONS=use-vc`; loopback-only and empty networks get neither.
@@ -3408,6 +3627,7 @@ pub struct InstalledSandbox {
     sandbox: ProjectSandbox,
     profile: PathBuf,
     unconfined: bool,
+    calls: LinuxSupervisor,
     #[cfg(target_os = "linux")]
     linux: linux::LinuxSandbox,
     #[cfg(target_os = "windows")]
@@ -3419,9 +3639,15 @@ impl InstalledSandbox {
     /// Linux, picks the Landlock helper next to the engine's executable or bubblewrap; on
     /// Windows, checks the helper next to the engine's executable first, then writes its
     /// boundary profile with the engine's grants folder (see
-    /// [`windows::WindowsSandbox::install`]). Output: the sandbox bound to that profile, the
-    /// install refusal, or `Unavailable` where this system has no boundary.
-    pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
+    /// [`windows::WindowsSandbox::install`]). `calls` is the owner's "Linux call supervisor"
+    /// choice, which every launch must pass and only Linux acts on. Output: the sandbox
+    /// bound to that profile, the install refusal, or `Unavailable` where this system has no
+    /// boundary.
+    pub fn install(
+        sandbox: ProjectSandbox,
+        profile: &Path,
+        calls: LinuxSupervisor,
+    ) -> Result<Self, SandboxError> {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
         {
@@ -3453,6 +3679,7 @@ impl InstalledSandbox {
                 sandbox,
                 profile: profile.to_path_buf(),
                 unconfined: false,
+                calls,
                 windows,
             })
         }
@@ -3463,12 +3690,14 @@ impl InstalledSandbox {
             #[cfg(target_os = "linux")]
             let linux = {
                 let helper = std::env::current_exe()?.with_file_name(linux::HELPER_NAME);
-                linux::LinuxSandbox::detect(sandbox.clone(), &helper)?
+                let data = crate::tools::engine_root();
+                linux::LinuxSandbox::detect(sandbox.clone(), &helper)?.supervise(calls, data)
             };
             Ok(Self {
                 sandbox,
                 profile: profile.to_path_buf(),
                 unconfined: false,
+                calls,
                 #[cfg(target_os = "linux")]
                 linux,
             })
@@ -3521,6 +3750,12 @@ impl InstalledSandbox {
     /// Windows helper reads.
     pub fn profile(&self) -> &Path {
         &self.profile
+    }
+
+    /// The owner's "Linux call supervisor" choice this boundary was installed with; only
+    /// Linux acts on it.
+    pub fn linux_supervisor(&self) -> LinuxSupervisor {
+        self.calls
     }
 
     /// Rebuilds a harness command to run inside this boundary; see [`ProjectSandbox::wrap`]

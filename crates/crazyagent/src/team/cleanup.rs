@@ -1059,7 +1059,7 @@ fn remove_home_below(
 /// way [`rustix::fs::Dir::read_from`] does needs search on it, counts as one that stopped
 /// (code r1 F2 ds137-reset-walk). An open that stops on an entry that is still a folder
 /// clears its immutable and append-only flags ([`unpin_home_entry`]), gives this user rwx on
-/// it ([`open_up`]) and clears its ACL by its path ([`release_home_acls`]), each through
+/// it ([`open_up`]) and clears its ACL by its inode ([`release_home_acls`]), each through
 /// the parent by name, then opens it once more. Inputs: the parent handle and the name.
 /// Output: the folder, None once the name is gone or names no folder, or the error.
 #[cfg(unix)]
@@ -1176,7 +1176,7 @@ fn home_names(folder: std::os::fd::BorrowedFd<'_>) -> Result<Vec<std::ffi::CStri
 
 /// Unlinks the entry `name` of an open agent home folder, a folder as an empty folder, never
 /// following a link. An unlink that stops clears the immutable and append-only flags of the
-/// folder and the entry ([`unpin_home_entry`]) and both their ACLs by path
+/// folder and the entry ([`unpin_home_entry`]) and both their ACLs by inode
 /// ([`release_home_acls`]), then unlinks once more. Inputs: the parent handle and the name.
 /// Output: Ok once nothing has the name, or `cleanup_folder_failed`.
 #[cfg(unix)]
@@ -1303,6 +1303,12 @@ const ACL_BATCH: usize = 512;
 #[cfg(unix)]
 const STUCK_MAX: usize = 32;
 
+/// The most flushes that start `/bin/chmod` children in one walk: enough for every batch of
+/// [`DISK_ENTRIES_MAX`] entries and 64 more, so one walk starts at most twice this many
+/// children (ds181 r2, rv-sec3 F1).
+#[cfg(target_os = "macos")]
+const ACL_FLUSHES_MAX: usize = DISK_ENTRIES_MAX / ACL_BATCH + 64;
+
 /// Extended ACLs a walk clears in batches, each entry named `/.vol/<device>/<inode>`, which
 /// the system looks up by those numbers alone, so `/bin/chmod -N` resolves no path an agent
 /// can change and follows no link in one (RV-DS241-181). A folder or a file with one link
@@ -1312,8 +1318,10 @@ const STUCK_MAX: usize = 32;
 /// most [`ACL_BATCH`] of them (RV-DS241-182). An entry is taken once per walk: one waiting
 /// for the next clear is answered as taken again, so every folder that needs that clear is
 /// tried after it, and one already cleared is refused, so a folder the clear did not help is
-/// not tried again (ds181 r2, rv-code4 F2). Holds the entries waiting by name and by
-/// device and inode, those already cleared, and how many more it takes.
+/// not tried again (ds181 r2, rv-code4 F2). Children start in at most [`ACL_FLUSHES_MAX`]
+/// flushes; past that nothing more is taken, so the walk ends and the removal fails closed
+/// (ds181 r2, rv-sec3 F1). Holds the entries waiting by name and by device and inode, those
+/// already cleared, how many more it takes and how many more flushes may start children.
 #[cfg(target_os = "macos")]
 struct AclClears {
     named: Vec<PathBuf>,
@@ -1321,26 +1329,39 @@ struct AclClears {
     waiting: std::collections::HashSet<(i64, u64)>,
     cleared: std::collections::HashSet<(i64, u64)>,
     left: usize,
+    flushes_left: usize,
 }
 
 #[cfg(target_os = "macos")]
 impl AclClears {
-    /// An empty batch that takes up to [`DISK_ENTRIES_MAX`] entries. Output: the batch.
+    /// An empty batch that takes up to [`DISK_ENTRIES_MAX`] entries and starts children in up
+    /// to [`ACL_FLUSHES_MAX`] flushes. Output: the batch.
     fn new() -> Self {
+        #[cfg(test)]
+        let flushes_left = ACL_FLUSHES_CAP.get().unwrap_or(ACL_FLUSHES_MAX);
+        #[cfg(not(test))]
+        let flushes_left = ACL_FLUSHES_MAX;
+        assert!(flushes_left <= ACL_FLUSHES_MAX);
         Self {
             named: Vec::new(),
             links: Vec::new(),
             waiting: std::collections::HashSet::new(),
             cleared: std::collections::HashSet::new(),
             left: DISK_ENTRIES_MAX,
+            flushes_left,
         }
     }
 
     /// Takes the entry `found` describes, clearing the batch once [`ACL_BATCH`] wait. Input:
     /// the entry's status, read without following a link. Output: whether it was taken now or
-    /// waits from earlier; false for an entry already cleared in this walk or one never taken.
+    /// waits from earlier; false for an entry already cleared in this walk, one never taken,
+    /// and every entry once no flush may start a child.
     fn add(&mut self, found: &rustix::fs::Stat) -> bool {
         use rustix::fs::FileType;
+        if self.flushes_left == 0 {
+            assert!(self.waiting.is_empty());
+            return false;
+        }
         let kind = FileType::from_raw_mode(found.st_mode);
         let key = (i64::from(found.st_dev), found.st_ino);
         if self.waiting.contains(&key) {
@@ -1368,12 +1389,18 @@ impl AclClears {
     }
 
     /// Clears the ACLs of the entries waiting, in at most two children, and empties the
-    /// batch. A child that fails or does not start leaves those ACLs, and the step that needs
-    /// an entry then reports it.
+    /// batch; one flush of [`ACL_FLUSHES_MAX`] is spent only when some entry waits. A child
+    /// that fails or does not start leaves those ACLs, and the step that needs an entry then
+    /// reports it.
     fn flush(&mut self) {
         use std::process::{Command, Stdio};
         assert_eq!(self.waiting.len(), self.named.len() + self.links.len());
         assert!(self.named.len() <= ACL_BATCH && self.links.len() <= ACL_BATCH);
+        if self.waiting.is_empty() {
+            return;
+        }
+        assert!(self.flushes_left > 0);
+        self.flushes_left -= 1;
         self.cleared.extend(self.waiting.drain());
         let batches = [
             (&["-f", "-N"][..], &mut self.named),
@@ -1693,10 +1720,25 @@ thread_local! {
 
 #[cfg(all(test, target_os = "macos"))]
 thread_local! {
+    /// The most flushes that start a `/bin/chmod` child one walk on this thread may make, in
+    /// place of [`ACL_FLUSHES_MAX`], so a row reaches the cap with a short chain of folders;
+    /// None keeps the real cap.
+    pub(super) static ACL_FLUSHES_CAP: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
     /// A step a cleanup test runs in [`unpin`] once a pinned entry is open and before its
     /// flags change, standing in for a process an agent left that swaps a folder meanwhile.
     /// Runs once; None runs nothing.
     pub(super) static AFTER_UNPIN_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// A step a cleanup test runs in [`unpin_home_entry`] once it has named an entry that
+    /// will not open for `/usr/bin/chflags` and before that runs, standing in for a process
+    /// an agent left that swaps a folder meanwhile. Runs once; None runs nothing.
+    pub(super) static BEFORE_HOME_ENTRY_CHFLAGS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -1746,15 +1788,18 @@ pub(crate) fn unpin<P: rustix::path::Arg>(parent: impl std::os::fd::AsFd, name: 
 
 /// Clears the immutable and append-only flags of one entry of an agent home as [`unpin`]
 /// does and, when the entry will not open, such as one at mode 000, which changing flags
-/// does not need to read, by its path (RV-DS241-137 code r1 F2): its flags are read from its
-/// parent's handle without following a link, and only when one of them is set is
-/// `/usr/bin/chflags -h` run on its path, which changes a link itself rather than what it
-/// names. That path is resolved again, so a folder above it that a process swaps meanwhile
-/// is followed, which is why only an agent home's removal uses it: there a confined agent
-/// can set no flag (the profile denies it) and a Full one has the owner's rights already,
-/// while a Shared tool cache keeps [`unpin`] alone (T8-R2-F1). A file with a second link
-/// keeps its flags, as with [`unpin`]. Inputs: the entry's parent and its name there,
-/// absolute when the parent is the working folder.
+/// does not need to read, by its inode (RV-DS241-137 code r1 F2): its status is read from
+/// its parent's handle without following a link, and only when one of those flags is set is
+/// `/usr/bin/chflags -h` run on `/.vol/<device>/<inode>` from that status, which changes a
+/// link itself rather than what it names (rv-sec3 F1, RV-DS241-204): a confined agent can
+/// flag an entry in its project and move it into the home, where the profile denies setting
+/// flags only. No path is built in the engine, so a folder swapped before the run is not
+/// followed; the kernel still turns those numbers into the entry's current path and walks
+/// it, so a folder above it swapped for a link to an owner folder within that one call is
+/// followed (rv-sec3 r2 F1, backlog: a parent-handle flag call needs code this crate's
+/// forbid of unsafe code rules out). A Shared tool cache keeps [`unpin`] alone (T8-R2-F1). A file with a
+/// second link keeps its flags, as with [`unpin`]. Inputs: the entry's parent and its name
+/// there, absolute when the parent is the working folder.
 #[cfg(target_os = "macos")]
 pub(crate) fn unpin_home_entry<P: rustix::path::Arg + Copy>(
     parent: impl std::os::fd::AsFd,
@@ -1762,46 +1807,48 @@ pub(crate) fn unpin_home_entry<P: rustix::path::Arg + Copy>(
 ) {
     use nix::sys::stat::FileFlag;
     use rustix::fs::{AtFlags, FileType};
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
     let parent = parent.as_fd();
     let pinning = FileFlag::UF_IMMUTABLE | FileFlag::UF_APPEND;
     let pinned = || {
-        rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|found| {
-            let file = FileType::from_raw_mode(found.st_mode) != FileType::Directory;
-            let flags = FileFlag::from_bits_retain(found.st_flags);
-            flags.intersects(pinning)
-                && !(file && found.st_nlink != 1)
-                && found.st_uid == rustix::process::geteuid().as_raw()
-        })
+        rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+            .ok()
+            .filter(|found| {
+                let file = FileType::from_raw_mode(found.st_mode) != FileType::Directory;
+                let flags = FileFlag::from_bits_retain(found.st_flags);
+                flags.intersects(pinning)
+                    && !(file && found.st_nlink != 1)
+                    && found.st_uid == rustix::process::geteuid().as_raw()
+            })
     };
-    if !pinned() {
+    if pinned().is_none() {
         return;
     }
     unpin(parent, name);
-    if !pinned() {
+    let Some(found) = pinned() else {
         return;
+    };
+    let entry = PathBuf::from(format!("/.vol/{}/{}", found.st_dev, found.st_ino));
+    #[cfg(test)]
+    if let Some(step) = BEFORE_HOME_ENTRY_CHFLAGS.with(|step| step.borrow_mut().take()) {
+        step();
     }
-    let Ok(name) = name.as_cow_c_str() else {
-        return;
-    };
-    let name = Path::new(OsStr::from_bytes(name.to_bytes()));
-    let path = if name.is_absolute() {
-        name.to_path_buf()
-    } else {
-        let Ok(folder) = rustix::fs::getpath(parent) else {
-            return;
-        };
-        Path::new(OsStr::from_bytes(folder.to_bytes())).join(name)
-    };
-    let _ = crate::spawn_gate::status(
-        std::process::Command::new("/usr/bin/chflags")
-            .args(["-h", "nouchg,nouappnd", "--"])
-            .arg(&path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-    );
+    let _ = crate::spawn_gate::status(&mut flag_clear(&entry));
+}
+
+/// The `/usr/bin/chflags` run that clears the immutable and append-only flags of one entry,
+/// a link itself rather than what it names, with no input or output. Its options end before
+/// the flags word, since chflags reads anything after that word as a file (rv-sec3 r2 F2).
+/// Input: the entry. Output: the command, not started.
+#[cfg(target_os = "macos")]
+fn flag_clear(entry: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("/usr/bin/chflags");
+    command
+        .args(["-h", "--", "nouchg,nouappnd"])
+        .arg(entry)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
 }
 
 /// Leaves flags alone where no flag an agent may set keeps an entry from going. Inputs:

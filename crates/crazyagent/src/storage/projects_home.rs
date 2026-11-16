@@ -519,9 +519,10 @@ pub(super) fn add_ended(db: &Connection) -> Result<Option<AddEnded>, EngineError
 }
 
 /// Forgets an ended job the owner dismissed or a new job replaced: an ended add or a project
-/// move an engine stop cut short. A delete cut short stays on its project's banner until the
-/// owner keeps the project ([`delete_keep`]) or deletes it again. Inputs: the connection and
-/// its request. Output: Ok.
+/// move an engine stop cut short, with the old-folder mark of that move, so a dismissed
+/// warning is not shown again at the next start. A delete cut short stays on its project's
+/// banner until the owner keeps the project ([`delete_keep`]) or deletes it again. Inputs:
+/// the connection and its request. Output: Ok.
 pub(super) fn job_forget(db: &Connection, request: &RequestId) -> Result<(), EngineError> {
     db.execute(
         "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NOT NULL",
@@ -533,7 +534,7 @@ pub(super) fn job_forget(db: &Connection, request: &RequestId) -> Result<(), Eng
         [request.as_str()],
     )
     .map_err(error)?;
-    Ok(())
+    move_left_clear(db, request)
 }
 
 /// Checks a Delete everything job before it starts, writing nothing: the owner's admission,
@@ -718,6 +719,33 @@ pub(super) fn move_ended(db: &Connection) -> Result<Option<MoveEnded>, EngineErr
         })
     })
     .transpose()
+}
+
+/// Whether the project move recorded under `request` left its old folder behind: its record
+/// marked the folder as still to clear, since the move went by copy, and the folder is still
+/// there. A replay of that move answers the old-folder code its first reply carried (B17 -66).
+/// Inputs: the connection and the request. Output: the answer.
+pub(super) fn move_left(db: &Connection, request: &RequestId) -> Result<bool, EngineError> {
+    let origin: Option<String> = db
+        .query_row(
+            "SELECT origin FROM projects_home_project_move_left WHERE singleton=1 AND request=?1",
+            [request.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(origin.is_some_and(|origin| std::fs::symlink_metadata(origin).is_ok()))
+}
+
+/// Forgets the old-folder mark of the project move recorded under `request`, once its old
+/// folder was cleared. Inputs: the connection and the request. Output: Ok.
+pub(super) fn move_left_clear(db: &Connection, request: &RequestId) -> Result<(), EngineError> {
+    db.execute(
+        "DELETE FROM projects_home_project_move_left WHERE request=?1",
+        [request.as_str()],
+    )
+    .map_err(error)?;
+    Ok(())
 }
 
 /// A checked Delete everything: the plan with the project's research jobs, or the refusal code.
@@ -1303,6 +1331,7 @@ pub(super) fn project_move_settle(
             if let (Some(cut), Some(finished)) = (cut, finished) {
                 keep_move_ended(&tx, &cut, finished)?;
             }
+            keep_move_left(&tx)?;
             finished
         }
         Some(exchange) => {
@@ -1318,6 +1347,46 @@ pub(super) fn project_move_settle(
     tx.commit().map_err(error)?;
     if let Some(home::Finished::Moved { repointed }) = finished {
         eprintln!("project_move_settled copies_repointed={repointed}");
+    }
+    Ok(())
+}
+
+/// Keeps a project move whose record marked its old folder as still to clear, and whose old
+/// folder is still there, as the ended job the next status shows,
+/// `move_project_old_folder_left`, so an owner whose reply was lost to an engine stop during
+/// the clear is told (B17 -66). An ended job already kept, such as a move this start found
+/// cut short, stays, and the mark waits for the next start; a mark whose old folder is gone
+/// is forgotten. Input: the transaction. Output: Ok, or any SQLite failure.
+fn keep_move_left(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let mark: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT request, project, origin FROM projects_home_project_move_left WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((request, project, origin)) = mark else {
+        return Ok(());
+    };
+    if std::fs::symlink_metadata(&origin).is_err() {
+        tx.execute("DELETE FROM projects_home_project_move_left", [])
+            .map_err(error)?;
+        return Ok(());
+    }
+    let ended: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects_home_project_move_ended)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !ended {
+        tx.execute(
+            "INSERT INTO projects_home_project_move_ended VALUES (1,?1,?2,?3,'move',?4)",
+            rusqlite::params![request, project, origin, "move_project_old_folder_left"],
+        )
+        .map_err(error)?;
     }
     Ok(())
 }

@@ -105,7 +105,12 @@ const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROU
 /// context-mode from the engine's shared install answers in about 1 s; the margin covers a
 /// machine busy with builds, and a server that never answers delays the start by 60 s only.
 pub(super) const CLAUDE_MCP_CONNECT_LIMIT: (&str, &str) = ("MCP_TIMEOUT", "60000");
-const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
+/// Turns Claude Code's auto-memory off for every agent launch, beside `autoMemoryEnabled`
+/// false in its settings (RV-DS241-205): the home reset keeps `projects` for transcripts,
+/// and a `projects/<key>/memory/MEMORY.md` one run wrote would otherwise load into every
+/// later session in that home, teammates included, as standing instructions.
+pub(crate) const CLAUDE_AUTO_MEMORY_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"autoMemoryEnabled\":false,\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -962,6 +967,10 @@ fn claude_invocation(
         (
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
             OsString::from("1"),
+        ),
+        (
+            CLAUDE_AUTO_MEMORY_OFF.0,
+            OsString::from(CLAUDE_AUTO_MEMORY_OFF.1),
         ),
     ];
     if let Some((name, value)) = request.limits.provider_retry.claude_env() {

@@ -341,7 +341,7 @@ test("F08: an extra the owner types is a full plain socket path or a port below 
 
 test("F08: Agent access shows the extras with what each means, the apply choice and the extras log, and every grant refusal has the engine's sentence", () => {
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
-  assert.match(page, /<GrantsEditor prefix="ps" view={view} grants={grants} access={access} onChange={setGrants} \/>/);
+  assert.match(page, /<GrantsEditor prefix="ps" view={view} grants={grants} access={access} network={network} onChange={setGrants} \/>/);
   assert.match(page, /<ApplyChoices name="ps-apply-changes" value={applyChanges} onChange={setApplyChanges} \/>/);
   assert.match(page, /<GrantLog rows={view\.grant_log \?\? \[\]} \/>/);
   assert.ok(page.includes("setGrants(savedGrants(next))"));
@@ -450,21 +450,47 @@ test("every shared folders refusal has its own sentence in both UIs", () => {
   }
 });
 
-test("only on Linux do the network and access choices say ports hold no host and nested git is not blocked (RV-DS241-83, -85)", () => {
+test("only on Linux does the network choice say ports hold no host, and the access level names nested git once, only as the engine sends it (RV-DS241-83, -85, DEC-179 T4c)", () => {
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
   assert.ok(engine.includes(`pub const LINUX_PORTS_ANY_HOST_LINE: &str = "${access.LINUX_PORTS_ANY_HOST}";`), "the port gap reads as the engine states it");
-  assert.ok(engine.includes(`pub const LINUX_NESTED_GIT_LINE: &str = "${access.LINUX_NESTED_GIT}";`), "the nested git gap reads as the engine states it");
+  assert.ok(!("LINUX_NESTED_GIT" in access), "the engine's level lines carry the nested git line");
+  const nested = engine.match(/pub const LINUX_NESTED_GIT_LINE: &str = "([^"]+)";/)[1];
   const none = () => {};
-  const shown = (platform, chosen) => renderToStaticMarkup(createElement(access.NetworkChoices, { name: "n", value: "none", access: chosen, onChange: none, platform }))
-    + renderToStaticMarkup(createElement(access.AccessLevels, { name: "a", value: chosen, unavailable: () => null, onChange: none, platform }));
   const escaped = (text) => text.replaceAll("'", "&#x27;");
-  const linux = shown("linux", "sandboxed");
-  assert.ok(linux.includes(escaped(access.LINUX_PORTS_ANY_HOST)), linux);
-  assert.ok(linux.includes(escaped(access.LINUX_NESTED_GIT)), linux);
-  for (const page of [shown("macos", "sandboxed"), shown("windows", "sandboxed"), shown("linux", "full")]) {
+  const network = (platform, chosen) => renderToStaticMarkup(createElement(access.NetworkChoices, { name: "n", value: "none", access: chosen, onChange: none, platform }));
+  const levels = (platform, gaps) => renderToStaticMarkup(createElement(access.AccessLevels, { name: "a", value: "sandboxed", unavailable: () => null, gaps: () => gaps, onChange: none, platform }));
+  assert.ok(network("linux", "sandboxed").includes(escaped(access.LINUX_PORTS_ANY_HOST)));
+  for (const page of [network("macos", "sandboxed"), network("windows", "sandboxed"), network("linux", "full")]) {
     assert.ok(!page.includes(escaped(access.LINUX_PORTS_ANY_HOST)), page);
-    assert.ok(!page.includes(escaped(access.LINUX_NESTED_GIT)), page);
   }
+  for (const platform of ["linux", "macos"]) {
+    const quiet = levels(platform, []);
+    assert.ok(!quiet.includes(escaped(nested)), quiet);
+    const named = levels(platform, [nested]);
+    assert.equal(named.split(escaped(nested)).length - 1, 1, named);
+  }
+});
+
+test("the network choice shows the ports line the engine sends for it, and this desktop's own only for an engine that sends none (DEC-179 T3b)", () => {
+  const told = "a line the engine sends for this choice";
+  const line = access.LINUX_PORTS_ANY_HOST.replaceAll("'", "&#x27;");
+  const sent = (platform, chosen, gap) => renderToStaticMarkup(createElement(access.NetworkChoices, { name: "n", value: "none", access: chosen, onChange: () => {}, platform, gap }));
+  for (const platform of ["linux", "macos"]) {
+    const page = sent(platform, "sandboxed", told);
+    assert.ok(page.includes(told), page);
+    assert.ok(!page.includes(line), page);
+    assert.ok(!sent(platform, "full", told).includes(told), "Full access has no network limit to speak of");
+  }
+  assert.ok(!sent("linux", "sandboxed", null).includes(line), "the engine says this choice holds here");
+  assert.ok(sent("linux", "sandboxed", undefined).includes(line), "an engine that sends no line");
+  const networks = [{ network: "open", label: "Open", gap: "open line" }, { network: "none", label: "None", gap: null }, { network: "https", label: "Port 443 only" }];
+  assert.equal(access.networkGap({ networks }, "open", "macos"), "open line");
+  assert.equal(access.networkGap({ networks }, "none", "linux"), null);
+  assert.equal(access.networkGap({ networks }, "https", "linux"), access.LINUX_PORTS_ANY_HOST);
+  assert.equal(access.networkGap({ networks }, "https", "macos"), null);
+  assert.equal(access.networkGap(null, "none", "linux"), access.LINUX_PORTS_ANY_HOST);
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<NetworkChoices[^>]*gap=\{networkGap\(view, network\)\}/);
 });
 
 test("only on Linux below Full access do the allowed extras say a port is open on every host (RV-DS241-83)", () => {
@@ -473,5 +499,26 @@ test("only on Linux below Full access do the allowed extras say a port is open o
   assert.ok(shown("linux", "sandboxed").includes(line), shown("linux", "sandboxed"));
   for (const page of [shown("macos", "sandboxed"), shown("windows", "own_branch"), shown("linux", "full")]) {
     assert.ok(!page.includes(line), page);
+  }
+  const told = "a line the engine sends for None";
+  const saved = (gap) => ({ ...view, network: "none", networks: view.networks.map((choice) => choice.network === "none" ? { ...choice, gap } : choice) });
+  const sent = (platform, gap, network) => renderToStaticMarkup(createElement(access.GrantsEditor, { prefix: "g", view: saved(gap), grants: [], access: "sandboxed", network, onChange: () => {}, platform }));
+  assert.ok(sent("macos", told).includes(told), "the engine's line for the saved choice");
+  assert.ok(!sent("linux", null).includes(line), "the engine says None holds here");
+  assert.ok(sent("linux", null, "open").includes(line), "the choice being edited, not the saved one");
+});
+
+test("the access choice shows what the engine says this Linux can't hold for the chosen level (SA vid 4)", () => {
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const line = /pub const LINUX_SIGNALS_LINE: &str = "([^"]+)";/.exec(engine)?.[1];
+  assert.ok(line, "the engine states the signal gap");
+  const told = (level) => level === "sandboxed" ? [line] : [];
+  const shown = (chosen, gaps) => renderToStaticMarkup(createElement(access.AccessLevels, { name: "a", value: chosen, unavailable: () => null, gaps, onChange: () => {}, platform: "linux" }));
+  const escaped = line.replaceAll("'", "&#x27;");
+  assert.ok(shown("sandboxed", told).includes(escaped), shown("sandboxed", told));
+  assert.ok(!shown("own_branch", told).includes(escaped));
+  assert.ok(!shown("sandboxed", undefined).includes(escaped), "an older engine sends no gap line");
+  for (const page of ["../src/screens/project/settings.tsx", "../src/screens/new-project/index.tsx"]) {
+    assert.match(readFileSync(new URL(page, import.meta.url), "utf8"), /<AccessLevels [^\n]* gaps=\{/, page);
   }
 });

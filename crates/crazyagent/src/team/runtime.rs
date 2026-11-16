@@ -9645,6 +9645,7 @@ impl TeamRuntime {
                 .map_err(sandboxed)?;
         }
         sandbox.install(&profile).map_err(sandboxed)?;
+        self.note_unbridged(&stored.project_id, id, policy.network, &sandbox);
         let terminal_display = crate::coord::settings::read(&self.connection, &stored.project_id)
             .map_err(|e| {
                 with_code(
@@ -9708,6 +9709,31 @@ impl TeamRuntime {
         };
         made.keep();
         Ok((root, plan, mode))
+    }
+
+    /// Keeps in an agent's Messages timeline, once while it is kept, the engine's notice that
+    /// this launch stays on this computer's network on a Linux that nests agents
+    /// ([`crate::sandbox::linux_unbridged_notice`]). Takes the project, the agent, the
+    /// project's network choice and the agent's sandbox as launched. Returns nothing; a
+    /// notice that cannot be kept is logged, never a reason not to start.
+    fn note_unbridged(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        choice: AgentNetwork,
+        sandbox: &ProjectSandbox,
+    ) {
+        let Some(text) = crate::sandbox::linux_unbridged_notice(choice, sandbox) else {
+            return;
+        };
+        let kept = id > 0
+            && self.connection.unchecked_transaction().is_ok_and(|tx| {
+                super::agent_messages::note_once(&tx, project, id, &text, now_ms()).is_ok()
+                    && tx.commit().is_ok()
+            });
+        if !kept {
+            eprintln!("team_unbridged_notice_not_kept agent={id}");
+        }
     }
 
     /// The bounds of one agent process: the longest a launched harness may run. The owner's

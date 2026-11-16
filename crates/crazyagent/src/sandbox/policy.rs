@@ -520,9 +520,17 @@ impl AgentPolicy {
     /// family the owner has installed, the project uses or the owner chose, the IDE hooks
     /// and agent files choices, the tool cache choice with every choice, the shared folders
     /// choice with the top-level folders it can pick, and the policy's version, which a save
-    /// names. Inputs: the project folder, the
-    /// owner's tool homes and the version. Output: the view.
-    pub fn view(&self, project: &Path, homes: &ToolHomes, version: u64) -> PolicyView {
+    /// names. Inputs: the project folder, the owner's tool homes, the version, the owner's
+    /// sandbox settings, none when unreadable, and whether the project may hold another git
+    /// repository ([`LevelView::other_git`]). Output: the view.
+    pub fn view(
+        &self,
+        project: &Path,
+        homes: &ToolHomes,
+        version: u64,
+        settings: Option<crate::sandbox_settings::SandboxSettings>,
+        other_git: bool,
+    ) -> PolicyView {
         let allowed = self.allowed(project);
         let toolchains: Vec<ToolchainView> = Toolchain::ALL
             .into_iter()
@@ -536,15 +544,19 @@ impl AgentPolicy {
             .filter(|row| row.installed || row.used || self.choice(row.toolchain).is_some())
             .collect();
         assert!(toolchains.len() <= Toolchain::ALL.len());
+        let calls = settings.map(|settings| settings.linux_supervisor);
+        let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
+        let sockets = settings.map(|settings| settings.linux_sockets);
         PolicyView {
             access: self.access,
             network: self.network,
-            levels: LevelView::all(),
+            levels: LevelView::on(host, other_git),
             networks: AgentNetwork::ALL
                 .into_iter()
                 .map(|network| NetworkView {
                     network,
                     label: network.label().to_owned(),
+                    gap: linux_network_gap(network, host, sockets, &self.grants),
                 })
                 .collect(),
             toolchains,
@@ -800,12 +812,46 @@ pub struct HomeCachesView {
     pub label: String,
 }
 
-/// One network choice with the name shown to the owner.
+/// One network choice with the name shown to the owner and, on Linux, the line that says
+/// what the choice cannot hold on this computer ([`linux_network_gap`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkView {
     pub network: AgentNetwork,
     pub label: String,
+    #[serde(default)]
+    pub gap: Option<String>,
+}
+
+/// What a network choice cannot hold on this Linux, for the Agent access page: a port agents
+/// may reach on this computer is open on every host. Under `TcpOnly` the call supervisor
+/// keeps those ports to this computer, though Https reaches port 53 on any host; without it
+/// a nesting host's bridge does under None, unless a granted port is below its lowest.
+/// Inputs: the choice, the host under the setting, sockets, grants. Output: the line, or none.
+pub fn linux_network_gap(
+    network: AgentNetwork,
+    host: Option<crate::sandbox::LinuxHost>,
+    sockets: Option<crate::sandbox::LinuxSockets>,
+    grants: &[AccessGrant],
+) -> Option<String> {
+    let host = host?;
+    let tcp = sockets == Some(crate::sandbox::LinuxSockets::TcpOnly);
+    if host.supervised && tcp && network != AgentNetwork::Open {
+        return (network == AgentNetwork::Https)
+            .then(|| crate::sandbox::LINUX_DNS_ANY_HOST_LINE.to_owned());
+    }
+    let bridges = network == AgentNetwork::None && host.nested && tcp;
+    if !bridges {
+        return Some(crate::sandbox::LINUX_PORTS_ANY_HOST_LINE.to_owned());
+    }
+    grants
+        .iter()
+        .filter_map(|grant| match grant {
+            AccessGrant::Port { port } if *port < crate::sandbox::BRIDGE_PORT_MIN => Some(*port),
+            _ => None,
+        })
+        .min()
+        .map(crate::sandbox::linux_unbridged_line)
 }
 
 /// One access level with the reason it cannot run here, if any.
@@ -815,24 +861,98 @@ pub struct LevelView {
     pub access: AgentAccess,
     pub label: String,
     pub unavailable: Option<String>,
+    #[serde(default)]
+    pub gaps: Vec<String>,
 }
 
 impl LevelView {
-    /// Every access level, from the most to the least confined, each with the reason it
-    /// cannot run agents on this computer. Takes nothing. Returns one view for each level,
-    /// as a project's policy and the New Project catalog both show them.
-    pub fn all() -> Vec<Self> {
+    /// Every access level for the New Project catalog, from the most to the least
+    /// confined, each with the reason it cannot run agents on this computer, from what
+    /// [`LevelView::refresh`] last read of it under the owner's call supervisor setting; a
+    /// repository may be anywhere in a project not made yet. Input: the setting, none when
+    /// unreadable. Output: one view for each level.
+    pub fn all(calls: Option<crate::sandbox::LinuxSupervisor>) -> Vec<Self> {
+        Self::on(
+            crate::sandbox::linux_host_kept().map(|host| host.under(calls)),
+            true,
+        )
+    }
+
+    /// Reads again what this computer holds once it is a minute old, which on Linux may
+    /// start the sandbox helper and bubblewrap. A reader calls it before it opens its
+    /// database transaction, so [`LevelView::all`] inside never waits on a program.
+    /// Takes nothing. Returns nothing.
+    pub fn refresh() {
+        crate::sandbox::linux_host();
+    }
+
+    /// Every access level as [`LevelView::all`] gives them, for a computer that holds
+    /// `host`. Inputs: what a Linux holds under the setting, none on another system, and
+    /// whether the project may hold another git repository ([`LevelView::other_git`]), read
+    /// before any transaction. Output: one view for each level, with its [`linux_gaps`].
+    pub fn on(host: Option<crate::sandbox::LinuxHost>, other_git: bool) -> Vec<Self> {
         let levels: Vec<Self> = AgentAccess::ALL
             .into_iter()
             .map(|access| Self {
                 access,
                 label: access.label().to_owned(),
                 unavailable: access.unavailable().map(str::to_owned),
+                gaps: linux_gaps(access, host, other_git)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
             })
             .collect();
         assert_eq!(levels.len(), AgentAccess::ALL.len());
         levels
     }
+
+    /// Tells whether a project may hold a git repository besides its own, as its Agent
+    /// access lines need where the call supervisor runs: a bounded read of its folder
+    /// ([`crate::sandbox::linux_other_git`]), made only for a supervised host. A reader
+    /// calls it before its database transaction, so that read never holds one. Inputs:
+    /// what this Linux holds under the setting, none elsewhere, and the folder.
+    pub fn other_git(host: Option<crate::sandbox::LinuxHost>, project: &Path) -> bool {
+        host.is_some_and(|host| host.supervised) && crate::sandbox::linux_other_git(project)
+    }
+}
+
+/// What a Linux cannot hold for agents at one access level, as plain lines both clients
+/// show under it: why root runs no supervisor; nested git, or under the supervisor its
+/// narrower line where another repository may be and what it changes; then the process
+/// list, or signals too, where agents share the process namespace. Inputs: the level, the
+/// host under the setting and whether the project may hold another repository.
+pub fn linux_gaps(
+    access: AgentAccess,
+    host: Option<crate::sandbox::LinuxHost>,
+    other_git: bool,
+) -> Vec<&'static str> {
+    let Some(host) = host else {
+        return Vec::new();
+    };
+    assert!(!(host.root && host.supervised));
+    if access == AgentAccess::Full {
+        return Vec::new();
+    }
+    let mut lines = Vec::with_capacity(3);
+    if host.root {
+        lines.push(crate::sandbox::LINUX_ROOT_LINE);
+    }
+    if host.supervised {
+        if other_git {
+            lines.push(crate::sandbox::LINUX_KEPT_GIT_LINE);
+        }
+        lines.push(crate::sandbox::LINUX_SUPERVISED_LINE);
+    } else {
+        lines.push(crate::sandbox::LINUX_NESTED_GIT_LINE);
+    }
+    if !host.nested && (host.scoped || host.supervised) {
+        lines.push(crate::sandbox::LINUX_PROCESS_LIST_LINE);
+    } else if !host.nested {
+        lines.push(crate::sandbox::LINUX_SIGNALS_LINE);
+    }
+    assert!((1..=3).contains(&lines.len()));
+    lines
 }
 
 /// One toolchain family: whether the owner has it, the project uses it and agents may
@@ -988,7 +1108,7 @@ mod tests {
         );
         let saved = serde_json::to_string(&own).unwrap();
         assert!(saved.contains(r#""tool_cache":"per_agent""#), "{saved}");
-        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
         assert_eq!(view.tool_cache, ToolCacheScope::PerAgent);
         let listed: Vec<(&str, &str)> = view
             .tool_caches
@@ -1028,7 +1148,7 @@ mod tests {
             let read = load(&connection, "p").unwrap();
             assert_eq!(read.home_caches, choice);
             assert_eq!(read.pinned(folder.path()).home_caches, choice);
-            let view = read.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+            let view = read.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
             assert_eq!(view.home_caches, choice);
             let listed: Vec<(&str, &str)> = view
                 .home_cache_choices
@@ -1076,7 +1196,7 @@ mod tests {
         assert!(saved.contains(r#""apply_changes":"next_start""#), "{saved}");
         assert!(saved.contains(r#"{"kind":"port","port":47821}"#), "{saved}");
         assert!(saved.contains(r#"{"kind":"temp_folder"}"#), "{saved}");
-        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
         let listed: Vec<(&str, &str)> = view
             .apply_choices
             .iter()
@@ -1417,6 +1537,8 @@ mod tests {
             Path::new("/nonexistent"),
             &ToolHomes::at(Path::new("/nonexistent")),
             0,
+            Default::default(),
+            true,
         );
         assert!(view.ide_git_hooks);
         connection
@@ -1495,7 +1617,7 @@ mod tests {
             assert_eq!(read.ide_agent_files, choice);
             assert_eq!(read.pinned(nowhere).ide_agent_files, choice);
             assert_eq!(
-                read.view(nowhere, &ToolHomes::at(nowhere), 0)
+                read.view(nowhere, &ToolHomes::at(nowhere), 0, None, true)
                     .ide_agent_files,
                 choice
             );
@@ -1581,5 +1703,188 @@ mod tests {
         }
         assert!(state.contains("[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]$"));
         assert!(new.contains("[wW][oO][rR](k|K|\u{212a})[tT][rR][eE][eE](s|S|\u{17f})"));
+    }
+
+    #[test]
+    fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
+        use crate::sandbox::{LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets};
+        let host = |nested| {
+            Some(LinuxHost {
+                nested,
+                scoped: false,
+                supervised: false,
+                root: false,
+            })
+        };
+        let port = |port| AccessGrant::Port { port };
+        let line = Some(LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        let tcp = Some(LinuxSockets::TcpOnly);
+        let none = |nested, sockets, grants: &[AccessGrant]| {
+            linux_network_gap(AgentNetwork::None, host(nested), sockets, grants)
+        };
+        for network in AgentNetwork::ALL {
+            assert_eq!(linux_network_gap(network, None, tcp, &[]), None, "not Linux");
+            assert_eq!(linux_network_gap(network, host(false), tcp, &[]), line);
+        }
+        for network in [AgentNetwork::Open, AgentNetwork::Https] {
+            assert_eq!(linux_network_gap(network, host(true), tcp, &[]), line);
+        }
+        assert_eq!(none(true, tcp, &[]), None);
+        assert_eq!(none(true, tcp, &[port(8080), AccessGrant::TempFolder]), None);
+        assert_eq!(none(true, tcp, &[port(1024)]), None);
+        for sockets in [Some(LinuxSockets::TcpPorts), Some(LinuxSockets::Refuse), None] {
+            assert_eq!(none(true, sockets, &[]), line, "{sockets:?}");
+        }
+        let named = none(true, tcp, &[port(8080), port(443), port(80)]).unwrap();
+        assert_eq!(named, crate::sandbox::linux_unbridged_line(80));
+        assert!(named.contains("port 80 is below 1024"), "{named}");
+        assert_eq!(none(false, tcp, &[port(80)]), line, "no nest, the plain line");
+        let stored = r#"{"network":"none","label":"None"}"#;
+        let old: NetworkView = serde_json::from_str(stored).unwrap();
+        assert_eq!(old.gap, None, "a view an older engine stored");
+    }
+
+    #[test]
+    fn a_supervised_linux_under_tcp_only_drops_the_ports_line_but_names_port_53_for_https() {
+        use crate::sandbox::{
+            LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets,
+        };
+        let host = |nested| {
+            Some(LinuxHost {
+                nested,
+                scoped: false,
+                supervised: true,
+                root: false,
+            })
+        };
+        let low = [AccessGrant::Port { port: 80 }, AccessGrant::Port { port: 53 }];
+        let ports = Some(LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        let dns = Some(LINUX_DNS_ANY_HOST_LINE.to_owned());
+        let tcp = Some(LinuxSockets::TcpOnly);
+        for nested in [false, true] {
+            let gap = |network, sockets| linux_network_gap(network, host(nested), sockets, &low);
+            assert_eq!(gap(AgentNetwork::None, tcp), None, "nested {nested}");
+            assert_eq!(gap(AgentNetwork::Https, tcp), dns, "nested {nested}");
+            assert_eq!(gap(AgentNetwork::Open, tcp), ports, "nested {nested}");
+            for sockets in [Some(LinuxSockets::TcpPorts), Some(LinuxSockets::Refuse), None] {
+                for network in [AgentNetwork::None, AgentNetwork::Https] {
+                    assert_eq!(gap(network, sockets), ports, "{network:?} {sockets:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
+        use crate::sandbox::{
+            LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE, LinuxHost,
+        };
+        let host = |nested, scoped| {
+            Some(LinuxHost {
+                nested,
+                scoped,
+                supervised: false,
+                root: false,
+            })
+        };
+        let gaps = |access, nested, scoped| linux_gaps(access, host(nested, scoped), false);
+        let git = LINUX_NESTED_GIT_LINE;
+        for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+            assert!(linux_gaps(access, None, true).is_empty(), "not Linux");
+            assert_eq!(gaps(access, true, true), [git]);
+            assert_eq!(gaps(access, true, false), [git]);
+            assert_eq!(gaps(access, false, true), [git, LINUX_PROCESS_LIST_LINE]);
+            assert_eq!(gaps(access, false, false), [git, LINUX_SIGNALS_LINE]);
+            let found = linux_gaps(access, host(false, false), true);
+            assert_eq!(found, gaps(access, false, false), "unsupervised, a repository adds none");
+        }
+        assert!(gaps(AgentAccess::Full, false, false).is_empty());
+        let levels = LevelView::on(host(false, false), true);
+        assert_eq!(levels.len(), AgentAccess::ALL.len());
+        for level in &levels {
+            let told: Vec<&str> = level.gaps.iter().map(String::as_str).collect();
+            assert_eq!(told, gaps(level.access, false, false), "{:?}", level.access);
+        }
+        assert!(LevelView::on(None, true).iter().all(|level| level.gaps.is_empty()));
+        let stored = r#"{"access":"sandboxed","label":"Sandboxed","unavailable":null}"#;
+        let old: LevelView = serde_json::from_str(stored).unwrap();
+        assert!(old.gaps.is_empty(), "a view an older engine stored");
+    }
+
+    #[test]
+    fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hold() {
+        use crate::sandbox::{
+            LINUX_KEPT_GIT_LINE, LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_ROOT_LINE,
+            LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE, LinuxHost, LinuxSupervisor,
+        };
+        let held = |nested, scoped| LinuxHost {
+            nested,
+            scoped,
+            supervised: true,
+            root: false,
+        };
+        let root = LinuxHost {
+            nested: false,
+            scoped: false,
+            supervised: false,
+            root: true,
+        };
+        let sandboxed = |host, found| linux_gaps(AgentAccess::Sandboxed, Some(host), found);
+        let (kept, said) = (LINUX_KEPT_GIT_LINE, LINUX_SUPERVISED_LINE);
+        assert_eq!(sandboxed(held(true, false), false), [said]);
+        assert_eq!(sandboxed(held(true, true), true), [kept, said]);
+        for scoped in [false, true] {
+            let listed = [kept, said, LINUX_PROCESS_LIST_LINE];
+            assert_eq!(sandboxed(held(false, scoped), true), listed, "scoped {scoped}");
+        }
+        let open = [LINUX_ROOT_LINE, LINUX_NESTED_GIT_LINE, LINUX_SIGNALS_LINE];
+        assert_eq!(sandboxed(root, true), open);
+        assert_eq!(sandboxed(root, false), open);
+        for host in [held(false, false), root] {
+            assert!(linux_gaps(AgentAccess::Full, Some(host), true).is_empty());
+        }
+        let (on, off) = (Some(LinuxSupervisor::On), Some(LinuxSupervisor::Off));
+        assert_eq!(held(true, false).under(on), held(true, false));
+        assert!(!held(true, false).under(off).supervised);
+        assert!(!held(true, false).under(None).supervised, "unreadable shows every line");
+        assert_eq!(root.under(on), root);
+        assert_eq!(root.under(None), root);
+        assert!(!root.under(off).root, "with the supervisor Off, root changes nothing");
+        let catalog = LevelView::on(Some(held(true, false)), true);
+        assert_eq!(catalog[0].access, AgentAccess::Sandboxed);
+        let told: Vec<&str> = catalog[0].gaps.iter().map(String::as_str).collect();
+        assert_eq!(told, [kept, said], "the catalog has no project to rule one out");
+        let unread = LevelView::other_git(Some(held(true, false)), Path::new("/nonexistent"));
+        assert!(unread, "a folder that cannot be read rules out none");
+        let quiet = LevelView::on(Some(held(true, false)), false);
+        let told: Vec<&str> = quiet[0].gaps.iter().map(String::as_str).collect();
+        assert_eq!(told, [said], "a project with no other repository");
+    }
+
+    /// The Agent access page reads the project folder for another git repository before its
+    /// database transaction, and only where the call supervisor runs; the view takes that
+    /// answer (rv-secreview linux-t4c note 1, rv-code4 linux-t4c N2, DEC-179 T4d).
+    #[test]
+    fn only_a_supervised_host_reads_the_project_for_another_repository_and_the_view_takes_it() {
+        use crate::sandbox::{LINUX_KEPT_GIT_LINE, LinuxHost};
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join("vendor/.git")).unwrap();
+        let missing = temp.path().join("missing");
+        let host = |supervised| LinuxHost {
+            nested: true,
+            scoped: true,
+            supervised,
+            root: false,
+        };
+        assert!(LevelView::other_git(Some(host(true)), &project));
+        assert!(LevelView::other_git(Some(host(true)), &missing));
+        for unread in [Some(host(false)), None] {
+            assert!(!LevelView::other_git(unread, &project), "{unread:?}");
+            assert!(!LevelView::other_git(unread, &missing), "{unread:?}");
+        }
+        let lines = |other_git| LevelView::on(Some(host(true)), other_git).remove(0).gaps;
+        assert!(lines(true).contains(&LINUX_KEPT_GIT_LINE.to_owned()));
+        assert!(!lines(false).contains(&LINUX_KEPT_GIT_LINE.to_owned()));
     }
 }

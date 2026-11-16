@@ -1059,15 +1059,18 @@ fn turn_sandbox(
             .map_err(failure)?
     };
     #[cfg(target_os = "linux")]
-    let sandbox = {
-        let sandbox = sandbox.limit_sockets(stored_sandbox_settings(root)?.linux_sockets);
+    let (sandbox, calls) = {
+        let settings = stored_sandbox_settings(root)?;
+        let sandbox = sandbox.limit_sockets(settings.linux_sockets);
         if let Some(code) = sandbox.linux_refusal(executable) {
             return Err(failure(code));
         }
-        sandbox
+        (sandbox, settings.linux_supervisor)
     };
-    let installed =
-        InstalledSandbox::install(sandbox, &runtime.path.join(MASTER_PROFILE)).map_err(refused)?;
+    #[cfg(not(target_os = "linux"))]
+    let calls = crate::sandbox::LinuxSupervisor::On;
+    let profile = runtime.path.join(MASTER_PROFILE);
+    let installed = InstalledSandbox::install(sandbox, &profile, calls).map_err(refused)?;
     let installed = if policy.access == AgentAccess::Full {
         installed.unconfined()
     } else {
@@ -1101,17 +1104,7 @@ fn stored_sandbox_settings(
     let engine = root
         .engine_root()
         .map_err(|_| failure("master_sandbox_unavailable"))?;
-    let connection = rusqlite::Connection::open_with_flags(
-        engine.join("engine.db"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| failure("master_sandbox_unavailable"))?;
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(|_| failure("master_sandbox_unavailable"))?;
-    crate::sandbox_settings::load(&connection).map_err(|_| failure("master_sandbox_unavailable"))
+    crate::sandbox_settings::stored(engine).map_err(|_| failure("master_sandbox_unavailable"))
 }
 
 /// Refuses the master turn boundary where the owner-only turn directory cannot be made.
@@ -1343,6 +1336,7 @@ mod tests {
             &connection,
             &crate::sandbox_settings::SandboxSettings {
                 linux_sockets: crate::sandbox::LinuxSockets::TcpPorts,
+                ..Default::default()
             },
         )
         .unwrap();

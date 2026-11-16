@@ -2674,6 +2674,7 @@ pub(super) fn access_view(access: AgentAccess, version: u64) -> PolicyView {
                 access: level,
                 label: level.label().to_owned(),
                 unavailable: None,
+                gaps: Vec::new(),
             })
             .collect(),
         networks: crate::sandbox::policy::AgentNetwork::ALL
@@ -2681,6 +2682,7 @@ pub(super) fn access_view(access: AgentAccess, version: u64) -> PolicyView {
             .map(|network| crate::sandbox::policy::NetworkView {
                 network,
                 label: network.label().to_owned(),
+                gap: None,
             })
             .collect(),
         toolchains: Vec::new(),

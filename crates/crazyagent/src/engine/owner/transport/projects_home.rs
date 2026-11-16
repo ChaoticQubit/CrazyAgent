@@ -520,6 +520,15 @@ pub(super) async fn serve(
             drop(barrier.take());
             tally.mark_clearing();
             let cleared = tokio::task::spawn_blocking(move || old.clear()).await;
+            if matches!(cleared, Ok(Ok(()))) {
+                let request = id.clone();
+                if let Err(e) = engine
+                    .owner_job(|reply| Job::HomeProjectMoveCleared(request, reply))
+                    .await
+                {
+                    eprintln!("project_move_left_not_forgotten cause={}", e.0);
+                }
+            }
             barrier = Some(engine.owner_egress.write().await);
             result = match regranted(authority.authenticate(packet), a, true) {
                 Ok(()) => match cleared {
@@ -743,7 +752,9 @@ async fn remove_staging(staging: std::path::PathBuf) {
 }
 
 /// Finds an earlier recording of this exact mutation, so a retry after a lost
-/// reply returns the first receipt instead of repeating the disk work.
+/// reply returns the first receipt instead of repeating the disk work. A project move
+/// recorded as applied whose old folder is still left to clear answers
+/// `move_project_old_folder_left` again, as its first reply did (B17 -66).
 async fn replayed(
     engine: &Arc<Engine>,
     a: &Admission,
@@ -751,14 +762,30 @@ async fn replayed(
 ) -> Result<Option<Step>, EngineError> {
     let hash = request.mutation_hash()?;
     let id = request.request_id.clone();
+    let moved = matches!(
+        &request.operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::MoveProjectHome { .. }
+        }
+    );
     Ok(
         match engine
             .owner_job(|reply| Job::OwnerReconcile(a.clone(), id, Some(hash), reply))
             .await?
         {
             OwnerResponse::Committed { mut operation } => {
+                let left = moved
+                    && operation.result == OwnerResult::Applied
+                    && engine
+                        .owner_job(|reply| {
+                            Job::HomeProjectMoveLeft(request.request_id.clone(), reply)
+                        })
+                        .await?;
                 operation.historical_replay = true;
-                Some(Step::Reply(Box::new(OwnerResponse::Applied { operation })))
+                Some(match left {
+                    true => rejected(OLD_FOLDER_LEFT),
+                    false => Step::Reply(Box::new(OwnerResponse::Applied { operation })),
+                })
             }
             OwnerResponse::NotRecordedAtBarrier { .. } => None,
             other => Some(Step::Reply(Box::new(other))),
