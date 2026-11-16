@@ -648,6 +648,16 @@ pools = [
         );
     }
 
+    /// L388: the pools test engine seeds its local account where no model server the host
+    /// runs can answer, so no row here reaches the owner's Ollama.
+    #[tokio::test]
+    async fn the_pools_test_engine_seeds_its_local_account_where_no_host_model_server_answers() {
+        let (live, _) = Live::start().await;
+        crate::tui::test_home::assert_no_host_model_server(&live.root.path().join("global.toml"))
+            .await;
+        live.close().await;
+    }
+
     #[tokio::test]
     async fn the_shell_keeps_the_owner_identity_while_the_trusted_connection_lasts() {
         let (live, access) = Live::start().await;

@@ -2308,6 +2308,15 @@ async fn a_master_saved_from_the_team_screen_is_read_again_by_the_project_page()
     assert!(!shown.contains("This project changed"), "{shown}");
 }
 
+/// L388: the project page test engine seeds its local account where no model server the
+/// host runs can answer, so no master or research step here reaches the owner's Ollama.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_project_page_test_engine_seeds_its_local_account_where_no_host_model_server_answers() {
+    let engine = Engine::start().await;
+    crate::tui::test_home::assert_no_host_model_server(&engine.root.path().join("global.toml"))
+        .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_first_message_opens_the_master_and_reaches_the_engine() {
     let mut engine = Engine::start().await;

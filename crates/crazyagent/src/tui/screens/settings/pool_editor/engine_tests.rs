@@ -188,6 +188,14 @@ fn ctx() -> Ctx {
     ctx
 }
 
+/// L388: the pool editor test engine seeds its local account where no model server the host
+/// runs can answer, so no row here reaches the owner's Ollama.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pool_editor_test_engine_seeds_its_local_account_where_no_host_model_server_answers() {
+    let engine = Engine::start().await;
+    crate::tui::test_home::assert_no_host_model_server(&engine.global()).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_pool_settings_wait_for_an_engine_slow_to_accept_their_connection() {
     let runtime = tokio::runtime::Builder::new_multi_thread()

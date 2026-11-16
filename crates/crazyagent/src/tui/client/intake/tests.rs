@@ -61,6 +61,7 @@ async fn a_started_onboarding_opens_the_project_the_engine_gave_when_the_slug_is
     let global = root.path().join("global.toml");
     std::fs::write(&global, POOL_SETTINGS).unwrap();
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    crate::tui::test_home::assert_no_host_model_server(&global).await;
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let mut service = EngineService::start_with_settings_sources(
         root.path(),

@@ -63,6 +63,44 @@ pub(in crate::tui) fn engine_config() -> crate::config::EffectiveConfig {
     config
 }
 
+/// Asserts that every http model endpoint in a test engine's settings names a loopback port
+/// that is none of the owner's tool ports and refuses connections, so the engine never
+/// reaches a model server the host runs, such as Ollama on 11434 (backlog L388).
+/// Input: the settings file the engine started with. Output: none; panics on a breach.
+pub(in crate::tui) async fn assert_no_host_model_server(global: &std::path::Path) {
+    let text = std::fs::read_to_string(global).unwrap();
+    let settings: toml::Value = toml::from_str(&text).unwrap();
+    let connections = settings
+        .get("model_access")
+        .and_then(|access| access.get("connections"))
+        .and_then(toml::Value::as_array)
+        .expect("the settings list model connections");
+    let mut checked = 0;
+    for connection in connections {
+        let Some(url) = connection
+            .get("endpoint")
+            .and_then(|endpoint| endpoint.get("url"))
+            .and_then(toml::Value::as_str)
+        else {
+            continue;
+        };
+        let url = url::Url::parse(url).unwrap();
+        let port = url.port_or_known_default().unwrap();
+        assert!(
+            !crate::sandbox::OWNER_PORTS.contains(&port),
+            "{url} names a port the owner's tools listen on"
+        );
+        let host: std::net::IpAddr = url.host_str().unwrap().parse().unwrap();
+        assert!(host.is_loopback(), "{url} is not a loopback address");
+        assert!(
+            !crate::accounts::probe::reachable(&url, std::time::Duration::from_millis(400)).await,
+            "{url} accepted a connection"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no http endpoint was checked: {text}");
+}
+
 /// Runs real git in a folder with no system, global or hook config, for tests that build
 /// a project checkout. Inputs: the folder and the git arguments. Output: git's standard
 /// output; panics when git fails.
