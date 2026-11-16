@@ -424,6 +424,7 @@ impl Servers {
                 pre: build.join(proxy::PRE),
                 token,
                 workspace,
+                served: Arc::default(),
             },
         ));
         *locked(&slot.state) = Some(Running {

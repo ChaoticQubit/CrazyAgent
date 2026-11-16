@@ -54,13 +54,15 @@ const PAGE_DROPPED: [&str; 5] = [
 
 /// What one project's proxy serves: its own loopback port, the IDE server's port behind it,
 /// the build's [`PRE`] folder, the launch's connection token, which never leaves the engine
-/// except toward the server, and the engine's workspace file the workbench is pinned to.
+/// except toward the server, the engine's workspace file the workbench is pinned to, and the
+/// processes the open saw listening on the server port once it was ready, unset until then.
 pub struct Site {
     pub port: u16,
     pub upstream: u16,
     pub pre: PathBuf,
     pub token: String,
     pub workspace: String,
+    pub served: Arc<std::sync::OnceLock<Vec<i32>>>,
 }
 
 /// The template the workbench builds each webview's origin from: every webview gets its own
@@ -104,6 +106,7 @@ pub async fn serve(listener: TcpListener, site: Site) {
     assert!(site.port != 0 && site.upstream != 0 && site.port != site.upstream);
     assert_eq!(site.token.len(), 2 * super::token::TOKEN_BYTES);
     assert!(site.workspace.starts_with('/'));
+    assert!(site.served.get().is_none_or(|served| !served.is_empty()));
     let site = Arc::new(site);
     let mut connections = tokio::task::JoinSet::new();
     loop {

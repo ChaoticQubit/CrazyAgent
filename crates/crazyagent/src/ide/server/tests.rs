@@ -162,6 +162,18 @@ async fn a_listener_outside_the_servers_group_refuses_the_open() {
     assert_eq!(gone.0, "ide_server_port_taken");
 }
 
+/// rv-ds241 L1: a port a wildcard listener of this user holds is not free, so the open picks
+/// another server port instead of recording one the server would only bind beside it, which
+/// would refuse every later open of the project.
+#[test]
+fn a_port_a_wildcard_listener_of_this_user_holds_is_not_free() {
+    let held = crate::spawn_gate::bind_tcp_std(("0.0.0.0", 0)).unwrap();
+    let port = held.local_addr().unwrap().port();
+    assert!(!ports::free(port), "a wildcard listener holds {port}");
+    drop(held);
+    assert!(ports::free(port), "free once it is released");
+}
+
 #[tokio::test]
 async fn ide_server_listens_only_on_loopback() {
     let checkout = scratch();
