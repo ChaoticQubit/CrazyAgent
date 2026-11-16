@@ -2,8 +2,8 @@ import { Channel } from "@tauri-apps/api/core";
 import type { FitAddon } from "@xterm/addon-fit";
 import type { IDisposable, ITerminalOptions, Terminal } from "@xterm/xterm";
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type Ref } from "react";
-import { attachTerminal, detachTerminal, loadTeamGraph, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
-import type { GraphNode, TerminalMessage } from "../../engine-client";
+import { attachTerminal, detachTerminal, loadTeamGraph, promptTerminal, resizeTerminal, typeIntoTerminal, type Result } from "../../api";
+import type { GraphNode, TeamGraph, TerminalMessage } from "../../engine-client";
 import type { InputChoice } from "./terminal-io";
 import { afterFirstPaint, readLastProject, readTerminalInput, type Loaded, type ProjectRow } from "../../state";
 import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../ui";
@@ -775,10 +775,12 @@ export function keepTerminalsOf(open: (project: string | null) => boolean): void
 let epoch = 0;
 
 /** Loads a remembered terminal hidden, behind the views the owner opened since, when the set
- * has room and the project's team still lists that terminal. Inputs: the entry and the
- * session it was read in. Output: none. */
-async function preloadView(entry: SavedView, at: number): Promise<void> {
-  const graph = await loadTeamGraph(entry.key.project);
+ * has room and the project's team still lists that terminal. Inputs: the entry, the session it
+ * was read in, and the project's team graph when the caller already read it, so app start
+ * reads each graph once; with none given it is read here. Output: none. */
+async function preloadView(entry: SavedView, at: number, read: Result<TeamGraph> | null = null): Promise<void> {
+  assert(read === null || read.kind === "ok", "a team graph passed in is one that was read");
+  const graph = read ?? await loadTeamGraph(entry.key.project);
   if (at !== epoch || graph.kind !== "ok" || !kept.roomBehind(entry.key)) return;
   if (!graph.value.nodes.some((node) => node.terminal === entry.key.terminal && teammatePane(node) === entry.key.pane)) return;
   kept.keepBehind(new KeptView(entry.key, entry.size));
@@ -795,7 +797,7 @@ async function preloadKept(listed: ReadonlySet<string>, at: number): Promise<voi
   if (saved.length > 0 || last === null || !listed.has(last)) return;
   const graph = await loadTeamGraph(last);
   const master = graph.kind === "ok" ? graph.value.nodes.find((node) => node.kind === "master") : undefined;
-  if (at === epoch && master?.terminal) await preloadView({ key: { project: last, terminal: master.terminal, pane: teammatePane(master) }, size: null }, at);
+  if (at === epoch && master?.terminal) await preloadView({ key: { project: last, terminal: master.terminal, pane: teammatePane(master) }, size: null }, at, graph);
 }
 
 /** Keeps the main window's kept terminal views to open projects (DEC-187): once the project
