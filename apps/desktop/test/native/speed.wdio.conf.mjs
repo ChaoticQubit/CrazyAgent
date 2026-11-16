@@ -17,7 +17,7 @@ assert.equal(baseline.services.length, 1);
  * helpers already running (so row T6 can tell the app's own) right before it spawns the app. */
 class SpeedTauriService extends NoRespawnTauriService {
   onPrepare(...args) {
-    const launch = { at_ms: Date.now(), helpers: webkitHelpers() };
+    const launch = { at_ms: Date.now(), helpers: webkitHelpers().map((helper) => helper.pid) };
     writeFileSync(join(evidence, "speed-launch.json"), JSON.stringify(launch), { flag: "wx", mode: 0o600 });
     return super.onPrepare(...args);
   }

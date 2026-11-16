@@ -159,6 +159,14 @@ test("New Project starts the engine's job, follows it on the page and runs its f
   assert.match(client, /\| \{ state: "building"; done: number; total: number \}/);
 });
 
+test("a setup job New Project dismisses leaves Home at once: the page waits for the dismiss, then reads the job again (#99 F1)", () => {
+  const wizard = read("src/screens/new-project/index.tsx");
+  const calls = wizard.match(/dismissIntake\(/g) ?? [];
+  assert.equal(calls.length, 1, "one place dismisses the page's job");
+  assert.match(wizard, /await dismissIntake\([a-z]+\);\s*session\?\.refreshIntake\(\);/, "the job is read again only once the engine dropped it");
+  assert.ok(!wizard.includes("void dismissIntake("), "no dismiss leaves Home to the 30 s idle read");
+});
+
 test("New Project opened again drops the answers of a project its job already made, read from the job or, once the job left Home, from the projects; a page closed during the follow-ups keeps none (rv-code bgjobs-3b F3)", async () => {
   const flow = await import("../src/screens/new-project/index.tsx");
   const started = { id: "setup-1", project: "notes" };

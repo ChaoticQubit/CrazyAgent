@@ -33,6 +33,8 @@ SHIFT_RIGHT = b"\x1b[1;2C"
 BRAND = "CrazyAgent"
 CRUMB = "  /  "
 SPINNER = re.compile(r"[\u2800-\u28ff]\s+Loading")
+FRAME_END = re.compile(rb"\x1b\[\?25l\Z|\x1b\[\?25h\x1b\[\d+;\d+H\Z")
+FRAME_END_BYTES = 32
 PROJECT = "{project}"
 STEP_SECONDS = 30
 SETTLE_SECONDS = 0.3
@@ -78,6 +80,16 @@ def usable(screen, path, project):
     assert project.strip(), "a project name"
     listed = tuple(path) != ("Home",) or project in screen
     return at(screen, path) and listed and not SPINNER.search(screen)
+
+
+def ready(output, screen, paths, project):
+    """Whether a step is done: the bytes read end where a frame ends, as ratatui ends each
+    frame by hiding the cursor or showing it at its place, and the screen is usable at one of
+    the paths. The TUI writes a frame in pieces of up to 1 KiB, so a cut frame can show a new
+    header over the old body. Takes the bytes read, their screen, the paths and the project.
+    Returns the answer."""
+    return (FRAME_END.search(bytes(output[-FRAME_END_BYTES:])) is not None
+            and any(usable(screen, path, project) for path in paths))
 
 
 def step_paths(name, crumbs, project):
@@ -134,7 +146,7 @@ class Terminal:
         while True:
             self.pump(LOOK_SECONDS)
             screen = self.screen()
-            if any(usable(screen, path, project) for path in paths):
+            if ready(tui_flow.outputs[self.master], screen, paths, project):
                 return (time.monotonic() - began) * 1000.0
             assert self.child.poll() is None, \
                 "%s: the TUI exited with %r:\n%s" % (name, self.child.poll(), screen)

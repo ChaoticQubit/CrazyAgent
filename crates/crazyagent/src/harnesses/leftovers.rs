@@ -500,8 +500,10 @@ pub(crate) struct Lineage {
 }
 
 /// Where a listing thread reports its output, or none when it failed or ran out of bounds.
+/// The lock is never taken: it is reached only through `&mut` with `get_mut`, and it keeps
+/// a lineage `Sync`, so a stop's leftovers can be borrowed across an await.
 #[cfg(unix)]
-type Listing = std::sync::mpsc::Receiver<Option<Vec<u8>>>;
+type Listing = std::sync::Mutex<std::sync::mpsc::Receiver<Option<Vec<u8>>>>;
 
 /// One row of a process table: the process, its parent's id and its session's id, if read.
 #[cfg(unix)]
@@ -1546,6 +1548,9 @@ fn read_bounded(
 ) -> Result<Vec<u8>, Unstopped> {
     use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
     if let Some(listing) = pending {
+        let listing = listing
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if matches!(listing.try_recv(), Err(TryRecvError::Empty)) {
             return Err(Unstopped::Uncertain);
         }
@@ -1562,7 +1567,7 @@ fn read_bounded(
     match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()) + TABLE_GRACE) {
         Ok(listing) => listing.ok_or(Unstopped::Uncertain),
         Err(RecvTimeoutError::Timeout) => {
-            *pending = Some(receiver);
+            *pending = Some(std::sync::Mutex::new(receiver));
             Err(Unstopped::Uncertain)
         }
         Err(RecvTimeoutError::Disconnected) => Err(Unstopped::Uncertain),
@@ -2129,6 +2134,14 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_stops_leftovers_can_be_borrowed_across_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<Lineage>();
+        shared::<Leftovers>();
+        shared::<Unstopped>();
+    }
+
+    #[test]
     fn a_settle_ends_at_once_while_a_held_up_listing_is_still_in_flight() {
         let (_listing, held_up) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
         let lineage = Lineage {
@@ -2143,7 +2156,7 @@ pub(crate) mod tests {
             table: PS_TABLE,
             unchecked: true,
             scanned: true,
-            pending: Some(held_up),
+            pending: Some(std::sync::Mutex::new(held_up)),
             sandboxed: false,
             token: None,
             leader_started: None,
@@ -2189,7 +2202,7 @@ pub(crate) mod tests {
             table: PS_TABLE,
             unchecked: true,
             scanned: true,
-            pending: Some(held_up),
+            pending: Some(std::sync::Mutex::new(held_up)),
             sandboxed: false,
             token: None,
             leader_started: None,
