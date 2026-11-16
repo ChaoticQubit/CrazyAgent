@@ -53,14 +53,35 @@ export const POWER_PLIST = "macos/dev.crazyagent.power.plist";
 /** The executables a macOS release signs itself before the Tauri build, each under its own name. */
 export const MACOS_PRESIGNED = Object.freeze(["crazyagent", POWER_HELPER]);
 
-/** Lists the executables staged for the desktop bundle of `target`. */
+/**
+ * Lists the executables staged for the desktop bundle of `target`: its sidecars, plus the lid
+ * helper on macOS. Input: Rust target triple. Output: executable names, sidecars first.
+ */
 export function bundled(target) {
-  return sidecars(target);
+  const names = sidecars(target);
+  if (targetInfo(target).os === "macos") names.push(POWER_HELPER);
+  assert.equal(new Set(names).size, names.length, "release_bundled_unique_invariant");
+  return names;
 }
 
-/** Builds the `tauri build --config` overlay for `target`. Output: the overlay object. */
+/**
+ * Builds the `tauri build --config` overlay for `target`. Tauri signs every `externalBin` with
+ * the app's entitlements, so on macOS the engine and the lid helper, which the release signs
+ * itself with none, go in through `bundle.macOS.files` beside the daemon plist. Input: Rust
+ * target triple. Output: the overlay object.
+ */
 export function releaseOverlay(target) {
-  return { bundle: { externalBin: sidecars(target).map((name) => `binaries/${name}`) } };
+  const macos = targetInfo(target).os === "macos";
+  const external = sidecars(target).filter((name) => !macos || !MACOS_PRESIGNED.includes(name));
+  const bundle = { externalBin: external.map((name) => `binaries/${name}`) };
+  if (macos) {
+    const signed = MACOS_PRESIGNED.map((name) => [`MacOS/${name}`, `binaries/${name}-${target}`]);
+    bundle.macOS = { files: { ...Object.fromEntries(signed), "Library/LaunchDaemons/dev.crazyagent.power.plist": POWER_PLIST } };
+    assert.equal(Object.keys(bundle.macOS.files).length, MACOS_PRESIGNED.length + 1, "release_overlay_files_invariant");
+  }
+  const placed = [...external, ...(macos ? MACOS_PRESIGNED : [])];
+  assert(sidecars(target).every((name) => placed.includes(name)), "release_overlay_sidecar_invariant");
+  return { bundle };
 }
 
 /** Names the CLI archive for `version` and `target`: `.zip` on Windows, `.tar.gz` elsewhere. */
@@ -68,7 +89,8 @@ export function cliArchiveName(version, target) {
   return `crazyagent-${version}-${target}.${targetInfo(target).os === "windows" ? "zip" : "tar.gz"}`;
 }
 
-async function isFile(path) {
+/** Tells whether `path` is a regular file, not a link. Output: false when it does not exist. */
+export async function isFile(path) {
   try {
     return (await lstat(path)).isFile();
   } catch (error) {
@@ -92,14 +114,14 @@ function run(command, args, options = {}) {
 }
 
 /**
- * Copies the built executables for `target` from `cargoDir`, the rcli host from `rcli` and the
- * tmux build-tmux.sh made from `tmux` into `<tauriDir>/binaries/<name>-<target>[.exe]`, and writes
- * `binaries/release.conf.json`, the `tauri build --config` overlay naming them as
- * `bundle.externalBin`. Output: staged paths and overlay path.
+ * Copies the built executables for `target` from `cargoDir` (the lid helper too on macOS), the
+ * rcli host from `rcli` and the tmux build-tmux.sh made from `tmux` into
+ * `<tauriDir>/binaries/<name>-<target>[.exe]`, and writes `binaries/release.conf.json`, the
+ * `releaseOverlay` for `tauri build --config`. Output: staged paths and overlay path.
  */
 export async function stageSidecars({ target, cargoDir, rcli, tmux, tauriDir }) {
   const { exe } = targetInfo(target);
-  const names = sidecars(target);
+  const names = bundled(target);
   const given = { "crazyagent-rcli": rcli, "crazyagent-tmux": tmux };
   const sources = names.map((name) => (Object.hasOwn(given, name) ? given[name] : join(cargoDir, `${name}${exe}`)));
   for (const [index, source] of sources.entries()) if (typeof source !== "string" || !(await isFile(source))) fail(`release_sidecar_missing:${names[index]}`);
@@ -114,7 +136,7 @@ export async function stageSidecars({ target, cargoDir, rcli, tmux, tauriDir }) 
     staged.push(path);
   }
   const config = join(out, "release.conf.json");
-  await writeFile(config, `${JSON.stringify({ bundle: { externalBin: names.map((name) => `binaries/${name}`) } }, null, 2)}\n`);
+  await writeFile(config, `${JSON.stringify(releaseOverlay(target), null, 2)}\n`);
   assert.equal(staged.length, names.length, "release_stage_count_invariant");
   return { staged, config };
 }

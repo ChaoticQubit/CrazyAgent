@@ -364,6 +364,9 @@ jobs:
           if [ "$PLATFORM" = windows ]; then
             cargo build --release --locked --target "$TARGET" -p crazyagent-win-sandbox --bin crazyagent-win-boundary
           fi
+          if [ "$PLATFORM" = macos ]; then
+            cargo build --release --locked --target "$TARGET" -p crazyagent-mac-power --bin crazyagent-power-helper
+          fi
       - name: Build rcli host
         env:
           BUN_PATH: ${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path }}
@@ -496,6 +499,9 @@ jobs:
             unset keychain_password
           fi
           unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD
+          if [ "$PLATFORM" = macos ] && [ "$status" = signed ]; then
+            node scripts/release/signing.mjs presign --target "$TARGET" --tauri-dir apps/desktop/src-tauri --keychain "$keychain"
+          fi
           rm -rf "${CARGO_TARGET_DIR:-target}/$TARGET/release/bundle"
           cd apps/desktop
           node node_modules/@tauri-apps/cli/tauri.js build --ci --target "$TARGET" --config src-tauri/binaries/release.conf.json
@@ -550,6 +556,32 @@ jobs:
             codesign --verify --strict --verbose=2 "$tmux"
             display="$(codesign --display --verbose=2 "$tmux" 2>&1)"
             grep -E -q 'flags=.*runtime' <<< "$display" || { echo "::error::the bundled tmux is not signed with the hardened runtime"; exit 1; }
+          fi
+      - name: Check the bundled engine and Keep awake helper
+        if: matrix.os == 'macos'
+        env:
+          SIGNING_STATUS: ${{ steps.desktop.outputs.status }}
+        run: |
+          set -euo pipefail
+          app="${CARGO_TARGET_DIR:-target}/$TARGET/release/bundle/macos/CrazyAgent.app"
+          cmp "$app/Contents/Library/LaunchDaemons/dev.crazyagent.power.plist" apps/desktop/src-tauri/macos/dev.crazyagent.power.plist
+          case "$TARGET" in aarch64-apple-darwin) arch=arm64 ;; x86_64-apple-darwin) arch=x86_64 ;; *) echo "::error::no macOS architecture for $TARGET"; exit 1 ;; esac
+          for name in crazyagent crazyagent-power-helper; do
+            binary="$app/Contents/MacOS/$name"
+            test -f "$binary" && test -x "$binary"
+            test "$(lipo -archs "$binary")" = "$arch"
+            if [ "$SIGNING_STATUS" = signed ]; then
+              codesign --verify --strict --verbose=2 "$binary"
+              display="$(codesign --display --verbose=2 "$binary" 2>&1)"
+              grep -E -q "^Identifier=$name\$" <<< "$display" || { echo "::error::$name is not signed under the identifier $name"; exit 1; }
+              grep -E -q '^TeamIdentifier=GK729B5HZQ$' <<< "$display" || { echo "::error::$name is not signed by team GK729B5HZQ, which the helper and its launch constraint pin"; exit 1; }
+              grep -E -q 'flags=.*runtime' <<< "$display" || { echo "::error::$name is not signed with the hardened runtime"; exit 1; }
+              entitlements="$(codesign --display --entitlements - --xml "$binary" 2> /dev/null)"
+              if grep -q '<key>' <<< "$entitlements"; then echo "::error::$name carries an entitlement; the helper refuses an engine with any"; exit 1; fi
+            fi
+          done
+          if [ "$SIGNING_STATUS" = signed ]; then
+            codesign --verify --deep --strict --verbose=2 "$app"
           fi
       - name: Package release assets
         env:
