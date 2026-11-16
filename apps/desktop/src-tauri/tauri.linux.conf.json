@@ -8,7 +8,12 @@
     "linux": {
       "deb": {
         "depends": ["xdg-utils", "bubblewrap"],
-        "section": "devel"
+        "section": "devel",
+        "files": {
+          "/usr/share/crazyagent/apparmor/crazyagent-landlock": "linux/apparmor/crazyagent-landlock"
+        },
+        "postInstallScript": "linux/deb/postinst",
+        "preRemoveScript": "linux/deb/prerm"
       },
       "appimage": {
         "bundleMediaFramework": false

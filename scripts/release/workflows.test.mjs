@@ -300,6 +300,17 @@ test("every GitHub-hosted CI Rust job keeps its build cache with the pinned rust
   }
 });
 
+test("a Linux release builds the sandbox helper static in its own folder after the other binaries and puts it where staging reads them, so no dynamic loader runs in its AppArmor profile (DEC-179 SBX-3 fold, rv-ds241 F1)", async () => {
+  const release = await workflow("release.yml");
+  const step = steps(release, "build").find((text) => /^\s*(- )?name: Build command line binaries$/m.test(text));
+  assert(step, "the command line build step exists");
+  const all = step.indexOf('cargo build --release --locked --target "$TARGET" -p crazyagent --bins');
+  const linux = step.indexOf('if [ "$PLATFORM" = linux ]; then');
+  const helper = step.indexOf('RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --locked --target "$TARGET" -p crazyagent --bin crazyagent-landlock --target-dir "${CARGO_TARGET_DIR:-target}/crt-static"');
+  const kept = step.indexOf('install -m 0755 "${CARGO_TARGET_DIR:-target}/crt-static/$TARGET/release/crazyagent-landlock" "${CARGO_TARGET_DIR:-target}/$TARGET/release/crazyagent-landlock"');
+  assert(all >= 0 && linux > all && helper > linux && kept > helper, "the static helper replaces the one the full build made");
+});
+
 test("a release builds the bundled tmux from its pinned script before staging sidecars and the Tauri bundle, on macOS and Linux only, and checks it is signed on macOS (DEC-157)", async () => {
   const release = await workflow("release.yml");
   const build = steps(release, "build");

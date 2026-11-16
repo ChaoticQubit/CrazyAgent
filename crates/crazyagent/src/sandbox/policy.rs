@@ -919,9 +919,10 @@ impl LevelView {
 
 /// What a Linux cannot hold for agents at one access level, as plain lines both clients
 /// show under it: why root runs no supervisor; nested git, or under the supervisor its
-/// narrower line where another repository may be and what it changes; then the process
-/// list, or signals too, where agents share the process namespace. Inputs: the level, the
-/// host under the setting and whether the project may hold another repository.
+/// narrower line where another repository may be and what it changes; then, where agents
+/// share the process namespace, why AppArmor keeps it shared when it does, and the process
+/// list, or signals too. Inputs: the level, the host under the setting and whether the
+/// project may hold another repository.
 pub fn linux_gaps(
     access: AgentAccess,
     host: Option<crate::sandbox::LinuxHost>,
@@ -931,10 +932,11 @@ pub fn linux_gaps(
         return Vec::new();
     };
     assert!(!(host.root && host.supervised));
+    assert!(!(host.nested && host.armored));
     if access == AgentAccess::Full {
         return Vec::new();
     }
-    let mut lines = Vec::with_capacity(3);
+    let mut lines = Vec::with_capacity(4);
     if host.root {
         lines.push(crate::sandbox::LINUX_ROOT_LINE);
     }
@@ -946,12 +948,15 @@ pub fn linux_gaps(
     } else {
         lines.push(crate::sandbox::LINUX_NESTED_GIT_LINE);
     }
+    if host.armored && !host.root {
+        lines.push(crate::sandbox::LINUX_APPARMOR_LINE);
+    }
     if !host.nested && (host.scoped || host.supervised) {
         lines.push(crate::sandbox::LINUX_PROCESS_LIST_LINE);
     } else if !host.nested {
         lines.push(crate::sandbox::LINUX_SIGNALS_LINE);
     }
-    assert!((1..=3).contains(&lines.len()));
+    assert!((1..=4).contains(&lines.len()));
     lines
 }
 
@@ -1714,6 +1719,7 @@ mod tests {
                 scoped: false,
                 supervised: false,
                 root: false,
+                armored: false,
             })
         };
         let port = |port| AccessGrant::Port { port };
@@ -1755,6 +1761,7 @@ mod tests {
                 scoped: false,
                 supervised: true,
                 root: false,
+                armored: false,
             })
         };
         let low = [AccessGrant::Port { port: 80 }, AccessGrant::Port { port: 53 }];
@@ -1785,6 +1792,7 @@ mod tests {
                 scoped,
                 supervised: false,
                 root: false,
+                armored: false,
             })
         };
         let gaps = |access, nested, scoped| linux_gaps(access, host(nested, scoped), false);
@@ -1822,12 +1830,14 @@ mod tests {
             scoped,
             supervised: true,
             root: false,
+            armored: false,
         };
         let root = LinuxHost {
             nested: false,
             scoped: false,
             supervised: false,
             root: true,
+            armored: false,
         };
         let sandboxed = |host, found| linux_gaps(AgentAccess::Sandboxed, Some(host), found);
         let (kept, said) = (LINUX_KEPT_GIT_LINE, LINUX_SUPERVISED_LINE);
@@ -1861,6 +1871,54 @@ mod tests {
         assert_eq!(told, [said], "a project with no other repository");
     }
 
+    /// A Linux where AppArmor keeps unprivileged programs out of user namespaces and agents
+    /// get no process space of their own says AppArmor is why, just before the process or
+    /// signals line it explains, at every limited level and never under Full; a Linux
+    /// without the restriction, or one where CrazyAgent runs as root, whom the restriction
+    /// does not cover, says nothing of AppArmor (DEC-179 SBX-3, addendum 7, rv-ds241 nit).
+    #[test]
+    fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
+        use crate::sandbox::{
+            LINUX_APPARMOR_LINE, LINUX_KEPT_GIT_LINE, LINUX_NESTED_GIT_LINE,
+            LINUX_PROCESS_LIST_LINE, LINUX_ROOT_LINE, LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE,
+            LinuxHost,
+        };
+        let host = |scoped, supervised, root| LinuxHost {
+            nested: false,
+            scoped,
+            supervised,
+            root,
+            armored: true,
+        };
+        let (git, said, armor) = (
+            LINUX_NESTED_GIT_LINE,
+            LINUX_SUPERVISED_LINE,
+            LINUX_APPARMOR_LINE,
+        );
+        let (listed, signals) = (LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE);
+        for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+            let gaps = |host, other_git| linux_gaps(access, Some(host), other_git);
+            assert_eq!(gaps(host(true, false, false), false), [git, armor, listed]);
+            assert_eq!(gaps(host(false, false, false), false), [git, armor, signals]);
+            assert_eq!(gaps(host(false, true, false), false), [said, armor, listed]);
+            let kept = [LINUX_KEPT_GIT_LINE, said, armor, listed];
+            assert_eq!(gaps(host(false, true, false), true), kept, "four lines at most");
+            let root = [LINUX_ROOT_LINE, git, signals];
+            assert_eq!(gaps(host(false, false, true), false), root, "root: no AppArmor line");
+            let free = LinuxHost {
+                armored: false,
+                ..host(true, false, false)
+            };
+            assert_eq!(gaps(free, false), [git, listed], "no restriction, no AppArmor line");
+        }
+        let full = linux_gaps(AgentAccess::Full, Some(host(false, false, false)), true);
+        assert!(full.is_empty());
+        let levels = LevelView::on(Some(host(true, false, false)), false);
+        let told: Vec<&str> = levels[0].gaps.iter().map(String::as_str).collect();
+        assert_eq!(told, [git, armor, listed], "both clients get the line");
+        assert!(armor.contains("sudo dpkg-reconfigure crazy-agent"), "{armor}");
+    }
+
     /// The Agent access page reads the project folder for another git repository before its
     /// database transaction, and only where the call supervisor runs; the view takes that
     /// answer (rv-secreview linux-t4c note 1, rv-code4 linux-t4c N2, DEC-179 T4d).
@@ -1876,6 +1934,7 @@ mod tests {
             scoped: true,
             supervised,
             root: false,
+            armored: false,
         };
         assert!(LevelView::other_git(Some(host(true)), &project));
         assert!(LevelView::other_git(Some(host(true)), &missing));

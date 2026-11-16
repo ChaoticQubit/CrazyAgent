@@ -116,6 +116,43 @@ fn rewrite_config(homes: &Directory, key: &str, bytes: &[u8]) -> Result<(), Engi
     home.verify(&homes.file, OsStr::new(key))
 }
 
+/// The file and change time of the config an undone save put back in a generated SDK home,
+/// which a master turn's re-pin must match (rv-sec3 G4 r2 F1).
+pub(super) type PutBack = (Identity, (i64, i64));
+
+/// Reads the file and change time of the config a generated SDK home's folder names now,
+/// without following a link. Input: the home's SDK directory. Output: them, or None when
+/// the config does not open.
+fn put_back(sdk: &Directory) -> Option<PutBack> {
+    let config = rustix::fs::openat(
+        &sdk.file,
+        CONFIG,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .ok()?;
+    let metadata = File::from(config).metadata().ok()?;
+    Some((
+        Identity::of(&metadata),
+        (metadata.ctime(), metadata.ctime_nsec()),
+    ))
+}
+
+/// Remembers the config an undone save put back in one generated SDK home, replacing an
+/// older one for that home and dropping the first remembered home once as many homes as
+/// profile slots are held. Inputs: the map, the home's path and the put-back. Output: none.
+fn remember_put_back(
+    undone: &mut BTreeMap<std::path::PathBuf, PutBack>,
+    home: &Path,
+    config: PutBack,
+) {
+    if !undone.contains_key(home) && undone.len() >= MAX_PROFILES {
+        undone.pop_first();
+    }
+    undone.insert(home.to_path_buf(), config);
+    assert!(undone.len() <= MAX_PROFILES);
+}
+
 /// A changed connection's config swapped into a generated SDK home, with the file it
 /// replaced kept in staging until the save is known to have registered or not.
 struct Swapped {
@@ -143,25 +180,33 @@ impl Swapped {
 
     /// Ends a swap once the save's outcome is known: keeps the new config, or first puts
     /// the replaced one back, then removes the staging directory. Inputs: the homes
-    /// directory and whether to keep the new config. Output: none; a staging directory a
-    /// failure here leaves, the replaced config in it after a failed undo included, goes
-    /// at the next sweep.
-    fn settle(self, homes: &File, keep: bool) {
-        if keep || self.undo().is_ok() {
-            let _ = self.staged.discard(homes);
+    /// directory and whether to keep the new config. Output: the put-back config's file and
+    /// change time after an undo that put one back, else None; a staging directory a failure
+    /// here leaves, the replaced config in it after a failed undo included, goes at the next
+    /// sweep.
+    fn settle(self, homes: &File, keep: bool) -> Option<PutBack> {
+        if !keep && self.undo().is_err() {
+            return None;
         }
+        let _ = self.staged.discard(homes);
+        if keep || !self.replaced {
+            return None;
+        }
+        put_back(&self.sdk)
     }
 }
 
 /// Swaps the engine's config for a changed connection into a generated SDK home in one
 /// rename, keeping the file it replaces in staging (RV-DS241-50). Inputs: the homes
-/// directory, the home the caller holds locked, its key and the bytes. Output: the swap,
-/// or the failure with the home's config as it was.
+/// directory, the home the caller holds locked, its key, the bytes and the put-backs to
+/// note an undo in. Output: the swap, or the failure with the home's config as it was.
 fn swap_config(
     homes: &Directory,
     home: &Directory,
     key: &str,
     bytes: &[u8],
+    undone: &mut BTreeMap<std::path::PathBuf, PutBack>,
+    path: &Path,
 ) -> Result<Swapped, EngineError> {
     let sdk = Directory::open(&home.file, OsStr::new(".backboard"))?;
     let staged = Staging::create(&homes.file, STAGING)?;
@@ -184,7 +229,9 @@ fn swap_config(
     match checked {
         Ok(()) => Ok(swapped),
         Err(error) => {
-            swapped.settle(&homes.file, false);
+            if let Some(put) = swapped.settle(&homes.file, false) {
+                remember_put_back(undone, path, put);
+            }
             Err(error)
         }
     }
@@ -294,6 +341,7 @@ impl NativeProfileCustody {
         let slots = scan_slots(&root.file)?;
         let homes = self.homes()?;
         staging::sweep(&homes.file, STAGING)?;
+        let path = self.anchor.path.join(HOMES).join(&key);
         let mut held = Vec::new();
         let mut swapped = None;
         if slots.contains_key(&key) {
@@ -305,7 +353,8 @@ impl NativeProfileCustody {
             if actual.connection != *connection {
                 let home = Directory::open(&homes.file, OsStr::new(&key))?;
                 held.push(lock(&home.file)?);
-                swapped = Some((swap_config(&homes, &home, &key, &bytes)?, profile));
+                let swap = swap_config(&homes, &home, &key, &bytes, &mut self.undone, &path)?;
+                swapped = Some((swap, profile));
             }
         } else if slots.len() >= MAX_PROFILES {
             return Err(failure("native_profile_capacity"));
@@ -326,7 +375,6 @@ impl NativeProfileCustody {
             identity: &root_identity,
             held: &held,
         };
-        let path = self.anchor.path.join(HOMES).join(&key);
         let registered = homes
             .verify(&self.anchor.directory, OsStr::new(HOMES))
             .and_then(|()| ConfiguredRcliUse::capture(&path, connection))
@@ -334,10 +382,10 @@ impl NativeProfileCustody {
                 self.register_locked(host, connection, profile_ref, captured, &locked)
             });
         if let Some((swapped, profile)) = swapped {
-            swapped.settle(
-                &homes.file,
-                registered.is_ok() || pins(&profile, connection),
-            );
+            let keep = registered.is_ok() || pins(&profile, connection);
+            if let Some(put) = swapped.settle(&homes.file, keep) {
+                remember_put_back(&mut self.undone, &path, put);
+            }
         }
         registered
     }
