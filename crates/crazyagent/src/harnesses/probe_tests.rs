@@ -128,6 +128,84 @@ async fn a_fresh_cached_catalog_starts_no_probe() {
     assert!(!cache.probing());
 }
 
+/// PROBE-CACHE: a fresh cached catalog whose harness file was removed outside the app
+/// answers from a new probe at once, with no owner check, instead of the old row.
+#[tokio::test]
+async fn a_cached_catalog_whose_harness_file_is_gone_is_probed_before_it_answers() {
+    let folder = tempfile::Builder::new()
+        .prefix("probe-gone-")
+        .tempdir()
+        .unwrap();
+    let search = Search::new(vec![folder.path().to_path_buf()], None, Vec::new());
+    let cache = ProbeCache::new(Duration::from_secs(3600));
+    install(folder.path());
+    let first = cache.entries(search.clone(), false).await.unwrap();
+    assert_eq!(codex(&first), &HarnessStatus::Ready);
+    std::fs::remove_file(folder.path().join("codex")).unwrap();
+    let served = cache.entries(search, false).await.unwrap();
+    assert_eq!(
+        codex(&served),
+        &HarnessStatus::NotInstalled,
+        "a harness file gone since the probe is never answered from the cache"
+    );
+    assert!(!cache.probing(), "the read probed before answering");
+}
+
+/// PROBE-CACHE: a harness file's identity stays the same while nothing changes and differs
+/// once the file is rewritten in place, replaced by a link, or that link is repointed, and a
+/// missing file has none.
+#[cfg(unix)]
+#[test]
+fn a_harness_file_rewritten_relinked_or_removed_reads_as_another_binary() {
+    let folder = tempfile::Builder::new()
+        .prefix("probe-identity-")
+        .tempdir()
+        .unwrap();
+    let file = folder.path().join("codex");
+    install(folder.path());
+    let probed = identity(&file);
+    assert!(probed.is_some(), "a found harness file has an identity");
+    assert_eq!(identity(&file), probed, "an untouched file reads the same");
+
+    std::fs::write(&file, "#!/bin/sh\necho updated\n").unwrap();
+    let rewritten = identity(&file);
+    assert!(rewritten.is_some());
+    assert_ne!(
+        rewritten, probed,
+        "a file rewritten in place is another binary"
+    );
+
+    let first = folder.path().join("versions/1/codex");
+    let second = folder.path().join("versions/2/codex");
+    for real in [&first, &second] {
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        install(real.parent().unwrap());
+    }
+    std::fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink(&first, &file).unwrap();
+    let linked = identity(&file);
+    assert!(linked.is_some());
+    assert_ne!(
+        linked, rewritten,
+        "a link in the file's place is another binary"
+    );
+    std::fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink(&second, &file).unwrap();
+    let repointed = identity(&file);
+    assert!(repointed.is_some());
+    assert_ne!(
+        repointed, linked,
+        "a link repointed outside the app is another binary"
+    );
+
+    std::fs::remove_file(&second).unwrap();
+    assert_eq!(
+        identity(&file),
+        None,
+        "a link to a removed file has no identity"
+    );
+}
+
 #[cfg(unix)]
 fn entry_of<'a>(entries: &'a [HarnessEntry], id: &str) -> &'a HarnessEntry {
     entries
