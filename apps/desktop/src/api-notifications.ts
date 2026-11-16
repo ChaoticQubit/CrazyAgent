@@ -18,7 +18,7 @@ export type NoticeKind =
   | "change_set_landed" | "change_set_conflict" | "change_set_rolled_back"
   | "account_near_limit" | "account_at_limit" | "pool_failover"
   | "app_update_ready" | "engine_restarted" | "engine_lost" | "harness_update" | "team_alert"
-  | "keep_awake_ended" | "keep_awake_heat";
+  | "keep_awake_ended" | "keep_awake_heat" | "keep_awake_apps_not_paused";
 
 /** Every kind in the engine's order, with its class and the label both clients show
  * (`NoticeKind::label`, checked against the engine source by a test). */
@@ -47,6 +47,7 @@ export const NOTICE_KINDS: readonly { kind: NoticeKind; class: NoticeClass; labe
   { kind: "team_alert", class: "info", label: "Team alert" },
   { kind: "keep_awake_ended", class: "info", label: "Keep awake ended" },
   { kind: "keep_awake_heat", class: "info", label: "Hot during Keep awake" },
+  { kind: "keep_awake_apps_not_paused", class: "info", label: "Apps not paused" },
 ];
 
 /** The page a click opens, the engine's `NoticeTarget`: never an address, since item text

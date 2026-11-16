@@ -223,7 +223,7 @@ impl NoticeKind {
             Self::KeepAwakeApproval => "Lid hold approval",
             Self::KeepAwakeEnded => "Keep awake ended",
             Self::KeepAwakeHeat => "Hot during Keep awake",
-            Self::KeepAwakeAppsNotPaused => "",
+            Self::KeepAwakeAppsNotPaused => "Apps not paused",
         }
     }
 

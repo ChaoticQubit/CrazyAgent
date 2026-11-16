@@ -28,6 +28,13 @@ const NOT_THAWED: &str = "Keep awake could not start an app again that it paused
                           open it again.";
 const NOT_UNMUTED: &str = "Keep awake could not put the sound back after the lid was closed. Run \
                            crazyagent keep-awake restore, or check the sound settings.";
+const AGENTS_UNKNOWN_TEXT: &str = "Keep awake did not pause the apps you chose while the \
+                                   lid was closed: it could not tell which processes belong \
+                                   to agents. They kept running.";
+const APPS_UNREAD_TEXT: &str = "Keep awake did not pause the apps you chose while the lid \
+                                was closed: it could not read which apps are running. They \
+                                kept running.";
+const APPS_NOT_PAUSED_SUBJECT: &str = "keep_awake_apps_not_paused:";
 const HOT_UNTIL_CRITICAL: &str =
     "This computer is running hot. Keep awake goes on and ends if the heat gets critical.";
 const HOT_NEVER_ENDS: &str =
@@ -57,6 +64,9 @@ const _: () = assert!(NOT_PUT_BACK.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(NOT_READ.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(NOT_THAWED.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(NOT_UNMUTED.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(AGENTS_UNKNOWN_TEXT.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(APPS_UNREAD_TEXT.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(APPS_NOT_PAUSED_SUBJECT.len() + 20 <= 128);
 const _: () = assert!(HOT_UNTIL_CRITICAL.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(HOT_NEVER_ENDS.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(LID_JOURNAL_TEXT.len() <= TEXT_BYTES_MAX);
@@ -130,17 +140,32 @@ pub(crate) fn hold_ended(connection: &Connection, ended: EndReason, since_ms: i6
     note(connection, &info, now);
 }
 
-/// Red stub for QUESTION-03:02 A: the words of an "Apps not paused" notice. Input:
-/// whether agents could not be told apart. Output: nothing yet.
+/// The words of an "Apps not paused" notice (QUESTION-03:02 A): why the lid-closed lane
+/// froze none of the chosen apps. Input: true when it could not tell which processes
+/// belong to agents, false when it could not read the running apps. Output: the text.
 pub fn apps_not_paused_text(agents_unknown: bool) -> &'static str {
-    let _ = agents_unknown;
-    ""
+    if agents_unknown {
+        AGENTS_UNKNOWN_TEXT
+    } else {
+        APPS_UNREAD_TEXT
+    }
 }
 
-/// Red stub for QUESTION-03:02 A: records nothing yet. Inputs: the connection, whether
-/// agents could not be told apart, and the time.
+/// Records that the lid-closed lane froze none of the chosen apps, once per refusal
+/// (rv-code T17b r1 F1, QUESTION-03:02 A). Inputs: the engine database, whether agents
+/// could not be told apart, and the time of the step that saw it. Output: none; a write
+/// that fails is logged.
 pub(crate) fn apps_not_paused(connection: &Connection, agents_unknown: bool, now: i64) {
-    let _ = (connection, agents_unknown, now);
+    assert!(now > 0);
+    let subject = format!("{APPS_NOT_PAUSED_SUBJECT}{now}");
+    let info = InfoNotice {
+        kind: NoticeKind::KeepAwakeAppsNotPaused,
+        project_id: None,
+        subject: &subject,
+        text: apps_not_paused_text(agents_unknown),
+        target: NoticeTarget::KeepAwake,
+    };
+    note(connection, &info, now);
 }
 
 /// Records heat a hold runs on through, once per hold. Inputs: the connection inside the

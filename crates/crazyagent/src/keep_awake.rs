@@ -646,6 +646,8 @@ pub struct Keeper {
     covered: Option<freeze::Cover>,
     #[cfg(unix)]
     lane_noted: Vec<String>,
+    #[cfg(unix)]
+    lane_refused: u64,
 }
 
 impl Keeper {
@@ -860,13 +862,28 @@ impl Keeper {
     /// tries, and clears them once it put everything back (rv-secreview and rv-code T17
     /// r1). It writes only when that changes, starting from nothing named, so the engine
     /// start's own rows stay until the lane names its kinds. A write that fails is logged
-    /// and tried again at the next step. Input: the engine database outside any transaction.
-    fn note_lane(&mut self, connection: &Connection) {
+    /// and tried again at the next step. Each freeze the lane refused whole since the last
+    /// step gets one "Apps not paused" notice with its reason (rv-code T17b r1 F1); that
+    /// write is logged when it fails and not tried again. Inputs: the engine database
+    /// outside any transaction and the time.
+    fn note_lane(&mut self, connection: &Connection, now_ms: i64) {
         #[cfg(unix)]
         {
             let Some(lane) = self.lane.as_ref() else {
                 return;
             };
+            if let Some((count, code)) = lane.refused()
+                && count != self.lane_refused
+            {
+                assert!(count > self.lane_refused);
+                let agents_unknown = code.starts_with(freeze::AGENTS_UNKNOWN);
+                crate::notifications::keep_awake::apps_not_paused(
+                    connection,
+                    agents_unknown,
+                    now_ms,
+                );
+                self.lane_refused = count;
+            }
             let stuck = lane.stuck();
             if stuck == self.lane_noted {
                 return;
@@ -878,7 +895,7 @@ impl Keeper {
             }
         }
         #[cfg(not(unix))]
-        let _ = connection;
+        let _ = (connection, now_ms);
     }
 
     /// Brings the platform hold in step with the wanted state. A hold found lost is logged
@@ -955,7 +972,7 @@ impl Keeper {
         if sensed.is_some() {
             self.note_lid_journal(connection);
         }
-        self.note_lane(connection);
+        self.note_lane(connection, now_ms);
         let settled = since(self.evaluated_ms, TICK_MS) && self.work == Some(work);
         if settled && sensed.is_none() && !dirty(connection)? {
             return Ok(None);

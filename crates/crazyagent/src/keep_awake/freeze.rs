@@ -26,8 +26,10 @@ const APPS_BYTES_MAX: usize = 32 * 1024;
 const RUNNING_MAX: usize = 512;
 #[cfg(unix)]
 const SCAN_MAX: usize = 1 << 20;
+/// The code of a freeze refused because the agents could not be told apart (rv-code
+/// T17b r1 F1); the keeper names it in the owner's notice.
 #[cfg(unix)]
-const AGENTS_UNKNOWN: &str = "keep_awake_freeze_agents_unknown";
+pub(crate) const AGENTS_UNKNOWN: &str = "keep_awake_freeze_agents_unknown";
 const LOCK: &str = "lid-closed.lock";
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 const LOCK_STEP: Duration = Duration::from_millis(50);
@@ -1457,12 +1459,14 @@ mod lane {
     /// holding its lock, and keeps one thaw guard alive while anything is journaled. What
     /// it could not put back it tries again on its own while uncovered, and after three
     /// failed tries in a row it names those kinds for the owner's notice (rv-secreview and
-    /// rv-code T17 r1).
+    /// rv-code T17 r1). A freeze it refuses whole it counts and names by its code, for
+    /// the owner's notice too (rv-code T17b r1 F1).
     #[derive(Debug)]
     pub struct Lane {
         orders: mpsc::Sender<Order>,
         worker: Option<JoinHandle<()>>,
         stuck: Arc<Mutex<Vec<String>>>,
+        refused: Arc<Mutex<Option<(u64, String)>>>,
     }
 
     /// The lane thread's own state.
@@ -1476,6 +1480,7 @@ mod lane {
         covered: bool,
         tries: u32,
         stuck: Arc<Mutex<Vec<String>>>,
+        refused: Arc<Mutex<Option<(u64, String)>>>,
     }
 
     impl Lane {
@@ -1492,6 +1497,7 @@ mod lane {
             assert!(engine > 1);
             let (orders, inbox) = mpsc::channel();
             let stuck = Arc::new(Mutex::new(Vec::new()));
+            let refused = Arc::new(Mutex::new(None));
             let mut worker = Worker {
                 root,
                 program,
@@ -1502,6 +1508,7 @@ mod lane {
                 covered: false,
                 tries: 0,
                 stuck: Arc::clone(&stuck),
+                refused: Arc::clone(&refused),
             };
             let worker = std::thread::Builder::new()
                 .name("keep-awake-lid-closed".into())
@@ -1530,6 +1537,7 @@ mod lane {
                 orders,
                 worker: Some(worker),
                 stuck,
+                refused,
             })
         }
 
@@ -1553,9 +1561,14 @@ mod lane {
                 .clone()
         }
 
-        /// Red stub for QUESTION-03:02 A: the lane's latest whole refusal. Output: none yet.
+        /// The lane's latest freeze refused whole, for the owner's notice: how many it
+        /// refused so far and that one's code (rv-code T17b r1 F1). Output: none before
+        /// the first.
         pub fn refused(&self) -> Option<(u64, String)> {
-            None
+            self.refused
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
         }
 
         /// Asks the lane to undo everything and end, without waiting.
@@ -1682,7 +1695,8 @@ mod lane {
         /// Freezes each listed instance of a chosen app that may be frozen now, checked
         /// per process now, not when it was chosen (rv-secreview T17 r1 F1), and never one
         /// at or below a tmux server on this engine's sockets (T17b); at most `FROZEN_MAX`
-        /// at once. Input: the chosen apps.
+        /// at once. One it cannot check it refuses whole and counts for the owner's
+        /// notice (rv-code T17b r1 F1). Input: the chosen apps.
         fn freeze(&mut self, apps: &[FreezeApp]) {
             let engine = self.engine;
             let found = super::servers(&self.root).and_then(|roots| {
@@ -1693,6 +1707,13 @@ mod lane {
                 Ok(found) => found,
                 Err(problem) => {
                     eprintln!("keep awake freeze: {}", problem.0);
+                    let mut refused = self
+                        .refused
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let count = refused.as_ref().map_or(0, |(count, _)| *count) + 1;
+                    assert!(count > 0);
+                    *refused = Some((count, problem.0));
                     return;
                 }
             };
