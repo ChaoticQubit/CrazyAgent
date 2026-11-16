@@ -400,7 +400,7 @@ test("a delete an engine stop cut short shows on the project with Keep the proje
   const { id, folder } = await made(name);
   await value(run.bridge, "desktop_recovery_banner", { projectId: id });
   await restart(() => sql(`INSERT INTO projects_delete_pending(exchange) VALUES (900);
-    INSERT INTO ledger_actions(kind,action_key,payload,started_ms) VALUES ('project_delete','${id}','{"project":"${id}","exchange":900}',1);`));
+    INSERT INTO ledger_actions(kind,action_key,payload,started_ms) VALUES ('project_delete','${id}','{"project":"${id}","exchange":900}',${Date.now()});`));
   assert.equal(sql("SELECT count(*) FROM projects_delete_pending"), "0", "the start still forgets the plan, so a home move may go");
   const held = await value(run.bridge, "desktop_intake_status");
   assert.ok(held === null || held.project_id !== id, `a 2.4.1 mark names no job, so Home shows none for it: ${JSON.stringify(held)}`);
