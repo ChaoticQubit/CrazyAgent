@@ -2697,7 +2697,7 @@ thread_local! {
 /// Locks a home's launch lock once opened, only one [`lock_kept`] passes. Input: the open.
 /// Output: the locked file, `launch_context_unsafe` or `launch_home_busy`.
 #[cfg(unix)]
-fn held(opened: rustix::io::Result<std::os::fd::OwnedFd>) -> Result<File, LaunchError> {
+fn lock_opened(opened: rustix::io::Result<std::os::fd::OwnedFd>) -> Result<File, LaunchError> {
     let file = File::from(opened.map_err(|_| failure("launch_context_unsafe"))?);
     let found = rustix::fs::fstat(&file).map_err(|_| failure("launch_context_unsafe"))?;
     if !lock_kept(&found) {
@@ -2718,7 +2718,7 @@ fn held(opened: rustix::io::Result<std::os::fd::OwnedFd>) -> Result<File, Launch
 fn lock_listed(home: &Path, id: Option<&str>) -> Result<File, LaunchError> {
     use crate::harnesses::home::{Walk, listed_folder};
     let folder = listed_folder(home, id, &[], Walk::Check)?;
-    held(rustix::fs::openat(
+    lock_opened(rustix::fs::openat(
         &folder,
         LOCK,
         OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
