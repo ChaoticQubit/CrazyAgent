@@ -1008,6 +1008,13 @@ const HOME_NAMES_CHUNK: usize = 4096;
 #[cfg(unix)]
 const HOME_ADDED_CHUNKS_MAX: usize = 8;
 
+/// How many listings' worth of names one removal's listings return across its whole walk
+/// before it refuses as `cleanup_walk_too_long`: far past any home a run leaves, so only a
+/// process still adding entries, also in folders the walk has not reached yet, gets there
+/// (RESET-WALK-F1).
+#[cfg(unix)]
+const HOME_WALK_CHUNKS_MAX: usize = 4096;
+
 /// Removes the entry `name` of an open agent home folder with all it holds, each step
 /// relative to an open folder handle and none following a link, so a folder a process an
 /// agent left swaps for a link meanwhile goes as that link, what the link names stays, and
@@ -1024,17 +1031,19 @@ pub(crate) fn remove_home_entry<P: rustix::path::Arg>(
     name: P,
 ) -> Result<(), EngineError> {
     let name = name.into_c_str().map_err(|_| folder_failed())?;
-    remove_home_below(parent.as_fd(), &name, 0)
+    let mut left = HOME_NAMES_CHUNK * HOME_WALK_CHUNKS_MAX;
+    remove_home_below(parent.as_fd(), &name, 0, &mut left)
 }
 
 /// Removes one entry as [`remove_home_entry`] does, `depth` folders below the entry it was
-/// given. Inputs: the parent handle, the name and the depth. Output: as
-/// [`remove_home_entry`].
+/// given, with `left` names its walk's listings may still return. Inputs: the parent
+/// handle, the name, the depth and the names left. Output: as [`remove_home_entry`].
 #[cfg(unix)]
 fn remove_home_below(
     parent: std::os::fd::BorrowedFd<'_>,
     name: &std::ffi::CStr,
     depth: usize,
+    left: &mut usize,
 ) -> Result<(), EngineError> {
     use rustix::fs::{AtFlags, FileType};
     assert!(plain_name(name));
@@ -1049,7 +1058,7 @@ fn remove_home_below(
     if FileType::from_raw_mode(found.st_mode) == FileType::Directory
         && let Some(folder) = open_home_folder(parent, name).map_err(|_| folder_failed())?
     {
-        empty_home_folder(&folder, depth)?;
+        empty_home_folder(&folder, depth, left)?;
     }
     unlink_home_entry(parent, name)
 }
@@ -1102,10 +1111,15 @@ pub(crate) fn open_home_folder(
 /// lists at most [`HOME_NAMES_CHUNK`] names at a time from a fresh listing and removes them
 /// until a listing comes back empty, so no folder's size stops it (code r1 F1
 /// ds137-reset-walk). Removing more than the count plus [`HOME_ADDED_CHUNKS_MAX`] listings'
-/// worth means a process is still adding entries, and the removal stops. Inputs: the folder
-/// and its depth. Output: Ok once a listing finds it empty, or `cleanup_folder_failed`.
+/// worth means a process is still adding entries, and the removal stops. Inputs: the folder,
+/// its depth and the names its walk's listings may still return. Output: Ok once a listing
+/// finds it empty, or `cleanup_folder_failed`.
 #[cfg(unix)]
-fn empty_home_folder(folder: &std::os::fd::OwnedFd, depth: usize) -> Result<(), EngineError> {
+fn empty_home_folder(
+    folder: &std::os::fd::OwnedFd,
+    depth: usize,
+    left: &mut usize,
+) -> Result<(), EngineError> {
     use std::os::fd::AsFd;
     unpin_home_entry(folder, c".");
     let _ = rustix::fs::fchmod(folder, rustix::fs::Mode::RWXU);
@@ -1122,7 +1136,7 @@ fn empty_home_folder(folder: &std::os::fd::OwnedFd, depth: usize) -> Result<(), 
             return Err(folder_failed());
         }
         for name in &names {
-            remove_home_below(folder.as_fd(), name, depth + 1)?;
+            remove_home_below(folder.as_fd(), name, depth + 1, left)?;
         }
     }
 }

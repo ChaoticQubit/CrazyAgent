@@ -1568,7 +1568,7 @@ fn a_folder_that_denies_listing_has_its_acl_cleared_through_its_parents_handle_a
 
 /// Opens a test folder as a walk holds one: read only, never through a link. Input: the
 /// folder. Output: its handle.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn walk_handle(folder: &Path) -> std::os::fd::OwnedFd {
     use rustix::fs::{Mode, OFlags};
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -2509,4 +2509,56 @@ fn removing_an_agents_worktree_takes_its_own_tool_caches_and_keeps_the_shared_on
         assert!(left(name) && left(&format!("{name}.primed")), "{name}");
     }
     assert!(case.history_kept(1) && case.kept(2));
+}
+
+/// Plants `tree` in a test home: folders `a` and `b` of three files each, so one reset walk
+/// of it lists eight names. Input: the home.
+#[cfg(unix)]
+fn plant_walk_tree(home: &Path) {
+    for folder in ["a", "b"] {
+        let at = home.join("tree").join(folder);
+        std::fs::create_dir_all(&at).unwrap();
+        for file in ["1", "2", "3"] {
+            std::fs::write(at.join(file), b"").unwrap();
+        }
+    }
+}
+
+/// RESET-WALK-F1: one removal's walk spends its budget across every folder it empties and
+/// refuses as `cleanup_walk_too_long` once a listing returns more names than are left, though
+/// no folder gained an entry, so a process filling folders the walk has not reached yet,
+/// which no folder's own bound sees, cannot stretch it past a fixed bound.
+#[cfg(unix)]
+#[test]
+fn a_reset_walk_whose_listings_return_more_names_than_its_budget_refuses_as_too_long() {
+    use std::os::fd::AsFd;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(tmp.path()).unwrap();
+    plant_walk_tree(&home);
+    let parent = walk_handle(&home);
+    let mut left = 7;
+
+    let removed = remove_home_below(parent.as_fd(), c"tree", 0, &mut left).map_err(|e| e.0);
+
+    assert_eq!(removed, Err("cleanup_walk_too_long".to_string()));
+    assert!(home.join("tree").exists());
+}
+
+/// RESET-WALK-F1 guard: a walk spends one unit per name its listings return, so a budget of
+/// exactly the names a tree holds removes all of it and ends at zero.
+#[cfg(unix)]
+#[test]
+fn a_reset_walk_spends_one_unit_per_listed_name_and_a_budget_of_exactly_those_clears_the_tree() {
+    use std::os::fd::AsFd;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(tmp.path()).unwrap();
+    plant_walk_tree(&home);
+    let parent = walk_handle(&home);
+    let mut left = 8;
+
+    let removed = remove_home_below(parent.as_fd(), c"tree", 0, &mut left).map_err(|e| e.0);
+
+    assert_eq!(removed, Ok(()));
+    assert_eq!(left, 0);
+    assert!(std::fs::symlink_metadata(home.join("tree")).is_err());
 }
