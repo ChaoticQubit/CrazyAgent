@@ -37,7 +37,7 @@ pub mod windows;
 /// The variables that point an agent's tools at its tool cache (T8): uv's cache, and the
 /// pnpm store, the only store variable pnpm 12 reads (probe P5). [`agent_env`] keeps a
 /// harness from replacing either once the sandbox set it.
-const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
+pub(crate) const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
 
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";

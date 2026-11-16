@@ -1,6 +1,7 @@
 pub mod accounts;
 pub(crate) mod codex_folder;
 pub mod drivers;
+mod env_names;
 pub mod finding;
 pub mod home;
 pub mod interactive;
@@ -673,53 +674,59 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
         .zip(specs())
         .map(|(harness, spec)| {
             assert_eq!(harness.id(), spec.id);
-            let executable = search.locate(spec);
-            let status = match (&executable, spec.launch, spec.tools_limited) {
-                (None, _, _) => HarnessStatus::NotInstalled,
-                (Some(_), Some(reason), _) | (Some(_), None, Some(reason)) => {
-                    HarnessStatus::Limited {
-                        reason: reason.into(),
-                    }
-                }
-                (Some(_), None, None) => HarnessStatus::Ready,
-            };
-            HarnessEntry {
-                id: spec.id.into(),
-                name: spec.name.into(),
-                status_label: status.label(),
-                status,
-                executable,
-                headless: spec.headless.into(),
-                tools: spec
-                    .tools_limited
-                    .map_or(ToolControl::Switchable, |reason| ToolControl::Limited {
-                        reason: reason.into(),
-                    }),
-                model_selection: spec.model_selection,
-                account_kinds: spec.account_kinds.to_vec(),
-                team: match interactive::support(spec.id) {
-                    interactive::Support::Terminal => TeamUse::Available,
-                    interactive::Support::HeadlessOnly { reason } if harness.master() => {
-                        TeamUse::MasterOnly {
-                            reason: reason.into(),
-                        }
-                    }
-                    interactive::Support::HeadlessOnly { reason }
-                    | interactive::Support::Unavailable { reason } => TeamUse::Unavailable {
-                        reason: reason.into(),
-                    },
-                },
-                aliases: harness.aliases().to_vec(),
-                terminal: harness.record() != manifest::RecordKind::Unavailable,
-                master: harness.master(),
-                research: harness.research(),
-                sub_agents: harness.sub_agents(),
-                account_protocols: harness.account_protocols().to_vec(),
-            }
+            entry(harness, search)
         })
         .collect();
     assert_eq!(entries.len(), specs().len());
     entries
+}
+
+/// Builds the catalog row of one harness from its manifest: Limited by the manifest's
+/// reason it cannot start, else by its tools reason, once it is found. Input: the harness
+/// and the search space. Output: the entry with its detected status.
+pub(crate) fn entry(harness: &'static registry::Harness, search: &Search) -> HarnessEntry {
+    let spec = harness.spec();
+    let executable = search.locate(&spec);
+    let status = match (&executable, spec.launch, spec.tools_limited) {
+        (None, _, _) => HarnessStatus::NotInstalled,
+        (Some(_), Some(reason), _) | (Some(_), None, Some(reason)) => HarnessStatus::Limited {
+            reason: reason.into(),
+        },
+        (Some(_), None, None) => HarnessStatus::Ready,
+    };
+    HarnessEntry {
+        id: spec.id.into(),
+        name: spec.name.into(),
+        status_label: status.label(),
+        status,
+        executable,
+        headless: spec.headless.into(),
+        tools: spec
+            .tools_limited
+            .map_or(ToolControl::Switchable, |reason| ToolControl::Limited {
+                reason: reason.into(),
+            }),
+        model_selection: spec.model_selection,
+        account_kinds: spec.account_kinds.to_vec(),
+        team: match interactive::support(spec.id) {
+            interactive::Support::Terminal => TeamUse::Available,
+            interactive::Support::HeadlessOnly { reason } if harness.master() => {
+                TeamUse::MasterOnly {
+                    reason: reason.into(),
+                }
+            }
+            interactive::Support::HeadlessOnly { reason }
+            | interactive::Support::Unavailable { reason } => TeamUse::Unavailable {
+                reason: reason.into(),
+            },
+        },
+        aliases: harness.aliases().to_vec(),
+        terminal: harness.record() != manifest::RecordKind::Unavailable,
+        master: harness.master(),
+        research: harness.research(),
+        sub_agents: harness.sub_agents(),
+        account_protocols: harness.account_protocols().to_vec(),
+    }
 }
 
 /// Marks each found harness the tool resolver can't start, read as a launch reads it, as

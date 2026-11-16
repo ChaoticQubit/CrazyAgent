@@ -2,8 +2,8 @@ use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{
     Adoption, AgentInstructions, AppInstructionSettings, ImportCommit, ImportFile,
-    InstructionSettings, InstructionView, OwnerClient, PROCESS_CODES, ProcessText, Proposal,
-    SavedText, UncommittedImport,
+    InstructionSettings, InstructionSource, InstructionView, OwnerClient, PROCESS_CODES,
+    ProcessText, Proposal, SavedText, UncommittedImport,
 };
 use crazyagent::protocol::ProjectId;
 use std::path::PathBuf;
@@ -86,6 +86,28 @@ impl NativeBridge {
         Ok(Box::pin(async move {
             client
                 .read_instruction_file(PathBuf::from(path))
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Lists each harness's own instructions file the engine offers for the app-wide import,
+    /// run without the bridge lock; reads no file. Output: the sources in catalog order.
+    pub fn instruction_sources(&self) -> Result<Unlocked<Vec<InstructionSource>>, BridgeError> {
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client.instruction_sources().await.map_err(process_error)
+        }))
+    }
+
+    /// Reads one harness's own instructions file by the harness's id, run without the bridge
+    /// lock; the engine takes the path from the harness's manifest and nothing is saved.
+    /// Input: the harness id. Output: the text for the app-wide editor.
+    pub fn read_instruction_source(&self, harness: String) -> Result<Unlocked<String>, BridgeError> {
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .read_instruction_source(harness)
                 .await
                 .map_err(process_error)
         }))
