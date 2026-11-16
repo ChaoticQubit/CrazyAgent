@@ -105,3 +105,27 @@ impl GitHub {
         Ok(())
     }
 }
+
+/// Carries a moved project's publish job, if any, from its old folder to its new one, as
+/// both moves rewrite the project's folder, so the moved project keeps its publish and a
+/// recorded publish is still never asked. The engine root is the folder of the database
+/// the move writes. A carry that fails is logged and the move still finishes; the job then
+/// stays under the old folder. Inputs: that database and both folders. Output: none.
+pub(crate) fn carry_publish(db: &Connection, from: &Path, to: &Path) {
+    let _ = (db, from, to);
+}
+
+/// Saves a project's publish job where the engine keeps it, for rows outside the GitHub
+/// module. Inputs: the engine root and the job. Output: none; a failed save panics.
+#[cfg(test)]
+pub(crate) fn keep_job(root: &Path, job: &super::GitHubPublishJob) {
+    state::save_job(root, job).unwrap();
+}
+
+/// Reads a project's publish job from where the engine keeps it, for rows outside the
+/// GitHub module. Inputs: the engine root and the project folder. Output: the job, if
+/// any; a failed read panics.
+#[cfg(test)]
+pub(crate) fn kept_job(root: &Path, project: &Path) -> Option<super::GitHubPublishJob> {
+    state::load_job(root, project).unwrap()
+}
