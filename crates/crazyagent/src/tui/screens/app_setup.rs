@@ -2632,7 +2632,6 @@ impl Screen for AppSetup {
             hints.push(hint("h", "Change home"));
             if matches!(&self.github, Load::Ready(github) if github.signed_in) {
                 hints.push(hint("g", "Sign out of GitHub"));
-                hints.push(hint("G", "GitHub rules"));
             }
             hints.push(hint("l", "Linux sockets"));
             hints.push(hint("v", "Linux supervisor"));
@@ -2648,6 +2647,14 @@ impl Screen for AppSetup {
             hints.push(hint("Ctrl-Q", "Quit"));
         }
         hints
+    }
+
+    fn keys(&self, ctx: &Ctx) -> Vec<Hint> {
+        let mut keys = self.hints(ctx);
+        if let Some(at) = keys.iter().position(|item| item.key == "g") {
+            keys.insert(at + 1, hint("G", "GitHub rules"));
+        }
+        keys
     }
 
     fn typing(&self) -> bool {
