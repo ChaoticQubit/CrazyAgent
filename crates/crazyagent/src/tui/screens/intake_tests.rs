@@ -22,6 +22,7 @@ use crate::tui::keys::Key;
 use crate::tui::run::owner_arrival;
 use crate::tui::seam::{Arrival, PoolChange, Request, ShellRequest};
 use crate::tui::shell::Shell;
+use crate::tui::test_home::{LOCAL_ADDRESS, refusing_port};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -40,11 +41,6 @@ pools = [
 ]
 "#;
 
-/// Stands for the seeded local account's address in test settings. `Engine::with` swaps it
-/// for a loopback port that refuses every connection, so no row reaches a model server the
-/// host runs (a host Ollama on 127.0.0.1:11434 made the account read ready).
-const LOCAL_ADDRESS: &str = "LOCAL_ADDRESS";
-
 struct Engine {
     root: tempfile::TempDir,
     user: tempfile::TempDir,
@@ -54,21 +50,6 @@ struct Engine {
     controller: OwnerController,
     #[cfg(target_os = "macos")]
     _keychain: crate::credentials::test_keychain::TestKeychain,
-}
-
-/// Binds a loopback port without listening on it, so every connection to it is refused
-/// while the socket lives and no other process can take the port. Output: the socket, which
-/// the test engine holds, and its address.
-fn refusing_port() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
-    let socket =
-        crate::spawn_gate::bind_tcp_unlistened(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .unwrap();
-    let address = socket.local_addr().unwrap();
-    assert!(
-        address.ip().is_loopback() && address.port() != 0,
-        "{address}"
-    );
-    (socket, address)
 }
 
 impl Engine {
