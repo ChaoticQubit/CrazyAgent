@@ -210,12 +210,14 @@ fn check_env(env: &Value, path: &str) -> Result<(), Refused> {
 
 /// Checks the `accounts` block of a manifest, which says how a listed harness is given an
 /// account of each wire format it lists: each entry is named after one wire format the
-/// manifest lists, and its `env` sets plain variables the engine does not own (none it sets
-/// on a launch: search path, home, temp folder, shell, locale, git, proxy or its own) to
-/// text that holds no placeholder but `{relay_url}`, `{token}` and `{model}`. A harness on a shared
-/// driver lists each wire format by its full name and has an entry for every one; the
-/// engine's own adapters need none. Input: the manifest. Output: Ok, or a refusal that
-/// names the setting.
+/// manifest lists, and its `env` sets plain variables, none of the names this check refuses
+/// (search path, home, temp folder, shell, locale, git, proxy and the engine's own), to
+/// text that holds no placeholder but `{relay_url}`, `{token}` and `{model}`. That list is
+/// a load-time subset, not the launch guard: `sandbox::agent_env` sets the engine's pins
+/// (git, home, TLS and the zsh temp prefix) after the harness's own variables, so an entry
+/// never replaces one. A harness on a shared driver lists each wire format by its full name
+/// and has an entry for every one; the engine's own adapters need none. Input: the
+/// manifest. Output: Ok, or a refusal that names the setting.
 pub fn check(manifest: &Manifest) -> Result<(), Refused> {
     let shared = !own_adapter(manifest);
     if shared

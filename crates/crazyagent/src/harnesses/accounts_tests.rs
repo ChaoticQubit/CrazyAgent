@@ -196,10 +196,10 @@ fn a_hand_over_is_refused_for_an_account_the_harness_cannot_run_or_a_key_without
 }
 
 /// Task 17: the `accounts` block hands over only the relay URL, the placeholder and the
-/// model, through plain environment names the engine does not own (the ones it sets on a
-/// launch: search path, home, temp folder, shell, locale, git, proxy and its own), one entry
-/// for each wire format the manifest lists by its full name, and every refusal names the
-/// setting.
+/// model, through plain environment names, none of those the load check refuses (search
+/// path, home, temp folder, shell, locale, git, proxy and the engine's own; the launch
+/// keeps every other engine pin by setting it last), one entry for each wire format the
+/// manifest lists by its full name, and every refusal names the setting.
 #[test]
 fn an_accounts_block_hands_over_only_the_relay_url_the_placeholder_and_the_model() {
     built(&["gemini"], GEMINI_ENV);
