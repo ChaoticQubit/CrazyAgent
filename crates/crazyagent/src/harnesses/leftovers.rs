@@ -206,14 +206,14 @@ pub struct HeldView {
 /// One hold of a Full access stop: the account it keeps, if any, the report naming what
 /// still runs, what the stop holds, such as the agent's account lease, until the
 /// hold ends or the owner keeps the processes running, the run's place on the hidden folders
-/// list, if it has one, until the hold ends in any mode, who left it, the names it shows,
-/// where it stands, when it began and whether a sandboxed run left it ([`confined_left_by`]).
+/// list, if it has one, until the hold ends in any mode ([`end_hold`]), who left it, the names
+/// it shows, where it stands, when it began and whether a sandboxed run left it
+/// ([`confined_left_by`]).
 struct Held {
     account: Option<CredentialRef>,
     report: String,
     #[allow(dead_code)]
     kept: Option<Box<dyn Send>>,
-    #[allow(dead_code)]
     listed: Option<Box<dyn Send>>,
     by: HoldBy,
     names: String,
@@ -601,8 +601,8 @@ impl Leftovers {
     /// `account` with this report and `by`, until a watcher pass shows no process of the agent
     /// running, both the table and the token's processes read, or the owner signs the account
     /// out ([`release`]), then drops it; the engine's exit ends the hold too. A pass that
-    /// cannot read both is retried, never taken as clean; with none named, the hold ends after
-    /// `UNCHECKED_HOLD_MAX` even while no listing works. `mode` starts it: End has the watcher
+    /// cannot read both is retried, never taken as clean; with none named, the hold ends once
+    /// no pass could check for `UNCHECKED_HOLD_MAX` in a row. `mode` starts it: End has the watcher
     /// end the processes, Keep lets `kept` and the account go at once, Ask waits for the
     /// owner's [`end_held`] or [`keep_held`]. When no watching thread starts, only the owner's
     /// sign-out ends it. Inputs: the leftovers, the account they keep, if any, what they hold,
@@ -620,9 +620,9 @@ impl Leftovers {
     /// Holds as [`Leftovers::hold`] does, for a run on the hidden folders list (SA-VID14):
     /// `kept`, such as its account lease, goes as `mode` says, and `listed`, its place on that
     /// list, stays in every mode, through Keep, the owner's [`keep_held`] and a sign-out
-    /// ([`release`]), until the hold ends, so a kept run is named while its processes run and
-    /// frees its place once they end.
-    /// Inputs: as for `hold`, plus the listing. Output: none.
+    /// ([`release`]), until the hold ends, so a kept run is named while its processes, or a
+    /// child they handed off to that holds the launch's token, run and frees its place once
+    /// they end. Inputs: as for `hold`, plus the listing. Output: none.
     pub fn hold_listed<T: Send + 'static, L: Send + 'static>(
         self,
         account: Option<CredentialRef>,
@@ -664,6 +664,7 @@ impl Leftovers {
                     (HoldState::Kept, None, None)
                 }
             };
+        let listing = listed.is_some();
         let previous = held().insert(
             key,
             Held {
@@ -682,7 +683,7 @@ impl Leftovers {
         let lineage = *self.0;
         let _ = std::thread::Builder::new()
             .name("full-access-hold".into())
-            .spawn(move || watch(key, lineage));
+            .spawn(move || watch(key, lineage, listing));
     }
 }
 
@@ -694,14 +695,14 @@ enum Ending {
     Kill,
 }
 
-/// Watches one hold until its processes are gone and could be checked, or `UNCHECKED_HOLD_MAX`
-/// passes with none named, or the hold is let go: each pass reads the table, retries a token
-/// scan that failed, and under Ending sends SIGTERM once, then SIGKILL past [`LEFTOVER_GRACE`],
-/// only to processes that same pass found with the start they were known by. Inputs: the
-/// hold's key and its lineage. Output: none; the hold is removed at the end.
-fn watch(key: u64, mut lineage: Lineage) {
-    let begun = Instant::now();
+/// Watches one hold until a checked pass ([`Lineage::pass`]) finds none of its processes,
+/// passes find none and cannot check for `UNCHECKED_HOLD_MAX` in a row, or the hold is let
+/// go. Under Ending it sends SIGTERM once, then SIGKILL past [`LEFTOVER_GRACE`].
+/// Inputs: the hold's key, its lineage and whether the hold has a listing. Output: none; the
+/// hold ends through [`end_hold`].
+fn watch(key: u64, mut lineage: Lineage, listed: bool) {
     let mut termed: Option<Instant> = None;
+    let mut blind: Option<Instant> = None;
     let mut checked = false;
     while let Some(state) = state_of(key) {
         let signal = match (state, termed) {
@@ -709,13 +710,15 @@ fn watch(key: u64, mut lineage: Lineage) {
             (HoldState::Ending, Some(at)) if at.elapsed() >= LEFTOVER_GRACE => Some(Ending::Kill),
             _ => None,
         };
-        let read = lineage.pass(signal);
+        let read = lineage.pass(signal, listed);
         if signal == Some(Ending::Term) && read.is_some() {
             termed = Some(Instant::now());
         }
         checked = read == Some(true);
         assert_eq!(checked, !lineage.unchecked);
-        if lineage.known.is_empty() && (checked || begun.elapsed() >= UNCHECKED_HOLD_MAX) {
+        let none = lineage.known.is_empty();
+        blind = (none && !checked).then(|| blind.unwrap_or_else(Instant::now));
+        if none && (checked || blind.is_some_and(|at| at.elapsed() >= UNCHECKED_HOLD_MAX)) {
             break;
         }
         lineage.name();
@@ -729,12 +732,18 @@ fn watch(key: u64, mut lineage: Lineage) {
     end_hold(key, checked);
 }
 
-/// Ends one hold once its watcher stops: removes it and drops what it keeps. Inputs: the
-/// hold's key and whether its last pass was checked. Output: none.
+/// Ends one hold once its watcher stops: removes it and drops what it keeps outside the lock,
+/// except that a listing whose last pass could not check, under Keep or Ask, is forgotten, so
+/// a run whose processes may still run stays on the hidden folders list for the engine's life.
+/// Inputs: the hold's key and whether its last pass was checked. Output: none.
 fn end_hold(key: u64, checked: bool) {
-    let _ = checked;
     let ended = held().remove(&key);
-    drop(ended);
+    if let Some(mut hold) = ended {
+        if !checked && hold.state != HoldState::Ending {
+            std::mem::forget(hold.listed.take());
+        }
+        drop(hold);
+    }
 }
 
 impl Lineage {
@@ -824,12 +833,13 @@ impl Lineage {
 
     /// One pass of a hold's watcher: reads the table and applies it, sends `signal`, if any,
     /// to the known processes that same table shows with the start they were known by, then
-    /// retries the token scan while it has not read. A failed read is a retry, never clean.
-    /// Inputs: the lineage and the signal. Output: none when the table could not be read,
-    /// else whether the lineage is now checked, the token's processes read too; `unchecked`
-    /// is set to the opposite.
+    /// scans for the token while it has not read, and again for a `listed` hold that knows
+    /// none, so a child its parent left keeps the run named. A failed read is a retry, never
+    /// clean. Inputs: the lineage, the signal and whether the hold has a listing. Output: none
+    /// when the table could not be read, else whether the lineage is now checked, the token's
+    /// processes read too; `unchecked` is set to the opposite.
     #[cfg(unix)]
-    fn pass(&mut self, signal: Option<Ending>) -> Option<bool> {
+    fn pass(&mut self, signal: Option<Ending>, listed: bool) -> Option<bool> {
         let Ok(rows) = rows(self.table, &mut self.pending) else {
             self.unchecked = true;
             return None;
@@ -838,7 +848,7 @@ impl Lineage {
         if let Some(signal) = signal {
             self.signal(&rows, signal);
         }
-        if !self.scanned {
+        if !self.scanned || (listed && self.known.is_empty()) {
             self.scanned = self.add_carriers().is_ok();
         }
         self.unchecked = !self.scanned;
@@ -847,7 +857,7 @@ impl Lineage {
 
     /// Reads nothing where no process table is read. Input: unused. Output: none.
     #[cfg(not(unix))]
-    fn pass(&mut self, _signal: Option<Ending>) -> Option<bool> {
+    fn pass(&mut self, _signal: Option<Ending>, _listed: bool) -> Option<bool> {
         self.unchecked = true;
         None
     }
