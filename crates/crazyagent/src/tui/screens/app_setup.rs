@@ -380,6 +380,16 @@ pub fn setup_plain(code: &str) -> String {
     .to_owned()
 }
 
+/// A plain sentence for a Linux sandbox setting save's problem code: a save refused as
+/// stale, as another window saved the sandbox first, says the setting changed elsewhere and
+/// that the saved one shows now, as the screen reads it again; any other code reads as
+/// [`setup_plain`] has it. Input: the code. Output: the sentence.
+fn sandbox_plain(code: &str) -> String {
+    crate::config::plain_problem(code)
+        .filter(|_| code == crate::storage::versioned::STALE_CODE)
+        .map_or_else(|| setup_plain(code), str::to_owned)
+}
+
 /// The sentence for why a tool or default skill did not install.
 /// Input: the reason the engine sent, which is the setup sentence it already chose.
 /// Output: that sentence; a plain code instead gets the setup sentence for the code.
@@ -860,7 +870,7 @@ impl AppSetup {
         }
     }
 
-    fn changed(&mut self, result: &Result<(), String>, ctx: &mut Ctx) {
+    fn changed(&mut self, result: &Result<(), String>, plain: fn(&str) -> String, ctx: &mut Ctx) {
         let (done, fixing) = match self.sent.take() {
             Some(Sent::Done(done)) => (done, None),
             Some(Sent::Fix { done, name }) => (done, Some(name)),
@@ -876,7 +886,7 @@ impl AppSetup {
                 self.reload(ctx);
             }
             Err(code) => {
-                ctx.say(Message::error(&setup_plain(code), ""));
+                ctx.say(Message::error(&plain(code), ""));
                 if code == crate::storage::versioned::STALE_CODE {
                     self.reload(ctx);
                 }
@@ -2880,9 +2890,9 @@ impl Screen for AppSetup {
             AppSetupEvent::Status(result) => return self.read_setup(result, ctx),
             AppSetupEvent::Ran(result) => self.ran(result, ctx),
             AppSetupEvent::Installed(_) => {}
+            AppSetupEvent::SandboxSet(result) => self.changed(result, sandbox_plain, ctx),
             AppSetupEvent::PackChanged(result)
             | AppSetupEvent::HomeSet(result)
-            | AppSetupEvent::SandboxSet(result)
             | AppSetupEvent::CleanupSet(result)
             | AppSetupEvent::QuitSet(result)
             | AppSetupEvent::MasterStepsSet(result)
@@ -2890,7 +2900,7 @@ impl Screen for AppSetup {
             | AppSetupEvent::MasterFramesSet(result)
             | AppSetupEvent::ProviderRetrySet(result)
             | AppSetupEvent::FixSet(result)
-            | AppSetupEvent::RefusedToolSet(result) => self.changed(result, ctx),
+            | AppSetupEvent::RefusedToolSet(result) => self.changed(result, setup_plain, ctx),
             AppSetupEvent::Sandbox(result) => {
                 self.reading[3] = false;
                 self.sandbox = loaded(result);
@@ -2923,7 +2933,7 @@ impl Screen for AppSetup {
                 let result = result.as_ref().map(|github| {
                     self.github = Load::Ready(github.clone());
                 });
-                self.changed(&result.map_err(Clone::clone), ctx);
+                self.changed(&result.map_err(Clone::clone), setup_plain, ctx);
             }
             AppSetupEvent::Home(result) => {
                 self.reading[1] = false;
