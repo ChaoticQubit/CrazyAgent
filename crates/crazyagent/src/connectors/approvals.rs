@@ -42,6 +42,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connector_approvals (
     title TEXT NOT NULL,
     tool TEXT NOT NULL,
     preview TEXT NOT NULL,
+    arguments TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('waiting', 'allowed', 'denied', 'expired')),
     created_ms INTEGER NOT NULL,
     expires_ms INTEGER NOT NULL,
@@ -187,6 +188,23 @@ fn plain(text: &str, secrets: &[SecretString]) -> String {
     clean
 }
 
+/// One argument value whole, every name and text as [`plain`] shows it.
+fn scrubbed(value: &Value, secrets: &[SecretString]) -> Value {
+    match value {
+        Value::String(text) => Value::String(plain(text, secrets)),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|item| scrubbed(item, secrets)).collect())
+        }
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, item)| (plain(key, secrets), scrubbed(item, secrets)))
+                .collect(),
+        ),
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+    }
+}
+
 /// One argument value as a preview shows it: a text quoted and cut to `VALUE_CHARS_MAX`
 /// characters, a list or an object by its size, anything else as written.
 fn short(value: &Value, secrets: &[SecretString]) -> String {
@@ -243,8 +261,12 @@ pub fn preview(tool: &str, arguments: &Map<String, Value>, secrets: &[SecretStri
 /// preview shows it, so the owner reads what the vendor would get. Inputs: the arguments
 /// and the connector's secret forms. Output: the text, or none past `ARGUMENTS_BYTES_MAX`.
 pub fn arguments(arguments: &Map<String, Value>, secrets: &[SecretString]) -> Option<String> {
-    let _ = (arguments, secrets);
-    Some(String::new())
+    let shown = scrubbed(&Value::Object(arguments.clone()), secrets);
+    let text = serde_json::to_string(&shown).ok()?;
+    if text.len() > ARGUMENTS_BYTES_MAX || leaks(&text, secrets) {
+        return None;
+    }
+    Some(text)
 }
 
 /// Records one write that waits for the owner, unless `WAITING_PER_LAUNCH_MAX` of its launch
@@ -258,15 +280,16 @@ pub fn ask(
     now_ms: i64,
 ) -> Result<i64, EngineError> {
     assert!(write.preview.len() <= PREVIEW_BYTES_MAX);
+    assert!(write.arguments.len() <= ARGUMENTS_BYTES_MAX);
     initialize(db)?;
     let wait_ms = i64::from(wait.minutes()) * MINUTE_MS;
     let expires_ms = now_ms.saturating_add(wait_ms);
     let added = db
         .execute(
             "INSERT INTO connector_approvals
-                 (launch, project, agent, connector, title, tool, preview, state, created_ms,
-                  expires_ms)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'waiting', ?8, ?9
+                 (launch, project, agent, connector, title, tool, preview, arguments, state,
+                  created_ms, expires_ms)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?12, 'waiting', ?8, ?9
              WHERE (SELECT COUNT(*) FROM connector_approvals
                     WHERE state='waiting' AND launch=?1) < ?10
                AND (SELECT COUNT(*) FROM connector_approvals WHERE state='waiting') < ?11",
@@ -282,6 +305,7 @@ pub fn ask(
                 expires_ms,
                 WAITING_PER_LAUNCH_MAX as i64,
                 WAITING_MAX as i64,
+                write.arguments,
             ],
         )
         .map_err(sqlite)?;
@@ -332,7 +356,7 @@ pub fn answer(
     }
     if now_ms >= expires_ms {
         tx.execute(
-            "UPDATE connector_approvals SET state='expired', answered_ms=expires_ms
+            "UPDATE connector_approvals SET state='expired', arguments='', answered_ms=expires_ms
              WHERE id=?1 AND state='waiting'",
             [id],
         )
@@ -346,7 +370,7 @@ pub fn answer(
     };
     let changed = tx
         .execute(
-            "UPDATE connector_approvals SET state=?2, answered_ms=?3
+            "UPDATE connector_approvals SET state=?2, arguments='', answered_ms=?3
              WHERE id=?1 AND state='waiting'",
             params![id, answered.name(), now_ms],
         )
@@ -389,7 +413,8 @@ pub fn get(db: &Connection, id: i64) -> Result<Option<ApprovalView>, EngineError
     }
     db.query_row(
         "SELECT a.id, a.project, json_extract(p.body, '$.spec.name'), a.agent, a.connector,
-                a.title, a.tool, a.preview, a.state, a.created_ms, a.expires_ms, a.answered_ms
+                a.title, a.tool, a.preview, a.state, a.created_ms, a.expires_ms, a.answered_ms,
+                a.arguments
          FROM connector_approvals a LEFT JOIN projects p ON p.id = a.project
          WHERE a.id=?1",
         [id],
@@ -405,7 +430,7 @@ pub fn get(db: &Connection, id: i64) -> Result<Option<ApprovalView>, EngineError
                 title: row.get(5)?,
                 tool: row.get(6)?,
                 preview: row.get(7)?,
-                arguments: String::new(),
+                arguments: row.get(12)?,
                 state: State::parse(&state).ok_or(rusqlite::Error::InvalidQuery)?,
                 created_ms: row.get(9)?,
                 expires_ms: row.get(10)?,
@@ -424,7 +449,7 @@ pub fn expire(db: &Connection, now_ms: i64) -> Result<usize, EngineError> {
         return Ok(0);
     }
     db.execute(
-        "UPDATE connector_approvals SET state='expired', answered_ms=expires_ms
+        "UPDATE connector_approvals SET state='expired', arguments='', answered_ms=expires_ms
          WHERE state='waiting' AND expires_ms<=?1",
         [now_ms],
     )
@@ -438,7 +463,7 @@ pub fn expire_ids(db: &Connection, ids: &[i64], now_ms: i64) -> Result<usize, En
     }
     let mut statement = db
         .prepare(
-            "UPDATE connector_approvals SET state='expired', answered_ms=?2
+            "UPDATE connector_approvals SET state='expired', arguments='', answered_ms=?2
              WHERE id=?1 AND state='waiting'",
         )
         .map_err(sqlite)?;
@@ -456,7 +481,8 @@ pub fn expire_waiting(db: &Connection, now_ms: i64) -> Result<usize, EngineError
         return Ok(0);
     }
     db.execute(
-        "UPDATE connector_approvals SET state='expired', answered_ms=?1 WHERE state='waiting'",
+        "UPDATE connector_approvals SET state='expired', arguments='', answered_ms=?1
+         WHERE state='waiting'",
         [now_ms],
     )
     .map_err(sqlite)

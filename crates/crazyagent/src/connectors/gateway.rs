@@ -83,12 +83,14 @@ const SETTLING: &str = "approvals";
 const SETTLE_EVERY: Duration = Duration::from_secs(1);
 pub(crate) const ALLOW_BUDGET: Duration =
     Duration::from_secs(CONNECTOR_WAIT.as_secs() + shim::REPLY_WAIT.as_secs() + 10);
+const ALLOW_ROOM_MS: i64 = (shim::HELD_WAIT.as_secs() - ALLOW_BUDGET.as_secs()) as i64 * 1000;
 const SEPARATOR: &str = "__";
 
 const _: () = assert!(LIST_CONNECTOR_BYTES_MAX <= LIST_BYTES_MAX);
 const _: () = assert!(LIST_BYTES_MAX + 64 * 1024 < shim::ANSWER_BYTES_MAX as usize);
 const _: () = assert!(4 * 1024 * 1024 < shim::ANSWER_BYTES_MAX as usize);
 const _: () = assert!(CONNECTOR_WAIT.as_secs() < shim::REPLY_WAIT.as_secs());
+const _: () = assert!(30 * 60 + ALLOW_BUDGET.as_secs() < shim::HELD_WAIT.as_secs());
 
 /// Whether a vendor tool only reads or may change something at the vendor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -587,6 +589,15 @@ struct Parked {
     row: CallRow,
 }
 
+/// Who still waits for a held write: its connector server, nobody because the server gave
+/// up, closed or died, or nobody because its launch ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Waiter {
+    Waits,
+    Left,
+    Ended,
+}
+
 /// The engine half for one engine root: the vendor sessions of its launches, held
 /// between calls, the write calls held for the owner's answer by approval id, one lock per
 /// connector so its vendor is called one at a time, how long a call waits for that lock,
@@ -701,10 +712,11 @@ impl Gateway {
         answered + self.settle_at(&db, crate::semantic::now_ms())
     }
 
-    /// Answers the held writes whose approval was answered, whose wait ran out at `now_ms`
-    /// or whose launch ended: an Allow runs the call after every check passes again, a Deny
-    /// or an end answers with its refusal, and a launch that ended gets no answer. Inputs:
-    /// the engine database and the time now in milliseconds. Output: how many were answered.
+    /// Settles the held writes whose approval was answered or ran out by `now_ms`, whose
+    /// server stopped waiting or whose launch ended. An Allow runs once the engine claims the
+    /// call from its server, every check passes again and it can still finish before that
+    /// server gives up; a Deny or an end answers its refusal; a write nobody waits for ends
+    /// expired with no answer. Inputs: the database and the time now. Output: how many.
     pub(crate) fn settle_at(&self, db: &Connection, now_ms: i64) -> usize {
         if locked(&self.parked).is_empty() {
             return 0;
@@ -713,7 +725,7 @@ impl Gateway {
         let live: Option<BTreeSet<String>> = launches(db)
             .ok()
             .map(|found| found.into_iter().map(|launch| launch.id).collect());
-        let taken: Vec<(i64, Parked, Option<State>, bool)> = {
+        let taken: Vec<(i64, Parked, Option<State>, Waiter)> = {
             let mut parked = locked(&self.parked);
             let ids: Vec<i64> = parked.keys().copied().collect();
             let mut taken = Vec::new();
@@ -721,18 +733,25 @@ impl Gateway {
                 let Ok(state) = approvals::state(db, id) else {
                     continue;
                 };
-                let launch = &parked[&id].launch.id;
-                let gone = live.as_ref().is_none_or(|live| !live.contains(launch));
-                if gone || state != Some(State::Waiting) {
+                let entry = &parked[&id];
+                let gone = live
+                    .as_ref()
+                    .is_none_or(|live| !live.contains(&entry.launch.id));
+                let waiter = if gone {
+                    Waiter::Ended
+                } else {
+                    waiter(&self.root, &entry.launch.id, &entry.call)
+                };
+                if waiter != Waiter::Waits || state != Some(State::Waiting) {
                     let entry = parked.remove(&id).expect("a parked id is in the map");
-                    taken.push((id, entry, state, gone));
+                    taken.push((id, entry, state, waiter));
                 }
             }
             taken
         };
         let settings = settings::load(db).map_or(ConnectorSettings::DEFAULT, |(saved, _)| saved);
         let mut answered = 0;
-        for (id, entry, state, gone) in taken {
+        for (id, entry, state, waiter) in taken {
             let Parked {
                 launch,
                 call,
@@ -740,33 +759,49 @@ impl Gateway {
                 args,
                 mut row,
             } = entry;
-            let result = if gone {
-                let _ = approvals::expire_ids(db, &[id], now_ms);
-                Err("connector_write_expired")
-            } else if state == Some(State::Allowed) {
-                let pass = Pass::Allowed;
-                match self.run_call(db, &launch, &settings, &shown, &args, &mut row, pass) {
-                    Ok(Done::Ran(done)) => Ok(done),
-                    Ok(Done::Waiting) => unreachable!("an allowed write is never held again"),
-                    Err(code) => Err(code),
+            let mailbox = Mailbox::open_for_engine(&mailbox_path(&self.root, &launch.id)).ok();
+            let late = now_ms - row.started_ms >= ALLOW_ROOM_MS;
+            let expired = Err("connector_write_expired");
+            let (result, reply) = match (waiter, state) {
+                (Waiter::Waits, Some(State::Allowed)) if late => (expired, true),
+                (Waiter::Waits, Some(State::Allowed)) => {
+                    if claim(mailbox.as_ref(), &call) {
+                        let ran = self.run_call(
+                            db,
+                            &launch,
+                            &settings,
+                            &shown,
+                            &args,
+                            &mut row,
+                            Pass::Allowed,
+                        );
+                        let ran = match ran {
+                            Ok(Done::Ran(done)) => Ok(done),
+                            Ok(Done::Waiting) => unreachable!("an allowed write is held again"),
+                            Err(code) => Err(code),
+                        };
+                        (ran, true)
+                    } else {
+                        (expired, false)
+                    }
                 }
-            } else if state == Some(State::Denied) {
-                Err("connector_write_denied")
-            } else {
-                Err("connector_write_expired")
+                (Waiter::Waits, Some(State::Denied)) => (Err("connector_write_denied"), true),
+                (Waiter::Waits, _) => (expired, true),
+                (Waiter::Left | Waiter::Ended, _) => {
+                    let _ = approvals::expire_ids(db, &[id], now_ms);
+                    (expired, false)
+                }
             };
             let ms = (crate::semantic::now_ms() - row.started_ms).max(0);
             let answer = self.finish(db, &settings, row, result, ms);
-            if gone {
-                continue;
-            }
-            let Ok(mailbox) = Mailbox::open_for_engine(&mailbox_path(&self.root, &launch.id)) else {
+            let Some(mailbox) = mailbox else {
                 continue;
             };
-            if write_answer(&mailbox, &call, &encoded(&answer)).is_ok() {
+            if reply && write_answer(&mailbox, &call, &encoded(&answer)).is_ok() {
                 answered += 1;
             }
             let _ = mailbox.remove(&format!("{call}{}", shim::HELD_SUFFIX));
+            let _ = mailbox.remove(&format!("{call}{}", shim::RUNNING_SUFFIX));
         }
         answered
     }
@@ -1220,6 +1255,10 @@ impl Gateway {
                     let forms = secret_forms(&self.root, spec, &held.bindings);
                     let fields = args.as_object().cloned().unwrap_or_default();
                     self.give_back(launch, name, held, true);
+                    let forms = forms?;
+                    let Some(arguments) = approvals::arguments(&fields, &forms) else {
+                        return Err("connector_arguments_invalid");
+                    };
                     let write = PendingWrite {
                         launch: launch.id.clone(),
                         project: launch.snapshot.project.clone(),
@@ -1227,8 +1266,8 @@ impl Gateway {
                         connector: name.clone(),
                         title: title_of(&connector),
                         tool: vendor.clone(),
-                        preview: approvals::preview(&vendor, &fields, &forms?),
-                        arguments: String::new(),
+                        preview: approvals::preview(&vendor, &fields, &forms),
+                        arguments,
                     };
                     let parked = Parked {
                         launch: launch.clone(),
@@ -1377,6 +1416,8 @@ fn sweep(mailbox: &Mailbox) {
         (shim::TAKEN_SUFFIX, STALE),
         (shim::ANSWER_PART_SUFFIX, STALE),
         (shim::HELD_SUFFIX, HELD_STALE),
+        (shim::RUNNING_SUFFIX, HELD_STALE),
+        (shim::ALIVE_SUFFIX, HELD_STALE),
     ] {
         for (modified, id) in mailbox.entries(suffix) {
             if now.duration_since(modified).is_ok_and(|age| age >= stale) {
@@ -1386,16 +1427,71 @@ fn sweep(mailbox: &Mailbox) {
     }
 }
 
-/// Removes every held mark in one launch's mailbox, for a gateway that starts holding no
-/// write, so no connector server waits for an answer that never comes. Inputs: the engine
-/// root and the launch id.
+/// Removes every held and running mark in one launch's mailbox, for a gateway that starts
+/// holding no write, so no connector server waits for an answer that never comes. Inputs:
+/// the engine root and the launch id.
 fn drop_held(root: &Path, launch: &str) {
     let Ok(mailbox) = Mailbox::open_for_engine(&mailbox_path(root, launch)) else {
         return;
     };
-    for (_, id) in mailbox.entries(shim::HELD_SUFFIX) {
-        let _ = mailbox.remove(&format!("{id}{}", shim::HELD_SUFFIX));
+    for suffix in [shim::HELD_SUFFIX, shim::RUNNING_SUFFIX] {
+        for (_, id) in mailbox.entries(suffix) {
+            let _ = mailbox.remove(&format!("{id}{suffix}"));
+        }
     }
+}
+
+/// Whether the connector server that handed a held call still waits for it: its held mark
+/// is there and it still holds the lock on the call's alive mark. Inputs: the engine root,
+/// the launch and the call id. Output: `Waits` or `Left`.
+fn waiter(root: &Path, launch: &str, call: &str) -> Waiter {
+    let Ok(mailbox) = Mailbox::open_for_engine(&mailbox_path(root, launch)) else {
+        return Waiter::Left;
+    };
+    let held = mailbox.read(&format!("{call}{}", shim::HELD_SUFFIX)).is_ok();
+    if held && alive(&mailbox, call) {
+        Waiter::Waits
+    } else {
+        Waiter::Left
+    }
+}
+
+/// Whether a server still holds the lock on a call's alive mark. An unlocked mark is a
+/// server that died and is removed; a lock that cannot be checked counts as gone. Inputs:
+/// the mailbox and the call id. Output: the answer.
+fn alive(mailbox: &Mailbox, call: &str) -> bool {
+    let name = format!("{call}{}", shim::ALIVE_SUFFIX);
+    let Ok(file) = mailbox.read(&name) else {
+        return false;
+    };
+    match file.try_lock() {
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(_)) => false,
+        Ok(()) => {
+            let _ = mailbox.remove(&name);
+            false
+        }
+    }
+}
+
+/// Claims an allowed held call from the server that waits for it, so that server keeps
+/// waiting for the answer and can no longer drop it: its held mark becomes the running mark,
+/// then the server's lock is checked again. Inputs: the mailbox and the call id. Output:
+/// whether the engine may run the call; a claim whose server is gone is let go.
+fn claim(mailbox: Option<&Mailbox>, call: &str) -> bool {
+    let Some(mailbox) = mailbox else {
+        return false;
+    };
+    let running = format!("{call}{}", shim::RUNNING_SUFFIX);
+    let held = format!("{call}{}", shim::HELD_SUFFIX);
+    if mailbox.rename(&held, &running).is_err() {
+        return false;
+    }
+    if alive(mailbox, call) {
+        return true;
+    }
+    let _ = mailbox.remove(&running);
+    false
 }
 
 fn read_ask(mailbox: &Mailbox, name: &str) -> Option<Vec<u8>> {

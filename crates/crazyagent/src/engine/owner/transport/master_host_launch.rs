@@ -887,6 +887,20 @@ fn require_master_tool_policy(
     Ok(())
 }
 
+/// Whether a Codex `ca-connectors` entry waits exactly as the engine's agent entries do:
+/// `HARNESS_WAIT` for a tool call and `STARTUP_WAIT` to start, both whole seconds. Input: the
+/// entry. Output: the answer.
+fn waits(entry: &toml::Table) -> bool {
+    let seconds = |name: &str, wait: Duration| {
+        entry
+            .get(name)
+            .and_then(toml::Value::as_integer)
+            .is_some_and(|found| u64::try_from(found).ok() == Some(wait.as_secs()))
+    };
+    seconds("tool_timeout_sec", crate::connectors::launch::HARNESS_WAIT)
+        && seconds("startup_timeout_sec", crate::connectors::launch::STARTUP_WAIT)
+}
+
 /// Checks that a Codex `mcp_servers=` setting names only the engine's servers: one
 /// `crazyagent-team` entry of exactly the expected engine executable and team server arguments
 /// for the turn's drop file, mailbox and tools switched off and, with a connector folder, one
@@ -923,7 +937,8 @@ fn delegate_only(setting: &str, tools: crate::engine::claude_host::MasterTools<'
                     .and_then(toml::Value::as_table)
                     .is_some_and(|entry| {
                         let args = entry.get("args").and_then(toml::Value::as_array);
-                        entry.len() == 2
+                        entry.len() == 4
+                            && waits(entry)
                             && named(entry.get("command"), tools.engine)
                             && args.is_some_and(|args| {
                                 matches!(args.as_slice(), [command, launch]
@@ -1148,11 +1163,13 @@ fn delegate_servers(
         .join(",");
     let connector = match tools.connector {
         Some(folder) => format!(
-            ",{}={{command={},args=[{},{}]}}",
+            ",{}={{command={},args=[{},{}],tool_timeout_sec={},startup_timeout_sec={}}}",
             crate::connectors::launch::SERVER_NAME,
             text(tools.engine)?,
             toml_edit::Value::from(crate::connectors::shim::SERVER_COMMAND),
             text(folder)?,
+            crate::connectors::launch::HARNESS_WAIT.as_secs(),
+            crate::connectors::launch::STARTUP_WAIT.as_secs(),
         ),
         None => String::new(),
     };
