@@ -179,3 +179,83 @@ pub fn clear_acl(entry: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> {
         Err(std::io::Error::last_os_error())
     }
 }
+
+/// A process's unique id and the unique id of the process it was forked from, as the kernel
+/// keeps them: unique ids are never reused, and the second stays the forking parent's after
+/// that parent exits and the process is handed to launchd.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessIds {
+    pub unique: u64,
+    pub forked_from: u64,
+}
+
+/// The `proc_pidinfo` flavor that reads a process's unique ids, `PROC_PIDUNIQIDENTIFIERINFO`
+/// in xnu's private proc_info header; the macOS SDK leaves it out.
+#[cfg(target_os = "macos")]
+const PID_UNIQUE_IDS: libc::c_int = 17;
+
+/// The kernel's `proc_uniqidentifierinfo`: the main program's UUID, the unique id, the forking
+/// parent's unique id, the pid version, the forking parent's pid version and two reserved words.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Default)]
+struct UniqueIdsInfo {
+    _program: [u8; 16],
+    unique: u64,
+    forked_from: u64,
+    _version: i32,
+    _forked_from_version: i32,
+    _reserved: [u64; 2],
+}
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<UniqueIdsInfo>() == 56);
+
+/// Reads a process's [`ProcessIds`] via `proc_pidinfo`. A process that ended, one of another
+/// user, or an answer that is not a whole record with a forking parent older than the process
+/// reads as none. Safety contract of its one unsafe call: `info` is a local of exactly the
+/// size passed, so the kernel writes inside it, and it outlives the call. Input: the process
+/// id. Output: its ids, or none.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn process_ids(pid: i32) -> Option<ProcessIds> {
+    let mut info = UniqueIdsInfo::default();
+    let size = libc::c_int::try_from(std::mem::size_of::<UniqueIdsInfo>()).ok()?;
+    let read = unsafe { libc::proc_pidinfo(pid, PID_UNIQUE_IDS, 0, (&raw mut info).cast(), size) };
+    if read != size || info.unique == 0 || info.forked_from >= info.unique {
+        return None;
+    }
+    Some(ProcessIds {
+        unique: info.unique,
+        forked_from: info.forked_from,
+    })
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::process_ids;
+
+    /// A running child's ids name this process as its forking parent, and an ended, reaped
+    /// child reads as none.
+    #[test]
+    fn a_child_names_this_process_as_the_one_it_was_forked_from_and_an_ended_one_has_no_ids() {
+        let own =
+            process_ids(i32::try_from(std::process::id()).unwrap()).expect("this process has ids");
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        let ids = process_ids(pid).expect("a running child has ids");
+        assert_eq!(ids.forked_from, own.unique, "{ids:?} {own:?}");
+        assert!(ids.unique > own.unique, "{ids:?} {own:?}");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(
+            process_ids(pid),
+            None,
+            "an ended and reaped child has no ids"
+        );
+    }
+}
