@@ -2510,10 +2510,11 @@ fn an_interpreter_copy_the_owner_cannot_execute_or_start_is_refused() {
 }
 
 /// rv-sec3 B18 F2: an update command's script runs only under an interpreter that runs the
-/// script it is given, judged by its real file: a shell with no word but `-e`, `-u` and `-x`
-/// flags, or Node with only flags that change no code it runs. A launcher such as lockf,
+/// script it is given, judged by its real file: a shell with no word but `-e`, `-u`, `-p` and
+/// `-x` flags, or Node with only flags that change no code it runs. A launcher such as lockf,
 /// ssh-agent, taskpolicy or xargs, perl at all (so `perl -S`), a shell given `-c` and Node
-/// given `-e` are refused; `#!/bin/sh -eu` and Node with `--no-warnings` pass.
+/// given `-e` are refused; `#!/bin/sh -eu`, stock Homebrew's `#!/bin/bash -pu` (rv-sec3 b18-r3
+/// F1) and Node with `--no-warnings` pass.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_update_script_runs_only_under_a_shell_or_node_that_runs_it() {
@@ -2551,6 +2552,7 @@ fn an_update_script_runs_only_under_a_shell_or_node_that_runs_it() {
     }
     let passed = [
         ("sh-eu", "#!/bin/sh -eu\n"),
+        ("brew", "#!/bin/bash -pu\n"),
         ("node-quiet", "#!/usr/bin/env -S node --no-warnings\n"),
     ];
     for (name, line) in passed {
