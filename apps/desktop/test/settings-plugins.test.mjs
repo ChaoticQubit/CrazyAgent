@@ -297,6 +297,37 @@ test("the Add MCP server form takes exactly the full command paths the engine ta
   assert.equal(keys.isWindows("MacIntel"), false);
 });
 
+const addServerShown = async (platform) => {
+  const { SessionContext } = await import("../src/state.ts");
+  Object.defineProperty(navigator, "platform", { value: platform, configurable: true });
+  try {
+    return renderToStaticMarkup(createElement(SessionContext.Provider, { value: { showToast() {} } },
+      createElement(plugins.AddServerDialog, { open: true, scope: { kind: "global" }, onClose: forbidden, onAdded: forbidden })));
+  } finally {
+    delete navigator.platform;
+  }
+};
+
+test("the Add MCP server command field's example is a drive path on Windows and a /-path elsewhere (#132 r2 F1)", async () => {
+  const windows = await addServerShown("Win32");
+  assert.match(windows, /The full path, such as C:\\Program Files\\nodejs\\npx\.cmd\./);
+  assert.doesNotMatch(windows, /opt\/homebrew/);
+  const mac = await addServerShown("MacIntel");
+  assert.match(mac, /The full path, such as \/opt\/homebrew\/bin\/npx\./);
+  assert.doesNotMatch(mac, /npx\.cmd/);
+});
+
+test("the Add MCP server dialog says this Mac only on a Mac, and this computer on Windows and Linux (#132 r2 F1, leader 13:12)", async () => {
+  for (const platform of ["Win32", "Linux x86_64"]) {
+    const markup = await addServerShown(platform);
+    assert.match(markup, /Command on this computer/, platform);
+    assert.doesNotMatch(markup, /this Mac/, platform);
+  }
+  const mac = await addServerShown("MacIntel");
+  assert.match(mac, /Command on this Mac/);
+  assert.doesNotMatch(mac, /this computer/);
+});
+
 test("names, secret names and skill folders are checked with the engine's rules before sending", () => {
   assert.equal(serverNameError("github"), undefined);
   assert.equal(serverNameError("GitHub tools"), "Use 1 to 64 lowercase letters, digits, - or _ for the name.");
