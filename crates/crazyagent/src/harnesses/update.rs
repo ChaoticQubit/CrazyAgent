@@ -59,7 +59,7 @@ const ADMIN_GROUP: u32 = 80;
 const GREEDY: &str = "--greedy-auto-updates";
 const MODULES: &str = "node_modules";
 const UPDATE_SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
-const SHELL_FLAGS: &str = "eux";
+const SHELL_FLAGS: &str = "eupx";
 const NODE_FLAGS: [&str; 3] = ["--no-warnings", "--no-deprecation", "--enable-source-maps"];
 
 const _: () = assert!(3 + NPM_FLAGS_MAX <= ARGS_MAX);
@@ -863,8 +863,10 @@ fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'sta
 }
 
 /// Whether an interpreter an update command's script names runs that script and nothing it
-/// looks up by name, read by its real file: a shell given only `-e`, `-u` and `-x` flags, or
-/// Node given only flags that change no code it runs. Any other program, such as a launcher
+/// looks up by name, read by its real file: a shell given only `-e`, `-u`, `-p` and `-x`
+/// flags, as stock Homebrew's `#!/bin/bash -pu` (privileged mode reads no startup or
+/// environment files, so it only narrows), or Node given only flags that change no code it
+/// runs. Any other program, such as a launcher
 /// that runs a later word (`lockf`, `xargs`, `perl -S`), a shell given `-c` or another word,
 /// and Node given `-e`, is refused, so no shipped update command needs more (rv-sec3 B18 F2).
 /// Inputs: the interpreter's real file and the first line's words before the script.
