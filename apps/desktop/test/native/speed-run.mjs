@@ -174,8 +174,10 @@ async function collect(mode, sides, kept, out) {
 
 /** The speed driver (DEC-169). `noise` runs the base against itself and writes noise.json;
  * `compare` runs the base against the candidate, judges every metric with that noise and writes
- * verdict.json. A failed run is counted in both and judged from the good runs; a side short of
- * `KEPT_MIN` good runs is not judged. Exits 0 pass, 1 fail, error or not judged, 75 refused. */
+ * verdict.json. A failed run on a quiet Mac is counted in both, the verdict comes from the good
+ * runs, and a candidate that failed more runs than the base fails; a failed run the Mac got busy
+ * through runs again; a side short of `KEPT_MIN` good runs is not judged. Exits 0 pass, 1 fail,
+ * error or not judged, 75 refused. */
 async function main() {
   const usage = "usage: speed-run.mjs noise|compare --base <dir> [--candidate <dir> --noise <noise.json>] --out <dir>";
   const mode = process.argv[2];
