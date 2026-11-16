@@ -1054,8 +1054,7 @@ pub(crate) fn remove_home_within<P: rustix::path::Arg>(
     left: &mut usize,
 ) -> Result<(), EngineError> {
     let name = name.into_c_str().map_err(|_| folder_failed())?;
-    let mut fresh = *left;
-    remove_home_below(parent.as_fd(), &name, 0, &mut fresh)
+    remove_home_below(parent.as_fd(), &name, 0, left)
 }
 
 /// Removes one entry as [`remove_home_entry`] does, `depth` folders below the entry it was

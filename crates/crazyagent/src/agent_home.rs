@@ -1458,7 +1458,8 @@ fn open_real_folder(folder: &Path) -> rustix::io::Result<std::os::fd::OwnedFd> {
 /// outside the home (sec F1 ds137-lock-linux). Flags an agent set on the home are cleared
 /// first (RV-DS241-138). Inputs: the home, what stays in it and the entries held so far.
 /// Output: unit, or `agent_home_unwritable` when a folder will not open or list, one entry
-/// stays or a folder still changes after [`HOME_PASSES_MAX`] passes.
+/// stays, a folder still changes after [`HOME_PASSES_MAX`] passes or one pass lists and
+/// walks more than [`crate::team::cleanup::HOME_WALK_NAMES`] names (RESET-WALK-N1).
 #[cfg(unix)]
 fn keep_only(
     home: &Path,
@@ -1522,6 +1523,9 @@ fn keep_in(
             if matches!(name.to_bytes(), b"." | b"..") {
                 continue;
             }
+            left = left
+                .checked_sub(1)
+                .ok_or_else(|| failure("agent_home_unwritable"))?;
             let found = match rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
                 Err(rustix::io::Errno::NOENT) => continue,
                 Err(_) => return Err(failure("agent_home_unwritable")),
@@ -1625,6 +1629,9 @@ fn clear_memory(
             if matches!(name.to_bytes(), b"." | b"..") {
                 continue;
             }
+            left = left
+                .checked_sub(1)
+                .ok_or_else(|| failure("agent_home_unwritable"))?;
             let found = match rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
                 Err(rustix::io::Errno::NOENT) => continue,
                 Err(_) => return Err(failure("agent_home_unwritable")),
