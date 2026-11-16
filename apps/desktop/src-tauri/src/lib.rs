@@ -4350,6 +4350,59 @@ async fn desktop_connector_set_sign_in_with(
     call.await
 }
 
+/// Starts a connector's sign-in through the browser and opens the engine's address in the
+/// owner's browser here, so the page never holds it; a browser that does not open cancels
+/// the sign-in. Inputs: the window and the connector. Output: nothing, or the refusal.
+#[tauri::command]
+async fn desktop_connector_sign_in(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_sign_in(name.clone())?;
+    let url = call.await?;
+    let Err(refused) = bridge::open::open_link(&url).await else {
+        return Ok(());
+    };
+    let cancel = lock(&state).await?.cancel_connector_sign_in(name)?;
+    let _ended = cancel.await;
+    Err(refused)
+}
+
+#[tauri::command]
+async fn desktop_connector_sign_in_state(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+) -> Result<crazyagent::connectors::sign_in::SignInState, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_sign_in_state(name)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_cancel_sign_in(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+) -> Result<crazyagent::connectors::sign_in::SignInState, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.cancel_connector_sign_in(name)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_sign_out(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+) -> Result<crazyagent::connectors::ConnectorsView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_sign_out(name)?;
+    call.await
+}
+
 #[tauri::command]
 async fn desktop_connector_reach(
     webview: Webview,
@@ -6089,6 +6142,10 @@ native_commands! {
     desktop_connector_clear_key,
     desktop_connector_grant,
     desktop_connector_set_sign_in_with,
+    desktop_connector_sign_in,
+    desktop_connector_sign_in_state,
+    desktop_connector_cancel_sign_in,
+    desktop_connector_sign_out,
     desktop_connector_reach,
     desktop_connector_approval,
     desktop_connector_answer,

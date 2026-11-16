@@ -4,13 +4,14 @@ use crate::app_plugins::{
     Binding, ConnectorTrust, KeyTrust, OAuthTrust, Origin, PluginKind, PluginStatus, Preview,
     Problem, ReadOnlyTrust, RunsView, SecretView, TrustView,
 };
+use crate::connectors::sign_in::SignInState;
 use crate::connectors::{
     ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, OAuthView, SignIn,
     SignInWith, SizeCap, Wait, WritePolicy,
 };
 use crate::engine::owner::ConnectorsSaved;
 use crate::tui::client::OwnerEvent;
-use crate::tui::client::connectors::{ConnectorsEvent, ConnectorsJob};
+use crate::tui::client::connectors::{ConnectorsEvent, ConnectorsJob, SignInStarted};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::render_tests::{check, ready, render, shell_at};
 use crate::tui::screens::open;
@@ -20,6 +21,7 @@ use crate::tui::theme::Role;
 
 const SHA: &str = "c0ffee";
 const TYPED_KEY: &str = "lin-secret-typed";
+const LINK: &str = "https://vendor.example/authorize?state=s1";
 
 fn secret(name: &str, binding: Binding) -> SecretView {
     SecretView {
@@ -223,6 +225,75 @@ fn both_two_secrets(way: SignInWith) -> ConnectorsView {
     let site = secret("site", Binding::None);
     read.connectors[1].secrets.push(site);
     read
+}
+
+/// The page with Notion last, a connector that signs in only through the browser, signed in
+/// or not.
+fn browser(signed_in: bool) -> ConnectorsView {
+    let mut read = view();
+    let status = if signed_in {
+        PluginStatus::Ready
+    } else {
+        PluginStatus::NeedsSignIn
+    };
+    let none = secret("none", Binding::None);
+    let mut notion = connector(
+        "notion",
+        "Notion",
+        Origin::Bundled,
+        status,
+        "mcp.notion.com",
+        none,
+    );
+    notion.secrets.clear();
+    notion.sign_in = SignIn::Browser;
+    notion.oauth = Some(OAuthView {
+        signed_in,
+        own_app_allowed: false,
+        own_app: None,
+        redirect: "http://127.0.0.1/callback".into(),
+        using: SignInWith::Browser,
+    });
+    read.connectors.push(notion);
+    read
+}
+
+/// Notion's own page, signed in or not.
+fn notion(signed_in: bool) -> Shell {
+    let mut shell = page(browser(signed_in));
+    keys(&mut shell, &[Key::Down, Key::Down, Key::Down, Key::Enter]);
+    shell
+}
+
+fn started(opened: bool) -> ConnectorsEvent {
+    let url = LINK.to_owned();
+    ConnectorsEvent::SignIn {
+        name: "notion".into(),
+        result: Ok(SignInStarted { url, opened }),
+    }
+}
+
+fn stands(result: Result<SignInState, String>) -> ConnectorsEvent {
+    ConnectorsEvent::SignInState {
+        name: "notion".into(),
+        result,
+    }
+}
+
+fn reads_state(job: &ConnectorsJob) -> bool {
+    matches!(job, ConnectorsJob::SignInState { name } if name == "notion")
+}
+
+/// Notion's page after `s` started a sign-in, waiting for the browser that opened.
+fn waiting() -> Shell {
+    let mut shell = notion(false);
+    keys(&mut shell, &[Key::Char('s')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::SignIn { ref name } if name == "notion"
+    ));
+    arrive(&mut shell, started(true));
+    shell
 }
 
 fn refused_file(name: &str, problem: Problem) -> ConnectorView {
@@ -1221,4 +1292,206 @@ fn under_browser_a_saved_key_can_be_cleared_without_switching_to_key() {
         one(&mut shell),
         ConnectorsJob::ClearKey { ref name, ref secret } if name == "github" && secret == "token"
     ));
+}
+
+/// Task 10 pages slice A: `s` on a connector that signs in through the browser starts its
+/// sign-in and shows the address for copying while it waits; each refresh reads where it
+/// stands, one read at a time, and once it is signed in the page reads itself again.
+#[test]
+fn s_signs_in_through_the_browser_and_each_refresh_reads_where_it_stands() {
+    let mut shell = notion(false);
+    assert!(shows(&mut shell, "s Sign in"));
+    let mut shell = waiting();
+    assert!(shows(&mut shell, "Waiting for the browser"));
+    assert!(shows(&mut shell, LINK), "the address is shown for copying");
+    assert!(shows(&mut shell, "c Cancel") && !shows(&mut shell, "s Sign in"));
+    assert!(requests(&mut shell).is_empty());
+    shell.refresh();
+    assert!(reads_state(&one(&mut shell)));
+    shell.refresh();
+    assert!(requests(&mut shell).is_empty(), "one read at a time");
+    arrive(&mut shell, stands(Ok(SignInState::Waiting)));
+    assert!(shows(&mut shell, "Waiting for the browser"));
+    shell.refresh();
+    assert!(reads_state(&one(&mut shell)));
+    arrive(&mut shell, stands(Ok(SignInState::SignedIn)));
+    assert!(said(&shell).contains("Notion is signed in."));
+    assert!(read_all(&one(&mut shell)), "the page reads itself again");
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(browser(true))));
+    assert!(shows(&mut shell, "the vendor is not told"));
+    assert!(shows(&mut shell, "s Sign out"));
+    assert!(!shows(&mut shell, "Waiting for the browser"));
+    shell.refresh();
+    assert!(
+        requests(&mut shell).is_empty(),
+        "an ended sign-in is not read"
+    );
+}
+
+/// Task 10 pages slice A: `c` cancels a waiting sign-in once, and every way a sign-in ends
+/// or is refused says why in the engine's words, the desktop's too, the finishing sentence
+/// among them; an answer for another connector changes nothing.
+#[test]
+fn c_cancels_a_waiting_sign_in_and_each_end_says_why() {
+    let mut shell = waiting();
+    keys(&mut shell, &[Key::Char('c')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::CancelSignIn { ref name } if name == "notion"
+    ));
+    assert!(!shows(&mut shell, "c Cancel"));
+    keys(&mut shell, &[Key::Char('c')]);
+    assert!(requests(&mut shell).is_empty(), "one cancel");
+    let other = ConnectorsEvent::SignInState {
+        name: "github".into(),
+        result: Ok(SignInState::Cancelled),
+    };
+    arrive(&mut shell, other);
+    assert!(shows(&mut shell, "Waiting for the browser"));
+    arrive(&mut shell, stands(Ok(SignInState::Cancelled)));
+    assert!(said(&shell).contains("The sign-in was cancelled."));
+    assert!(read_all(&one(&mut shell)));
+    assert!(!shows(&mut shell, "Waiting for the browser"));
+
+    let expired = "connector_oauth_callback_expired";
+    let words = "The browser did not come back within 5 minutes; sign in again.";
+    assert_eq!(refusal(expired), words);
+    let mut shell = waiting();
+    let code = expired.to_owned();
+    arrive(&mut shell, stands(Ok(SignInState::Failed { code })));
+    assert!(said(&shell).contains(words));
+
+    let mut shell = waiting();
+    let gone = "trusted_connection_unavailable".to_owned();
+    arrive(&mut shell, stands(Err(gone)));
+    assert!(said(&shell).contains("Couldn't read the sign-in."));
+    assert!(!shows(&mut shell, "Waiting for the browser"));
+
+    let mut shell = notion(false);
+    keys(&mut shell, &[Key::Char('s')]);
+    one(&mut shell);
+    arrive(&mut shell, started(false));
+    assert!(said(&shell).contains("The browser did not open."));
+    assert!(shows(&mut shell, LINK));
+
+    let finishing = "connector_oauth_sign_in_finishing";
+    let refused = [finishing, "connector_oauth_needs_own_app"];
+    for code in refused {
+        let mut shell = notion(false);
+        keys(&mut shell, &[Key::Char('s')]);
+        one(&mut shell);
+        let answer = ConnectorsEvent::SignIn {
+            name: "notion".into(),
+            result: Err(code.into()),
+        };
+        arrive(&mut shell, answer);
+        assert!(said(&shell).contains(&refusal(code)), "{code}");
+        assert!(shows(&mut shell, "s Sign in"), "{code}");
+    }
+    let words = "This connector's last sign-in is still finishing; try again in a moment.";
+    assert_eq!(refusal(finishing), words);
+}
+
+/// Task 10 pages slice A: `s` signs a signed-in connector out, whose page says the vendor
+/// is not told, and a sign-out while the last sign-in still finishes says to wait; one
+/// that offers both and signs in with a key now is signed out without switching (rv-sec2
+/// F1: removing a sign-in never makes it live first).
+#[test]
+fn s_signs_a_signed_in_connector_out_and_a_finishing_sign_in_says_to_wait() {
+    let mut shell = notion(true);
+    assert!(shows(&mut shell, "the vendor is not told"));
+    keys(&mut shell, &[Key::Char('s')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::SignOut { ref name } if name == "notion"
+    ));
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(browser(false))));
+    assert!(said(&shell).contains("Notion is signed out."));
+    assert!(shows(&mut shell, "s Sign in") && !shows(&mut shell, "s Sign out"));
+
+    let finishing = "connector_oauth_sign_in_finishing";
+    let mut shell = notion(true);
+    keys(&mut shell, &[Key::Char('s')]);
+    one(&mut shell);
+    arrive(&mut shell, ConnectorsEvent::Page(Err(finishing.into())));
+    assert!(said(&shell).contains(&refusal(finishing)));
+    assert!(shows(&mut shell, "s Sign out"));
+
+    let mut read = both(SignInWith::Key);
+    let oauth = read.connectors[1].oauth.as_mut();
+    oauth.expect("GitHub offers both").signed_in = true;
+    let mut shell = page(read);
+    keys(&mut shell, &[Key::Down, Key::Enter]);
+    assert!(shows(&mut shell, "s Sign out"));
+    keys(&mut shell, &[Key::Char('s')]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::SignOut { ref name } if name == "github"
+    ));
+}
+
+/// Task 10 pages slice A: a connector that signs in with a key, or offers both and signs in
+/// with a key now and is not signed in, has no browser sign-in, and `s` and `c` send
+/// nothing; under Browser it signs in here.
+#[test]
+fn a_connector_signing_in_with_a_key_has_no_browser_sign_in() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::Enter]);
+    assert!(!shows(&mut shell, "s Sign in"));
+    keys(&mut shell, &[Key::Char('s'), Key::Char('c')]);
+    assert!(requests(&mut shell).is_empty());
+    let mut shell = page(both(SignInWith::Key));
+    keys(&mut shell, &[Key::Down, Key::Enter]);
+    assert!(!shows(&mut shell, "s Sign in") && !shows(&mut shell, "s Sign out"));
+    keys(&mut shell, &[Key::Char('s')]);
+    assert!(requests(&mut shell).is_empty());
+    let mut shell = page(both(SignInWith::Browser));
+    keys(&mut shell, &[Key::Down, Key::Enter]);
+    assert!(
+        shows(&mut shell, "s Sign in"),
+        "Both under Browser signs in"
+    );
+}
+
+/// Task 10 pages slice A: a sign-in the engine keeps calling waiting is read at most
+/// `SIGN_IN_READS_MAX` times, which outlasts the engine's five-minute wait, and then the
+/// page reads itself again instead.
+#[test]
+fn a_sign_in_is_read_a_bounded_number_of_times() {
+    let mut shell = waiting();
+    for _ in 0..SIGN_IN_READS_MAX {
+        shell.refresh();
+        assert!(reads_state(&one(&mut shell)));
+        arrive(&mut shell, stands(Ok(SignInState::Waiting)));
+    }
+    shell.refresh();
+    assert!(read_all(&one(&mut shell)), "the page reads itself again");
+    assert!(!shows(&mut shell, "Waiting for the browser"));
+}
+
+/// rv-code CONN-T10-PAGES-A F1, leader 02:44: while one connector's sign-in waits, every
+/// other connector's Sign in is withheld with "Finish or cancel the <name> sign-in first.",
+/// which `s` says too, so the page never drops the waiting one; once it ends, Sign in is back.
+#[test]
+fn while_one_sign_in_waits_another_connector_says_to_finish_it_first() {
+    let mut read = browser(false);
+    read.connectors[1].sign_in = SignIn::Both;
+    read.connectors[1].status = PluginStatus::NeedsSignIn;
+    read.connectors[1].oauth = browser(false).connectors[3].oauth.clone();
+    let mut shell = page(read.clone());
+    keys(&mut shell, &[Key::Down, Key::Down, Key::Down, Key::Enter]);
+    keys(&mut shell, &[Key::Char('s')]);
+    assert!(matches!(one(&mut shell), ConnectorsJob::SignIn { .. }));
+    arrive(&mut shell, started(true));
+    keys(&mut shell, &[Key::Esc, Key::Up, Key::Up, Key::Enter]);
+    let first = "Finish or cancel the Notion sign-in first.";
+    assert!(shows(&mut shell, first), "GitHub's page says why");
+    assert!(!shows(&mut shell, "s Sign in"));
+    keys(&mut shell, &[Key::Char('s')]);
+    assert!(requests(&mut shell).is_empty(), "the waiting one is kept");
+    assert!(said(&shell).contains(first), "s says why too");
+    arrive(&mut shell, stands(Ok(SignInState::Cancelled)));
+    assert!(read_all(&one(&mut shell)));
+    arrive(&mut shell, ConnectorsEvent::Page(Ok(read)));
+    assert!(shows(&mut shell, "s Sign in") && !shows(&mut shell, first));
 }

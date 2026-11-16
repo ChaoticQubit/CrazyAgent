@@ -425,6 +425,14 @@ test("Settings lists Connectors in Agents right after Plugins and skills and ope
   assert.match(source("../src/ui/router.ts"), /"plugins", "connectors", "process"/u);
 });
 
+/** The engine's sentence for each of its connector_oauth_* codes, read from connectors.rs
+ * with the first letter raised, as both apps show it. Output: each code with its sentence. */
+function oauthWords() {
+  const rust = source("../../../crates/crazyagent/src/connectors.rs");
+  const pairs = [...rust.matchAll(/\(\s*"(connector_oauth_\w+)",\s*"([^"]+)",?\s*\)/gu)];
+  return Object.fromEntries(pairs.map(([, code, sentence]) => [code, sentence[0].toUpperCase() + sentence.slice(1)]));
+}
+
 test("Every refusal the Connectors protocol answers, past the owner codes, has a connector sentence, the same in the TUI", () => {
   const words = {
     app_plugin_bundled: "Built-in connectors can't be removed or replaced.",
@@ -449,6 +457,7 @@ test("Every refusal the Connectors protocol answers, past the owner codes, has a
     connector_approval_unknown: "That approval is gone.",
     connector_approval_closed: "This write was already answered or its wait ran out. The page now shows where it stands.",
     connector_sign_in_one_way: "This connector signs in one way only, so there is nothing to choose.",
+    ...oauthWords(),
   };
   for (const [code, sentence] of Object.entries(words)) {
     assert.equal(api.connectorProblem({ code, cause: code, message: "Something went wrong. Try again." }), sentence, code);
@@ -474,6 +483,10 @@ test("The Connectors commands, the harness rows' one included, are built, regist
     desktop_connector_clear_key: "{ name, secret }",
     desktop_connector_grant: "{ project, connector, enabled, who }",
     desktop_connector_set_sign_in_with: "{ name, way }",
+    desktop_connector_sign_in: "{ name }",
+    desktop_connector_sign_in_state: "{ name }",
+    desktop_connector_cancel_sign_in: "{ name }",
+    desktop_connector_sign_out: "{ name }",
     desktop_connector_reach: "{}",
   };
   const apiSource = source("../src/api-connectors.ts");
@@ -677,4 +690,108 @@ test("The Connectors page types name the same fields and words as the engine's C
     assert.ok(variants(name).length >= 2, `${name} is read from the engine`);
     assert.deepEqual(union(name), variants(name), `${name} has the engine's words`);
   }
+});
+
+const notion = (signedIn) => connector("notion", "Notion", { kind: signedIn ? "ready" : "needs_sign_in" }, {
+  sign_in: "browser", secrets: [],
+  oauth: { signed_in: signedIn, own_app_allowed: false, own_app: null, redirect: "http://127.0.0.1/callback", using: "browser" },
+});
+const signInPage = (shown, signing = null) => page({ view: { kind: "ok", value: { ...CATALOG, connectors: [shown] } }, open: shown.name, signing });
+
+test("A connector that signs in through the browser offers Sign in, then Waiting for the browser with Cancel, then Sign out saying the vendor is not told, in the TUI's words", () => {
+  const offered = signInPage(notion(false));
+  assert.ok(offered.includes("aria-label=\"Sign in to Notion\""), "Sign in is offered");
+  const waiting = signInPage(notion(false), "notion");
+  assert.ok(text(waiting).includes(api.CONNECTORS_PAGE.waiting), "the page says it waits for the browser");
+  assert.ok(waiting.includes("aria-label=\"Cancel the sign-in to Notion\"") && !waiting.includes("aria-label=\"Sign in to Notion\""));
+  assert.ok(!text(offered).includes(api.CONNECTORS_PAGE.waiting), "nothing waits before Sign in");
+  const signedIn = signInPage(notion(true));
+  assert.ok(signedIn.includes("aria-label=\"Sign out of Notion\"") && !signedIn.includes("aria-label=\"Sign in to Notion\""));
+  assert.ok(text(signedIn).includes(api.CONNECTORS_PAGE.signOutHelp) && api.CONNECTORS_PAGE.signOutHelp.includes("the vendor is not told"));
+  assert.ok(!signInPage(both("key")).includes("Sign in to Board"), "no browser sign-in while it signs in with a key");
+  assert.ok(signInPage(both("browser")).includes("aria-label=\"Sign in to Board\""), "one that offers both signs in here under Browser");
+  const keySignedIn = { ...both("key"), oauth: { ...both("key").oauth, signed_in: true } };
+  assert.ok(signInPage(keySignedIn).includes("aria-label=\"Sign out of Board\""), "rv-sec2 F1: a sign-in is removed without making it live first");
+  assert.ok(!page({ open: "linear" }).includes("Sign in to Linear"), "a key connector has no browser sign-in");
+  const tui = source("../../../crates/crazyagent/src/tui/screens/settings/connectors/words.rs");
+  const words = ["signIn", "signOut", "waiting", "signOutHelp", "signInCancelled", "notReadSignIn"].map((key) => api.CONNECTORS_PAGE[key]);
+  for (const said of words) assert.ok(typeof said === "string" && tui.includes(`"${said}"`), `the TUI says ${said}`);
+  assert.equal(api.signedInLine?.("Notion"), "Notion is signed in.");
+  assert.equal(api.signedOutLine?.("Notion"), "Notion is signed out.");
+});
+
+test("Where a sign-in stands decides the page's next step: waiting keeps reading, and every end stops, reads the page again and says why in the engine's words", () => {
+  assert.equal(typeof api.signInStep, "function", "one rule reads where a sign-in stands");
+  const step = (state) => api.signInStep(state, "Notion");
+  assert.deepEqual(step({ state: "waiting" }), { reading: true, toast: null, failure: null });
+  assert.deepEqual(step({ state: "signed_in" }), { reading: false, toast: "Notion is signed in.", failure: null });
+  assert.deepEqual(step({ state: "cancelled" }), { reading: false, toast: "The sign-in was cancelled.", failure: null });
+  assert.deepEqual(step({ state: "none" }), { reading: false, toast: null, failure: null });
+  const failed = step({ state: "failed", code: "connector_oauth_callback_expired" });
+  assert.deepEqual(failed, { reading: false, toast: null, failure: "The browser did not come back within 5 minutes; sign in again." });
+  const wait = source("../../../crates/crazyagent/src/connectors/callback.rs").match(/pub const CALLBACK_WAIT: Duration = Duration::from_secs\((\d+) \* (\d+)\);/u);
+  assert.ok(wait !== null, "the engine's wait is read from the engine");
+  const waitMs = Number(wait[1]) * Number(wait[2]) * 1000;
+  assert.ok(api.SIGN_IN_READ_MS >= 1000, "at most one read a second");
+  assert.ok(api.SIGN_IN_READS_MAX * api.SIGN_IN_READ_MS > waitMs, "the reads outlast the engine's wait");
+  assert.ok(api.SIGN_IN_READS_MAX * api.SIGN_IN_READ_MS <= 2 * waitMs, "and stop soon after it");
+  const signInWords = Object.keys(oauthWords());
+  assert.ok(signInWords.length >= 19 && signInWords.includes("connector_oauth_sign_in_finishing"), "every sign-in code is worded");
+});
+
+test("Sign in, where it stands, Cancel and Sign out each send only the connector's name, and Sign in never hands the page the address", async () => {
+  for (const name of ["signInConnector", "loadConnectorSignIn", "cancelConnectorSignIn", "signOutConnector"]) assert.equal(typeof api[name], "function", name);
+  await bridged(null, async (sent) => {
+    assert.deepEqual(await api.signInConnector("notion"), { kind: "ok", value: null }, "the address stays in the app");
+    assert.deepEqual(sent, [["desktop_connector_sign_in", { name: "notion" }]]);
+  });
+  await bridged({ state: "waiting" }, async (sent) => {
+    assert.deepEqual(await api.loadConnectorSignIn("notion"), { kind: "ok", value: { state: "waiting" } });
+    assert.deepEqual(await api.cancelConnectorSignIn("notion"), { kind: "ok", value: { state: "waiting" } });
+    assert.deepEqual(sent, [["desktop_connector_sign_in_state", { name: "notion" }], ["desktop_connector_cancel_sign_in", { name: "notion" }]]);
+  });
+  await bridged(CATALOG, async (sent) => {
+    assert.equal((await api.signOutConnector("notion")).kind, "ok");
+    assert.deepEqual(sent, [["desktop_connector_sign_out", { name: "notion" }]]);
+  });
+  const lib = source("../src-tauri/src/lib.rs");
+  const body = lib.match(/async fn desktop_connector_sign_in\(([^]*?)\n\}/u)?.[1] ?? "";
+  assert.match(body, /-> Result<\(\), BridgeError>/u, "the command answers nothing, so the address never reaches the page");
+  assert.match(body, /bridge::open::open_link\(&url\)/u, "the app opens the address itself");
+  assert.match(body, /cancel_connector_sign_in/u, "a browser that did not open cancels the sign-in");
+  const routes = source("../src-tauri/e2e_bridge/routes.rs");
+  assert.ok(!routes.includes("\"desktop_connector_sign_in\" =>"), "the e2e bridge never opens a browser");
+  assert.ok(routes.includes("\"desktop_connector_sign_in_state\" =>") && routes.includes("\"desktop_connector_sign_out\" =>"));
+});
+
+test("The page reads a waiting sign-in once a second through one rule, stops at the cap, and a Cancel or Sign out goes through the page's own calls", () => {
+  const screen = source("../src/screens/settings/connectors.tsx");
+  assert.match(screen, /signInStep\(/u, "the container reads each answer through signInStep");
+  assert.match(screen, /reads < SIGN_IN_READS_MAX/u, "the reads stop at the cap");
+  assert.match(screen, /setTimeout\([^)]*SIGN_IN_READ_MS\)/u, "one read a second, never overlapping");
+  assert.match(screen, /onSignOut: \(shown\) => \{ if \(!busy\) void changed\(\(\) => signOutConnector\(shown\.name\), signedOutLine\(shown\.title\)\); \}/u);
+  assert.match(screen, /onCancelSignIn: /u);
+});
+
+test("A waiting sign-in keeps Waiting for the browser and Cancel on its page while the connector reads Key, as the TUI does, so the reads never run with no way to stop them", () => {
+  const switched = signInPage(both("key"), "board");
+  assert.ok(text(switched).includes(api.CONNECTORS_PAGE.waiting), "the page still says it waits");
+  assert.ok(switched.includes("aria-label=\"Cancel the sign-in to Board\""), "Cancel stays");
+  assert.ok(!switched.includes("aria-label=\"Sign in to Board\""));
+});
+
+test("While one connector's sign-in waits, every other connector's Sign in is disabled with the line saying to finish or cancel it first, in the TUI's words (rv-code CONN-T10-PAGES-A F1, leader 02:44)", () => {
+  const view = { kind: "ok", value: { ...CATALOG, connectors: [notion(false), both("browser")] } };
+  const other = page({ view, open: "board", signing: "notion" });
+  const button = other.match(/<button[^>]*aria-label="Sign in to Board"[^>]*>/u)?.[0] ?? "";
+  assert.ok(button.includes("disabled"), `Board's Sign in is disabled: ${button}`);
+  assert.ok(text(other).includes("Finish or cancel the Notion sign-in first."), text(other));
+  const own = page({ view, open: "notion", signing: "notion" });
+  assert.ok(own.includes("aria-label=\"Cancel the sign-in to Notion\""), "the waiting one keeps Cancel");
+  const free = page({ view, open: "board" });
+  assert.ok(!(free.match(/<button[^>]*aria-label="Sign in to Board"[^>]*>/u)?.[0] ?? "").includes("disabled"), "nothing waits, so Sign in is on");
+  assert.ok(!text(free).includes("sign-in first."));
+  assert.equal(api.signInFirstLine?.("Notion"), "Finish or cancel the Notion sign-in first.");
+  const tui = source("../../../crates/crazyagent/src/tui/screens/settings/connectors/words.rs");
+  assert.ok(tui.includes("\"Finish or cancel the {} sign-in first.\""), "the TUI says the same line");
 });

@@ -3655,6 +3655,45 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_set_sign_in_with(name, way)?; call.await }.await;
             routed(result)
         }
+        "desktop_connector_sign_in_state" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+            }
+            let Args { name } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_sign_in_state(name)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_cancel_sign_in" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+            }
+            let Args { name } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.cancel_connector_sign_in(name)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_sign_out" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+            }
+            let Args { name } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_sign_out(name)?; call.await }.await;
+            routed(result)
+        }
         "desktop_connector_reach" => {
             let result: Result<_, BridgeError> = async { Ok(read(state).await?.connector_reach()) }.await;
             routed(result)

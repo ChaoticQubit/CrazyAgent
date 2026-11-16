@@ -1,18 +1,21 @@
-import { CONNECTORS_PAGE, SIGN_IN_WITH_CHOICES, chosenWay, connectorState, originLine, reachesLine, secretsShown, type ConnectorView } from "../../api-connectors";
+import { CONNECTORS_PAGE, SIGN_IN_WITH_CHOICES, browserNow, chosenWay, connectorState, originLine, reachesLine, secretsShown, signInFirstLine, signedIn, type ConnectorView } from "../../api-connectors";
 import { Button, Notice, StatusBadge, formatRoute } from "../../ui";
 import { secretLine } from "./app-plugins";
 import type { ConnectorActions } from "./connectors";
 
 const BACK = formatRoute({ name: "settings", tab: "connectors" });
 
-/** A connector's own page: the way back, title, origin, state, hosts, Sign in with where its
- * file offers both, Set key or Clear key per secret under Key and Clear key per saved key
- * under Browser, Review and Remove; a refused file shows only its reason. Inputs: the name,
- * the connector when listed, a busy flag, the last failure and the actions. Output: the page. */
-export function ConnectorDetailView({ name, connector, busy, failure, actions }: {
+/** A connector's own page: the way back, title, origin, state, hosts, Sign in with, Sign in,
+ * Waiting for the browser with Cancel, or Sign out, its keys, Review and Remove; a refused
+ * file shows only its reason. Inputs: the name, the connector when listed, a busy flag,
+ * whether its sign-in waits, the title of another connector whose sign-in waits, the last
+ * failure and the actions. Output: the page. */
+export function ConnectorDetailView({ name, connector, busy, waiting, elsewhere = null, failure, actions }: {
   name: string;
   connector: ConnectorView | null;
   busy: boolean;
+  waiting: boolean;
+  elsewhere?: string | null;
   failure: string;
   actions: ConnectorActions;
 }) {
@@ -23,6 +26,8 @@ export function ConnectorDetailView({ name, connector, busy, failure, actions }:
   const way = chosenWay(connector);
   const refused = connector.status.kind === "refused";
   const runs = connector.runs;
+  const signed = !refused && signedIn(connector);
+  const offered = !refused && !signed && !waiting && browserNow(connector);
   return <div className="pj-stack">
     {back}
     <div className="settings-top"><div>
@@ -44,6 +49,18 @@ export function ConnectorDetailView({ name, connector, busy, failure, actions }:
         </label>)}
       </fieldset>}
       {way !== null && <p className="small muted">{CONNECTORS_PAGE.signInWithHelp}</p>}
+      {signed && <div className="pj-row" data-sign-in="signed_in">
+        <Button size="small" variant="quiet" aria-label={`Sign out of ${connector.title}`} disabled={busy} onClick={() => actions.onSignOut(connector)}>{CONNECTORS_PAGE.signOut}</Button>
+      </div>}
+      {signed && <p className="small muted">{CONNECTORS_PAGE.signOutHelp}</p>}
+      {!refused && !signed && waiting && <div className="pj-row" data-sign-in="waiting">
+        <span role="status">{CONNECTORS_PAGE.waiting}</span>
+        <Button size="small" aria-label={`Cancel the sign-in to ${connector.title}`} onClick={() => actions.onCancelSignIn(connector)}>Cancel</Button>
+      </div>}
+      {offered && <div className="pj-row" data-sign-in="offered">
+        <Button size="small" variant="primary" aria-label={`Sign in to ${connector.title}`} disabled={busy || elsewhere !== null} onClick={() => actions.onSignIn(connector)}>{CONNECTORS_PAGE.signIn}</Button>
+      </div>}
+      {offered && elsewhere !== null && <p className="small muted">{signInFirstLine(elsewhere)}</p>}
       {secrets.length > 0 && <ul className="pj-rows" aria-label={`Secrets of ${connector.title}`}>{secrets.map((secret) => <li key={secret.name} className="pj-row between">
         <span>{secretLine(secret)}</span>
         {secret.binding.kind === "none"

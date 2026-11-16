@@ -2,6 +2,7 @@ use super::*;
 use crate::app_plugins::Preview;
 use crate::connectors::approvals::{AllowedWrites, ApprovalView};
 use crate::connectors::audit::ActivityView;
+use crate::connectors::sign_in::SignInState;
 use crate::connectors::{ConnectorSettings, ConnectorsView, SignInWith, Who};
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
 
@@ -110,6 +111,33 @@ impl OwnerController {
         self.connectors_client()?
             .connector_set_sign_in_with(name, way)
             .await
+    }
+
+    /// Starts a connector's sign-in through the owner's browser. Input: the connector.
+    /// Output: the address the owner's browser opens.
+    pub async fn connector_sign_in(&self, name: String) -> Result<String, EngineError> {
+        self.connectors_client()?.connector_sign_in(name).await
+    }
+
+    /// Reads where a connector's sign-in stands. Input: the connector. Output: its state.
+    pub async fn connector_sign_in_state(&self, name: String) -> Result<SignInState, EngineError> {
+        self.connectors_client()?
+            .connector_sign_in_state(name)
+            .await
+    }
+
+    /// Cancels a connector's waiting sign-in. Input: the connector. Output: where it stands
+    /// after, still waiting while the browser's answer is being redeemed.
+    pub async fn cancel_connector_sign_in(&self, name: String) -> Result<SignInState, EngineError> {
+        self.connectors_client()?
+            .cancel_connector_sign_in(name)
+            .await
+    }
+
+    /// Signs a connector out at the owner's ask; the vendor is not told. Input: the
+    /// connector. Output: the page.
+    pub async fn connector_sign_out(&self, name: String) -> Result<ConnectorsView, EngineError> {
+        self.connectors_client()?.connector_sign_out(name).await
     }
 
     /// Saves the connector settings. Inputs: the settings and the version read. Output:

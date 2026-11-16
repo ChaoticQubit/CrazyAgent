@@ -2,8 +2,9 @@ import { useEffect, useRef, useState, type FormEvent, type RefObject } from "rea
 import type { Result } from "../../api";
 import { pickAppPluginFile, problemText, type Problem } from "../../api-app-plugins";
 import {
-  CONNECTOR_DEFAULTS, CONNECTORS_PAGE, NATIVE_CHOICES, SIZE_CHOICES, WAIT_CHOICES, WRITE_CHOICES, addConnector, clearConnectorKey, connectorState, keyLine, loadConnectorReach, loadConnectors,
-  originLine, reachesLine, removeConnector, reviewConnector, previewConnector, saveConnectorSettings, setConnectorKey, setConnectorSignInWith, settingsToSave, signsInWithLine,
+  CONNECTOR_DEFAULTS, CONNECTORS_PAGE, NATIVE_CHOICES, SIGN_IN_READ_MS, SIGN_IN_READS_MAX, SIZE_CHOICES, WAIT_CHOICES, WRITE_CHOICES, addConnector, cancelConnectorSignIn,
+  clearConnectorKey, connectorState, keyLine, loadConnectorReach, loadConnectorSignIn, loadConnectors, originLine, reachesLine, removeConnector, reviewConnector, previewConnector,
+  saveConnectorSettings, setConnectorKey, setConnectorSignInWith, settingsToSave, signInConnector, signInStep, signOutConnector, signedOutLine, signsInWithLine,
   trustConnector, trustLines, type ConnectorPreview, type ConnectorView, type ConnectorsView, type ConnectorTrustView, type NativeConnectors, type SettingPicks, type SignInWith,
   type SizeCap, type Wait, type WritePolicy,
 } from "../../api-connectors";
@@ -45,6 +46,9 @@ export interface ConnectorActions {
   onPickWrite: (write: WritePolicy) => void;
   onPickWait: (wait: Wait) => void;
   onSignInWith: (connector: ConnectorView, way: SignInWith) => void;
+  onSignIn: (connector: ConnectorView) => void;
+  onCancelSignIn: (connector: ConnectorView) => void;
+  onSignOut: (connector: ConnectorView) => void;
   onPickNative: (native: NativeConnectors) => void;
   onPickSize: (sizeCap: SizeCap) => void;
   onSave: () => void;
@@ -216,9 +220,9 @@ function SettingsForm({ page, picks, saving, problem, actions }: {
  * with each connector's state, hosts and page, Add connector, and the connector settings
  * with the locked line; or the open connector's own page; over either the open dialog.
  * Inputs: the page read, the harness rows, the connector the route opened, the open dialog, the picked
- * settings, busy and saving flags, the last failure and save problem, the key field and
- * the actions. Output: the tab. */
-export function ConnectorsSettingsView({ view, reach, open, dialog, write, wait, native, sizeCap, busy, saving, failure, problem, keyRef, actions }: {
+ * settings, busy and saving flags, the connector whose sign-in waits, the last failure and
+ * save problem, the key field and the actions. Output: the tab. */
+export function ConnectorsSettingsView({ view, reach, open, dialog, write, wait, native, sizeCap, busy, saving, signing = null, failure, problem, keyRef, actions }: {
   view: Loaded<ConnectorsView>;
   reach: Loaded<string[]>;
   open: string | null;
@@ -229,6 +233,7 @@ export function ConnectorsSettingsView({ view, reach, open, dialog, write, wait,
   sizeCap: SizeCap | null;
   busy: boolean;
   saving: boolean;
+  signing?: string | null;
   failure: string;
   problem: string;
   keyRef?: RefObject<HTMLInputElement | null>;
@@ -241,8 +246,9 @@ export function ConnectorsSettingsView({ view, reach, open, dialog, write, wait,
   const dialogs = <ConnectorDialogs dialog={dialog} busy={busy} failure={failure} keyRef={keyRef} actions={actions} />;
   if (open !== null) {
     const connector = page.connectors.find((listed) => listed.name === open) ?? null;
+    const elsewhere = signing === null || signing === open ? null : page.connectors.find((listed) => listed.name === signing)?.title ?? signing;
     return <>
-      <ConnectorDetailView name={open} connector={connector} busy={busy} failure={dialog.kind === "none" ? failure : ""} actions={actions} />
+      <ConnectorDetailView name={open} connector={connector} busy={busy} waiting={signing === open} elsewhere={elsewhere} failure={dialog.kind === "none" ? failure : ""} actions={actions} />
       {dialogs}
     </>;
   }
@@ -288,8 +294,34 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
   const [saving, setSaving] = useState(false);
   const [reading, setReading] = useState(false);
   const [problem, setProblem] = useState("");
+  const [signing, setSigning] = useState<{ name: string; title: string } | null>(null);
   const keyRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => { setReading(false); }, [view]);
+  useEffect(() => {
+    if (signing === null) return undefined;
+    let live = true;
+    void (async () => {
+      for (let reads = 0; reads < SIGN_IN_READS_MAX; reads += 1) {
+        await new Promise((done) => { window.setTimeout(done, SIGN_IN_READ_MS); });
+        if (!live) return;
+        const result = session.noteResult(await loadConnectorSignIn(signing.name));
+        if (!live) return;
+        if (result.kind !== "ok") {
+          setFailure(result.kind === "not_ready" ? NOT_READY : `${CONNECTORS_PAGE.notReadSignIn} ${result.message}`);
+          break;
+        }
+        const step = signInStep(result.value, signing.title);
+        if (step.reading) continue;
+        if (step.toast !== null) session.showToast(step.toast);
+        if (step.failure !== null) setFailure(step.failure);
+        break;
+      }
+      if (!live) return;
+      setSigning(null);
+      reload();
+    })();
+    return () => { live = false; };
+  }, [signing]);
   useEffect(() => {
     if (view.kind !== "ok") return;
     if (write === view.value.settings.write) setWrite(null);
@@ -331,6 +363,10 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     session.showToast(words);
     reload();
     return true;
+  }
+
+  async function signIn(shown: ConnectorView) {
+    if (await attempt(() => signInConnector(shown.name)) !== undefined) setSigning({ name: shown.name, title: shown.title });
   }
 
   async function remove() {
@@ -407,6 +443,9 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     onPickWrite: (choice) => { setWrite(choice); setProblem(""); },
     onPickWait: (choice) => { setWait(choice); setProblem(""); },
     onSignInWith: (shown, way) => { if (!busy) void changed(() => setConnectorSignInWith(shown.name, way), signsInWithLine(shown.title, way)); },
+    onSignIn: (shown) => { if (!busy && signing === null) void signIn(shown); },
+    onCancelSignIn: (shown) => { if (!busy && signing?.name === shown.name) void attempt(() => cancelConnectorSignIn(shown.name)); },
+    onSignOut: (shown) => { if (!busy) void changed(() => signOutConnector(shown.name), signedOutLine(shown.title)); },
     onPickNative: (choice) => { setNative(choice); setProblem(""); },
     onPickSize: (choice) => { setSizeCap(choice); setProblem(""); },
     onSave: () => { if (!saving && !reading) void save(); },
@@ -415,6 +454,6 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
 
   return <div className="stack">
     <ConnectorsSettingsView view={view} reach={reach} open={connector ?? null} dialog={dialog} write={write} wait={wait} native={native} sizeCap={sizeCap} busy={busy} saving={saving || reading}
-      failure={failure} problem={problem} keyRef={keyRef} actions={actions} />
+      signing={signing?.name ?? null} failure={failure} problem={problem} keyRef={keyRef} actions={actions} />
   </div>;
 }

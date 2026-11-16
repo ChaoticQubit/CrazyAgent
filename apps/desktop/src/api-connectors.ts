@@ -41,6 +41,8 @@ export type SignIn = "key" | "browser" | "both" | "not_yet";
 export type SignInWith = "key" | "browser";
 export interface OwnAppView { client_id: string; secret_saved: boolean }
 export interface OAuthView { signed_in: boolean; own_app_allowed: boolean; own_app: OwnAppView | null; redirect: string; using: SignInWith }
+/** Where a connector's sign-in through the browser stands, the engine's SignInState. */
+export type SignInState = { state: "none" } | { state: "waiting" } | { state: "signed_in" } | { state: "failed"; code: string } | { state: "cancelled" };
 export interface ConnectorRuns { kind: "connector"; url: string; hosts: string[]; oauth_hosts: string[]; vendor_read_only: boolean }
 export interface ConnectorView {
   name: string;
@@ -183,6 +185,12 @@ export const CONNECTORS_PAGE = {
   oauthNotYet: "Signs in with OAuth, which this build does not have.",
   signInWith: "Sign in with",
   signInWithHelp: "Only the way you choose is used; the other stays saved.",
+  signIn: "Sign in",
+  signOut: "Sign out",
+  waiting: "Waiting for the browser",
+  signOutHelp: "Sign out forgets the sign-in on this computer; the vendor is not told.",
+  signInCancelled: "The sign-in was cancelled.",
+  notReadSignIn: "Couldn't read the sign-in.",
   refusedFile: "Fix its file, or remove it on the App plugins page.",
   settings: "Connector settings",
   write: "Write actions",
@@ -258,6 +266,55 @@ export function signsInWithLine(title: string, way: SignInWith): string {
   const choice = SIGN_IN_WITH_CHOICES.find((option) => option.choice === way);
   if (choice === undefined) throw new Error(`no way ${way}`);
   return `${title} signs in with ${choice.label}.`;
+}
+
+/** How often the page reads a waiting sign-in, and how many reads it makes before it reads
+ * the page again instead: six minutes, past the engine's five-minute CALLBACK_WAIT. */
+export const SIGN_IN_READ_MS = 1000;
+export const SIGN_IN_READS_MAX = 360;
+
+/** Whether a connector signs in through the browser now: one whose file offers only that,
+ * or offers both and signs in with the browser. Input: the connector. Output: the answer. */
+export function browserNow(connector: ConnectorView): boolean {
+  return connector.sign_in === "browser" || chosenWay(connector) === "browser";
+}
+
+/** Whether a connector holds a browser sign-in, whichever way it signs in now, so Sign out
+ * never needs a switch that makes it live first (rv-sec2 F1). Input: the connector. Output:
+ * the answer. */
+export function signedIn(connector: ConnectorView): boolean {
+  return connector.oauth?.signed_in === true;
+}
+
+/** The line a finished sign-in says, the same in the TUI. Input: the connector's title.
+ * Output: "<title> is signed in.". */
+export function signedInLine(title: string): string {
+  return `${title} is signed in.`;
+}
+
+/** The line on another connector's page while one sign-in waits, the same in the TUI
+ * (rv-code CONN-T10-PAGES-A F1). Input: the waiting connector's title. Output: the line. */
+export function signInFirstLine(title: string): string {
+  return `Finish or cancel the ${title} sign-in first.`;
+}
+
+/** The line a sign-out confirms with, the same in the TUI. Input: the connector's title.
+ * Output: "<title> is signed out.". */
+export function signedOutLine(title: string): string {
+  return `${title} is signed out.`;
+}
+
+/** The page's next step for where a sign-in stands: waiting keeps reading; every end stops,
+ * reads the page again and says why, a failure in the engine's words. Inputs: the state and
+ * the connector's title. Output: whether to keep reading, the toast and the failure. */
+export function signInStep(stands: SignInState, title: string): { reading: boolean; toast: string | null; failure: string | null } {
+  switch (stands.state) {
+    case "waiting": return { reading: true, toast: null, failure: null };
+    case "signed_in": return { reading: false, toast: signedInLine(title), failure: null };
+    case "cancelled": return { reading: false, toast: CONNECTORS_PAGE.signInCancelled, failure: null };
+    case "failed": return { reading: false, toast: null, failure: connectorProblem({ code: stands.code }) };
+    case "none": return { reading: false, toast: null, failure: null };
+  }
 }
 const NOT_CONNECTOR: Problem = { code: "app_plugin_not_connector", line: null, field: "kind", message: "this is not a connector; add it on the App plugins page." };
 
@@ -361,6 +418,25 @@ export const CONNECTOR_REFUSALS: Record<string, string> = {
   connector_request_bounds: "The request is too large.",
   connector_outcome_unknown: "The engine did not answer in time; check the list again.",
   connector_sign_in_one_way: "This connector signs in one way only, so there is nothing to choose.",
+  connector_oauth_callback_expired: "The browser did not come back within 5 minutes; sign in again.",
+  connector_oauth_callback_flooded: "The sign-in got too many wrong answers on this computer, so it stopped; sign in again.",
+  connector_oauth_callback_unavailable: "The engine could not open its sign-in address on this computer; try again.",
+  connector_oauth_client_invalid: "The sign-in app's id or secret is not usable; save it again.",
+  connector_oauth_code_invalid: "The sign-in answer held no usable code; sign in again.",
+  connector_oauth_issuer_mismatch: "The sign-in answer came from another server than the one asked, so it was not used.",
+  connector_oauth_key_store_unavailable: "The engine's key store could not be read or written.",
+  connector_oauth_metadata_invalid: "The vendor's sign-in details could not be read.",
+  connector_oauth_needs_own_app: "This service needs your own OAuth app; add its client id in the connector's settings.",
+  connector_oauth_not_offered: "This connector does not offer a sign-in.",
+  connector_oauth_pkce_unsupported: "The vendor's sign-in lacks the secure code check the engine requires (PKCE S256).",
+  connector_oauth_redirect_invalid: "A sign-in can only come back to this computer.",
+  connector_oauth_refused: "The vendor refused the sign-in.",
+  connector_oauth_scope_undeclared: "The vendor asked for access the connector's file does not declare, or for writes while they are off.",
+  connector_oauth_sign_in_finishing: "This connector's last sign-in is still finishing; try again in a moment.",
+  connector_oauth_state_unknown: "This sign-in has ended or was already answered; start it again.",
+  connector_oauth_step_up_limit: "The vendor still wants more access after two sign-ins; check the connector's settings.",
+  connector_oauth_token_invalid: "The vendor's sign-in answer held no usable token.",
+  connector_oauth_trust_changed: "The connector's file changed since this sign-in began; start it again.",
 };
 
 /** The app's sentence, in connector words, for each other refusal the Connectors protocol
@@ -617,4 +693,28 @@ export function revokeWrites(project: string, connector: string): Promise<Result
  * Output: the page. */
 export function setConnectorSignInWith(name: string, way: SignInWith): Promise<Result<ConnectorsView>> {
   return connectorCall<ConnectorsView>("desktop_connector_set_sign_in_with", { name, way });
+}
+
+/** Starts a connector's sign-in through the browser; the app opens the address itself, so
+ * the page never holds it. Input: the connector. Output: nothing once the browser was asked. */
+export function signInConnector(name: string): Promise<Result<null>> {
+  return connectorCall<null>("desktop_connector_sign_in", { name });
+}
+
+/** Reads where a connector's sign-in through the browser stands. Input: the connector.
+ * Output: its state. */
+export function loadConnectorSignIn(name: string): Promise<Result<SignInState>> {
+  return connectorCall<SignInState>("desktop_connector_sign_in_state", { name });
+}
+
+/** Cancels a connector's waiting sign-in. Input: the connector. Output: where it stands
+ * after, still waiting while the browser's answer is redeemed. */
+export function cancelConnectorSignIn(name: string): Promise<Result<SignInState>> {
+  return connectorCall<SignInState>("desktop_connector_cancel_sign_in", { name });
+}
+
+/** Signs a connector out on this computer; the vendor is not told. Input: the connector.
+ * Output: the page. */
+export function signOutConnector(name: string): Promise<Result<ConnectorsView>> {
+  return connectorCall<ConnectorsView>("desktop_connector_sign_out", { name });
 }

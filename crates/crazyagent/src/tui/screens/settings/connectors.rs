@@ -1,15 +1,18 @@
 use crate::app_plugins::{Binding, Origin, PluginStatus, Preview, Problem, TrustView};
+use crate::connectors::callback::CALLBACK_WAIT;
+use crate::connectors::sign_in::SignInState;
 use crate::connectors::{
     ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, SignIn, SignInWith,
     SizeCap, Wait, WritePolicy,
 };
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
 use crate::tui::client::app_plugins::MANIFEST_BYTES_MAX;
-use crate::tui::client::connectors::{ConnectorsEvent, ConnectorsJob};
+use crate::tui::client::connectors::{ConnectorsEvent, ConnectorsJob, SignInStarted};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint};
 use crate::tui::keys::Key;
+use crate::tui::run::REFRESH;
 use crate::tui::screens::settings::app_plugins::safe;
 use crate::tui::screens::settings::connector_activity::turn;
 use crate::tui::screens::settings_accounts::{send, settings_event};
@@ -22,8 +25,9 @@ use ratatui::text::Line;
 use std::path::PathBuf;
 use words::{
     ADD_FIELD, BACK, BROWSER_NO_KEY, CHECK, CHECKING, KEY_EMPTY, KEY_FIELD, NOT_CONNECTOR,
-    OAUTH_NOT_YET, SAVE, SAVED, STALE, chosen_way, hosts, keys_shown, other_way, refusal,
-    secrets_shown, signs_in_with, way_word,
+    NOT_OPENED, NOT_READ_SIGN_IN, OAUTH_NOT_YET, SAVE, SAVED, SIGN_IN, SIGN_IN_CANCELLED, SIGN_OUT,
+    STALE, browser_now, chosen_way, hosts, keys_shown, other_way, refusal, secrets_shown,
+    sign_in_first, signed_in, signed_in_line, signed_out_line, signs_in_with, way_word,
 };
 
 mod draw;
@@ -37,6 +41,9 @@ const GUTTER: u16 = 2;
 const KEY_CHARS_MAX: usize = 1024;
 const PATH_CHARS_MAX: usize = 1024;
 const SETTING_ROWS: usize = 4;
+const SIGN_IN_READS_MAX: usize = 72;
+const _: () = assert!(SIGN_IN_READS_MAX as u64 * REFRESH.as_secs() > CALLBACK_WAIT.as_secs());
+const _: () = assert!(SIGN_IN_READS_MAX as u64 * REFRESH.as_secs() <= 2 * CALLBACK_WAIT.as_secs());
 const NOT_READ: &str = "Couldn't load the connectors.";
 const NOT_SAVED: &str = "The connector settings were not saved.";
 const ABSOLUTE: &str = "Type the full path of a .yaml file, starting with /.";
@@ -51,14 +58,27 @@ enum Row {
     Size,
 }
 
-/// The one request in flight: a read, a manifest check or review, a connector change, or
-/// a settings save.
+/// The one request in flight: a read, a manifest check or review, a connector change, a
+/// settings save, or the start of a sign-in through the browser.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pending {
     Read,
     Check,
     Change,
     Settings,
+    SignIn,
+}
+
+/// A sign-in through the browser this page started and still reads: the connector and its
+/// title, the address shown for copying, whether a cancel was sent, how many state reads
+/// or cancels are on their way, and how many reads were sent.
+struct Signing {
+    name: String,
+    title: String,
+    url: String,
+    cancelled: bool,
+    asked: usize,
+    reads: usize,
 }
 
 /// The paste box and the typed path, with the one that has focus.
@@ -104,11 +124,11 @@ enum Open {
 /// Settings, Connectors (DEC-168 addenda 18, 27 and 32): the catalog of every connector with
 /// its state, the harnesses that reach connectors and the four connector settings beside the
 /// locked line. Enter opens a connector's page with its address and secrets, where `w`
-/// switches one that offers both between Key and Browser, `k` sets a key typed once and `u`
-/// clears it while it signs in with a key, Enter reviews a changed file and `x` removes the
-/// owner's own; `a` adds a manifest only after its trust screen, scrolled to its end, is
-/// confirmed with `y`. A settings pick waits for Enter and saves with the version read. One
-/// request at a time, and Esc waits for it.
+/// switches one that offers both between Key and Browser, `k` sets a key and `u` clears it,
+/// `s` signs in through the browser or out and `c` cancels a waiting sign-in, which each
+/// refresh reads; Enter reviews a changed file and `x` removes the owner's own; `a` adds a
+/// manifest only after its trust screen, read to its end, is confirmed with `y`. A settings
+/// pick waits for Enter and saves with the version read. One request at a time.
 pub(in crate::tui) struct ConnectorsPage {
     stored: Load<ConnectorsView>,
     write: WritePolicy,
@@ -126,6 +146,7 @@ pub(in crate::tui) struct ConnectorsPage {
     failure: Option<String>,
     sent: Option<String>,
     done: Option<String>,
+    signing: Option<Signing>,
 }
 
 impl ConnectorsPage {
@@ -149,6 +170,7 @@ impl ConnectorsPage {
             failure: None,
             sent: None,
             done: None,
+            signing: None,
         }
     }
 
@@ -374,6 +396,75 @@ impl ConnectorsPage {
         self.ask(job, Pending::Change, ctx);
     }
 
+    fn waiting_on(&self, name: &str) -> bool {
+        self.signing
+            .as_ref()
+            .is_some_and(|signing| signing.name == name)
+    }
+
+    fn sign_in_or_out(&mut self, ctx: &mut Ctx) {
+        let Some(connector) = self.opened() else {
+            return;
+        };
+        if refused(connector) {
+            return;
+        }
+        let name = connector.name.clone();
+        if signed_in(connector) {
+            self.done = Some(signed_out_line(&connector.title));
+            self.ask(ConnectorsJob::SignOut { name }, Pending::Change, ctx);
+            return;
+        }
+        if !browser_now(connector) || self.waiting_on(&name) {
+            return;
+        }
+        if let Some(other) = &self.signing {
+            let first = sign_in_first(&other.title);
+            ctx.say(Message::warning("Not yet.", &first));
+            return;
+        }
+        self.ask(ConnectorsJob::SignIn { name }, Pending::SignIn, ctx);
+    }
+
+    fn cancel_sign_in(&mut self, ctx: &mut Ctx) {
+        let Some(name) = self.detail.clone() else {
+            return;
+        };
+        let open = |signing: &&mut Signing| signing.name == name && !signing.cancelled;
+        let Some(signing) = self.signing.as_mut().filter(open) else {
+            return;
+        };
+        signing.cancelled = true;
+        signing.asked += 1;
+        assert!(signing.asked <= 2, "one read and one cancel at most");
+        let job = ConnectorsJob::CancelSignIn { name };
+        send(ctx, SettingsJob::Connectors(Box::new(job)));
+    }
+
+    /// Reads where the page's sign-in stands when no read or cancel is on its way, at most
+    /// `SIGN_IN_READS_MAX` times, after which the page reads itself again instead. Input:
+    /// the context. Output: none; the read goes out on the context.
+    fn read_sign_in(&mut self, ctx: &mut Ctx) {
+        let Some(signing) = self.signing.as_mut() else {
+            return;
+        };
+        if signing.asked > 0 {
+            return;
+        }
+        if signing.reads >= SIGN_IN_READS_MAX {
+            self.signing = None;
+            self.read(ctx);
+            return;
+        }
+        signing.reads += 1;
+        signing.asked += 1;
+        assert!(signing.reads <= SIGN_IN_READS_MAX);
+        let job = ConnectorsJob::SignInState {
+            name: signing.name.clone(),
+        };
+        send(ctx, SettingsJob::Connectors(Box::new(job)));
+    }
+
     fn save_key(&mut self, ctx: &mut Ctx) {
         let Open::Key(form) = &mut self.open else {
             return;
@@ -480,10 +571,75 @@ impl ConnectorsPage {
                 self.pending = None;
                 self.saved(result, ctx);
             }
+            ConnectorsEvent::SignIn { name, result } => {
+                if self.pending != Some(Pending::SignIn) {
+                    return;
+                }
+                self.pending = None;
+                self.started(name, result, ctx);
+            }
+            ConnectorsEvent::SignInState { name, result } => self.stands(name, result, ctx),
             ConnectorsEvent::Activity(_)
             | ConnectorsEvent::Approval { .. }
             | ConnectorsEvent::Writes { .. } => {}
         }
+    }
+
+    fn started(&mut self, name: &str, result: &Result<SignInStarted, String>, ctx: &mut Ctx) {
+        assert!(self.pending.is_none());
+        let started = match result {
+            Ok(started) => started,
+            Err(code) => {
+                ctx.say(Message::error("Not signed in.", &refusal(code)));
+                return;
+            }
+        };
+        let title = self
+            .connectors()
+            .iter()
+            .find(|connector| connector.name == name)
+            .map_or_else(|| name.to_owned(), |connector| connector.title.clone());
+        self.signing = Some(Signing {
+            name: name.to_owned(),
+            title,
+            url: safe(&started.url),
+            cancelled: false,
+            asked: 0,
+            reads: 0,
+        });
+        if !started.opened {
+            ctx.say(Message::warning(
+                NOT_OPENED,
+                "Go to the address on its page.",
+            ));
+        }
+    }
+
+    /// Takes where the page's sign-in stands: waiting keeps it, and every end stops reading,
+    /// says why and reads the page again; an answer for another connector changes nothing.
+    /// Inputs: the connector, the answer and the context. Output: none.
+    fn stands(&mut self, name: &str, result: &Result<SignInState, String>, ctx: &mut Ctx) {
+        let Some(signing) = self.signing.as_mut().filter(|signing| signing.name == name) else {
+            return;
+        };
+        signing.asked = signing.asked.saturating_sub(1);
+        let title = signing.title.clone();
+        match result {
+            Ok(SignInState::Waiting) => return,
+            Ok(SignInState::SignedIn) => {
+                ctx.say(Message::success("Signed in.", &signed_in_line(&title)));
+            }
+            Ok(SignInState::Failed { code }) => {
+                ctx.say(Message::error("Not signed in.", &refusal(code)));
+            }
+            Ok(SignInState::Cancelled) => {
+                ctx.say(Message::warning("Not signed in.", SIGN_IN_CANCELLED));
+            }
+            Ok(SignInState::Idle) => {}
+            Err(code) => ctx.say(Message::error(NOT_READ_SIGN_IN, &refusal(code))),
+        }
+        self.signing = None;
+        self.read(ctx);
     }
 
     fn store(&mut self, view: &ConnectorsView) {
@@ -707,6 +863,8 @@ impl ConnectorsPage {
             Key::Down => self.secret = (self.secret + 1).min(secrets.saturating_sub(1)),
             Key::Enter => self.review(ctx),
             Key::Char('w') => self.switch_way(ctx),
+            Key::Char('s') => self.sign_in_or_out(ctx),
+            Key::Char('c') => self.cancel_sign_in(ctx),
             Key::Char('k') => self.key_form(ctx),
             Key::Char('u') => self.clear_key(ctx),
             Key::Char('x') => self.remove(ctx),
@@ -783,6 +941,17 @@ impl ConnectorsPage {
                 let other = format!("{} {}", words::SIGN_IN_WITH, way_word(other_way(now)));
                 hints.push(hint("w", &other));
             }
+            let signing = self.signing.as_ref();
+            let signing = signing.filter(|signing| signing.name == connector.name);
+            if signed_in(connector) {
+                hints.push(hint("s", SIGN_OUT));
+            } else if let Some(signing) = signing {
+                if !signing.cancelled {
+                    hints.push(hint("c", "Cancel"));
+                }
+            } else if browser_now(connector) && !refused(connector) && self.signing.is_none() {
+                hints.push(hint("s", SIGN_IN));
+            }
             let secret = listed.get(self.secret);
             if keys && secret.is_some() {
                 hints.push(hint("k", "Set key"));
@@ -824,7 +993,7 @@ impl Screen for ConnectorsPage {
                 Line::styled(format!("Saving{}", ctx.glyphs.ellipsis), ctx.theme.muted)
             }
             Some(Pending::Check) => Line::styled(CHECKING, ctx.theme.muted),
-            Some(Pending::Read | Pending::Change) | None => Line::default(),
+            Some(Pending::Read | Pending::Change | Pending::SignIn) | None => Line::default(),
         }
     }
 
@@ -901,6 +1070,7 @@ impl Screen for ConnectorsPage {
         if matches!(self.stored, Load::Idle) {
             self.read(ctx);
         }
+        self.read_sign_in(ctx);
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
