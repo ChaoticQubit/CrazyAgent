@@ -391,3 +391,45 @@ fn an_acp_launch_in_a_project_starts_with_its_manifest_arguments_and_home_variab
     assert_eq!(config, Some(home.join("config").as_os_str()));
     assert_eq!(installed.engine_servers().len(), 1);
 }
+
+const ACP_PIPED: &str = "piped:\n  driver: \"acp\"\n  argv:\n    - \"--home\"\n    - \"{home}\"\n  tools_off:\n    - \"--no-tools\"\n";
+
+fn rendered_names(home: &Path) -> Option<Vec<String>> {
+    let mut names: Vec<String> = servers_in(&home.join("agent").join("mcp.json"))?["mcpServers"]
+        .as_object()?
+        .keys()
+        .cloned()
+        .collect();
+    names.sort();
+    Some(names)
+}
+
+/// T19b 19b-1: an ACP harness takes the engine's team server in `session/new`, so the MCP
+/// file its manifest renders names only the owner's servers and the agent never sees the team
+/// server twice; any other listed harness still finds the team server in that file.
+#[test]
+fn an_acp_harness_renders_only_the_owners_servers_and_takes_the_team_server_in_its_session() {
+    let (_folder, home) = private_home();
+    let teamed = || {
+        context()
+            .with_agent_team_tool(Path::new(ENGINE), &home.join("mailbox"), &[], false)
+            .unwrap()
+    };
+
+    let acp = teamed().install_listed(&manifest(&format!("{ACP_PIPED}{BLOCKS}")), &home, true);
+
+    assert!(acp.is_ok(), "{:?}", acp.as_ref().err());
+    assert_eq!(rendered_names(&home), Some(vec!["files".to_owned()]));
+    assert_eq!(acp.ok().map(|found| found.engine_servers().len()), Some(1));
+
+    let other = teamed().install_listed(&manifest(BLOCKS), &home, true);
+
+    assert!(other.is_ok(), "{:?}", other.as_ref().err());
+    assert_eq!(
+        rendered_names(&home),
+        Some(vec![
+            crate::team::tool::SERVER_NAME.to_owned(),
+            "files".to_owned()
+        ])
+    );
+}
