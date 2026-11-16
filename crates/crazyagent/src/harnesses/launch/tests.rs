@@ -1858,7 +1858,10 @@ fn a_context_less_acp_launch_runs_with_its_home_block_variables() {
         .unwrap();
     let base = directory.path().canonicalize().unwrap();
     let home = base.join("standin-acp").join("account-1");
-    std::fs::create_dir_all(&home).unwrap();
+    let work = base.join("work");
+    for folder in [&home, &work] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
     for folder in [base.clone(), base.join("standin-acp"), home.clone()] {
         std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
@@ -1867,7 +1870,7 @@ fn a_context_less_acp_launch_runs_with_its_home_block_variables() {
     let request = LaunchRequest {
         harness: "standin-acp".into(),
         executable: PathBuf::from("/usr/bin/true"),
-        working_dir: base.clone(),
+        working_dir: work,
         account: AccountBinding::Url {
             home: home.clone(),
             base_url: "http://127.0.0.1:11434".into(),
