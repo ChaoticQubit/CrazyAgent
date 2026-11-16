@@ -1228,3 +1228,18 @@ fn removing_a_connector_resolves_its_sign_in_notice() {
         "a removed connector leaves no item behind"
     );
 }
+
+/// Every sign-in code a page can show is listed once, sorted, and has a plain sentence
+/// with no code words in it.
+#[test]
+fn every_oauth_code_has_a_plain_sentence() {
+    let mut sorted = OAUTH_CODES.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted, OAUTH_CODES.to_vec(), "sorted, each once");
+    for code in OAUTH_CODES {
+        let plain = crate::connectors::plain_problem(code);
+        assert!(plain.is_some(), "{code} has a sentence");
+        assert!(!plain.unwrap().contains('_'), "{code}");
+    }
+}
