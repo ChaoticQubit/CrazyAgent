@@ -120,6 +120,21 @@ test("the Overview mounts the publish card, which drives every publish action", 
   assert.equal(publishJob.DRAFT_POLL_MS, 2000);
 });
 
+test("a failed publish read keeps the last job shown with its problem and Try again, and a failed answer reads the job again", () => {
+  const drafting = { kind: "ok", value: job({ step: "drafting" }) };
+  const lines = { kind: "ok", value: job({ step: "lines", lines: [".env*"], draft: { by: "agent" } }) };
+  const lost = { kind: "error", code: "github_outcome_unknown", message: "We couldn't confirm what GitHub did." };
+  assert.deepEqual(publishJob.readKept(drafting, lost), { read: drafting, failed: lost.message });
+  assert.deepEqual(publishJob.readKept(null, unreachable), { read: null, failed: unreachable.message });
+  assert.deepEqual(publishJob.readKept(drafting, { kind: "not_ready" }), { read: drafting, failed: publishJob.ENGINE_STARTING });
+  assert.deepEqual(publishJob.readKept(drafting, lines), { read: lines, failed: null });
+  const card = read("src/screens/project/github-publish.tsx");
+  assert.match(card, /readKept\(/);
+  assert.match(card, /\}, \[view\.kind, tick\]\);/, "the draft poll goes on after a failed read");
+  assert.match(card, /if \(result\.kind !== "ok"\) \{\n\s+failed\(result\);\n\s+setTick\(\(value\) => value \+ 1\);/, "a failed answer reads the job again");
+  assert.match(card, /id="pj-github-reread"/, "a failed read offers Try again");
+});
+
 test("the Overview asks to publish a project with no publish through two bridge commands, and Publish opens the New Project form", async () => {
   assert.equal(publishJob.PROMPT_LINE, "This project is not on GitHub. Publish it?");
   assert.deepEqual([publishJob.PROMPT_PUBLISH, publishJob.PROMPT_NOT_NOW, publishJob.PROMPT_NEVER], ["Publish", "Not now", "Don't ask again"]);
