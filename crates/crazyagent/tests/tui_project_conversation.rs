@@ -79,10 +79,9 @@ impl Process {
 
     fn diagnostics(&self) -> String {
         format!(
-            "pid={}\nstdout: {}\nstderr: {}",
+            "pid={}\n{}",
             self.child.id(),
-            String::from_utf8_lossy(&self.stdout.lock().unwrap().bytes),
-            String::from_utf8_lossy(&self.stderr.lock().unwrap().bytes),
+            captured_text(&self.stdout, &self.stderr)
         )
     }
 
@@ -193,6 +192,16 @@ impl Drop for Process {
             eprintln!("{}", self.diagnostics());
         }
     }
+}
+
+/// Reads both captured streams for a failure message. Process's Drop prints it while a
+/// failed assert unwinds, and that assert may have held a capture. Inputs: the two captures.
+/// Output: the text.
+fn captured_text(stdout: &Mutex<Capture>, stderr: &Mutex<Capture>) -> String {
+    let read = |capture: &Mutex<Capture>| {
+        String::from_utf8_lossy(&capture.lock().unwrap().bytes).into_owned()
+    };
+    format!("stdout: {}\nstderr: {}", read(stdout), read(stderr))
 }
 
 fn start_engine(root: &Path) -> Process {
@@ -742,4 +751,24 @@ async fn real_tui_reads_actual_bounded_history_pages_and_sanitizes_terminal_text
     );
     assert_eq!(fixture.current_brief().await, fixture.seed);
     fixture.assert_no_other_effects().await;
+}
+
+/// TEST-DROP-UNWRAP: a capture a failed assert poisoned while it held it still reads back,
+/// so Process's Drop, which prints both captures while that assert unwinds, never panics a
+/// second time and aborts the whole test binary.
+#[test]
+fn a_poisoned_capture_still_reads_back_for_the_failure_message() {
+    let stdout = Mutex::new(Capture::default());
+    stdout.lock().unwrap().bytes.extend_from_slice(b"ready\n");
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = stdout.lock().unwrap();
+        panic!("a failed assert while the capture is held");
+    }));
+    assert!(poisoned.is_err());
+    assert!(stdout.is_poisoned());
+    let stderr = Mutex::new(Capture::default());
+    let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        captured_text(&stdout, &stderr)
+    }));
+    assert_eq!(text.ok().as_deref(), Some("stdout: ready\nstderr: "));
 }

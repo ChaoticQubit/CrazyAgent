@@ -294,7 +294,7 @@ impl Drop for PaneCallers {
         if let Some(serving) = self.serving.take() {
             let _ = serving.join();
         }
-        for (_, mut shell, input) in self.shells.lock().unwrap().drain(..) {
+        for (_, mut shell, input) in taken(&mut self.shells) {
             drop(input);
             let _ = shell.kill();
             let _ = shell.wait();
@@ -304,4 +304,26 @@ impl Drop for PaneCallers {
             let _ = std::fs::remove_dir(folder);
         }
     }
+}
+
+/// Takes what a lock holds, for a Drop that may run while a panic that held the lock unwinds.
+/// Input: the lock. Output: its value, leaving the default.
+fn taken<T: Default>(lock: &mut Mutex<T>) -> T {
+    std::mem::take(lock.get_mut().unwrap())
+}
+
+/// TEST-DROP-UNWRAP: the shells a failed pane call poisoned while it held them are still
+/// taken, so the callers' Drop, which runs while that panic unwinds, never panics a second
+/// time and aborts the whole test binary.
+#[test]
+fn a_poisoned_lock_is_still_taken() {
+    let mut lock = Mutex::new(vec![7u8]);
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = lock.lock().unwrap();
+        panic!("a pane call failed while it held the shells");
+    }));
+    assert!(poisoned.is_err());
+    assert!(lock.is_poisoned());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| taken(&mut lock)));
+    assert_eq!(result.ok(), Some(vec![7]));
 }
