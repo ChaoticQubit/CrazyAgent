@@ -14752,8 +14752,13 @@ fn hook_trust(
     let answer = match keys {
         Ok(keys) if keys.is_empty() => return HookTrust::Settled,
         Ok(keys) => ask(&keys),
-        Err(_) if waited => return HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_UNLISTED),
-        Err(_) => return HookTrust::Later,
+        Err(_) if !waited => return HookTrust::Later,
+        Err(crate::launch_context::HookKeysUnread::Absent) => {
+            return HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_UNLISTED);
+        }
+        Err(crate::launch_context::HookKeysUnread::Unreadable) => {
+            return HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_LIST_UNREADABLE);
+        }
     };
     match answer {
         Ok(true) => HookTrust::Settled,

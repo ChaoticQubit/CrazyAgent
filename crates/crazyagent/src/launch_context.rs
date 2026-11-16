@@ -2223,18 +2223,44 @@ pub enum HookKeysUnread {
 /// ask Codex whether it trusts each one (PA1213R2-F2). Takes the agent's `CODEX_HOME`.
 /// Returns the keys, empty when the launch pinned none, or why there are none.
 pub fn codex_pinned_keys(home: &Path) -> Result<Vec<String>, HookKeysUnread> {
-    let file =
-        File::open(home.join(STATE).join(CODEX_HOOK_KEYS)).map_err(|_| HookKeysUnread::Absent)?;
+    let file = match open_unfollowed(&home.join(STATE).join(CODEX_HOOK_KEYS)) {
+        Ok(file) => file,
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {
+            return Err(HookKeysUnread::Absent);
+        }
+        Err(_) => return Err(HookKeysUnread::Unreadable),
+    };
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(
         &mut std::io::Read::take(file, CODEX_HOOK_KEYS_BYTES_MAX + 1),
         &mut bytes,
     )
-    .map_err(|_| HookKeysUnread::Absent)?;
+    .map_err(|_| HookKeysUnread::Unreadable)?;
     if bytes.len() as u64 > CODEX_HOOK_KEYS_BYTES_MAX {
-        return Err(HookKeysUnread::Absent);
+        return Err(HookKeysUnread::Unreadable);
     }
-    serde_json::from_slice(&bytes).map_err(|_| HookKeysUnread::Absent)
+    serde_json::from_slice(&bytes).map_err(|_| HookKeysUnread::Unreadable)
+}
+
+/// Opens a launch file for reading without following a link in its place, so a link planted
+/// there fails to open instead of being read (#166 N1). Input: the path. Output: the file,
+/// or the error, `NotFound` when nothing is there.
+#[cfg(unix)]
+fn open_unfollowed(path: &Path) -> std::io::Result<File> {
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(std::io::Error::from)
+}
+
+/// Opens a launch file for reading where no-follow opening does not exist; no launch writes
+/// one there, since `write_private` refuses. Input: the path. Output: the file or the error.
+#[cfg(not(unix))]
+fn open_unfollowed(path: &Path) -> std::io::Result<File> {
+    File::open(path)
 }
 
 /// The owner's hooks a Codex launch runs (PA-12): those on an event Codex has, each copied
