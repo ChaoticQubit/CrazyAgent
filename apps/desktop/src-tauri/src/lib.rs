@@ -254,6 +254,15 @@ fn engine_older(engine: &str, app: &str) -> bool {
     crazyagent::update::is_newer(app, engine).unwrap_or(false)
 }
 
+/// Whether the launch may replace the engine that answered without the owner's confirm: it
+/// is older than this app and the login service is installed and running, so the swap stops
+/// the service's engine and never installs a service beside an engine started by hand
+/// (DEC-134 addendum 1, #111 F1). Inputs: both versions and the service's status. Output:
+/// the answer.
+fn swap_on_launch(_engine: &str, _app: &str, _service: &crazyagent::service::Status) -> bool {
+    false
+}
+
 /// Takes this app run's one replacement of an older engine. Input: the run's flag. Output:
 /// true the first time, false after.
 fn first_replacement(taken: &AtomicBool) -> bool {
@@ -5767,6 +5776,35 @@ mod tests {
         untold.store(true, Ordering::SeqCst);
         assert!(take_signal(&untold));
         assert!(!untold.load(Ordering::SeqCst));
+    }
+
+    /// #111 F1: the launch swaps an older engine only while the login service is installed
+    /// and running; an older engine with no service, or with a service that runs nothing,
+    /// keeps today's mismatch view, and an engine of this app's version is never swapped.
+    #[test]
+    fn only_an_older_engine_the_login_service_runs_is_replaced_at_launch() {
+        let app = "2.4.1-dev.202611161323";
+        let older = "2.4.1-dev.202611150900";
+        let service = |installed: bool, running: bool| crazyagent::service::Status {
+            installed,
+            running,
+            pid: running.then_some(4242),
+        };
+        assert!(swap_on_launch(older, app, &service(true, true)));
+        assert!(
+            !swap_on_launch(older, app, &service(false, false)),
+            "an older engine started by hand, with no login service, is left alone"
+        );
+        assert!(
+            !swap_on_launch(older, app, &service(true, false)),
+            "an installed service that runs nothing did not start the engine that answered"
+        );
+        assert!(
+            !swap_on_launch(older, app, &service(false, true)),
+            "a loaded job without its definition cannot be replaced through the service"
+        );
+        assert!(!swap_on_launch(app, app, &service(true, true)));
+        assert!(!swap_on_launch("2.4.2", app, &service(true, true)));
     }
 
     /// UI-5-F3: the close walls command refuses a wall of another project and admits the main

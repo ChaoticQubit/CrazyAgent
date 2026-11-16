@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { terminalServers } from "./e2e-harness.mjs";
-import { DATA, SIDECAR, STAGED, home, lockedVersion, scratchService, versionOf } from "./engine-swap.wdio.conf.mjs";
+import { DATA, SIDECAR, STAGED, home, lockedVersion, ownerEngine, scratchService, versionOf } from "./engine-swap.wdio.conf.mjs";
 
 const SWAP_MS = 240000;
 const LINE = "CrazyAgent's engine was updated to match this app.";
@@ -40,6 +40,7 @@ describe("An engine older than the app is replaced at launch on its own (DEC-134
       return told && seen.running;
     },{ timeout: SWAP_MS, interval: 100, timeoutMsg: `the app never ran on the swapped engine with its line: ${JSON.stringify(seen)}` });
     assert.notEqual(seen.heading, "CrazyAgent's engine needs a restart", "the restart view never shows for an older engine");
+    assert.deepEqual(ownerEngine(), staged.owner, "the owner's own login service and engine are untouched: the app ran on the scratch root");
     const now = scratchService();
     assert.equal(now.label, staged.label, "the same scratch service runs the engine");
     assert.ok(now.pid !== null && now.pid !== staged.oldPid, `a new engine process runs: ${JSON.stringify(now)}`);

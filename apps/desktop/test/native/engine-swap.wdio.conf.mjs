@@ -65,6 +65,16 @@ export function scratchService() {
   return { label: label[1], pid: pid ? Number(pid[1]) : null };
 }
 
+/** The owner's own login service as launchd reports it, read only through `launchctl print`
+ * and never through `crazyagent`, so a run whose app missed the scratch environment and
+ * swapped the owner's engine fails. Output: { loaded, pid }, pid null while nothing runs. */
+export function ownerEngine() {
+  const printed = spawnSync("/bin/launchctl", ["print", `gui/${process.getuid()}/dev.crazyagent.engine`], { encoding: "utf8", timeout: 10000 });
+  if (printed.status !== 0) return { loaded: false, pid: null };
+  const pid = (printed.stdout ?? "").match(/^\s*pid = (\d+)$/m);
+  return { loaded: true, pid: pid ? Number(pid[1]) : null };
+}
+
 /** The version the running engine published in its locator. Output: the version or null. */
 export function lockedVersion() {
   try {
@@ -154,7 +164,7 @@ export const config = {
     swapIn(app, "crazyagent-desktop");
     assert.equal(versionOf(SIDECAR), newer, "the bundle now holds this build's engine");
     writeFileSync(STAGED, JSON.stringify({
-      label, older, newer, oldPid: running.pid, install: installed.status,
+      label, older, newer, oldPid: running.pid, install: installed.status, owner: ownerEngine(),
       bundle: realpathSync(BUNDLE), terminals: terminalServers(DATA),
     }, null, 1));
   },
@@ -173,5 +183,10 @@ export const config = {
     const server = join(DATA, "terminal", "tmux.sock");
     if (existsSync(server)) spawnSync("tmux", ["-S", server, "kill-server"], { env: { PATH: process.env.PATH }, stdio: "ignore" });
     homeLock?.release();
+    if (!existsSync(STAGED)) return;
+    const before = JSON.parse(readFileSync(STAGED, "utf8")).owner;
+    const after = ownerEngine();
+    writeFileSync(join(evidence, "owner-engine.txt"), `${JSON.stringify(before)}\n${JSON.stringify(after)}\n`);
+    if (JSON.stringify(before) !== JSON.stringify(after)) throw new SevereServiceError(`the owner's engine changed during the run: ${JSON.stringify(before)} then ${JSON.stringify(after)}`);
   },
 };
