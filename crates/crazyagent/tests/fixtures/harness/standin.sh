@@ -203,6 +203,20 @@ replay() {
 			esac
 			exit "$code"
 			;;
+		'@standin tick')
+			saved=$(stty -g)
+			stty -icanon -echo min 0 time 2
+			ticks=0
+			got=0
+			while [ "$got" = 0 ]; do
+				ticks=$((ticks + 1))
+				printf '\rworking %s' "$ticks"
+				got=$(dd bs=1 count=1 2>/dev/null | wc -c | tr -d ' ')
+			done
+			stty "$saved"
+			printf '\n'
+			printf '\n' >>"$state/stdin-$run"
+			;;
 		'@standin sleep '*)
 			pause=${line#'@standin sleep '}
 			case $pause in
@@ -283,6 +297,39 @@ serve_rpc() {
 	exit 0
 }
 
+call_mcp() {
+	input=$1
+	opened=$(grep -m 1 '"method":"session/new"' "$state/stdin-$run")
+	server=$(printf '%s\n' "$opened" |
+		sed -n -E 's/.*"command":"([^"]+)".*/\1/p')
+	listed=$(printf '%s\n' "$opened" |
+		sed -n -E 's/.*"args":\[([^]]*)\].*/\1/p')
+	case $server in
+	/*) ;;
+	*) refuse "turn-$turn.mcp needs a session/new that names an MCP server by its full path." ;;
+	esac
+	sep='","'
+	set --
+	if [ -n "$listed" ]; then
+		rest=${listed#\"}
+		rest=${rest%\"}
+		while :; do
+			case $rest in
+			*"$sep"*)
+				set -- "$@" "${rest%%"$sep"*}"
+				rest=${rest#*"$sep"}
+				;;
+			*)
+				set -- "$@" "$rest"
+				break
+				;;
+			esac
+		done
+	fi
+	"$server" "$@" <"$input" >"$state/mcp-$turn.out" 2>"$state/mcp-$turn.err" ||
+		refuse "the MCP server for turn-$turn.mcp ended with an error."
+}
+
 serve_acp() {
 	while IFS= read -r incoming || [ -n "$incoming" ]; do
 		printf '%s\n' "$incoming" >>"$state/stdin-$run"
@@ -303,6 +350,8 @@ serve_acp() {
 		fi
 		if [ "$method" = session/prompt ]; then
 			next_turn
+			file=$(fixture mcp)
+			[ -z "$file" ] || call_mcp "$file"
 			replay "$(fixture out)"
 			[ "$stopped" != eof ] || break
 			if [ "$stopped" = cancelled ]; then

@@ -382,9 +382,13 @@ pub struct LaunchSecret {
     pub value: SecretValue,
 }
 
+/// One MCP server a launch gives its agent, with its secret values read. `engine` is true
+/// only for the engine's own team server, which `AgentContext` adds itself; a server the
+/// owner saved is never marked, whatever its name.
 #[derive(Debug)]
 pub struct LaunchServer {
     pub name: String,
+    pub engine: bool,
     pub spec: ServerSpec,
     pub secrets: Vec<LaunchSecret>,
 }

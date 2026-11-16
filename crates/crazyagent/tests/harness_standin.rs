@@ -2,6 +2,8 @@ mod e2e_support;
 
 use crazyagent::harnesses::manifest::{DriverKind, RecordKind};
 use crazyagent::harnesses::registry::Registry;
+use crazyagent::team::Delegation;
+use crazyagent::team::tool::{DROP_FILE, SERVER_COMMAND, SERVER_NAME, take};
 use e2e_support::harness_standin::{self, KINDS, Standin};
 use std::fs;
 
@@ -51,6 +53,8 @@ const SESSION_REFUSAL: &str =
     "standin: the session id is not 1 to 64 letters, digits, dots, dashes or underscores.\n";
 const KIND_REFUSAL: &str = "standin: the program name or --kind names no stand-in kind.\n";
 const HOME_REFUSAL: &str = "standin: --home or STANDIN_HOME must name an absolute folder.\n";
+const MCP_INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"standin","version":"1"}}}"#;
+const MCP_DELEGATE: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delegate","arguments":{"harness":"codex","task":"Write page.md"}}}"#;
 
 /// Joins lines, each with its newline. Input: the lines. Output: the text.
 fn lines(items: &[&str]) -> String {
@@ -466,4 +470,60 @@ fn a_bad_session_id_kind_or_home_is_refused_before_anything_is_written() {
     assert_eq!(filed.status.code(), Some(2));
     assert_eq!(filed.stderr, SESSION_REFUSAL.as_bytes());
     assert!(!standin.home().join("file").exists());
+}
+
+/// T19b 19b-3: on a turn whose `turn-<n>.mcp` fixture holds MCP lines, the ACP stand-in runs
+/// the MCP server its `session/new` named with those lines on its input and keeps the answer
+/// in `mcp-<n>.out`; the engine's own `team-mcp` server then takes the `delegate` call into
+/// its drop file, as a stand-in lead's call reaches the runtime.
+#[test]
+fn acp_runs_the_mcp_server_its_session_names_and_keeps_its_answer() {
+    let standin = Standin::new("acp");
+    standin.put("session-id", "sess_standin");
+    standin.put("turn-1.mcp", lines(&[MCP_INITIALIZE, MCP_DELEGATE]));
+    standin.put("turn-1.out", lines(&[CHUNK]));
+    let drop = standin.home().canonicalize().unwrap().join(DROP_FILE);
+    let new = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "session/new",
+        "params": {"cwd": "/tmp", "mcpServers": [{
+            "name": SERVER_NAME,
+            "command": env!("CARGO_BIN_EXE_crazyagent"),
+            "args": [SERVER_COMMAND, drop.to_str().unwrap()],
+            "env": []
+        }]}
+    })
+    .to_string();
+    let mut live = standin.start(&standin.at_home(&[]));
+    live.send(INITIALIZE);
+    assert_eq!(live.line().as_deref(), Some(INITIALIZED));
+    live.send(&new);
+    assert_eq!(live.line().as_deref(), Some(NEW_REPLY));
+    live.send(PROMPT);
+    assert_eq!(live.line().as_deref(), Some(CHUNK));
+    assert_eq!(live.line().as_deref(), Some(PROMPT_REPLY));
+    assert_eq!(live.finish().status.code(), Some(0));
+    let kept = standin.log("mcp-1.out");
+    let answers: Vec<serde_json::Value> = kept
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert_eq!(
+        answers
+            .iter()
+            .map(|answer| answer["id"].clone())
+            .collect::<Vec<_>>(),
+        [serde_json::json!(1), serde_json::json!(2)],
+        "{kept}"
+    );
+    assert_eq!(answers[1]["result"]["isError"], false, "{kept}");
+    assert_eq!(
+        take(&drop),
+        [Delegation {
+            harness: Some("codex".into()),
+            prompt: "Write page.md".into(),
+            role: None,
+        }]
+    );
 }

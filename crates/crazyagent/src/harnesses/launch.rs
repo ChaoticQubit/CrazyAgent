@@ -8,7 +8,7 @@ use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexS
 use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::credentials::SecretString;
-use crate::launch_context::{AgentContext, Installed};
+use crate::launch_context::{AgentContext, EngineServer, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -603,6 +603,123 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     Ok((request, Some(relay)))
 }
 
+/// Routes a launch of a listed harness on a ChatGPT sign-in through a ChatGPT relay on
+/// 127.0.0.1: the relay holds the sign-in's access token in engine memory and forwards
+/// only Responses requests to the ChatGPT backend, and the returned request names the
+/// relay's base URL and a random placeholder instead. The launch runs in the harness's own
+/// private home made in the agent's home, never in the sign-in's managed home, where the
+/// engine hands Codex the sign-in's own copy, and its sandbox is made after routing, for
+/// that home. Codex and Claude Code keep their own sign-in paths. Inputs: the request bound
+/// to the sign-in, with no sandbox profile yet, the harness, the stored sign-in, the
+/// agent's own 0700 home and the sign-in source. Output: the request to launch and the
+/// relay, which must live as long as the agent. A source read from another sign-in than
+/// the stored one is a wiring fault and stops on an assertion before any relay starts.
+/// Refusals: `launch_chatgpt_unsupported` for an own adapter, a harness that does not list
+/// `openai-responses`, another account or a request not bound to a sign-in,
+/// `launch_chatgpt_sandbox_premade` for a request that already carries a sandbox profile,
+/// `launch_chatgpt_home_is_managed` for an agent home that is the sign-in's managed home,
+/// lies inside it or holds it, `launch_account_home_holds_sign_in` where a sign-in's record
+/// lies, or the private home's refusal.
+pub fn route_chatgpt(
+    mut request: LaunchRequest,
+    harness: &super::registry::Harness,
+    connection: &crate::config::ModelConnection,
+    base: &Path,
+    source: std::sync::Arc<crate::model_gateway::relay::chatgpt::ChatGptSource>,
+) -> Result<(LaunchRequest, Relay), LaunchError> {
+    let AccountBinding::Subscription { home: managed } = &request.account else {
+        return Err(failure("launch_chatgpt_unsupported"));
+    };
+    let routed = harness.takes_chatgpt_sign_in()
+        && harness.named(&request.harness)
+        && super::registry::is_chatgpt_sign_in(connection);
+    if !routed {
+        return Err(failure("launch_chatgpt_unsupported"));
+    }
+    if request.sandbox_profile.is_some() {
+        return Err(failure("launch_chatgpt_sandbox_premade"));
+    }
+    let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
+        return Err(failure("launch_chatgpt_unsupported"));
+    };
+    assert!(
+        source.profile() == profile_ref,
+        "a ChatGPT relay serves only the sign-in it was read from"
+    );
+    if overlaps(base, managed) {
+        return Err(failure("launch_chatgpt_home_is_managed"));
+    }
+    let home = chatgpt_home(base, harness, &connection.id)?;
+    let relay = Relay::start_chatgpt(source).map_err(|error| LaunchError(error.0, None))?;
+    request.account = AccountBinding::Url {
+        home,
+        base_url: relay.base_url(),
+        key: Some(Secret::new(relay.token().to_owned())?),
+    };
+    assert!(relay.is_chatgpt());
+    assert!(request.account.home().starts_with(base));
+    assert!(
+        request
+            .account
+            .key()
+            .is_some_and(|key| is_placeholder(key.reveal()))
+    );
+    Ok((request, relay))
+}
+
+/// Whether two folders overlap: one is the other or lies inside it, as written or as their
+/// real paths where they exist, so neither a link nor a folder made later hides it.
+/// Inputs: the two folders. Output: the answer.
+fn overlaps(left: &Path, right: &Path) -> bool {
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let within = |left: &Path, right: &Path| left.starts_with(right) || right.starts_with(left);
+    within(left, right) || within(&real(left), &real(right))
+}
+
+/// Makes the private home a ChatGPT launch runs in, `<agent home>/<harness id>/<account>`
+/// (T18), refusing an agent home or a private home that holds a sign-in's record.
+/// Inputs: the agent's own 0700 home, the harness and the account. Output: the home,
+/// `launch_account_home_holds_sign_in`, or the private home's refusal.
+#[cfg(unix)]
+fn chatgpt_home(
+    base: &Path,
+    harness: &super::registry::Harness,
+    account: &crate::protocol::CredentialRef,
+) -> Result<PathBuf, LaunchError> {
+    holds_no_sign_in(base)?;
+    let home = super::home::private_home(base, &harness.manifest().id, account)?;
+    holds_no_sign_in(&home)?;
+    Ok(home)
+}
+
+/// Refuses a private home where its Unix owner and 0700 mode cannot be checked. Inputs:
+/// unused. Output: `launch_account_home_unavailable`.
+#[cfg(not(unix))]
+fn chatgpt_home(
+    base: &Path,
+    harness: &super::registry::Harness,
+    account: &crate::protocol::CredentialRef,
+) -> Result<PathBuf, LaunchError> {
+    let _ = (base, harness, account);
+    Err(failure("launch_account_home_unavailable"))
+}
+
+/// Refuses a folder that holds a native sign-in's own record, Codex's or Claude Code's,
+/// as a file, a link or anything else, so a listed harness never runs where it could read
+/// a sign-in's tokens. Input: the folder. Output: Ok, or
+/// `launch_account_home_holds_sign_in`, also when the folder cannot be looked into.
+#[cfg(unix)]
+fn holds_no_sign_in(folder: &Path) -> Result<(), LaunchError> {
+    use crate::engine::bootstrap::{CLAUDE_RECORD, CODEX_RECORD};
+    for record in [CODEX_RECORD, CLAUDE_RECORD] {
+        match std::fs::symlink_metadata(folder.join(record)) {
+            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(failure("launch_account_home_holds_sign_in")),
+        }
+    }
+    Ok(())
+}
+
 /// Builds the exact command a launch would spawn, without spawning it.
 /// Input: the launch request. Output: the command, or a plain refusal code when an
 /// input is unsafe or the harness has no launch adapter.
@@ -649,19 +766,42 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     let (arguments, environment) = match drivers::piped(&request.harness)? {
         Piped::Codex => codex_invocation(request, installed, key_file.as_deref())?,
         Piped::Claude => claude_invocation(request, installed, key_file.as_deref()),
-        Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
+        Piped::Acp => acp_invocation(request)?,
+        Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
             return Err(failure("launch_harness_unsupported"));
         }
     };
     sandboxed(request, installed, &arguments, &environment)
 }
 
+/// The command line of an ACP agent: its manifest's arguments filled for this launch, and no
+/// variable of its own, since the installed context gives its home block's variables.
+/// Input: the request. Output: the arguments and variables, or the refusal
+/// [`drivers::acp::arguments`] gives.
+fn acp_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> {
+    let listed = super::registry::registry()
+        .get(&request.harness)
+        .ok_or_else(|| failure("launch_harness_unsupported"))?;
+    let arguments = drivers::acp::arguments(
+        listed.manifest(),
+        request.account.home(),
+        &request.working_dir,
+        request.model.as_deref(),
+        request.tools,
+    )?;
+    Ok((
+        arguments.into_iter().map(OsString::from).collect(),
+        Vec::new(),
+    ))
+}
+
 /// Wraps a harness command line in the launch's sandbox, with the agent's own environment:
 /// its home, temporary folder, tool path, plain locale, the model proxy and git identity of
-/// an installed context, and the harness's own variables. Inputs: the checked request, the
-/// installed context, if any, the harness arguments and variables. Output: the command with
-/// piped standard streams in the working folder, or `launch_sandbox_unavailable` off macOS
-/// and `launch_environment_refused` when the environment cannot be built.
+/// an installed context, the harness's own variables and those a listed harness's home block
+/// sets. Inputs: the checked request, the installed context, if any, the harness arguments
+/// and variables. Output: the command with piped standard streams in the working folder, or
+/// `launch_sandbox_unavailable` off macOS and `launch_environment_refused` when the
+/// environment cannot be built.
 fn sandboxed(
     request: &LaunchRequest,
     installed: Option<&Installed>,
@@ -711,9 +851,15 @@ fn sandboxed(
                 .map(|(name, value)| (name, OsStr::new(value))),
         );
     }
+    let listed = installed.map(Installed::environment).unwrap_or_default();
     let harness_env = environment
         .iter()
-        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())));
+        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())))
+        .chain(
+            listed
+                .iter()
+                .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str()))),
+        );
     let words = super::interactive::launch_words(&request.executable)?;
     let (program, script) = words
         .split_first()
@@ -1142,12 +1288,14 @@ enum Driver {
 
 impl Driver {
     /// Starts the protocol driver of one headless launch: a Codex native lead (PA-7) keeps
-    /// the sub-agent threads its Codex starts, any other Codex launch interrupts each one.
-    /// Inputs: the request and whether it is a Codex native lead. Output: the driver and its
-    /// first frames, or a plain refusal code.
+    /// the sub-agent threads its Codex starts, any other Codex launch interrupts each one,
+    /// and an ACP launch opens its session with the engine's own MCP servers.
+    /// Inputs: the request, whether it is a Codex native lead and the engine's servers.
+    /// Output: the driver and its first frames, or a plain refusal code.
     fn new(
         request: &LaunchRequest,
         native_threads: bool,
+        servers: &[EngineServer],
     ) -> Result<(Self, Vec<Vec<u8>>), LaunchError> {
         let piped = drivers::piped(&request.harness);
         assert!(!native_threads || (matches!(piped, Ok(Piped::Codex)) && request.tools));
@@ -1196,7 +1344,7 @@ impl Driver {
             Piped::Acp => {
                 let (protocol, start) = Acp::new(&request.working_dir, request.tools, None)?;
                 let driver = Self::Acp {
-                    protocol: Box::new(protocol),
+                    protocol: Box::new(protocol.with_servers(servers)),
                 };
                 Ok((driver, vec![start]))
             }
@@ -1560,7 +1708,11 @@ impl Session {
         (relay, key): (Option<Relay>, Option<KeyFile>),
     ) -> Result<Self, LaunchError> {
         let native_threads = context.as_ref().is_some_and(Installed::native_threads);
-        let (driver, startup) = Driver::new(&request, native_threads)?;
+        let servers = context
+            .as_ref()
+            .map(Installed::engine_servers)
+            .unwrap_or_default();
+        let (driver, startup) = Driver::new(&request, native_threads, servers)?;
         let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
         command.env(LINEAGE_VARIABLE, token.as_str());
         let (sender, lines) = sync_channel(LINES_AHEAD_MAX);

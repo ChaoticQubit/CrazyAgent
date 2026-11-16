@@ -24,6 +24,7 @@ fn context() -> AgentContext {
         plugins: LaunchPlugins {
             servers: vec![LaunchServer {
                 name: "files".into(),
+                engine: false,
                 spec: ServerSpec::Stdio {
                     command: "/usr/bin/files".into(),
                     args: vec!["--stdio".into()],
@@ -142,6 +143,7 @@ fn a_listed_launch_leaves_out_a_server_with_a_tool_the_owner_switched_off() {
     let mut context = context();
     context.plugins.servers.push(LaunchServer {
         name: "notes".into(),
+        engine: false,
         spec: ServerSpec::Http {
             url: "http://127.0.0.1:4100/mcp".into(),
         },
@@ -249,4 +251,272 @@ fn an_adopted_listed_launch_removes_only_its_own_files_inside_the_home() {
     assert!(home.join("agent").is_dir());
     assert_eq!(fs::read_to_string(&kept).ok().as_deref(), Some("kept"));
     assert_eq!(fs::read_to_string(&beside).ok().as_deref(), Some("kept"));
+}
+
+const ENGINE: &str = "/Applications/CrazyAgent.app/Contents/MacOS/crazyagent";
+
+/// T19b Q2 (leader 19:35): an ACP launch hands its agent in `session/new` only the engine's
+/// own team server, marked where the engine adds it; the frame never carries an owner
+/// server, its secret name or its secret value.
+#[test]
+fn an_acp_session_opens_with_the_engines_team_server_and_never_an_owner_secret() {
+    let (_folder, home) = private_home();
+    let mailbox = home.join("mailbox");
+    let context = context()
+        .with_agent_team_tool(Path::new(ENGINE), &mailbox, &[], false)
+        .unwrap();
+
+    let installed = context.install_listed(&manifest(""), &home, true);
+
+    assert!(installed.is_ok(), "{:?}", installed.as_ref().err());
+    let installed = installed.unwrap();
+    let mailbox = mailbox.to_str().unwrap().to_owned();
+    assert_eq!(
+        installed.engine_servers().to_vec(),
+        vec![EngineServer {
+            name: crate::team::tool::SERVER_NAME.into(),
+            command: ENGINE.into(),
+            args: vec![
+                crate::team::tool::AGENT_SERVER_COMMAND.into(),
+                mailbox.clone()
+            ],
+        }]
+    );
+    let (acp, _) =
+        crate::harnesses::drivers::acp::Acp::new(Path::new("/work"), true, None).unwrap();
+    let mut acp = acp.with_servers(installed.engine_servers());
+    let (_, writes) = acp
+        .receive(
+            br#"{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#,
+        )
+        .unwrap();
+    assert_eq!(writes.len(), 1);
+    let frame = String::from_utf8(writes[0].clone()).unwrap();
+    let opened: serde_json::Value = serde_json::from_str(&frame).unwrap();
+    assert_eq!(
+        opened["params"]["mcpServers"],
+        serde_json::json!([{
+            "name": crate::team::tool::SERVER_NAME,
+            "command": ENGINE,
+            "args": [crate::team::tool::AGENT_SERVER_COMMAND, mailbox],
+            "env": []
+        }])
+    );
+    for owner in ["s3cret", "FILES_TOKEN", "/usr/bin/files", "\"files\""] {
+        assert!(
+            !frame.contains(owner),
+            "{owner} reached session/new: {frame}"
+        );
+    }
+}
+
+/// T19b Q2: a server the owner saved under the engine's team server name is never marked
+/// as the engine's own, so it never reaches an ACP session, even with no secret.
+#[test]
+fn an_owner_server_under_the_team_server_name_never_reaches_an_acp_session() {
+    let (_folder, home) = private_home();
+    let mut context = context();
+    context.plugins.servers.push(LaunchServer {
+        name: crate::team::tool::SERVER_NAME.into(),
+        engine: false,
+        spec: ServerSpec::Stdio {
+            command: "/usr/bin/files".into(),
+            args: vec![
+                crate::team::tool::AGENT_SERVER_COMMAND.into(),
+                "/tmp/mailbox".into(),
+            ],
+        },
+        secrets: Vec::new(),
+    });
+
+    let installed = context.install_listed(&manifest(""), &home, true);
+
+    assert!(installed.is_ok(), "{:?}", installed.as_ref().err());
+    assert_eq!(
+        installed.ok().map(|found| found.engine_servers().to_vec()),
+        Some(Vec::new())
+    );
+}
+
+/// T19b 19b-1: an ACP launch inside a project starts its harness with the manifest's
+/// arguments and the variables its home block sets, and keeps the engine's team server for
+/// its session, never in an argument.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_acp_launch_in_a_project_starts_with_its_manifest_arguments_and_home_variables() {
+    let (_folder, home) = private_home();
+    let work = tempfile::tempdir().unwrap();
+    let work = work.path().canonicalize().unwrap();
+    let profiles = tempfile::tempdir().unwrap();
+    let profile = profiles.path().canonicalize().unwrap().join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let context = context()
+        .with_agent_team_tool(Path::new(ENGINE), &home.join("mailbox"), &[], false)
+        .unwrap();
+    let request = crate::harnesses::launch::LaunchRequest {
+        harness: "standin-acp".into(),
+        executable: PathBuf::from("/usr/bin/true"),
+        working_dir: work,
+        account: crate::harnesses::launch::AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:11434".into(),
+            key: None,
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile),
+        unconfined: false,
+        git_identity: None,
+        limits: crate::harnesses::launch::LaunchLimits::default(),
+    };
+
+    let built = crate::harnesses::launch::command_with_context(&request, &context);
+
+    assert!(built.is_ok(), "{:?}", built.as_ref().err());
+    let (command, installed) = built.unwrap();
+    let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
+    assert_eq!(
+        args[args.len().saturating_sub(2)..],
+        [std::ffi::OsStr::new("--home"), home.as_os_str()]
+    );
+    assert!(
+        args.iter()
+            .all(|argument| !argument.to_string_lossy().contains("team-mcp")),
+        "{args:?}"
+    );
+    let config = command
+        .get_envs()
+        .find(|(name, _)| *name == "STANDIN_ACP_CONFIG")
+        .and_then(|(_, value)| value);
+    assert_eq!(config, Some(home.join("config").as_os_str()));
+    assert_eq!(installed.engine_servers().len(), 1);
+}
+
+const ACP_PIPED: &str = "piped:\n  driver: \"acp\"\n  argv:\n    - \"--home\"\n    - \"{home}\"\n  tools_off:\n    - \"--no-tools\"\n";
+
+fn rendered_names(home: &Path) -> Option<Vec<String>> {
+    let mut names: Vec<String> = servers_in(&home.join("agent").join("mcp.json"))?["mcpServers"]
+        .as_object()?
+        .keys()
+        .cloned()
+        .collect();
+    names.sort();
+    Some(names)
+}
+
+/// T19b 19b-1: an ACP harness takes the engine's team server in `session/new`, so the MCP
+/// file its manifest renders names only the owner's servers and the agent never sees the team
+/// server twice; any other listed harness still finds the team server in that file.
+#[test]
+fn an_acp_harness_renders_only_the_owners_servers_and_takes_the_team_server_in_its_session() {
+    let (_folder, home) = private_home();
+    let teamed = || {
+        context()
+            .with_agent_team_tool(Path::new(ENGINE), &home.join("mailbox"), &[], false)
+            .unwrap()
+    };
+
+    let acp = teamed().install_listed(&manifest(&format!("{ACP_PIPED}{BLOCKS}")), &home, true);
+
+    assert!(acp.is_ok(), "{:?}", acp.as_ref().err());
+    assert_eq!(rendered_names(&home), Some(vec!["files".to_owned()]));
+    assert_eq!(acp.ok().map(|found| found.engine_servers().len()), Some(1));
+
+    let other = teamed().install_listed(&manifest(BLOCKS), &home, true);
+
+    assert!(other.is_ok(), "{:?}", other.as_ref().err());
+    assert_eq!(
+        rendered_names(&home),
+        Some(vec![
+            crate::team::tool::SERVER_NAME.to_owned(),
+            "files".to_owned()
+        ])
+    );
+}
+
+/// T19b 19b-3: a started ACP agent's session opens with the engine's team server its
+/// installed context carries, as the stand-in's own log of its input shows, and with no owner
+/// secret; this covers the line that hands those servers from the launch to its driver.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_started_acp_agent_opens_its_session_with_the_engines_team_server_and_no_owner_secret() {
+    let (_folder, home) = private_home();
+    let base = tempfile::Builder::new()
+        .prefix("ca-acp-team-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let work = base.path().canonicalize().unwrap().join("work");
+    fs::DirBuilder::new().mode(0o700).create(&work).unwrap();
+    let profile = base.path().canonicalize().unwrap().join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let install = tempfile::tempdir().unwrap();
+    let program = install.path().canonicalize().unwrap().join("standin-acp");
+    fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/harness/standin.sh"
+        ),
+        &program,
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let mailbox = home.join("mailbox");
+    let context = context()
+        .with_agent_team_tool(Path::new(ENGINE), &mailbox, &[], false)
+        .unwrap();
+    let request = crate::harnesses::launch::LaunchRequest {
+        harness: "standin-acp".into(),
+        executable: program,
+        working_dir: work,
+        account: crate::harnesses::launch::AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:11434".into(),
+            key: None,
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile),
+        unconfined: false,
+        git_identity: None,
+        limits: crate::harnesses::launch::LaunchLimits::default(),
+    };
+
+    let started = crate::harnesses::launch::Session::start_with_context(request, context);
+
+    assert!(started.is_ok(), "{:?}", started.as_ref().err());
+    let mut session = started.unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut events = Vec::new();
+    while !events
+        .iter()
+        .any(|event| matches!(event, crate::harnesses::launch::LaunchEvent::Ready { .. }))
+    {
+        assert!(std::time::Instant::now() < deadline, "{events:?}");
+        if let Some(event) = session
+            .next_event(std::time::Duration::from_millis(200))
+            .unwrap()
+        {
+            events.push(event);
+        }
+    }
+    let log = fs::read_to_string(home.join("standin").join("stdin-1")).unwrap_or_default();
+    let opened = log
+        .lines()
+        .find(|line| line.contains("\"session/new\""))
+        .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+    assert_eq!(
+        opened.map(|frame| frame["params"]["mcpServers"].clone()),
+        Some(serde_json::json!([{
+            "name": crate::team::tool::SERVER_NAME,
+            "command": ENGINE,
+            "args": [crate::team::tool::AGENT_SERVER_COMMAND, mailbox.to_str().unwrap()],
+            "env": []
+        }])),
+        "{log}"
+    );
+    assert!(
+        !log.contains("s3cret") && !log.contains("FILES_TOKEN"),
+        "{log}"
+    );
+    session.stop().unwrap();
 }

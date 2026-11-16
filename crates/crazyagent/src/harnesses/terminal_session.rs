@@ -1,4 +1,5 @@
 use super::codex_folder::{self, Screen};
+use super::interactive::settings::{STEPS_MAX, Step, TerminalSettings};
 use super::interactive::{self, Run, Support, Transcript};
 use super::launch::{
     Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route,
@@ -25,6 +26,8 @@ pub use adopt::{KEEPERS_MAX, KeeperPin, PaneRecord, RecordSource};
 
 pub const PROMPT_BYTES_MAX: usize = 1024 * 1024;
 pub(crate) const READY_WAIT: Duration = Duration::from_secs(30);
+/// The failure of a launch whose first screen, as its manifest names it, never showed.
+pub(crate) const FIRST_SCREEN_MISSING: &str = "launch_first_screen_missing";
 const READY_QUIET: Duration = Duration::from_millis(700);
 const PASTE_SETTLE: Duration = Duration::from_millis(200);
 const POLL: Duration = Duration::from_millis(100);
@@ -47,6 +50,34 @@ const PASTE_END: &str = "\x1b[201~";
 const ENTER: &[u8] = b"\r";
 const ESCAPE: &[u8] = b"\x1b";
 
+/// Gives the keys that submit a prompt and interrupt a turn: those the settings of a
+/// harness run from its manifest name, else Enter and Escape. Input: the settings, if any.
+/// Output: the submit key's bytes and the interrupt key's.
+fn keys(settings: Option<&TerminalSettings>) -> (&'static [u8], &'static [u8]) {
+    settings.map_or((ENTER, ESCAPE), |settings| {
+        (settings.submit().bytes(), settings.interrupt().bytes())
+    })
+}
+
+/// Tells whether a launch failure ends the launch for good, since no later look can mend
+/// it: a first screen its manifest names never showed, or Codex's folder access screen or
+/// its input box never came. Input: the failure. Output: whether it does.
+pub(crate) fn ended_the_launch(problem: &LaunchError) -> bool {
+    [
+        FIRST_SCREEN_MISSING,
+        codex_folder::SCREEN_MISSING,
+        codex_folder::BOX_MISSING,
+    ]
+    .contains(&problem.0.as_str())
+}
+
+/// The plain sentence an owner reads for a launch whose first screen never showed. Inputs:
+/// the harness's name and the text the missing step waits for. Output: the sentence.
+pub(crate) fn first_screen_missing(harness: &str, seen: &str) -> String {
+    let wait = READY_WAIT.as_secs();
+    format!("{harness} did not show its first screen (\"{seen}\") within {wait} seconds.")
+}
+
 /// A harness running its own interactive app in a terminal pane of the engine's host.
 /// Prompts are typed into the pane; replies, tool use and turn ends are read from the
 /// harness's own session record, never from the screen. Stop or drop ends the pane.
@@ -62,6 +93,10 @@ pub struct TerminalSession {
     ready: bool,
     first: Option<FirstScreen>,
     folder: Option<FolderStep>,
+    steps: VecDeque<Step>,
+    harness_name: Option<String>,
+    submit_key: &'static [u8],
+    interrupt_key: &'static [u8],
     turn: bool,
     held: bool,
     over_hold: bool,
@@ -235,7 +270,29 @@ impl TerminalSession {
             .as_ref()
             .map(|context| context.install(&request.harness, request.account.home(), request.tools))
             .transpose()?;
-        Self::open(host, agent, request, installed, context.as_ref(), resume)
+        Self::open(
+            host,
+            agent,
+            request,
+            installed,
+            context.as_ref(),
+            resume,
+            None,
+        )
+    }
+
+    /// Starts a harness from given terminal settings, such as a stand-in outside the
+    /// catalog, continuing the conversation `resume` names when given. Inputs: the host,
+    /// the pane name, the request, the settings and the conversation. Output: the running
+    /// session, or a plain refusal code; nothing is left behind on refusal.
+    pub fn start_with(
+        host: Arc<dyn Host>,
+        agent: AgentId,
+        request: LaunchRequest,
+        settings: TerminalSettings,
+        resume: Option<&Resume>,
+    ) -> Result<Self, LaunchError> {
+        Self::open(host, agent, request, None, None, resume, Some(settings))
     }
 
     /// Starts an agent whose caller already installed the project context into its home,
@@ -248,7 +305,15 @@ impl TerminalSession {
         installed: Installed,
         context: &AgentContext,
     ) -> Result<Self, LaunchError> {
-        Self::open(host, agent, request, Some(installed), Some(context), None)
+        Self::open(
+            host,
+            agent,
+            request,
+            Some(installed),
+            Some(context),
+            None,
+            None,
+        )
     }
 
     fn open(
@@ -258,9 +323,10 @@ impl TerminalSession {
         installed: Option<Installed>,
         context: Option<&AgentContext>,
         resume: Option<&Resume>,
+        settings: Option<TerminalSettings>,
     ) -> Result<Self, LaunchError> {
         validate(&request)?;
-        if interactive::support(&request.harness) != Support::Terminal {
+        if settings.is_none() && interactive::support(&request.harness) != Support::Terminal {
             return Err(failure("launch_terminal_unsupported"));
         }
         if let Some(code) = agent_pane_unavailable(std::env::consts::OS) {
@@ -273,7 +339,13 @@ impl TerminalSession {
             .working_dir
             .canonicalize()
             .map_err(|_| failure("launch_working_dir_unavailable"))?;
-        let claude = matches!(records::reader(&request.harness), Ok(Reader::ClaudeSession));
+        let reader = records::reader(&request.harness);
+        let manifest_record = matches!(reader, Ok(Reader::JsonlAppend | Reader::JsonRewrite));
+        let settings = match settings {
+            None if manifest_record => Some(interactive::catalog_settings(&request.harness)?),
+            settings => settings,
+        };
+        let claude = settings.is_none() && matches!(reader, Ok(Reader::ClaudeSession));
         if claude {
             interactive::prepare_claude_home(&home, &cwd)?;
         }
@@ -281,7 +353,7 @@ impl TerminalSession {
             Some(resume) => resume.id.clone(),
             None => interactive::session_id()?,
         };
-        let command = interactive::command(
+        let command = interactive::command_with(
             &request,
             installed.as_ref(),
             &Run {
@@ -289,7 +361,18 @@ impl TerminalSession {
                 key_file: key.as_ref().map(|key| key.path.as_path()),
                 resume: resume.is_some(),
             },
+            settings.as_ref(),
         )?;
+        let (submit_key, interrupt_key) = keys(settings.as_ref());
+        let steps: VecDeque<Step> = settings
+            .as_ref()
+            .map(|settings| settings.first_screen().iter().cloned().collect())
+            .unwrap_or_default();
+        let harness_name = settings.as_ref().map(|settings| settings.name().to_owned());
+        let named = claude
+            || settings
+                .as_ref()
+                .is_some_and(|settings| resume.is_some() || settings.takes_session());
         let folder = codex_folder::behind_a_screen(&command.argv).then_some(FolderStep::Waiting);
         if let Some(team) = installed.as_ref().and_then(Installed::native) {
             interactive::write_teammate_command(&home, &command, &request, team)?;
@@ -350,7 +433,7 @@ impl TerminalSession {
         assert_eq!(pane.agent, agent);
         let unkept = host.unkept(&agent);
         let ready = LaunchEvent::Ready {
-            native_session: claude.then_some(session_id),
+            native_session: named.then_some(session_id),
         };
         let session = Self {
             host,
@@ -364,6 +447,10 @@ impl TerminalSession {
             ready: false,
             first: None,
             folder,
+            steps,
+            harness_name,
+            submit_key,
+            interrupt_key,
             turn: false,
             held: false,
             over_hold: false,
@@ -443,6 +530,15 @@ impl TerminalSession {
             .map(|(id, record)| Resume { id, record })
     }
 
+    /// The plain reason this launch is stuck before its first screen: the sentence of
+    /// [`first_screen_missing`] for the needed step it still waits on. Output: the
+    /// sentence, none when no needed step is left.
+    pub fn first_screen_reason(&self) -> Option<String> {
+        let step = self.steps.iter().find(|step| !step.optional)?;
+        let name = self.harness_name.as_deref()?;
+        Some(first_screen_missing(name, &step.seen))
+    }
+
     /// Returns the pane's first process, which leads the process group of the harness.
     pub fn process_group(&self) -> u32 {
         self.pid
@@ -515,12 +611,13 @@ impl TerminalSession {
             self.type_bytes(part.as_bytes())?;
         }
         std::thread::sleep(PASTE_SETTLE);
-        self.type_bytes(ENTER)?;
+        self.type_bytes(self.submit_key)?;
         self.turn = true;
         Ok(())
     }
 
-    /// Presses Escape in the app, which stops the running turn in Codex and Claude Code. A
+    /// Presses the app's interrupt key, which stops the running turn: Escape in Codex and
+    /// Claude Code, the key its manifest names for a harness run from its settings. A
     /// turn held open for the app's background commands has no request running for Escape
     /// to stop, so it ends here as interrupted, its commands still counted as running.
     /// Output: Ok once typed or ended, or `launch_not_running` with no turn.
@@ -539,7 +636,7 @@ impl TerminalSession {
             ]);
             return Ok(());
         }
-        self.type_bytes(ESCAPE)
+        self.type_bytes(self.interrupt_key)
     }
 
     /// Waits up to `wait` for the next event of the turn the engine started. Text, tool
@@ -726,11 +823,15 @@ impl TerminalSession {
     /// Looks once, without waiting, whether the app reads keys yet by the rule its first
     /// prompt waits for: it has drawn its screen, nothing changed on it for `READY_QUIET`
     /// and it turned bracketed paste on (see [`Host::input_live`]), or `READY_WAIT` passed
-    /// since the first look. A Codex launch behind its folder access screen is ready only
-    /// once that screen took its one Enter and the input box is up, and fails instead of
-    /// typing when that does not happen in time. A failed look keeps the wait, so the next
-    /// look tries again within the same bound. Output: the answer, the failed look's
-    /// problem, a folder access failure, or `launch_closed` once the pane ended.
+    /// since the first look. A harness run from its settings answers its first-screen steps
+    /// first, each as soon as its text shows, however busy the screen, a needed one within
+    /// `READY_WAIT` or `launch_first_screen_missing`, an optional one never waited for, and
+    /// only then waits on a quiet screen and bracketed paste. A Codex launch behind its
+    /// folder access screen is ready only once that screen took its one Enter and the input
+    /// box is up, and fails instead of typing when that does not happen in time. A failed
+    /// look keeps the wait, so the next look tries again within the same bound. Output: the
+    /// answer, the failed look's problem, a folder access failure, or `launch_closed` once
+    /// the pane ended.
     pub fn poll_ready(&mut self) -> Result<bool, LaunchError> {
         if self.ready {
             return Ok(true);
@@ -749,6 +850,10 @@ impl TerminalSession {
                 }));
             }
         } else if first.started.elapsed() >= READY_WAIT {
+            if self.steps.iter().any(|step| !step.optional) {
+                return Err(failure(FIRST_SCREEN_MISSING));
+            }
+            self.steps.clear();
             self.ready = true;
             self.first = None;
             return Ok(true);
@@ -788,8 +893,14 @@ impl TerminalSession {
             first.drawn = true;
             first.quiet = Instant::now();
         }
-        let ready = first.drawn
-            && first.quiet.elapsed() >= READY_QUIET
+        let drawn = first.drawn;
+        let answered = drawn && self.past_first_screen()?;
+        let quiet = self
+            .first
+            .as_ref()
+            .is_some_and(|first| first.quiet.elapsed() >= READY_QUIET);
+        let ready = answered
+            && quiet
             && self.host.input_live(&self.agent).map_err(host_failure)?
             && self.past_folder_screen()?;
         if ready {
@@ -797,6 +908,41 @@ impl TerminalSession {
             self.first = None;
         }
         Ok(ready)
+    }
+
+    /// Answers the first screen of a harness run from its settings: each step's key once,
+    /// only once its text shows, in order. An optional step whose text is not shown is
+    /// passed over for a later step that is, and each press drops the steps up to it and
+    /// starts the next step's wait. A launch with no needed step left is past it. Output:
+    /// whether every needed step was answered, or the failed look's problem.
+    fn past_first_screen(&mut self) -> Result<bool, LaunchError> {
+        if self.steps.is_empty() {
+            return Ok(true);
+        }
+        let screen = self.host.screen(&self.agent).map_err(host_failure)?;
+        let shown = String::from_utf8_lossy(&screen);
+        let mut found = None;
+        for (at, step) in self.steps.iter().enumerate() {
+            if shown.contains(step.seen.as_str()) {
+                found = Some(at);
+                break;
+            }
+            if !step.optional {
+                break;
+            }
+        }
+        let Some(at) = found else {
+            return Ok(self.steps.iter().all(|step| step.optional));
+        };
+        let press = self.steps[at].press;
+        self.type_bytes(press.bytes())?;
+        self.steps.drain(..=at);
+        assert!(self.steps.len() < STEPS_MAX);
+        if let Some(first) = self.first.as_mut() {
+            first.started = Instant::now();
+            first.quiet = Instant::now();
+        }
+        Ok(false)
     }
 
     /// Takes a launch one step past Codex's folder access screen: Enter once, only on
@@ -1417,3 +1563,7 @@ mod tests;
 
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod folder_screen_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "terminal_session/manifest_tests.rs"]
+mod manifest_tests;

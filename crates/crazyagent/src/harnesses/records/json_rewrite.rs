@@ -73,6 +73,15 @@ impl JsonRewrite {
         self.position
     }
 
+    /// Looks for the record now without reading it, as a resumed run checks the record it
+    /// was handed. Output: the record's full path, or none while there is none.
+    pub fn find(&mut self) -> Option<PathBuf> {
+        if self.below.is_none() {
+            self.first();
+        }
+        self.record()
+    }
+
     /// Moves past every entry the record holds now, so the next read returns only entries
     /// written after; a record caught half-written is skipped once it is whole. Output:
     /// nothing, or a plain code when the record cannot be read or is no list.

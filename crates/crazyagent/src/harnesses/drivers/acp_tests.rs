@@ -741,3 +741,86 @@ fn an_acp_manifest_names_its_own_tools_off_switch_or_says_tools_are_limited() {
         refused.message
     );
 }
+
+fn team_server() -> EngineServer {
+    EngineServer {
+        name: "crazyagent-team".into(),
+        command: "/Applications/CrazyAgent.app/Contents/MacOS/crazyagent".into(),
+        args: vec!["team-mcp-agent".into(), "/agent/tmp/mailbox".into()],
+    }
+}
+
+/// T19b 19b-1: an ACP session opens with the engine's own MCP servers it was given, in the
+/// ACP stdio form with no variable, whether `session/new` opens it or `session/load`
+/// continues one, and with no server at all while tools are off.
+#[test]
+fn a_session_opens_with_the_engines_own_servers_in_the_acp_stdio_form_and_none_with_tools_off() {
+    let expected = json!([{
+        "name": "crazyagent-team",
+        "command": "/Applications/CrazyAgent.app/Contents/MacOS/crazyagent",
+        "args": ["team-mcp-agent", "/agent/tmp/mailbox"],
+        "env": []
+    }]);
+    let opened = |tools: bool, resume: Option<&str>, capabilities: Value| {
+        let (acp, _) = Acp::new(Path::new(CWD), tools, resume).unwrap();
+        let mut acp = acp.with_servers(&[team_server()]);
+        let (_, writes) = acp.receive(&initialized(capabilities)).unwrap();
+        assert_eq!(writes.len(), 1);
+        parsed(&writes[0])
+    };
+    let new = opened(true, None, json!({}));
+    assert_eq!(new["method"], "session/new");
+    assert_eq!(new["params"]["mcpServers"], expected);
+    let load = opened(true, Some(SESSION), json!({"loadSession": true}));
+    assert_eq!(load["method"], "session/load");
+    assert_eq!(load["params"]["mcpServers"], expected);
+    let off = opened(false, None, json!({}));
+    assert_eq!(off["method"], "session/new");
+    assert_eq!(off["params"]["mcpServers"], json!([]));
+}
+
+/// T19b 19b-1: an ACP agent starts with its manifest's `piped.argv`, each `{home}`, `{cwd}`
+/// and `{model}` filled, and with `piped.tools_off` added only while tools are off; `{model}`
+/// with no model and a placeholder an ACP launch cannot fill are refused.
+#[test]
+fn an_acp_agent_starts_with_its_manifest_arguments_and_its_tools_off_switch_only_with_tools_off() {
+    const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-acp.yaml");
+    let parse = |text: &str| crate::harnesses::manifest::parse(text.as_bytes()).unwrap();
+    let (home, cwd) = (Path::new("/agent/home"), Path::new(CWD));
+    let standin = parse(STANDIN);
+    assert_eq!(
+        arguments(&standin, home, cwd, None, true).ok(),
+        Some(vec!["--home".to_owned(), "/agent/home".to_owned()])
+    );
+    assert_eq!(
+        arguments(&standin, home, cwd, None, false).ok(),
+        Some(vec![
+            "--home".to_owned(),
+            "/agent/home".to_owned(),
+            "--no-tools".to_owned()
+        ])
+    );
+    let argv = "    - \"--home\"\n    - \"{home}\"\n";
+    assert!(STANDIN.contains(argv));
+    let filled = parse(&STANDIN.replace(
+        argv,
+        "    - \"--cwd={cwd}\"\n    - \"--model\"\n    - \"{model}\"\n",
+    ));
+    assert_eq!(
+        arguments(&filled, home, cwd, Some("m-1"), true).ok(),
+        Some(vec![
+            "--cwd=/work/project".to_owned(),
+            "--model".to_owned(),
+            "m-1".to_owned()
+        ])
+    );
+    assert_eq!(
+        arguments(&filled, home, cwd, None, true).err(),
+        Some(failure("launch_model_unsupported"))
+    );
+    let session = parse(&STANDIN.replace(argv, "    - \"{session}\"\n"));
+    assert_eq!(
+        arguments(&session, home, cwd, None, true).err(),
+        Some(failure("launch_harness_unsupported"))
+    );
+}
