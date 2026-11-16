@@ -26,10 +26,10 @@ use std::path::PathBuf;
 use words::{
     ADD_FIELD, BACK, BROWSER_NO_KEY, CHECK, CHECKING, CLIENT_ID, CLIENT_SECRET, ENTER_CLIENT_ID,
     KEY_EMPTY, KEY_FIELD, NOT_CONNECTOR, NOT_OPENED, NOT_READ_SIGN_IN, OAUTH_NOT_YET,
-    REMOVE_OWN_APP, SAVE, SAVED, SIGN_IN, SIGN_IN_CANCELLED, SIGN_OUT, STALE, USE_OWN_APP,
-    browser_now, chosen_way, hosts, keys_shown, other_way, own_app_removed, own_app_saved, refusal,
-    secrets_shown, sign_in_first, signed_in, signed_in_line, signed_out_line, signs_in_with,
-    way_word,
+    REMOVE_OWN_APP, RETYPE_SECRET, SAVE, SAVED, SIGN_IN, SIGN_IN_CANCELLED, SIGN_OUT, STALE,
+    USE_OWN_APP, browser_now, chosen_way, hosts, keys_shown, other_way, own_app_removed,
+    own_app_saved, refusal, secrets_shown, sign_in_first, signed_in, signed_in_line,
+    signed_out_line, signs_in_with, way_word,
 };
 
 mod draw;
@@ -115,6 +115,7 @@ struct OwnAppForm {
     client_id: TextField,
     secret: TextField,
     on_secret: bool,
+    secret_sent: bool,
 }
 
 enum Open {
@@ -498,6 +499,7 @@ impl ConnectorsPage {
             client_id: TextField::new(CLIENT_ID, CLIENT_ID_CHARS_MAX),
             secret: TextField::secret(CLIENT_SECRET, KEY_CHARS_MAX),
             on_secret: false,
+            secret_sent: false,
         };
         self.failure = None;
         self.open = Open::OwnApp(Box::new(form));
@@ -530,8 +532,13 @@ impl ConnectorsPage {
             return;
         }
         let secret = if form.secret.is_empty() {
+            if form.secret_sent {
+                self.failure = Some(RETYPE_SECRET.into());
+                return;
+            }
             None
         } else {
+            form.secret_sent = true;
             let typed = AccountSecret::new(form.secret.take_secret());
             assert!(
                 form.secret.is_empty(),

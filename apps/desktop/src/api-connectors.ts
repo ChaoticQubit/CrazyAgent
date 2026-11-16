@@ -198,6 +198,7 @@ export const CONNECTORS_PAGE = {
   clientSecret: "Client secret (empty for a public app)",
   clientSecretHelp: "The secret is sent to the engine once and never shown again.",
   enterClientId: "Enter a client id.",
+  retypeSecret: "Type the client secret again.",
   useOwnApp: "Use my own app",
   removeOwnApp: "Remove my app",
   refusedFile: "Fix its file, or remove it on the App plugins page.",

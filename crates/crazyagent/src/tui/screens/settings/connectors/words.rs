@@ -122,6 +122,9 @@ pub(in crate::tui) const CLIENT_SECRET_HELP: &str =
     "The secret is sent to the engine once and never shown again.";
 /// The form's line when Save is pressed with no client id, the desktop's words.
 pub(in crate::tui) const ENTER_CLIENT_ID: &str = "Enter a client id.";
+/// The form's line when Save is pressed with the secret field empty after a typed secret
+/// left it, so a refusal never turns into a public app (rv-code2 F1), the desktop's words.
+pub(in crate::tui) const RETYPE_SECRET: &str = "Type the client secret again.";
 /// The action that opens the own app form, the desktop's words.
 pub(in crate::tui) const USE_OWN_APP: &str = "Use my own app";
 /// The action that removes a saved own app, the desktop's words.

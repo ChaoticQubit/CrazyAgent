@@ -28,7 +28,7 @@ export type ConnectorDialog =
   | { kind: "trust"; yaml: string | null; trust: ConnectorTrustView; review: boolean }
   | { kind: "refused"; yaml: string | null; problem: Problem }
   | { kind: "key"; connector: string; title: string; hosts: string[]; secret: string }
-  | { kind: "own_app"; connector: string; title: string; redirect: string; clientId: string }
+  | { kind: "own_app"; connector: string; title: string; redirect: string; clientId: string; secretSent: boolean }
   | { kind: "remove"; connector: string; title: string };
 
 /** Everything the Connectors views ask their container to do. */
@@ -428,6 +428,11 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     }
     const secret = keyRef.current.value;
     keyRef.current.value = "";
+    if (secret === "" && dialog.secretSent) {
+      setFailure(CONNECTORS_PAGE.retypeSecret);
+      return;
+    }
+    if (secret !== "") setDialog({ ...dialog, secretSent: true });
     const { connector: name, title } = dialog;
     await changed(() => setConnectorOwnApp(name, clientId, secret), ownAppSavedLine(title));
   }
@@ -482,7 +487,7 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     onUseOwnApp: (shown) => {
       assert(shown.oauth !== null && shown.oauth.own_app_allowed, "only a connector whose file offers an own app opens its entry");
       setFailure("");
-      setDialog({ kind: "own_app", connector: shown.name, title: shown.title, redirect: shown.oauth.redirect, clientId: "" });
+      setDialog({ kind: "own_app", connector: shown.name, title: shown.title, redirect: shown.oauth.redirect, clientId: "", secretSent: false });
     },
     onClientId: (clientId) => { if (dialog.kind === "own_app") setDialog({ ...dialog, clientId }); },
     onSaveApp: () => { if (!busy) void saveApp(); },
