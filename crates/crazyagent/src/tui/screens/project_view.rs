@@ -13,6 +13,7 @@ use super::project::{
 use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render, sanitize};
 use super::project_master::{activity_rows, last_activity};
+use super::project_publish::{PROMPT_KEY, PROMPT_LINE};
 use super::project_team::window;
 use super::project_time::{clock, duration};
 use super::sessions::Sessions;
@@ -1110,6 +1111,25 @@ fn needs_you(screen: &ProjectScreen, look: &Look) -> Vec<Row> {
     ]
 }
 
+/// Says whether the Overview shows the GitHub publish question and takes its G key: the
+/// engine said to ask, and the project has its setup. Takes the screen. Returns the answer.
+pub(in crate::tui) fn asks_github(screen: &ProjectScreen) -> bool {
+    screen.github_notice && !screen.setup_missing
+}
+
+fn github_notice(screen: &ProjectScreen, look: &Look) -> Vec<Row> {
+    if !asks_github(screen) {
+        return Vec::new();
+    }
+    vec![
+        Row::default(),
+        Row::of(PROMPT_LINE, look.muted)
+            .push("   ", Style::new())
+            .push(PROMPT_KEY.0, look.heading)
+            .push(format!(" {}", PROMPT_KEY.1), look.fg),
+    ]
+}
+
 fn pool_line(screen: &ProjectScreen, look: &Look) -> Row {
     match &screen.pool {
         _ if !screen.pool_ready => Row::of("Not ready yet", look.muted),
@@ -1213,9 +1233,14 @@ fn overview(
                 ));
             }
         }
-        let tabs_room = room.saturating_sub(lines.len());
+        let notice = github_notice(screen, look);
+        let tabs_room = room.saturating_sub(lines.len() + notice.len());
         lines.extend(overview_tab_rows(screen, content, tabs_room, look));
+        lines.extend(notice);
         help.push(key);
+        if asks_github(screen) {
+            help.push(PROMPT_KEY);
+        }
         if screen.overview_tabs.is_some() {
             help.extend(OVERVIEW_TAB_KEYS);
         }
@@ -1228,6 +1253,9 @@ fn overview(
             ("n", "Dismiss"),
             ("e", "Edit first"),
         ]);
+    }
+    if asks_github(screen) {
+        help.push(PROMPT_KEY);
     }
     help.extend([("Enter", "Open"), ("o", "Open folder")]);
     if screen.overview_tabs.is_some() {
@@ -1250,8 +1278,10 @@ fn overview(
         left.extend(work_rows(screen, look, true, left_width));
         left.extend(roadmap_row(screen, look));
         left.extend(roadmap_status_row(screen, look));
-        let left_room = room.saturating_sub(left.len());
+        let notice = github_notice(screen, look);
+        let left_room = room.saturating_sub(left.len() + notice.len());
         left.extend(overview_tab_rows(screen, left_width, left_room, look));
+        left.extend(notice);
         let mut right = vec![Row::of("Team", look.heading)];
         if let Some(setup) = &screen.setup {
             let team = &setup.team;
@@ -1338,8 +1368,10 @@ fn overview(
             .pad(6)
             .cat(pool_line(screen, look)),
     );
-    let tabs_room = room.saturating_sub(lines.len());
+    let notice = github_notice(screen, look);
+    let tabs_room = room.saturating_sub(lines.len() + notice.len());
     lines.extend(overview_tab_rows(screen, content, tabs_room, look));
+    lines.extend(notice);
     (lines, None, help)
 }
 

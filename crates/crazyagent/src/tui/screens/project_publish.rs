@@ -1,6 +1,7 @@
 use super::intake::copy;
-use super::new_project_publish::Publish;
-use super::new_project_view::{Look, Row};
+use super::new_project_page::key_event;
+use super::new_project_publish::{GitHub, PUBLISH_LINE, PanelRow, Publish};
+use super::new_project_view::{Look, Row, panel_hints, publish_panel, wrap_words};
 use super::project_markdown::sanitize;
 use crate::github::{
     GitHubIgnoreDraft, GitHubPromptAnswer, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan,
@@ -65,8 +66,8 @@ pub(in crate::tui) struct AskPane {
 impl AskPane {
     /// Says whether a reply answers the GitHub read the form waits on. Takes the query.
     /// Returns the answer.
-    pub fn takes(&self, _query: &IntakeQuery) -> bool {
-        false
+    pub fn takes(&self, query: &IntakeQuery) -> bool {
+        self.reading.as_ref() == Some(query)
     }
 
     /// Handles a key: on the question Enter opens the form and reads the GitHub sign-in,
@@ -75,27 +76,117 @@ impl AskPane {
     /// the sign-in while signed out or reads it again after a failed read, and every other
     /// key goes to the panel. Takes the key, the project's name and its about text.
     /// Returns what the page does next.
-    pub fn key(&mut self, _key: &Key, _name: &str, _about: &str) -> AskKey {
+    pub fn key(&mut self, key: &Key, name: &str, about: &str) -> AskKey {
+        let reading = self.reading.is_some();
+        let Some(publish) = self.form.as_mut() else {
+            return match key {
+                Key::Enter => {
+                    self.form = Some(Publish::default());
+                    self.reading = Some(IntakeQuery::GitHubStatus);
+                    AskKey::Read(IntakeQuery::GitHubStatus)
+                }
+                Key::Char('n') => AskKey::Answer(GitHubPromptAnswer::NotNow),
+                Key::Char('x') => AskKey::Answer(GitHubPromptAnswer::Never),
+                Key::Esc => AskKey::Close,
+                _ => AskKey::Handled,
+            };
+        };
+        if *key == Key::Esc {
+            return AskKey::Close;
+        }
+        match (publish.github.clone(), publish.panel, key) {
+            (GitHub::SignedIn, Some(PanelRow::Done), Key::Enter) => {
+                if let Some(plan) = publish.plan(name, about) {
+                    return AskKey::Start(plan);
+                }
+                let stop = publish.problem(name, about).map(|(row, _)| row);
+                publish.panel = Some(stop.unwrap_or(PanelRow::Done));
+            }
+            (GitHub::SignedIn, Some(_), Key::Paste(text)) => {
+                publish.paste(text, name, about);
+            }
+            (GitHub::SignedIn, Some(_), _) => {
+                if let Some(event) = key_event(key) {
+                    publish.panel_key(event, name, about);
+                }
+            }
+            (GitHub::SignedOut, _, Key::Enter) => return AskKey::SignIn,
+            (GitHub::Failed(_), _, Key::Enter) if !reading => {
+                publish.set_github(GitHub::Checking);
+                self.reading = Some(IntakeQuery::GitHubStatus);
+                return AskKey::Read(IntakeQuery::GitHubStatus);
+            }
+            _ => {}
+        }
         AskKey::Handled
     }
 
     /// Takes the reply to the form's GitHub read: the sign-in, then the accounts while
-    /// signed in, which opens the panel on its first row. Takes the reply, one [`takes`]
-    /// accepts. Returns the read to send next, if any.
-    ///
-    /// [`takes`]: AskPane::takes
-    pub fn arrived(&mut self, _event: &IntakeEvent) -> Option<IntakeQuery> {
-        None
+    /// signed in, which opens the panel on its first row; a reply it did not ask for changes
+    /// nothing. Takes the reply. Returns the read to send next, if any.
+    pub fn arrived(&mut self, event: &IntakeEvent) -> Option<IntakeQuery> {
+        if !self.takes(&event.query) {
+            return None;
+        }
+        self.reading = None;
+        let publish = self.form.as_mut()?;
+        let next = publish.arrived(&event.query, &event.result);
+        if publish.github == GitHub::SignedIn && publish.panel.is_none() {
+            publish.panel = Some(PanelRow::Visibility);
+        }
+        self.reading.clone_from(&next);
+        next
     }
 
     /// The pane's words: the question, the sign-in being read, signed out, a read that
     /// failed, or the publish panel with Publish as its last row. Takes the project's name,
     /// its about text and the look. Returns the words.
-    pub fn text(&self, _name: &str, _about: &str, _look: &Look) -> AskText {
+    pub fn text(&self, name: &str, about: &str, look: &Look) -> AskText {
+        let cancel = ("Esc", "Cancel");
+        let (body, hints) = match self.form.as_ref() {
+            None => (
+                vec![
+                    Row::of(PROMPT_LINE, look.fg),
+                    Row::default(),
+                    Row::of(PUBLISH_LINE, look.muted),
+                ],
+                vec![
+                    ("Enter", "Publish"),
+                    ("n", "Not now"),
+                    ("x", "Don't ask again"),
+                    ("Esc", "Close"),
+                ],
+            ),
+            Some(publish) => match &publish.github {
+                GitHub::Checking => (vec![Row::of(CHECKING, look.muted)], vec![cancel]),
+                GitHub::SignedOut => (
+                    vec![Row::of(SIGNED_OUT, look.fg)],
+                    vec![("Enter", "Sign in"), cancel],
+                ),
+                GitHub::Failed(problem) => {
+                    let mut body = vec![Row::of(STATUS_FAILED, look.error)];
+                    body.extend(
+                        wrap_words(&sanitize(problem), 64)
+                            .into_iter()
+                            .take(3)
+                            .map(|line| Row::of(line, look.muted)),
+                    );
+                    (body, vec![("Enter", "Try again"), cancel])
+                }
+                GitHub::SignedIn => (
+                    publish_panel(publish, name, about, "Publish", look),
+                    panel_hints(
+                        publish.panel.unwrap_or(PanelRow::Visibility),
+                        "Publish",
+                        "Cancel",
+                    ),
+                ),
+            },
+        };
         AskText {
             title: PUBLISH_TITLE,
-            body: Vec::new(),
-            hints: Vec::new(),
+            body,
+            hints,
         }
     }
 }

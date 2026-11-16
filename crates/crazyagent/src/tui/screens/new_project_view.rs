@@ -4,7 +4,7 @@ use super::new_project::{
 };
 use super::new_project_input::{TextInput, cells, char_cells};
 use super::new_project_publish::{
-    GitHub, PUBLISH_DOCS, PUBLISH_LINE, PUBLISH_TOGGLE, PanelRow, SIGN_IN_WAIT,
+    GitHub, PUBLISH_DOCS, PUBLISH_LINE, PUBLISH_TOGGLE, PanelRow, Publish, SIGN_IN_WAIT,
 };
 use super::project_access::FULL_ACCESS_WARNING;
 use super::project_markdown::sanitize;
@@ -614,17 +614,7 @@ pub(in crate::tui) fn wizard_screen(
     let mut help = help_keys(wizard);
     if let Some(open) = wizard.publish.panel {
         rows = publish_box(wizard, rows, width, look);
-        help = vec![
-            match open {
-                PanelRow::Visibility => ("Space", "Private or public"),
-                PanelRow::Account => ("\u{2190}\u{2192}", "Change account"),
-                PanelRow::Name | PanelRow::Description => ("Type", "Edit"),
-                PanelRow::Docs => ("Space", "On or off"),
-                PanelRow::Done => ("Enter", "Done"),
-            },
-            ("\u{2191}\u{2193}", "Move"),
-            ("Esc", "Close"),
-        ];
+        help = panel_hints(open, "Done", "Close");
     }
     if let Some(picker) = wizard.picker {
         rows = picker_box(wizard, picker.target, picker.cursor, rows, width, look);
@@ -782,12 +772,49 @@ fn shown_tail(text: &str, width: usize) -> String {
     format!("\u{2026}{tail}")
 }
 
+/// The keys of the GitHub panel for its open row: that row's own key, moving between rows
+/// and closing. Inputs: the open row, the last row's word and the closing key's word.
+/// Output: the keys, as key and label.
+pub(in crate::tui) fn panel_hints(
+    open: PanelRow,
+    done: &'static str,
+    close: &'static str,
+) -> Vec<(&'static str, &'static str)> {
+    vec![
+        match open {
+            PanelRow::Visibility => ("Space", "Private or public"),
+            PanelRow::Account => ("\u{2190}\u{2192}", "Change account"),
+            PanelRow::Name | PanelRow::Description => ("Type", "Edit"),
+            PanelRow::Docs => ("Space", "On or off"),
+            PanelRow::Done => ("Enter", done),
+        },
+        ("\u{2191}\u{2193}", "Move"),
+        ("Esc", close),
+    ]
+}
+
 fn publish_box(wizard: &Wizard, base: Vec<Row>, width: usize, look: &Look) -> Vec<Row> {
-    let publish = &wizard.publish;
-    let Some(open) = publish.panel else {
+    if wizard.publish.panel.is_none() {
         return base;
-    };
+    }
     let (name, about) = (wizard.name.value(), wizard.about.value());
+    let body = publish_panel(&wizard.publish, name, about, "Done", look);
+    modal(&base, width, 64, "Publish on GitHub", body, 2, look)
+}
+
+/// The GitHub panel's rows: visibility, account, repository name, description, the docs
+/// switch, the problem of a row a publish Start would refuse, the accounts' problem and the
+/// last row, the open row selected. New project draws them in its modal and the Overview's
+/// publish form in its own. Inputs: the block, the project name, the about text, the last
+/// row's word and the look. Output: the rows.
+pub(in crate::tui) fn publish_panel(
+    publish: &Publish,
+    name: &str,
+    about: &str,
+    done: &str,
+    look: &Look,
+) -> Vec<Row> {
+    let open = publish.panel;
     let problem = publish.problem(name, about);
     let field = |text: String| format!("[ {:<34} ]", shown_tail(&text, 34));
     let owner = publish.shown_owner().map_or_else(
@@ -813,11 +840,11 @@ fn publish_box(wizard: &Wizard, base: Vec<Row>, width: usize, look: &Look) -> Ve
                 format!("Description  {}", field(publish.shown_description(about)))
             }
             PanelRow::Docs => checkbox(publish.docs, PUBLISH_DOCS),
-            PanelRow::Done => "[ Done ]".to_owned(),
+            PanelRow::Done => format!("[ {done} ]"),
         };
         let error = problem.is_some_and(|(at, _)| at == row);
         let style = if error { look.error } else { look.fg };
-        list_row(Row::of(text, style), 56, row == open, true, look)
+        list_row(Row::of(text, style), 56, Some(row) == open, true, look)
     };
     let mut body: Vec<Row> = PanelRow::ALL[..5].iter().map(|row| line(*row)).collect();
     if let Some((_, text)) = problem {
@@ -832,7 +859,7 @@ fn publish_box(wizard: &Wizard, base: Vec<Row>, width: usize, look: &Look) -> Ve
     }
     body.push(Row::default());
     body.push(line(PanelRow::Done));
-    modal(&base, width, 64, "Publish on GitHub", body, 2, look)
+    body
 }
 
 fn stack(draw: &mut Draw) {

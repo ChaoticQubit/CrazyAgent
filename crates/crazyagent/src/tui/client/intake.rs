@@ -310,9 +310,18 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             )),
-            IntakeQuery::GitHubPublishPrompt { .. }
-            | IntakeQuery::GitHubPublishPromptSet { .. } => {
-                return Err("github_outcome_unknown".to_owned());
+            IntakeQuery::GitHubPublishPrompt { project } => IntakeView::Prompt(
+                controller
+                    .github_publish_prompt(project)
+                    .await
+                    .map_err(problem)?,
+            ),
+            IntakeQuery::GitHubPublishPromptSet { project, answer } => {
+                controller
+                    .github_publish_prompt_set(project, answer)
+                    .await
+                    .map_err(problem)?;
+                IntakeView::PromptKept
             }
             IntakeQuery::GitHubPublishDiscard { project } => IntakeView::Discarded(
                 controller
