@@ -8058,7 +8058,7 @@ fn a_refused_publish_from_the_question_keeps_the_form_with_what_was_typed_and_sa
         "the form says why: {shown}"
     );
     assert!(
-        !shown.contains("Sending your answer..."),
+        !shown.contains("Sending your answer...") && shown.contains("Checking..."),
         "the read after the refusal sends no answer: {shown}"
     );
     assert!(
@@ -8084,6 +8084,56 @@ fn a_refused_publish_from_the_question_keeps_the_form_with_what_was_typed_and_sa
         publish_asks(&mut shell),
         [start],
         "Publish again sends the kept plan"
+    );
+}
+
+#[test]
+fn a_refused_publish_whose_read_finds_a_publish_closes_the_form_and_says_why_on_the_message_line() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: crate::github::default_repo_name("Notes"),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    publish_reply(&mut shell, start, Err("github_publish_in_progress".into()));
+    let status = IntakeQuery::GitHubPublishStatus { project };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status,
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Drafting,
+        ))))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        !shown.contains("[ Publish ]"),
+        "a publish closes the form: {shown}"
+    );
+    assert_eq!(
+        shell
+            .ctx
+            .message()
+            .map(|message| (message.lead.clone(), message.rest.clone())),
+        Some((
+            super::new_project_publish::PUBLISH_NOT_STARTED.to_owned(),
+            super::intake::copy("github_publish_in_progress"),
+        )),
+        "the reason the form showed is not lost with it"
     );
 }
 
