@@ -8,9 +8,10 @@ use super::launch::{
 };
 use super::records::{self, Reader};
 use crate::coord::settings::{HarnessKind, TerminalDisplay};
+use crate::harnesses::accounts::Handover;
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -47,6 +48,15 @@ if [ -n "$r" ]; then ${n:+"$n"} "$e" "$@" resume "$r"; else ${n:+"$n"} "$e" "$@"
 c=$?
 kill "$a" 2>/dev/null
 exit "$c"
+"#;
+/// Starts a listed harness inside its sandbox with the value its account hand-over gives
+/// under the names the hand-over lists, which the terminal host's variable guard keeps out
+/// of a pane's own variables. Arguments: the value, the names joined by spaces, then the
+/// harness's own command, which replaces the shell.
+const HANDED_SCRIPT: &str = r#"k=$1
+for n in $2; do export "$n=$k"; done
+shift 2
+exec "$@"
 "#;
 /// The variable that hands [`CODEX_BRIDGE_SCRIPT`] the absolute interpreter of a Codex that
 /// asks `env` for `node`, so the bridge runs it with no search path.
@@ -332,9 +342,9 @@ pub fn command(
 }
 
 /// Builds what the terminal host runs for one interactive agent as [`command`] does, from
-/// given terminal settings instead of the catalog's, such as a stand-in's. A harness run
-/// from settings gets their arguments and follows their record; an account with a key,
-/// tools off, Full access and a project context are refused until their tasks land.
+/// given terminal settings instead of the catalog's, such as a stand-in's, which give its
+/// arguments and record. A key, tools off, Full access, a project context unless
+/// [`takes_context`] holds and an account hand-over for another binding are refused.
 /// Inputs: as for `command`, and the settings. Output: the command, or a refusal code.
 pub fn command_with(
     request: &LaunchRequest,
@@ -343,6 +353,10 @@ pub fn command_with(
     settings: Option<&TerminalSettings>,
 ) -> Result<InteractiveCommand, LaunchError> {
     validate(request)?;
+    let handover = installed.and_then(Installed::handover);
+    if handover.is_some() && request.sandbox_profile.is_none() {
+        return Err(failure("launch_environment_refused"));
+    }
     if request.account.key().is_some() != run.key_file.is_some() {
         return Err(failure("launch_key_file_invalid"));
     }
@@ -357,12 +371,15 @@ pub fn command_with(
         None => Vec::new(),
     };
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
+    let tool_home = installed
+        .and_then(Installed::tool_home)
+        .unwrap_or(request.account.home());
     let mut env = vec![
         ("HOME".to_owned(), home.clone()),
         (
             "PATH".to_owned(),
             toolchains::with_agent_git(
-                request.account.home(),
+                tool_home,
                 if request.tools {
                     toolchains::agent_path(&homes, TOOLS_ON_PATH)
                 } else {
@@ -405,7 +422,8 @@ pub fn command_with(
             if request.unconfined {
                 return Err(failure("launch_harness_unsupported"));
             }
-            if installed.is_some() {
+            let harness = request.harness.as_str();
+            if installed.is_some_and(|installed| !takes_context(settings, installed, harness)) {
                 return Err(failure("launch_context_unsupported"));
             }
             if !records::json_files::session_shaped(run.session_id) {
@@ -501,10 +519,10 @@ pub fn command_with(
             Transcript::Unavailable
         }
     };
-    for (name, value) in toolchains::agent_env(request.account.home(), &homes) {
+    for (name, value) in toolchains::agent_env(tool_home, &homes) {
         env.push((name.to_owned(), text(Path::new(&value))?));
     }
-    if let Some(tmp) = toolchains::existing_tmp(request.account.home()) {
+    if let Some(tmp) = toolchains::existing_tmp(tool_home) {
         let tmp = if native_lead {
             toolchains::native_lead_tmp(&tmp)
         } else {
@@ -518,7 +536,27 @@ pub fn command_with(
                 .map(|(name, value)| (name.to_owned(), value)),
         );
     }
-    let env = agent_env(&env)?;
+    if let Some(handover) = handover {
+        super::launch::handover_fits(request, handover)?;
+    }
+    let listed = installed.map(Installed::environment).unwrap_or_default();
+    let env = agent_env(&env, listed, handover)?;
+    let (env, handed) = handed_apart(env, handover);
+    if let Some(handover) = handover.filter(|_| !handed.is_empty()) {
+        assert_eq!(argv[0], SANDBOX_EXEC);
+        let placeholder = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        assert_eq!(handover.token(), placeholder);
+        let names = handed.join(" ");
+        let bridge = [
+            "/bin/sh",
+            "-c",
+            HANDED_SCRIPT,
+            "handed",
+            handover.token(),
+            names.as_str(),
+        ];
+        argv.splice(3..3, bridge.map(str::to_owned));
+    }
     let built = InteractiveCommand {
         argv,
         cwd,
@@ -530,6 +568,27 @@ pub fn command_with(
     }
     assert_eq!(built.argv[0] == SANDBOX_EXEC, !request.unconfined);
     Ok(built)
+}
+
+/// Tells whether a pane run from a manifest's terminal settings may take an installed
+/// project context: one a listed launch wrote for a manifest that renders MCP servers, so
+/// the team tools reach the harness through its MCP file and no other way. A listed
+/// context was written for the settings' harness, the request's own. Inputs: the settings,
+/// the installed context and the request's harness. Output: the answer.
+fn takes_context(settings: &TerminalSettings, installed: &Installed, harness: &str) -> bool {
+    let id = settings.manifest().id.as_str();
+    let listed = installed.files().filter(|files| files.listed);
+    if let Some(files) = listed {
+        let written = files.home.parent().and_then(Path::file_name);
+        let other = "a listed context written for another harness";
+        assert_eq!(written, Some(OsStr::new(id)), "{other}");
+        let named = super::registry::registry().get(harness);
+        let named = named.map_or(harness, |found| found.manifest().id.as_str());
+        let mismatched = "a pane request for another harness than its settings";
+        assert_eq!(named, id, "{mismatched}");
+    }
+    let renders = super::render::read(settings.manifest());
+    listed.is_some() && renders.is_ok_and(|renders| renders.mcp.is_some())
 }
 
 /// Reads the terminal settings of a catalog harness whose manifest names a manifest
@@ -545,21 +604,67 @@ pub(crate) fn catalog_settings(harness: &str) -> Result<TerminalSettings, Launch
     })
 }
 
-/// Passes a pane's variables through the one agent environment builder, so a pane gets
-/// the same refusals and git settings as every other agent process.
-/// Input: the variables in order. Output: them with [`crate::sandbox::AGENT_GIT_ENV`]
-/// appended, or `launch_environment_refused`.
-fn agent_env(env: &[(String, String)]) -> Result<Vec<(String, String)>, LaunchError> {
+/// Passes a pane's variables through the one agent environment builder, as every agent
+/// process's, with a listed harness's home block variables and account hand-over after them
+/// as its piped launch has them, the hand-over's placeholder the one exception to the guard.
+/// Inputs: the variables, the home block's and the hand-over. Output: the variables with
+/// [`crate::sandbox::AGENT_GIT_ENV`] appended, or `launch_environment_refused`.
+fn agent_env(
+    env: &[(String, String)],
+    listed: &[(OsString, OsString)],
+    handover: Option<&Handover>,
+) -> Result<Vec<(String, String)>, LaunchError> {
     let base: Vec<(&str, &OsStr)> = env
         .iter()
         .map(|(name, value)| (name.as_str(), OsStr::new(value)))
         .collect();
-    crate::sandbox::agent_env(&base, std::iter::empty())
-        .map_err(|_| failure("launch_environment_refused"))?
+    let handed_env = handover.map(Handover::env).unwrap_or_default();
+    let harness = listed
+        .iter()
+        .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str())))
+        .chain(
+            handed_env
+                .iter()
+                .map(|(name, value)| (OsStr::new(name), Some(OsStr::new(value)))),
+        );
+    let names: Vec<&str> = handed_env
+        .iter()
+        .filter(|(_, value)| handover.is_some_and(|handover| value == handover.token()))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let refused = |_: crate::sandbox::SandboxError| failure("launch_environment_refused");
+    let built = match handover {
+        Some(handover) => {
+            let handed = crate::sandbox::Handed::new(&names, handover.token())
+                .map_err(refused)?;
+            crate::sandbox::agent_env_handing(&base, harness, handed)
+        }
+        None => crate::sandbox::agent_env(&base, harness),
+    };
+    built
+        .map_err(refused)?
         .into_iter()
         .map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| failure("launch_environment_refused"))
+}
+
+/// Takes the names an account hand-over lists out of a pane's variables: those it lists
+/// that hold exactly its value, which the terminal host's variable guard refuses in a pane,
+/// so [`HANDED_SCRIPT`] sets them inside the sandbox instead. Inputs: the variables, already
+/// checked, and the hand-over. Output: the other variables and those names, in order.
+fn handed_apart(
+    env: Vec<(String, String)>,
+    handover: Option<&Handover>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let Some(handover) = handover else {
+        return (env, Vec::new());
+    };
+    let listed = |name: &str| handover.env().iter().any(|pair| pair.0 == name);
+    let (handed, kept): (Vec<_>, Vec<_>) = env
+        .into_iter()
+        .partition(|(name, value)| value == handover.token() && listed(name));
+    (kept, handed.into_iter().map(|(name, _)| name).collect())
 }
 
 fn exposes(command: &InteractiveCommand, key: &Secret) -> bool {

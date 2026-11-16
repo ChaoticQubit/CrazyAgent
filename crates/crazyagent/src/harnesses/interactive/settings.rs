@@ -212,6 +212,13 @@ impl TerminalSettings {
         &self.rules
     }
 
+    /// The manifest these settings were read from, for the blocks other launch steps read,
+    /// such as its `mcp` render, which decides whether a pane takes a project context.
+    /// Output: the manifest.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
     /// Fills the record path for one run. Inputs: the run's private home, absolute, and
     /// its session id. Output: the record as the run's transcript follows it, or a plain
     /// refusal code.

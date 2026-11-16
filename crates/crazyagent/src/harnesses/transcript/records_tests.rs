@@ -197,3 +197,32 @@ fn a_manifest_record_resumed_from_a_kept_position_reads_on_from_it() {
     assert_eq!(resumed.start(), kept);
     assert_eq!(resumed.read().unwrap(), [STARTED, text("b")]);
 }
+
+/// DEC-180 T20 M8 (Q2): the words typed into a jsonl-append harness's pane are the text of
+/// the line its `turn_started` rule matches, read on from where the turn before was read
+/// to, so a live master's owner turn gets them; a start with no text and a reply give none.
+#[test]
+fn a_jsonl_append_record_gives_the_words_its_turn_started_rule_reads_as_typed() {
+    let home = Home::new();
+    let first = [
+        json!({"type": "started", "prompt": "continue"}),
+        json!({"type": "text", "delta": "On it"}),
+        json!({"type": "done", "ok": true}),
+    ];
+    let record = home.write(&below("jsonl"), &jsonl(&first), NEW);
+    let typed_end = jsonl(&first[..1]).len() as u64;
+    let whole = jsonl(&first).len() as u64;
+    let read = typed_past("standin-jsonl-append", &record, 0);
+    let typed = vec![(typed_end, "continue".to_owned())];
+    assert_eq!(read, Some((typed, whole)));
+    let second = [
+        json!({"type": "started"}),
+        json!({"type": "done", "ok": true}),
+        json!({"type": "started", "prompt": "continue"}),
+    ];
+    appended(&record, &second);
+    let end = whole + jsonl(&second).len() as u64;
+    let read = typed_past("standin-jsonl-append", &record, whole);
+    let typed = vec![(end, "continue".to_owned())];
+    assert_eq!(read, Some((typed, end)));
+}

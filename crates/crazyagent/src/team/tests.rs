@@ -4473,6 +4473,43 @@ fn the_team_status_counts_an_agent_stored_under_a_harness_alias_as_live() {
     );
 }
 
+/// DEC-180 T20 M8: a master on a listed harness turns live only when its manifest names a
+/// terminal record the engine reads. One whose manifest names none, such as an ACP-only
+/// harness, is refused with `team_master_no_terminal` and its live switch stays off.
+#[test]
+fn a_listed_master_turns_live_only_when_its_manifest_names_a_terminal_record() {
+    let (_directory, mut connection) = database();
+    let refused = Outcome::Rejected {
+        code: "team_master_no_terminal".into(),
+    };
+    for (project, harness, outcome) in [
+        ("listed-acp", "standin-acp", refused),
+        ("listed-append", "standin-jsonl-append", Outcome::Applied),
+    ] {
+        let mut setup = stored(project, vec![]);
+        setup.team.master = harness.into();
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1,?2)",
+                params![project, serde_json::to_string(&setup).unwrap()],
+            )
+            .unwrap();
+        let pool = access(project, &["local-a"]);
+        let tx = connection.transaction().unwrap();
+        let version = settings_version(&tx, &setup.project_id).unwrap();
+        let on = TeamAction::LiveMaster {
+            project_id: setup.project_id.clone(),
+            on: true,
+            version,
+        };
+        let live = outcome == Outcome::Applied;
+        assert_eq!(execute(&tx, &pool, &on).unwrap(), outcome, "{harness}");
+        tx.commit().unwrap();
+        let now_live = master::live(&connection, &setup.project_id).unwrap();
+        assert_eq!(now_live, live, "{harness}");
+    }
+}
+
 /// T3-15: while the Task-start reminder is On, a native teammate's first prompt and its
 /// first prompt after it rested get the lead's reminder, a prompt mid-task and a lead whose
 /// launch names nothing give none, and with the setting Off no prompt gets it.

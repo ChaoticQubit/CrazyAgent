@@ -1,5 +1,6 @@
 use super::drivers::rules;
 use super::interactive::Transcript;
+use super::interactive::settings::TerminalSettings;
 use super::launch::{LaunchError, failure, rate_limited};
 use super::manifest::{Fact, RecordKind, Rule};
 use super::records::json_rewrite::JsonRewrite;
@@ -1595,6 +1596,11 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
 pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64, String)>, u64)> {
     let mut file = open_record(harness, record)?;
     let reader = records::stored(harness);
+    let settings = match reader {
+        Some(Reader::JsonlAppend) => Some(super::interactive::catalog_settings(harness).ok()?),
+        _ => None,
+    };
+    let rules = settings.as_ref().map_or(&[][..], TerminalSettings::rules);
     let length = file.metadata().ok()?.len();
     if length < offset {
         return None;
@@ -1624,7 +1630,7 @@ pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64
                 continue;
             }
             end = at;
-            let text = (!long).then(|| typed_line(reader, &line)).flatten();
+            let text = (!long).then(|| typed_line(reader, rules, &line)).flatten();
             long = false;
             line.clear();
             if let Some(text) = text {
@@ -1642,12 +1648,18 @@ pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64
 }
 
 /// Reads one finished line of a harness record as a typed message, as `typed_past` counts
-/// one. A line without the word `"user"` cannot be typed and is not parsed, so the many
-/// long lines a turn writes cost one scan each. Takes the record's reader and the line.
-/// Returns the typed text, or none for any other line or a record with no reader.
-fn typed_line(reader: Option<Reader>, line: &[u8]) -> Option<String> {
+/// one. A Codex or Claude Code line without the word `"user"` cannot be typed and is not
+/// parsed, so the many long lines a turn writes cost one scan each; a jsonl-append line is
+/// typed when its manifest's `turn_started` rule reads a text from it. Takes the reader,
+/// the record rules and the line. Returns the typed text, or none for any other line.
+fn typed_line(reader: Option<Reader>, rules: &[Rule], line: &[u8]) -> Option<String> {
     const USER: &[u8] = b"\"user\"";
     let reader = reader?;
+    if reader == Reader::JsonlAppend {
+        let value = serde_json::from_slice::<Value>(line).ok()?;
+        let found = rules::matched(rules, &value)?;
+        return found.text.filter(|_| found.fact == Fact::TurnStarted);
+    }
     if !line.windows(USER.len()).any(|part| part == USER) {
         return None;
     }
