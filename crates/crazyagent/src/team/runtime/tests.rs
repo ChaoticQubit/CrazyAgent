@@ -9012,28 +9012,45 @@ fn a_master_on_the_fifteen_minute_choice_stops_at_the_idle_bound() {
 }
 
 /// The 1 h choice keeps an idle master for four of the engine's bounds, so it outlasts the
-/// 15 min bound and then stops (DEC-117 Q4).
+/// 15 min bound and then stops (DEC-117 Q4). The row sets the master's idle time itself, so
+/// a slow machine between the turn's end and the row's checks cannot shift the count.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_master_on_the_one_hour_choice_stops_at_four_idle_bounds() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let bound = Duration::from_secs(1);
+    let bound = Duration::from_secs(30);
     let (mut team, id) = idle_plain_master(
         &fixture,
         &host,
         bound,
         Some(crate::team::MasterIdleStop::OneHour),
     );
-    let idle_seen = Instant::now();
+    let idle_for = |team: &mut TeamRuntime, idle: Duration| {
+        let since = Instant::now()
+            .checked_sub(idle)
+            .expect("the machine has run longer than four idle bounds");
+        team.workers.get_mut(&id).unwrap().idle_since = since;
+        since
+    };
+    assert!(
+        team.workers[&id].busy.is_none() && !team.workers[&id].stopping,
+        "the master is idle after its turn"
+    );
+    let kept = idle_for(&mut team, bound * 7 / 2);
+    team.reap_idle(&fixture.setup).unwrap();
+    assert!(
+        !team.workers[&id].stopping,
+        "the 1 h choice keeps a master idle for 3.5 bounds, past the 15 min bound"
+    );
+    assert_eq!(
+        team.workers[&id].idle_since, kept,
+        "the reap counted the master as idle and kept its idle time"
+    );
+    idle_for(&mut team, bound * 4);
     fixture.until(&mut team, "the idle master stops at four bounds", |f| {
         f.agent_status(id).0 == AgentStatus::Stopped
     });
-    assert!(
-        idle_seen.elapsed() >= bound * 2,
-        "the 1 h choice stopped it after {:?}, at the 15 min bound",
-        idle_seen.elapsed()
-    );
     team.shutdown().unwrap();
 }
 
