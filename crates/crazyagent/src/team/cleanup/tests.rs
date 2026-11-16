@@ -1374,6 +1374,44 @@ fn a_home_entry_that_will_not_open_is_unpinned_by_its_inode_never_through_a_swap
     );
 }
 
+/// rv-sec3 r2 F1 (B12): an agent-home entry at mode 000 has its immutable flag cleared
+/// through its parent's open handle alone, with no path walked above that parent, so a
+/// folder above it that a process swaps for a link inside the clear is never followed. The
+/// row shuts the folder above the parent: a clear that walks a path, as a `/.vol` name
+/// does, is refused there, while one through the handle is not.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_entry_under_a_shut_folder_is_unpinned_through_its_parents_handle_alone() {
+    use std::os::macos::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let immutable = nix::sys::stat::FileFlag::UF_IMMUTABLE.bits();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let git = root.join("home/.cargo/git");
+    let shut = git.join("x");
+    write(&shut.join("f"), b"left by a terminal\n");
+    std::fs::set_permissions(shut.join("f"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(chflags("uchg", &shut.join("f")));
+    let _left = Unlocked(shut.join("f"));
+    let parent = rustix::fs::openat(
+        rustix::fs::CWD,
+        &shut,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    unpin_home_entry(&parent, c"f");
+
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let flags = std::fs::symlink_metadata(shut.join("f")).unwrap().st_flags();
+    assert_eq!(flags & immutable, 0, "the entry kept its flag");
+}
+
 /// rv-sec3 r2 F2 (B12): `/usr/bin/chflags` stops reading options at its flags word, so the
 /// flag clear ends its options before that word; a `--` after it is read as a file and
 /// clears the flags of an entry of that name in the engine's working folder.
