@@ -165,13 +165,14 @@ fn is_socket(path: &std::path::Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_socket())
 }
 
-/// KA-T17B-R2-F1 (rv-code2 kept-cap r1 F1): a lead's next start removes the teammates'
-/// sockets of its earlier starts that nothing listens at, so they never pile up toward the
-/// freeze's cap on engine-named sockets. One a server still answers at stays until a later
-/// start finds it dead, and a plain file under a teammates' name is never removed.
+/// KA-T17B-R2-F1 (rv-code2 kept-cap r1 F1, QUESTION-04:15 B): a lead's next start puts a
+/// plain file over each teammates' socket of its earlier starts that nothing listens at, so
+/// they never pile up toward the freeze's cap and no listener can bind there again. One a
+/// server still answers at stays until a later start finds it dead, a plain file under a
+/// teammates' name is left as it is, and no staged file is left behind.
 #[cfg(unix)]
 #[test]
-fn a_leads_next_start_removes_its_earlier_teammates_sockets_once_nothing_listens_there() {
+fn a_leads_next_start_puts_a_plain_file_over_earlier_teammates_sockets_nothing_listens_at() {
     let disk = tempfile::tempdir().unwrap();
     let root = disk.path();
     let lead = AgentId::team(1).unwrap();
@@ -191,8 +192,12 @@ fn a_leads_next_start_removes_its_earlier_teammates_sockets_once_nothing_listens
     assert!(is_socket(&dead));
     let live = renew_teammates_socket(root, &lead).unwrap();
     assert!(
-        std::fs::symlink_metadata(&dead).is_err(),
-        "a socket nothing listens at is removed by the next start"
+        std::fs::symlink_metadata(&dead).is_ok_and(|metadata| metadata.is_file()),
+        "a socket nothing listens at becomes a plain file at the next start"
+    );
+    assert!(
+        crate::spawn_gate::bind_unix_std(&dead).is_err(),
+        "no listener can bind where the dead socket was"
     );
 
     let server = crate::spawn_gate::bind_unix_std(&live).unwrap();
@@ -201,14 +206,20 @@ fn a_leads_next_start_removes_its_earlier_teammates_sockets_once_nothing_listens
     drop(server);
     renew_teammates_socket(root, &lead).unwrap();
     assert!(
-        std::fs::symlink_metadata(&live).is_err(),
-        "once its server is gone, a later start removes it"
+        std::fs::symlink_metadata(&live).is_ok_and(|metadata| metadata.is_file()),
+        "once its server is gone, a later start retires it"
     );
     assert_eq!(
         std::fs::read_to_string(&planted).unwrap(),
         "not a socket",
         "a plain file under a teammates' name stays"
     );
+    let staged: Vec<_> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(staged.is_empty(), "{staged:?}: no staged file is left");
 }
 
 /// PLCC-L1: a lead's start marks its teammates' server pin pending, so a record that is
