@@ -1059,11 +1059,16 @@ fn project_shell(project: &ProjectId, name: &str) -> Shell {
 }
 
 /// A fresh terminal on Home that has read the engine's job, as starting the TUI again does.
-/// Inputs: the connection. Output: the shell.
+/// The owner opens and clears the filter before the reads land, so Home keeps its focus on
+/// the list: this engine's one account sits at a port that refuses connections, so setup is
+/// never done and Home would otherwise move the focus to Get set up, where Enter opens
+/// Accounts. Inputs: the connection. Output: the shell.
 async fn home_shell(connection: &mut Connection) -> Shell {
     let mut ctx = ctx(120, 30);
     let screen = open(&Place::Home, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
+    shell.key(Key::Char('/'));
+    shell.key(Key::Esc);
     pump(&mut shell, connection).await;
     super::intake::ask(&mut shell.ctx, IntakeQuery::JobStatus);
     pump(&mut shell, connection).await;
