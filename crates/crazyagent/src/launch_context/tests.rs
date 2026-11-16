@@ -5160,3 +5160,72 @@ fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
         assert!(!section.contains("ctx_execute"), "{off:?}: {section}");
     }
 }
+
+/// SECRET-CLAUDE-CONFIG: both MCP config texts hold each secret exactly, a double quote and
+/// a backslash in it included, and a name given twice keeps its last value in both.
+#[test]
+fn both_mcp_configs_hold_each_secret_exactly() {
+    let secret = |name: &str, value: &str| LaunchSecret {
+        name: name.into(),
+        value: crate::plugins::SecretValue::new(value.as_bytes().to_vec()),
+    };
+    let servers = [
+        LaunchServer {
+            name: "tools".into(),
+            spec: ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: vec!["--stdio".into()],
+            },
+            secrets: vec![
+                secret("API_TOKEN", "first"),
+                secret("API_TOKEN", r#"say "hi" \ bye"#),
+                secret("OTHER", "plain"),
+            ],
+        },
+        LaunchServer {
+            name: "remote.docs".into(),
+            spec: ServerSpec::Http {
+                url: "https://mcp.example.invalid/mcp".into(),
+            },
+            secrets: vec![secret("Authorization", r"Bearer a\b")],
+        },
+        LaunchServer {
+            name: "keyless".into(),
+            spec: ServerSpec::Http {
+                url: "https://keyless.example.invalid/mcp".into(),
+            },
+            secrets: Vec::new(),
+        },
+    ];
+    let claude: serde_json::Value =
+        serde_json::from_str(&claude_config(&servers).unwrap()).unwrap();
+    let declared = &claude["mcpServers"];
+    assert_eq!(declared["tools"]["env"]["API_TOKEN"], r#"say "hi" \ bye"#);
+    assert_eq!(declared["tools"]["env"]["OTHER"], "plain");
+    assert_eq!(declared["tools"]["type"], "stdio");
+    assert_eq!(
+        declared["remote.docs"]["headers"]["Authorization"],
+        r"Bearer a\b"
+    );
+    assert_eq!(declared["keyless"]["headers"], serde_json::json!({}));
+    let codex: toml::Table = codex_config("instructions", &servers, &[], &[], "", None)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let declared = codex["mcp_servers"].as_table().unwrap();
+    assert_eq!(
+        declared["tools"]["env"]["API_TOKEN"].as_str(),
+        Some(r#"say "hi" \ bye"#)
+    );
+    assert_eq!(declared["tools"]["env"]["OTHER"].as_str(), Some("plain"));
+    assert_eq!(declared["tools"]["command"].as_str(), Some("/usr/bin/true"));
+    assert_eq!(
+        declared["remote.docs"]["http_headers"]["Authorization"].as_str(),
+        Some(r"Bearer a\b")
+    );
+    assert!(declared["keyless"].get("http_headers").is_none());
+    assert_eq!(
+        codex["developer_instructions"].as_str(),
+        Some("instructions")
+    );
+}

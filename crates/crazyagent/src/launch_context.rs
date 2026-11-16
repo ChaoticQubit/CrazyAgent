@@ -1951,9 +1951,8 @@ fn codex_config(
         let mut table = toml_edit::Table::new();
         table.set_implicit(true);
         for server in servers {
-            let mut values = toml_edit::InlineTable::new();
             for secret in &server.secrets {
-                values.insert(secret.name.as_str(), secret_text(secret)?.into());
+                secret_text(secret)?;
             }
             let mut entry = toml_edit::Table::new();
             match &server.spec {
@@ -1964,15 +1963,9 @@ fn codex_config(
                             .map(String::as_str)
                             .collect::<toml_edit::Array>(),
                     );
-                    if !values.is_empty() {
-                        entry["env"] = toml_edit::value(values);
-                    }
                 }
                 ServerSpec::Http { url } => {
                     entry["url"] = toml_edit::value(url.as_str());
-                    if !values.is_empty() {
-                        entry["http_headers"] = toml_edit::value(values);
-                    }
                 }
             }
             if let Some((_, off)) = off_tools.iter().find(|(name, _)| *name == server.name) {
@@ -1987,7 +1980,76 @@ fn codex_config(
         }
         document["mcp_servers"] = toml_edit::Item::Table(table);
     }
-    Ok(document.to_string())
+    secret_tables(document.to_string(), servers)
+}
+
+/// Appends each server's secrets to a Codex `config.toml` text as its own
+/// `[mcp_servers.<server>.env]` or `.http_headers` table, written straight from the stored
+/// secret into one buffer of the text's exact size, so no document or growth copies a
+/// secret. Inputs: the text without secrets and the servers, their secrets already checked
+/// by `secret_text`. Output: the whole text.
+fn secret_tables(text: String, servers: &[LaunchServer]) -> Result<String, LaunchError> {
+    let mut tables = Vec::new();
+    for server in servers.iter().filter(|server| !server.secrets.is_empty()) {
+        let field = match server.spec {
+            ServerSpec::Stdio { .. } => "env",
+            ServerSpec::Http { .. } => "http_headers",
+        };
+        let server_key = toml_edit::Key::new(declared_server_name(&server.name));
+        let header = format!("\n[mcp_servers.{}.{field}]\n", server_key.display_repr());
+        let mut values = std::collections::BTreeMap::new();
+        for secret in &server.secrets {
+            values.insert(secret.name.as_str(), secret_text(secret)?);
+        }
+        let lines: Vec<(String, &str)> = values
+            .into_iter()
+            .map(|(name, value)| (toml_edit::Key::new(name).display_repr().into_owned(), value))
+            .collect();
+        tables.push((header, lines));
+    }
+    let newline = usize::from(!tables.is_empty() && !text.is_empty() && !text.ends_with('\n'));
+    let size = text.len()
+        + newline
+        + tables
+            .iter()
+            .map(|(header, lines)| {
+                header.len()
+                    + lines
+                        .iter()
+                        .map(|(name, value)| name.len() + value.len() + escapes(value) + 6)
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+    let mut whole = String::with_capacity(size);
+    let capacity = whole.capacity();
+    whole.push_str(&text);
+    if newline == 1 {
+        whole.push('\n');
+    }
+    for (header, lines) in &tables {
+        whole.push_str(header);
+        for (name, value) in lines {
+            whole.push_str(name);
+            whole.push_str(" = \"");
+            for character in value.chars() {
+                if matches!(character, '"' | '\\') {
+                    whole.push('\\');
+                }
+                whole.push(character);
+            }
+            whole.push_str("\"\n");
+        }
+    }
+    assert_eq!(whole.len(), size);
+    assert_eq!(whole.capacity(), capacity);
+    Ok(whole)
+}
+
+/// Counts the characters a TOML basic string must escape in a secret `secret_text` passed,
+/// which holds no control character: its double quotes and backslashes. Input: the secret.
+/// Output: the count.
+fn escapes(value: &str) -> usize {
+    value.matches(['"', '\\']).count()
 }
 
 /// One hook a Codex launch writes into its `config.toml`: the event, its trust-key label,
@@ -2238,28 +2300,97 @@ fn hook_command(root: &str, command: &str) -> String {
 /// Output: the JSON text, or `launch_context_secret_invalid` or
 /// `launch_context_server_name_taken`.
 pub fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
-    let mut declared = serde_json::Map::new();
+    let mut declared = std::collections::BTreeMap::new();
     for server in servers {
-        let mut values = serde_json::Map::new();
+        let mut values = std::collections::BTreeMap::new();
         for secret in &server.secrets {
-            values.insert(secret.name.clone(), secret_text(secret)?.into());
+            values.insert(secret.name.as_str(), secret_text(secret)?);
         }
         let entry = match &server.spec {
-            ServerSpec::Stdio { command, args } => serde_json::json!({
-                "type": "stdio", "command": command, "args": args, "env": values
-            }),
-            ServerSpec::Http { url } => serde_json::json!({
-                "type": "http", "url": url, "headers": values
-            }),
+            ServerSpec::Stdio { command, args } => ClaudeServer::Stdio {
+                args,
+                command,
+                env: values,
+                r#type: "stdio",
+            },
+            ServerSpec::Http { url } => ClaudeServer::Http {
+                headers: values,
+                r#type: "http",
+                url,
+            },
         };
-        let name = declared_server_name(&server.name);
-        if declared.contains_key(name) {
+        if declared
+            .insert(declared_server_name(&server.name), entry)
+            .is_some()
+        {
             return Err(failure("launch_context_server_name_taken"));
         }
-        declared.insert(name.to_owned(), entry);
     }
-    serde_json::to_string(&serde_json::json!({ "mcpServers": declared }))
-        .map_err(|_| failure("launch_context_unavailable"))
+    sized_json(&ClaudeConfig {
+        mcp_servers: declared,
+    })
+}
+
+/// Claude Code's `--mcp-config` document, borrowing every value, secrets included.
+#[derive(Serialize)]
+struct ClaudeConfig<'a> {
+    #[serde(rename = "mcpServers")]
+    mcp_servers: std::collections::BTreeMap<&'a str, ClaudeServer<'a>>,
+}
+
+/// One declared MCP server, borrowing its values, so serializing it copies no secret. The
+/// fields are in name order, the order the file was always written in.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ClaudeServer<'a> {
+    Stdio {
+        args: &'a [String],
+        command: &'a str,
+        env: std::collections::BTreeMap<&'a str, &'a str>,
+        r#type: &'static str,
+    },
+    Http {
+        headers: std::collections::BTreeMap<&'a str, &'a str>,
+        r#type: &'static str,
+        url: &'a str,
+    },
+}
+
+/// Counts the bytes written to it and keeps none, so a buffer can be sized before the
+/// real write.
+struct Counted(usize);
+
+impl std::io::Write for Counted {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serializes a value that borrows secrets into one buffer allocated at the text's exact
+/// size, so no growth frees a block holding part of a secret, and wipes that buffer if the
+/// write fails. Input: the value. Output: the JSON text, or `launch_context_unavailable`.
+fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
+    let mut counted = Counted(0);
+    serde_json::to_writer(&mut counted, value)
+        .map_err(|_| failure("launch_context_unavailable"))?;
+    let mut text = Vec::with_capacity(counted.0);
+    let capacity = text.capacity();
+    if serde_json::to_writer(&mut text, value).is_err() {
+        crate::credentials::wipe(&mut text);
+        return Err(failure("launch_context_unavailable"));
+    }
+    assert_eq!(text.len(), counted.0);
+    assert_eq!(text.capacity(), capacity);
+    String::from_utf8(text).map_err(|error| {
+        let mut bytes = error.into_bytes();
+        crate::credentials::wipe(&mut bytes);
+        failure("launch_context_unavailable")
+    })
 }
 
 /// Refuses launch context files where owner-only no-follow creation does not exist.
