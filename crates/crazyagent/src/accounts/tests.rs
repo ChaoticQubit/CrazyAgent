@@ -19,6 +19,7 @@ fn catalog_lists_every_provider_with_plain_ordered_methods() {
         [
             "ChatGPT / Codex",
             "Claude",
+            "Gemini API",
             "OpenRouter",
             "OpenAI API",
             "Anthropic API",
@@ -44,12 +45,13 @@ fn catalog_lists_every_provider_with_plain_ordered_methods() {
         labels(Provider::Claude),
         ["Sign in with your Claude subscription", "Use an API key"]
     );
+    assert_eq!(labels(Provider::Gemini), ["Use an API key"]);
     assert_eq!(labels(Provider::Openrouter), ["Use an API key"]);
     assert_eq!(labels(Provider::OpenaiApi), ["Use an API key"]);
     assert_eq!(labels(Provider::AnthropicApi), ["Use an API key"]);
     assert_eq!(labels(Provider::OpenaiCompatible), ["Connect a URL"]);
     assert_eq!(labels(Provider::Local), ["Connect a URL"]);
-    let local = &catalog[6].methods[0];
+    let local = &catalog[7].methods[0];
     assert_eq!(local.url, Field::Required);
     assert_eq!(
         local.url_preset.as_deref(),
@@ -57,12 +59,12 @@ fn catalog_lists_every_provider_with_plain_ordered_methods() {
     );
     assert_eq!(local.key, Field::Hidden);
     assert_eq!(local.model, Field::Required);
-    let compatible = &catalog[5].methods[0];
+    let compatible = &catalog[6].methods[0];
     assert_eq!(
         (compatible.url, compatible.key, compatible.model),
         (Field::Required, Field::Optional, Field::Required)
     );
-    let openrouter = &catalog[2].methods[0];
+    let openrouter = &catalog[3].methods[0];
     assert_eq!(openrouter.url, Field::Hidden);
     assert_eq!(
         openrouter.url_preset.as_deref(),
@@ -298,8 +300,8 @@ fn statuses_have_plain_labels() {
 
 /// Task 17 (DEC-180 addendum 2, answer 3): the engine has a Gemini API key kind: one
 /// method, a key and a model on Google's own address, stored in the Gemini wire format, so
-/// it fits only a harness that speaks that format. The Add account tiles of both apps offer
-/// it from Task 21 on, which adds it to the served catalog and turns the last check round.
+/// it fits only a harness that speaks that format. Task 21 serves it in the catalog right
+/// after Claude, so the Add account tiles of both apps offer it right after Anthropic.
 #[test]
 fn a_gemini_api_key_is_an_account_kind_on_googles_address_in_its_own_wire_format() {
     let gemini: Provider =
@@ -357,9 +359,20 @@ fn a_gemini_api_key_is_an_account_kind_on_googles_address_in_its_own_wire_format
         serde_json::to_value(gemini).unwrap(),
         serde_json::json!("gemini")
     );
-    assert!(
-        catalog().iter().all(|entry| entry.provider != gemini),
-        "the Add account tiles offer the Gemini API from Task 21 on"
+    let served = catalog();
+    let at = served.iter().position(|entry| entry.provider == gemini);
+    assert_eq!(at, Some(2), "the Gemini API is served right after Claude");
+    assert_eq!(served[2].name, "Gemini API");
+    assert_eq!(served[2].methods.len(), 1);
+    let key = &served[2].methods[0];
+    assert_eq!(key.method, SignInMethod::ApiKey);
+    assert_eq!(
+        (key.url, key.key, key.model),
+        (Field::Hidden, Field::Required, Field::Required)
+    );
+    assert_eq!(
+        key.url_preset.as_deref(),
+        Some("https://generativelanguage.googleapis.com")
     );
 }
 

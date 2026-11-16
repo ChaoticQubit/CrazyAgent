@@ -621,7 +621,7 @@ export function saveMasterFrameSettings(settings: MasterFrameSettings): Promise<
   return change("desktop_set_master_frame_settings", { settings, generation: nextGeneration() });
 }
 
-export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
+export type AccountProvider = "chatgpt" | "claude" | "gemini" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
 export type SignInMethod = "subscription" | "api_key" | "url";
 export type AccountField = "hidden" | "optional" | "required";
 export type AccountStatus = "signed_in" | "not_signed_in" | "key_saved" | "unreachable" | "signing_in";

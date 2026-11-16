@@ -42,14 +42,16 @@ fn every_account() -> Vec<(Provider, SignInMethod, AccountKind, ModelConnection)
     accounts
 }
 
-/// The owner-visible answer DEC-141 asks for: which harness runs on which account. Inputs:
+/// The owner-visible answer DEC-141 asks for: which harness runs on which account; a Gemini
+/// API key, in its own wire format, runs on none of the three (Task 17, Task 21). Inputs:
 /// the harness kind, the provider and the sign-in method. Output: whether it runs there.
 fn runs_on(harness: HarnessKind, provider: Provider, method: SignInMethod) -> bool {
-    use Provider::{AnthropicApi, Chatgpt, Claude};
+    use Provider::{AnthropicApi, Chatgpt, Claude, Gemini};
     match (harness, provider, method) {
         (HarnessKind::Codex, Chatgpt, SignInMethod::Subscription) => true,
         (HarnessKind::ClaudeCode, Claude, SignInMethod::Subscription) => true,
         (_, _, SignInMethod::Subscription) => false,
+        (_, Gemini, _) => false,
         (HarnessKind::Rcli, ..) => true,
         (HarnessKind::ClaudeCode, Claude | AnthropicApi, SignInMethod::ApiKey) => true,
         (HarnessKind::ClaudeCode, ..) => false,

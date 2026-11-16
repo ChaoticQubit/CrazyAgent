@@ -2670,7 +2670,7 @@ export function submitMaster(ticket: string, sessionId: string, text: string, ge
   return invoke<IntentReceipt>("desktop_submit_master", { ticket, sessionId, text, generation });
 }
 
-export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
+export type AccountProvider = "chatgpt" | "claude" | "gemini" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
 
 export type SignInMethod = "subscription" | "api_key" | "url";
 

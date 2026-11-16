@@ -314,6 +314,13 @@ fn a_listed_harness_names_the_kinds_of_account_that_fit_it_when_its_pool_has_non
         "No account in this project's pool can run Row Harness. Accounts that fit it: Claude or Anthropic API"
     );
     assert_eq!(
+        line(
+            &["gemini"],
+            "accounts:\n  gemini:\n    env:\n      GEMINI_API_KEY: \"{token}\"\n"
+        ),
+        "No account in this project's pool can run Row Harness. Accounts that fit it: Gemini API"
+    );
+    assert_eq!(
         line(&[], ""),
         "No account in this project's pool can run Row Harness, and no kind of account CrazyAgent can add fits it yet"
     );

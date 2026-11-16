@@ -783,6 +783,24 @@ pub fn below(installed: &str, minimum: &str) -> bool {
     plain_version(installed) && higher(minimum, installed)
 }
 
+/// The line both clients show beside Update for a harness older than the oldest version
+/// CrazyAgent drives (DEC-166, Task 21). Inputs: the harness name and its versions row.
+/// Output: the line, or None without a plain floor, without an installed version, or for an
+/// installed version not known to be below the floor.
+pub fn needs_newer_line(harness: &str, versions: &HarnessVersions) -> Option<String> {
+    let minimum = versions
+        .run_min
+        .as_deref()
+        .filter(|minimum| plain_version(minimum))?;
+    let installed = versions.installed.as_deref()?;
+    if !below(installed, minimum) {
+        return None;
+    }
+    Some(format!(
+        "{harness} {installed} is too old for CrazyAgent; it needs {minimum} or newer."
+    ))
+}
+
 fn unreadable() -> Latest {
     Latest::Failed {
         code: CHECK_UNREADABLE.to_owned(),
