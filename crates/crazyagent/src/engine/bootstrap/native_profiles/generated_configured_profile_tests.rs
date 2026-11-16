@@ -524,6 +524,33 @@ fn a_master_slot_whose_config_was_replaced_keeps_the_changed_file_refusal() {
     assert_eq!(refused.unwrap_err().0, "rcli_profile_identity_changed");
 }
 
+/// rv-code4 B22 R2-F1: a master slot on an account's generated SDK home whose config got
+/// other bytes is refused by the master turn's re-pin as a changed config,
+/// rcli_profile_config_changed, the code the owner's register gives it, never as a mere
+/// change of file.
+#[test]
+fn a_master_slot_whose_config_bytes_changed_is_refused_as_a_changed_config() {
+    let mut case = ConfiguredCase::new(false, false);
+    case.custody
+        .prepare_configured_rcli_profile(&case.host, &case.connection, &case.profile, None)
+        .unwrap();
+    let home = case.custody.generated_configured_home(&case.profile);
+    let master = reference("master-target-profile");
+    case.custody
+        .register_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+        .unwrap();
+    let config = home.join(".backboard/config.json");
+    let mut bytes = std::fs::read(&config).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(&config, &bytes).unwrap();
+
+    let refused = case
+        .custody
+        .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home);
+
+    assert_eq!(refused.unwrap_err().0, "rcli_profile_config_changed");
+}
+
 /// rv-sec3 G4 r2 F1 (RV-DS241-50 r1): a master slot on an account's generated SDK home
 /// re-pins, at its next turn, the config an account save stopped after its swap put back,
 /// the same file with a new change time, at the next generation.

@@ -6667,6 +6667,20 @@ auth = { method = "none" }"#;
         );
     }
 
+    /// Replaces a config file with a copy of the same bytes and mode, a new inode, as a
+    /// save through a rename does. Input: the config file. Output: none; it asserts the
+    /// new inode.
+    fn replace_config(config: &Path) {
+        use std::os::unix::fs::MetadataExt;
+        let before = std::fs::symlink_metadata(config).unwrap();
+        let copy = config.with_extension("json.copy");
+        std::fs::write(&copy, std::fs::read(config).unwrap()).unwrap();
+        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(before.mode() & 0o7777))
+            .unwrap();
+        std::fs::rename(&copy, config).unwrap();
+        assert_ne!(std::fs::symlink_metadata(config).unwrap().ino(), before.ino());
+    }
+
     /// Runs the preparation of a master turn that must be refused. Inputs: the fixture, the
     /// prepare command and what the turn follows, named in the panic. Output: the refusal's
     /// cause, from a refused turn or from the error, or None.
@@ -7056,6 +7070,34 @@ auth = { method = "none" }"#;
             refused.as_deref(),
             Some("rcli_profile_changed_in_conversation")
         );
+        assert_master_generation(&case, 1);
+        case.close().await;
+    }
+
+    /// rv-code4 B22 R2-F1: after a rebinding, a real change to the chosen member's pinned
+    /// home, its config replaced by a copy (a new inode), is still named as a changed file.
+    /// The owner adds an account outside the master's pool and sends; the turn is refused
+    /// with rcli_profile_identity_changed and the slot keeps its generation. At d6bc5cf16
+    /// the pinned route's refusal was dropped and the turn named
+    /// master_configured_receipt_stale, a sign-in gap that fails over.
+    #[tokio::test]
+    async fn a_master_turn_after_a_replaced_config_and_a_settings_rebind_names_the_changed_file() {
+        let case = Fixture::new(true).await;
+        let config = generated_master_config(&case);
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("an engine-generated SDK home must register and prepare the first turn");
+        };
+        fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
+        replace_config(&config);
+        let before = add_outside_account(&case).await;
+
+        let prepare = next_turn(&case, "after-replace-and-rebind").await;
+        let refused = refused_cause(&case, prepare, "a replaced config and a rebind").await;
+
+        let (session, _) = case.view().await;
+        assert_ne!(session.binding().0, &before, "the outside edit rebound the session");
+        assert_eq!(refused.as_deref(), Some("rcli_profile_identity_changed"));
         assert_master_generation(&case, 1);
         case.close().await;
     }
