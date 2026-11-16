@@ -161,7 +161,19 @@ impl Harness {
     /// ChatGPT sign-in reaches through the ChatGPT relay never gets the copy.
     /// Input: the stored connection. Output: the answer.
     pub fn signs_in_natively(&self, connection: &crate::config::ModelConnection) -> bool {
-        self.account_fits(connection)
+        use crate::config::{ModelAuthentication, ModelEndpoint};
+        matches!(
+            (&connection.endpoint, &connection.auth),
+            (
+                ModelEndpoint::Native {},
+                ModelAuthentication::NativeManaged { .. }
+            )
+        ) && connection.protocol.as_str() == "native"
+            && self
+                .manifest
+                .account_kinds
+                .contains(&AccountKind::Subscription)
+            && self.named(connection.harness.as_str())
     }
 
     /// Whether it can run on one account (DEC-141 PA-4), the one rule every master, team
@@ -175,14 +187,8 @@ impl Harness {
         let protocol = connection.protocol.as_str();
         match (&connection.endpoint, &connection.auth) {
             (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { .. }) => {
-                protocol == "native"
-                    && ((self
-                        .manifest
-                        .account_kinds
-                        .contains(&AccountKind::Subscription)
-                        && self.named(connection.harness.as_str()))
-                        || (made_with_codex(connection.harness.as_str())
-                            && self.takes_chatgpt_sign_in()))
+                self.signs_in_natively(connection)
+                    || (is_chatgpt_sign_in(connection) && self.takes_chatgpt_sign_in())
             }
             (
                 ModelEndpoint::Http { .. },

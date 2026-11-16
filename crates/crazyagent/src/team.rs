@@ -1290,8 +1290,10 @@ pub enum TeamReach {
 /// Tells how an agent of the launch harness reaches its model through one connection, by
 /// the one account rule every harness shares (DEC-141 PA-4): an endpoint whose wire format
 /// the harness speaks, with its key reference when it has one, or a native managed profile
-/// of that harness. Takes the connection and the launch harness identifier. Returns the
-/// reach, or none when the harness runs no team agents or cannot run on that connection.
+/// of that harness. A ChatGPT sign-in that fits a listed harness only through the ChatGPT
+/// relay is no managed reach, since a managed launch hands the agent the sign-in's own
+/// credential copy (T22). Takes the connection and the launch harness identifier. Returns
+/// the reach, or none when the harness runs no team agents or cannot run on that connection.
 fn reach(connection: &crate::config::ModelConnection, harness: &str) -> Option<TeamReach> {
     let harness = launch_harness(harness)?;
     if !crate::harnesses::account_fits(harness, connection) {
@@ -1306,7 +1308,11 @@ fn reach(connection: &crate::config::ModelConnection, harness: &str) -> Option<T
                 _ => None,
             },
         }),
-        (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { profile_ref }) => {
+        (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { profile_ref })
+            if crate::harnesses::registry::registry()
+                .get(harness)
+                .is_some_and(|own| own.signs_in_natively(connection)) =>
+        {
             Some(TeamReach::Managed {
                 profile_ref: profile_ref.clone(),
                 model: (connection.model.id != NATIVE_DEFAULT_MODEL)
