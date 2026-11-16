@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 import "./load-source.mjs";
-import { bundle, withPage } from "./browser.mjs";
+import { bundle, keyInPage, withPage } from "./browser.mjs";
 
 const io = await import("../src/screens/team/terminal-io.ts");
 const coord = await import("../src/screens/team/coordination.tsx");
@@ -42,8 +42,15 @@ test("each master input choice says whether keys reach the terminal and whether 
 
 const fixture = await bundle(new URL("./fixtures/live-master.mjs", import.meta.url).pathname);
 
-async function keyPress(send, modifiers) {
-  const event = { modifiers, key: "c", code: "KeyC", windowsVirtualKeyCode: 67, nativeVirtualKeyCode: 8 };
+/** Presses C with DevTools modifiers: a real key through DevTools, except with Cmd held, which
+ * is pressed inside the page so it reaches no Mac menu bar (ABOUT-THIS-MAC); the app's copy key
+ * reads both alike. Inputs: the page's send and evaluate and the modifiers. Output: none. */
+async function keyPress(send, evaluate, modifiers) {
+  if ((modifiers & 4) !== 0) {
+    await evaluate(keyInPage("c", "KeyC", modifiers));
+    return;
+  }
+  const event = { modifiers, key: "c", code: "KeyC", windowsVirtualKeyCode: 67, nativeVirtualKeyCode: 67 };
   await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...event });
   if (modifiers === 0) await send("Input.dispatchKeyEvent", { type: "char", text: "c", ...event });
   await send("Input.dispatchKeyEvent", { type: "keyUp", ...event });
@@ -71,12 +78,12 @@ test("in a real terminal, Cmd+C puts the selection on the clipboard and types no
     await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);
     await evaluate("Fixture.selectAll()");
     const selection = await evaluate("Fixture.selection()");
-    await keyPress(send, 4);
+    await keyPress(send, evaluate, 4);
     const copied = await evaluate("navigator.clipboard.readText()");
     const typedAfterCopy = await evaluate("Fixture.typedText()");
     const kept = await evaluate("Fixture.selection()");
     await evaluate("Fixture.clearSelection()");
-    await keyPress(send, 2);
+    await keyPress(send, evaluate, 2);
     return { selection, copied, typedAfterCopy, kept, typedAfterInterrupt: await evaluate("Fixture.typedText()") };
   }).finally(() => server?.close());
   assert.match(seen.selection, /^first line of output\nsecond line\n/);
@@ -95,10 +102,10 @@ test("off a Mac, Ctrl+C copies the selection and lets it go, so the next Ctrl+C 
     await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);
     await evaluate("Fixture.selectAll()");
     const selection = await evaluate("Fixture.selection()");
-    await keyPress(send, 2);
+    await keyPress(send, evaluate, 2);
     const copied = await evaluate("navigator.clipboard.readText()");
     const afterCopy = { selection: await evaluate("Fixture.selection()"), typed: await evaluate("Fixture.typedText()") };
-    await keyPress(send, 2);
+    await keyPress(send, evaluate, 2);
     return { selection, copied, afterCopy, typedAfterSecond: await evaluate("Fixture.typedText()") };
   }).finally(() => server?.close());
   assert.match(seen.selection, /^first line of output\nsecond line\n/);
@@ -312,7 +319,7 @@ test("copy works in the master and agent terminal of every harness kind at every
             await evaluate(`navigator.clipboard.writeText(${JSON.stringify(NOTHING_COPIED)})`);
             await drag(send, from, to, modifiers);
             await wander();
-            await keyPress(send, copyKeys);
+            await keyPress(send, evaluate, copyKeys);
             return evaluate("navigator.clipboard.readText()");
           };
           const plain = await copied(0);

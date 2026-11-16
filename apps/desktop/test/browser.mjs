@@ -4,19 +4,23 @@ import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
-import { chromeExecutable, startChrome } from "./chrome.mjs";
+import { chromeExecutable, refusedCall, startChrome } from "./chrome.mjs";
 
 const STARTUP_MS = 15000;
 const CALL_MS = 15000;
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
 const PAGE = '<!doctype html><html lang="en"><head></head><body></body></html>';
 
-/** A page script that cancels every key press made with Cmd (Meta) held, before any page
- * handler runs, which still sees the key. Chrome on macOS hands a key press its page left
- * uncancelled to the Mac menu bar, so a Cmd key a test sent through DevTools opened About This
- * Mac on the owner's screen (ABOUT-THIS-MAC); a cancelled one ends in the page. */
-export const MAC_MENU_GUARD = 'addEventListener("keydown", (event) => { if (event.metaKey) event.preventDefault(); }, true);';
-const GUARDED = '(() => { const press = new KeyboardEvent("keydown", { key: "c", metaKey: true, cancelable: true }); dispatchEvent(press); return press.defaultPrevented; })()';
+/** The page script that presses one key inside the page, on the focused element, with modifiers
+ * numbered as DevTools numbers them (Alt 1, Ctrl 2, Cmd 4, Shift 8): keydown then keyup,
+ * bubbling and cancelable, so the app's own key handling reads it. The key never leaves the
+ * page, so a Cmd key reaches no Mac menu bar (ABOUT-THIS-MAC). Inputs: the key, its code and
+ * the modifiers. Output: the script text for `evaluate`. */
+export function keyInPage(key, code, modifiers) {
+  assert.ok(Number.isInteger(modifiers) && modifiers >= 0 && modifiers <= 15, "modifiers are DevTools bits");
+  const init = { key, code, altKey: (modifiers & 1) !== 0, ctrlKey: (modifiers & 2) !== 0, metaKey: (modifiers & 4) !== 0, shiftKey: (modifiers & 8) !== 0, bubbles: true, cancelable: true, composed: true };
+  return `(() => { const target = document.activeElement ?? document.body; for (const type of ["keydown", "keyup"]) target.dispatchEvent(new KeyboardEvent(type, ${JSON.stringify(init)})); })()`;
+}
 
 /** Bundles one test fixture and the production modules it imports into a script that defines
  * `Fixture` in the page. Input: the fixture path. Output: the script text. */
@@ -48,7 +52,8 @@ async function devtoolsEndpoint(profile, chrome) {
 }
 
 /** Opens one DevTools connection. Input: its WebSocket URL. Output: `send(method, params)`, which
- * fails a call Chrome does not answer within CALL_MS or once the connection closes,
+ * refuses before sending a call `refusedCall` names (a Cmd key on macOS), fails a call Chrome
+ * does not answer within CALL_MS or once the connection closes,
  * `on(method, listener)` for DevTools events such as `Network.loadingFailed`, and `close()`. */
 async function connect(url) {
   const socket = new WebSocket(url);
@@ -73,6 +78,11 @@ async function connect(url) {
     waiting.clear();
   };
   const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const refused = refusedCall(method, params);
+    if (refused !== null) {
+      reject(new Error(`${method}: ${refused}`));
+      return;
+    }
     if (socket.readyState !== WebSocket.OPEN) {
       reject(new Error(`${method}: DevTools connection closed`));
       return;
@@ -141,9 +151,6 @@ export async function withPage(check) {
         };
         await evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close();`);
         assert.equal(await evaluate("document.compatMode"), "CSS1Compat", "the page is in standards mode, as the app's page is");
-        await evaluate(MAC_MENU_GUARD);
-        await page.send("Page.addScriptToEvaluateOnNewDocument", { source: MAC_MENU_GUARD });
-        assert.equal(await evaluate(GUARDED), true, "a Cmd key press ends in the page, never in the Mac menu bar");
         await page.send("Emulation.setFocusEmulationEnabled", { enabled: true });
         assert.equal(await evaluate("document.hasFocus()"), true, "the page has focus, as the app window does");
         return await check({ evaluate, send: page.send, on: page.on, context: browserContextId });

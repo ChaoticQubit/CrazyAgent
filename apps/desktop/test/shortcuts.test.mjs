@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bundle, withPage } from "./browser.mjs";
+import { bundle, keyInPage, withPage } from "./browser.mjs";
 
 const fixture = await bundle(new URL("./fixtures/shortcuts.mjs", import.meta.url).pathname);
 const CTRL = 2;
 const META = 4;
 
-async function press(send, key, modifiers) {
+async function press(send, evaluate, key, modifiers) {
+  if ((modifiers & 4) !== 0) {
+    await evaluate(keyInPage(key, key === "/" ? "Slash" : `Key${key.toUpperCase()}`, modifiers));
+    return;
+  }
   for (const type of ["rawKeyDown", "keyUp"]) {
     await send("Input.dispatchKeyEvent", { type, key, code: key === "/" ? "Slash" : `Key${key.toUpperCase()}`, modifiers, windowsVirtualKeyCode: key === "/" ? 191 : key.toUpperCase().charCodeAt(0) });
   }
@@ -21,7 +25,7 @@ async function onPlatform(platform, check) {
     await evaluate("Fixture.mountGoTo()");
     const step = async (focus, key, modifiers) => {
       await evaluate(`document.querySelector(${JSON.stringify(focus)}).focus()`);
-      await press(send, key, modifiers);
+      await press(send, evaluate, key, modifiers);
       await evaluate("new Promise((done) => setTimeout(done, 0))");
       const open = await evaluate("Fixture.openDialog()");
       const keys = await evaluate("Fixture.shortcutKeys()");
