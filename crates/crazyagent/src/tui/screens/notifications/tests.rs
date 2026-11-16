@@ -335,6 +335,13 @@ fn enter_opens_each_items_page_and_marks_an_unread_item_read() {
             Place::Settings(SettingsSection::Harnesses),
         ),
         (NoticeTarget::Connectors, Place::Connectors),
+        (
+            NoticeTarget::ConnectorApproval {
+                project_id: id(TIDEPOOL),
+                id: 42,
+            },
+            Place::ConnectorApproval { id: 42 },
+        ),
         (NoticeTarget::Home, Place::Home),
     ];
     for (target, place) in cases {
