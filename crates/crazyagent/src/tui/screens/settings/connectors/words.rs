@@ -1,7 +1,7 @@
 use crate::app_plugins::{
     Binding, Origin, PluginStatus, ReadOnlyTrust, RunsView, SecretView, TrustView,
 };
-use crate::connectors::{ConnectorView, NativeConnectors, SizeCap};
+use crate::connectors::{ConnectorView, NativeConnectors, SignIn, SizeCap};
 use crate::tui::screens::settings::app_plugins::{problem_text, safe};
 use crate::tui::screens::settings::connector_activity::problem_words;
 use crate::tui::theme::Role;
@@ -81,6 +81,8 @@ pub(in crate::tui) const REFUSED_PASTED: &str = "This manifest can't be added";
 pub(in crate::tui) const REFUSED_LISTED: &str = "This connector can't be trusted";
 /// The code a ready trust screen with no connector block is refused under (WORDS r4).
 pub(in crate::tui) const NOT_CONNECTOR: &str = "app_plugin_not_connector";
+/// The state word of a connector a project can turn on (WORDS r1).
+pub(in crate::tui) const READY: &str = "Ready";
 /// The line under a refused connector file on its row and its page (WORDS r7).
 pub(in crate::tui) const REFUSED_FILE: &str = "Fix its file, or remove it on the App plugins page.";
 
@@ -199,7 +201,8 @@ pub(in crate::tui) fn origin_line(connector: &ConnectorView) -> String {
 }
 
 /// A connector's one state word with its role and the line under it, checked in the
-/// desktop's order: Refused (with its problem), Needs review, Needs a key, then Ready.
+/// desktop's order (WORDS r11): Refused (with its problem), Needs review, Unavailable (it
+/// signs in with OAuth, which the engine lists Ready with no key), Needs a key, then Ready.
 /// Input: the connector. Output: the word, its role and the line, if any.
 pub(in crate::tui) fn state(connector: &ConnectorView) -> (&'static str, Role, Option<String>) {
     match &connector.status {
@@ -209,12 +212,17 @@ pub(in crate::tui) fn state(connector: &ConnectorView) -> (&'static str, Role, O
             Role::Warning,
             Some("Review this connector before a project can use it.".into()),
         ),
+        _ if connector.sign_in == SignIn::NotYet => (
+            "Unavailable",
+            Role::Warning,
+            Some(OAUTH_NOT_YET.into()),
+        ),
         PluginStatus::NeedsKey => (
             "Needs a key",
             Role::Warning,
             Some("Set a key for each secret it needs.".into()),
         ),
-        PluginStatus::Ready => ("Ready", Role::Success, None),
+        PluginStatus::Ready => (READY, Role::Success, None),
     }
 }
 

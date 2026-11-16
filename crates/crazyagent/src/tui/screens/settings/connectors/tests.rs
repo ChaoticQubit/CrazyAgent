@@ -737,12 +737,11 @@ fn an_oauth_only_connector_reads_unavailable_with_the_oauth_line_once_and_review
     }
     let mut shell = page(read);
     let tall = render(&mut shell, 80, 48);
-    let word = |title: &str, word: &str| {
-        tall.iter()
-            .any(|row| row.contains(title) && row.trim_end().ends_with(word))
+    let reads = |title: &str, word: &str| {
+        tall.iter().any(|row| row.contains(title) && row.trim_end().ends_with(word))
     };
-    assert!(word("GitHub", "Unavailable"), "{tall:#?}");
-    assert!(word("Board", "Needs review"), "review comes before Unavailable");
+    assert!(reads("GitHub", "Unavailable"), "{tall:#?}");
+    assert!(reads("Board", "Needs review"), "review comes before Unavailable");
     assert_eq!(tall.join("\n").matches(oauth).count(), 1, "{tall:#?}");
     keys(&mut shell, &[Key::Down, Key::Enter]);
     assert!(shows(&mut shell, "Settings  /  Connectors  /  GitHub"));

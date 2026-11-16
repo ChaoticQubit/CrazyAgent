@@ -1,4 +1,3 @@
-use crate::app_plugins::PluginStatus;
 use crate::connectors::{ConnectorsView, Grant, Who};
 use crate::protocol::ProjectId;
 use crate::tui::client::connectors::{ConnectorsEvent, ConnectorsJob};
@@ -8,7 +7,7 @@ use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::settings::app_plugins::safe;
 use crate::tui::screens::settings::connector_activity::turn;
-use crate::tui::screens::settings::connectors::words::{refusal, state};
+use crate::tui::screens::settings::connectors::words::{READY, refusal, state};
 use crate::tui::screens::settings_accounts::{send, settings_event};
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::Arrival;
@@ -75,7 +74,7 @@ impl Switch {
 }
 
 /// The switches the page lists and the titles of the rest, the desktop's projectRows:
-/// every ready connector and every one whose switch is On, in the page's order, then an On
+/// every Ready connector and every one whose switch is On, in the page's order, then an On
 /// switch whose connector is gone. One row per name, the first listed winning, so a
 /// built-in connector hides the owner's refused file it shadows. Input: the page. Output:
 /// the switches and the others.
@@ -89,13 +88,14 @@ fn switches(view: &ConnectorsView) -> (Vec<Switch>, Vec<String>) {
             continue;
         }
         let grant = grant_of(&connector.name).cloned();
-        let ready = connector.status == PluginStatus::Ready;
+        let word = state(connector).0;
+        let ready = word == READY;
         if ready || grant.as_ref().is_some_and(|grant| grant.enabled) {
             listed.push(Switch {
                 name: connector.name.clone(),
                 title: safe(&connector.title),
                 ready,
-                word: state(connector).0,
+                word,
                 grant,
             });
         } else {

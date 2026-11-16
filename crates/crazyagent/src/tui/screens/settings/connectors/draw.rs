@@ -1,14 +1,13 @@
 use super::words::{
     ADD_HELP, ADD_TITLE, CATALOG, CATALOG_ABOUT, HARNESSES, HARNESSES_ABOUT, KEY_HELP,
-    LOCKED_LABEL, LOCKED_REASON, LOCKED_VALUE, NATIVE_CHOICES, NATIVE_HELP, NATIVE_LABEL,
-    OAUTH_NOT_YET, PURPOSE, REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS,
-    SIZE_CHOICES, SIZE_HELP, SIZE_LABEL, origin_line, reaches_line, refusal, secret_line, state,
-    trust_lines,
+    LOCKED_LABEL, LOCKED_REASON, LOCKED_VALUE, NATIVE_CHOICES, NATIVE_HELP, NATIVE_LABEL, PURPOSE,
+    REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS, SIZE_CHOICES, SIZE_HELP,
+    SIZE_LABEL, origin_line, reaches_line, refusal, secret_line, state, trust_lines,
 };
 use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, Row, TITLE, refused};
 use crate::app_plugins::RunsView;
 use crate::connectors::launch::reach;
-use crate::connectors::{ConnectorView, ConnectorsView, SignIn};
+use crate::connectors::{ConnectorView, ConnectorsView};
 use crate::coord::settings::HarnessKind;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Modal, hint};
@@ -249,9 +248,6 @@ impl ConnectorsPage {
         if let Some(RunsView::Connector { url, .. }) = &connector.runs {
             let address = format!("Address: {}", safe(url));
             lines.extend(wrap(&address, width).into_iter().map(Line::raw));
-        }
-        if connector.sign_in == SignIn::NotYet && !refused(connector) {
-            lines.extend(muted(OAUTH_NOT_YET, width, ctx));
         }
         self.failure_lines(&mut lines, width, ctx);
         lines.push(Line::default());
