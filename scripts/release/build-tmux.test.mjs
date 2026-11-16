@@ -202,6 +202,17 @@ test("a failed build step prints the end of its log after the failure code, so a
   }
 });
 
+test("on Linux tmux is handed the wide ncurses it was built with, since tmux 3.8's own setupterm search then appends -lncurses, a library a wide ncurses 6.6 build never makes, and every later link check fails (release run 43840451293)", () => {
+  const text = readFileSync(SCRIPT, "utf8");
+  const ncurses = text.match(/^build_ncurses\(\) \{\n[\s\S]*?\n\}\n/m);
+  assert(ncurses, "build_ncurses() is defined on lines of its own");
+  assert(!/--disable-widec|--enable-widec=no/.test(ncurses[0]), "ncurses is built wide, so its library is ncursesw");
+  const linux = text.match(/^  build_tmux "\$tree" --enable-static[^\n]*$/m);
+  assert(linux, "the Linux branch builds a static tmux");
+  assert(linux[0].includes(`LIBNCURSESW_CFLAGS="-I$prefix/include"`), linux[0]);
+  assert(linux[0].includes(`LIBNCURSESW_LIBS="-L$prefix/lib -lncursesw"`), linux[0]);
+});
+
 test("every build step that writes a log hands that log to fail(), so each step's failure prints its own tail", () => {
   const text = readFileSync(SCRIPT, "utf8");
   const calls = [...text.matchAll(/fail "build_tmux_([a-z0-9]+)_failed: (\$tree\/[a-z0-9]+\.log)"([^\n]*)/g)];
