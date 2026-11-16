@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
 use crate::protocol::Outcome;
-use crate::sandbox::{LinuxSockets, LinuxSupervisor};
+use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use rusqlite::{Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -16,15 +16,18 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS sandbox_settings (
 const SUPERVISOR_COLUMN: &str = "ALTER TABLE sandbox_settings ADD COLUMN linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off'))";
 
 /// The owner's app-wide sandbox settings: how a limited-network agent's sockets are held
-/// on Linux ("Linux limited-network sockets") and whether Linux agents run under the call
-/// supervisor ("Linux call supervisor"). Before the first save every value is its default;
-/// a client that sends no supervisor choice gets the default.
+/// on Linux ("Linux limited-network sockets"), whether Linux agents run under the call
+/// supervisor ("Linux call supervisor") and whether a Linux launch without the full sandbox
+/// is refused (DEC-185). Before the first save every value is its default; a client that
+/// sends no supervisor or strict choice gets the default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxSettings {
     pub linux_sockets: LinuxSockets,
     #[serde(default)]
     pub linux_supervisor: LinuxSupervisor,
+    #[serde(default)]
+    pub linux_strict: LinuxStrict,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -106,6 +109,7 @@ pub fn load(connection: &Connection) -> Result<SandboxSettings, EngineError> {
     Ok(SandboxSettings {
         linux_sockets: value(sockets)?,
         linux_supervisor: value(supervisor)?,
+        linux_strict: LinuxStrict::default(),
     })
 }
 
@@ -191,13 +195,18 @@ mod tests {
                 .is_err(),
             "the table refuses a value outside the three options"
         );
-        for row in ["'open','on'", "'tcp_only','maybe'"] {
+        for row in [
+            "'open','on','off'",
+            "'tcp_only','maybe','off'",
+            "'tcp_only','on','maybe'",
+        ] {
             connection
                 .execute_batch(&format!(
-                    "DROP TABLE sandbox_settings; CREATE TABLE sandbox_settings (singleton INTEGER PRIMARY KEY, linux_sockets TEXT NOT NULL, linux_supervisor TEXT NOT NULL); INSERT INTO sandbox_settings VALUES(1,{row});"
+                    "DROP TABLE sandbox_settings; CREATE TABLE sandbox_settings (singleton INTEGER PRIMARY KEY, linux_sockets TEXT NOT NULL, linux_supervisor TEXT NOT NULL, linux_strict TEXT NOT NULL); INSERT INTO sandbox_settings VALUES(1,{row});"
                 ))
                 .unwrap();
-            assert_eq!(load(&connection).unwrap_err().0, "sandbox_settings_invalid");
+            let read = load(&connection).map_err(|error| error.0);
+            assert_eq!(read, Err("sandbox_settings_invalid".into()), "{row}");
         }
     }
 
@@ -214,6 +223,7 @@ mod tests {
             let settings = SandboxSettings {
                 linux_sockets: LinuxSockets::TcpPorts,
                 linux_supervisor,
+                linux_strict: LinuxStrict::Off,
             };
             assert_eq!(save(&connection, &settings).unwrap(), Outcome::Applied);
             assert_eq!(load(&connection).unwrap(), settings);
@@ -251,6 +261,7 @@ mod tests {
         let kept = SandboxSettings {
             linux_sockets: LinuxSockets::TcpPorts,
             linux_supervisor: LinuxSupervisor::On,
+            linux_strict: LinuxStrict::Off,
         };
         assert_eq!(load(&connection).unwrap(), kept);
         let off = SandboxSettings {
@@ -275,6 +286,7 @@ mod tests {
         let off = SandboxSettings {
             linux_sockets: LinuxSockets::TcpPorts,
             linux_supervisor: LinuxSupervisor::Off,
+            linux_strict: LinuxStrict::Off,
         };
         save(&connection, &off).unwrap();
         assert_eq!(stored(&engine).unwrap(), off);
@@ -299,7 +311,72 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&off).unwrap(),
-            r#"{"linux_sockets":"tcp_only","linux_supervisor":"off"}"#
+            r#"{"linux_sockets":"tcp_only","linux_supervisor":"off","linux_strict":"off"}"#
         );
+    }
+
+    #[test]
+    fn each_strict_option_is_saved_and_read_back_and_a_fresh_engine_has_off() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = Connection::open(folder.path().join("engine.db")).unwrap();
+        initialize(&connection).unwrap();
+        assert_eq!(load(&connection).unwrap().linux_strict, LinuxStrict::Off);
+        for linux_strict in [LinuxStrict::On, LinuxStrict::Off, LinuxStrict::On] {
+            let settings = SandboxSettings {
+                linux_sockets: LinuxSockets::TcpPorts,
+                linux_supervisor: LinuxSupervisor::Off,
+                linux_strict,
+            };
+            assert_eq!(save(&connection, &settings).unwrap(), Outcome::Applied);
+            assert_eq!(load(&connection).unwrap(), settings);
+        }
+        assert!(
+            connection
+                .execute(
+                    "UPDATE sandbox_settings SET linux_strict='maybe' WHERE singleton=1",
+                    [],
+                )
+                .is_err(),
+            "the table refuses a value outside the two options"
+        );
+    }
+
+    #[test]
+    fn an_engine_database_from_before_the_strict_setting_reads_off_and_keeps_the_others() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = Connection::open(folder.path().join("engine.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sandbox_settings (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), linux_sockets TEXT NOT NULL CHECK(linux_sockets IN ('tcp_only', 'refuse', 'tcp_ports')), linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off'))); INSERT INTO sandbox_settings VALUES(1,'refuse','off');",
+            )
+            .unwrap();
+        initialize(&connection).unwrap();
+        initialize(&connection).unwrap();
+        let columns: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('sandbox_settings') WHERE name='linux_strict'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 1, "the strict column is added once");
+        let kept = SandboxSettings {
+            linux_sockets: LinuxSockets::Refuse,
+            linux_supervisor: LinuxSupervisor::Off,
+            linux_strict: LinuxStrict::Off,
+        };
+        assert_eq!(load(&connection).unwrap(), kept);
+    }
+
+    #[test]
+    fn a_client_that_sends_no_strict_choice_gets_off_and_each_choice_has_one_word() {
+        let old: SandboxSettings =
+            serde_json::from_str(r#"{"linux_sockets":"tcp_only","linux_supervisor":"on"}"#)
+                .unwrap();
+        assert_eq!(old.linux_strict, LinuxStrict::Off);
+        for (strict, word) in [(LinuxStrict::Off, "\"off\""), (LinuxStrict::On, "\"on\"")] {
+            assert_eq!(serde_json::to_string(&strict).unwrap(), word);
+            assert_eq!(serde_json::from_str::<LinuxStrict>(word).unwrap(), strict);
+        }
     }
 }

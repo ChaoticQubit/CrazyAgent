@@ -1613,6 +1613,7 @@ fn boundary_check(
         .linux_supervisor;
     #[cfg(not(target_os = "linux"))]
     let calls = crate::sandbox::LinuxSupervisor::On;
+    let strict = crate::sandbox::LinuxStrict::Off;
     let profile = check_profile(&checks, id);
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
         .and_then(|sandbox| sandbox.keep_ports(kept))
@@ -1622,7 +1623,7 @@ fn boundary_check(
             Some(install) => sandbox.allow_read(install),
             None => Ok(sandbox),
         })
-        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profile, calls))
+        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profile, calls, strict))
         .map_err(boundary)?;
     let mut server = std::process::Command::new(program);
     server.args(args).current_dir(&folders[0]);

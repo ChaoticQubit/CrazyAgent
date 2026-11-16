@@ -1070,7 +1070,8 @@ fn turn_sandbox(
     #[cfg(not(target_os = "linux"))]
     let calls = crate::sandbox::LinuxSupervisor::On;
     let profile = runtime.path.join(MASTER_PROFILE);
-    let installed = InstalledSandbox::install(sandbox, &profile, calls).map_err(refused)?;
+    let strict = crate::sandbox::LinuxStrict::Off;
+    let installed = InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(refused)?;
     let installed = if policy.access == AgentAccess::Full {
         installed.unconfined()
     } else {

@@ -6,7 +6,7 @@ use crate::master_step_limit::{MasterStepSettings, StepLimit};
 use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
-use crate::sandbox::{LinuxSockets, LinuxSupervisor};
+use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use crate::sandbox_settings::SandboxSettings;
 use crate::setup::{Dependency, DependencyStatus, PackGroup, Version};
 use crate::tui::client::OwnerEvent;
@@ -767,7 +767,7 @@ fn settings_show_the_home_and_github_and_sign_out_after_yes() {
     let github = find(&rows, "GitHub    ");
     assert!(github.contains("Signed in as octocat"));
     assert!(github.contains("with GitHub sign-in"));
-    assert!(bar(&rows).contains("g Sign out of GitHub"));
+    assert!(bar(&rows).contains("g Sign out"));
     shell.key(Key::Char('g'));
     find(&render(&mut shell, 120, 36), "Sign out of GitHub?");
     shell.key(Key::Char('y'));
@@ -786,7 +786,7 @@ fn settings_show_the_home_and_github_and_sign_out_after_yes() {
     assert_eq!(lead(&shell), "Signed out of GitHub.");
     let rows = render(&mut shell, 120, 36);
     assert!(find(&rows, "GitHub    ").contains("Not signed in"));
-    assert!(!bar(&rows).contains("Sign out of GitHub"));
+    assert!(!bar(&rows).contains("g Sign out"));
 }
 
 #[test]
@@ -1021,6 +1021,7 @@ fn turning_the_call_supervisor_off_saves_it_and_keeps_the_sockets_choice() {
     let off = SandboxSettings {
         linux_sockets: LinuxSockets::TcpPorts,
         linux_supervisor: LinuxSupervisor::Off,
+        ..SandboxSettings::default()
     };
     assert_eq!(sent(&mut shell), off);
     shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
@@ -1035,6 +1036,7 @@ fn changing_sockets_keeps_the_supervisor_off_and_turning_it_on_keeps_the_sockets
     let off = SandboxSettings {
         linux_sockets: LinuxSockets::TcpOnly,
         linux_supervisor: LinuxSupervisor::Off,
+        ..SandboxSettings::default()
     };
     stored(&mut shell, off);
     shell.key(Key::Char('l'));
@@ -1086,6 +1088,93 @@ fn neither_linux_setting_is_saved_while_the_engine_has_not_said_both() {
         let unknown = format!("The {words} setting is not known yet.");
         assert_eq!(lead(&shell), unknown);
     }
+}
+
+#[test]
+fn settings_show_the_strict_linux_setting_off_by_default_and_what_each_option_does() {
+    let mut shell = settings(120, 72);
+    let rows = render(&mut shell, 120, 72);
+    assert!(find(&rows, "Linux strict ").contains("Off"));
+    assert!(bar(&rows).contains("x Strict"));
+    shell.key(Key::Char('x'));
+    let rows = render(&mut shell, 120, 72);
+    find(&rows, "Refuse agents without the full Linux sandbox:");
+    for title in ["> Off", "  On"] {
+        find(&rows, title);
+    }
+    find(&rows, "process space of its own");
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the current option saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn turning_strict_on_saves_it_and_keeps_the_sockets_and_supervisor_choices() {
+    let mut shell = settings_with(120, 60, LinuxSockets::TcpPorts);
+    let kept = SandboxSettings {
+        linux_sockets: LinuxSockets::TcpPorts,
+        linux_supervisor: LinuxSupervisor::Off,
+        linux_strict: LinuxStrict::Off,
+    };
+    stored(&mut shell, kept);
+    shell.key(Key::Char('x'));
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> On");
+    shell.key(Key::Enter);
+    let on = SandboxSettings {
+        linux_strict: LinuxStrict::On,
+        ..kept
+    };
+    assert_eq!(sent(&mut shell), on);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    assert_eq!(lead(&shell), "Linux strict: On.");
+    stored(&mut shell, on);
+    assert!(find(&render(&mut shell, 120, 60), "Linux strict ").contains("On"));
+}
+
+#[test]
+fn changing_sockets_or_the_supervisor_keeps_strict_on() {
+    let mut shell = settings(120, 60);
+    let strict = SandboxSettings {
+        linux_sockets: LinuxSockets::TcpOnly,
+        linux_supervisor: LinuxSupervisor::On,
+        linux_strict: LinuxStrict::On,
+    };
+    stored(&mut shell, strict);
+    shell.key(Key::Char('l'));
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let refused = SandboxSettings {
+        linux_sockets: LinuxSockets::Refuse,
+        ..strict
+    };
+    assert_eq!(sent(&mut shell), refused);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    let _read_back = jobs(&mut shell);
+    stored(&mut shell, refused);
+    shell.key(Key::Char('v'));
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let off = SandboxSettings {
+        linux_supervisor: LinuxSupervisor::Off,
+        ..refused
+    };
+    assert_eq!(sent(&mut shell), off);
+    assert_eq!(off.linux_strict, LinuxStrict::On);
+}
+
+#[test]
+fn the_strict_setting_is_not_saved_while_the_engine_has_not_said_it() {
+    let mut shell = Shell::with(ctx(120, 60), Box::new(AppSetup::new(false)));
+    let _asked = jobs(&mut shell);
+    shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
+    let _read = jobs(&mut shell);
+    shell.key(Key::Char('x'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(lead(&shell), "The Linux strict setting is not known yet.");
 }
 
 fn cleanup_chosen(shell: &mut Shell) -> CleanupSettings {
@@ -1784,6 +1873,16 @@ fn the_sockets_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
 }
 
 #[test]
+fn the_strict_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('x'));
+        let (first, last) = ("Refuse agents without the full", "says why.");
+        ask_in_body(&mut shell, width, height, first, last);
+    }
+}
+
+#[test]
 fn the_supervisor_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
     for (width, height) in ASK_SIZES {
         let mut shell = settings(width, height);
@@ -1995,12 +2094,7 @@ fn every_app_settings_hint_stays_on_the_bar_from_80_by_24_to_240_columns() {
     let wide = crate::tui::screens::settings_accounts::tests::bar_rows(&rows);
     assert_eq!(wide.len(), 1, "{wide:?}");
     let hints = crate::tui::screens::settings_accounts::tests::wide_hints(&wide[0]);
-    for needed in [
-        "Esc Back",
-        "z Master frame",
-        "g Sign out of GitHub",
-        "? Help",
-    ] {
+    for needed in ["Esc Back", "z Master frame", "g Sign out", "? Help"] {
         assert!(hints.iter().any(|hint| hint == needed), "{hints:?}");
     }
     for (width, height) in [(200, 80), (209, 80), (80, 24)] {
@@ -2188,13 +2282,7 @@ fn a_refused_tool_keeps_every_app_settings_hint_on_the_bar_from_80_by_24_to_240_
     let wide = crate::tui::screens::settings_accounts::tests::bar_rows(&rows);
     assert_eq!(wide.len(), 1, "{wide:?}");
     let hints = crate::tui::screens::settings_accounts::tests::wide_hints(&wide[0]);
-    for needed in [
-        "p Fix",
-        "u Unused",
-        "Esc Back",
-        "g Sign out of GitHub",
-        "? Help",
-    ] {
+    for needed in ["p Fix", "u Unused", "Esc Back", "g Sign out", "? Help"] {
         assert!(hints.iter().any(|hint| hint == needed), "{hints:?}");
     }
     for (width, height) in [(200, 80), (209, 80), (80, 24)] {
@@ -2219,9 +2307,10 @@ fn signed_in_app_settings_show_every_key_at_80_by_24_with_or_without_a_fix() {
         "Enter Install missing",
         "d Remove",
         "h Home",
-        "g Sign out of GitHub",
+        "g Sign out",
         "l Sockets",
         "v Supervisor",
+        "x Strict",
         "f Finished",
         "q Quitting",
         "e Retry",

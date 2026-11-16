@@ -438,7 +438,8 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     use crate::engine::owner::{HostStamp, NativeProfileBinding};
     use crate::protocol::{ConfigId, Cursor, SessionId};
     use crate::sandbox::{
-        InstalledSandbox, LinuxSupervisor, ProjectSandbox, SandboxNetwork, SandboxRemote,
+        InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork,
+        SandboxRemote,
     };
 
     let reference = |value: &str| CredentialRef::new(value).unwrap();
@@ -511,7 +512,9 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     .allow_read(installed_claude().parent().unwrap())
     .unwrap();
     let profile = root.path().join("master.sb");
-    let sandbox = InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On).unwrap();
+    let sandbox =
+        InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off)
+            .unwrap();
     assert!(
         !sandbox
             .sandbox()

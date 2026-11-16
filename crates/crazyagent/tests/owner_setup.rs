@@ -11,7 +11,7 @@ use crazyagent::master_session::{MasterBackend, MasterOwnerAction};
 use crazyagent::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
 use crazyagent::project_setup::{ProjectSetup, TeamPlan};
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
-use crazyagent::sandbox::{LinuxSockets, LinuxSupervisor};
+use crazyagent::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use crazyagent::sandbox_settings::SandboxSettings;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -296,6 +296,7 @@ async fn each_linux_call_supervisor_option_is_saved_in_the_engine_and_survives_a
         let settings = SandboxSettings {
             linux_sockets: LinuxSockets::Refuse,
             linux_supervisor,
+            linux_strict: LinuxStrict::Off,
         };
         let set = controller.set_sandbox_settings(settings, generation).await;
         assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
@@ -304,6 +305,7 @@ async fn each_linux_call_supervisor_option_is_saved_in_the_engine_and_survives_a
     let off = SandboxSettings {
         linux_sockets: LinuxSockets::TcpOnly,
         linux_supervisor: LinuxSupervisor::Off,
+        linux_strict: LinuxStrict::Off,
     };
     let set = controller.set_sandbox_settings(off, 3).await;
     assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
@@ -311,6 +313,36 @@ async fn each_linux_call_supervisor_option_is_saved_in_the_engine_and_survives_a
     case.restart().await;
     let mut controller = case.controller().await;
     assert_eq!(controller.sandbox_settings().await.unwrap(), off);
+    drop(controller);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn each_strict_linux_option_is_saved_in_the_engine_and_survives_a_restart() {
+    let mut case = Case::new().await;
+    let mut controller = case.controller().await;
+    let fresh = controller.sandbox_settings().await.unwrap();
+    assert_eq!(fresh.linux_strict, LinuxStrict::Off);
+    for (generation, linux_strict) in [(1, LinuxStrict::On), (2, LinuxStrict::Off)] {
+        let settings = SandboxSettings {
+            linux_sockets: LinuxSockets::TcpPorts,
+            linux_supervisor: LinuxSupervisor::Off,
+            linux_strict,
+        };
+        let set = controller.set_sandbox_settings(settings, generation).await;
+        assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
+        assert_eq!(controller.sandbox_settings().await.unwrap(), settings);
+    }
+    let on = SandboxSettings {
+        linux_strict: LinuxStrict::On,
+        ..SandboxSettings::default()
+    };
+    let set = controller.set_sandbox_settings(on, 3).await;
+    assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
+    drop(controller);
+    case.restart().await;
+    let mut controller = case.controller().await;
+    assert_eq!(controller.sandbox_settings().await.unwrap(), on);
     drop(controller);
     case.close().await;
 }

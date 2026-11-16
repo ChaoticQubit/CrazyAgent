@@ -7,6 +7,7 @@ const LABEL = "Linux limited-network sockets";
 const HELP = "How an agent limited to its model reaches the network when CrazyAgent runs on Linux. Landlock limits TCP by port only.";
 const REFUSE = 'input[value="refuse"]';
 const CALLS = "Linux call supervisor";
+const STRICT = "Refuse agents without the full Linux sandbox";
 
 test("Sandbox shows its title, then Linux with each setting's words above its choices", async () => {
   const seen = await onTab("sandbox", {}, async (page) => ({ ...(await shown(page)), border: await page.evaluate("getComputedStyle(document.querySelector('.set-line-ctl > fieldset') ?? document.body).borderTopWidth") }));
@@ -15,7 +16,7 @@ test("Sandbox shows its title, then Linux with each setting's words above its ch
   assert.equal(seen.border, "0px", "the browser's fieldset box does not frame the choices");
   assert.deepEqual(seen.top.actions, []);
   assert.deepEqual(seen.sections.map((section) => section.heading), ["Linux"]);
-  const [row, calls] = seen.sections[0].rows;
+  const [row, calls, strict] = seen.sections[0].rows;
   assert.equal(row.label, LABEL);
   assert.equal(row.help, HELP);
   assert.equal(row.radios, 3);
@@ -24,6 +25,10 @@ test("Sandbox shows its title, then Linux with each setting's words above its ch
   assert.equal(calls.radios, 2);
   assert.ok(calls.controlTop >= calls.labelBottom, `its choices stand under its words: ${JSON.stringify(calls)}`);
   assert.ok(calls.labelBottom > row.controlTop, `the supervisor stands under the sockets: ${JSON.stringify(calls)}`);
+  assert.equal(strict?.label, STRICT, JSON.stringify(seen.sections[0].rows));
+  assert.equal(strict.radios, 2);
+  assert.ok(strict.controlTop >= strict.labelBottom, `its choices stand under its words: ${JSON.stringify(strict)}`);
+  assert.ok(strict.labelBottom > calls.controlTop, `the strict setting stands under the supervisor: ${JSON.stringify(strict)}`);
   for (const part of ["TCP only, names looked up over TCP (recommended)", "Do not start limited-network agents", "TCP ports only", "On (recommended)", "Off", "Save changes"]) {
     assert.ok(seen.says.includes(part), `${part} in ${seen.says}`);
   }
@@ -42,6 +47,9 @@ test("the changed mark shows only away from the engine's default, for a stored v
   const callsMark = (page) => page.evaluate("Fixture.sections()[0]?.rows[1]?.mark ?? null");
   assert.equal(await onTab("sandbox", {}, callsMark), null);
   assert.equal(await onTab("sandbox", { calls: "off" }, callsMark), "changed");
+  const strictMark = (page) => page.evaluate("Fixture.sections()[0]?.rows[2]?.mark ?? null");
+  assert.equal(await onTab("sandbox", {}, strictMark), null);
+  assert.equal(await onTab("sandbox", { strict: "on" }, strictMark), "changed");
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
   assert.match(engine, /pub enum LinuxSockets \{\s*#\[default\]\s*TcpOnly,/, "the mark's default is the engine's default");
   const source = readFileSync(new URL("../src/screens/settings/sandbox.tsx", import.meta.url), "utf8");
@@ -72,9 +80,9 @@ for (const [state, scene, expected] of [
 test("real Tab keys reach the choices, then Save changes once a pick differs", async () => {
   const seen = await onTab("sandbox", {}, async (page) => {
     await press(page, REFUSE);
-    return walk(page, 3);
+    return walk(page, 4);
   });
-  assert.deepEqual(seen, ["refuse", "on", "Save changes"]);
+  assert.deepEqual(seen, ["refuse", "on", "off", "Save changes"]);
 });
 
 for (const theme of ["light", "dark"]) {
