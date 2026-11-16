@@ -63,7 +63,7 @@ fn the_catalog_says_what_each_harness_can_be_and_which_endpoint_accounts_it_runs
     let rcli = row("rcli");
     assert!(!rcli.terminal && rcli.master && !rcli.research);
     assert_eq!(rcli.sub_agents, SubAgents::App);
-    assert_eq!(rcli.account_protocols, ["*"]);
+    assert_eq!(rcli.account_protocols, ["openai*", "anthropic-messages"]);
     for entry in &entries {
         assert_eq!(
             entry.terminal,

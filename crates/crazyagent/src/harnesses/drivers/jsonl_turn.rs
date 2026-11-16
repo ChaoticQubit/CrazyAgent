@@ -1,5 +1,5 @@
 use super::super::launch::{LaunchError, LaunchEvent, PROMPT_BYTES_MAX, failure};
-use super::super::manifest::{self, DriverKind, Fact, Manifest, PLACEHOLDERS, Refused, Rule};
+use super::super::manifest::{self, DriverKind, Fact, Manifest, Refused, Rule};
 use super::rules;
 use crate::adapters::LINE_BYTES_MAX;
 use crate::app_plugins::yaml::Value as Yaml;
@@ -56,21 +56,6 @@ impl Config {
                 "piped.argv: {prompt} is needed, so each turn's prompt reaches the harness.".into(),
             );
         }
-        let positional = argv
-            .iter()
-            .position(|argument| argument == "--")
-            .unwrap_or(argv.len());
-        if argv[..positional]
-            .iter()
-            .any(|argument| argument.starts_with("{prompt}"))
-        {
-            return refuse(
-                manifest::VALUE,
-                "piped.argv: {prompt} begins an argument; write it after text such as \
-                 --prompt= or after a -- entry, so a prompt is never read as an option."
-                    .into(),
-            );
-        }
         let resume = arguments(piped, "resume")?.unwrap_or_default();
         if !resume.is_empty() && !resume.iter().any(|argument| argument.contains("{session}")) {
             return refuse(
@@ -79,20 +64,8 @@ impl Config {
             );
         }
         let tools_off = arguments(piped, "tools_off")?;
-        for (key, added) in [
-            ("resume", resume.as_slice()),
-            ("tools_off", tools_off.as_deref().unwrap_or_default()),
-        ] {
-            if added.iter().any(|argument| argument.contains("{prompt}")) {
-                return refuse(
-                    manifest::VALUE,
-                    format!(
-                        "piped.{key}: {{prompt}} belongs in piped.argv only, so a prompt is \
-                         never read as an option."
-                    ),
-                );
-            }
-        }
+        let positional =
+            super::positional(&argv, &resume, tools_off.as_deref().unwrap_or_default())?;
         let set = match piped.get("rules") {
             None | Some(Yaml::Null) => {
                 return refuse(
@@ -252,12 +225,7 @@ impl JsonlTurn {
         } else {
             self.config.tools_off.as_deref().unwrap_or_default()
         };
-        let (options, positional) = self.config.argv.split_at(self.config.positional);
-        let argv = options
-            .iter()
-            .chain(resume)
-            .chain(off)
-            .chain(positional)
+        let argv = super::ordered(&self.config.argv, self.config.positional, resume, off)
             .map(|argument| self.fill(argument, prompt))
             .collect::<Result<Vec<String>, LaunchError>>()?;
         assert_eq!(
@@ -377,28 +345,7 @@ impl JsonlTurn {
     }
 
     fn fill(&self, argument: &str, prompt: &str) -> Result<String, LaunchError> {
-        let mut filled = String::with_capacity(argument.len());
-        let mut rest = argument;
-        while let Some(open) = rest.find('{') {
-            filled.push_str(&rest[..open]);
-            let after = &rest[open + 1..];
-            let name = after
-                .find('}')
-                .map(|close| &after[..close])
-                .filter(|name| PLACEHOLDERS.contains(name));
-            match name {
-                Some(name) => {
-                    filled.push_str(self.value(name, prompt)?);
-                    rest = &after[name.len() + 1..];
-                }
-                None => {
-                    filled.push('{');
-                    rest = after;
-                }
-            }
-        }
-        filled.push_str(rest);
-        Ok(filled)
+        super::fill(argument, |name| self.value(name, prompt))
     }
 
     fn value<'a>(&'a self, name: &str, prompt: &'a str) -> Result<&'a str, LaunchError> {
@@ -429,7 +376,7 @@ impl JsonlTurn {
     }
 }
 
-fn arguments(piped: &Yaml, key: &str) -> Result<Option<Vec<String>>, Refused> {
+pub(super) fn arguments(piped: &Yaml, key: &str) -> Result<Option<Vec<String>>, Refused> {
     let place = format!("piped.{key}");
     let items = match piped.get(key) {
         None | Some(Yaml::Null) => return Ok(None),
@@ -464,7 +411,7 @@ fn arguments(piped: &Yaml, key: &str) -> Result<Option<Vec<String>>, Refused> {
         .map(Some)
 }
 
-fn plain_session(id: &str) -> bool {
+pub(super) fn plain_session(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= SESSION_BYTES_MAX
         && !id.starts_with('-')

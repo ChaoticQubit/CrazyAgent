@@ -22,8 +22,7 @@ piped:
     - "{home}"
     - "--model"
     - "{model}"
-    - "--prompt"
-    - "{prompt}"
+    - "--prompt={prompt}"
   resume:
     - "--resume"
     - "{session}"
