@@ -205,13 +205,16 @@ pub struct HeldView {
 
 /// One hold of a Full access stop: the account it keeps, if any, the report naming what
 /// still runs, what the stop holds, such as the agent's account lease, until the
-/// hold ends or the owner keeps the processes running, who left it, the names it shows, where
-/// it stands, when it began and whether a sandboxed run left it ([`confined_left_by`]).
+/// hold ends or the owner keeps the processes running, the run's place on the hidden folders
+/// list, if it has one, until the hold ends in any mode, who left it, the names it shows,
+/// where it stands, when it began and whether a sandboxed run left it ([`confined_left_by`]).
 struct Held {
     account: Option<CredentialRef>,
     report: String,
     #[allow(dead_code)]
     kept: Option<Box<dyn Send>>,
+    #[allow(dead_code)]
+    listed: Option<Box<dyn Send>>,
     by: HoldBy,
     names: String,
     state: HoldState,
@@ -308,8 +311,9 @@ pub fn end_held(key: u64, project: &str) -> bool {
 
 /// Lets one hold of a project keep its processes running, the owner's Keep: the account and
 /// what the stop held for it, such as the account lease, are let go at once, and
-/// the processes stay listed until they end. Inputs: the hold's key and the project it must
-/// belong to. Output: whether it is now kept.
+/// the processes stay listed, as does the run's place on the hidden folders list, until they
+/// end. Inputs: the hold's key and the project it must belong to. Output: whether it is now
+/// kept.
 pub fn keep_held(key: u64, project: &str) -> bool {
     let released = {
         let mut held = held();
@@ -598,6 +602,38 @@ impl Leftovers {
         by: HoldBy,
         mode: LeftoverMode,
     ) {
+        self.begin(account, Box::new(kept), None, by, mode);
+    }
+
+    /// Holds as [`Leftovers::hold`] does, for a run on the hidden folders list (SA-VID14):
+    /// `kept`, such as its account lease, goes as `mode` says, and `listed`, its place on that
+    /// list, stays in every mode, Keep and the owner's [`keep_held`] included, until the hold
+    /// ends, so a kept run is named while its processes run and frees its place once they end.
+    /// Inputs: as for `hold`, plus the listing. Output: none.
+    pub fn hold_listed<T: Send + 'static, L: Send + 'static>(
+        self,
+        account: Option<CredentialRef>,
+        kept: T,
+        listed: L,
+        by: HoldBy,
+        mode: LeftoverMode,
+    ) {
+        assert!(by.project.is_some(), "a listed run belongs to a project");
+        self.begin(account, Box::new(kept), Some(Box::new(listed)), by, mode);
+    }
+
+    /// Starts one hold for [`Leftovers::hold`] and [`Leftovers::hold_listed`]: records it, with
+    /// `kept` let go at once under Keep and `listed` kept whatever the mode, and starts its
+    /// watcher. Inputs: the account, what it keeps, the listing, if any, who left it and the
+    /// owner's setting. Output: none.
+    fn begin(
+        self,
+        account: Option<CredentialRef>,
+        kept: Box<dyn Send>,
+        listed: Option<Box<dyn Send>>,
+        by: HoldBy,
+        mode: LeftoverMode,
+    ) {
         let key = NEXT_HELD.fetch_add(1, Ordering::Relaxed);
         let sandboxed = self.0.sandboxed;
         let report = self.plain();
@@ -608,19 +644,22 @@ impl Leftovers {
         };
         let (state, account, kept): (HoldState, Option<CredentialRef>, Option<Box<dyn Send>>) =
             match mode {
-                LeftoverMode::End => (HoldState::Ending, account, Some(Box::new(kept))),
-                LeftoverMode::Ask => (HoldState::Held, account, Some(Box::new(kept))),
+                LeftoverMode::End => (HoldState::Ending, account, Some(kept)),
+                LeftoverMode::Ask => (HoldState::Held, account, Some(kept)),
                 LeftoverMode::Keep => {
                     drop(kept);
                     (HoldState::Kept, None, None)
                 }
             };
+        assert!(state != HoldState::Kept || (kept.is_none() && account.is_none()));
+        assert!(listed.is_none() || by.project.is_some());
         let previous = held().insert(
             key,
             Held {
                 account,
                 report,
                 kept,
+                listed,
                 by,
                 names,
                 state,
@@ -633,26 +672,6 @@ impl Leftovers {
         let _ = std::thread::Builder::new()
             .name("full-access-hold".into())
             .spawn(move || watch(key, lineage));
-    }
-
-    /// Holds as [`Leftovers::hold`] does, for a run on the hidden folders list (SA-VID14):
-    /// `kept`, such as its account lease, goes as `mode` says, and `listed`, its place on that
-    /// list, is held under End and let go for the engine's life under Keep and Ask.
-    /// Inputs: as for `hold`, plus the listing. Output: none.
-    pub fn hold_listed<T: Send + 'static, L: Send + 'static>(
-        self,
-        account: Option<CredentialRef>,
-        kept: T,
-        listed: L,
-        by: HoldBy,
-        mode: LeftoverMode,
-    ) {
-        if mode == LeftoverMode::End {
-            self.hold(account, (kept, listed), by, mode);
-        } else {
-            std::mem::forget(listed);
-            self.hold(account, kept, by, mode);
-        }
     }
 }
 
