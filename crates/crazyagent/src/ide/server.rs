@@ -161,6 +161,9 @@ struct Running {
     /// A Full access launch's processes, followed while it runs and settled after its group
     /// ends ([`finish`]); none below Full.
     followed: Option<Arc<Followed>>,
+    /// Set by the proxy once no process the open saw ready holds the server port
+    /// ([`proxy::Site::refused`]): the watch then stops the launch and no open reuses it.
+    refused: Arc<AtomicBool>,
 }
 
 /// A Full access launch's leader and lineage token, and its lineage once read, under a lock
@@ -418,6 +421,7 @@ impl Servers {
         record_group(&folder, group);
         let launch = self.launches.fetch_add(1, Ordering::SeqCst);
         let served = Arc::new(std::sync::OnceLock::new());
+        let refused = Arc::new(AtomicBool::new(false));
         let proxy = tokio::spawn(proxy::serve(
             listener,
             proxy::Site {
@@ -427,6 +431,7 @@ impl Servers {
                 token,
                 workspace,
                 served: Arc::clone(&served),
+                refused: Arc::clone(&refused),
             },
         ));
         *locked(&slot.state) = Some(Running {
@@ -443,6 +448,7 @@ impl Servers {
             ready: false,
             proxy,
             followed,
+            refused,
         });
         tokio::spawn(watch(Arc::downgrade(&slot), launch, self.idle, self.start));
         let listening = ready(&slot, launch, server_port, group, self.start, &self.closed).await;
@@ -758,6 +764,7 @@ async fn reuse(slot: &Slot, policy: IdePolicy) -> Option<ServerInfo> {
         let mut state = locked(&slot.state);
         let running = state.as_mut()?;
         if running.ready
+            && !running.refused.load(Ordering::SeqCst)
             && running.policy.holds(policy)
             && matches!(running.child.try_wait(), Ok(None))
         {
@@ -812,10 +819,10 @@ async fn ready(
     }
 }
 
-/// Stops a launch once it exited, went untouched for `idle`, or was not ready within
-/// `start` of its start because the open that started it was cut, checking again under the
-/// start lock so an open that is still starting or just reused it keeps it. Runs from the
-/// moment the launch is stored and ends with the launch.
+/// Stops a launch once it exited, its proxy refused it, went untouched for `idle`, or was not
+/// ready within `start` of its start because the open that started it was cut, checking again
+/// under the start lock so an open that is still starting or just reused it keeps it. Runs
+/// from the moment the launch is stored and ends with the launch.
 async fn watch(weak: Weak<Slot>, launch: u64, idle: Duration, start: Duration) {
     loop {
         tokio::time::sleep(WATCH_POLL.min(idle).min(start)).await;
@@ -841,14 +848,15 @@ async fn watch(weak: Weak<Slot>, launch: u64, idle: Duration, start: Duration) {
 }
 
 /// Whether a launch should stop: none when the slot holds another launch or none, else
-/// whether it exited, went untouched for `idle`, or is still not ready `start` after it
-/// started.
+/// whether it exited, its proxy found the server port no longer held ([`Running::refused`]),
+/// it went untouched for `idle`, or it is still not ready `start` after it started.
 fn due(slot: &Slot, launch: u64, idle: Duration, start: Duration) -> Option<bool> {
     let mut state = locked(&slot.state);
     let running = state.as_mut().filter(|running| running.launch == launch)?;
     let exited = !matches!(running.child.try_wait(), Ok(None));
     let unready = !running.ready && running.started.elapsed() >= start;
-    Some(exited || unready || running.touched.elapsed() >= idle)
+    let refused = running.refused.load(Ordering::SeqCst);
+    Some(exited || unready || refused || running.touched.elapsed() >= idle)
 }
 
 async fn stop_launch(slot: &Slot, launch: u64) {
@@ -1513,18 +1521,30 @@ async fn owned_listener(port: u16, group: Pid) -> Result<Vec<i32>, EngineError> 
     Ok(pids)
 }
 
-/// Checks, for one proxied connection and before anything is sent on it, that every listener
-/// on the server's port is one of the processes the open saw listening there once ready, on
-/// 127.0.0.1 only. A process that took the port after the server exited, inside the IDE's
-/// group or not, gets nothing (rv-sa241 LEAD-1). Inputs: the port and those processes.
-/// Output: done, or `ide_server_port_taken` or `ide_server_not_loopback`.
+/// Checks, before anything is sent on a proxied connection, that a process the open saw ready
+/// still listens on 127.0.0.1 at the server port and that every other holder of a listener
+/// there is one of them too, a process sharing the socket included (rv-sa241 LEAD-1, LEAD-2);
+/// a wildcard listener gets no 127.0.0.1 connection, so it fails nothing (LOW-1). Inputs:
+/// the port and those processes. Output: done, `ide_server_port_taken` or a check failure.
 #[cfg(target_os = "macos")]
 pub(super) async fn served_by(port: u16, served: &[i32]) -> Result<(), EngineError> {
     assert!(!served.is_empty());
     let listeners = tokio::task::spawn_blocking(move || listeners(port))
         .await
         .map_err(|_| failure("ide_server_check_failed"))??;
-    judged(&listeners, port, |pid| served.contains(&pid))
+    let loopback = format!("127.0.0.1:{port}");
+    let wildcard = format!("*:{port}");
+    let held = listeners
+        .iter()
+        .any(|(pid, address)| served.contains(pid) && *address == loopback);
+    let foreign = listeners
+        .iter()
+        .any(|(pid, address)| *address != wildcard && !served.contains(pid));
+    if !held || foreign {
+        return Err(failure("ide_server_port_taken"));
+    }
+    assert!(!listeners.is_empty());
+    Ok(())
 }
 
 /// Judges the listeners on the server's port: `ide_server_port_taken` when none listens or
@@ -1560,12 +1580,14 @@ pub(super) async fn served_by(_port: u16, _served: &[i32]) -> Result<(), EngineE
     Err(failure("ide_platform_unqualified"))
 }
 
-/// Lists the processes listening on a TCP port and the address each binds, through `lsof`
+/// Lists every process listening on a TCP port and the address each binds, through `lsof`
 /// run within [`LISTENERS_TIME`], its process group stopped after, so a listing that hangs
-/// holds no open and no proxied request. Input: the port. Output: process ids with
+/// holds no open and no proxied request. Every process holding a listening socket there is
+/// named, one sharing another's socket included. Input: the port. Output: process ids with
 /// addresses, empty when none listens, or `ide_server_check_failed`.
 #[cfg(target_os = "macos")]
 pub(crate) fn listeners(port: u16) -> Result<Vec<(i32, String)>, EngineError> {
+    assert_ne!(port, 0);
     let mut command = Command::new("/usr/sbin/lsof");
     command
         .env_clear()
