@@ -263,7 +263,6 @@ fn put(home: &Path, path: &str, text: String) -> Result<PathBuf, LaunchError> {
 fn put_in(home: &Path, folders: &[&str], name: &str, bytes: &[u8]) -> Result<(), LaunchError> {
     use rustix::fs::{AtFlags, Mode, OFlags};
     use std::io::Write;
-    use std::os::unix::fs::MetadataExt;
     let folder = super::home::listed_folder(home, None, folders, super::home::Walk::Make)?;
     match rustix::fs::unlinkat(&folder, name, AtFlags::empty()) {
         Ok(()) | Err(rustix::io::Errno::NOENT) => {}
@@ -277,11 +276,22 @@ fn put_in(home: &Path, folders: &[&str], name: &str, bytes: &[u8]) -> Result<(),
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
         .map_err(unwritable)?;
-    let metadata = file.metadata().map_err(unwritable)?;
+    whole(&file, bytes.len())
+}
+
+/// Checks a file a launch just wrote and synced: owner-only, holding exactly the bytes
+/// written. Inputs: the open file and the count of bytes written. Output: done,
+/// `launch_context_unwritable` when it cannot be read, or `launch_account_home_unsafe`.
+#[cfg(unix)]
+fn whole(file: &std::fs::File, len: usize) -> Result<(), LaunchError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file
+        .metadata()
+        .map_err(|_| failure("launch_context_unwritable"))?;
     if metadata.mode() & 0o077 != 0 {
         return Err(failure("launch_account_home_unsafe"));
     }
-    assert_eq!(metadata.len(), bytes.len() as u64);
+    assert_eq!(metadata.len(), len as u64);
     Ok(())
 }
 
