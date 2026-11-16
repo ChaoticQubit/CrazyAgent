@@ -14752,7 +14752,8 @@ fn hook_trust(
     let answer = match keys {
         Some(keys) if keys.is_empty() => return HookTrust::Settled,
         Some(keys) => ask(&keys),
-        None => Err("codex_hook_keys_unread"),
+        None if waited => return HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_UNLISTED),
+        None => return HookTrust::Later,
     };
     match answer {
         Ok(true) => HookTrust::Settled,
