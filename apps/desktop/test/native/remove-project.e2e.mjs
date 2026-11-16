@@ -424,11 +424,15 @@ test("a delete an engine stop cut short shows on the project with Keep the proje
   assert.equal(sql(`SELECT count(*) FROM ledger_actions WHERE kind='project_delete' AND action_key='${id}' AND outcome IS NULL`), "0", "Keep the project clears the mark");
 });
 
-test("a delete waits on Home for the project's agents to stop, refuses another project's delete naming it, is found again by the same project's start and a new window, and moves the folder to the Trash once they stopped (DEC-177)", { timeout: 300000 }, async () => {
+test("a delete waits on Home for the project's agents to stop, refuses another project's delete naming it, is found again by the same project's start and a new window, and moves both its folders to the Trash once they stopped (DEC-177)", { timeout: 300000 }, async () => {
   const name = "Slow Stop";
   const { id, folder } = await made(name);
   const other = await made("Waits Its Turn");
   writeFileSync(join(folder, "notes.md"), "kept until the agents stop\n");
+  const library = join(run.projects, "slowstop-library");
+  mkdirSync(library, { mode: 0o700 });
+  writeFileSync(join(library, "notes.md"), "moves with the project\n");
+  sql(`UPDATE projects SET body=json_set(body,'$.spec.repositories',json_array('${library}')) WHERE id='${id}'`);
   working(id, 81);
   const waiting = `Waiting for 1 agent of ${name} to stop...`;
   let asked = 0;
@@ -439,6 +443,7 @@ test("a delete waits on Home for the project's agents to stop, refuses another p
     await me.waitFor("Home's waiting line", (text) => text.includes(waiting), JOB_MS);
     assert.deepEqual(await rowButtons(page), ["Stop"], "Stop is offered while the agents stop");
     assert.equal(readFileSync(join(folder, "notes.md"), "utf8"), "kept until the agents stop\n", "nothing moves while it waits");
+    assert.equal(readFileSync(join(library, "notes.md"), "utf8"), "moves with the project\n", "its repository waits too");
     await me.capture("delete-job-stopping");
     await openRemove(page, me, other.id, "Waits Its Turn");
     await confirmDelete(page, me, "Waits Its Turn");
@@ -464,6 +469,8 @@ test("a delete waits on Home for the project's agents to stop, refuses another p
   assert.equal(await listed(other.id), true, "the refused delete left the other project");
   assert.ok(!existsSync(folder), "the folder left the projects folder");
   assert.ok(inVolumeTrash(folder), "the folder is in the test volume's Trash");
+  assert.ok(!existsSync(library), "its repository left the projects folder");
+  assert.ok(inVolumeTrash(library), "its repository is in the test volume's Trash too: a delete of 2 folders ends Done");
   assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Dismiss forgets the ended delete");
 });
 
