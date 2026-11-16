@@ -3052,7 +3052,8 @@ fn a_memory_pass_whose_walks_together_pass_its_budget_refuses_though_each_fits_a
 
 /// RESET-WALK-N1 code r1 F1: the removals one home pass makes spend its budget too, so two
 /// unwanted folders whose walks each fit the budget alone refuse together with one folder
-/// left, instead of each removal getting a fresh budget.
+/// left, instead of each removal getting a fresh budget. The walk's own refusal reaches the
+/// caller as `cleanup_walk_too_long` (RESET-WALK-CODE).
 #[cfg(unix)]
 #[test]
 fn a_home_pass_whose_folder_walks_together_pass_its_budget_refuses_though_each_fits_alone() {
@@ -3066,7 +3067,7 @@ fn a_home_pass_whose_folder_walks_together_pass_its_budget_refuses_though_each_f
 
     let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 5);
 
-    assert_eq!(reset, Err(AgentHomeError("agent_home_unwritable".into())));
+    assert_eq!(reset, Err(AgentHomeError("cleanup_walk_too_long".into())));
     assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
 }
 
