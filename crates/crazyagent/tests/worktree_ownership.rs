@@ -1588,3 +1588,41 @@ async fn a_failed_checkout_stays_uncertain_on_a_plain_and_a_renumbered_volume() 
         }
     }
 }
+
+/// Rewrites a lease worktree's Git index with `read-tree` alone, as a checkout cut off
+/// after `read-tree` leaves it, and checks that its entries hold no file stat data.
+/// Input: the lease worktree.
+fn index_from_read_tree(worktree: &Path) {
+    git(worktree, &["read-tree", "HEAD"]);
+    let listed = git(worktree, &["ls-files", "--debug", "--", "tracked"]);
+    assert!(listed.contains("size: 0\t"), "{listed}");
+}
+
+/// LEASE-LEGACY-UNCERTAIN, rv-sec3 #160 N4: with an index from `read-tree` alone, which
+/// holds no file stat data, the start check compares the files' content: a whole worktree
+/// waits for recovery, while a file of the same size with other bytes, or a missing file,
+/// keeps the lease Uncertain.
+#[tokio::test]
+async fn an_uncertain_lease_whose_index_has_no_stat_data_is_checked_on_its_content() {
+    use crazyagent::worktrees::LeaseState;
+    let altered = |worktree: &Path| {
+        index_from_read_tree(worktree);
+        std::fs::write(worktree.join("tracked"), "COMMITTED\n").unwrap();
+    };
+    let missing = |worktree: &Path| {
+        index_from_read_tree(worktree);
+        std::fs::remove_file(worktree.join("tracked")).unwrap();
+    };
+    let cases: [(&str, &dyn Fn(&Path), LeaseState); 3] = [
+        ("whole", &index_from_read_tree, LeaseState::RecoveryRequired),
+        ("same size, other bytes", &altered, LeaseState::Uncertain),
+        ("missing", &missing, LeaseState::Uncertain),
+    ];
+    for (case, change, expected) in cases {
+        assert_eq!(
+            uncertain_after(change, |_| Renumber::Nothing).await,
+            expected,
+            "{case}"
+        );
+    }
+}
