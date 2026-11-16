@@ -78,7 +78,7 @@ fn until(mut condition: impl FnMut() -> bool) -> bool {
 /// Steps the keeper one second of engine time at a time, with a short real pause so the
 /// sensor thread can answer. Inputs: the keeper, the engine database, the engine time,
 /// moved on in place, and how many steps. Output: the last view a step produced.
-fn steps(
+pub(super) fn steps(
     keeper: &mut Keeper,
     connection: &Connection,
     now_ms: &mut i64,
@@ -97,7 +97,7 @@ fn steps(
 
 /// Steps the keeper until a view meets the check. Inputs: as `steps`, and the check.
 /// Output: the first view that meets it; the row fails after `STEPS_MAX` steps.
-fn step_until(
+pub(super) fn step_until(
     keeper: &mut Keeper,
     connection: &Connection,
     now_ms: &mut i64,

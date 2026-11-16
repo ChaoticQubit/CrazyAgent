@@ -1,11 +1,12 @@
-use super::{NOW_MS, SECOND_MS};
-use crate::keep_awake::LidSupport;
+use super::sensing::{step_until, steps};
+use super::{IDLE, IDLE_AND_LID, NOW_MS, SECOND_MS, agent, engine};
+use crate::keep_awake::{Heat, Keeper, LidSupport, PowerSource};
 use crate::keep_awake::hold_macos::{
     ENDED_TO_PROTECT, HELPER_UNANSWERED, HelperLine, LEASE_S, LID_UNREAD, LID_WITHHELD_MACOS,
     LidLine, LidPlatform, PIN_NONE, PIN_OTHER, READ_EVERY_MS, SLEEP_NOT_RESTORED, STATUS_UNREAD,
     VERSION_UNREAD, gate, macos_major,
 };
-use crate::keep_awake::power::{LID_REFUSED, LidAsk, READ_MS};
+use crate::keep_awake::power::{LID_REFUSED, LidAsk, LidReader, PowerReading, READ_MS, Reader};
 use crazyagent_mac_power::client::CallError;
 use crazyagent_mac_power::protocol::{FloorView, PinView, Refusal, Reply, Request, View};
 use crazyagent_mac_power::service::{Service, Status};
@@ -426,7 +427,10 @@ fn a_refused_hold_reads_the_helper_once_and_says_why() {
         "the refusal stands until the next read"
     );
     assert_eq!(full.calls(), [HOLD, Request::Read]);
+}
 
+#[test]
+fn a_failed_renewal_keeps_the_lid_held_until_the_lease_runs_out() {
     let mut renewal = Rig::enabled();
     assert_eq!(renewal.line.step(WANTED, NOW_MS), LidSupport::Held);
     renewal.answer(
@@ -435,26 +439,108 @@ fn a_refused_hold_reads_the_helper_once_and_says_why() {
         }),
         Ok(ready()),
     );
-    assert_eq!(renewal.line.step(WANTED, NOW_MS + READING_MS), refused);
-    renewal.line.step(RESTING, NOW_MS + 2 * READING_MS);
+    for reading in 1..4 {
+        let support = renewal.line.step(WANTED, NOW_MS + reading * READING_MS);
+        assert_eq!(support, LidSupport::Held, "a lease that still runs holds the lid");
+    }
+    assert_eq!(renewal.calls(), [HOLD; 4], "no read while the lease runs");
+    let out_ms = NOW_MS + i64::from(LEASE_S) * 1000;
     assert_eq!(
-        renewal.calls(),
-        [HOLD, HOLD, Request::Read, Request::Release],
-        "a lease that may still run is released once the lid is not wanted"
+        renewal.line.step(WANTED, out_ms),
+        not_available(LID_REFUSED),
+        "four failed renewals end the hold within the lease (threat model section 9)"
+    );
+    assert_eq!(renewal.calls(), [HOLD, HOLD, HOLD, HOLD, HOLD, Request::Read]);
+    renewal.line.step(RESTING, out_ms + READING_MS);
+    assert_eq!(renewal.calls().len(), 6, "a lease that ran out is not released");
+
+    let mut floor = Rig::enabled();
+    assert_eq!(floor.line.step(WANTED, NOW_MS), LidSupport::Held);
+    floor.answer(
+        Ok(Reply::Refused {
+            reason: Refusal::Floor,
+        }),
+        Ok(Reply::State(view(PinView::You, FloorView::Battery, true))),
+    );
+    assert_eq!(
+        floor.line.step(WANTED, NOW_MS + READING_MS),
+        not_available(ENDED_TO_PROTECT),
+        "a refusal other than pmset says why at once"
     );
 }
 
 #[test]
-fn a_hold_the_helper_did_not_answer_says_so_and_is_released_later() {
+fn a_renewal_the_helper_did_not_answer_holds_and_is_released_later() {
     let mut rig = Rig::enabled();
     assert_eq!(rig.line.step(WANTED, NOW_MS), LidSupport::Held);
     rig.answer(Err(CallError::Connect(io::ErrorKind::NotFound)), Ok(ready()));
     assert_eq!(
         rig.line.step(WANTED, NOW_MS + READING_MS),
-        not_available(HELPER_UNANSWERED)
+        LidSupport::Held,
+        "the lease granted at the last reading still runs"
     );
     rig.line.step(RESTING, NOW_MS + 2 * READING_MS);
     assert_eq!(rig.calls(), [HOLD, HOLD, Request::Release]);
+
+    let mut first = Rig::enabled();
+    first.answer(
+        Err(CallError::Exchange(io::ErrorKind::TimedOut)),
+        Ok(ready()),
+    );
+    assert_eq!(
+        first.line.step(WANTED, NOW_MS),
+        not_available(HELPER_UNANSWERED)
+    );
+    first.line.step(RESTING, NOW_MS + READING_MS);
+    assert_eq!(
+        first.calls(),
+        [HOLD],
+        "a first hold that got no answer holds nothing and counts as the last read"
+    );
+}
+
+#[test]
+fn the_keeper_keeps_the_lid_through_failed_renewals_while_the_lease_runs() {
+    let (_folder, connection) = engine();
+    let rig = Rig::enabled();
+    let calls = rig.calls.clone();
+    let answers = rig.answers.clone();
+    let mut line = rig.line;
+    let lid: LidReader = Box::new(move |ask, now_ms| line.step(ask, now_ms));
+    let reader: Reader = Box::new(|| PowerReading {
+        source: PowerSource::Ac,
+        battery_pct: Some(80),
+        heat: Heat::Nominal,
+        lid_closed: Some(false),
+        lid_support: LidSupport::HelperMissing,
+    });
+    let mut keeper = Keeper::default().with_sensors(reader, Some(lid));
+    let mut now_ms = NOW_MS;
+    agent(&connection, "working");
+    let called = |request: Request| calls.lock().unwrap().contains(&request);
+
+    step_until(&mut keeper, &connection, &mut now_ms, |view| {
+        view.state.want == IDLE_AND_LID && called(HOLD)
+    });
+    *answers.lock().unwrap() = Answers {
+        hold: Ok(Reply::Refused {
+            reason: Refusal::Pmset,
+        }),
+        read: Ok(ready()),
+    };
+    let held = steps(&mut keeper, &connection, &mut now_ms, 65).unwrap();
+    assert_eq!(
+        held.state.want, IDLE_AND_LID,
+        "two failed renewals inside the lease keep the lid"
+    );
+    assert!(!called(Request::Release), "a lease that still runs is kept");
+
+    let ended = step_until(&mut keeper, &connection, &mut now_ms, |view| {
+        view.state.want == IDLE
+    });
+    assert_eq!(ended.lid_support, not_available(LID_REFUSED));
+    assert!(called(Request::Read));
+    assert!(!called(Request::Release), "a lease that ran out is not released");
 }
 
 #[test]
