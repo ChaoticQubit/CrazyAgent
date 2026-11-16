@@ -1232,6 +1232,7 @@ struct NativeOwner {
     conversation_operation: Option<(RequestId, String)>,
     model_pending: Option<model_access::Submission>,
     model_operation: Option<(RequestId, String)>,
+    rule_lane: Option<std::thread::JoinHandle<()>>,
 }
 
 impl NativeOwner {
@@ -1251,6 +1252,7 @@ impl NativeOwner {
             conversation_operation: None,
             model_pending: None,
             model_operation: None,
+            rule_lane: None,
         }
     }
 

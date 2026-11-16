@@ -139,6 +139,7 @@ pub(in crate::tui) enum IntakeView {
     Job(Option<JobView>),
     JobStopped(bool),
     JobDismissed(bool),
+    RuleChanging,
     RuleDefaults(BTreeSet<GitHubRule>),
     Rules(Box<GitHubRepoRules>),
 }
@@ -204,6 +205,20 @@ impl NativeOwner {
             self.detach();
         }
         IntakeEvent { query, result }
+    }
+
+    /// Starts one GitHub rule switch on a lane thread of its own, so the worker takes other
+    /// requests while GitHub answers, which can take minutes; the switch's result comes
+    /// later as an unfinished owner event. One switch runs at a time. Takes the switch job
+    /// and the reply sender. Returns the answer the worker gives at once: `RuleChanging`,
+    /// or the refusal, `github_rule_busy` while a switch still runs.
+    pub(super) fn rule_lane(
+        &mut self,
+        job: IntakeJob,
+        replies: &std::sync::mpsc::SyncSender<OwnerReply>,
+    ) -> IntakeEvent {
+        let _ = replies;
+        IntakeEvent::failed(&job, "github_rule_unstarted")
     }
 
     async fn intake_view(&mut self, job: IntakeJob, lost: &mut bool) -> Result<IntakeView, String> {

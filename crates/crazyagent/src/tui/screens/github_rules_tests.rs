@@ -471,6 +471,61 @@ fn a_long_required_checks_detail_keeps_the_sending_line_and_the_problem_at_80_by
     assert!(ellipsis(&shell, &rows), "{rows:#?}");
 }
 
+/// The worker answers a switch at once as changing (rv-ds241 gh-s6c N1): the page keeps
+/// saying it sends, reads nothing and sends nothing more, and takes the switch's own
+/// result when it comes; a switch refused because another still runs says so in words
+/// and reads the page again.
+#[test]
+fn a_switch_answered_as_changing_waits_for_its_own_result() {
+    let (mut shell, id) = project(80, 24, page(|_| {}));
+    let read = IntakeQuery::GitHubRules {
+        project: id.clone(),
+    };
+    let sending = format!("Sending {}{SENDING_TAIL}", rule_label(GitHubRule::WikiOff));
+    go(&mut shell, GitHubRule::WikiOff);
+    shell.key(Key::Char(' '));
+    let [sent] = <[IntakeQuery; 1]>::try_from(asked(&mut shell)).unwrap();
+    shell.arrive(arrival(sent.clone(), Ok(IntakeView::RuleChanging)));
+    assert!(
+        asked(&mut shell).is_empty(),
+        "the changing answer reads nothing"
+    );
+    let rows = render(&mut shell, 80, 24);
+    assert!(flat(&rows).contains(&sending), "{rows:#?}");
+    assert!(
+        !flat(&rows).contains(&copy("github_reply_invalid")),
+        "{rows:#?}"
+    );
+    go(&mut shell, GitHubRule::IssuesOn);
+    shell.key(Key::Char(' '));
+    assert!(asked(&mut shell).is_empty(), "one switch in flight");
+    shell.arrive(arrival(
+        sent,
+        Ok(IntakeView::Rules(Box::new(page(|page| {
+            set(page, GitHubRule::WikiOff, true, GitHubRuleState::Applied);
+        })))),
+    ));
+    assert!(asked(&mut shell).is_empty(), "the result is the page");
+    go(&mut shell, GitHubRule::WikiOff);
+    let rows = render(&mut shell, 80, 24);
+    assert!(!flat(&rows).contains("Sending "), "{rows:#?}");
+    assert!(
+        shows(&rows, &checkbox(true, rule_label(GitHubRule::WikiOff))),
+        "{rows:#?}"
+    );
+    let busy = known("github_rule_busy").unwrap_or_default();
+    assert!(!busy.is_empty(), "the refusal has words");
+    go(&mut shell, GitHubRule::IssuesOn);
+    shell.key(Key::Char(' '));
+    let [sent] = <[IntakeQuery; 1]>::try_from(asked(&mut shell)).unwrap();
+    shell.arrive(arrival(sent, Err("github_rule_busy".into())));
+    assert_eq!(asked(&mut shell), [read.clone()]);
+    shell.arrive(arrival(read, Ok(IntakeView::Rules(Box::new(page(|_| {}))))));
+    let rows = render(&mut shell, 80, 24);
+    assert!(flat(&rows).contains(busy), "{rows:#?}");
+    assert!(!shows(&rows, "github_rule_busy"), "{rows:#?}");
+}
+
 /// A project CrazyAgent did not publish says where its rules show; a build without the
 /// read says so; any other failed read offers r to read again.
 #[test]
