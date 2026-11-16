@@ -234,9 +234,13 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
         let allowed = crate::sandbox::agent_variable_allowed(name, value);
         assert!(allowed, "{name:?}");
     }
-    let at = built.argv.iter().position(|word| word == "-c").unwrap();
-    assert_eq!(built.argv[at - 1], "/bin/sh");
-    let bridge = &built.argv[at + 1..at + 5];
+    let (sandbox, place) = (crate::sandbox::SANDBOX_EXEC, profile.to_str().unwrap());
+    assert_eq!(built.argv[..3], [sandbox, "-f", place]);
+    assert_eq!(built.argv[3..5], ["/bin/sh", "-c"]);
+    let words = ["handed", LOCAL_PLACEHOLDER, "OPENAI_API_KEY"];
+    assert_eq!(built.argv[6..9], words);
+    assert_eq!(built.argv[9..11], ["/usr/bin/true", "--home"]);
+    let bridge = &built.argv[5..9];
     let shown = std::process::Command::new("/bin/sh")
         .arg("-c")
         .args(bridge)

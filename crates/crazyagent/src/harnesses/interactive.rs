@@ -371,12 +371,15 @@ pub fn command_with(
         None => Vec::new(),
     };
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
+    let tool_home = installed
+        .and_then(Installed::tool_home)
+        .unwrap_or(request.account.home());
     let mut env = vec![
         ("HOME".to_owned(), home.clone()),
         (
             "PATH".to_owned(),
             toolchains::with_agent_git(
-                request.account.home(),
+                tool_home,
                 if request.tools {
                     toolchains::agent_path(&homes, TOOLS_ON_PATH)
                 } else {
@@ -516,10 +519,10 @@ pub fn command_with(
             Transcript::Unavailable
         }
     };
-    for (name, value) in toolchains::agent_env(request.account.home(), &homes) {
+    for (name, value) in toolchains::agent_env(tool_home, &homes) {
         env.push((name.to_owned(), text(Path::new(&value))?));
     }
-    if let Some(tmp) = toolchains::existing_tmp(request.account.home()) {
+    if let Some(tmp) = toolchains::existing_tmp(tool_home) {
         let tmp = if native_lead {
             toolchains::native_lead_tmp(&tmp)
         } else {
@@ -646,9 +649,9 @@ fn agent_env(
         .ok_or_else(|| failure("launch_environment_refused"))
 }
 
-/// Takes the names an account hand-over lists out of a pane's variables: those holding
-/// exactly its value, which the terminal host's variable guard refuses in a pane, so
-/// [`HANDED_SCRIPT`] sets them inside the sandbox instead. Inputs: the variables, already
+/// Takes the names an account hand-over lists out of a pane's variables: those it lists
+/// that hold exactly its value, which the terminal host's variable guard refuses in a pane,
+/// so [`HANDED_SCRIPT`] sets them inside the sandbox instead. Inputs: the variables, already
 /// checked, and the hand-over. Output: the other variables and those names, in order.
 fn handed_apart(
     env: Vec<(String, String)>,
@@ -657,9 +660,10 @@ fn handed_apart(
     let Some(handover) = handover else {
         return (env, Vec::new());
     };
+    let listed = |name: &str| handover.env().iter().any(|pair| pair.0 == name);
     let (handed, kept): (Vec<_>, Vec<_>) = env
         .into_iter()
-        .partition(|(_, value)| value == handover.token());
+        .partition(|(name, value)| value == handover.token() && listed(name));
     (kept, handed.into_iter().map(|(name, _)| name).collect())
 }
 

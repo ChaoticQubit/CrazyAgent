@@ -497,12 +497,22 @@ impl<'a> Handed<'a> {
     /// other sandbox from reading the launch's environment. Inputs: the names, from the
     /// manifest's accounts entry for the account's wire format, and the one value they may
     /// hold. Output: the exception, or `Invalid` for a value that is neither a relay token
-    /// nor the keyless placeholder, and off macOS.
+    /// nor the keyless placeholder, a name refused for more than a key suffix, and off macOS.
     pub fn new(names: &'a [&'a str], value: &'a str) -> Result<Self, SandboxError> {
         let handed = crate::model_gateway::relay::is_relay_token(value)
             || value == crate::model_gateway::relay::LOCAL_PLACEHOLDER;
         if !cfg!(target_os = "macos") || !handed {
             return Err(invalid("a launch hands only its own relay token"));
+        }
+        let other = |name: &&str| {
+            let upper = name.to_ascii_uppercase();
+            REFUSED_VARIABLES.contains(&upper.as_str())
+                || REFUSED_PREFIXES
+                    .iter()
+                    .any(|prefix| upper.starts_with(prefix))
+        };
+        if names.iter().any(other) {
+            return Err(invalid("a launch hands its value only under a key name"));
         }
         assert!(crate::model_gateway::relay::is_placeholder(value));
         Ok(Self { names, value })
