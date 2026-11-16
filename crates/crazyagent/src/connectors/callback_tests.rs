@@ -73,7 +73,9 @@ fn the_callback_accepts_one_matching_state_and_refuses_everything_else() {
         "GET /callback?state={STATE}&code=c1 HTTP/1.1\r\nX: {}\r\n\r\n",
         "x".repeat(9 * 1024)
     );
+    let tabbed = format!("/callback?state={}\t{}&code=c1", &STATE[..3], &STATE[3..]);
     let refused = [
+        get(&tabbed),
         sent("POST", &format!("/callback?state={STATE}&code=c1")),
         get(&format!("/other?state={STATE}&code=c1")),
         get(&format!("//callback?state={STATE}&code=c1")),
