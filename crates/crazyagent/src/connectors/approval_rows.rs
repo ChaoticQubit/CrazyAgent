@@ -42,12 +42,21 @@ fn owner_answers(bench: &Bench, id: i64, answer: approvals::Answer) {
 
 /// The writes waiting for the owner now, by approval id.
 fn waiting_ids(bench: &Bench) -> Vec<i64> {
-    approvals::waiting(&bench.case.db, approvals::WAITING_MAX)
+    let now = crate::semantic::now_ms();
+    approvals::waiting(&bench.case.db, approvals::WAITING_MAX, now)
         .unwrap()
         .unwrap_or_default()
         .into_iter()
         .map(|found| found.id)
         .collect()
+}
+
+/// One approval as the owner's page reads it now. Inputs: the database and the id. Output:
+/// the approval.
+fn viewed(db: &rusqlite::Connection, id: i64) -> approvals::ApprovalView {
+    approvals::get(db, id, crate::semantic::now_ms())
+        .unwrap()
+        .unwrap()
 }
 
 /// How many write calls the activity log holds with the outcome given, sent or not.
@@ -200,7 +209,7 @@ fn a_write_waits_for_the_owner_and_runs_only_after_allow() {
     let write = call(1, "board__create_issue", json!({"title": "Fix login"}));
     let replies = talk_with(&bench, &launch, &[write], WAIT, |bench, id| {
         assert!(vendor_calls(&vendor).is_empty(), "the vendor saw it first");
-        asked.push(approvals::get(&bench.case.db, id).unwrap().unwrap());
+        asked.push(viewed(&bench.case.db, id));
         owner_answers(bench, id, approvals::Answer::Allow);
     });
     assert_eq!(asked.len(), 1, "{asked:?}");
@@ -350,7 +359,7 @@ fn a_held_write_expires_at_the_wait_setting_and_says_so() {
     let write = call(1, "board__create_issue", json!({}));
     let replies = talk_with(&bench, &launch, &[write], WAIT, |bench, id| {
         let db = &bench.case.db;
-        let view = approvals::get(db, id).unwrap().unwrap();
+        let view = viewed(db, id);
         assert_eq!(view.expires_ms - view.created_ms, 2 * 60 * 1000);
         assert_eq!(bench.gateway.settle_at(db, view.expires_ms - 1), 0);
         assert_eq!(approvals::state(db, id).unwrap(), Some(State::Waiting));
@@ -664,7 +673,7 @@ fn the_owner_sees_every_argument_a_held_write_sends_with_secret_forms_withheld()
     let write = call(1, "board__create_issue", fields);
     let mut seen = None;
     let replies = talk_with(&bench, &launch, &[write], WAIT, |bench, id| {
-        let view = approvals::get(&bench.case.db, id).unwrap().unwrap();
+        let view = viewed(&bench.case.db, id);
         assert!(view.hidden, "the view is marked");
         seen = Some((id, view.arguments));
         owner_answers(bench, id, approvals::Answer::Allow);
@@ -684,7 +693,7 @@ fn the_owner_sees_every_argument_a_held_write_sends_with_secret_forms_withheld()
     let (_, error) = shown(&replies[0]);
     assert!(!error);
     assert!(sent_to(&vendor, "create_issue"));
-    let answered = approvals::get(&bench.case.db, id).unwrap().unwrap();
+    let answered = viewed(&bench.case.db, id);
     assert_eq!(answered.arguments, "");
 }
 
@@ -698,7 +707,7 @@ fn an_allowed_write_too_late_to_finish_before_its_server_gives_up_is_never_sent(
     let replies = talk_with(&bench, &launch, &[write], WAIT, |bench, id| {
         owner_answers(bench, id, approvals::Answer::Allow);
         let db = &bench.case.db;
-        let view = approvals::get(db, id).unwrap().unwrap();
+        let view = viewed(db, id);
         let room = shim::HELD_WAIT - ALLOW_BUDGET;
         let late = view.created_ms + i64::try_from(room.as_millis()).unwrap();
         assert_eq!(bench.gateway.settle_at(db, late), 1);
@@ -806,7 +815,7 @@ fn a_write_allowed_behind_a_slow_one_in_the_same_settle_is_never_sent_too_late()
         owner_answers(&bench, *id, approvals::Answer::Allow);
     }
     let db = &bench.case.db;
-    let first = approvals::get(db, ids[0]).unwrap().unwrap();
+    let first = viewed(db, ids[0]);
     let room = i64::try_from((shim::HELD_WAIT - ALLOW_BUDGET).as_millis()).unwrap();
     let margin = i64::try_from((slow / 2).as_millis()).unwrap();
     let now = first.created_ms + room - margin;

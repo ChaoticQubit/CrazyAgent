@@ -458,9 +458,9 @@ pub fn state(db: &Connection, id: i64) -> Result<Option<State>, EngineError> {
     Ok(name.as_deref().and_then(State::parse))
 }
 
-/// One approval as the owner's page shows it. Inputs: the database and the id. Output:
-/// the approval, or none.
-pub fn get(db: &Connection, id: i64) -> Result<Option<ApprovalView>, EngineError> {
+/// One approval as the owner's page shows it at `now_ms`. Inputs: the database, the id and
+/// the time now. Output: the approval, or none.
+pub fn get(db: &Connection, id: i64, _now_ms: i64) -> Result<Option<ApprovalView>, EngineError> {
     if !asked_before(db)? {
         return Ok(None);
     }
@@ -603,9 +603,14 @@ pub fn revoke_writes(
     Ok(removed == 1)
 }
 
-/// The waiting approvals for their notices. Inputs: the database and the most to read.
-/// Output: them in id order, or none before any approval was asked.
-pub fn waiting(db: &Connection, max: usize) -> Result<Option<Vec<Waiting>>, EngineError> {
+/// The approvals still waiting at `now_ms`, for their notices. Inputs: the database, the
+/// most to read and the time now. Output: them in id order, or none before any approval
+/// was asked.
+pub fn waiting(
+    db: &Connection,
+    max: usize,
+    _now_ms: i64,
+) -> Result<Option<Vec<Waiting>>, EngineError> {
     if !asked_before(db)? {
         return Ok(None);
     }
