@@ -62,7 +62,7 @@ pub fn thermal(text: &str) -> Heat {
 mod live {
     use super::super::power::PowerReading;
     use super::super::state::{Heat, PowerSource};
-    use super::{TEXT_BYTES_MAX, THERMAL_KEY, battery, thermal};
+    use super::{PERCENT_MAX, TEXT_BYTES_MAX, THERMAL_KEY, battery, thermal};
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -108,20 +108,27 @@ mod live {
         (status.success() && read.is_ok()).then_some(text)
     }
 
-    /// Reads this Mac's power source, charge and thermal pressure from two system tools.
-    /// The lid is not read here, and the lid support stays the reason the Mac starts
-    /// with. Output: the reading, unknown where a tool gave nothing.
+    /// Reads this Mac's power source, charge and thermal pressure from two system tools, and
+    /// whether the lid is closed from `AppleClamshellState` on the power management root
+    /// domain, read in process with no helper and no root (fix5 ASK-01:41, leader 01:42),
+    /// closed with or without an external display, as Linux reads it. The lid support stays
+    /// the reason the Mac starts with. Output: the reading, unknown where nothing was read.
     pub(crate) fn read() -> PowerReading {
         let (source, battery_pct) = run("/usr/bin/pmset", &["-g", "batt"])
             .map_or((PowerSource::Unknown, None), |text| battery(&text));
         let heat = run("/usr/bin/notifyutil", &["-g", THERMAL_KEY])
             .map_or(Heat::Unknown, |text| thermal(&text));
-        PowerReading {
+        let lid_closed = crazyagent_mac_power::lid::read().map(|lid| lid.closed);
+        let reading = PowerReading {
             source,
             battery_pct,
             heat,
+            lid_closed,
             ..PowerReading::unknown()
-        }
+        };
+        assert_eq!(reading.lid_closed, lid_closed);
+        assert!(reading.battery_pct.is_none_or(|percent| percent <= PERCENT_MAX));
+        reading
     }
 }
 
