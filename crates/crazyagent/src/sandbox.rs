@@ -1026,8 +1026,9 @@ pub const LINUX_APPARMOR_LINE: &str = "On this Linux, AppArmor keeps agents from
 /// when it starts agents in a process namespace of their own, `scoped` when the kernel
 /// keeps their signals inside their own Landlock domain (Linux 6.12 or newer),
 /// `supervised` when the call supervisor holds every guard here, as launches start it,
-/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1), and
-/// `armored` when AppArmor's user namespace restriction is why it nests none (SBX-3).
+/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1),
+/// `armored` when AppArmor's user namespace restriction is why it nests none (SBX-3), and
+/// `routed` when it gives an agent limited to ports on any host a network of its own (SBX-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinuxHost {
     pub nested: bool,
@@ -1035,6 +1036,17 @@ pub struct LinuxHost {
     pub supervised: bool,
     pub root: bool,
     pub armored: bool,
+    pub routed: bool,
+}
+
+/// The network a Linux that nests agents gives one limited to ports on any host
+/// ([`ProjectSandbox::routed`]): `any`, the ports it leaves through on any host, and
+/// `bridged`, the loopback ports carried to this computer as for a bridged agent, each list
+/// rising and each port once (DEC-179 SBX-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Routed {
+    pub any: Vec<u16>,
+    pub bridged: Vec<u16>,
 }
 
 impl LinuxHost {
@@ -2704,6 +2716,15 @@ impl ProjectSandbox {
         assert!(!ports.is_empty() && ports.len() <= REMOTES_MAX);
         assert!(!self.resolves_over_tcp());
         Some(ports)
+    }
+
+    /// The network a Linux that nests agents gives this one of its own, leaving only
+    /// through its ports on any host: the sockets setting is `TcpOnly`, the limited network
+    /// names at least one port on any host and every other remote is a loopback port
+    /// [`BRIDGE_PORT_MIN`] or higher, bridged as [`ProjectSandbox::bridged_ports`] does.
+    /// Output: the ports, or none when the agent keeps the shared network.
+    pub fn routed(&self) -> Option<Routed> {
+        None
     }
 
     /// The port that alone keeps this agent on this computer's network on a Linux that

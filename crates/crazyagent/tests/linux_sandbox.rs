@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 use crazyagent::sandbox::linux::{
     BWRAP_PATHS, HelperRequest, LOADER_REFUSED, LinuxBackend, LinuxSandbox, NEST_ARGS,
-    loader_variable,
+    NETWORK_SHARED, SLIRP_PATHS, loader_variable,
 };
 
 use crazyagent::sandbox::{
@@ -2621,6 +2621,300 @@ fn the_broker_runs_while_the_agent_does_and_ends_with_it() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(!broker_runs(port), "the broker ends with the agent");
+}
+
+/// Tells, by a control that owes the engine nothing, whether this machine has what a
+/// routed agent needs besides nesting: slirp4netns at its fixed place and an
+/// `iptables-restore` on the nf_tables backend. No input. Output: true when it has both.
+fn routing_tools() -> bool {
+    let slirp = SLIRP_PATHS.iter().all(|path| Path::new(path).is_file());
+    let version = crazyagent::spawn_gate::output(
+        Command::new("/usr/sbin/iptables-restore")
+            .arg("--version")
+            .stdin(Stdio::null()),
+    );
+    let said = |output: Output| String::from_utf8_lossy(&output.stdout).contains("(nf_tables)");
+    slirp && version.is_ok_and(said)
+}
+
+/// The routed backend for a policy, on a machine whose controls say it nests agents and
+/// has the routing tools, where the host report and detection must both route this one.
+/// Input: the policy. Output: the sandbox, or none, with the reason printed, where the
+/// machine lacks either and the row is skipped (DEC-179 SBX-2).
+fn routed(sandbox: ProjectSandbox) -> Option<LinuxSandbox> {
+    nesting_bwrap()?;
+    if !routing_tools() {
+        eprintln!("skipped: this machine has no slirp4netns or no nf_tables iptables");
+        return None;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(data.path()));
+    assert!(host.routed, "this machine can route agents, so the report says so: {host:?}");
+    let sandbox = nested(sandbox)?;
+    assert!(
+        sandbox.routed().is_some(),
+        "this machine routes agents, so detection routes this one"
+    );
+    Some(sandbox)
+}
+
+/// Runs a bash script as the agent, for the rows that open TCP connections through bash's
+/// `/dev/tcp`. Inputs: the sandbox, the case and the script, which exits 0. Output: what it
+/// printed.
+fn bash(sandbox: &dyn Sandbox, case: &Case, script: &str) -> String {
+    let mut harness = Command::new("/bin/bash");
+    harness
+        .args(["-c", script])
+        .current_dir(case.project.join("worktrees"));
+    agent_stdout(Some(sandbox), harness)
+}
+
+/// Serves `pong` on every address at a port Linux picks, for up to 16 connections. No
+/// input. Output: the port.
+fn pong_everywhere() -> u16 {
+    let served = crazyagent::spawn_gate::bind_tcp_std("0.0.0.0:0").unwrap();
+    let port = served.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut asked in served.incoming().flatten().take(16) {
+            let _ = asked.write_all(b"pong\n");
+        }
+    });
+    port
+}
+
+#[test]
+fn a_routed_agent_reaches_its_any_host_port_and_not_a_bridged_port_on_another_host() {
+    let case = case();
+    let other = outward_address();
+    let (any, port) = (pong_everywhere(), pong_everywhere());
+    let reach = format!(
+        "read -r line </dev/tcp/{other}/{any}; echo \"any=$line\"; \
+         (exec 4<>/dev/tcp/{other}/{port}) 2>/dev/null && echo other=reached || echo other=refused; \
+         read -r line </dev/tcp/127.0.0.1/{port}; echo \"loopback=$line\""
+    );
+    let gateway = format!(
+        "(exec 4<>/dev/tcp/10.0.2.2/{port}) 2>/dev/null && echo gateway=reached || echo gateway=refused"
+    );
+    let network = SandboxNetwork::Only(vec![
+        SandboxRemote::AnyHost(any),
+        SandboxRemote::Loopback(port),
+    ]);
+    let shared = pinned(policy(&case, network.clone()));
+    assert_eq!(
+        bash(&shared, &case, &reach),
+        "any=pong\nother=reached\nloopback=pong\n",
+        "on the shared network the bridged port is open on every host (RV-DS241-83)"
+    );
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    assert_eq!(
+        bash(&sandbox, &case, &reach),
+        "any=pong\nother=refused\nloopback=pong\n"
+    );
+    assert_eq!(bash(&sandbox, &case, &gateway), "gateway=refused\n");
+}
+
+#[test]
+fn a_routed_agent_holds_no_capability_and_cannot_change_its_rules() {
+    let case = case();
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]);
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    let script = "grep '^CapEff:' /proc/self/status; \
+        printf '*filter\\nCOMMIT\\n' | iptables-restore 2>/dev/null && echo rules=changed || echo rules=kept; \
+        ip link set tap0 down 2>/dev/null && echo link=changed || echo link=kept";
+    assert_eq!(
+        bash(&sandbox, &case, script),
+        "CapEff:\t0000000000000000\nrules=kept\nlink=kept\n"
+    );
+}
+
+/// The agent's resolver file names slirp's resolver alone, a name only the host's resolver
+/// knows (systemd-resolved's `_gateway`, in no hosts file) is found through it over TCP, and
+/// no UDP socket opens to reach another resolver.
+#[test]
+fn a_routed_agent_looks_names_up_through_the_sandbox_resolver() {
+    let case = case();
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]);
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    let script = "grep '^nameserver' /etc/resolv.conf; \
+        getent hosts _gateway >/dev/null && echo name=found || echo name=missing; \
+        python3 -c 'import socket
+try:
+    socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b\"x\", (\"1.1.1.1\", 53))
+    print(\"udp=sent\")
+except OSError:
+    print(\"udp=refused\")'";
+    assert_eq!(
+        bash(&sandbox, &case, script),
+        "nameserver 10.0.2.3\nname=found\nudp=refused\n"
+    );
+}
+
+/// The processes that build a routed agent's network: each setup child, found by its
+/// arguments with the route port, and each slirp4netns one of them started. Input: the
+/// port. Output: their process ids, setup children first.
+fn route_processes(port: u16) -> (Vec<u32>, Vec<u32>) {
+    let wanted = port.to_string();
+    let pids: Vec<u32> = fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .collect();
+    let setup: Vec<u32> = pids
+        .iter()
+        .copied()
+        .filter(|pid| {
+            fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|line| {
+                let words: Vec<&[u8]> = line.split(|byte| *byte == 0).collect();
+                words.contains(&b"--egress".as_slice()) && words.contains(&wanted.as_bytes())
+            })
+        })
+        .collect();
+    let slirp = pids
+        .into_iter()
+        .filter(|pid| {
+            let named = fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|comm| comm.trim_end() == "slirp4netns");
+            let parent = fs::read_to_string(format!("/proc/{pid}/status"))
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find_map(|line| line.strip_prefix("PPid:"))
+                        .and_then(|value| value.trim().parse::<u32>().ok())
+                });
+            named && parent.is_some_and(|parent| setup.contains(&parent))
+        })
+        .collect();
+    (setup, slirp)
+}
+
+#[test]
+fn the_routed_network_ends_with_the_agent() {
+    let case = case();
+    let route = 18_443;
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(route)]);
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    let none = (Vec::new(), Vec::new());
+    assert_eq!(route_processes(route), none);
+    let (mut child, _output) = started(&sandbox, &case, "echo ready; read -r line");
+    let (setup, slirp) = route_processes(route);
+    assert_eq!(
+        (setup.len(), slirp.len()),
+        (1, 1),
+        "a routed agent runs with its setup child and slirp4netns"
+    );
+    drop(child.stdin.take());
+    assert!(exit_within(&mut child, Duration::from_secs(5)).is_some());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while route_processes(route) != none && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(route_processes(route), none, "the network ends with the agent");
+}
+
+/// The setup child never lets an agent start on a network it did not build: handed a
+/// stand-in for bubblewrap's child that shares this test's network namespace, it refuses,
+/// writes no block byte and kills the stand-in. It needs no slirp4netns, so it holds on
+/// every machine.
+#[test]
+fn a_failed_setup_never_starts_the_agent() {
+    use std::os::unix::process::ExitStatusExt;
+    let mut stand_in = crazyagent::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let mut setup = crazyagent::spawn_gate::spawn(
+        helper_command()
+            .arg("--egress")
+            .arg(std::process::id().to_string())
+            .arg("18444")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let info = format!("{{\n    \"child-pid\": {}\n}}\n", stand_in.id());
+    setup
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(info.as_bytes())
+        .unwrap();
+    let output = setup.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&output.stderr);
+    let ended = exit_within(&mut stand_in, Duration::from_secs(5));
+    if ended.is_none() {
+        stand_in.kill().unwrap();
+        stand_in.wait().unwrap();
+    }
+    assert!(!output.status.success(), "{said}");
+    assert!(output.stdout.is_empty(), "a block byte: {:?}", output.stdout);
+    assert!(said.contains(NETWORK_SHARED), "{said}");
+    assert_eq!(
+        ended.and_then(|status| status.signal()),
+        Some(9),
+        "the setup child kills the agent it never let start"
+    );
+}
+
+#[test]
+fn without_slirp_the_agent_keeps_the_shared_network_and_the_supervisor() {
+    if let Some(slirp) = SLIRP_PATHS.iter().find(|path| Path::new(path).exists()) {
+        eprintln!("skipped: {slirp} is installed here");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().canonicalize().unwrap();
+    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(data.as_path()));
+    assert!(!host.routed, "{host:?}");
+    let case = case();
+    let other = outward_address();
+    let port = pong_everywhere();
+    let network = SandboxNetwork::Only(vec![
+        SandboxRemote::AnyHost(443),
+        SandboxRemote::Loopback(port),
+    ]);
+    let Some(sandbox) = nested(policy(&case, network)) else {
+        return;
+    };
+    assert!(sandbox.routed().is_none());
+    let supervised = sandbox.supervise(LinuxSupervisor::On, Some(data.as_path()));
+    let script = format!(
+        "read -r line </dev/tcp/127.0.0.1/{port}; echo \"loopback=$line\"; \
+         (exec 4<>/dev/tcp/{other}/{port}) 2>/dev/null && echo other=reached || echo other=refused"
+    );
+    assert_eq!(
+        bash(&supervised, &case, &script),
+        "loopback=pong\nother=refused\n",
+        "the call supervisor refuses the loopback port on another host"
+    );
+}
+
+#[test]
+fn the_routed_network_leaves_no_descriptor_in_the_harness() {
+    let case = case();
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]);
+    let Some(sandbox) = routed(policy(&case, network.clone())) else {
+        return;
+    };
+    let shared = pinned(policy(&case, network));
+    let open = |sandbox: &dyn Sandbox| {
+        String::from_utf8(run(sandbox, &case, "ls /proc/self/fd").stdout).unwrap()
+    };
+    assert_eq!(open(&sandbox), "0\n1\n2\n3\n");
+    assert_eq!(open(&sandbox), open(&shared));
 }
 
 /// A guard: bubblewrap's outer process, the first process of a nested agent, runs with no

@@ -1720,6 +1720,7 @@ mod tests {
                 supervised: false,
                 root: false,
                 armored: false,
+                routed: false,
             })
         };
         let port = |port| AccessGrant::Port { port };
@@ -1762,6 +1763,7 @@ mod tests {
                 supervised: true,
                 root: false,
                 armored: false,
+                routed: false,
             })
         };
         let low = [AccessGrant::Port { port: 80 }, AccessGrant::Port { port: 53 }];
@@ -1793,6 +1795,7 @@ mod tests {
                 supervised: false,
                 root: false,
                 armored: false,
+                routed: false,
             })
         };
         let gaps = |access, nested, scoped| linux_gaps(access, host(nested, scoped), false);
@@ -1831,6 +1834,7 @@ mod tests {
             supervised: true,
             root: false,
             armored: false,
+            routed: false,
         };
         let root = LinuxHost {
             nested: false,
@@ -1838,6 +1842,7 @@ mod tests {
             supervised: false,
             root: true,
             armored: false,
+            routed: false,
         };
         let sandboxed = |host, found| linux_gaps(AgentAccess::Sandboxed, Some(host), found);
         let (kept, said) = (LINUX_KEPT_GIT_LINE, LINUX_SUPERVISED_LINE);
@@ -1889,6 +1894,7 @@ mod tests {
             supervised,
             root,
             armored: true,
+            routed: false,
         };
         let (git, said, armor) = (
             LINUX_NESTED_GIT_LINE,
@@ -1935,6 +1941,7 @@ mod tests {
             supervised,
             root: false,
             armored: false,
+            routed: false,
         };
         assert!(LevelView::other_git(Some(host(true)), &project));
         assert!(LevelView::other_git(Some(host(true)), &missing));
