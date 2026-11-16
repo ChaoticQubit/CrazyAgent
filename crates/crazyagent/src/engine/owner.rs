@@ -1347,6 +1347,8 @@ pub enum OwnerData {
         project_id: ProjectId,
         paths: Vec<String>,
         version: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        runs: Vec<crate::sandbox::hidden_paths::RunKind>,
     },
     ProjectAgentPolicy {
         project_id: ProjectId,

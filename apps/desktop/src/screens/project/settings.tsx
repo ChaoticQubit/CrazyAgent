@@ -514,6 +514,14 @@ export function hiddenSeers(status: TeamStatus | null): TeamAgent[] {
   return status === null ? [] : status.agents.filter((agent) => agent.sees_hidden === true);
 }
 
+/** What the hidden folders section says about the engine runs still running that started
+ * before a folder was hidden (SA-VID14-R2-N2). Stub: nothing yet. Input: the saved folders,
+ * or null before they are read. Output: the line, or null while none is listed. */
+export function hiddenRunsLine(saved: HiddenPaths | null): string | null {
+  void saved;
+  return null;
+}
+
 /** What the hidden folders section says about the agents that can still open a hidden
  * folder. Input: the agents, at least one. Output: the line naming them. */
 export function seersLine(agents: TeamAgent[]): string {
@@ -601,6 +609,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
       <p>{seersLine(seers)}</p>
       <Button pending={restarting} pendingLabel="Restarting..." disabled={restarting} onClick={() => void restart()}>Restart them</Button>
     </div>}
+    {!fullAccess && hiddenRunsLine(saved) !== null && <p className="pj-note warn" role="status">{hiddenRunsLine(saved)}</p>}
     {saved === null && !note && <p className="pj-muted" role="status">Loading...</p>}
     {saved !== null && <ul className="pj-paths" aria-label="Hidden folders">
       {paths.length === 0 && <li className="pj-muted">No hidden folders.</li>}

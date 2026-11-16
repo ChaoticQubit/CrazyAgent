@@ -131,9 +131,16 @@ impl OwnerController {
             .await?
             .data
         {
-            OwnerData::ProjectHiddenPaths { paths, version, .. } => {
-                Ok(crate::project_setup::HiddenPaths { paths, version })
-            }
+            OwnerData::ProjectHiddenPaths {
+                paths,
+                version,
+                runs,
+                ..
+            } => Ok(crate::project_setup::HiddenPaths {
+                paths,
+                version,
+                runs,
+            }),
             _ => Err(EngineError("controller_read_response".into())),
         }
     }

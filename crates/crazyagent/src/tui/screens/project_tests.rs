@@ -3149,6 +3149,7 @@ fn a_stale_hidden_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_rea
         Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
             paths: vec!["/Users/owner/project/secret".into()],
             version: 3,
+            runs: Vec::new(),
         })),
     );
     assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
@@ -3193,6 +3194,7 @@ fn a_stale_hidden_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_rea
                 "/Users/owner/project/keys".into(),
             ],
             version: 4,
+            runs: Vec::new(),
         })),
     );
     let hidden = screen.hidden.as_ref().unwrap();
@@ -3223,6 +3225,7 @@ fn a_stale_hidden_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_rea
         Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
             paths: vec!["/Users/owner/project/secret".into()],
             version: 5,
+            runs: Vec::new(),
         })),
     );
     assert!(screen.hidden.is_none(), "Esc keeps the saved one");
@@ -3253,6 +3256,7 @@ fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
     screen.hidden_paths = Some(crate::project_setup::HiddenPaths {
         paths: vec!["/Users/owner/secret".into()],
         version: 0,
+        runs: Vec::new(),
     });
     screen.context = Some(crate::project_setup::ProjectContext {
         project_id: project.clone(),
@@ -3334,6 +3338,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
         Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
             paths: vec!["/Users/owner/secret".into()],
             version: 1,
+            runs: Vec::new(),
         })),
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
@@ -3415,6 +3420,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     screen.hidden_paths = Some(crate::project_setup::HiddenPaths {
         paths: vec![],
         version: 2,
+        runs: Vec::new(),
     });
     screen.key(key(KeyCode::Char('k')));
     screen.paste(&format!("/{}", "d".repeat(1100)));
@@ -5267,8 +5273,8 @@ fn a_folder_cut_to_its_tail_fits_its_cells() {
 /// SA-VID14-A: on the Settings tab the running agents that can still open a folder hidden
 /// after they started are named under the hidden folders, with h to restart them, which
 /// sends Restart them for the project; with none listed h sends nothing. The editor says the
-/// list covers team agents and not research, overview, roadmap, onboarding or lockfile
-/// rebuild runs (r1, SA-VID14-R2-N1).
+/// list covers team agents, and that engine runs started before are named too (r1,
+/// SA-VID14-R2-N1, SA-VID14-R2-N2).
 #[test]
 fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them() {
     use crate::team::{GraphNode, NodeKind, TeamAction, TeamGraph};
@@ -5280,6 +5286,7 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them(
     screen.hidden_paths = Some(crate::project_setup::HiddenPaths {
         paths: vec!["/Users/owner/secret".into()],
         version: 0,
+        runs: Vec::new(),
     });
     let node = |id: &str, kind, label: &str, sees_hidden: bool| GraphNode {
         id: id.into(),
@@ -5352,13 +5359,61 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them(
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     for line in [
         "Team agents that started before you hid a folder,",
-        "research, overview, roadmap, onboarding or lockfile",
-        "rebuild run that started before keeps its access until",
-        "it ends.",
+        "Research jobs and overview, roadmap, onboarding,",
+        "instructions cleanup, code graph and lockfile rebuild",
+        "runs that started before are named there too, and keep",
+        "their access until they end.",
     ] {
         assert!(
             shown.contains(line),
             "the editor says what the list covers: {shown}"
         );
     }
+}
+
+/// SA-VID14-R2-N2: engine runs still running that started before a folder was hidden are
+/// named under Hidden by kind, each once, with no key, and the line goes once none is left.
+#[test]
+fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
+    use crate::sandbox::hidden_paths::RunKind;
+    let look = Look::plain();
+    let project = ProjectId::new("hidden-runs").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.jobs = Some(Vec::new());
+    let saved = |runs: Vec<RunKind>| crate::project_setup::HiddenPaths {
+        paths: vec!["/Users/owner/secret".into()],
+        version: 0,
+        runs,
+    };
+    screen.hidden_paths = Some(saved(vec![
+        RunKind::Research,
+        RunKind::Overview,
+        RunKind::Roadmap,
+        RunKind::Onboarding,
+        RunKind::InstructionsCleanup,
+        RunKind::CodeGraph,
+        RunKind::Lockfiles,
+    ]));
+    let shown = text(&project_screen(&mut screen, 80, 40, &look).rows);
+    for line in [
+        "          Runs that can still open a hidden folder until they end: research",
+        "          job, overview run, roadmap run, onboarding run, instructions",
+        "          cleanup run, code graph build, lockfile rebuild run",
+    ] {
+        assert!(shown.contains(line), "wrapped to the page: {shown}");
+    }
+    screen.hidden_paths = Some(saved(vec![RunKind::Research]));
+    let shown = text(&project_screen(&mut screen, 120, 40, &look).rows);
+    assert!(
+        shown.contains("Runs that can still open a hidden folder until they end: research job"),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("h Restart them"),
+        "a run has no restart key: {shown}"
+    );
+    screen.hidden_paths = Some(saved(Vec::new()));
+    let shown = text(&project_screen(&mut screen, 80, 40, &look).rows);
+    assert!(!shown.contains("until they end:"), "{shown}");
 }

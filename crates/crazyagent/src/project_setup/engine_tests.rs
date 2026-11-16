@@ -4174,7 +4174,8 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
         owner.project_hidden_paths(project.clone()).await.unwrap(),
         HiddenPaths {
             paths: vec![text(&secret)],
-            version: 1
+            version: 1,
+            runs: Vec::new(),
         },
         "the stale window changed nothing"
     );
@@ -4195,7 +4196,8 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
         owner.project_hidden_paths(project.clone()).await.unwrap(),
         HiddenPaths {
             paths: vec![text(&secret), text(&vendor)],
-            version: 2
+            version: 2,
+            runs: Vec::new(),
         },
         "after a re-read the redo lands"
     );
@@ -4218,7 +4220,8 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
         owner.project_hidden_paths(project.clone()).await.unwrap(),
         HiddenPaths {
             paths: vec![],
-            version: 3
+            version: 3,
+            runs: Vec::new(),
         },
         "the project added again under the same id starts with no hidden folders"
     );
@@ -4235,6 +4238,68 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
     }
     drop(owner);
     engine.stop().await;
+}
+
+/// SA-VID14-R2-N2: the hidden folders read names the kind of an engine run that started
+/// before a folder was hidden while it runs, and nothing once it ends.
+#[tokio::test]
+async fn hidden_paths_read_names_engine_runs_that_started_before_a_folder_was_hidden() {
+    use crate::sandbox::hidden_paths::RunKind;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("hidden-runs-wire").unwrap();
+    let created = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(created), OwnerResult::Applied);
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    let secret = stored.project_folder().join("secret");
+    std::fs::create_dir_all(&secret).unwrap();
+    let secret = std::fs::canonicalize(&secret).unwrap();
+    let run =
+        crate::sandbox::hidden_paths::running(RunKind::Research, project.as_str(), &[]).unwrap();
+    let saved = owner
+        .set_project_hidden_paths(
+            project.clone(),
+            0,
+            vec![secret.to_str().unwrap().to_owned()],
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    assert_eq!(
+        owner
+            .project_hidden_paths(project.clone())
+            .await
+            .unwrap()
+            .runs,
+        vec![RunKind::Research],
+        "a run that started before the folder was hidden is named while it runs"
+    );
+    let after = crate::sandbox::hidden_paths::running(
+        RunKind::Overview,
+        project.as_str(),
+        std::slice::from_ref(&secret),
+    )
+    .unwrap();
+    drop(run);
+    assert_eq!(
+        owner
+            .project_hidden_paths(project.clone())
+            .await
+            .unwrap()
+            .runs,
+        Vec::<RunKind>::new(),
+        "an ended run and one that hid the folder are not named"
+    );
+    drop(after);
 }
 
 /// DEC-182 S7: an engine start ends every GitHub rule proposal an earlier engine left

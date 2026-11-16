@@ -3014,15 +3014,20 @@ fn owner_read(
                 .collect(),
             version: versioned::current(&tx, &versioned::read_paths_item(project_id))?.version,
         },
-        OwnerRead::ProjectHiddenPaths { project_id } => OwnerData::ProjectHiddenPaths {
-            project_id: project_id.clone(),
-            paths: crate::sandbox::hidden_paths::load(&tx, project_id.as_str())
-                .map_err(error)?
-                .into_iter()
-                .map(|path| path.display().to_string())
-                .collect(),
-            version: versioned::current(&tx, &versioned::hidden_paths_item(project_id))?.version,
-        },
+        OwnerRead::ProjectHiddenPaths { project_id } => {
+            let saved =
+                crate::sandbox::hidden_paths::load(&tx, project_id.as_str()).map_err(error)?;
+            OwnerData::ProjectHiddenPaths {
+                project_id: project_id.clone(),
+                runs: crate::sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
+                paths: saved
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+                version: versioned::current(&tx, &versioned::hidden_paths_item(project_id))?
+                    .version,
+            }
+        }
         OwnerRead::ProjectAgentPolicy { project_id } => {
             let Some(setup) = crate::project_setup::load_setup(&tx, project_id)? else {
                 return Err(error(no_setup_code(&tx, project_id)?));

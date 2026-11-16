@@ -2651,6 +2651,15 @@ fn seers_line(screen: &ProjectScreen, look: &Look) -> Option<Row> {
     })
 }
 
+/// The Settings line naming the kinds of engine runs still running that started before a
+/// folder was hidden and can open it until they end (SA-VID14-R2-N2). Stub: none yet.
+/// Takes the screen, the width the lines wrap at and the look. Returns the rows, none while
+/// no run is listed.
+fn runs_lines(screen: &ProjectScreen, width: usize, look: &Look) -> Vec<Row> {
+    let _ = (screen, width, look);
+    Vec::new()
+}
+
 /// The Settings line for a project's hidden folders: how many, or loading.
 /// Takes the screen and look. Returns the row with its edit key.
 fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
@@ -2712,6 +2721,11 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         entry("Hidden", hidden_line(screen, look)),
     ];
     lines.extend(seers_line(screen, look).map(|row| entry("", row)));
+    lines.extend(
+        runs_lines(screen, content.saturating_sub(10), look)
+            .into_iter()
+            .map(|row| entry("", row)),
+    );
     lines.extend([
         entry(
             "Access",
