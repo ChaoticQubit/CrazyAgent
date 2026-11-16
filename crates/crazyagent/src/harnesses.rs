@@ -743,7 +743,7 @@ pub struct ProbeCache {
 struct Probe {
     search: Search,
     entries: Vec<HarnessEntry>,
-    found: Vec<Option<Identity>>,
+    found: Identities,
     started: Instant,
 }
 
@@ -788,7 +788,7 @@ impl ProbeCache {
         self.probing.load(Ordering::SeqCst)
     }
 
-    fn cached(&self, search: &Search) -> Option<(Vec<HarnessEntry>, Vec<Option<Identity>>, bool)> {
+    fn cached(&self, search: &Search) -> Option<(Vec<HarnessEntry>, Identities, bool)> {
         let last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
         last.as_ref()
             .filter(|probe| probe.search == *search)
@@ -819,7 +819,7 @@ impl ProbeCache {
         &self,
         search: Search,
         entries: Vec<HarnessEntry>,
-        found: Vec<Option<Identity>>,
+        found: Identities,
         started: Instant,
     ) {
         assert_eq!(entries.len(), specs().len());
@@ -848,6 +848,10 @@ struct Identity {
     node: (u64, u64, i64, i64),
 }
 
+/// The identity of each catalog row's harness file, in the rows' order, none for a row with no
+/// file found.
+type Identities = Vec<Option<Identity>>;
+
 /// Reads a harness file's identity. Input: the executable path as the catalog lists it.
 /// Output: the identity, or none when the file cannot be read.
 fn identity(executable: &Path) -> Option<Identity> {
@@ -875,8 +879,8 @@ fn identity(executable: &Path) -> Option<Identity> {
 
 /// Reads the identity of every catalog row's harness file, none for a row with no file found.
 /// Input: the catalog rows. Output: one identity per row, in the same order.
-fn identities(entries: &[HarnessEntry]) -> Vec<Option<Identity>> {
-    let found: Vec<Option<Identity>> = entries
+fn identities(entries: &[HarnessEntry]) -> Identities {
+    let found: Identities = entries
         .iter()
         .map(|entry| entry.executable.as_deref().and_then(identity))
         .collect();
@@ -887,9 +891,7 @@ fn identities(entries: &[HarnessEntry]) -> Vec<Option<Identity>> {
 /// Probes the catalog off the runtime and reads each found harness file's identity right
 /// after. Input: the search. Output: the rows and their identities, or an error when the task
 /// failed.
-async fn probe(
-    search: Search,
-) -> Result<(Vec<HarnessEntry>, Vec<Option<Identity>>), tokio::task::JoinError> {
+async fn probe(search: Search) -> Result<(Vec<HarnessEntry>, Identities), tokio::task::JoinError> {
     tokio::task::spawn_blocking(move || {
         let entries = catalog(&search);
         let found = identities(&entries);
