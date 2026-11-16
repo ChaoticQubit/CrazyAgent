@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { endTerminals, start, stop } from "./e2e-harness.mjs";
 import {
-  KEPT_MIN, REFUSED_EXIT, SPEED_STATE, incomplete, joinSample, judge, noiseShares, prepareKeychain, privateFolder, quiet, readQuiet,
-  runSchedule, sampleMetrics, stayedQuiet,
+  KEPT_MIN, REFUSED_EXIT, SPEED_STATE, compareExit, incomplete, joinSample, judge, noiseShares, prepareKeychain, privateFolder, quiet,
+  readQuiet, runSchedule, sampleMetrics, stayedQuiet,
 } from "./speed-budget.mjs";
 import { PROJECT } from "./speed-seed.mjs";
 
@@ -211,7 +211,7 @@ async function main() {
     console.log(`${row.status.padEnd(10)} ${row.metric} ${medians} ${(row.reasons ?? []).join("; ")}`);
   }
   if (gaps.length > 0) console.error(`NOT JUDGED: ${gaps.join(", ")}`);
-  return rows.some((row) => row.status === "fail") || gaps.length > 0 ? 1 : 0;
+  return compareExit(rows, gaps, failed);
 }
 
 /** Reads the noise a `noise` run wrote, refusing one read on another base or a candidate that

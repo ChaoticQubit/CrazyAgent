@@ -405,6 +405,12 @@ export function joinSample(sample, tui) {
   return joined;
 }
 
+/** The exit of a compare run: 1 when a metric failed or could not be judged, else 0. Inputs:
+ * judge's rows, `incomplete`'s metrics and the failed runs per side. Output: the exit code. */
+export function compareExit(rows, gaps, failed) {
+  return rows.some((row) => row.status === "fail") || gaps.length > 0 ? 1 : 0;
+}
+
 /** The floor a metric's gap must pass to fail. Input: the metric. Output: the floor. */
 function floorFor(metric) {
   assert.match(metric, /_(ms|mb)$/, `a metric with a unit: ${metric}`);

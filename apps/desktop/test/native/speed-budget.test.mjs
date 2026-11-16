@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { FAILURE_TEXT_MAX, KEPT_MIN, REFUSED_EXIT, REQUIRED, clickUntilUsable, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, prepareKeychain, privateFolder, quiet, runSchedule, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
+import { FAILURE_TEXT_MAX, KEPT_MIN, REFUSED_EXIT, REQUIRED, clickUntilUsable, compareExit, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, prepareKeychain, privateFolder, quiet, runSchedule, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
 
 const QUIET = { load1: 0.8, compilers: [], memoryLevel: 80, onAC: true, screenLocked: false, busy: false };
 
@@ -372,21 +372,25 @@ test("a run the Mac got busy through runs again, three in a row refuse, and a bu
   assert.equal(none.calls, 0);
 });
 
-/** A stand-in keychain tool: records each call and answers the two reads with the listing
- * given. Inputs: the search list and default keychain it prints for a home. Output: the tool and
- * its calls. */
-function keychainTool(searchList = (keychain) => [keychain], effect = () => {}) {
+/** A stand-in keychain tool: records each call, prints for a home its own login keychain as its
+ * search list and default unless `answer` prints something else, and runs no real tool. Input:
+ * the answer, given the home, the arguments and the calls so far, or null to print the home's
+ * own. Output: the tool and its calls. */
+function keychainTool(answer = () => null) {
   const calls = [];
   const tool = (home, args) => {
     calls.push([home, ...args]);
-    effect(args);
-    const keychain = join(home, "Library", "Keychains", "login.keychain-db");
-    if (args.length === 3 && args[0] === "list-keychains") return searchList(keychain).map((path) => `    "${path}"`).join("\n") + "\n";
-    if (args.length === 3 && args[0] === "default-keychain") return `    "${keychain}"\n`;
-    return "";
+    const given = answer(home, args, calls);
+    if (given !== null) return given;
+    const reads = args.length === 3 && (args[0] === "list-keychains" || args[0] === "default-keychain");
+    return reads ? printed(join(home, "Library", "Keychains", "login.keychain-db")) : "";
   };
   return { tool, calls };
 }
+
+const printed = (...paths) => `${paths.map((path) => `    "${path}"`).join("\n")}\n`;
+const loginOf = (home) => join(home, "Library", "Keychains", "login.keychain-db");
+const setBefore = (calls, setting) => calls.some((call) => call[1] === setting && call.includes("-s"));
 
 /** Runs `check` with a new speed state home under /private/tmp and an owner home stand-in, then
  * removes both. Input: the check, given the home and the owner home. Output: none. */
@@ -406,19 +410,23 @@ function withStateHome(check) {
 
 const MAC_ONLY = { skip: process.platform !== "darwin" && "a speed state home lies under /private/tmp on macOS" };
 
-test("a new speed state home gets its own empty login keychain as its default and its only search entry, as the gate prepared by hand (DEC-146)", MAC_ONLY, () => {
+test("a new speed state home gets its own empty login keychain as its default and its only search entry, as the gate prepared by hand (DEC-146), with the owner's search list and default read before and after", MAC_ONLY, () => {
   withStateHome((home, owner) => {
     const { tool, calls } = keychainTool();
-    const keychain = join(home, "Library", "Keychains", "login.keychain-db");
+    const keychain = loginOf(home);
     assert.equal(prepareKeychain(home, owner, tool), keychain);
+    const ownerReads = [[owner, "list-keychains", "-d", "user"], [owner, "default-keychain", "-d", "user"]];
     assert.deepEqual(calls, [
+      ...ownerReads,
       [home, "create-keychain", "-p", "", keychain],
       [home, "set-keychain-settings", keychain],
       [home, "list-keychains", "-d", "user", "-s", keychain],
       [home, "default-keychain", "-d", "user", "-s", keychain],
       [home, "list-keychains", "-d", "user"],
       [home, "default-keychain", "-d", "user"],
+      ...ownerReads,
     ]);
+    assert.ok(calls.filter((call) => call.length > 4).every((call) => call[0] === home), "every call that changes a setting runs on the state home");
     for (const folder of ["Library", "Library/Keychains", "Library/Preferences"]) {
       assert.equal(lstatSync(join(home, folder)).mode & 0o777, 0o700, folder);
     }
@@ -430,13 +438,16 @@ test("a keychain is prepared only in a new speed state home, only as its own, an
     const outside = keychainTool();
     assert.throws(() => prepareKeychain(owner, owner, outside.tool), /a speed state home/);
     assert.deepEqual(outside.calls, [], "no keychain tool runs outside a state home");
-    const shared = keychainTool((keychain) => [keychain, join(owner, "Library", "Keychains", "login.keychain-db")]);
+    const shared = keychainTool((at, args) => at === home && args.length === 3 && args[0] === "list-keychains" ? printed(loginOf(home), loginOf(owner)) : null);
     assert.throws(() => prepareKeychain(home, owner, shared.tool), /only its own keychain/);
     assert.throws(() => prepareKeychain(home, owner, keychainTool().tool), /no Library yet/, "a home is prepared once");
   });
   withStateHome((home, owner) => {
     const settings = join(owner, "Library", "Preferences", "com.apple.security.plist");
-    const leaky = keychainTool(undefined, (args) => { if (args[0] === "create-keychain") writeFileSync(settings, "changed"); });
+    const leaky = keychainTool((_, args) => {
+      if (args[0] === "create-keychain") writeFileSync(settings, "changed");
+      return null;
+    });
     assert.throws(() => prepareKeychain(home, owner, leaky.tool), /the owner's keychain settings/);
     assert.ok(existsSync(settings));
   });
@@ -446,6 +457,28 @@ test("a keychain is prepared only in a new speed state home, only as its own, an
     assert.throws(() => prepareKeychain(home, owner, before.tool), /the owner's keychain settings file stays absent/);
     assert.deepEqual(before.calls, [], "no keychain tool runs while the owner has a settings file");
   });
+});
+
+test("a keychain prepared for a state home that reached the owner's search list or default keychain stops the run", MAC_ONLY, () => {
+  withStateHome((home, owner) => {
+    const listLeak = keychainTool((at, args, calls) => at === owner && args[0] === "list-keychains" && setBefore(calls, "list-keychains") ? printed(loginOf(owner), loginOf(home)) : null);
+    assert.throws(() => prepareKeychain(home, owner, listLeak.tool), /the owner's search list is unchanged/);
+  });
+  withStateHome((home, owner) => {
+    const defaultLeak = keychainTool((at, args, calls) => at === owner && args[0] === "default-keychain" && setBefore(calls, "default-keychain") ? printed(loginOf(home)) : null);
+    assert.throws(() => prepareKeychain(home, owner, defaultLeak.tool), /the owner's default keychain is unchanged/);
+  });
+});
+
+test("a compare fails when a metric fails or is not judged, or when the candidate failed more runs than the base", () => {
+  const pass = [{ metric: "page_ms", status: "pass" }];
+  assert.equal(compareExit(pass, [], { base: 0, candidate: 0 }), 0);
+  assert.equal(compareExit(pass, [], { base: 1, candidate: 1 }), 0, "a hiccup both sides met is counted, not failed");
+  assert.equal(compareExit(pass, [], { base: 2, candidate: 0 }), 0, "the base's own failures are counted only");
+  assert.equal(compareExit(pass, [], { base: 0, candidate: 1 }), 1, "a run only the candidate failed is a finding");
+  assert.equal(compareExit(pass, [], { base: 1, candidate: 2 }), 1);
+  assert.equal(compareExit([{ metric: "page_ms", status: "fail" }], [], { base: 0, candidate: 0 }), 1);
+  assert.equal(compareExit(pass, ["tui_launch_ms"], { base: 0, candidate: 0 }), 1);
 });
 
 test("speed-run gives each state home its prepared keychain as it makes the home", () => {
