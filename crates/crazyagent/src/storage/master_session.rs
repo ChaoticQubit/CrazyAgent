@@ -6546,6 +6546,15 @@ auth = { method = "none" }"#;
             panic!("the registered key must prepare the first turn");
         };
         fail_first(case, &first, MasterReason::RuntimeUnavailable).await;
+        let before = add_outside_account(case).await;
+        let prepare = next_turn(case, "after-settings-change").await;
+        (before, prepare)
+    }
+
+    /// Has the owner add an account outside the master's pool, which moves the settings
+    /// binding and leaves the master's scope as it was, so the next send rebinds the
+    /// session (PA-6, DEC-092). Input: the fixture. Output: the config id before the edit.
+    async fn add_outside_account(case: &Fixture) -> ConfigId {
         let basis = owner_read(
             &case.storage,
             &case.started,
@@ -6572,8 +6581,94 @@ auth = { method = "none" }"#;
             },
         )
         .await;
-        let prepare = next_turn(case, "after-settings-change").await;
-        (basis.config_id, prepare)
+        basis.config_id
+    }
+
+    /// Moves the fixture's configured home to its account's generated SDK home, which the
+    /// engine registers at the first turn. Input: the fixture. Output: the path of the config
+    /// file in that home.
+    fn generated_master_config(case: &Fixture) -> std::path::PathBuf {
+        let connection = case
+            .config
+            .settings
+            .model_access
+            .as_ref()
+            .unwrap()
+            .connections[0]
+            .clone();
+        let profile_ref =
+            super::super::account_profile::configured_profile_ref(&connection).unwrap();
+        let homes = case.root.path().join("configured-sdk-homes");
+        std::fs::create_dir(&homes).unwrap();
+        std::fs::set_permissions(&homes, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let generated = homes.join(format!(
+            "{:x}",
+            Sha256::digest(profile_ref.as_str().as_bytes())
+        ));
+        std::fs::rename(&case.home, &generated).unwrap();
+        generated.join(".backboard/config.json")
+    }
+
+    /// Writes other bytes over a config file and puts its bytes and modified time back, as
+    /// a confined master can, so only its change time moves (rv-sec3 G4 r2 F1). Input: the
+    /// config file. Output: none; it asserts the same file and bytes with a new change time.
+    fn write_and_restore_config(config: &Path) {
+        use std::os::unix::fs::MetadataExt;
+        let bytes = std::fs::read(config).unwrap();
+        let before = std::fs::symlink_metadata(config).unwrap();
+        std::fs::write(config, b"{}").unwrap();
+        std::fs::write(config, &bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(config)
+            .unwrap()
+            .set_modified(before.modified().unwrap())
+            .unwrap();
+        let after = std::fs::symlink_metadata(config).unwrap();
+        assert_eq!(std::fs::read(config).unwrap(), bytes);
+        assert_eq!(
+            (after.dev(), after.ino(), after.mode(), after.nlink()),
+            (before.dev(), before.ino(), before.mode(), before.nlink())
+        );
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+        assert_ne!(
+            (after.ctime(), after.ctime_nsec()),
+            (before.ctime(), before.ctime_nsec())
+        );
+    }
+
+    /// Runs the preparation of a master turn that must be refused. Inputs: the fixture, the
+    /// prepare command and what the turn follows, named in the panic. Output: the refusal's
+    /// cause, from a refused turn or from the error, or None.
+    async fn refused_cause(
+        case: &Fixture,
+        prepare: MasterRuntimeCommand,
+        after: &str,
+    ) -> Option<String> {
+        match case.runtime(prepare).await {
+            Ok(MasterRuntimeResult::Turn(turn)) => turn.cause,
+            Ok(MasterRuntimeResult::Prepared(prepared)) => panic!(
+                "a turn after {after} must not prepare {:?}",
+                prepared.attempt.connection
+            ),
+            Ok(_) => None,
+            Err(failure) => Some(failure.0),
+        }
+    }
+
+    /// Checks the generation the fixture's master registration records. Inputs: the
+    /// fixture and the generation it must hold. Output: none; it asserts.
+    fn assert_master_generation(case: &Fixture, generation: u64) {
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let record = registration(
+            &tx,
+            &case.session.session_id,
+            &case.session.selection.target_profile_ref,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(record.proof.generation, generation);
     }
 
     /// Ends the fixture's first turn with a failure the runtime reported. Inputs: the
@@ -6876,84 +6971,62 @@ auth = { method = "none" }"#;
         case.close().await;
     }
 
-    /// rv-sec3 G4 r2 F1 (RV-DS241-50 r1): the master's generated SDK home config written over
-    /// and put back outside an account save, the same bytes and inode with its modified time
+    /// rv-sec3 G4 r2 F1: a master whose generated SDK home's config was written over and
+    /// put back outside an account save, the same bytes and inode with its modified time
     /// reset, moves only its change time. The master's next turn is refused with
-    /// rcli_profile_identity_changed and its slot keeps its generation; at RV-DS241-50 r1 the
-    /// turn re-pinned it unseen. An undone save's put-back still re-pins, in custody's rows.
+    /// rcli_profile_changed_in_conversation (rv-code4 B22 F3) and its slot keeps its
+    /// generation; at RV-DS241-50 r1 the turn re-pinned it unseen. An undone save's put-back
+    /// still re-pins, in custody's rows.
     #[tokio::test]
     async fn a_master_turn_after_its_config_was_written_and_restored_outside_a_save_is_refused() {
-        use std::os::unix::fs::MetadataExt;
         let case = Fixture::new(true).await;
-        let connection = case
-            .config
-            .settings
-            .model_access
-            .as_ref()
-            .unwrap()
-            .connections[0]
-            .clone();
-        let profile_ref =
-            super::super::account_profile::configured_profile_ref(&connection).unwrap();
-        let homes = case.root.path().join("configured-sdk-homes");
-        std::fs::create_dir(&homes).unwrap();
-        std::fs::set_permissions(&homes, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let generated = homes.join(format!(
-            "{:x}",
-            Sha256::digest(profile_ref.as_str().as_bytes())
-        ));
-        std::fs::rename(&case.home, &generated).unwrap();
+        let config = generated_master_config(&case);
         let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
         else {
             panic!("an engine-generated SDK home must register and prepare the first turn");
         };
         fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
-        let config = generated.join(".backboard/config.json");
-        let bytes = std::fs::read(&config).unwrap();
-        let before = std::fs::symlink_metadata(&config).unwrap();
-        std::fs::write(&config, b"{}").unwrap();
-        std::fs::write(&config, &bytes).unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&config)
-            .unwrap()
-            .set_modified(before.modified().unwrap())
-            .unwrap();
-        let after = std::fs::symlink_metadata(&config).unwrap();
-        assert_eq!(std::fs::read(&config).unwrap(), bytes);
-        assert_eq!(
-            (after.dev(), after.ino(), after.mode(), after.nlink()),
-            (before.dev(), before.ino(), before.mode(), before.nlink())
-        );
-        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
-        assert_ne!(
-            (after.ctime(), after.ctime_nsec()),
-            (before.ctime(), before.ctime_nsec())
-        );
+        write_and_restore_config(&config);
 
         let prepare = next_turn(&case, "after-write-and-restore").await;
-        let refused = match case.runtime(prepare).await {
-            Ok(MasterRuntimeResult::Turn(turn)) => turn.cause,
-            Ok(MasterRuntimeResult::Prepared(prepared)) => panic!(
-                "a config written and put back outside a save must not prepare {:?}",
-                prepared.attempt.connection
-            ),
-            Ok(_) => None,
-            Err(failure) => Some(failure.0),
-        };
+        let refused = refused_cause(&case, prepare, "a write-and-restore").await;
 
-        assert_eq!(refused.as_deref(), Some("rcli_profile_identity_changed"));
-        let mut db = case.db();
-        let tx = db.transaction().unwrap();
-        let record = registration(
-            &tx,
-            &case.session.session_id,
-            &case.session.selection.target_profile_ref,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(record.proof.generation, 1);
-        drop(tx);
+        assert_eq!(
+            refused.as_deref(),
+            Some("rcli_profile_changed_in_conversation")
+        );
+        assert_master_generation(&case, 1);
+        case.close().await;
+    }
+
+    /// rv-code4 B22 F2: the G4 refusal holds across a rebinding. A master writes over its
+    /// generated SDK home's config and puts it back, then the owner adds an account outside
+    /// the master's pool and sends, so the session moves to the new settings binding and
+    /// its registration reads stale. The turn is still refused, with
+    /// rcli_profile_changed_in_conversation, and the slot keeps its generation; before, the
+    /// stale registration took the owner's permissive register and re-pinned it unseen.
+    #[tokio::test]
+    async fn a_master_turn_after_a_write_and_restore_and_a_settings_rebind_is_refused() {
+        let case = Fixture::new(true).await;
+        let config = generated_master_config(&case);
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("an engine-generated SDK home must register and prepare the first turn");
+        };
+        fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
+        write_and_restore_config(&config);
+        let before = add_outside_account(&case).await;
+
+        let prepare = next_turn(&case, "after-write-and-restore-and-rebind").await;
+        let refused = refused_cause(&case, prepare, "a write-and-restore and a rebind").await;
+
+        let (session, _) = case.view().await;
+        assert_ne!(session.binding().0, &before, "the outside edit rebound the session");
+        assert_eq!(
+            refused.as_deref(),
+            Some("rcli_profile_changed_in_conversation")
+        );
+        assert_master_generation(&case, 1);
         case.close().await;
     }
 

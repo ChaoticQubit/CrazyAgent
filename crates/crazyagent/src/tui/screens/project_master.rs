@@ -1272,11 +1272,33 @@ mod tests {
     }
 
     /// rv-sec3 G4 r2 F1: a turn refused because the local model's config file changed outside
-    /// a save says a new conversation is needed, since trying the same one again never helps;
-    /// a send refused for it says the same.
+    /// a save, with its own code since rv-code4 B22 F3, says a new conversation is needed,
+    /// since trying the same one again never helps; a send refused for it says the same.
     #[test]
     fn a_turn_refused_for_a_changed_local_model_config_says_to_end_the_conversation() {
-        let line = "The local model's config file changed since this conversation started, so the master cannot use it. Press e to end it, then send again. (rcli_profile_identity_changed)";
+        let line = "The local model's config file changed since this conversation started, so the master cannot use it. Press e to end it, then send again. (rcli_profile_changed_in_conversation)";
+        let mut stopped = turn(
+            1,
+            3,
+            MasterTurnPhase::Blocked,
+            Some(MasterReason::RuntimeUnavailable),
+        );
+        stopped.cause = Some("rcli_profile_changed_in_conversation".to_owned());
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &[stopped],
+            &[entry(3, "Go.")],
+        );
+        assert_eq!(transcript.messages.last().unwrap().text, line);
+        assert_eq!(master_problem("rcli_profile_changed_in_conversation"), line);
+    }
+
+    /// rv-code4 B22 F3: a refusal because the local model's config file or folder was changed
+    /// on disk in another way, which also stops a master from starting, names that plainly
+    /// and never says to end a conversation, since a new one is refused the same way.
+    #[test]
+    fn a_refusal_for_a_local_model_config_changed_on_disk_never_says_to_end_the_conversation() {
+        let line = "The local model's config file or folder changed on disk, so the master cannot use it. (rcli_profile_identity_changed)";
         let mut stopped = turn(
             1,
             3,

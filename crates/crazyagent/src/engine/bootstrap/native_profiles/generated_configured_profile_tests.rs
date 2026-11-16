@@ -458,8 +458,9 @@ fn write_and_restore(config: &Path) {
 }
 
 /// rv-sec3 G4 r2 F1: a master slot on an account's generated SDK home whose config was
-/// written and put back outside a save is refused by the master turn's re-pin, so the change
-/// stays visible; the owner's own registration still re-pins it, at the next generation.
+/// written and put back outside a save is refused by the master turn's re-pin with its own
+/// code, rcli_profile_changed_in_conversation (rv-code4 B22 F3), so the change stays
+/// visible; the owner's own registration still re-pins it, at the next generation.
 #[test]
 fn a_config_written_and_restored_outside_a_save_is_never_re_pinned_for_a_master() {
     let mut case = ConfiguredCase::new(false, false);
@@ -480,12 +481,47 @@ fn a_config_written_and_restored_outside_a_save_is_never_re_pinned_for_a_master(
         .custody
         .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home);
 
-    assert_eq!(refused.unwrap_err().0, "rcli_profile_identity_changed");
+    assert_eq!(
+        refused.unwrap_err().0,
+        "rcli_profile_changed_in_conversation"
+    );
     let owner = case
         .custody
         .register_configured_rcli_profile(&case.host, &case.connection, &master, &home)
         .unwrap();
     assert_eq!(owner.profile_generation, first.profile_generation + 1);
+}
+
+/// rv-code4 B22 F3: a master slot on an account's generated SDK home whose config was
+/// replaced by another file of the same bytes, a new inode, keeps the refusal of a changed
+/// file, rcli_profile_identity_changed, and never the in-conversation code, whose advice to
+/// end the conversation would only loop: a new conversation's register refuses it too.
+#[test]
+fn a_master_slot_whose_config_was_replaced_keeps_the_changed_file_refusal() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let mut case = ConfiguredCase::new(false, false);
+    case.custody
+        .prepare_configured_rcli_profile(&case.host, &case.connection, &case.profile, None)
+        .unwrap();
+    let home = case.custody.generated_configured_home(&case.profile);
+    let master = reference("master-target-profile");
+    case.custody
+        .register_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+        .unwrap();
+    let config = home.join(".backboard/config.json");
+    let before = std::fs::symlink_metadata(&config).unwrap();
+    let copy = home.join(".backboard/config.json.copy");
+    std::fs::write(&copy, std::fs::read(&config).unwrap()).unwrap();
+    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(before.mode() & 0o7777))
+        .unwrap();
+    std::fs::rename(&copy, &config).unwrap();
+    assert_ne!(std::fs::symlink_metadata(&config).unwrap().ino(), before.ino());
+
+    let refused = case
+        .custody
+        .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home);
+
+    assert_eq!(refused.unwrap_err().0, "rcli_profile_identity_changed");
 }
 
 /// rv-sec3 G4 r2 F1 (RV-DS241-50 r1): a master slot on an account's generated SDK home
