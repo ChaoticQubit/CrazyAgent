@@ -3,7 +3,9 @@ use super::master_reply::TurnCapture;
 use super::{RcliMasterBinding, RcliMasterHost, RcliMasterLaunch};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
 use crate::protocol::{CredentialRef, ProjectId, ProtocolError, RequestId, SessionId};
-use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crate::sandbox::{
+    InstalledSandbox, LinuxSupervisor, ProjectSandbox, SandboxNetwork, SandboxRemote,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -80,7 +82,8 @@ fn sandbox(case: &Case, project: &Path) -> InstalledSandbox {
     .unwrap()
     .allow_read(root)
     .unwrap();
-    InstalledSandbox::install(sandbox, &profiles.join("rcli.sb")).unwrap()
+    let profile = profiles.join("rcli.sb");
+    InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On).unwrap()
 }
 
 fn credential(text: &str) -> CredentialRef {

@@ -253,10 +253,14 @@ impl ProfileForm {
         items
     }
 
-    /// Validates the form and builds the profile.
+    /// Validates the form and builds the profile, first clearing the refusals an earlier
+    /// save left under the role, bio and stack, so only this save's refusal shows.
     /// Input: none. Output: the profile, or the slot to focus with its error
     /// shown under the field.
     pub fn profile(&mut self) -> Result<OwnerProfile, Slot> {
+        self.role.error = None;
+        self.bio.error = None;
+        self.stack.error = None;
         self.check(Slot::Name);
         if self.name.error.is_some() {
             return Err(Slot::Name);
@@ -763,6 +767,32 @@ mod tests {
                 name: "Ada".into(),
                 ..kept
             })
+        );
+    }
+
+    /// RV-DS241-207: once a refused stack entry is fixed, the save that goes through leaves
+    /// no refusal under any field, the stack's or one the engine gave the role before.
+    #[test]
+    fn a_save_that_goes_through_leaves_no_refusal_under_any_field() {
+        let mut form = ProfileForm::new(None, None);
+        typed(&mut form, "Mira");
+        form.stack.set("Go, Ru\u{200b}st");
+        let refused = form.profile();
+        form.stack.set("Go, Rust");
+        form.show_problem(Slot::Role, "owner_profile_role");
+
+        let saved = form.profile().map(|profile| profile.preferred_stack);
+
+        assert_eq!(refused.err(), Some(Slot::Stack));
+        assert_eq!(saved, Ok(vec!["Go".to_owned(), "Rust".to_owned()]));
+        assert_eq!(
+            (
+                form.name.error.as_deref(),
+                form.role.error.as_deref(),
+                form.bio.error.as_deref(),
+                form.stack.error.as_deref(),
+            ),
+            (None, None, None, None)
         );
     }
 

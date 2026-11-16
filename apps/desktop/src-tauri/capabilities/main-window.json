@@ -132,6 +132,8 @@
     "allow-desktop-github-use-cli",
     "allow-desktop-github-sign-out",
     "allow-desktop-github-repos",
+    "allow-desktop-github-owners",
+    "allow-desktop-github-publish-start",
     "allow-desktop-clone-repo",
     "allow-desktop-icloud-download",
     "allow-desktop-icloud-progress",

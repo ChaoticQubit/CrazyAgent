@@ -502,3 +502,48 @@ async fn native_auth_custodian_codex_failure_report_keeps_a_guard_refusal_seen_a
     })
     .await;
 }
+
+/// RV-DS241-53: a Claude Code child whose deadline falls while a custody exchange is in
+/// flight lets that exchange finish before it stops, so the channel still carries the
+/// failure report and the engine records `native_auth_claude_deadline`, never the
+/// `native_auth_interrupted` of a channel left with an unanswered request.
+#[tokio::test]
+async fn a_claude_deadline_during_a_custody_exchange_leaves_the_channel_able_to_report() {
+    channel_case(|case| async move {
+        let (committed, launch) = case.launch("entry-run-claude-deadline").await;
+        let mut channel = case.channel().await;
+        let guard = case.guard(&committed, NativeProfileUsePurpose::Authentication);
+        let mut session = CustodySession::new(guard);
+        let home = session.profile_path().unwrap();
+        let claude = case.root.join("claude-stand-in");
+        std::fs::write(&claude, b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let executable =
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(&claude).unwrap();
+        crate::engine::owner::transport::native_auth_channel::REPLY_DELAY
+            .set((1, std::time::Duration::from_secs(4)));
+        let ended = crate::engine::native_auth_host::claude_auth::process::run_child(
+            &mut session,
+            &mut channel,
+            &executable,
+            &home,
+            crate::engine::native_auth_host::claude_auth::ClaudeAuthCommand::Status,
+            std::time::Instant::now() + std::time::Duration::from_millis(1500),
+        )
+        .await;
+        crate::engine::owner::transport::native_auth_channel::REPLY_DELAY
+            .set((0, std::time::Duration::ZERO));
+        assert_eq!(
+            ended.err().map(|error| error.0).as_deref(),
+            Some("native_auth_claude_deadline")
+        );
+        let checked = session.check(&mut channel).await.map_err(|error| error.0);
+        assert!(
+            matches!(checked, Ok(NativeAuthCustodyControl::Continue)),
+            "{:?}",
+            checked.err()
+        );
+        drop((session, channel, launch));
+    })
+    .await;
+}

@@ -162,6 +162,50 @@ pub(crate) fn entry_switch(tx: &Transaction<'_>, id: &str) -> Result<Option<bool
     Ok(present(tx, entry)?.map(|record| record.enabled))
 }
 
+/// Drops one project from the switched-off hooks every pack row keeps ([`KeptHook`]) when the
+/// project is removed or its id is taken again, so a later setup run never switches a hook
+/// off in a new project that reuses the id (RV-DS241-195). Every kept hook stays, so the
+/// hook a new pin adds still matches the one running the same thing and takes nothing from
+/// a switched-off sibling (rv-code2 B3B-1); the next seed clears them all. A database with
+/// no pack table, or a row that does not read, is left as it is. Inputs: the transaction
+/// and the project. Output: any SQLite failure.
+pub(super) fn forget_project(
+    tx: &Transaction<'_>,
+    project: &crate::protocol::ProjectId,
+) -> Result<(), EngineError> {
+    let table: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+            ["setup_pack"],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !table {
+        return Ok(());
+    }
+    let mut statement = tx.prepare("SELECT body FROM setup_pack").map_err(error)?;
+    let bodies = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    let holds = |hook: &KeptHook| hook.projects.iter().any(|id| id == project.as_str());
+    for body in bodies {
+        let Ok(mut record) = serde_json::from_str::<PackRecord>(&body) else {
+            continue;
+        };
+        if !record.hooks.iter().any(holds) {
+            continue;
+        }
+        for hook in &mut record.hooks {
+            hook.projects.retain(|id| id != project.as_str());
+        }
+        assert!(!record.hooks.iter().any(holds));
+        save_pack(tx, &record)?;
+    }
+    Ok(())
+}
+
 fn save_pack(tx: &Transaction<'_>, record: &PackRecord) -> Result<(), EngineError> {
     let body = serde_json::to_string(record).map_err(|_| error("setup_record_invalid"))?;
     tx.execute(
@@ -883,8 +927,9 @@ fn seed_hooks(
 
 /// Switches the hooks setup just added off as the owner had them before they went with a
 /// replaced pin or a removed item ([`KeptHook`]), each by the kept hooks [`kept_for`] gives
-/// it, everywhere or in the same projects, then forgets what was kept. Inputs: the
-/// transaction, engine root, the entry's row and the added hooks. Output: any failure.
+/// it, everywhere or in the same projects that still exist (RV-DS241-195), then forgets what
+/// was kept. Inputs: the transaction, engine root, the entry's row and the added hooks.
+/// Output: any failure.
 #[cfg(unix)]
 fn keep_hooks(
     tx: &Transaction<'_>,
@@ -909,7 +954,8 @@ fn keep_hooks(
         }
         for project in kept.iter().flat_map(|kept| &kept.projects) {
             tx.execute(
-                "INSERT OR IGNORE INTO plugin_switches(project,item) VALUES(?1,?2)",
+                "INSERT OR IGNORE INTO plugin_switches(project,item)
+                 SELECT ?1, ?2 WHERE EXISTS(SELECT 1 FROM projects WHERE id=?1)",
                 [project, &hook.id],
             )
             .map_err(error)?;

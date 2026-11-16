@@ -16,7 +16,7 @@ const NULL_DEVICE: &str = "NUL";
 const SESSION_BUS_NAMES: [&str; 2] = ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"];
 const CLONE_TIME: Duration = Duration::from_secs(1800);
 pub(super) const GIT_USER: &str = "x-access-token";
-const NAME_BYTES_MAX: usize = 100;
+pub(super) const NAME_BYTES_MAX: usize = 100;
 const ERROR_BYTES_MAX: u64 = 16 << 10;
 const CONFIG_BYTES_MAX: u64 = 64 << 10;
 

@@ -2508,6 +2508,37 @@ async fn starting_onboarding_moves_the_instruction_files_and_the_view_lists_them
     bench.stop().await;
 }
 
+/// RV-DS241-202: a folder that came with a `.crazyagent/instructions.md` CrazyAgent cannot
+/// read, here not UTF-8, refuses the onboarding start with its own plain code and leaves the
+/// file as it is, so its text is never taken as the owner's once it is made readable; the
+/// next start after the file is fixed labels it under the Imported heading.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_arrived_project_file_that_cannot_be_read_refuses_the_start_until_it_can_be_labelled() {
+    const UNREADABLE: &[u8] = b"ARRIVED-RULE-202 \xff\xfe\n";
+    let mut bench = Bench::start_without_graphify(|repo| {
+        fs::create_dir_all(repo.join(".crazyagent")).unwrap();
+        fs::write(repo.join(".crazyagent").join("instructions.md"), UNREADABLE).unwrap();
+    })
+    .await;
+    bench.use_repos_as_home().await;
+    let file = bench.repo.join(".crazyagent").join("instructions.md");
+    let repo = bench.repo.clone();
+    let refused = bench.start_onboarding_at(&repo).await;
+    assert_eq!(
+        rejection(&refused).as_deref(),
+        Some("onboarding_instructions_unreadable"),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read(&file).unwrap(), UNREADABLE);
+    fs::write(&file, "ARRIVED-RULE-202\n").unwrap();
+    bench.start_onboarding().await;
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "### Imported from .crazyagent/instructions.md\n\nARRIVED-RULE-202\n"
+    );
+    bench.stop().await;
+}
+
 /// A project onboarded from an existing folder runs its agents in their own clones, as a
 /// New Project does: onboarding saves the New Project access level wherever this computer
 /// can run it, and starting the same folder's onboarding again keeps the level the owner
@@ -2541,6 +2572,7 @@ async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
                 ..Default::default()

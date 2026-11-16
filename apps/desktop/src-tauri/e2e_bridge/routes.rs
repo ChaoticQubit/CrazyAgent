@@ -11,6 +11,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::coord::settings::SubagentMode;
     use crazyagent::coord::tool_switches::Switch;
     use crazyagent::engine::owner::ModelAccessCollection;
+    use crazyagent::github::GitHubPublishPlan;
     use crazyagent::engine::owner::NativeAuthMethod;
     use crazyagent::ide::bridge::run_command::RunMode;
     use crazyagent::learning::MarkStep;
@@ -1872,6 +1873,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_repos(page)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_github_owners" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_owners()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_github_publish_start" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+                plan: GitHubPublishPlan,
+            }
+            let Args { project, plan } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_start(&project, plan)?; call.await }.await;
             routed(result)
         }
         "desktop_clone_repo" => {

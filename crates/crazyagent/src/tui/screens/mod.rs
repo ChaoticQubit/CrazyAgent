@@ -14,6 +14,7 @@ pub(in crate::tui) mod intake_job;
 pub(in crate::tui) mod new_project;
 mod new_project_input;
 pub(in crate::tui) mod new_project_page;
+pub(in crate::tui) mod new_project_publish;
 pub(in crate::tui) mod new_project_view;
 pub mod onboarding;
 pub(in crate::tui) mod planning_line;
@@ -49,6 +50,8 @@ pub mod welcome;
 mod intake_tests;
 #[cfg(all(test, unix))]
 mod new_project_frames;
+#[cfg(all(test, unix))]
+mod new_project_publish_tests;
 #[cfg(all(test, unix))]
 mod new_project_tests;
 #[cfg(all(test, unix))]
