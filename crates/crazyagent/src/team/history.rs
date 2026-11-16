@@ -459,13 +459,9 @@ struct Tree {
 /// Code or Codex home's own, for a Claude Code agent the home its native teammates run with
 /// and a listed agent's ([`listed_trees`]), each only while the agent's folder and that home
 /// are plain folders. Takes the engine database, the project and the agents folder. Returns
-/// the folders.
-fn record_trees(
-    connection: &Connection,
-    project: &ProjectId,
-    agents: &Path,
-) -> (Vec<Tree>, usize) {
-    let mut trees = Vec::new();
+/// the folders and the entries their listing visited, at most `VISITS_MAX`.
+fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> (Vec<Tree>, usize) {
+    let (mut trees, mut visits) = (Vec::new(), 0);
     for (agent, harness, role) in team_agents(connection, project).unwrap_or_default() {
         let found = crate::harnesses::registry::registry().get(&harness);
         let Some(harness) = found.map(|found| found.manifest().id.as_str()) else {
@@ -475,7 +471,8 @@ fn record_trees(
             "claude-code" => "projects",
             "codex" => "sessions",
             _ => {
-                let listed = listed_trees(connection, project, agents, (agent, &role), harness);
+                let mine = (agent, role.as_str());
+                let listed = listed_trees(connection, project, agents, mine, harness, &mut visits);
                 trees.extend(listed);
                 continue;
             }
@@ -504,20 +501,22 @@ fn record_trees(
             });
         }
     }
-    (trees, 0)
+    assert!(visits <= VISITS_MAX);
+    (trees, visits)
 }
 
 /// Lists the record folders of one team agent of a listed harness that keeps a jsonl-append
 /// record: in each account's private home, `<home>/<harness id>/<account>` (T18), the
-/// folder its manifest's record path fixes, ids under `agent-N/<account>`, for at most
-/// `ACCOUNTS_MAX` accounts that are plain folders. Takes the database, project, agents
-/// folder, agent with its role and the harness. Returns the folders, none for any other.
+/// folder its record path fixes, ids under `agent-N/<account>`, for at most `ACCOUNTS_MAX`
+/// plain account folders among the entries the visit count allows. Takes the database,
+/// project, agents folder, agent and role, harness and visit count. Returns the folders.
 fn listed_trees(
     connection: &Connection,
     project: &ProjectId,
     agents: &Path,
     (agent, role): (i64, &str),
     harness: &'static str,
+    visits: &mut usize,
 ) -> Vec<Tree> {
     use crate::harnesses::records::{self, Reader};
     let Some(found) = crate::harnesses::registry::registry().get(harness) else {
@@ -535,11 +534,20 @@ fn listed_trees(
     let Ok(entries) = std::fs::read_dir(agents.join(&listed)) else {
         return Vec::new();
     };
-    let mut accounts: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| listed.join(entry.file_name()))
-        .filter(|account| plain(account))
-        .collect();
+    let mut accounts = Vec::new();
+    for entry in entries {
+        if *visits >= VISITS_MAX {
+            break;
+        }
+        *visits += 1;
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let account = listed.join(entry.file_name());
+        if plain(&account) {
+            accounts.push(account);
+        }
+    }
     accounts.sort();
     accounts.truncate(ACCOUNTS_MAX);
     if accounts.is_empty() {
