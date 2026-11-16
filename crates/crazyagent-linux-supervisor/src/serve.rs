@@ -221,15 +221,12 @@ fn exists(place: &Place) -> bool {
     rustix::fs::statat(&place.folder, place.name(), AtFlags::SYMLINK_NOFOLLOW).is_ok()
 }
 
-/// Tells whether an entry is a symlink or a folder, the two kinds no held store takes
-/// (DEC-185 S2b). Input: the entry's place. Output: true for either kind, false for any
-/// other kind or no entry, or the error of the read.
-fn link_or_folder(place: &Place) -> Result<bool, Errno> {
+/// Tells whether a held store refuses the entry at a place, read without following it:
+/// a symlink or a folder ([`rules::store_takes`], DEC-185 S2b). Input: the entry's place.
+/// Output: true for either kind, false for any other kind or no entry, or the read's error.
+fn store_refuses(place: &Place) -> Result<bool, Errno> {
     match rustix::fs::statat(&place.folder, place.name(), AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) => {
-            let kind = FileType::from_raw_mode(stat.st_mode);
-            Ok(matches!(kind, FileType::Symlink | FileType::Directory))
-        }
+        Ok(stat) => Ok(!rules::store_takes(stat.st_mode)),
         Err(Errno::NOENT) => Ok(false),
         Err(errno) => Err(errno),
     }
@@ -1154,10 +1151,10 @@ impl Job<'_> {
         Ok(Answer::Value(0))
     }
 
-    /// Links or renames for the caller between two resolved folders. The new name is
-    /// judged as a new entry; under the held guard both sides of a rename as moved, a
-    /// link's source as kept, through a pin when the kernel's link is followed, and no
-    /// symlink or folder goes into a held store, its kind read under the names lock alone.
+    /// Links or renames between two resolved folders, the new name judged as a new entry;
+    /// under the held guard both sides of a rename as moved, a link's source as kept (by a
+    /// pin when followed), and no symlink or folder put in a held store, read by name under
+    /// the names lock alone or from the pin, which a symlink's descriptor can land on.
     /// Inputs: each path with its folder register, and which call with its flags.
     fn pair(&self, old: (u64, Vec<u8>), new: (u64, Vec<u8>), pair: Pair) -> Result<Answer, Errno> {
         let from = self.place(&Base::of(old.0), &old.1)?;
@@ -1179,7 +1176,7 @@ impl Job<'_> {
         let _shared = alone
             .is_none()
             .then(|| names.read().unwrap_or_else(PoisonError::into_inner));
-        if (into && !follows && link_or_folder(&from)?) || (back && link_or_folder(&to)?) {
+        if (into && !follows && store_refuses(&from)?) || (back && store_refuses(&to)?) {
             return Err(Errno::ACCESS);
         }
         let fresh = !exists(&to);
@@ -1192,6 +1189,9 @@ impl Job<'_> {
                     let pin = OFlags::PATH | OFlags::CLOEXEC;
                     let pin = rustix::fs::openat(a.0, a.1, pin, Mode::empty())?;
                     self.kept_pin(pin.as_fd())?;
+                    if into && !rules::store_takes(rustix::fs::fstat(&pin)?.st_mode) {
+                        return Err(Errno::ACCESS);
+                    }
                     let own = format!("/proc/self/fd/{}", pin.as_raw_fd());
                     rustix::fs::linkat(CWD, own.as_str(), b.0, b.1, AtFlags::SYMLINK_FOLLOW)?;
                 } else {

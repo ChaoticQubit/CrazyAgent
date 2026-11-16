@@ -299,8 +299,8 @@ impl Held {
 /// symlink and a folder, either of which could carry git outside the store. Input: the
 /// entry's mode as `stat` gives it. Output: true when the entry may be put there.
 pub fn store_takes(mode: u32) -> bool {
-    let _ = mode;
-    true
+    let (kind, symlink, folder) = (mode & 0o170_000, 0o120_000, 0o040_000);
+    kind != symlink && kind != folder
 }
 
 /// One entry as the kernel knows it whatever its name: its device and inode numbers.
