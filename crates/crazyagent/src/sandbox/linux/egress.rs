@@ -906,6 +906,7 @@ mod tests {
         "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
         "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
         "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
+        "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
         "COMMIT\n",
     );
@@ -931,6 +932,7 @@ mod tests {
         "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
         "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
         "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
+        "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
         "COMMIT\n",
         "# Completed on Sun Nov 15 23:10:00 2026\n",
@@ -983,6 +985,7 @@ mod tests {
         let belt = "-A OUTPUT -d 127.0.0.0/8 -j DROP";
         let link = "-A OUTPUT -d 169.254.0.0/16 -j DROP";
         let metadata = "-A OUTPUT -d 100.100.100.200/32 -j DROP";
+        let wire = "-A OUTPUT -d 168.63.129.16/32 -j DROP";
         for ports in [&[443][..], &[53, 443], &[1, 8443, 65535]] {
             let rules = egress_rules(ports);
             let lines: Vec<&str> = rules.lines().collect();
@@ -999,10 +1002,11 @@ mod tests {
             assert_eq!(lines.get(fenced + 1), Some(&belt), "{rules}");
             assert_eq!(lines.get(fenced + 2), Some(&link), "{rules}");
             assert_eq!(lines.get(fenced + 3), Some(&metadata), "{rules}");
+            assert_eq!(lines.get(fenced + 4), Some(&wire), "{rules}");
             for port in ports {
                 let line = format!("-A OUTPUT -o tap0 -p tcp -m tcp --dport {port} -j ACCEPT");
                 let at = lines.iter().position(|kept| *kept == line);
-                assert!(at.is_some_and(|at| at > fenced + 3), "{port}: {rules}");
+                assert!(at.is_some_and(|at| at > fenced + 4), "{port}: {rules}");
             }
             assert!(
                 !rules.contains("10.0.2.2"),
@@ -1025,6 +1029,7 @@ mod tests {
             "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
             "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
             "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
+            "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
             "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
             "COMMIT\n",
         );
@@ -1034,7 +1039,8 @@ mod tests {
         let added = SAVED.replace("COMMIT\n", "-A OUTPUT -o tap0 -p udp -j ACCEPT\nCOMMIT\n");
         let dropped = SAVED.replace("-A OUTPUT -d 10.0.2.0/24 -j DROP\n", "");
         let reached = SAVED.replace("-A OUTPUT -d 100.100.100.200/32 -j DROP\n", "");
-        for changed in [widened, added, dropped, reached] {
+        let wired = SAVED.replace("-A OUTPUT -d 168.63.129.16/32 -j DROP\n", "");
+        for changed in [widened, added, dropped, reached, wired] {
             assert_ne!(canonical_rules(&changed), canonical, "{changed}");
         }
         assert_eq!(
