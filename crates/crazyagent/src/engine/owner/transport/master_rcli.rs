@@ -352,6 +352,7 @@ impl OwnerRuntimeHandle {
             .await?;
         let mut prompted = false;
         let mut inspect_at = Instant::now();
+        let mut policy_checked = Instant::now();
         loop {
             if late(active.deadline) {
                 return Err(failure(TURN_DEADLINE));
@@ -360,6 +361,10 @@ impl OwnerRuntimeHandle {
                 let current = self.inspect_rcli_scope(prepared, turn_id, active).await?;
                 if current.phase == MasterTurnPhase::Cancelled {
                     return Ok(MasterRuntimeObservation::Cancelled);
+                }
+                if policy_checked.elapsed() >= super::master_runtime::POLICY_CHECK_EVERY {
+                    policy_checked = Instant::now();
+                    self.rcli_policy_covers(prepared, turn_id).await?;
                 }
                 inspect_at = Instant::now() + INSPECT_INTERVAL;
             }
@@ -446,15 +451,22 @@ impl OwnerRuntimeHandle {
 
     /// Tells whether the policy the owner saved now still covers what a running RCLI master
     /// turn's sandbox granted at launch, its access and the toolchains its policy allowed,
-    /// as native turns check (RCLI-NARROWING). Stub: always covered. Inputs: the prepared
-    /// turn and its id. Output: Ok while covered, else the narrowing's code or the refusal.
+    /// as native turns check (RCLI-NARROWING). Inputs: the prepared turn and its id.
+    /// Output: Ok while covered, else the narrowing's code or the storage refusal.
     pub(super) async fn rcli_policy_covers(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
     ) -> Result<(), EngineError> {
-        let _ = (prepared, turn_id);
-        Ok(())
+        let policy = &prepared.agent_policy;
+        let granted = policy.allowed(&prepared.repository);
+        match self
+            .master_turn_narrowed(prepared, turn_id, policy.access, &granted)
+            .await?
+        {
+            Some(narrowed) => Err(failure(narrowed.code())),
+            None => Ok(()),
+        }
     }
 
     async fn inspect_rcli_scope(
