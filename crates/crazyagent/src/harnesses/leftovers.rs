@@ -465,9 +465,10 @@ struct Process {
 
 /// The processes of a Full access agent the engine can still find: its leader, every
 /// process in the leader's session while that leader runs, every process whose parent is
-/// one of them, and every process whose environment holds the launch's `token`. A process
-/// that left all of them before it was seen, such as a daemon whose parent already exited
-/// and whose environment was cleared or is not shown, is not found. `table` is the command
+/// one of them, on macOS every process forked from one of them, and every process whose
+/// environment holds the launch's `token`. A process that left all of them before it was
+/// seen, such as a double-forked daemon whose short-lived middle process no table showed and
+/// whose environment was cleared or is not shown, is not found. `table` is the command
 /// that lists the processes; `unchecked` tells that a listing failed, so the lineage may
 /// miss processes; `pending` is a listing still held up past its bound, which a later read
 /// waits out instead of starting another; `sandboxed` tells the agent ran in a sandbox no
@@ -1065,10 +1066,13 @@ impl Lineage {
     }
 
     /// Applies one table read: keeps each known process still running with the same start,
-    /// under the name it was last read by, then adds this user's processes in the leader's session
-    /// and those whose parent is kept. Session members join only while the leader runs with
-    /// the start its first read found, so a stranger that reuses a dead leader's id never
-    /// joins (SECAUDIT-SETSID-LEFTOVER r1 L1). Inputs: the lineage and the rows. Output: none.
+    /// under the name it was last read by, then adds this user's processes in the leader's
+    /// session, those whose parent is kept, and on macOS those forked from a process known
+    /// before this read or kept in it, by the forking parent's unique id, which the kernel
+    /// keeps after that parent exits and never reuses (SETSID-A-RESIDUAL). Session members
+    /// join only while the leader runs with the start its first read found, so a stranger that
+    /// reuses a dead leader's id never joins (SECAUDIT-SETSID-LEFTOVER r1 L1). Inputs: the
+    /// lineage and the rows. Output: none.
     #[cfg(unix)]
     fn apply(&mut self, rows: &[Row]) {
         let session = self.leader_started.as_ref().is_some_and(|started| {
@@ -1091,7 +1095,13 @@ impl Lineage {
             let found = rows.iter().find(|(process, parent, member)| {
                 !kept.iter().any(|known| known.pid == process.pid)
                     && ((session && *member == Some(self.leader))
-                        || kept.iter().any(|known| known.pid == *parent))
+                        || kept.iter().any(|known| known.pid == *parent)
+                        || process.forked_from.is_some_and(|from| {
+                            self.known
+                                .iter()
+                                .chain(kept.iter())
+                                .any(|known| known.unique == Some(from))
+                        }))
             });
             match found {
                 Some((process, ..)) => kept.push(process.clone()),
@@ -1117,9 +1127,13 @@ enum Following {
 /// BL-PANE-FOLLOW-GAP, LINUX-KILL-GROUP): the
 /// thread takes the first read, or a pane's own, then the engine's shared table every
 /// [`FOLLOWER_PACE`], so a process a table showed in the run stays known once it leaves the
-/// run's session and loses its parent. One that does both between two tables it took, up to the pace plus the table's age
-/// plus the reads, is never seen, and only its token can still find it at the stop: the
-/// SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
+/// run's session and loses its parent. On macOS so does a process forked from one a table
+/// showed, even when it leaves the session and that parent exits between two tables, as
+/// `ssh -f` and an ssh ControlPersist master detach: it is linked by the forking parent's
+/// unique id (SETSID-A-RESIDUAL). What stays open, accepted with owner item 6, is a double
+/// fork whose middle process lives and exits between two tables, up to the pace plus the
+/// table's age plus the reads: its child is never seen, and only its token can still find it
+/// at the stop, the SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
 /// apply a table, so a stop never waits for a read in flight. Holds the leader, the launch's
 /// token, whether the run is sandboxed, the lineage and the sender whose drop ends the thread.
 pub(crate) struct Follower {
