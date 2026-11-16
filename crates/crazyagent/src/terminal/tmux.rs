@@ -203,6 +203,42 @@ enum Pending {
     },
 }
 
+/// The process the kernel names as the listener bound at one socket, read from a raw
+/// connection, never a tmux client, through the short address a long path needs (T17b).
+/// The name the kernel gives the peer must be that address, so a link swapped in at the
+/// path names nothing, and tmux pads the name with zero bytes after its end. Input: the
+/// socket path. Output: its pid, none when nothing listens there, or
+/// `terminal_unavailable` when something answers that cannot be named.
+pub fn listener(socket: &Path) -> Result<Option<u32>, HostError> {
+    let unnamed = || failure("terminal_unavailable");
+    let address = crate::socket_address::address(socket).map_err(|_| unnamed())?;
+    let stream = match crate::spawn_gate::connect_unix_std(&address) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(_) => return Err(unnamed()),
+    };
+    let peer = stream.peer_addr().map_err(|_| unnamed())?;
+    let named = peer
+        .as_pathname()
+        .ok_or_else(unnamed)?
+        .as_os_str()
+        .as_bytes();
+    if named.split(|byte| *byte == 0).next() != Some(address.as_os_str().as_bytes()) {
+        return Err(unnamed());
+    }
+    let pid = crate::team::caller::peer_pid(&stream)
+        .filter(|pid| *pid > 1)
+        .ok_or_else(unnamed)?;
+    Ok(Some(pid))
+}
+
 /// Finds the tmux program the engine uses, anew on each call, through the one tool resolver:
 /// the app's folder, the owner's own installs, the system folders, then `<root>/setup/bin`
 /// last ([`crate::tools::Places::engine`]).
@@ -455,14 +491,8 @@ impl Tmux {
     /// name is padded with zero bytes after its end. Output: its pid, or none when nothing
     /// there answers or the listener is bound elsewhere.
     fn server_pid(&self) -> Option<u32> {
-        let socket = self.address().ok()?;
-        let stream = crate::spawn_gate::connect_unix_std(&socket).ok()?;
-        let peer = stream.peer_addr().ok()?;
-        let named = peer.as_pathname()?.as_os_str().as_bytes();
-        if named.split(|byte| *byte == 0).next()? != socket.as_os_str().as_bytes() {
-            return None;
-        }
-        crate::team::caller::peer_pid(&stream).filter(|pid| *pid > 1)
+        self.address().ok()?;
+        listener(&self.socket()).ok().flatten()
     }
 
     /// Keeps the panes whose first process the kernel reports as a child of the listener at

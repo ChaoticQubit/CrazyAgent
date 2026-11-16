@@ -655,7 +655,10 @@ fn every_tmux_server_on_a_socket_of_this_engine_is_an_agent_root_whatever_its_na
     let lead = StandIn::listening(&bin, "tmux", &lead_socket, &[]);
     let mates_socket = tmp.0.join("teammates-0123456789abcdef.sock");
     let mates = StandIn::listening(&bin, "crazyagent-tmux", &mates_socket, &[]);
-    drop(crazyagent::spawn_gate::bind_unix_std(tmp.0.join("ended.sock")).unwrap());
+    drop(
+        crazyagent::spawn_gate::bind_unix_std(tmp.0.join("teammates-ffffffffffffffff.sock"))
+            .unwrap(),
+    );
     let engine = StandIn::sleep(&bin);
 
     let roots = freeze::servers(&root).unwrap();

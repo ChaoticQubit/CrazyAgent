@@ -350,33 +350,37 @@ pub fn choices() -> Result<Vec<FreezeApp>, EngineError> {
     pickable(&running, std::process::id(), &BTreeSet::new())
 }
 
-/// Tells whether a tmux server's command line serves a socket in one of this engine's
-/// socket folders (leader 01:57, until T17b). Inputs: the command line and the folders.
-/// Output: true when it does.
+/// This engine's tmux socket folders (T17b): its terminal folder and the short temp folder
+/// of each team agent, from the same agent home the terminal host uses. Input: the engine
+/// root. Output: the folders, or why the agents cannot all be listed (an unreadable team
+/// folder, more than `AGENTS_MAX` agents), which refuses every freeze.
 #[cfg(unix)]
-fn serves(args: &str, folders: &[PathBuf]) -> bool {
-    folders
-        .iter()
-        .filter(|folder| folder.is_absolute())
-        .any(|folder| args.contains(&format!(" -S {}/", folder.display())))
-}
-
-/// This engine's tmux socket folders (leader 01:57, until T17b): its terminal folder and
-/// the short temp folder of each agent below its team folder, at most `AGENTS_MAX`. Input:
-/// the engine root. Output: the folders.
-#[cfg(unix)]
-fn socket_folders(root: &Path) -> Vec<PathBuf> {
+fn socket_folders(root: &Path) -> Result<Vec<PathBuf>, EngineError> {
     let mut folders = vec![root.join(crate::terminal::FOLDER)];
-    let agents = root.join("team").join("agents");
-    let listing = std::fs::read_dir(agents).into_iter().flatten().flatten();
-    for found in listing.take(AGENTS_MAX) {
-        if found.file_name().to_string_lossy().starts_with("agent-") {
-            let home = found.path().join("home");
-            folders.push(crate::sandbox::toolchains::tmp_path(&home));
+    let team = root.join("team");
+    let unread = |problem: std::io::Error| error("keep_awake_freeze_servers", problem);
+    let listing = match std::fs::read_dir(team.join("agents")) {
+        Ok(listing) => listing,
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(folders),
+        Err(problem) => return Err(unread(problem)),
+    };
+    for found in listing {
+        let name = found.map_err(unread)?.file_name();
+        let id = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("agent-"))
+            .and_then(|id| id.parse::<i64>().ok());
+        let Some(id) = id else {
+            continue;
+        };
+        if folders.len() > AGENTS_MAX {
+            return Err(error("keep_awake_freeze_servers", "too many agents"));
         }
+        let home = crate::team::runtime::agent_home(&team, id);
+        folders.push(crate::sandbox::toolchains::tmp_path(&home));
     }
     assert!(!folders.is_empty() && folders.len() <= AGENTS_MAX + 1);
-    folders
+    Ok(folders)
 }
 
 /// Tells whether an executable may never be frozen: a system program, a desktop shell, or
@@ -500,7 +504,7 @@ mod unix {
     const TABLE_MAX: usize = 32 * 1024;
     const TREE_MAX: usize = 256;
     const ROOTS_MAX: usize = 1024;
-    const SERVERS_MAX: usize = 256;
+    const SCAN_MAX: usize = 4096;
     const RUN_WAIT: Duration = Duration::from_secs(2);
     const RUN_STEP: Duration = Duration::from_millis(10);
     const SHARED: [&str; 7] = [
@@ -849,6 +853,22 @@ mod unix {
         engine: u32,
         roots: &BTreeSet<u32>,
     ) -> Result<Frozen, EngineError> {
+        freeze_with(journal, listed, engine, roots, identities)
+    }
+
+    /// Freezes one listed instance as `freeze` says, with a given reader of who runs now,
+    /// read three times: to journal, just before the stops, and once more after them. A
+    /// stopped process that runs another program by then is not the app's any more, so it
+    /// goes on at once; a stop or that last read that fails lets every stopped one go on
+    /// and returns the failure, the entry left for the thaw (rv-sec3 T17 r2 F1). Inputs:
+    /// as `freeze`, and the reader. Output: as `freeze`.
+    pub fn freeze_with(
+        journal: &mut Journal,
+        listed: &Running,
+        engine: u32,
+        roots: &BTreeSet<u32>,
+        read: impl Fn(&[u32]) -> Result<BTreeMap<u32, Proc>, EngineError>,
+    ) -> Result<Frozen, EngineError> {
         let name = listed.app.name.as_str();
         let pid = listed.pid;
         assert!(!name.is_empty());
@@ -866,7 +886,7 @@ mod unix {
         }
         let mut asked = vec![pid];
         asked.extend(&tree);
-        let found = identities(&asked)?;
+        let found = read(&asked)?;
         let main = found
             .get(&pid)
             .ok_or_else(|| error("keep_awake_freeze_gone", pid))?;
@@ -901,28 +921,43 @@ mod unix {
         };
         journal.record(frozen.entry())?;
         let pids: Vec<u32> = frozen.procs.iter().map(|proc| proc.pid).collect();
-        let now = identities(&pids)?;
+        let now = read(&pids)?;
+        let mut stopped: Vec<&Proc> = Vec::new();
+        let mut failed = None;
         for proc in &frozen.procs {
-            if now.get(&proc.pid).is_some_and(|now| same(now, proc)) {
-                signal(proc.pid, rustix::process::Signal::STOP)?;
+            if !now.get(&proc.pid).is_some_and(|now| same(now, proc)) {
+                continue;
+            }
+            match signal(proc.pid, rustix::process::Signal::STOP) {
+                Ok(()) => stopped.push(proc),
+                Err(problem) => {
+                    failed = Some(problem);
+                    break;
+                }
             }
         }
+        let still: Vec<u32> = stopped.iter().map(|proc| proc.pid).collect();
+        let after = match failed {
+            Some(problem) => Err(problem),
+            None => read(&still),
+        };
+        let mut let_go = None;
+        for proc in &stopped {
+            let kept = after
+                .as_ref()
+                .is_ok_and(|after| after.get(&proc.pid).is_some_and(|now| same(now, proc)));
+            if !kept && let Err(problem) = signal(proc.pid, rustix::process::Signal::CONT) {
+                let_go = let_go.or(Some(problem));
+            }
+        }
+        after?;
+        if let Some(problem) = let_go {
+            return Err(problem);
+        }
+        assert!(stopped.len() <= frozen.procs.len());
         assert!(!frozen.procs.is_empty() && frozen.procs.len() <= PROCS_MAX);
         assert_eq!(frozen.procs[0].pid, pid);
         Ok(frozen)
-    }
-
-    /// Red stub for rv-sec3 T17 r2 F1: freezes as `freeze` does and never calls the
-    /// reader. Inputs: as `freeze`, and the reader of who runs now. Output: as `freeze`.
-    pub fn freeze_with(
-        journal: &mut Journal,
-        listed: &Running,
-        engine: u32,
-        roots: &BTreeSet<u32>,
-        read: impl Fn(&[u32]) -> Result<BTreeMap<u32, Proc>, EngineError>,
-    ) -> Result<Frozen, EngineError> {
-        let _ = read;
-        freeze(journal, listed, engine, roots)
     }
 
     /// Thaws one journaled app with a given reader of who runs now: in the boot session it
@@ -991,70 +1026,65 @@ mod unix {
         Ok(kept)
     }
 
-    /// The tmux servers this engine knows (leader 01:57, until T17b): the owner's tmux
-    /// processes whose command line serves a socket in this engine's terminal folder or an
-    /// agent's temp folder. Input: the engine root. Output: their pids, or why they cannot
-    /// be read, which refuses every freeze.
+    /// The agent roots this engine knows (T17b): the listener at each tmux socket in its
+    /// terminal folder and in every agent's short temp folder, named by the system from a
+    /// raw connection, never by a program name or a command line (rv-code T17 r2 F1), and
+    /// reached through the short address a long path needs (rv-sec3 T17 r2 F2). The
+    /// engine's server holds its kept panes, and each lead's own and teammates' servers
+    /// hold that lead's agents, after an engine restart too. Input: the engine root.
+    /// Output: their pids, or why one cannot be read, which refuses every freeze.
     pub fn servers(root: &Path) -> Result<BTreeSet<u32>, EngineError> {
-        let folders = super::socket_folders(root);
-        #[cfg(target_os = "linux")]
-        let found = linux::tmux().ok_or_else(|| error("keep_awake_freeze_table", "no tmux"))?;
-        #[cfg(not(target_os = "linux"))]
-        let found = tmux()?;
-        if found.len() > SERVERS_MAX {
-            return Err(error("keep_awake_freeze_table", "too many tmux processes"));
+        let mut known = BTreeSet::new();
+        for folder in super::socket_folders(root)? {
+            for socket in sockets(&folder)? {
+                let listener = crate::terminal::tmux::listener(&socket)
+                    .map_err(|problem| error("keep_awake_freeze_servers", problem))?;
+                known.extend(listener);
+                if known.len() > ROOTS_MAX {
+                    return Err(error("keep_awake_freeze_servers", "too many tmux servers"));
+                }
+            }
         }
-        let known: BTreeSet<u32> = found
-            .into_iter()
-            .filter(|(_, args)| super::serves(args, &folders))
-            .map(|(pid, _)| pid)
-            .collect();
-        assert!(known.len() <= SERVERS_MAX);
+        assert!(known.len() <= ROOTS_MAX);
         Ok(known)
     }
 
-    /// Lists the owner's tmux processes and their command lines: one `ps` for the names,
-    /// one for the command lines of those. Output: pid and command line each, or why not.
-    #[cfg(not(target_os = "linux"))]
-    fn tmux() -> Result<Vec<(u32, String)>, EngineError> {
+    /// The owner's tmux sockets in one folder, by the names the engine gives them (its
+    /// own, a lead's own, a lead's teammates'), read without following a link, at most
+    /// `SCAN_MAX` entries. Input: the folder. Output: their paths, none for a folder that
+    /// does not exist, or why it cannot be read.
+    fn sockets(folder: &Path) -> Result<Vec<PathBuf>, EngineError> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let unread = |problem: std::io::Error| error("keep_awake_freeze_servers", problem);
+        let listing = match std::fs::read_dir(folder) {
+            Ok(listing) => listing,
+            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(problem) => return Err(unread(problem)),
+        };
         let own = rustix::process::getuid().as_raw();
-        let text = run(&mut tool("/bin/ps", &["-axo", "pid=,uid=,comm="]))
-            .ok_or_else(|| error("keep_awake_freeze_table", "no process list"))?;
-        let pids: Vec<u32> = text
-            .lines()
-            .take(TABLE_MAX)
-            .filter_map(|line| {
-                let mut words = line.split_whitespace();
-                let pid: u32 = words.next()?.parse().ok()?;
-                let uid: u32 = words.next()?.parse().ok()?;
-                let comm = words.collect::<Vec<_>>().join(" ");
-                let named = Path::new(&comm)
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("tmux"));
-                (uid == own && pid > 1 && named).then_some(pid)
-            })
-            .collect();
-        if pids.is_empty() {
-            return Ok(Vec::new());
+        let mut found = Vec::new();
+        for (seen, entry) in listing.enumerate() {
+            if seen >= SCAN_MAX {
+                return Err(error("keep_awake_freeze_servers", "too many entries"));
+            }
+            let entry = entry.map_err(unread)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let tmux = name == crate::terminal::tmux::SOCKET
+                || name == crate::terminal::HARNESS_SOCKET
+                || name.starts_with(crate::terminal::TEAMMATES_SOCKET_PREFIX);
+            let path = entry.path();
+            let socket = tmux
+                && std::fs::symlink_metadata(&path).is_ok_and(|metadata| {
+                    metadata.file_type().is_socket() && metadata.uid() == own
+                });
+            if socket {
+                found.push(path);
+            }
         }
-        if pids.len() > SERVERS_MAX {
-            return Err(error("keep_awake_freeze_table", "too many tmux processes"));
-        }
-        let list: Vec<String> = pids.iter().map(u32::to_string).collect();
-        let (_, text) = ran(&mut tool(
-            "/bin/ps",
-            &["-o", "pid=,args=", "-p", &list.join(",")],
-        ))
-        .ok_or_else(|| error("keep_awake_freeze_table", "no command lines"))?;
-        let found: Vec<(u32, String)> = text
-            .lines()
-            .filter_map(|line| {
-                let (pid, args) = line.trim_start().split_once(' ')?;
-                let pid: u32 = pid.parse().ok()?;
-                pids.contains(&pid).then(|| (pid, args.trim().to_owned()))
-            })
-            .collect();
-        assert!(found.len() <= pids.len());
+        assert!(found.len() <= SCAN_MAX);
         Ok(found)
     }
 
@@ -1147,7 +1177,6 @@ mod unix {
 
         const ENTRIES_MAX: usize = 4096;
         const ENTRY_BYTES_MAX: u64 = 64 * 1024;
-        const ARGS_BYTES_MAX: u64 = 64 * 1024;
 
         /// The fields after a process's name in `/proc/<pid>/stat`, from the state on.
         fn stat(pid: u32) -> Option<Vec<String>> {
@@ -1198,11 +1227,22 @@ mod unix {
         }
 
         /// Reads who one process is: field 22 of its stat (start time in clock ticks since
-        /// boot) and the executable it runs (rv-code T17 r1 F1). Output: none only when it
-        /// is gone, or `keep_awake_freeze_identity` for any other failure, such as too many
-        /// open files, which keeps a journal entry.
+        /// boot) and the executable it runs (rv-code T17 r1 F1). A pid another user now
+        /// holds is not one Keep awake journaled, since it journals only the owner's, so it
+        /// reads as gone (rv-code T17 r2 F2). Output: none only when it is gone, or
+        /// `keep_awake_freeze_identity` for any other failure, such as too many open files,
+        /// which keeps a journal entry.
         pub(super) fn identity(pid: u32) -> Result<Option<Proc>, EngineError> {
+            use std::os::unix::fs::MetadataExt;
             let unread = |problem: std::io::Error| error("keep_awake_freeze_identity", problem);
+            let owner = match std::fs::metadata(format!("/proc/{pid}")) {
+                Ok(found) => found.uid(),
+                Err(problem) if gone(&problem) => return Ok(None),
+                Err(problem) => return Err(unread(problem)),
+            };
+            if owner != rustix::process::getuid().as_raw() {
+                return Ok(None);
+            }
             let text = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
                 Ok(text) => text,
                 Err(problem) if gone(&problem) => return Ok(None),
@@ -1224,36 +1264,6 @@ mod unix {
                 start,
                 exe: exe.to_string_lossy().into_owned(),
             }))
-        }
-
-        /// Lists the owner's tmux processes and their command lines from `/proc`, each line
-        /// at most 64 KiB, its words joined by spaces. Output: pid and command line each, or
-        /// none when the process table cannot be read.
-        pub(super) fn tmux() -> Option<Vec<(u32, String)>> {
-            use std::io::Read;
-            let own = rustix::process::getuid().as_raw();
-            let mut found = Vec::new();
-            for row in table()?.iter().filter(|row| row.uid == own && row.pid > 1) {
-                let Ok(exe) = std::fs::read_link(format!("/proc/{}/exe", row.pid)) else {
-                    continue;
-                };
-                let named = exe
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("tmux"));
-                if !named {
-                    continue;
-                }
-                let Ok(file) = std::fs::File::open(format!("/proc/{}/cmdline", row.pid)) else {
-                    continue;
-                };
-                let mut bytes = Vec::new();
-                if file.take(ARGS_BYTES_MAX).read_to_end(&mut bytes).is_err() {
-                    continue;
-                }
-                let args = String::from_utf8_lossy(&bytes).replace('\0', " ");
-                found.push((row.pid, args.trim().to_owned()));
-            }
-            Some(found)
         }
 
         /// The folders desktop entries live in: the owner's, then the system's, then the
@@ -1649,8 +1659,8 @@ mod lane {
 
         /// Freezes each listed instance of a chosen app that may be frozen now, checked
         /// per process now, not when it was chosen (rv-secreview T17 r1 F1), and never one
-        /// inside a tmux server this engine knows (leader 01:57, until T17b); at most
-        /// `FROZEN_MAX` at once. Input: the chosen apps.
+        /// at or below a tmux server on this engine's sockets (T17b); at most `FROZEN_MAX`
+        /// at once. Input: the chosen apps.
         fn freeze(&mut self, apps: &[FreezeApp]) {
             let engine = self.engine;
             let found = super::servers(&self.root).and_then(|roots| {
@@ -1742,6 +1752,3 @@ mod lane {
         }
     }
 }
-
-#[cfg(all(test, unix))]
-mod tests;
