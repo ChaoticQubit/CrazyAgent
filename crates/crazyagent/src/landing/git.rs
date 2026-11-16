@@ -655,6 +655,18 @@ impl Repo {
         Ok(self.clone())
     }
 
+    /// This repository for a step that only reads a linked agent worktree, confined as a step
+    /// writing the object store is ([`Self::confined`]), so a link swapped in during an index
+    /// refresh or compare leads its git nowhere the step may not read (LINUX-LANDING part 2).
+    /// One on a private index, as a harness clone's check uses, stays as it is. Output: the
+    /// repository, or the refusal [`Self::confined`] gives.
+    pub(super) fn reading(&self) -> Result<Self, EngineError> {
+        if self.index.is_some() {
+            return Ok(self.clone());
+        }
+        self.confined(Writes::Objects)
+    }
+
     fn check_version(&self) -> Result<(), EngineError> {
         let printed = self.capture(&["version"], 256)?;
         let text = String::from_utf8_lossy(&printed);
