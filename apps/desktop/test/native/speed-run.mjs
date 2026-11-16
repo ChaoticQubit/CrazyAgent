@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { endTerminals, start, stop } from "./e2e-harness.mjs";
 import {
-  KEPT_MIN, REFUSED_EXIT, SPEED_STATE, incomplete, joinSample, judge, noiseShares, privateFolder, quiet, readQuiet, runSchedule,
-  sampleMetrics, stayedQuiet,
+  KEPT_MIN, REFUSED_EXIT, SPEED_STATE, incomplete, joinSample, judge, noiseShares, prepareKeychain, privateFolder, quiet, readQuiet,
+  runSchedule, sampleMetrics, stayedQuiet,
 } from "./speed-budget.mjs";
 import { PROJECT } from "./speed-seed.mjs";
 
@@ -35,13 +35,15 @@ function artifacts(folder) {
 }
 
 /** Makes a side's kept engine state folder, new and private: mkdtemp creates it 0700 with a
- * name no one else can take first, short enough for the engine's socket address. Inputs: the
- * mode, the side's label and its artifacts. Output: the state folder. */
+ * name no one else can take first, short enough for the engine's socket address. Its home gets
+ * its own keychain at once (DEC-146), as the gate prepared each by hand. Inputs: the mode, the
+ * side's label and its artifacts. Output: the state folder. */
 function freshState(mode, label, side) {
   const state = realpathSync(mkdtempSync(`/tmp/cas-${mode}-${label}-${side.digest.slice(0, 8)}-`));
   assert.match(state, SPEED_STATE, "a speed state folder");
   privateFolder(state);
   mkdirSync(join(state, "home"), { mode: 0o700 });
+  prepareKeychain(join(state, "home"));
   return state;
 }
 
@@ -172,7 +174,8 @@ async function collect(mode, sides, kept, out) {
 
 /** The speed driver (DEC-169). `noise` runs the base against itself and writes noise.json;
  * `compare` runs the base against the candidate, judges every metric with that noise and writes
- * verdict.json. Exits 0 pass, 1 fail or error, 75 refused (not judged). */
+ * verdict.json. A failed run is counted in both and judged from the good runs; a side short of
+ * `KEPT_MIN` good runs is not judged. Exits 0 pass, 1 fail, error or not judged, 75 refused. */
 async function main() {
   const usage = "usage: speed-run.mjs noise|compare --base <dir> [--candidate <dir> --noise <noise.json>] --out <dir>";
   const mode = process.argv[2];
@@ -188,15 +191,21 @@ async function main() {
   const shares = mode === "compare" ? readNoise(values.noise, base, candidate) : null;
   mkdirSync(values.out, { recursive: true, mode: 0o700 });
   assert.equal(readdirSync(values.out).length, 0, "--out is empty");
-  const { samples } = await collect(mode, { base, candidate }, kept, values.out);
+  const { samples, failed } = await collect(mode, { base, candidate }, kept, values.out);
+  if (failed.base + failed.candidate > 0) console.error(`FAILED RUNS: base ${failed.base}, candidate ${failed.candidate} (runs.json)`);
+  const short = ["base", "candidate"].filter((name) => samples[name].length < KEPT_MIN);
+  if (short.length > 0) {
+    console.error(`NOT JUDGED: ${short.map((name) => `${name} kept ${samples[name].length} good runs`).join(", ")}, of the ${KEPT_MIN} a verdict needs`);
+    return 1;
+  }
   if (mode === "noise") {
-    const noise = { base: base.digest, shares: noiseShares(samples.base, samples.candidate) };
+    const noise = { base: base.digest, shares: noiseShares(samples.base, samples.candidate), failed };
     record(values.out, "noise.json", noise);
     return 0;
   }
   const rows = judge(samples.base, samples.candidate, shares);
   const gaps = incomplete(rows);
-  record(values.out, "verdict.json", { base: base.digest, candidate: candidate.digest, rows, incomplete: gaps });
+  record(values.out, "verdict.json", { base: base.digest, candidate: candidate.digest, rows, incomplete: gaps, failed });
   for (const row of rows) {
     const medians = row.base ? `${row.base.median} -> ${row.candidate.median}` : `kept ${row.kept}`;
     console.log(`${row.status.padEnd(10)} ${row.metric} ${medians} ${(row.reasons ?? []).join("; ")}`);

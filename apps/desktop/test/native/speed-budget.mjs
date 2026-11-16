@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { lstatSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, statSync } from "node:fs";
+import { userInfo } from "node:os";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
 /** Exit code of a speed run the Mac was too busy to judge: EX_TEMPFAIL, so a gate reads it as
  * not run, never as a pass or a failure. */
@@ -27,6 +28,9 @@ const TAINTED_MAX = 3;
 /** Most characters of a failed run's error its record keeps: the tail, where run.mjs puts the
  * child's stderr. */
 export const FAILURE_TEXT_MAX = 4000;
+/** The macOS keychain tool, and the longest one call of it may take. */
+const SECURITY = "/usr/bin/security";
+const SECURITY_MS_MAX = 30_000;
 
 const round = (value) => Number(value.toFixed(2));
 
@@ -238,33 +242,93 @@ export function schedule(kept) {
 
 /** Runs every scheduled launch (`schedule`), each only once the Mac is quiet and kept only when
  * the Mac stayed quiet through it; a run it got busy through runs again, and `TAINTED_MAX` in a
- * row refuse. Inputs: kept runs per side, `{ quietBefore, launch, quietAfter }` (null or the
- * busy reasons; `{ run, sample }` for a side and whether it is a warm-up; `{ quiet, reasons }`)
- * and the progress it fills: `{ samples, failed, runs }`. Output: null, or the refusal's reasons. */
+ * row refuse. A launch that fails is recorded with its error, counted for its side and not run
+ * again, and the schedule goes on, so the medians come from the good runs; once a side can no
+ * longer reach `KEPT_MIN` good runs the schedule ends, as no verdict could come. Inputs: kept
+ * runs per side, `{ quietBefore, launch, quietAfter }` (null or the busy reasons; `{ run,
+ * sample }` for a side and whether it is a warm-up; `{ quiet, reasons }`) and the progress it
+ * fills: `{ samples, failed, runs }`. Output: null, or the refusal's reasons. */
 export async function runSchedule(kept, { quietBefore, launch, quietAfter }, progress) {
-  const { samples, runs } = progress;
-  for (const { side, warm } of schedule(kept)) {
+  assert.ok(Number.isInteger(kept) && kept >= KEPT_MIN, `at least ${KEPT_MIN} kept runs per side`);
+  const { samples, failed, runs } = progress;
+  const order = schedule(kept);
+  for (const [at, { side, warm }] of order.entries()) {
     for (let tainted = 0; ; tainted += 1) {
       if (tainted >= TAINTED_MAX) return [`${TAINTED_MAX} runs in a row saw the Mac get busy`];
       const busy = await quietBefore();
       if (busy) return busy;
-      const done = await launch(side, warm);
+      let done;
+      try {
+        done = await launch(side, warm);
+      } catch (error) {
+        failed[side] += 1;
+        runs.push({ side, warm, failed: failureText(error) });
+        break;
+      }
       const after = quietAfter();
       runs.push({ side, warm, ...done.run, quiet_after: after.quiet, reasons: after.reasons });
       if (!after.quiet) continue;
       if (!warm) samples[side].push(done.sample);
       break;
     }
+    const left = order.slice(at + 1).filter((slot) => slot.side === side && !slot.warm).length;
+    if (samples[side].length + left < KEPT_MIN) return null;
   }
-  assert.equal(samples.base.length, kept);
-  assert.equal(samples.candidate.length, kept);
+  for (const side of ["base", "candidate"]) {
+    assert.ok(samples[side].length <= kept && samples[side].length + failed[side] <= kept + 1, `${side}: one result a slot`);
+  }
   return null;
 }
 
-/** Gives a new speed state home its own keychain (DEC-146). Input: the home. Output: the
- * keychain's path. */
-export function prepareKeychain(home) {
-  return join(home, "Library", "Keychains", "login.keychain-db");
+/** The text a failed run's record keeps: the error's message, its last `FAILURE_TEXT_MAX`
+ * characters. Input: what the launch threw. Output: the text. */
+function failureText(error) {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.slice(-FAILURE_TEXT_MAX);
+}
+
+/** Runs the keychain tool for a speed state home with only that HOME and the system PATH, as the
+ * gate's kc-state.sh did, so it reads and writes that home's keychain settings. Inputs: the home
+ * and the tool's arguments. Output: what the tool printed. */
+export function securityIn(home, args) {
+  return execFileSync(SECURITY, args, {
+    env: { HOME: home, PATH: "/usr/bin:/bin" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: SECURITY_MS_MAX,
+  });
+}
+
+/** The paths a keychain tool listing names, one a line, without its indent and quotes. Input:
+ * the listing. Output: the paths. */
+function listedPaths(text) {
+  return text.split("\n").map((line) => line.trim()).filter((line) => line !== "").map((line) => line.replace(/^"(.*)"$/, "$1"));
+}
+
+/** When the owner's keychain settings file last changed, or null while there is none. Input:
+ * the owner's home. Output: the stamp. */
+function settingsStamp(realHome) {
+  const settings = join(realHome, "Library", "Preferences", "com.apple.security.plist");
+  return existsSync(settings) ? statSync(settings).mtimeMs : null;
+}
+
+/** Gives a new speed state home its own empty login keychain as its default and its only
+ * search-list entry, as the gate's kc-state.sh prep did by hand (DEC-146), so an app and a TUI
+ * run on that home never reach the owner's keychain. Refuses a folder that is not a new speed
+ * state home, and fails when the owner's keychain settings file changed meanwhile. Inputs: the
+ * home, the owner's home and the keychain tool. Output: the keychain's path. */
+export function prepareKeychain(home, realHome = userInfo().homedir, security = securityIn) {
+  assert.ok(basename(home) === "home" && SPEED_STATE.test(dirname(home)), `a speed state home: ${home}`);
+  privateFolder(home);
+  const before = settingsStamp(realHome);
+  assert.ok(!existsSync(join(home, "Library")), `a new speed state home holds no Library yet: ${home}`);
+  for (const folder of ["Library", "Library/Keychains", "Library/Preferences"]) mkdirSync(join(home, folder), { mode: 0o700 });
+  const keychain = join(home, "Library", "Keychains", "login.keychain-db");
+  security(home, ["create-keychain", "-p", "", keychain]);
+  security(home, ["set-keychain-settings", keychain]);
+  security(home, ["list-keychains", "-d", "user", "-s", keychain]);
+  security(home, ["default-keychain", "-d", "user", "-s", keychain]);
+  assert.deepEqual(listedPaths(security(home, ["list-keychains", "-d", "user"])), [keychain], "the home's search list holds only its own keychain");
+  assert.deepEqual(listedPaths(security(home, ["default-keychain", "-d", "user"])), [keychain], "the home's default keychain is its own");
+  assert.equal(settingsStamp(realHome), before, "the owner's keychain settings file is unchanged");
+  return keychain;
 }
 
 /** The values one metric has across a side's samples. Inputs: the samples and the metric.
