@@ -177,6 +177,30 @@ async fn delete_everything_forgets_the_notes_and_the_id_never_comes_back() {
     engine.stop().await;
 }
 
+/// Leader 01:11: the engine's own first open ran the backfill, so a note left under an id
+/// afterwards, as a build without the removal record leaves one, is caught when a folder of
+/// that name is added: it gets a new id and none of the note.
+#[tokio::test]
+async fn a_leftover_written_after_the_engine_opened_still_blocks_its_id() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    write(
+        &engine,
+        "INSERT INTO memory_library(id,project,origin,text)
+            VALUES ('m-late','late-app','{\"kind\":\"written\"}','A note an old build left.');",
+    );
+    let path = folder(&engine, &["late-app"]);
+    assert_eq!(
+        onboard(&mut owner, &path, 1).await,
+        started("late-app-2"),
+        "an id with leftover rows is never given out"
+    );
+    assert_eq!(notes(&engine, "late-app-2"), 0);
+    assert_eq!(notes(&engine, "late-app"), 1);
+    drop(owner);
+    engine.stop().await;
+}
+
 #[tokio::test]
 async fn start_onboarding_answers_the_id_it_gave() {
     let engine = Engine::start().await;

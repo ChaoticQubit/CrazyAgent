@@ -178,6 +178,41 @@ fn the_backfill_runs_once_and_every_later_open_skips_it() {
     assert_eq!(hold_left(&db).unwrap(), None);
 }
 
+/// Leader 01:11, run-once vetoed alone: an id with rows left after the backfill ran, as a
+/// build without the removal record leaves them, is stepped over as if held, whatever the
+/// case of the rows' id; a leftover onboarding row alone is not, since starting onboarding
+/// replaces or refuses that row itself.
+#[test]
+fn a_leftover_written_after_the_backfill_still_blocks_its_id() {
+    let (_directory, db) = database();
+    assert!(hold_left(&db).unwrap().is_some());
+    db.execute_batch(
+        "INSERT INTO memory_library(id,project,origin,text) VALUES
+            ('m1','late-app','{\"kind\":\"written\"}','Written after the first open.'),
+            ('m2','Loud-App','{\"kind\":\"written\"}','Written under capitals.');
+         INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
+            VALUES ('draft-app','/gone/draft-app','pool-team','done','done','{}',1,1);",
+    )
+    .unwrap();
+    let recorded = count(&db, "SELECT count(*) FROM projects_removed");
+    assert_eq!(hold_left(&db).unwrap(), None);
+    assert_eq!(
+        free_id(&db, Path::new("/p/late-app")).unwrap(),
+        Ok(id("late-app-2")),
+        "a leftover written after the backfill still blocks its id"
+    );
+    assert_eq!(
+        free_id(&db, Path::new("/p/loud-app")).unwrap(),
+        Ok(id("loud-app-2"))
+    );
+    assert_eq!(
+        free_id(&db, Path::new("/p/draft-app")).unwrap(),
+        Ok(id("draft-app"))
+    );
+    assert!(!held(&db, &id("late-app")).unwrap(), "the probe holds nothing itself");
+    assert_eq!(count(&db, "SELECT count(*) FROM projects_removed"), recorded);
+}
+
 /// rv-sa241 N2: the backfill never fills the record past `REMOVED_MAX`, so leftover ids of an
 /// old database can't leave Remove and Delete everything refused for good.
 #[test]
