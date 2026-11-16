@@ -2921,6 +2921,10 @@ mod tests {
             &[UNSHARE_NET, "--block-fd", "6"],
             &[UNSHARE_NET, "--ro-bind-data", "7", "/etc/resolv.conf"],
             &["--info-fd", "5", UNSHARE_NET],
+            &[UNSHARE_NET, "--args", "5"],
+            &[UNSHARE_NET, "--userns-block-fd", "5"],
+            &[UNSHARE_NET, "--sync-fd", "5"],
+            &[UNSHARE_NET, "--json-status-fd", "5"],
         ] {
             assert!(read(nest(&route, options)).is_err(), "{options:?}");
             assert!(read(nest(&bridged, options)).is_err(), "{options:?}");
