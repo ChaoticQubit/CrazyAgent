@@ -253,7 +253,7 @@ struct Grant {
 /// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
 /// and `tmux` is that server's program, which its teammates are split off with;
 /// `native_threads` is a native-mode Codex lead's sub-agent thread cap (PA-7); `hookless`
-/// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks);
+/// marks a launch that fires no hooks, as [`starts_hookless`] says (DEC-104 bare-hooks);
 /// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
 /// `proxy` is the model proxy an agent with tools under the None network reaches its model
 /// through, the only network its profile allows (S4b); `relay` is the key relay a keyed
@@ -384,9 +384,7 @@ impl Plan {
         }
         assert_eq!(
             self.hookless,
-            crate::coord::settings::HarnessKind::from_harness(&self.harness)
-                == Some(crate::coord::settings::HarnessKind::ClaudeCode)
-                && claude_bare(&account),
+            starts_hookless(&self.harness, claude_bare(&account)),
             "an agent's recorded hooks state is the one its launch gets"
         );
         Ok(LaunchRequest {
@@ -9305,11 +9303,7 @@ impl TeamRuntime {
             }
         };
         let endpoint = matches!(account.reach, TeamReach::Endpoint { .. });
-        let hookless =
-            crate::coord::settings::HarnessKind::from_harness(launch).is_some_and(|kind| {
-                kind.lacks(endpoint, crate::coord::settings::Protection::Receipts)
-                    .is_some()
-            });
+        let hookless = starts_hookless(launch, endpoint);
         self.connection
             .execute(
                 "UPDATE team_agents SET hookless=?2 WHERE id=?1",
@@ -9715,20 +9709,26 @@ impl TeamRuntime {
         };
         let listed = matches!(kind, Some(crate::coord::settings::HarnessKind::Listed(_)));
         let mode = match &account.reach {
-            TeamReach::Endpoint { base_url, .. } => Mode::Kept {
-                account: AccountBinding::Url {
-                    home: match listed {
-                        true => listed_home(&home, launch, &account.connection)?,
-                        false => home,
+            TeamReach::Endpoint { base_url, .. } => {
+                let (binding, context) = match listed {
+                    true => (
+                        listed_home(&home, launch, &account.connection)?,
+                        context.with_tool_home(&home),
+                    ),
+                    false => (home, context),
+                };
+                Mode::Kept {
+                    account: AccountBinding::Url {
+                        home: binding,
+                        base_url: relay_url.unwrap_or_else(|| base_url.clone()),
+                        key: relay_token,
                     },
-                    base_url: relay_url.unwrap_or_else(|| base_url.clone()),
-                    key: relay_token,
-                },
-                context: Box::new(match handover {
-                    Some(handover) => context.with_handover(handover),
-                    None => context,
-                }),
-            },
+                    context: Box::new(match handover {
+                        Some(handover) => context.with_handover(handover),
+                        None => context,
+                    }),
+                }
+            }
             TeamReach::Managed { .. } => Mode::PerTurn { home },
         };
         made.keep();
@@ -14020,6 +14020,19 @@ pub fn agent_home(state: &Path, id: i64) -> PathBuf {
         .join("agents")
         .join(format!("agent-{id}"))
         .join("home")
+}
+
+/// Tells whether an agent of one launch harness starts with no hooks, so with no receipts,
+/// owner hooks or edit guard (DEC-141 PA-12): what its harness kind lacks for receipts on
+/// that account kind, true for Claude Code on an API key or URL account and for every
+/// listed harness. `prepare` records it and every start of the plan checks it. Inputs: the
+/// launch harness and whether the account is anything but a signed-in subscription.
+/// Output: the answer.
+fn starts_hookless(harness: &str, endpoint: bool) -> bool {
+    crate::coord::settings::HarnessKind::from_harness(harness).is_some_and(|kind| {
+        kind.lacks(endpoint, crate::coord::settings::Protection::Receipts)
+            .is_some()
+    })
 }
 
 /// The private home a team agent of a listed harness runs in on one account (T18 LEAD-1),

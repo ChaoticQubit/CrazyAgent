@@ -67,6 +67,7 @@ fn context() -> AgentContext {
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
         handover: None,
+        tool_home: None,
     }
 }
 
@@ -897,6 +898,74 @@ fn a_native_install_given_a_hand_over_is_refused() {
         );
     }
     assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+}
+
+/// rv-code4 T19b F2 guard row: a listed install whose context names a tool home its private
+/// home is not inside is refused before it writes a file, so a launch never takes its temp
+/// folder, `git` or cargo home from a folder its sandbox was not built from; the agent home
+/// around the private home is kept on the guard.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_listed_install_keeps_only_a_tool_home_its_private_home_is_inside() {
+    let (folder, home) = harness_home("standin-acp");
+    let base = folder.path().canonicalize().unwrap();
+    let elsewhere = base.join("elsewhere");
+    for tool_home in [elsewhere.as_path(), home.as_path()] {
+        let refused = context()
+            .with_tool_home(tool_home)
+            .install("standin-acp", &home, false);
+
+        assert_eq!(
+            refused.err().map(|problem| problem.0),
+            Some("launch_context_unsafe".to_owned()),
+            "{tool_home:?}"
+        );
+    }
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+
+    let installed = context()
+        .with_tool_home(&base)
+        .install("standin-acp", &home, false);
+
+    assert!(installed.is_ok(), "{:?}", installed.as_ref().err());
+    assert_eq!(installed.unwrap().tool_home(), Some(base.as_path()));
+}
+
+/// rv-code4 T19b F7: a listed install whose context names a tool home writes the agent's own
+/// `getconf` into that home's launch folder, naming the short temp folder the team runtime
+/// made there, so the PATH its launch builds from the tool home leads with it and
+/// context-mode makes its script folders where the agent may write, as in a native agent.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_listed_install_with_a_tool_home_writes_the_agents_getconf_there() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let (folder, home) = harness_home("standin-acp");
+    let base = folder.path().canonicalize().unwrap();
+    let _removed = TmpRemoved(base.clone());
+    let scratch = crate::sandbox::toolchains::make_tmp(&base).unwrap();
+
+    let installed = context()
+        .with_tool_home(&base)
+        .install("standin-acp", &home, true);
+
+    assert!(installed.is_ok(), "{:?}", installed.as_ref().err());
+    let getconf = base.join(STATE).join("bin").join("getconf");
+    let script = fs::read_to_string(&getconf).unwrap_or_default();
+    assert!(
+        script.contains(&scratch.display().to_string()),
+        "{getconf:?}: {script}"
+    );
+    let path = crate::sandbox::toolchains::with_agent_git(&base, "/usr/bin:/bin".to_owned());
+    assert!(
+        path.starts_with(&format!("{}:", getconf.parent().unwrap().display())),
+        "{path}"
+    );
+    assert!(!home.join(STATE).join("bin").exists());
 }
 
 /// T19b 19b-2 guard row: a keyless hand-over given to a launch bound to a relay token at the

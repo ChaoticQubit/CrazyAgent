@@ -752,6 +752,17 @@ export type TeamRole = "master" | "sub" | "teammate";
 /** What the screens show in place of receipts for an agent whose launch fires no hooks
  * (DEC-104 bare-hooks), instead of zeros or a blank. */
 export const HOOKLESS_WORDS = "unavailable for this account kind";
+/** What the screens show in place of receipts for an agent of a listed harness, whose launch
+ * writes no hooks on any account. */
+export const LISTED_HOOKLESS_WORDS = "unavailable for this harness";
+const NATIVE_HARNESSES: ReadonlySet<string> = new Set(["claude-code", "claude", "codex", "rcli"]);
+/** The words a hookless agent shows in place of receipts, as the engine's `hookless_words`
+ * gives them: the harness reason for a listed harness, the account-kind reason for Claude
+ * Code started bare or an agent whose harness is not known. Input: the agent's harness, an id
+ * or alias. Output: the words. */
+export function hooklessWords(harness?: string): string {
+  return harness === undefined || NATIVE_HARNESSES.has(harness) ? HOOKLESS_WORDS : LISTED_HOOKLESS_WORDS;
+}
 export type TeamAgentStatus = "starting" | "idle" | "working" | "stopped" | "failed";
 export type TeamTaskStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
 export type TeamMessageAuthor = "owner" | "master" | "engine";
