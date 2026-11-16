@@ -194,13 +194,16 @@ fn plain(text: &str, secrets: &[SecretString]) -> String {
 }
 
 /// One name or text as the full arguments show it: each hidden or control character other
-/// than a line break or tab written as a visible `\u{XXXX}` escape, never left out, or
-/// `[withheld]` when it holds a secret form as sent, as escaped or as [`plain`] cleans it.
+/// than a line break or tab written as a visible `\u{XXXX}` escape and each backslash
+/// doubled, so no two texts show alike and none is left out; or `[withheld]` when it holds
+/// a secret form as sent, as escaped or as [`plain`] cleans it.
 fn whole(text: &str, secrets: &[SecretString]) -> String {
     let mut shown = String::with_capacity(text.len());
     for found in text.chars() {
         if crate::memory::hidden_char(found) {
             shown.push_str(&format!("\\u{{{:04X}}}", u32::from(found)));
+        } else if found == '\\' {
+            shown.push_str("\\\\");
         } else {
             shown.push(found);
         }

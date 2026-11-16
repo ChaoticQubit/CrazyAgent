@@ -24,7 +24,7 @@ const VIEW = {
     connector("github", "GitHub", { kind: "ready" }),
     connector("atlassian", "Atlassian", { kind: "needs_key" }, { secrets: [{ name: "api_key", binding: { kind: "none" } }] }),
     connector("board", "Board", { kind: "needs_review" }, { origin: "user" }),
-    connector("desk", "Desk", { kind: "needs_key" }, { sign_in: "not_yet", secrets: [] }),
+    connector("desk", "Desk", { kind: "ready" }, { sign_in: "not_yet", secrets: [] }),
   ],
   more: false, settings: SETTINGS, version: 2, project: "alpha",
   grants: [
@@ -206,18 +206,19 @@ test("Settings, Connectors lists every connector with its state word and line, w
   assert.ok(rowOf("atlassian").includes("Needs a key Set a key for each secret it needs."), rowOf("atlassian"));
   assert.ok(rowOf("board").includes("board, version 1.0.0. Added by you."), rowOf("board"));
   assert.ok(rowOf("board").includes("Needs review Review this connector before a project can use it."), rowOf("board"));
-  assert.ok(rowOf("desk").includes("Needs a key Signs in with OAuth, which this build does not have."), "a connector that signs in with OAuth says so instead of asking for a key");
+  assert.ok(rowOf("desk").includes("Unavailable Signs in with OAuth, which this build does not have."), `a connector that signs in with OAuth says so, not Ready: ${rowOf("desk")}`);
   assert.ok(rowOf("broken").includes("Refused The address must start with https://. (app_plugin_url_not_https, line 7, connector.url)"), rowOf("broken"));
   for (const hidden of [HASH, "lin_api"]) assert.ok(!markup.includes(hidden), `the catalog never shows ${hidden}`);
   assert.ok(text(page({ view: { kind: "ok", value: { ...CATALOG, more: true } } })).includes("Showing the first 7 connectors."));
 });
 
-test("A connector's state is checked in a fixed order, Refused, Needs review, Needs a key, Ready, and matches the project section's word", () => {
+test("A connector's state is checked in a fixed order, Refused, Needs review, Unavailable, Needs a key, Ready, and matches the project section's word", () => {
   const states = [
     [connector("a", "A", { kind: "refused", problem: PROBLEM }), { word: "Refused", tone: "danger", detail: "The address must start with https://. (app_plugin_url_not_https, line 7, connector.url)" }],
     [connector("b", "B", { kind: "needs_review" }), { word: "Needs review", tone: "warn", detail: "Review this connector before a project can use it." }],
     [connector("c", "C", { kind: "needs_key" }), { word: "Needs a key", tone: "warn", detail: "Set a key for each secret it needs." }],
-    [connector("d", "D", { kind: "needs_key" }, { sign_in: "not_yet" }), { word: "Needs a key", tone: "warn", detail: "Signs in with OAuth, which this build does not have." }],
+    [connector("d", "D", { kind: "ready" }, { sign_in: "not_yet", secrets: [] }), { word: "Unavailable", tone: "warn", detail: "Signs in with OAuth, which this build does not have." }],
+    [connector("f", "F", { kind: "needs_review" }, { sign_in: "not_yet", secrets: [] }), { word: "Needs review", tone: "warn", detail: "Review this connector before a project can use it." }],
     [connector("e", "E", { kind: "ready" }), { word: "Ready", tone: "ok", detail: null }],
   ];
   for (const [shown, state] of states) {
@@ -332,19 +333,20 @@ test("Connector settings: Write actions, Approval wait, Harness-native connector
   assert.deepEqual(radios(read, "connector-wait"), [["minutes2", false], ["minutes10", true], ["minutes30", false]]);
   assert.deepEqual(radios(read, "connector-native"), [["off", true], ["on", false]]);
   assert.deepEqual(radios(read, "connector-size-cap"), [["kib64", false], ["kib256", true], ["mib1", false]]);
-  assert.ok(!shown.includes("changed"), "the defaults are not marked");
+  const marks = (markup) => (markup.match(/class="set-changed"/gu) ?? []).length;
+  assert.equal(marks(read), 0, "the defaults are not marked");
   assert.match(saveButton(read), /disabled=""/u, "nothing to save yet");
   const picked = page({ write: "read_only", wait: "minutes2", native: "on", sizeCap: "mib1" });
   assert.deepEqual(radios(picked, "connector-write"), [["ask_every_time", false], ["ask_once_per_project", false], ["read_only", true]]);
   assert.deepEqual(radios(picked, "connector-wait"), [["minutes2", true], ["minutes10", false], ["minutes30", false]]);
   assert.deepEqual(radios(picked, "connector-native"), [["off", false], ["on", true]]);
   assert.deepEqual(radios(picked, "connector-size-cap"), [["kib64", false], ["kib256", false], ["mib1", true]]);
-  assert.equal(text(picked).split("changed").length, 5, "each setting away from its default is marked");
+  assert.equal(marks(picked), 4, "each setting away from its default is marked");
   assert.doesNotMatch(saveButton(picked), /disabled=""/u);
   for (const [patch, what] of [[{ write: "ask_once_per_project" }, "Write actions"], [{ wait: "minutes30" }, "Approval wait"]]) {
     const one = page(patch);
     assert.doesNotMatch(saveButton(one), /disabled=""/u, `a ${what} pick alone can be saved`);
-    assert.equal(text(one).split("changed").length, 2, `${what} is marked`);
+    assert.equal(marks(one), 1, `${what} is marked`);
   }
   assert.match(saveButton(page({ write: "ask_every_time", wait: "minutes10", native: "off", sizeCap: "kib256" })), /disabled=""/u, "picks equal to the settings read are no change");
   assert.match(page({ native: "on", problem: api.CONNECTORS_PAGE.stale }), /role="alert"[^>]*>.*The connector settings changed elsewhere\. Check them and try again\./su);

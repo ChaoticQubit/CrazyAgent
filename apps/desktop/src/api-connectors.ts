@@ -126,12 +126,14 @@ export function notReadyLine(titles: string[]): string {
   return `Not ready yet: ${titles.join(", ")}. Set them up in Settings, Connectors.`;
 }
 
-/** A connector's state word, checked in a fixed order: Refused, Needs review, Needs a key,
- * then Ready, the same in the TUI. Input: the connector. Output: the word. */
+/** A connector's state word, checked in a fixed order: Refused, Needs review, Unavailable
+ * (it signs in with OAuth, which this build does not have), Needs a key, then Ready, the
+ * same in the TUI. Input: the connector. Output: the word. */
 export function connectorWord(connector: ConnectorView): string {
   const status = connector.status;
   if (status.kind === "refused") return "Refused";
   if (status.kind === "needs_review") return "Needs review";
+  if (connector.sign_in === "not_yet") return "Unavailable";
   if (status.kind === "needs_key") return "Needs a key";
   return "Ready";
 }
@@ -154,7 +156,7 @@ export function projectRows(view: ConnectorsView): { rows: ProjectRow[]; others:
     if (seen.has(connector.name)) continue;
     seen.add(connector.name);
     const grant = grantOf.get(connector.name) ?? null;
-    const ready = connector.status.kind === "ready";
+    const ready = connectorWord(connector) === "Ready";
     if (ready || grant?.enabled) rows.push({ name: connector.name, title: connector.title, ready, word: connectorWord(connector), grant });
     else others.push(connector.title);
   }
@@ -243,14 +245,15 @@ export function settingsToSave(read: ConnectorSettings, picks: SettingPicks): Co
 }
 
 /** A connector's state word with its tone and the line under it, checked in a fixed order:
- * Refused (with its problem), Needs review, Needs a key, then Ready. Input: the connector.
- * Output: the word, its tone and the line, if any. */
+ * Refused (with its problem), Needs review, Unavailable (with the OAuth line), Needs a key,
+ * then Ready. Input: the connector. Output: the word, its tone and the line, if any. */
 export function connectorState(connector: ConnectorView): { word: string; tone: Tone; detail: string | null } {
   const status = connector.status;
   const word = connectorWord(connector);
   if (status.kind === "refused") return { word, tone: "danger", detail: problemText(status.problem) };
   if (status.kind === "needs_review") return { word, tone: "warn", detail: "Review this connector before a project can use it." };
-  if (status.kind === "needs_key") return { word, tone: "warn", detail: connector.sign_in === "not_yet" ? CONNECTORS_PAGE.oauthNotYet : "Set a key for each secret it needs." };
+  if (connector.sign_in === "not_yet") return { word, tone: "warn", detail: CONNECTORS_PAGE.oauthNotYet };
+  if (status.kind === "needs_key") return { word, tone: "warn", detail: "Set a key for each secret it needs." };
   return { word, tone: "ok", detail: null };
 }
 
