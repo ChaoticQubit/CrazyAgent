@@ -2077,6 +2077,101 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
     );
 }
 
+/// A stand-in Claude Code that takes its turn, writes half a line and exits with the Linux
+/// call supervisor's held-stop code, as a harness ends when its supervisor stops.
+#[cfg(target_os = "linux")]
+const HELD_STOP_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s' '{"type":"assistant"'
+exit 122
+"#;
+
+/// DEC-185 S2a (rv-sec3 F1): a Claude master whose harness ends with the held-stop code
+/// ends its turn with the sandbox cause, not a protocol fault for the half line nor the
+/// native exit code, and closes clean, so the master runtime stores SandboxStopped rather
+/// than an uncertain cleanup (#101 r1, rv-code4 F1).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_claude_master_the_sandbox_stopped_for_a_held_name_says_so() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master(&mut fixture, HELD_STOP_HARNESS).await;
+    claude
+        .start_turn(RequestId::new("claude-held-turn").unwrap(), "Reply")
+        .await
+        .unwrap();
+    let failed = loop {
+        match claude.next_event().await {
+            Ok(_) => continue,
+            Err(error) => break error.0,
+        }
+    };
+    assert_eq!(failed, crate::sandbox::HELD_STOP_CAUSE);
+    assert_eq!(claude.close().await.map_err(|error| error.0), Ok(()));
+}
+
+/// A stand-in Claude Code that leaves a descendant in its own group holding its output,
+/// waits until that descendant has left and the row has seen the host start, then exits
+/// with the Linux call supervisor's held-stop code.
+#[cfg(target_os = "linux")]
+const HELD_STOP_LEAVING_HARNESS: &str = r#"#!/bin/sh
+/usr/bin/perl -e 'setpgrp(0, 0) or exit 1; open(my $file, ">", "run/descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' &
+echo $$ > run/leader.pid
+while [ ! -s run/descendant.pid ] || [ ! -e run/go ]; do /bin/sleep 0.01; done
+exit 122
+"#;
+
+/// #101 r1 (rv-sec3 N1): a held stop that leaves a process holding the harness's output
+/// ends the host on its own, without waiting on that output. Where the backend leaves such
+/// a process running (plain Landlock), close keeps the cleanup's own fault, so the run
+/// stays uncertain; where a process namespace ends it (bubblewrap), close is clean.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_claude_master_held_stop_that_left_a_process_closes_by_backend() {
+    use crate::engine::master_host_fixture::{HarnessProcesses, MasterFixture, RUN_FOLDER};
+    use crate::sandbox::LineageCheck;
+
+    let mut fixture = MasterFixture::new("claude");
+    let check = {
+        let profile = fixture.lease("claude-group-turn", 1).unwrap();
+        let home = profile.profile_path().unwrap();
+        let harness = fixture.stand_in("claude", HELD_STOP_LEAVING_HARNESS);
+        fixture
+            .sandbox(&home, harness.parent().unwrap())
+            .lineage_check()
+    };
+    assert_ne!(check, LineageCheck::FullAccess);
+    let mut claude = stand_in_master(&mut fixture, HELD_STOP_LEAVING_HARNESS).await;
+    fs::write(fixture.project.join(RUN_FOLDER).join("go"), "").unwrap();
+    let own_end = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if !matches!(
+                claude.status.borrow().phase,
+                Phase::Starting | Phase::Running
+            ) {
+                return true;
+            }
+            if claude.status.changed().await.is_err() {
+                return false;
+            }
+        }
+    })
+    .await;
+    assert!(
+        matches!(own_end, Ok(true)),
+        "the host did not end on the held exit by itself: {own_end:?}"
+    );
+    let closed = claude.close().await.map_err(|error| error.0);
+    if check == LineageCheck::Sandboxed {
+        let _processes = HarnessProcesses::wait(&fixture.project);
+        assert!(closed.is_err(), "{closed:?}");
+        assert_ne!(closed, Err(crate::sandbox::HELD_STOP_CAUSE.to_owned()));
+    } else {
+        assert_eq!(closed, Ok(()));
+    }
+}
+
 const EARLY_ASSISTANT_HARNESS: &str = r#"#!/bin/sh
 IFS= read -r turn
 printf '%s\n' '{"type":"assistant","uuid":"early-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"sk-ant-oat01-notarealtoken"}]}}'

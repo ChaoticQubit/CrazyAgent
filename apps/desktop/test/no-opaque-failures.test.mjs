@@ -277,6 +277,12 @@ test("a configured master stopped by a harness protocol fault, the frame size li
     "The master stopped: its copy of the project could not be checked. End the conversation, then send again. (master_bootstrap_uncertain)");
 });
 
+test("a configured master the sandbox stopped because a protected name could not be put back says so (DEC-185 S2a)", () => {
+  const turn = { id: "t", ordinal: 1, phase: "failed", reason: "sandbox_stopped", reply: null, cause: "sandbox_held_not_put_back" };
+  assert.equal(research.turnLine(turn),
+    "The master stopped: the sandbox stopped it because a protected name could not be put back. (sandbox_held_not_put_back)");
+});
+
 test("a team agent or task that closed on a launch code shows the engine line with its code", () => {
   const closed = "The agent process closed. (launch_protocol_failed)";
   const stopped = "The sub-agent stopped unexpectedly. (launch_input_closed)";

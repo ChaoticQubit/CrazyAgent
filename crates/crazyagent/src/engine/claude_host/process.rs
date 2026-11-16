@@ -245,6 +245,15 @@ impl Process {
         }
     }
 
+    /// Records a fault of the cleanup itself, which outranks the held stop so a run that
+    /// left something behind stays uncertain, and otherwise keeps the first fault.
+    /// Takes the cleanup fault. Returns nothing.
+    fn fail_cleanup(&mut self, fault: Fault) {
+        if self.fault.is_none_or(Fault::held) {
+            self.fault = Some(fault);
+        }
+    }
+
     fn drive(&mut self) {
         assert!(self.status.is_none());
         assert!(self.pending.is_none());
@@ -260,17 +269,22 @@ impl Process {
             self.read_stderr();
             self.reap();
             if self.status.is_some() {
-                if self.fault.is_none() && (self.stdout.is_some() || self.stderr.is_some()) {
+                let code = self.status.and_then(|status| status.code());
+                let held = Fault::Exit(code).held();
+                if !held && self.fault.is_none() && (self.stdout.is_some() || self.stderr.is_some())
+                {
                     std::thread::sleep(POLL_TIME);
                     continue;
                 }
-                if self.fault.is_none()
+                if held {
+                    self.fault = Some(Fault::Exit(code));
+                } else if self.fault.is_none()
                     && !(self.status.is_some_and(|status| status.success())
                         && self.completed_turns > 0
                         && self.protocol.state() == State::Idle
                         && self.frame.is_empty())
                 {
-                    self.fail(Fault::Exit(self.status.and_then(|status| status.code())));
+                    self.fail(Fault::Exit(code));
                 }
                 return;
             }
@@ -542,7 +556,7 @@ impl Process {
         match rustix::process::test_kill_process_group(self.group) {
             Err(Errno::SRCH) => self.group_absent = true,
             Ok(()) | Err(Errno::PERM) => {}
-            Err(_) => self.fail(Fault::Host("claude_host_group_unobservable")),
+            Err(_) => self.fail_cleanup(Fault::Host("claude_host_group_unobservable")),
         }
     }
 
@@ -555,7 +569,7 @@ impl Process {
             Ok(()) => true,
             Err(Errno::SRCH | Errno::PERM) => false,
             Err(_) => {
-                self.fail(Fault::Host("claude_host_kill_failed"));
+                self.fail_cleanup(Fault::Host("claude_host_kill_failed"));
                 false
             }
         };
@@ -566,7 +580,7 @@ impl Process {
                 Err(_) => {
                     self.reap();
                     if self.status.is_none() {
-                        self.fail(Fault::Host("claude_host_kill_failed"));
+                        self.fail_cleanup(Fault::Host("claude_host_kill_failed"));
                     }
                 }
             }
@@ -581,7 +595,7 @@ impl Process {
         if let Some(warden) = self.warden.take()
             && warden.fire(warden::FIRE_TIME).is_err()
         {
-            self.fail(Fault::Host("claude_host_cleanup_uncertain"));
+            self.fail_cleanup(Fault::Host("claude_host_cleanup_uncertain"));
         }
     }
 
@@ -634,7 +648,7 @@ impl Process {
                     if open {
                         self.stdout = None;
                         self.stderr = None;
-                        self.fail(Fault::Host("claude_host_cleanup_uncertain"));
+                        self.fail_cleanup(Fault::Host("claude_host_cleanup_uncertain"));
                     }
                     if !status.success()
                         && !self.stop.load(Ordering::Acquire)
@@ -649,7 +663,7 @@ impl Process {
             }
             if !uncertain && now >= cleanup_deadline {
                 uncertain = true;
-                self.fail(Fault::Host("claude_host_cleanup_uncertain"));
+                self.fail_cleanup(Fault::Host("claude_host_cleanup_uncertain"));
                 self.report.send_replace(Status {
                     phase: Phase::Closing,
                     fault: self.fault,
@@ -673,7 +687,7 @@ impl Process {
         if let Some(lineage) = lineage
             && let Err(unstopped) = lineage.and_then(Lineage::settle)
         {
-            self.fail(Fault::Host(unstopped.code()));
+            self.fail_cleanup(Fault::Host(unstopped.code()));
             if let (Unstopped::Left(left), Some(profile)) = (unstopped, self.profile.take()) {
                 let project = self.project.as_str();
                 left.hold(
@@ -702,7 +716,7 @@ impl Drop for Process {
     fn drop(&mut self) {
         if self.profile.is_some() {
             self.stop.store(true, Ordering::Release);
-            self.fail(Fault::Host("claude_host_custodian_interrupted"));
+            self.fail_cleanup(Fault::Host("claude_host_custodian_interrupted"));
             self.cleanup();
         }
     }

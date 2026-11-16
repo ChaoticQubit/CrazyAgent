@@ -133,7 +133,7 @@ impl HostProcess {
                 Ok(0) => {
                     self.stdout = None;
                     self.reap()?;
-                    return Err(if self.pending.is_empty() {
+                    return Err(if self.pending.is_empty() || self.held() {
                         self.exit_error()
                     } else {
                         error("rcli_master_truncated_event")
@@ -206,7 +206,19 @@ impl HostProcess {
         Ok(())
     }
 
+    /// Tells whether the host was stopped by the Linux call supervisor because it could not
+    /// take back an entry read as a held name ([`crate::sandbox::held_stop`]). Input: the
+    /// process. Output: true for that exit, which outranks what the host left half written.
+    fn held(&self) -> bool {
+        let code = self.status.as_ref().and_then(ExitStatus::code);
+        code.and_then(|code| crate::sandbox::held_stop(std::env::consts::OS, code))
+            .is_some()
+    }
+
     fn exit_error(&self) -> ProtocolError {
+        if self.held() {
+            return error(crate::sandbox::HELD_STOP_CAUSE);
+        }
         error(match self.status.as_ref().and_then(ExitStatus::code) {
             Some(64) => "rcli_master_control_rejected",
             Some(70) => "rcli_master_execution_failed",
@@ -657,5 +669,35 @@ read -r _
         assert!(process.stdout_bytes > STDOUT_BYTES_MAX);
         assert!(process.stdout_bytes <= STDOUT_BYTES_MAX + 4096);
         process.cleanup().unwrap();
+    }
+
+    /// DEC-185 S2a (rv-sec3 F1): an rcli master host that exits with the Linux call
+    /// supervisor's held-stop code ends with the sandbox cause, whether it left half a frame
+    /// or nothing, never the truncated event nor the plain exit code.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_rcli_master_the_sandbox_stopped_ends_with_the_sandbox_cause() {
+        for host in [r"printf '\000\000\000\020ab'; exit 122", "exit 122"] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", host])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+            let mut process =
+                HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let failure = loop {
+                assert!(Instant::now() < deadline, "{host}");
+                match process.frame() {
+                    Ok(Some(_)) => panic!("{host} wrote no whole frame"),
+                    Ok(None) => thread::sleep(Duration::from_millis(1)),
+                    Err(failure) => break failure,
+                }
+            };
+            assert_eq!(failure.0, crate::sandbox::HELD_STOP_CAUSE, "{host}");
+            process.cleanup().unwrap();
+        }
     }
 }

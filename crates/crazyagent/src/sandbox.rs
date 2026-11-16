@@ -117,6 +117,29 @@ pub const SHARED_WRITES_NEED_SEATBELT: &str = "writable shared folders need the 
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
+/// The Linux helper's exit code when its call supervisor could not take back an entry a
+/// case-folding folder read as a held name, and so stopped the run (DEC-185 S2a, rv-sec3
+/// F1). The supervisor crate keeps its own copy, tied to this one in the Linux sandbox; 125
+/// is its other stops, and 126 and up are the shell's and the signals'.
+pub const HELD_NOT_PUT_BACK_EXIT: i32 = 122;
+
+/// What the engine shows for a Linux run that ended with [`HELD_NOT_PUT_BACK_EXIT`].
+pub const HELD_NOT_PUT_BACK: &str =
+    "The sandbox stopped this run: a protected name could not be put back";
+
+/// Tells why a harness ended when its sandbox stopped it. Only the Linux call supervisor
+/// ends a run with [`HELD_NOT_PUT_BACK_EXIT`], so the code means that on Linux alone.
+/// Inputs: the system's name, as `std::env::consts::OS` gives it, and the exit code.
+/// Output: the sentence to show, or none when the code is the harness's own.
+pub fn held_stop(os: &str, code: i32) -> Option<&'static str> {
+    (os == "linux" && code == HELD_NOT_PUT_BACK_EXIT).then_some(HELD_NOT_PUT_BACK)
+}
+
+/// The cause every master host gives a turn whose harness the Linux call supervisor stopped
+/// because it could not take back an entry read as a held name ([`held_stop`]); the engine
+/// names it `MasterReason::SandboxStopped`.
+pub const HELD_STOP_CAUSE: &str = "sandbox_held_not_put_back";
+
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 /// The most folder links one sandbox makes readable by name beside its roots: the links
@@ -5496,6 +5519,27 @@ mod linux_sockets_tests {
                 None,
                 "{program}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod held_stop_tests {
+    use super::*;
+
+    /// A Linux run the call supervisor stopped because it could not take back an entry
+    /// read as a held name is told so; the same code on another system, and every other
+    /// code on Linux (125, the supervisor's other stops, among them) stays the harness's
+    /// own (DEC-185 S2a, rv-sec3 F1).
+    #[test]
+    fn a_linux_run_stopped_with_a_held_name_not_put_back_is_told_so() {
+        let said = held_stop("linux", HELD_NOT_PUT_BACK_EXIT);
+        assert_eq!(said, Some(HELD_NOT_PUT_BACK));
+        for code in [0, 1, 3, 125, 126, 137] {
+            assert_eq!(held_stop("linux", code), None, "{code}");
+        }
+        for os in ["macos", "windows"] {
+            assert_eq!(held_stop(os, HELD_NOT_PUT_BACK_EXIT), None, "{os}");
         }
     }
 }

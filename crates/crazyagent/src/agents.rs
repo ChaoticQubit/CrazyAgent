@@ -1853,7 +1853,8 @@ impl Stored {
             AgentState::Stopped => "Stopped".to_owned(),
             AgentState::Exited => match self.exit_code {
                 Some(0) | None => "Finished".to_owned(),
-                Some(code) => format!("Exited with code {code}"),
+                Some(code) => crate::sandbox::held_stop(std::env::consts::OS, code)
+                    .map_or_else(|| format!("Exited with code {code}"), str::to_owned),
             },
             AgentState::Failed => "Failed".to_owned(),
             AgentState::Closed => "Stopped when CrazyAgent closed".to_owned(),

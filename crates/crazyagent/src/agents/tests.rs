@@ -687,6 +687,39 @@ fn wiring_an_agent_that_exits_by_itself_is_shown_as_exited_never_running() {
     });
 }
 
+/// A Linux run whose call supervisor stopped because an entry read as a held name could
+/// not be taken back shows that reason, not a bare exit code; any other code, 125 among
+/// them, still shows the code (DEC-185 S2a, rv-sec3 F1). The stored row is built directly,
+/// so nothing is launched.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_the_sandbox_stopped_for_a_held_name_shows_why() {
+    let ended = |code: i32| {
+        Stored {
+            id: "held".into(),
+            project: ProjectId::new("controls").unwrap(),
+            role: AgentRole::SubAgent,
+            label: "held".into(),
+            harness: "claude".into(),
+            state: AgentState::Exited,
+            reattached: false,
+            attempt: 1,
+            exit_code: Some(code),
+            reason: None,
+            last_text: None,
+            started_ms: 1,
+            ended_ms: Some(2),
+            hosted: false,
+        }
+        .view(None, false)
+        .status
+    };
+    let stopped = ended(crate::sandbox::HELD_NOT_PUT_BACK_EXIT);
+    assert_eq!(stopped, crate::sandbox::HELD_NOT_PUT_BACK);
+    assert_eq!(ended(125), "Exited with code 125");
+    assert_eq!(ended(3), "Exited with code 3");
+}
+
 /// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
 /// replies, so this checks the supervisor's close and next start only.
 /// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.

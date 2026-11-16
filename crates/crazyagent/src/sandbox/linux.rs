@@ -1185,6 +1185,13 @@ fn hold(
     ExitCode::from(126)
 }
 
+const _: () = assert!(
+    serve::NOT_PUT_BACK_EXIT == super::HELD_NOT_PUT_BACK_EXIT
+        && serve::NOT_PUT_BACK_EXIT > 0
+        && serve::NOT_PUT_BACK_EXIT < serve::STOPPED_EXIT,
+    "the held-stop exit code is the engine's and sits below the supervisor's other stops"
+);
+
 /// Starts the harness under the call supervisor and stays as its parent, answering its
 /// guarded calls until it ends. The engine's stop signals reach the harness, which shares
 /// this process's group, and are held off here, so the helper ends with the harness.

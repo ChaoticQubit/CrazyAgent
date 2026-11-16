@@ -53,6 +53,34 @@ async fn codex_host_process_real_pipe_input_output_eof_and_reap_are_retained() {
     assert_eq!(process.close().await.unwrap(), status);
 }
 
+/// DEC-185 S2a (rv-sec3 F1): a Codex host process that exits with the Linux call
+/// supervisor's held-stop code ends with the sandbox cause once it is reaped, past what it
+/// wrote, never as a plain exit the host reads as a disconnect; and it closes clean, so the
+/// master runtime stores SandboxStopped (#101 r1, the Claude host's parity).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn codex_host_process_the_sandbox_stopped_ends_with_the_sandbox_cause() {
+    let root = tempfile::tempdir().unwrap();
+    let mut command = selected_command("/bin/sh", root.path());
+    command.args(["-c", "printf half; exit 122"]);
+    let mut process = CodexHostProcess::spawn(command, &budget()).await.unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match process.next_output().await {
+                Ok(CodexHostOutput::Stdout(_)) => {}
+                Ok(CodexHostOutput::Exited) => break None,
+                Err(error) => break Some(error.0),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended.as_deref(), Some(crate::sandbox::HELD_STOP_CAUSE));
+    let closed = process.close().await.map(|status| status.code());
+    assert_eq!(closed.map_err(|error| error.0), Ok(Some(122)));
+    assert_eq!(process.operation_result().map_err(|error| error.0), Ok(()));
+}
+
 /// A shell script that writes 5,600 numbered lines of 101 bytes, 565,600 bytes: more than
 /// the 128 chunks of 4,096 bytes the output queue holds.
 const FLOOD: &str =

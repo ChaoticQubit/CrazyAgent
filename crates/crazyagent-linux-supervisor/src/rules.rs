@@ -176,6 +176,15 @@ fn folded_parts(path: &Path) -> Option<Vec<String>> {
     path.is_absolute().then_some(parts)
 }
 
+/// Tells whether a name may be made in a folder under the held guard (rv-sec3 F1): a name
+/// with a byte outside ASCII is refused where one of the folder's held names is not there,
+/// since a case-folding folder can read it as that held name, which then has no node to
+/// hold, and git makes only ASCII names. Inputs: the name, the folder's held names and
+/// whether a name is there. Output: true when the name may be made.
+pub fn plainly_named(name: &OsStr, held: &[&OsStr], there: impl Fn(&OsStr) -> bool) -> bool {
+    name.is_ascii() || there(name) || held.iter().all(|&held| there(held))
+}
+
 /// The git folders an agent may make entries in: the top-level `.git` of each working
 /// tree in `trees`, the `.git` of each folder directly inside a folder in `kids`, and the
 /// `exact` paths. Every other entry named `.git`, and everything below one, is refused.
@@ -950,6 +959,38 @@ mod tests {
             HeldNodes::taken(&held(), no_folder).is_err(),
             "a held path's folder must be there"
         );
+    }
+
+    #[test]
+    fn a_new_name_outside_ascii_is_refused_where_a_held_name_is_not_there_yet() {
+        let present = ["HEAD", "caf\u{e9}.md"].map(OsStr::new);
+        let there = |name: &OsStr| present.contains(&name);
+        let missing = ["HEAD", "config.worktree"].map(OsStr::new);
+        let kelvin = OsStr::new("config.wor\u{212a}tree");
+        assert!(
+            !plainly_named(kelvin, &missing, there),
+            "a Kelvin sign spelling"
+        );
+        let long_s = OsStr::new("module\u{17f}");
+        assert!(!plainly_named(long_s, &missing, there), "a long s spelling");
+        assert!(plainly_named(
+            OsStr::new("config.worktree"),
+            &missing,
+            there
+        ));
+        assert!(plainly_named(OsStr::new("notes"), &missing, there));
+        let accented = OsStr::new("caf\u{e9}.md");
+        assert!(
+            plainly_named(accented, &missing, there),
+            "a name already there"
+        );
+        let new = OsStr::new("r\u{e9}sum\u{e9}.pdf");
+        assert!(
+            plainly_named(new, &[OsStr::new("HEAD")], there),
+            "every held name there"
+        );
+        assert!(plainly_named(new, &[], there), "a folder with no held name");
+        assert!(!plainly_named(new, &missing, there));
     }
 
     #[test]

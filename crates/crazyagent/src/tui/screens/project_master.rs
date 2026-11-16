@@ -418,6 +418,9 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::WorktreeUncertain) => {
             "its copy of the project could not be checked. Close the master and open it again, then send again."
         }
+        Some(MasterReason::SandboxStopped) => {
+            "the sandbox stopped it because a protected name could not be put back."
+        }
         Some(MasterReason::Cancelled) => "you stopped this turn.",
         Some(MasterReason::ApprovalRequired) | Some(MasterReason::Unknown) | None => {
             if turn.phase == MasterTurnPhase::Cancelled {
@@ -1035,6 +1038,10 @@ mod tests {
                 MasterReason::WorktreeUncertain,
                 "Codex stopped: its copy of the project could not be checked. Close the master and open it again, then send again. (worktree_uncertain) Press r to try again.",
             ),
+            (
+                MasterReason::SandboxStopped,
+                "Codex stopped: the sandbox stopped it because a protected name could not be put back. (sandbox_stopped) Press r to try again.",
+            ),
         ] {
             let transcript = build(
                 configured,
@@ -1081,6 +1088,7 @@ mod tests {
             (MasterReason::ProtocolFault, "protocol_fault"),
             (MasterReason::FrameLimit, "frame_limit"),
             (MasterReason::WorktreeUncertain, "worktree_uncertain"),
+            (MasterReason::SandboxStopped, "sandbox_stopped"),
             (MasterReason::Cancelled, "cancelled"),
         ];
         for (reason, code) in named {
