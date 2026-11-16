@@ -347,6 +347,12 @@ fn chatgpt_sign_in() -> ModelConnection {
 }
 
 fn chatgpt_relay() -> Relay {
+    chatgpt_relay_of("row-chatgpt-profile")
+}
+
+/// A ChatGPT relay for these rows serving the sign-in of one native profile. Input: the
+/// profile reference. Output: the started relay.
+fn chatgpt_relay_of(profile: &str) -> Relay {
     use crate::model_gateway::relay::chatgpt::{ChatGptSource, ChatGptTokens};
     let tokens = ChatGptTokens {
         access: SecretString::bearer(CHATGPT_ACCESS.as_bytes().to_vec()).unwrap(),
@@ -357,12 +363,25 @@ fn chatgpt_relay() -> Relay {
             + std::time::Duration::from_secs(3600),
     };
     let source = ChatGptSource::new(
+        crate::protocol::CredentialRef::new(profile).unwrap(),
         tokens,
         Box::new(|_: std::time::Duration, _: &dyn Fn() -> bool| {
             Err(crate::engine::EngineError("no renewal expected".into()))
         }),
     );
     Relay::start_chatgpt(std::sync::Arc::new(source)).expect("ChatGPT relay starts")
+}
+
+/// T22 r2 F2 (rv-code4): a ChatGPT relay is handed over only with the sign-in it serves.
+/// A relay started from another native profile's sign-in is a wiring fault that would
+/// spend that account's plan for this run, so the hand-over stops on an assertion.
+#[test]
+#[should_panic(expected = "a ChatGPT relay serves only the sign-in it was read from")]
+fn a_chatgpt_hand_over_stops_on_a_relay_of_another_sign_in() {
+    let registry = built(&["openai-responses"], RESPONSES_ENV);
+    let harness = &registry.all()[0];
+    let other = chatgpt_relay_of("another-chatgpt-profile");
+    let _ = super::chatgpt_handover(harness, &chatgpt_sign_in(), &other, "gpt-5-codex");
 }
 
 /// T22 R7: a ChatGPT sign-in is handed to a listed harness that lists `openai-responses` as

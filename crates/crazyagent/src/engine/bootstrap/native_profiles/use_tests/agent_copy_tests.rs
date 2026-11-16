@@ -1187,7 +1187,9 @@ fn chatgpt_source(
 
 /// T22: a ChatGPT source made from the held account hands out the sign-in's access token
 /// and account id as they are while the token has time left, without running a renewal,
-/// and leaves the account's record as it was.
+/// and leaves the account's record as it was. r2 F2 (rv-code4): it names the native
+/// profile it was read from, not the account's connection, so routing and the hand-over
+/// can check a run is served its own sign-in.
 #[test]
 fn a_chatgpt_source_from_custody_hands_out_a_fresh_sign_in_without_a_renewal() {
     let mut case = UseCase::new();
@@ -1197,6 +1199,7 @@ fn a_chatgpt_source_from_custody_hands_out_a_fresh_sign_in_without_a_renewal() {
     private_file(&record, &codex_auth(expires));
     let guard = execution(&mut case);
     let source = chatgpt_source(&guard, &harness);
+    assert_eq!(source.profile().as_str(), "unit-profile");
     let handed = source
         .current(&|| false)
         .map(|(access, account_id)| (access.expose().to_owned(), account_id));

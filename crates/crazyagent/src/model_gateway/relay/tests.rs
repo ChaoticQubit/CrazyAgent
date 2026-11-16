@@ -936,7 +936,14 @@ fn counted_source(
         counting.fetch_add(1, Ordering::SeqCst);
         answer()
     });
-    (calls, Arc::new(chatgpt::ChatGptSource::new(held, renew)))
+    (
+        calls,
+        Arc::new(chatgpt::ChatGptSource::new(
+            crate::protocol::CredentialRef::new("row-profile").unwrap(),
+            held,
+            renew,
+        )),
+    )
 }
 
 fn lasting() -> Duration {
@@ -1236,6 +1243,7 @@ fn dropping_a_chatgpt_relay_during_a_renewal_returns_promptly() {
         Err(EngineError("native_profile_renewal_stopped".into()))
     });
     let source = Arc::new(chatgpt::ChatGptSource::new(
+        crate::protocol::CredentialRef::new("row-profile").unwrap(),
         sign_in(ACCESS, None, epoch_now() + Duration::from_secs(10)),
         renew,
     ));

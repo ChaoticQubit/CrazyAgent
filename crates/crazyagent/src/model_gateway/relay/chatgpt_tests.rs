@@ -1,6 +1,7 @@
 use super::chatgpt::*;
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
+use crate::protocol::CredentialRef;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,6 +16,10 @@ fn tokens(access: &str, account_id: Option<&str>, expires: Duration) -> ChatGptT
         account_id: account_id.map(str::to_owned),
         expires,
     }
+}
+
+fn profile() -> CredentialRef {
+    CredentialRef::new("row-profile").unwrap()
 }
 
 fn never() -> bool {
@@ -55,6 +60,7 @@ fn refusal(source: &ChatGptSource) -> Option<String> {
 fn a_token_with_time_left_is_handed_out_without_a_renewal() {
     let (calls, _, renew) = counted(|| Ok(tokens("fresh", Some("acct-2"), now() * 2)));
     let source = ChatGptSource::new(
+        profile(),
         tokens("held", Some("acct-1"), now() + Duration::from_secs(3600)),
         renew,
     );
@@ -79,7 +85,7 @@ fn a_token_lapsing_within_the_margin_is_renewed_once_before_it_is_handed_out() {
             now() + Duration::from_secs(3600),
         ))
     });
-    let source = ChatGptSource::new(tokens("held", Some("acct-1"), held), renew);
+    let source = ChatGptSource::new(profile(), tokens("held", Some("acct-1"), held), renew);
     assert_eq!(
         handed(&source),
         Some(("fresh".to_owned(), Some("acct-2".to_owned())))
@@ -102,6 +108,7 @@ fn ten_requests_at_once_cause_one_renewal() {
         Ok(tokens("fresh", None, now() + Duration::from_secs(3600)))
     });
     let source = Arc::new(ChatGptSource::new(
+        profile(),
         tokens("held", None, now() + Duration::from_secs(10)),
         renew,
     ));
@@ -128,7 +135,7 @@ fn ten_requests_at_once_cause_one_renewal() {
 fn a_renewal_that_leaves_the_token_as_it_was_is_not_retried_before_the_backoff_ends() {
     let held = now() + Duration::from_secs(200);
     let (calls, _, renew) = counted(move || Ok(tokens("held", Some("acct-1"), held)));
-    let source = ChatGptSource::new(tokens("held", Some("acct-1"), held), renew);
+    let source = ChatGptSource::new(profile(), tokens("held", Some("acct-1"), held), renew);
     for _ in 0..3 {
         assert_eq!(
             handed(&source),
@@ -145,7 +152,7 @@ fn a_renewal_that_leaves_the_token_as_it_was_is_not_retried_before_the_backoff_e
 fn a_failed_renewal_while_the_token_still_has_time_forwards_the_token_it_had() {
     let held = now() + Duration::from_secs(200);
     let (calls, _, renew) = counted(|| Err(EngineError("native_profile_renewal_busy".into())));
-    let source = ChatGptSource::new(tokens("held", None, held), renew);
+    let source = ChatGptSource::new(profile(), tokens("held", None, held), renew);
     assert_eq!(handed(&source), Some(("held".to_owned(), None)));
     assert_eq!(handed(&source), Some(("held".to_owned(), None)));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -159,7 +166,7 @@ fn a_failed_renewal_while_the_token_still_has_time_forwards_the_token_it_had() {
 fn a_renewal_that_leaves_the_sign_in_lapsed_stops_the_source_for_good() {
     let lapsed = now() - Duration::from_secs(10);
     let (calls, _, renew) = counted(move || Ok(tokens("held", None, lapsed)));
-    let source = ChatGptSource::new(tokens("held", None, lapsed), renew);
+    let source = ChatGptSource::new(profile(), tokens("held", None, lapsed), renew);
     assert_eq!(refusal(&source), Some(SIGN_IN_EXPIRED.to_owned()));
     assert_eq!(source.failed(), Some(SIGN_IN_EXPIRED));
     assert_eq!(refusal(&source), Some(SIGN_IN_EXPIRED.to_owned()));
@@ -175,7 +182,11 @@ fn a_renewal_that_leaves_the_sign_in_lapsed_stops_the_source_for_good() {
 #[test]
 fn a_refused_renewal_of_a_token_about_to_lapse_stops_the_source() {
     let (calls, _, renew) = counted(|| Err(EngineError("native_profile_sign_in_revoked".into())));
-    let source = ChatGptSource::new(tokens("held", None, now() + Duration::from_secs(30)), renew);
+    let source = ChatGptSource::new(
+        profile(),
+        tokens("held", None, now() + Duration::from_secs(30)),
+        renew,
+    );
     assert_eq!(refusal(&source), Some(SIGN_IN_EXPIRED.to_owned()));
     assert_eq!(source.failed(), Some(SIGN_IN_EXPIRED));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -192,6 +203,7 @@ fn the_relay_stop_test_reaches_the_renewal() {
         Err(EngineError("native_profile_renewal_stopped".into()))
     });
     let source = ChatGptSource::new(
+        profile(),
         tokens("held", None, now() + Duration::from_secs(200)),
         renew,
     );
@@ -213,7 +225,11 @@ fn a_renewal_its_relay_stopped_does_not_stop_the_source() {
         }
         Ok(tokens("fresh", None, now() + Duration::from_secs(3600)))
     });
-    let source = ChatGptSource::new(tokens("held", None, now() + Duration::from_secs(30)), renew);
+    let source = ChatGptSource::new(
+        profile(),
+        tokens("held", None, now() + Duration::from_secs(30)),
+        renew,
+    );
     assert_ne!(
         source.current(&|| true).err().map(|problem| problem.0),
         None

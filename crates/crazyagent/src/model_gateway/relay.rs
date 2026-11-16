@@ -366,6 +366,15 @@ impl Relay {
         matches!(self.shared.key, Key::ChatGpt(_))
     }
 
+    /// The native profile a ChatGPT relay forwards the sign-in of. Output: its reference,
+    /// or none for a relay with a fixed key.
+    pub fn chatgpt_profile(&self) -> Option<&crate::protocol::CredentialRef> {
+        match &self.shared.key {
+            Key::Fixed(_) => None,
+            Key::ChatGpt(source) => Some(source.profile()),
+        }
+    }
+
     /// Why this relay stopped forwarding: `chatgpt_sign_in_expired` once its ChatGPT
     /// sign-in could not be renewed. Output: the code, or none.
     pub fn failure(&self) -> Option<&'static str> {

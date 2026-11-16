@@ -485,7 +485,7 @@ impl NativeProfileUse {
             record.copy.fill(0);
             tokens
         });
-        Ok(ChatGptSource::new(tokens, renew))
+        Ok(ChatGptSource::new(self.account().clone(), tokens, renew))
     }
 }
 

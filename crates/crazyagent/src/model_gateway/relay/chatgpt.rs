@@ -1,5 +1,6 @@
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
+use crate::protocol::CredentialRef;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -55,16 +56,21 @@ struct State {
 /// The ChatGPT sign-in a relay forwards with. It keeps the access token in memory and asks
 /// the engine's renewal for a fresh one shortly before it lapses, one renewal at a time;
 /// it never refreshes the sign-in itself, so only the engine ever uses the refresh token.
+/// It names the native profile it was read from, so a run is never served another
+/// sign-in's plan.
 pub struct ChatGptSource {
+    profile: CredentialRef,
     state: Mutex<State>,
     renew: Renew,
 }
 
 impl ChatGptSource {
     /// Holds a sign-in read from custody with the renewal that keeps it fresh.
-    /// Inputs: the sign-in and the renewal. Output: the source.
-    pub fn new(tokens: ChatGptTokens, renew: Renew) -> Self {
+    /// Inputs: the native profile it was read from, the sign-in and the renewal.
+    /// Output: the source.
+    pub fn new(profile: CredentialRef, tokens: ChatGptTokens, renew: Renew) -> Self {
         Self {
+            profile,
             state: Mutex::new(State {
                 tokens,
                 failed: None,
@@ -72,6 +78,11 @@ impl ChatGptSource {
             }),
             renew,
         }
+    }
+
+    /// The native profile this sign-in was read from. Output: its reference.
+    pub fn profile(&self) -> &CredentialRef {
+        &self.profile
     }
 
     fn state(&self) -> MutexGuard<'_, State> {

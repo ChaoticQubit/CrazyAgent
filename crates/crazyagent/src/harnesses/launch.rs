@@ -614,8 +614,11 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
 pub fn route_chatgpt(
     mut request: LaunchRequest,
     harness: &super::registry::Harness,
+    connection: &crate::config::ModelConnection,
+    base: &Path,
     source: std::sync::Arc<crate::model_gateway::relay::chatgpt::ChatGptSource>,
 ) -> Result<(LaunchRequest, Relay), LaunchError> {
+    let _ = (connection, base);
     let home = match &request.account {
         AccountBinding::Subscription { home }
             if harness.takes_chatgpt_sign_in() && harness.named(&request.harness) =>
