@@ -1,4 +1,4 @@
-import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api/core";
+import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
 import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 
@@ -2095,20 +2095,6 @@ export interface IdeFocus {
  * window when there is one. Output: the project and reveal, or null when none is waiting. */
 export function ideFocus(): Promise<IdeFocus | null> {
   return invoke<IdeFocus | null>("desktop_ide_focus");
-}
-
-/** Opens a live view of one agent's terminal. The channel gets the attach frame, the screen
- * and then live output until the terminal closes or the view detaches. Inputs: the terminal
- * name and the channel. Output: the view's serial once the engine accepted the attach. */
-export function terminalAttach(agent: string, output: Channel<TerminalMessage>, pane: string | null = null): Promise<number> {
-  return invoke<number>("desktop_terminal_attach", { agent, pane, output });
-}
-
-/** Closes this window's view of an agent terminal; the agent keeps running and a newer view
- * of it stays open. Inputs: the terminal name and the serial its attach returned. Output:
- * resolves once the view is gone. */
-export function terminalDetach(agent: string, serial: number): Promise<void> {
-  return invoke<void>("desktop_terminal_detach", { agent, serial });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {
