@@ -9,7 +9,7 @@ import { keepTerminalsOf, TerminalPanel, useKeptTerminalProjects } from "../../s
 
 let root = null;
 let probe = null;
-const engine = { callbacks: new Map(), channel: null, next: 0, typed: [], attaches: 0, detaches: 0, nodes: [], graphs: [] };
+const engine = { callbacks: new Map(), channel: null, next: 0, typed: [], attaches: 0, detaches: 0, nodes: [], graphs: [], resizes: [] };
 
 /** Sends one message down the attached terminal's channel as the bridge does, in order.
  * Input: the message, a control frame or raw output bytes. */
@@ -36,7 +36,7 @@ function stage() {
   probe?.unmount();
   probe = null;
   keepTerminalsOf(() => false);
-  Object.assign(engine, { callbacks: new Map(), channel: null, next: 0, typed: [], attaches: 0, detaches: 0, nodes: [], graphs: [] });
+  Object.assign(engine, { callbacks: new Map(), channel: null, next: 0, typed: [], attaches: 0, detaches: 0, nodes: [], graphs: [], resizes: [] });
   window.__TAURI_INTERNALS__ = {
     invoke: async (command, args) => {
       if (command === "desktop_terminal_attach") {
@@ -54,7 +54,10 @@ function stage() {
         engine.detaches += 1;
         return null;
       }
-      if (command === "desktop_terminal_resize") return null;
+      if (command === "desktop_terminal_resize") {
+        engine.resizes.push({ cols: args.cols, rows: args.rows });
+        return null;
+      }
       if (command === "desktop_team_graph") {
         engine.graphs.push(args.id);
         return { nodes: engine.nodes, edges: [] };
@@ -111,6 +114,12 @@ export function released() {
 /** The project ids the team graph was read for since the page was staged. Output: the ids. */
 export function graphs() {
   return [...engine.graphs];
+}
+
+/** Every terminal size the panel sent the engine since the page was staged, oldest first.
+ * Output: the columns and rows of each. */
+export function resizes() {
+  return engine.resizes.map((size) => ({ ...size }));
 }
 
 /** Where the kept view's element is and whether a terminal has the focus. Output: both. */
