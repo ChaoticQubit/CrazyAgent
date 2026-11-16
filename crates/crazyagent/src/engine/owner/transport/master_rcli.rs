@@ -247,7 +247,7 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
-        crate::agent_home::remove_shell_startup(&launch.home_dir, profile.engine_root())
+        crate::agent_home::remove_home_code(&launch.home_dir, profile.engine_root())
             .map_err(|error| EngineError(error.0))?;
         let text = turn_instruction_text(&prepared.instructions, &prepared.agent_project)?;
         launch.command().map_err(|error| EngineError(error.0))?;

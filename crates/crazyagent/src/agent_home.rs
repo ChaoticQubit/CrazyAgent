@@ -42,6 +42,10 @@ pub(crate) const SH_STARTUP: [&str; 5] = [
 /// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
 /// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
 pub(crate) const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
+/// The entries of a cargo home cargo runs code from: its config under both names, whose
+/// `build.rustc-wrapper`, linkers, runners and aliases name programs, and `bin`, whose
+/// `cargo-<name>` programs cargo runs for subcommands (AGENT-HOME-CONFIG).
+const CARGO_CODE: [&str; 3] = ["config.toml", "config", "bin"];
 /// The most passes a launch makes over one folder of an agent home it keeps only part of,
 /// each removing what the last left: a second finds what a listing skipped as entries went,
 /// and only a process still adding entries outlasts them all, which refuses the launch.
@@ -1338,7 +1342,22 @@ pub(crate) fn remove_shell_startup(home: &Path, engine_root: &Path) -> Result<()
 /// them. Inputs: the home and the engine's data root, both canonical. Output: unit, or
 /// `agent_home_unwritable` when one stays, refusing the turn.
 pub(crate) fn remove_home_code(home: &Path, engine_root: &Path) -> Result<(), AgentHomeError> {
-    remove_shell_startup(home, engine_root)
+    remove_shell_startup(home, engine_root)?;
+    if home == engine_root || !home.starts_with(engine_root) {
+        return Ok(());
+    }
+    let cargo = home.join(".cargo");
+    match fs::symlink_metadata(&cargo) {
+        Ok(found) if found.is_dir() => {
+            for name in CARGO_CODE {
+                remove_entry(&cargo.join(name))?;
+            }
+        }
+        Ok(_) => remove_entry(&cargo)?,
+        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(failure("agent_home_unwritable")),
+    }
+    Ok(())
 }
 
 /// Removes one entry of an agent home, or of an engine folder no agent writes, with all it
