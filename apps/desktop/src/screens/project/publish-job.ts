@@ -139,8 +139,9 @@ export function lostStartOver(since: number, now: number): boolean {
   return now - since >= START_LOST_WAIT_MS;
 }
 
-/** Marks a project whose publish Start Create sent lost its reply, so its Overview reads the
- * publish until it shows. Inputs: the project id and when the reply came. Output: none. */
+/** Marks a project whose publish Start, from Create or the Overview form, lost its reply,
+ * so its Overview reads the publish until it shows, also after the Overview is opened
+ * again. Inputs: the project id and when the reply came. Output: none. */
 export function noteLostStart(projectId: string, at: number): void {
   lostStarts.set(projectId, at);
 }
@@ -162,14 +163,17 @@ export function forgetLostStart(projectId: string): void {
 export type LostStep = "idle" | "seen" | "over" | "read";
 
 /** Decides the Overview's next step while a Start whose reply was lost may still land
- * (GSB-1, GSB2-2). Inputs: when the reply was lost, how many reads this mount has
- * answered, the read kept and now, in epoch milliseconds. Output: the step. */
+ * (GSB-1, GSB2-2): nothing until this mount's first read is back, and none showed only
+ * once a read found no publish after the Start's budget. Inputs: when the reply was lost,
+ * how many reads this mount has answered, the read kept and now, in epoch milliseconds.
+ * Output: the step. */
 export function lostStartStep(since: number | null, answered: number, read: Result<GitHubPublishJob | null> | null, now: number): LostStep {
   assert(Number.isSafeInteger(answered), "lost Start reads answered is not a count");
   assert(answered >= 0, "lost Start reads answered is below zero");
-  if (since === null) return "idle";
+  if (since === null || answered === 0) return "idle";
   if (publishView(read?.kind === "ok" ? read.value : null).kind !== "none") return "seen";
-  if (lostStartOver(since, now)) return "over";
+  const noJob = read?.kind === "ok" && read.value === null;
+  if (noJob && lostStartOver(since, now)) return "over";
   return "read";
 }
 
