@@ -7,6 +7,7 @@ use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 pub(super) use crate::setup::process::{private_folder, run_command, staging_folder};
 
@@ -15,6 +16,13 @@ pub(super) const NODE: &str = "node";
 
 /// The lock an install holds on `<folder>.lock` while it runs.
 pub(super) type Lock = HeldLock;
+
+/// Runs one install step whose output nobody reads, bounded like [`run_command`]. Inputs:
+/// the command and the bound. Output: whether it exited with success, or `setup_timeout` or
+/// `setup_install_failed`.
+pub(super) fn run_quiet(command: Command, limit: Duration) -> Result<bool, InstallError> {
+    run_command(command, limit).map(|(passed, _)| passed)
+}
 
 /// Whether a path is a file with an execute bit set. Input: the path. Output: the answer.
 pub(super) fn runnable(path: &Path) -> bool {

@@ -2,7 +2,8 @@ use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
 use crate::setup::InstallError;
 use base64::Engine;
 use os::{
-    NODE, lock, npm_ready, open_plain, private_folder, run_command, runnable, staging_folder,
+    NODE, lock, npm_ready, open_plain, private_folder, run_command, run_quiet, runnable,
+    staging_folder,
 };
 use sha2::{Digest, Sha512};
 use std::ffi::OsStr;
@@ -37,6 +38,10 @@ static INSTALLING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 mod unix;
 #[cfg(unix)]
 use unix as os;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows as os;
 
 /// What a server check runs for one approved spec. The check never runs the default pack's
 /// pinned context-mode npx launch, nor a spec only shaped like it whose npx the tool resolver
@@ -607,7 +612,7 @@ fn fill(
             OsStr::new("--no-save"),
             source,
         ]);
-    if !run_command(command, INSTALL_TIME)?.0 {
+    if !run_quiet(command, INSTALL_TIME)? {
         return Err(InstallError("context_mode_install_failed"));
     }
     checked(staged, version).map_err(InstallError)
@@ -645,5 +650,7 @@ fn npm_command(
     os::npm_wrap(sandbox, root, &profile, bin, &canonical(staged)?)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests;
