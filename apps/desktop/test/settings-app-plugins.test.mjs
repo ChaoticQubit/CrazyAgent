@@ -225,6 +225,8 @@ test("App plugins: every string a manifest or a file name supplies shows its hid
     assert.equal(embedding.description, escaped);
     const markup = render({ listing: result });
     for (const hidden of ["‮", "​"]) assert.ok(!markup.includes(hidden), `the page never shows ${JSON.stringify(hidden)} raw`);
+    assert.ok(markup.includes(`id="app-plugin-stem${encodeURIComponent(sneaky)}"`), "the switch id names the file encoded, in its id and label references");
+    assert.ok(markup.includes(`aria-labelledby="app-plugin-stem${encodeURIComponent(sneaky)}-label"`));
     assert.ok(text(markup).includes(`stem${escaped}, version 1.`), "the name line shows the escaped name");
   });
   const listings = [
