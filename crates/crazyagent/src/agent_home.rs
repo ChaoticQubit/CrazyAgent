@@ -1392,15 +1392,16 @@ fn open_real_folder(folder: &Path) -> rustix::io::Result<std::os::fd::OwnedFd> {
     })
 }
 
-/// Removes from an agent home every entry `kept` does not name with its kind, and does the
-/// same in each kept folder that has its own list ([`keep_in`]), never following a link
-/// (RV-DS241-137). The home is opened once, by its path without following a link in its last
-/// part, and each folder below it is opened, listed and changed only through handles opened
-/// relative to its parent's, so a process an agent left that swaps a folder for a link
-/// meanwhile never leads the reset outside the home (sec F1 ds137-lock-linux). Flags an agent
-/// set on the home are cleared first (RV-DS241-138). Inputs: the home, what stays in it and
-/// the entries held so far. Output: unit, or `agent_home_unwritable` when a folder will not
-/// open or list, one entry stays or a folder still changes after [`HOME_PASSES_MAX`] passes.
+/// Removes from an agent home every entry `kept` does not name with its kind, does the same
+/// in each kept folder that has its own list and clears each project's auto-memory in a kept
+/// `projects` ([`keep_in`], B20), never following a link (RV-DS241-137). The home is opened
+/// once, by its path without following a link in its last part, and each folder below it is
+/// opened, listed and changed only through handles opened relative to its parent's, so a
+/// process an agent left that swaps a folder for a link meanwhile never leads the reset
+/// outside the home (sec F1 ds137-lock-linux). Flags an agent set on the home are cleared
+/// first (RV-DS241-138). Inputs: the home, what stays in it and the entries held so far.
+/// Output: unit, or `agent_home_unwritable` when a folder will not open or list, one entry
+/// stays or a folder still changes after [`HOME_PASSES_MAX`] passes.
 #[cfg(unix)]
 fn keep_only(
     home: &Path,
@@ -1415,7 +1416,8 @@ fn keep_only(
 }
 
 /// Removes from one open real folder of an agent home, at `at`, every entry `kept` does not
-/// name with its kind, and does the same in each kept folder that has its own list. A kept
+/// name with its kind, does the same in each kept folder that has its own list and walks into
+/// a kept `projects` to clear each project's auto-memory ([`clear_memory`], B20). A kept
 /// file stays only as this user's file with one link, so a name an agent linked to the
 /// owner's file goes as a plain unlink and that file never changes (V231-ACL, r3). Flags an
 /// agent set on an entry it keeps are cleared (RV-DS241-138), and the folder and every entry
@@ -1599,8 +1601,9 @@ fn clear_memory(folder: std::os::fd::BorrowedFd<'_>, at: &Path) -> Result<(), Ag
 }
 
 /// Removes from one real folder of an agent home every entry `kept` does not name with its
-/// kind, and does the same in each kept folder that has its own list, by path, where no
-/// agent sandbox runs and no handle walk is built. Inputs: the folder, what stays in it and
+/// kind, does the same in each kept folder that has its own list and clears each project's
+/// auto-memory in a kept `projects` ([`clear_memory`], B20), by path, where no agent sandbox
+/// runs and no handle walk is built. Inputs: the folder, what stays in it and
 /// the entries held so far. Output: unit, or `agent_home_unwritable` when it cannot be
 /// listed, one entry stays or it still changes after [`HOME_PASSES_MAX`] passes.
 #[cfg(not(unix))]
