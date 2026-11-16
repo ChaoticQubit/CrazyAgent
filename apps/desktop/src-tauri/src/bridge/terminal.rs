@@ -360,8 +360,8 @@ struct Viewer {
 
 #[derive(Default)]
 struct Window {
-    viewers: HashMap<AgentId, Viewer>,
-    opening: HashMap<AgentId, u64>,
+    viewers: HashMap<ViewKey, Viewer>,
+    opening: HashMap<ViewKey, u64>,
     cleared: u64,
 }
 
@@ -370,7 +370,7 @@ impl Window {
         let opening = self
             .opening
             .keys()
-            .filter(|agent| !self.viewers.contains_key(*agent))
+            .filter(|key| !self.viewers.contains_key(*key))
             .count();
         self.viewers.len() + opening
     }
@@ -385,7 +385,7 @@ struct Views {
 impl Views {
     #[cfg(test)]
     fn serial(&self, window: &str, key: &ViewKey) -> Option<u64> {
-        let viewer = self.windows.get(window)?.viewers.get(&key.agent)?;
+        let viewer = self.windows.get(window)?.viewers.get(key)?;
         Some(viewer.serial)
     }
 
@@ -403,10 +403,9 @@ impl Views {
     /// opening, or a free place in the window and in all windows together. Takes the window
     /// label and the key. Returns unit, `terminal_window_closed` or `terminal_viewers_full`.
     fn admits(&self, window: &str, key: &ViewKey) -> Result<(), BridgeError> {
-        let agent = &key.agent;
         let shown = self.window(window)?;
-        let room = shown.viewers.contains_key(agent)
-            || shown.opening.contains_key(agent)
+        let room = shown.viewers.contains_key(key)
+            || shown.opening.contains_key(key)
             || (shown.held() < VIEWERS_MAX && self.held() < VIEWS_MAX);
         if room {
             Ok(())
@@ -428,13 +427,12 @@ impl Views {
         serial: u64,
         requests: mpsc::Sender<TerminalRequest>,
     ) -> Result<(), BridgeError> {
-        let agent = &key.agent;
         let shown = self.window(window)?;
         let newer = serial <= shown.cleared
-            || shown.opening.get(agent).is_some_and(|open| *open > serial)
+            || shown.opening.get(key).is_some_and(|open| *open > serial)
             || shown
                 .viewers
-                .get(agent)
+                .get(key)
                 .is_some_and(|viewer| viewer.serial > serial);
         if newer {
             return Err(failure("terminal_view_replaced"));
@@ -444,12 +442,12 @@ impl Views {
             .windows
             .get_mut(window)
             .ok_or_else(|| failure("terminal_window_closed"))?;
-        if shown.opening.get(agent) == Some(&serial) {
-            shown.opening.remove(agent);
+        if shown.opening.get(key) == Some(&serial) {
+            shown.opening.remove(key);
         }
         shown
             .viewers
-            .insert(agent.clone(), Viewer { serial, requests });
+            .insert(key.clone(), Viewer { serial, requests });
         assert!(shown.held() <= VIEWERS_MAX);
         assert!(self.held() <= VIEWS_MAX);
         Ok(())
@@ -470,9 +468,9 @@ impl Drop for Reservation {
     fn drop(&mut self) {
         if let Ok(mut views) = self.terminals.0.lock()
             && let Some(shown) = views.windows.get_mut(&self.window)
-            && shown.opening.get(&self.key.agent) == Some(&self.serial)
+            && shown.opening.get(&self.key) == Some(&self.serial)
         {
-            shown.opening.remove(&self.key.agent);
+            shown.opening.remove(&self.key);
         }
     }
 }
@@ -546,7 +544,7 @@ impl Terminals {
             .get_mut(window)
             .ok_or_else(|| failure("terminal_window_closed"))?
             .opening
-            .insert(key.agent.clone(), serial);
+            .insert(key.clone(), serial);
         assert!(views.held() <= VIEWS_MAX);
         Ok(Reservation {
             terminals: Arc::clone(self),
@@ -589,7 +587,7 @@ impl Terminals {
             .views()?
             .windows
             .get(window)
-            .and_then(|shown| shown.viewers.get(&key.agent))
+            .and_then(|shown| shown.viewers.get(key))
             .map(|viewer| viewer.requests.clone())
             .ok_or_else(|| failure("terminal_not_attached"))?;
         requests
@@ -598,19 +596,18 @@ impl Terminals {
             .map_err(|_| failure("terminal_not_attached"))
     }
 
-    /// Closes a window's view of one agent terminal; the agent keeps running.
-    /// Takes the window label, the terminal name and the serial its attach returned; a view
-    /// with another serial is a newer one and stays, and an agent without that view is
-    /// already detached. Returns nothing.
+    /// Closes a window's view of one agent terminal, whichever pane it shows; the agent keeps
+    /// running. Takes the window label, the terminal name and the serial its attach returned,
+    /// which names one view: a view with another serial, a newer one or the same agent's
+    /// other pane, stays, and an agent without that view is already detached. Returns nothing.
     pub fn detach(&self, window: &str, agent: &AgentId, serial: u64) -> Result<(), BridgeError> {
         let mut views = self.views()?;
-        if let Some(shown) = views.windows.get_mut(window)
-            && shown
+        if let Some(shown) = views.windows.get_mut(window) {
+            let before = shown.viewers.len();
+            shown
                 .viewers
-                .get(agent)
-                .is_some_and(|viewer| viewer.serial == serial)
-        {
-            shown.viewers.remove(agent);
+                .retain(|key, viewer| key.agent != *agent || viewer.serial != serial);
+            assert!(before - shown.viewers.len() <= 1);
         }
         Ok(())
     }
@@ -646,12 +643,9 @@ impl Terminals {
     fn forget(&self, window: &str, key: &ViewKey, serial: u64) {
         if let Ok(mut views) = self.0.lock()
             && let Some(shown) = views.windows.get_mut(window)
-            && shown
-                .viewers
-                .get(&key.agent)
-                .is_some_and(|v| v.serial == serial)
+            && shown.viewers.get(key).is_some_and(|v| v.serial == serial)
         {
-            shown.viewers.remove(&key.agent);
+            shown.viewers.remove(key);
         }
     }
 }

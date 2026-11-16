@@ -476,7 +476,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
       };
       const sendSize = () => {
         const size = terminalSize(terminal.cols, terminal.rows);
-        if (live && size) void resizeTerminal(name, size.cols, size.rows);
+        if (live && size) void resizeTerminal(name, size.cols, size.rows, pane);
       };
       const refit = () => {
         window.cancelAnimationFrame(frame);
@@ -494,9 +494,9 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
         sendSize();
       });
       const run = jobQueue(() => end(STOPPED_TYPING));
-      const typing = connectInput(terminal, run, async (chunk, wheel) => (await typeIntoTerminal(name, chunk, wheel)).kind === "ok", () => live, () => keys.current);
+      const typing = connectInput(terminal, run, async (chunk, wheel) => (await typeIntoTerminal(name, chunk, wheel, pane)).kind === "ok", () => live, () => keys.current);
       prompt.current = (text) => {
-        if (!live || !run(async () => (await promptTerminal(name, text)).kind === "ok")) return false;
+        if (!live || !run(async () => (await promptTerminal(name, text, pane)).kind === "ok")) return false;
         terminal.focus();
         return true;
       };
