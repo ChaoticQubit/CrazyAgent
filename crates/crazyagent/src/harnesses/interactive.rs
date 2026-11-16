@@ -49,6 +49,15 @@ c=$?
 kill "$a" 2>/dev/null
 exit "$c"
 "#;
+/// Starts a listed harness inside its sandbox with the value its account hand-over gives
+/// under the names the hand-over lists, which the terminal host's variable guard keeps out
+/// of a pane's own variables. Arguments: the value, the names joined by spaces, then the
+/// harness's own command, which replaces the shell.
+const HANDED_SCRIPT: &str = r#"k=$1
+for n in $2; do export "$n=$k"; done
+shift 2
+exec "$@"
+"#;
 /// The variable that hands [`CODEX_BRIDGE_SCRIPT`] the absolute interpreter of a Codex that
 /// asks `env` for `node`, so the bridge runs it with no search path.
 const BRIDGE_INTERPRETER: &str = "CRAZYAGENT_INTERPRETER";
@@ -529,6 +538,22 @@ pub fn command_with(
     }
     let listed = installed.map(Installed::environment).unwrap_or_default();
     let env = agent_env(&env, listed, handover)?;
+    let (env, handed) = handed_apart(env, handover);
+    if let Some(handover) = handover.filter(|_| !handed.is_empty()) {
+        assert_eq!(argv[0], SANDBOX_EXEC);
+        let placeholder = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        assert_eq!(handover.token(), placeholder);
+        let names = handed.join(" ");
+        let bridge = [
+            "/bin/sh",
+            "-c",
+            HANDED_SCRIPT,
+            "handed",
+            handover.token(),
+            names.as_str(),
+        ];
+        argv.splice(3..3, bridge.map(str::to_owned));
+    }
     let built = InteractiveCommand {
         argv,
         cwd,
@@ -619,6 +644,23 @@ fn agent_env(
         .map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| failure("launch_environment_refused"))
+}
+
+/// Takes the names an account hand-over lists out of a pane's variables: those holding
+/// exactly its value, which the terminal host's variable guard refuses in a pane, so
+/// [`HANDED_SCRIPT`] sets them inside the sandbox instead. Inputs: the variables, already
+/// checked, and the hand-over. Output: the other variables and those names, in order.
+fn handed_apart(
+    env: Vec<(String, String)>,
+    handover: Option<&Handover>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let Some(handover) = handover else {
+        return (env, Vec::new());
+    };
+    let (handed, kept): (Vec<_>, Vec<_>) = env
+        .into_iter()
+        .partition(|(_, value)| value == handover.token());
+    (kept, handed.into_iter().map(|(name, _)| name).collect())
 }
 
 fn exposes(command: &InteractiveCommand, key: &Secret) -> bool {
