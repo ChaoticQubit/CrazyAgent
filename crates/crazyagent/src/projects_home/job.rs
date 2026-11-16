@@ -169,8 +169,10 @@ impl IntakeJob {
 
     /// A job an engine stop cut short, as the engine start found it on disk. Inputs: as
     /// [`IntakeJob::new`] without overrides, and the code it ended with: `done`,
-    /// `home_move_source_left` (landed, part of the old folder left) or another failure,
-    /// read as failed while copying. Output: the ended job.
+    /// `home_move_source_left` (landed, part of the old folder left),
+    /// `move_project_old_folder_left` (a project moved, its old folder left), both read as
+    /// failed while clearing, or another failure, read as failed while copying. Output: the
+    /// ended job.
     pub fn restored(
         id: RequestId,
         kind: JobKind,
@@ -183,7 +185,7 @@ impl IntakeJob {
         let job = Self::new(id, kind, project, source, mode, Vec::new());
         let state = match ended {
             "done" => JobState::Done,
-            "home_move_source_left" => JobState::Failed {
+            "home_move_source_left" | "move_project_old_folder_left" => JobState::Failed {
                 code: ended.to_owned(),
                 phase: Phase::Clearing,
             },

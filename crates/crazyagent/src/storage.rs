@@ -180,6 +180,8 @@ pub(crate) enum Job {
     HomeAddSettle(RequestId, bool, oneshot::Sender<Result<(), EngineError>>),
     HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
     HomeProjectMoveEnded(oneshot::Sender<Result<Option<projects_home::MoveEnded>, EngineError>>),
+    HomeProjectMoveLeft(RequestId, oneshot::Sender<Result<bool, EngineError>>),
+    HomeProjectMoveCleared(RequestId, oneshot::Sender<Result<(), EngineError>>),
     HomeJobForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
     HomeDeleteCheck(
         Admission,
@@ -684,6 +686,17 @@ impl Storage {
                         }
                         Job::HomeProjectMoveEnded(reply) => {
                             let _ = reply.send(projects_home::move_ended(&connection));
+                        }
+                        Job::HomeProjectMoveLeft(request, reply) => {
+                            let _ = reply.send(projects_home::move_left(&connection, &request));
+                        }
+                        Job::HomeProjectMoveCleared(request, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::move_left_clear(&connection, &request)
+                            };
+                            let _ = reply.send(result);
                         }
                         Job::HomeJobForget(request, reply) => {
                             let result = if readonly {
