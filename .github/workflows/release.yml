@@ -563,6 +563,7 @@ jobs:
           SIGNING_STATUS: ${{ steps.desktop.outputs.status }}
         run: |
           set -euo pipefail
+          case "$SIGNING_STATUS" in signed|unsigned) ;; *) echo "::error::unknown signing status '$SIGNING_STATUS'; the signature checks cannot be skipped"; exit 1 ;; esac
           app="${CARGO_TARGET_DIR:-target}/$TARGET/release/bundle/macos/CrazyAgent.app"
           cmp "$app/Contents/Library/LaunchDaemons/dev.crazyagent.power.plist" apps/desktop/src-tauri/macos/dev.crazyagent.power.plist
           case "$TARGET" in aarch64-apple-darwin) arch=arm64 ;; x86_64-apple-darwin) arch=x86_64 ;; *) echo "::error::no macOS architecture for $TARGET"; exit 1 ;; esac
