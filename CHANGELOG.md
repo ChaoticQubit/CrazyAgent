@@ -11,19 +11,11 @@ Status of each version:
 
 ## [Unreleased]
 
-## [2.4.1] - 2026-11-14 02:36 UTC - In progress (not on master)
+## [2.4.1] - 2026-11-16 04:17 UTC - In progress (not on master)
 
-- Work merged into the 2.4.1 line from 2026-11-13 04:34 UTC to 2026-11-14 02:36 UTC, last merge d7011e65b. Built on [2.4.0].
+- Work merged into the 2.4.1 line from 2026-11-13 04:34 UTC to 2026-11-16 04:17 UTC, last merge 31fe8b547. Built on [2.4.0].
+- Version set to 2.4.1 on 2026-11-16 03:51 UTC (36c3c56d2).
 - Not built or released yet.
-- Still in review, not yet merged into this line:
-  - The default master is a harness the pool can run (an Anthropic API key pool leads with Claude Code), and the no-account line names the kind of account to add.
-  - A saved master harness switch shows in the master view at once, and a live master terminal no longer stays on "connecting to the terminal".
-  - A tool that was found but refused (such as graphify whose Python other users can change) reads "Found, not used" with its reason and a Fix permissions action.
-  - A setting for when a model provider can't be reached: Stop at once, Retry briefly or Harness default.
-  - Read-only runs fail over past an unreachable local model account.
-  - A Claude free reset count reads "couldn't read" instead of "No free resets" when the reply gives no reason about the account.
-  - Agents in kept terminals are frozen while the engine is closed and continue once their connection is back.
-  - Add folder and New Project answers that arrive late are checked, not read as a lost engine.
 
 ### Added
 
@@ -34,6 +26,14 @@ Status of each version:
 - Try again on the tools step after a setup run with failures.
 - Settings, Harnesses reads harnesses the same way first run does. A found harness that cannot run says what it needs ("<name> can't run on this Mac.") and offers Node.js through setup.
 - A team question names its asker and says Urgent, and "The agent is paused until you answer." while that holds.
+- Agents in kept terminals are frozen while the engine is closed and continue once their connection is back. A kept terminal that ends at quit, or after it could not continue, without its sandbox confirmed empty is recorded so, never as plainly stopped.
+- A setting for when a model provider can't be reached: Stop at once, Retry briefly or Harness default, in Settings, Harnesses in the app and in the TUI's app settings. New runs take the choice and runs already going keep theirs. Codex and Claude Code masters, agents and research runs follow it, and RCLI keeps sending each request exactly once under every choice.
+- A tool that was found but refused (such as graphify whose Python other users can change) reads "Found, not used" with its reason and a Fix permissions action. Fix permissions names the folder it will change and asks first, on the setup step and in Settings, and Settings, Pack, Unused tools chooses between the fix and showing the command only.
+- A Claude free resets setting in the Free resets section on Pools: Don't read (the default, until Claude Code can report free resets itself), Through Claude Code, or As Claude Code. The last two ask Anthropic as Claude Code, with Claude Code's User-Agent. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts. Picking a source reads every Pools row again.
+- Add folder runs as an engine job. Home shows it as a job card you can stop, retry, answer or dismiss, the header shows a short note while it runs, and the app sends one macOS notification when it ends while the window is in the background. On Windows it takes a drive or network share folder and refuses a relative path.
+- A sign-in, Check sign-in or sign-out is refused at once when the installed harness is older than its sign-in minimum. The app and the TUI name the version and the minimum and offer Update and Check again, and Settings, Harnesses names the sign-in minimum.
+- Each skill says where it came from.
+- Settings, Hooks lists one row per plugin, with its events under Show events in the app and under Enter in the TUI, and a project's Settings tab does the same.
 
 ### Changed
 
@@ -43,6 +43,20 @@ Status of each version:
 - The setup review says what the mapping step could not work out and what to do about it.
 - iCloud download progress moves per file.
 - A goal typed into the demo's live master terminal ticks its learning step.
+- Terminal display defaults to Fullscreen for Claude Code and Codex. A saved Classic choice is kept, and RCLI, which has no Fullscreen view, stays Classic. On macOS, Option-drag selects text in a Fullscreen terminal, such as Codex's.
+- The default master is a harness the pool can run (an Anthropic API key pool leads with Claude Code), and the no-account line names the kind of account to add.
+- Read-only runs fail over past an unreachable local model account.
+- Instructions imported from a project's existing agent files sit under an "### Imported from" label with their headings moved down a level. When that changes a line, the whole original is kept in .crazyagent/imported/, and the setup review asks you to check the imported text.
+- The TUI master view without a terminal matches the app's, and the demo and no-account lines name the kinds of account to add.
+- Opening the Overview or picking one of its tabs reads the tabs again, so a tab file changed outside CrazyAgent shows, and a failed re-read keeps the tabs shown.
+- Research: your retry, plan or replan of a research job resets its rate-limit count, rate-limited ends are capped, and a refused launch waits before trying again with a line that says why. The Overview keeps a waiting job's whole status, Queued and why.
+- A research run whose remote endpoint has no address, or refuses every address, and a managed account on a machine that reaches none of its sign-in hosts, end at once with their own line.
+- Adding a project runs one add at a time, a second add to the same destination is refused, and an add cut short by an engine stop is cleared at the next start, which says how it ended.
+- The TUI setup review's About is a field of several lines, with Ctrl-J for a new line.
+- The TUI tells a folder that did not arrive, and what a move left behind, in the desktop's words.
+- An engine start reports cut-short and swept staging counts only when there is something to count.
+- The TUI first-run Setup's c key reads Skip for now, and its whole help bar fits one row at 80x24.
+- On Linux below Full access, the access choices in the app and the TUI say that network limits hold ports, not hosts, and that nested git is not blocked. A port's access question says the port is open on every host.
 
 ### Fixed
 
@@ -52,6 +66,30 @@ Status of each version:
 - A slow bundled tmux version check no longer holds every terminal start.
 - A native lead's teammates' terminal server now runs under a keeper, and its servers end at the quit time limit.
 - The urgent question toast's Open puts the keyboard only on the urgent question that is waiting.
+- A master's reply no longer shows up repeated in its terminal when the pane width changes, such as when a sub-agent terminal opens beside the master.
+- A terminal read that tmux cut short is asked for again instead of being misread, and the terminal connection stays open.
+- A saved master harness switch shows in the master view at once, and a live master terminal no longer stays on "connecting to the terminal".
+- A Claude free reset count reads "couldn't read" instead of "No free resets" when the reply gives no reason about the account.
+- Add folder and New Project answers that arrive late are checked, not read as a lost engine.
+- A Delete everything that moved some folders to the Trash and then failed, or that an engine stop cut short, is shown as cut short, never as Failed or forgotten. Delete again keeps that notice when it moves nothing, in the TUI it opens Settings before it asks, a second delete of the same project is refused, and an engine start sweeps staging an engine stop left behind.
+- A project move waits for a graph refresh in flight, no longer stalls other projects' onboarding, refuses a destination another project still names, and tells you when part of the old folder was left, to check it there.
+- Home reads the folder before it answers a refused move and names its git link.
+- Pools shows the Free resets controls only from your stored settings, never from defaults while loading or after a failed read, and a Free resets save changes only the setting you changed, so two screens no longer overwrite each other.
+- Accounts open one drawer per account, and a late result never reaches or reopens another account's drawer.
+- The TUI New project keeps every refused or left draft, oldest first, up to eight, so leaving an open wizard never overwrites one.
+- A refused socket request in the app shows the engine's reason.
+- A task you cancelled before its turn could be sent ends cancelled, not queued again, and Ask agent to update rewrites only a queued resolve task.
+- A failed research job keeps its whole line up to 512 bytes, cut on a character boundary.
+- A gone agent's recovery notice no longer breaks every banner, and removing a project finishes its agents' notices.
+- Switched-off pack hooks stay off when the skill or server they follow is removed, and the hooks of a server a launch leaves out are left out too.
+- A plugin's hooks switch refused partway reads the hooks again, so the list shows what changed, and a project's hooks switch leaves out hooks switched off in Settings, as the TUI does.
+- The TUI waits one frame, not a whole tick, for an engine reply, and the app no longer redraws its whole window when a poll reads the same.
+- One agent's terminal kill, start and keep no longer hold other agents' terminals, and a view waits only for its own agent's kill under way.
+- Delete everything of one project no longer takes another project's Overview runs with a similar name, and a removed project gets no new Overview runs.
+- The hidden folders list saves against the version its screen read, so a stale save is refused instead of overwriting a newer one.
+- Wall windows check a question's length before reading it, and a terminal attach interrupted by a page load gives its place back.
+- The TUI turns its keyboard mode back on after an external editor closes.
+- On Linux the engine's login service writes its environment lines with the right quoting, and on Windows adding the command line tool to your Path keeps %VAR% entries as they were.
 
 ### Security
 
@@ -62,6 +100,41 @@ Status of each version:
 - The Node archive is kept only when its SHA-256 matches and every link inside it stays under its top folder.
 - The old engine tool folder is removed only when it is a real folder you own with private permissions.
 - A lead's tmux grant names the tmux file for reading and starting, never its folder.
+- On Linux older than 6.12, agents can stop or signal other programs you run, such as a dev server or CrazyAgent itself.
+- Each launch resets an agent's home to what the engine and its harness use across runs and removes the rest without following a link. Cargo caches stay only as links to your own, shell startup files and planted npm, yarn and cargo settings are removed, and an agent's sandbox denies writes to its shell startup files. Agent processes read no global git config and no Python user site.
+- Harness version reads, re-pins and Check again use only the file they checked, and a command whose link chain passes through a folder agents can write or a temp folder is refused. The harness catalog lists a PATH entry only while it still leads to the pinned file.
+- context-mode runs only from the checked shared install, never through npx, and is off on Windows. The install never runs a package script, its program file is checked against the pinned hash on every read, and Node.js older than 22.5 is refused with a line that says why.
+- No engine git runs a config hook or a signing program a repository names, engine git refuses lazy fetch, and a timed-out engine git is killed.
+- Git name checks fold the characters macOS file systems ignore, and the repository layout check ignores letter case.
+- Approve and Check validate a stored MCP server spec first, and a spec with hidden or control characters is refused with a line saying to remove and add it again. The approval view shows the command with hidden characters escaped.
+- Onboarding document gathering leaves out what your global git ignore file names and secret-like compound file names, and lists the documents folder without following links.
+- The IDE git bridge checks every config file and include target, and refuses a fetch or push while your git config holds an includeIf onbranch entry.
+- On Linux, a confined git step and its helper end with the engine, stale step locks and folders are swept, every landing git step on an agent worktree runs under Landlock, and a confined step no longer reads your own git ignore file.
+- On Linux, the bubblewrap sandbox runs through the helper with a socket filter that allows TCP only, and a git index or rebase state is never granted.
+- Every git deny below a writable root holds in any letter case, and the nested .git rule covers every writable root.
+- The project instructions file is protected on every platform, an instructions save stages its temp file in .crazyagent/context, and a hard-linked instructions file is refused.
+- Homebrew and setup tools run only from places other users cannot change and never as root. A nix-darwin store is accepted, a Node folder owned by another user is refused, and on Windows winget and uv run only by their full kept path.
+- A confined IDE start refuses a server data folder holding a .git, gets a new temp folder of its own and removes it after, and the IDE data folders' grant keeps the .git, launch file and root denies.
+- An access grant found stale after a move or a delete is answered as an outcome to check, never as nothing changed. Allow binds to the socket shown, and a failed check gives one refusal.
+- A team you stopped stays stopped: its tasks are not dispatched, a stopped agent cannot hand work on, and Recovery never restarts it.
+- A native lead taken over after its run time passed is ended at its launch deadline before any account handoff.
+- Below 80x24 in the TUI no screen takes a key, so Enter can no longer install and approve Setup's pack unseen. Only Ctrl+Q or Ctrl+C acts, and Setup's approval note sits last in the review.
+- TUI paste is taken whole or not at all, and the skill review shows the SKILL.md body as agents read it, every line in full with hidden characters escaped.
+- Profile fields refuse hidden, direction and tag characters and strip them from stored values, and stack entries are checked. A stored name left blank opens first run with the rest of the page filled in.
+- A launch is refused when its agent or teammates can write the engine a role is delegated to.
+- A login service naming a gone program, one on /Volumes or a translocated app is reinstalled for this app's engine, an engine on a disk image or in a temp folder is never installed, and an older AppImage keeps a newer private engine copy.
+- The model relay binds a port from a reserved block that agent sandboxes cannot bind and no port grant opens, skipping a port that is taken, refused or unavailable.
+- Codex rollouts open with no link followed from the agent home down.
+- Copies use exclusive creates that follow no link, and walk the source by open folder handles.
+- The check for folders other users can change reads ACLs on macOS and POSIX ACLs on Linux, and projects the engine set up count as folders agents can write.
+- Overview evidence leaves out hidden folders and secret-looking paths.
+- An Overview tab file that came with the project's files, not from you or CrazyAgent, is labelled so and is Copy only, and the engine refuses to run it or an IDE Install & use tab from it.
+- SDK homes you configure are an engine secret.
+- A master can never close the question an access request asks you. Only you decide it.
+- Adopting a running harness after an engine restart adopts only the recorded process, the replay of its record is bounded in time, and a cut record is passed over instead of being handed to the session as new turns.
+- App updates refuse a signature whose trusted comment names a field twice, and the old unhashed signature form.
+- The Linux release build checks its bun download against a pinned SHA-256, as the macOS build does.
+- Removing a project deletes its knowledge rows, its live master and notification rows, and its transcripts, the last by open folder handles.
 
 ## [V3] - 2026-11-13 16:59 UTC - In progress (not on master)
 
