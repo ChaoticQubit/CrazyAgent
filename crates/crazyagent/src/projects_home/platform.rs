@@ -141,16 +141,9 @@ pub(super) fn writable_folder(path: &Path) -> std::io::Result<()> {
 }
 
 /// Recreates the symlink at `original` as the same link at `copy`, never
-/// following it. Input: the original link, its target text and the new path.
-#[cfg(unix)]
-pub(super) fn copy_link(_original: &Path, target: PathBuf, copy: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, copy)
-}
-
-/// Recreates the symlink at `original` as the same link at `copy`, never
 /// following it; Windows keeps file and folder links apart. Written, not tested.
 #[cfg(target_os = "windows")]
-pub(super) fn copy_link(original: &Path, target: PathBuf, copy: &Path) -> std::io::Result<()> {
+fn copy_link(original: &Path, target: PathBuf, copy: &Path) -> std::io::Result<()> {
     use std::os::windows::fs::FileTypeExt;
     if fs::symlink_metadata(original)?.file_type().is_symlink_dir() {
         std::os::windows::fs::symlink_dir(target, copy)
@@ -231,16 +224,7 @@ impl SourceFolder {
     pub(super) fn names(
         &self,
     ) -> std::io::Result<impl Iterator<Item = std::io::Result<std::ffi::OsString>>> {
-        use std::os::unix::ffi::OsStringExt;
-        let listing = rustix::fs::Dir::read_from(&self.0)?;
-        Ok(listing.filter_map(|entry| match entry {
-            Ok(entry) => {
-                let name = entry.file_name().to_bytes();
-                (!matches!(name, b"." | b".."))
-                    .then(|| Ok(std::ffi::OsString::from_vec(name.to_vec())))
-            }
-            Err(error) => Some(Err(error.into())),
-        }))
+        listed(&self.0)
     }
 
     /// Reads the link `name` in this folder without following it. Output: its target text,
@@ -260,21 +244,21 @@ impl SourceFolder {
     }
 
     /// Copies the regular file `name` in this folder, the file `seen` describes, to a new
-    /// file at `copy`, never writing through a link there (RV-DS241-40). Inputs: the name,
-    /// its metadata from the listing and the new path. Output: Ok, or the I/O error,
-    /// `AlreadyExists` when anything holds `copy`.
+    /// file of the same name in `into`, never writing through a link there (RV-DS241-40).
+    /// Inputs: the name, its metadata from the listing and the folder to write in. Output:
+    /// Ok, or the I/O error, `AlreadyExists` when anything holds the name in `into`.
     pub(super) fn copy_file(
         &self,
         name: &std::ffi::OsStr,
         seen: &fs::Metadata,
-        copy: &Path,
+        into: &TargetFolder,
     ) -> std::io::Result<()> {
         use rustix::fs::{Mode, OFlags};
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
         let source = rustix::fs::openat(&self.0, name, flags, Mode::empty()).map_err(met_link)?;
         let source = fs::File::from(source);
         same_entry(&source, seen)?;
-        copy_opened(&source, seen, copy)
+        copy_opened(&source, seen, &into.0, name)
     }
 }
 
@@ -296,7 +280,7 @@ impl SourceFolder {
     pub(super) fn names(
         &self,
     ) -> std::io::Result<impl Iterator<Item = std::io::Result<std::ffi::OsString>>> {
-        Ok(fs::read_dir(&self.0)?.map(|entry| entry.map(|entry| entry.file_name())))
+        listed(&self.0)
     }
 
     /// Reads the link `name` in this folder. Output: its target text, or the I/O error.
@@ -304,20 +288,245 @@ impl SourceFolder {
         fs::read_link(self.0.join(name))
     }
 
-    /// Copies the file `name` in this folder to `copy` once nothing holds that path, then
-    /// gives it the listed permissions. Output: Ok, or the I/O error, `AlreadyExists` when
-    /// anything holds `copy`. Written, not tested.
+    /// Copies the file `name` in this folder to the same name in `into` once nothing holds
+    /// that path, then gives it the listed permissions. Output: Ok, or the I/O error,
+    /// `AlreadyExists` when anything holds the name in `into`. Written, not tested.
     pub(super) fn copy_file(
         &self,
         name: &std::ffi::OsStr,
         seen: &fs::Metadata,
-        copy: &Path,
+        into: &TargetFolder,
     ) -> std::io::Result<()> {
-        if fs::symlink_metadata(copy).is_ok() {
+        let copy = into.0.join(name);
+        if fs::symlink_metadata(&copy).is_ok() {
             return Err(std::io::ErrorKind::AlreadyExists.into());
         }
-        fs::copy(self.0.join(name), copy)?;
-        fs::set_permissions(copy, seen.permissions())
+        fs::copy(self.0.join(name), &copy)?;
+        fs::set_permissions(&copy, seen.permissions())
+    }
+}
+
+/// The names in an open folder, `.` and `..` left out, read as the walk goes. Input: the
+/// folder. Output: the names, or the I/O error.
+#[cfg(unix)]
+fn listed(
+    folder: &fs::File,
+) -> std::io::Result<impl Iterator<Item = std::io::Result<std::ffi::OsString>>> {
+    use std::os::unix::ffi::OsStringExt;
+    let listing = rustix::fs::Dir::read_from(folder)?;
+    Ok(listing.filter_map(|entry| match entry {
+        Ok(entry) => {
+            let name = entry.file_name().to_bytes();
+            (!matches!(name, b"." | b"..")).then(|| Ok(std::ffi::OsString::from_vec(name.to_vec())))
+        }
+        Err(error) => Some(Err(error.into())),
+    }))
+}
+
+/// The names in a folder. Windows: read by path. Input: the folder. Output: the names, or
+/// the I/O error. Written, not tested.
+#[cfg(target_os = "windows")]
+fn listed(
+    folder: &Path,
+) -> std::io::Result<impl Iterator<Item = std::io::Result<std::ffi::OsString>>> {
+    Ok(fs::read_dir(folder)?.map(|entry| entry.map(|entry| entry.file_name())))
+}
+
+/// What a folder of a tree being written holds at one name, a link not followed: nothing,
+/// a real folder, or anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Held {
+    Nothing,
+    Folder,
+    Other,
+}
+
+/// A folder a copy or a refill writes in, or the walk that makes a tree writable opens up,
+/// opened from the tree's root one plain name at a time with no link followed in any part,
+/// so a folder swapped for a link is refused, never written or walked through (DS-INTAKE).
+/// Unix: the open folder, each entry made or changed relative to it.
+#[cfg(unix)]
+pub(super) struct TargetFolder(fs::File);
+
+/// A folder a copy or a refill writes in, or the walk that makes a tree writable opens up.
+/// Windows: its path, checked to be a real folder when opened, each entry made or changed
+/// by path as before. Written, not tested.
+#[cfg(target_os = "windows")]
+pub(super) struct TargetFolder(PathBuf);
+
+#[cfg(unix)]
+impl TargetFolder {
+    /// Opens the folder `below` a tree's root. Inputs: the root and the plain names below it
+    /// (empty for the root itself). Output: the folder, or the I/O error, [`swapped`] when a
+    /// part is a link or not a folder now.
+    pub(super) fn open(root: &Path, below: &Path) -> std::io::Result<Self> {
+        use rustix::fs::OFlags;
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let folder = crate::platform::open_beneath(root, below, flags).map_err(met_link)?;
+        Ok(Self(fs::File::from(folder)))
+    }
+
+    /// The names in the folder, `.` and `..` left out. Output: the names, or the I/O error.
+    pub(super) fn names(
+        &self,
+    ) -> std::io::Result<impl Iterator<Item = std::io::Result<std::ffi::OsString>>> {
+        listed(&self.0)
+    }
+
+    /// What holds `name` in this folder, a link not followed. Input: the name. Output: the
+    /// answer, or the I/O error.
+    pub(super) fn holds(&self, name: &std::ffi::OsStr) -> std::io::Result<Held> {
+        use rustix::fs::{AtFlags, FileType};
+        match rustix::fs::statat(&self.0, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(found) if FileType::from_raw_mode(found.st_mode) == FileType::Directory => {
+                Ok(Held::Folder)
+            }
+            Ok(_) => Ok(Held::Other),
+            Err(rustix::io::Errno::NOENT) => Ok(Held::Nothing),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Makes the folder `name` in this folder, private to the owner until it gets its real
+    /// permissions. Input: the name. Output: Ok, or the I/O error, `AlreadyExists` when
+    /// anything holds the name.
+    pub(super) fn make_folder(&self, name: &std::ffi::OsStr) -> std::io::Result<()> {
+        rustix::fs::mkdirat(&self.0, name, rustix::fs::Mode::RWXU)?;
+        Ok(())
+    }
+
+    /// Makes `name` in this folder the same link as `_original`, never following it. Inputs:
+    /// the name, the original link and its target text. Output: Ok, or the I/O error,
+    /// `AlreadyExists` when anything holds the name.
+    pub(super) fn make_link(
+        &self,
+        name: &std::ffi::OsStr,
+        _original: &Path,
+        target: PathBuf,
+    ) -> std::io::Result<()> {
+        rustix::fs::symlinkat(target, &self.0, name)?;
+        Ok(())
+    }
+
+    /// The folder's own metadata, read through its handle. Output: it, or the I/O error.
+    pub(super) fn metadata(&self) -> std::io::Result<fs::Metadata> {
+        self.0.metadata()
+    }
+
+    /// Gives the folder itself the permissions `wanted`, through its handle. Input: the
+    /// permissions. Output: Ok, or the I/O error.
+    pub(super) fn set_mode(&self, wanted: fs::Permissions) -> std::io::Result<()> {
+        self.0.set_permissions(wanted)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl TargetFolder {
+    /// Adds owner read, write and search to the folder `name` in this folder, its other bits
+    /// kept. Linux has no chmod that refuses a link before kernel 6.6, so the entry is pinned
+    /// first ([`pin`]). Input: the name. Output: true once a folder was opened up, false for
+    /// a link or anything else there now, or the I/O error.
+    pub(super) fn open_up(&self, name: &std::ffi::OsStr) -> std::io::Result<bool> {
+        use rustix::fs::{FileType, Mode};
+        let (pinned, mode) = pin(&self.0, name)?;
+        if FileType::from_raw_mode(mode) != FileType::Directory {
+            return Ok(false);
+        }
+        chmod_pinned(&pinned, Mode::from_raw_mode(mode) | Mode::RWXU)?;
+        Ok(true)
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+impl TargetFolder {
+    /// Adds owner read, write and search to the folder `name` in this folder, its other bits
+    /// kept, through `chmodat` with `AT_SYMLINK_NOFOLLOW` on this folder's handle; a link put
+    /// there meanwhile gets the mode itself. Input: the name. Output: true once a folder was
+    /// opened up, false for a link or anything else there, or the I/O error.
+    pub(super) fn open_up(&self, name: &std::ffi::OsStr) -> std::io::Result<bool> {
+        use rustix::fs::{AtFlags, FileType, Mode};
+        let found = rustix::fs::statat(&self.0, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        if FileType::from_raw_mode(found.st_mode) != FileType::Directory {
+            return Ok(false);
+        }
+        let mode = Mode::from_raw_mode(found.st_mode) | Mode::RWXU;
+        rustix::fs::chmodat(&self.0, name, mode, AtFlags::SYMLINK_NOFOLLOW)?;
+        Ok(true)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl TargetFolder {
+    /// Opens the folder `below` a tree's root by path once it is a real folder. Inputs: the
+    /// root and the path below it. Output: the folder, or the I/O error, [`swapped`] for a
+    /// link or anything else. Written, not tested.
+    pub(super) fn open(root: &Path, below: &Path) -> std::io::Result<Self> {
+        let path = root.join(below);
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(swapped());
+        }
+        Ok(Self(path))
+    }
+
+    /// The names in the folder. Output: the names, or the I/O error.
+    pub(super) fn names(
+        &self,
+    ) -> std::io::Result<impl Iterator<Item = std::io::Result<std::ffi::OsString>>> {
+        listed(&self.0)
+    }
+
+    /// What holds `name` in this folder, a link not followed. Input: the name. Output: the
+    /// answer, or the I/O error.
+    pub(super) fn holds(&self, name: &std::ffi::OsStr) -> std::io::Result<Held> {
+        match fs::symlink_metadata(self.0.join(name)) {
+            Ok(found) if found.is_dir() && !found.file_type().is_symlink() => Ok(Held::Folder),
+            Ok(_) => Ok(Held::Other),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Held::Nothing),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Makes the folder `name` in this folder, writable until it gets its real permissions.
+    /// Input: the name. Output: Ok, or the I/O error.
+    pub(super) fn make_folder(&self, name: &std::ffi::OsStr) -> std::io::Result<()> {
+        let path = self.0.join(name);
+        fs::create_dir(&path)?;
+        private_folder(&path)
+    }
+
+    /// Makes `name` in this folder the same link as `original`. Inputs: the name, the
+    /// original link and its target text. Output: Ok, or the I/O error.
+    pub(super) fn make_link(
+        &self,
+        name: &std::ffi::OsStr,
+        original: &Path,
+        target: PathBuf,
+    ) -> std::io::Result<()> {
+        copy_link(original, target, &self.0.join(name))
+    }
+
+    /// Clears the read-only flag of the folder `name` in this folder. Input: the name.
+    /// Output: true once a folder was opened up, false for a link or anything else there, or
+    /// the I/O error.
+    pub(super) fn open_up(&self, name: &std::ffi::OsStr) -> std::io::Result<bool> {
+        let path = self.0.join(name);
+        let found = fs::symlink_metadata(&path)?;
+        if !found.is_dir() || found.file_type().is_symlink() {
+            return Ok(false);
+        }
+        private_folder(&path).map(|()| true)
+    }
+
+    /// The folder's own metadata. Output: it, or the I/O error.
+    pub(super) fn metadata(&self) -> std::io::Result<fs::Metadata> {
+        fs::symlink_metadata(&self.0)
+    }
+
+    /// Gives the folder itself the permissions `wanted`. Input: the permissions. Output: Ok,
+    /// or the I/O error.
+    pub(super) fn set_mode(&self, wanted: fs::Permissions) -> std::io::Result<()> {
+        fs::set_permissions(&self.0, wanted)
     }
 }
 
@@ -335,50 +544,54 @@ fn same_entry(opened: &fs::File, seen: &fs::Metadata) -> std::io::Result<()> {
     }
 }
 
-/// Creates the new file of a copy, failing when anything, a link included, holds its path.
-/// Input: the path. Output: the file, open for writing, or the I/O error.
+/// Creates the new file `name` of a copy in the open folder `into`, failing when anything, a
+/// link included, holds the name. Inputs: the folder and the name. Output: the file, open
+/// for writing, or the I/O error.
 #[cfg(unix)]
-fn new_file(copy: &Path) -> std::io::Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(copy)
+fn new_file(into: &fs::File, name: &std::ffi::OsStr) -> std::io::Result<fs::File> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW;
+    let mode = Mode::RUSR | Mode::WUSR;
+    let written = rustix::fs::openat(into, name, flags | OFlags::CLOEXEC, mode)?;
+    Ok(fs::File::from(written))
 }
 
-/// Copies an opened regular file to a new path. macOS: an APFS clone made only where
-/// nothing holds the path yet, else the new file is created first and `fs::copy` runs from
-/// one descriptor to the other through `/dev/fd/<n>`, which opens that same descriptor, so
-/// the bytes, extended attributes, access list and permissions are written as before and no
-/// path is resolved again. Inputs: the source, its listed metadata and the new path.
+/// Copies an opened regular file to a new file `name` in the open folder `into`. macOS: an
+/// APFS clone made only where nothing holds the name yet, else the new file is created first
+/// and `fs::copy` runs from one descriptor to the other through `/dev/fd/<n>`, so the bytes,
+/// extended attributes, access list and permissions are written as before and no path is
+/// resolved again. Inputs: the source, its listed metadata, the folder and the name.
 /// Output: Ok, or the I/O error.
 #[cfg(target_os = "macos")]
-fn copy_opened(source: &fs::File, seen: &fs::Metadata, copy: &Path) -> std::io::Result<()> {
+fn copy_opened(
+    source: &fs::File,
+    seen: &fs::Metadata,
+    into: &fs::File,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<()> {
     use rustix::io::Errno;
     use std::os::fd::AsRawFd;
-    match rustix::fs::fclonefileat(
-        source,
-        rustix::fs::CWD,
-        copy,
-        rustix::fs::CloneFlags::empty(),
-    ) {
-        Ok(()) => return set_mode(copy, seen.permissions()),
+    match rustix::fs::fclonefileat(source, into, name, rustix::fs::CloneFlags::empty()) {
+        Ok(()) => return set_mode_at(into, name, &seen.permissions()),
         Err(Errno::NOTSUP | Errno::XDEV) => {}
         Err(error) => return Err(error.into()),
     }
-    let written = new_file(copy)?;
+    let written = new_file(into, name)?;
     let handle = |file: &fs::File| PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
     fs::copy(handle(source), handle(&written)).map(drop)
 }
 
-/// Copies an opened regular file to a new path: its bytes and then its permissions, through
-/// the new file's own descriptor. Inputs: the source, its listed metadata and the new path.
-/// Output: Ok, or the I/O error.
+/// Copies an opened regular file to a new file `name` in the open folder `into`: its bytes
+/// and then its permissions, through the new file's own descriptor. Inputs: the source, its
+/// listed metadata, the folder and the name. Output: Ok, or the I/O error.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn copy_opened(source: &fs::File, seen: &fs::Metadata, copy: &Path) -> std::io::Result<()> {
-    let mut written = new_file(copy)?;
+fn copy_opened(
+    source: &fs::File,
+    seen: &fs::Metadata,
+    into: &fs::File,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    let mut written = new_file(into, name)?;
     let mut reader = source;
     std::io::copy(&mut reader, &mut written)?;
     written.set_permissions(seen.permissions())
@@ -405,28 +618,69 @@ pub(super) fn open_seen(path: &Path, _seen: &fs::Metadata) -> std::io::Result<fs
     fs::File::open(path)
 }
 
-/// Gives an entry the permissions `wanted`. macOS: never through a link at its path; a link
-/// put there gets the mode itself. Input: the path and the permissions. Output: Ok, or the
-/// I/O error.
-#[cfg(target_os = "macos")]
-pub(super) fn set_mode(path: &Path, wanted: fs::Permissions) -> std::io::Result<()> {
+/// Gives an entry the permissions `wanted`, never through a link at its path. Linux has no
+/// chmod that refuses a link before kernel 6.6, so the entry is pinned first ([`pin`]) and a
+/// link there is [`swapped`]. Input: the path and the permissions. Output: Ok, or the I/O
+/// error.
+#[cfg(target_os = "linux")]
+fn set_mode(path: &Path, wanted: fs::Permissions) -> std::io::Result<()> {
+    use rustix::fs::{FileType, Mode};
+    use std::os::unix::fs::PermissionsExt;
+    let (pinned, mode) = pin(rustix::fs::CWD, path)?;
+    if FileType::from_raw_mode(mode) == FileType::Symlink {
+        return Err(swapped());
+    }
+    chmod_pinned(&pinned, Mode::from_raw_mode(wanted.mode()))
+}
+
+/// Gives an entry the permissions `wanted`, never through a link at its path; a link put
+/// there gets the mode itself ([`set_mode_at`]). Input: the path and the permissions.
+/// Output: Ok, or the I/O error.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn set_mode(path: &Path, wanted: fs::Permissions) -> std::io::Result<()> {
+    set_mode_at(rustix::fs::CWD, path, &wanted)
+}
+
+/// Gives the entry `name` in the open folder `dir` the permissions `wanted` through `chmodat`
+/// with `AT_SYMLINK_NOFOLLOW`, so a link put there gets the mode itself. Inputs: the folder,
+/// the name and the permissions. Output: Ok, or the I/O error.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn set_mode_at<P: rustix::path::Arg>(
+    dir: impl std::os::fd::AsFd,
+    name: P,
+    wanted: &fs::Permissions,
+) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = rustix::fs::Mode::from_raw_mode(wanted.mode() as rustix::fs::RawMode);
-    rustix::fs::chmodat(
-        rustix::fs::CWD,
-        path,
-        mode,
-        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-    )?;
+    rustix::fs::chmodat(dir, name, mode, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
     Ok(())
 }
 
-/// Gives an entry the permissions `wanted` by path. Other systems: Linux has no chmod that
-/// refuses a link before kernel 6.6, and Windows keeps its read-only flag as before. Input:
-/// the path and the permissions. Output: Ok, or the I/O error.
-#[cfg(not(target_os = "macos"))]
-pub(super) fn set_mode(path: &Path, wanted: fs::Permissions) -> std::io::Result<()> {
-    fs::set_permissions(path, wanted)
+/// Pins the entry `name` in the open folder `dir` with `O_PATH`, no link followed, so its
+/// mode can change through [`chmod_pinned`] and never through a link. Inputs: the folder and
+/// the name. Output: the pinned entry and its mode, type bits included, or the I/O error.
+#[cfg(target_os = "linux")]
+fn pin<P: rustix::path::Arg>(
+    dir: impl std::os::fd::AsFd,
+    name: P,
+) -> std::io::Result<(std::os::fd::OwnedFd, rustix::fs::RawMode)> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let pinned = rustix::fs::openat(dir, name, flags, Mode::empty())?;
+    let mode = rustix::fs::fstat(&pinned)?.st_mode;
+    Ok((pinned, mode))
+}
+
+/// Changes the mode of an entry [`pin`] pinned through `/proc/self/fd/<n>`, which names that
+/// entry and no path. Inputs: the pinned entry and the mode. Output: Ok, or the I/O error.
+#[cfg(target_os = "linux")]
+fn chmod_pinned(pinned: &std::os::fd::OwnedFd, mode: rustix::fs::Mode) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    rustix::fs::chmod(
+        format!("/proc/self/fd/{}", pinned.as_raw_fd()).as_str(),
+        mode,
+    )?;
+    Ok(())
 }
 
 /// Opens a file for appending, creating it, and refuses to follow a link

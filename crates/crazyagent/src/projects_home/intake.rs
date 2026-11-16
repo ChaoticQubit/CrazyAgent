@@ -1,6 +1,6 @@
 use super::platform::{
-    SourceFolder, Stamp, copy_link, is_swapped, open_seen, permission_bits, private_folder,
-    set_mode, stamp, writable_folder,
+    Held, SourceFolder, Stamp, TargetFolder, is_swapped, open_seen, permission_bits,
+    private_folder, stamp, writable_folder,
 };
 use super::{AddMode, holds_owner_home, owner_home, path_text, real_folder, refused};
 use crate::engine::EngineError;
@@ -48,8 +48,8 @@ type TestStep = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
 #[cfg(all(test, unix))]
 thread_local! {
     /// A step an intake test runs once, just before the walk that makes a tree writable first
-    /// touches a folder below the tree's root, standing in for a process that swaps that
-    /// folder for a link meanwhile.
+    /// opens up an entry it listed below the tree's root, standing in for a process that
+    /// swaps that folder for a link meanwhile.
     static BEFORE_WRITABLE_FOLDER: TestStep = const { std::cell::RefCell::new(None) };
     /// A step an intake test runs once, just before a refill first opens a folder of its
     /// target below the root, standing in for a process that swaps that folder for a link
@@ -649,31 +649,30 @@ fn restore(copy: &Path, source: &Path) -> Result<(), EngineError> {
         .map_err(|_| refused("home_move_partial"))
 }
 
-/// Copies back every entry of `copy` missing from `target` without following
-/// links, each read through the folder of `copy` it was listed in and written only where
-/// nothing holds its path, then gives each folder of `target` its counterpart's
-/// permissions, never through a link put at its path (RV-DS241-40, RV-DS241-41).
-/// Input: a complete copy and a partly deleted folder it was copied from.
-/// Output: Ok, or the refusal codes of `copy_tree`; entries still in `target`
-/// are kept for `verify_tree` to compare.
+/// Copies back every entry of `copy` missing from `target` without following links, each
+/// read through the folder of `copy` it was listed in and made through the folder of
+/// `target` opened from its root with no link followed, only where nothing holds its name,
+/// then gives each folder of `target` its counterpart's permissions through its own handle
+/// (RV-DS241-40, RV-DS241-41, DS-INTAKE). Input: a complete copy and a partly deleted folder
+/// it was copied from. Output: Ok, or the refusal codes of `copy_tree`; entries still in
+/// `target` are kept for `verify_tree` to compare.
 fn fill_tree(copy: &Path, target: &Path) -> Result<(), EngineError> {
     let failed = |e: std::io::Error| copy_failed("refill", &e, false);
     if fs::symlink_metadata(target).is_err() {
         return copy_tree(copy, target);
     }
     let root = fs::symlink_metadata(copy).map_err(failed)?;
-    let mut folders = vec![(target.to_path_buf(), root.clone())];
-    let mut stack = vec![(copy.to_path_buf(), target.to_path_buf(), 0usize, root)];
+    let mut folders = vec![(PathBuf::new(), root.clone())];
+    let mut stack = vec![(PathBuf::new(), 0usize, root)];
     let mut entries = 0u64;
-    while let Some((from, to, depth, seen)) = stack.pop() {
+    while let Some((below, depth, seen)) = stack.pop() {
         #[cfg(all(test, unix))]
         if depth > 0 {
             run_step(&BEFORE_REFILL_FOLDER);
         }
-        let below = from
-            .strip_prefix(copy)
-            .map_err(|_| refused("home_copy_failed"))?;
-        let folder = SourceFolder::open(copy, below, &seen).map_err(failed)?;
+        let folder = SourceFolder::open(copy, &below, &seen).map_err(failed)?;
+        let into = TargetFolder::open(target, &below).map_err(failed)?;
+        let from = copy.join(&below);
         for name in folder.names().map_err(failed)? {
             entries += 1;
             if entries > ENTRIES_MAX {
@@ -681,33 +680,37 @@ fn fill_tree(copy: &Path, target: &Path) -> Result<(), EngineError> {
             }
             let name = name.map_err(failed)?;
             let path = from.join(&name);
-            let kept = to.join(&name);
             let metadata = fs::symlink_metadata(&path).map_err(failed)?;
             let kind = metadata.file_type();
-            match fs::symlink_metadata(&kept) {
-                Err(_) if kind.is_symlink() => {
-                    let link = folder.read_link(&name).map_err(failed)?;
-                    copy_link(&path, link, &kept).map_err(failed)?;
+            let held = into.holds(&name).map_err(failed)?;
+            if kind.is_dir() {
+                if held == Held::Other {
+                    continue;
                 }
-                Err(_) if kind.is_dir() => copy_tree(&path, &kept)?,
-                Err(_) => folder.copy_file(&name, &metadata, &kept).map_err(failed)?,
-                Ok(existing)
-                    if kind.is_dir() && existing.is_dir() && !existing.file_type().is_symlink() =>
-                {
-                    if depth + 1 > DEPTH_MAX {
-                        return Err(refused("home_copy_too_large"));
-                    }
-                    folders.push((kept.clone(), metadata.clone()));
-                    stack.push((path, kept, depth + 1, metadata));
+                if depth + 1 > DEPTH_MAX {
+                    return Err(refused("home_copy_too_large"));
                 }
-                Ok(_) => {}
+                if held == Held::Nothing {
+                    into.make_folder(&name).map_err(failed)?;
+                }
+                folders.push((below.join(&name), metadata.clone()));
+                stack.push((below.join(&name), depth + 1, metadata));
+            } else if !kind.is_symlink() && !kind.is_file() {
+                return Err(refused("home_copy_special_file"));
+            } else if held != Held::Nothing {
+                continue;
+            } else if kind.is_symlink() {
+                let link = folder.read_link(&name).map_err(failed)?;
+                into.make_link(&name, &path, link).map_err(failed)?;
+            } else {
+                folder.copy_file(&name, &metadata, &into).map_err(failed)?;
             }
         }
     }
-    for (folder, wanted) in folders.into_iter().rev() {
-        let now = fs::symlink_metadata(&folder).map_err(failed)?;
-        if permission_bits(&now) != permission_bits(&wanted) {
-            set_mode(&folder, wanted.permissions()).map_err(failed)?;
+    for (below, wanted) in folders.into_iter().rev() {
+        let folder = TargetFolder::open(target, &below).map_err(failed)?;
+        if permission_bits(&folder.metadata().map_err(failed)?) != permission_bits(&wanted) {
+            folder.set_mode(wanted.permissions()).map_err(failed)?;
         }
     }
     assert!(entries <= ENTRIES_MAX);
@@ -876,18 +879,24 @@ pub fn add_left(source: &Path, destination: &Path, moving: bool) -> &'static str
     }
 }
 
+/// Lets the owner delete a whole tree: adds owner read, write and search to its root and to
+/// each folder below, each changed through its parent's handle and then opened from the root
+/// with no link followed, so a folder swapped for a link is left as it is, never walked
+/// through (DS-INTAKE). Input: the tree's root. Output: Ok, or the I/O error.
 fn make_writable(root: &Path) -> std::io::Result<()> {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(folder) = stack.pop() {
-        #[cfg(all(test, unix))]
-        if folder != root {
+    writable_folder(root)?;
+    let mut stack = vec![PathBuf::new()];
+    while let Some(below) = stack.pop() {
+        let folder = match TargetFolder::open(root, &below) {
+            Err(error) if is_swapped(&error) && !below.as_os_str().is_empty() => continue,
+            opened => opened?,
+        };
+        for name in folder.names()? {
+            let name = name?;
+            #[cfg(all(test, unix))]
             run_step(&BEFORE_WRITABLE_FOLDER);
-        }
-        writable_folder(&folder)?;
-        for entry in fs::read_dir(&folder)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                stack.push(entry.path());
+            if folder.open_up(&name)? {
+                stack.push(below.join(name));
             }
         }
     }
@@ -986,12 +995,12 @@ fn gitdir_inside(root: &Path, folder: &Path, file: &Path) -> bool {
 }
 
 /// Copies a folder tree without following links, leaving out each entry `skip` names.
-/// Each source folder is opened from the root with no link followed and each entry is read
-/// through it, so an entry swapped for a link meanwhile is refused, never read through
-/// (RV-DS241-41), and each file is written only where nothing holds its path, so a link
-/// copied under a name that differs only in case is never written through (RV-DS241-40).
-/// Inputs: a real source folder, a target path that does not exist yet, the skip rule
-/// and the bounds. Output: as `copy_tree`.
+/// Each source and target folder is opened from its root with no link followed and each
+/// entry is read or made through it, so an entry swapped for a link meanwhile is refused,
+/// never read or written through (RV-DS241-41, DS-INTAKE), and each entry is made only where
+/// nothing holds its name, so a link copied under a name that differs only in case is never
+/// written through (RV-DS241-40). Inputs: a real source folder, a target path that does not
+/// exist yet, the skip rule and the bounds. Output: as `copy_tree`.
 fn copy_entries(
     source: &Path,
     target: &Path,
@@ -1011,14 +1020,13 @@ fn copy_entries(
     let mut copied = 0u64;
     fs::create_dir(target).map_err(failed)?;
     private_folder(target).map_err(failed)?;
-    let mut folders = vec![(target.to_path_buf(), root.permissions())];
-    let mut stack = vec![(source.to_path_buf(), target.to_path_buf(), 0usize, root)];
+    let mut folders = vec![(PathBuf::new(), root.permissions())];
+    let mut stack = vec![(PathBuf::new(), 0usize, root)];
     let mut entries = 0u64;
-    while let Some((from, to, depth, seen)) = stack.pop() {
-        let below = from
-            .strip_prefix(source)
-            .map_err(|_| refused("home_copy_failed"))?;
-        let folder = SourceFolder::open(source, below, &seen).map_err(failed)?;
+    while let Some((below, depth, seen)) = stack.pop() {
+        let folder = SourceFolder::open(source, &below, &seen).map_err(failed)?;
+        let into = TargetFolder::open(target, &below).map_err(failed)?;
+        let from = source.join(&below);
         for name in folder.names().map_err(failed)? {
             entries += 1;
             if entries > bounds.entries {
@@ -1027,7 +1035,6 @@ fn copy_entries(
             tally.go_on()?;
             let name = name.map_err(failed)?;
             let path = from.join(&name);
-            let copy = to.join(&name);
             let metadata = fs::symlink_metadata(&path).map_err(failed)?;
             let kind = metadata.file_type();
             if skip(&path, kind) {
@@ -1038,17 +1045,16 @@ fn copy_entries(
             }
             if kind.is_symlink() {
                 let link = folder.read_link(&name).map_err(failed)?;
-                copy_link(&path, link, &copy).map_err(failed)?;
+                into.make_link(&name, &path, link).map_err(failed)?;
             } else if kind.is_dir() {
                 if depth + 1 > bounds.depth {
                     return Err(refused("home_copy_too_large"));
                 }
-                fs::create_dir(&copy).map_err(failed)?;
-                private_folder(&copy).map_err(failed)?;
-                folders.push((copy.clone(), metadata.permissions()));
-                stack.push((path, copy, depth + 1, metadata));
+                into.make_folder(&name).map_err(failed)?;
+                folders.push((below.join(&name), metadata.permissions()));
+                stack.push((below.join(&name), depth + 1, metadata));
             } else if kind.is_file() {
-                folder.copy_file(&name, &metadata, &copy).map_err(failed)?;
+                folder.copy_file(&name, &metadata, &into).map_err(failed)?;
             } else {
                 return Err(refused("home_copy_special_file"));
             }
@@ -1056,8 +1062,10 @@ fn copy_entries(
             tally.copied.fetch_add(1, Ordering::SeqCst);
         }
     }
-    for (folder, permissions) in folders.into_iter().rev() {
-        fs::set_permissions(&folder, permissions).map_err(failed)?;
+    for (below, permissions) in folders.into_iter().rev() {
+        TargetFolder::open(target, &below)
+            .and_then(|folder| folder.set_mode(permissions))
+            .map_err(failed)?;
     }
     assert!(entries <= bounds.entries);
     assert!(copied <= entries);
