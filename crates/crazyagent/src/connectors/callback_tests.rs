@@ -77,6 +77,11 @@ fn the_callback_accepts_one_matching_state_and_refuses_everything_else() {
         sent("POST", &format!("/callback?state={STATE}&code=c1")),
         get(&format!("/other?state={STATE}&code=c1")),
         get(&format!("//callback?state={STATE}&code=c1")),
+        get(&format!("/./callback?state={STATE}&code=c1")),
+        get(&format!("/x/../callback?state={STATE}&code=c1")),
+        get(&format!("/call\tback?state={STATE}&code=c1")),
+        get(&format!("/callback/?state={STATE}&code=c1")),
+        get(&format!("/%63allback?state={STATE}&code=c1")),
         get("/callback?state=wrong&code=c1"),
         get(&format!("/callback?state={STATE}x&code=c1")),
         get("/callback?code=c1"),
@@ -143,6 +148,25 @@ fn a_flood_of_refused_requests_closes_the_callback() {
     }
     assert_eq!(thread.join().unwrap(), Waited::Flooded);
     assert!(closed(port));
+}
+
+/// DEC-168 addendum 30, update 22:58: a connection that sends nothing and closes gets no
+/// answer at all, so a browser's spare connection never reads a refusal, and the wait goes
+/// on for the real answer.
+#[test]
+fn a_connection_that_sends_nothing_gets_no_answer_and_the_wait_goes_on() {
+    let (port, _stop, thread) = waiting(WAIT);
+    let mut silent = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    silent.set_read_timeout(Some(WAIT)).unwrap();
+    silent.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    let _ = silent.read_to_end(&mut answer);
+    assert!(answer.is_empty(), "{}", String::from_utf8_lossy(&answer));
+    assert!(!thread.is_finished(), "a silent connection ended the wait");
+    let target = format!("/callback?state={STATE}&code=c1");
+    assert_eq!(ask(port, &get(&target)), (200, DONE_PAGE.to_owned()));
+    let code = "c1".to_owned();
+    assert_eq!(thread.join().unwrap(), Waited::Code { code, iss: None });
 }
 
 /// DEC-168 addendum 30 decision 5: a cancelled sign-in stops its wait at once and closes the
