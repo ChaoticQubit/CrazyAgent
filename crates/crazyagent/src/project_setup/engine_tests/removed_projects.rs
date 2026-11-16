@@ -269,6 +269,36 @@ async fn new_project_refuses_an_id_a_removal_holds() {
     engine.stop().await;
 }
 
+/// Leader 01:22: New Project goes through the leftover probe too, so a New Project named
+/// like an id an old build's removal left rows under is refused, and gets none of them.
+#[tokio::test]
+async fn new_project_refuses_an_id_with_leftover_rows() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    write(
+        &engine,
+        "INSERT INTO memory_library(id,project,origin,text)
+            VALUES ('m-left','left-over','{\"kind\":\"written\"}','A note an old build left.');",
+    );
+    let project = ProjectId::new("left-over").unwrap();
+    let named = owner
+        .setup_project(project, spec("Left over"), pooled_setup(vec![]), 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        result(named),
+        rejected("project_id_removed"),
+        "a New Project never gets an id with leftover rows"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects WHERE id='left-over'"),
+        0
+    );
+    assert_eq!(notes(&engine, "left-over"), 1, "a refused New Project clears nothing");
+    drop(owner);
+    engine.stop().await;
+}
+
 #[tokio::test]
 async fn a_full_record_refuses_a_removal_before_anything_is_removed() {
     let engine = Engine::start().await;
