@@ -69,6 +69,19 @@ test("the desktop says why RCLI has no native sub-agents in the engine's own wor
   assert.equal(coord.NATIVE_UNAVAILABLE.rcli, engine);
 });
 
+test("Task 21: a harness kind with no native sub-agents and no reason of its own reads the engine's words, in Coordination and in a refusal of Native", async () => {
+  const source = readFileSync(new URL("../../../crates/crazyagent/src/coord/settings.rs", import.meta.url), "utf8");
+  const engine = /pub const LISTED_NATIVE_UNAVAILABLE: &str =\s*"([^"]+)";/u.exec(source)?.[1];
+  assert.ok(engine, "the engine states the general reason");
+  assert.equal(coord.LISTED_NATIVE_UNAVAILABLE, engine);
+  for (const harness of ["claude-code", "codex"]) {
+    assert.equal(coord.modeOptions(harness, false)[0].disabledReason, engine, harness);
+    assert.equal(coord.modeHelper(harness, false), engine, harness);
+  }
+  const { failureSentence } = await import("../src/api-projects.ts");
+  assert.equal(failureSentence("coord_native_unsupported"), engine);
+});
+
 test("the desktop says what the app cannot show of Codex sub-agents in the engine's own words", () => {
   const source = readFileSync(new URL("../../../crates/crazyagent/src/coord/settings.rs", import.meta.url), "utf8");
   const engine = /pub const CODEX_NATIVE_SCOPE: &str =\s*"([^"]+)";/u.exec(source)?.[1];
@@ -323,7 +336,7 @@ test("the coordination settings name each harness as the catalog the page hands 
   const display = renderToStaticMarkup(createElement(coord.TerminalDisplaySetting, { projectId: "p", status, reload: forbidden, name }));
   assert.match(display, /Rocket has no Fullscreen view and stays Classic\./);
   assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, true, name), /^Fullscreen: Claude Prime and Codex Prime draw their own view/);
-  assert.equal(coord.modeOptions("codex", false, name)[0].disabledReason, "Codex Prime has no native sub-agents, so its sub-agents are CrazyAgent workers.");
-  assert.equal(coord.modeHelper("codex", false, name), "Codex Prime has no native sub-agents, so its sub-agents are CrazyAgent workers.");
+  assert.equal(coord.modeOptions("codex", false, name)[0].disabledReason, "This harness has no native sub-agents, so its sub-agents are CrazyAgent workers.");
+  assert.equal(coord.modeHelper("codex", false, name), "This harness has no native sub-agents, so its sub-agents are CrazyAgent workers.");
   assert.equal(coord.HARNESS_NAMES, undefined, "no list of harness names of its own is left in the desktop");
 });
