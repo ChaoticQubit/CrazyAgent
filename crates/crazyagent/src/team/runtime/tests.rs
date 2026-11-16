@@ -24799,6 +24799,75 @@ fn wiring_a_kept_native_lead_being_stopped_is_not_left_running_at_engine_stop() 
     host.kill(&AgentId::team(lead).unwrap()).unwrap();
 }
 
+/// LP-R1 F2: an engine stop that leaves an agent's pane running presses Escape in every
+/// other live pane of that agent's window, the teammates a native lead split off, as it
+/// does in the agent's own pane, so their turns stop with the engine while every pane stays.
+/// The agent is a real adopted pane served by its worker thread; the teammate is a real
+/// tmux pane in its window that records the first key it reads.
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_engine_stop_that_leaves_an_agent_running_presses_escape_in_its_teammates_panes() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = fixture.pane(&host, master);
+    fixture.keep(master, &record);
+    let agent = AgentId::team(master).unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "the adopted agent is idle", |f| {
+        f.agent_status(master).0 == AgentStatus::Idle && f.recorded(master)
+    });
+    let own = host
+        .panes(&agent)
+        .unwrap()
+        .into_iter()
+        .find(|listed| listed.pid == record.pid)
+        .unwrap()
+        .id;
+    let ready = fixture.base.join("teammate-ready");
+    let read = fixture.base.join("teammate-read");
+    let mate = teammate_split_running(
+        &fixture,
+        &own,
+        &format!(
+            "/bin/stty raw -echo && : > '{}' && /bin/dd bs=1 count=1 of='{}' 2>/dev/null; exec /bin/sleep 300",
+            ready.display(),
+            read.display()
+        ),
+    );
+    let deadline = Instant::now() + WAIT;
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "the teammate pane reads keys");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    assert_eq!(team.shutdown().unwrap(), names(&[master]));
+    let deadline = Instant::now() + WAIT;
+    while std::fs::metadata(&read).map_or(0, |file| file.len()) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        std::fs::read(&read).unwrap_or_default(),
+        b"\x1b",
+        "the engine stop pressed Escape in the teammate's pane"
+    );
+    let left: Vec<String> = host
+        .panes(&agent)
+        .unwrap()
+        .into_iter()
+        .filter(|listed| !listed.dead)
+        .map(|listed| listed.id)
+        .collect();
+    assert_eq!(left, [own, mate], "both panes keep running");
+    assert_eq!(
+        fixture.agent_status(master),
+        (AgentStatus::Stopped, Some(LEFT_RUNNING_NOTE.into()))
+    );
+    host.close(&[]).unwrap();
+}
+
 /// Wiring test of engine mechanics: a managed agent that starts its harness for each turn
 /// keeps no pane record, so a later engine neither leaves its pane running nor refuses to
 /// take it over, and its session record stays with recovery.
@@ -27283,6 +27352,14 @@ fn test_tmux(fixture: &Fixture, arguments: &[&str]) -> String {
 /// own pane. Returns the new pane's id.
 #[cfg(target_os = "macos")]
 fn teammate_split(fixture: &Fixture, lead_pane: &str) -> String {
+    teammate_split_running(fixture, lead_pane, "exec /bin/sleep 300")
+}
+
+/// Opens one teammate pane in a harness's window running a shell command, as
+/// [`teammate_split`] does. Takes the fixture, the harness's own pane and the command.
+/// Returns the new pane's id.
+#[cfg(target_os = "macos")]
+fn teammate_split_running(fixture: &Fixture, lead_pane: &str, command: &str) -> String {
     let pane = test_tmux(
         fixture,
         &[
@@ -27293,7 +27370,7 @@ fn teammate_split(fixture: &Fixture, lead_pane: &str) -> String {
             "#{pane_id}",
             "-t",
             lead_pane,
-            "exec /bin/sleep 300",
+            command,
         ],
     );
     test_tmux(fixture, &["select-layout", "-t", lead_pane, "tiled"]);
