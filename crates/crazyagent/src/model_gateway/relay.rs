@@ -10,6 +10,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 
+pub mod chatgpt;
+use chatgpt::{CHATGPT_CODEX_BASE_URL, ChatGptSource};
+
 pub const TOKEN_PREFIX: &str = "crazyagent-relay-";
 pub const LOCAL_PLACEHOLDER: &str = "crazyagent-local";
 const TOKEN_HEX: usize = 64;
@@ -324,6 +327,30 @@ impl Relay {
             shared,
             accept: Some(accept),
         })
+    }
+
+    /// Starts a relay for a ChatGPT sign-in: it forwards only `POST /responses` under the
+    /// ChatGPT backend Codex uses, with the source's access token and account id in place
+    /// of the placeholder. Input: the sign-in source, which may be shared by several relays
+    /// of one account. Output: the running relay, or `model_relay_unavailable`.
+    pub fn start_chatgpt(source: Arc<ChatGptSource>) -> Result<Self, EngineError> {
+        Self::start_chatgpt_at(CHATGPT_CODEX_BASE_URL, source)
+    }
+
+    fn start_chatgpt_at(base_url: &str, source: Arc<ChatGptSource>) -> Result<Self, EngineError> {
+        let (access, _) = source.current(&|| false)?;
+        Self::start(base_url, access)
+    }
+
+    /// Whether this relay forwards with a ChatGPT sign-in rather than a fixed key.
+    pub fn is_chatgpt(&self) -> bool {
+        false
+    }
+
+    /// Why this relay stopped forwarding: `chatgpt_sign_in_expired` once its ChatGPT
+    /// sign-in could not be renewed. Output: the code, or none.
+    pub fn failure(&self) -> Option<&'static str> {
+        None
     }
 
     /// The loopback port the relay listens on, for the agent's sandbox network rule.
@@ -862,6 +889,21 @@ pub(crate) fn upstream_config(
     Ok(config.into_bytes())
 }
 
+/// Builds the curl config for one request forwarded with a ChatGPT sign-in, which goes
+/// only to curl's stdin: the backend URL, the method, the harness's headers minus the
+/// dropped ones and every account-scoped header, `Authorization: Bearer` with the access
+/// token, `chatgpt-account-id` when the sign-in has one, and the body file.
+/// Output: the config bytes, or `model_relay_request_invalid`.
+pub(crate) fn chatgpt_config(
+    upstream: &Upstream,
+    incoming: &Incoming,
+    access: &SecretString,
+    _account_id: Option<&str>,
+    body: Option<&Path>,
+) -> Result<Vec<u8>, EngineError> {
+    upstream_config(upstream, incoming, KeyHeader::Bearer, access, body)
+}
+
 /// Builds the curl command for the provider without running it: no `.curlrc`, no
 /// redirects, only the upstream's scheme, streaming output with the reply headers first,
 /// and a cleared environment. Its arguments and environment hold no URL, header or key.
@@ -939,3 +981,6 @@ fn relay_reply(output: &mut impl BufRead, stream: &mut TcpStream) -> Result<(), 
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, unix))]
+mod chatgpt_tests;

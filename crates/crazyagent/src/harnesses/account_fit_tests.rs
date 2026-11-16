@@ -289,8 +289,9 @@ fn a_gemini_api_key_fits_only_a_harness_that_lists_the_gemini_wire_format() {
 }
 
 /// Task 17: every endpoint account the Add account screens can make fits a listed harness
-/// that lists the wire format the account stores, and no listed harness that lists another;
-/// a sign-in fits no listed harness, whichever format it lists.
+/// that lists the wire format the account stores, and no listed harness that lists another.
+/// A sign-in fits none of these: no endpoint account stores `openai-responses`, the one
+/// format a ChatGPT sign-in fits through the ChatGPT relay (T22).
 #[test]
 fn every_endpoint_account_fits_a_listed_harness_by_the_wire_format_it_stores() {
     let accounts = every_account();
@@ -316,5 +317,83 @@ fn every_endpoint_account_fits_a_listed_harness_by_the_wire_format_it_stores() {
                 "{format} on {provider:?} {method:?}"
             );
         }
+    }
+}
+
+fn native_sign_in(provider: Provider) -> ModelConnection {
+    every_account()
+        .into_iter()
+        .find(|(found, method, ..)| *found == provider && *method == SignInMethod::Subscription)
+        .map(|(.., connection)| connection)
+        .expect("the provider has a sign-in")
+}
+
+/// T22 R6 (DEC-180 addendum 2, answer 2): a ChatGPT sign-in fits Codex, as it always did,
+/// and a listed harness that lists the `openai-responses` wire format, through the ChatGPT
+/// relay; not a listed harness of another format, not another own adapter, and not once it
+/// is stored with another harness. A Claude subscription still fits Claude Code only, and
+/// an OpenAI API key still fits by the wire format it stores.
+#[test]
+fn a_chatgpt_sign_in_fits_a_listed_harness_that_lists_openai_responses_and_no_other() {
+    let chatgpt = native_sign_in(Provider::Chatgpt);
+    let claude = native_sign_in(Provider::Claude);
+    let built = super::registry::Registry::build(&[
+        (
+            "responses-row",
+            &fit_manifest(
+                "responses-row",
+                "jsonl-turn",
+                "openai-responses",
+                &handed("openai-responses"),
+            ),
+        ),
+        (
+            "chat-row",
+            &fit_manifest(
+                "chat-row",
+                "jsonl-turn",
+                "openai-chat",
+                &handed("openai-chat"),
+            ),
+        ),
+        (
+            "own-row",
+            &fit_manifest("own-row", "codex-app-server", "openai-responses", ""),
+        ),
+    ])
+    .expect("ChatGPT fit row manifests load");
+    let fits =
+        |id: &str, connection: &ModelConnection| built.get(id).unwrap().account_fits(connection);
+    assert!(fits("responses-row", &chatgpt));
+    assert!(!fits("chat-row", &chatgpt));
+    assert!(!fits("own-row", &chatgpt));
+    for id in ["responses-row", "chat-row", "own-row"] {
+        assert!(!fits(id, &claude), "{id}");
+    }
+    assert!(account_fits("codex", &chatgpt));
+    assert!(!account_fits("claude-code", &chatgpt));
+    assert!(account_fits("claude-code", &claude));
+    assert!(!account_fits("codex", &claude));
+    let mut moved = chatgpt.clone();
+    moved.harness = CredentialRef::new("responses-row").unwrap();
+    assert!(!fits("responses-row", &moved));
+    let (openai_key, _) = AccountDraft {
+        provider: Provider::OpenaiApi,
+        method: SignInMethod::ApiKey,
+        name: String::new(),
+        url: None,
+        model: Some("gpt-5".to_owned()),
+    }
+    .build(true, NONCE)
+    .expect("an OpenAI key account builds");
+    assert!(fits("chat-row", &openai_key));
+    assert!(!fits("responses-row", &openai_key));
+    for harness in super::registry::registry().all() {
+        let expected = harness.id() == "codex"
+            || harness
+                .account_protocols()
+                .iter()
+                .any(|listed| listed == "openai-responses");
+        assert_eq!(harness.account_fits(&chatgpt), expected, "{}", harness.id());
     }
 }

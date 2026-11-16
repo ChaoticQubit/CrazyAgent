@@ -1401,3 +1401,147 @@ fn an_acp_driver_hands_prompts_interrupts_and_lines_to_its_protocol() {
     );
     assert_eq!(driver.interrupt().unwrap_err().0, "launch_not_running");
 }
+
+const RESPONSES_LAUNCH_MANIFEST: &str = concat!(
+    "schema: 1\nkind: harness\nid: \"responses-launch\"\nname: \"Responses Launch\"\n",
+    "binaries:\n  - \"responses-launch\"\nheadless: \"responses-launch for the T22 rows\"\n",
+    "model_selection: true\naccount_kinds:\n  - \"api_key\"\n",
+    "  - \"open_ai_compatible_url\"\n  - \"local\"\n",
+    "roles:\n  - \"agent\"\nsub_agents: \"app\"\npiped:\n  driver: \"jsonl-turn\"\n",
+    "account_protocols:\n  - \"openai-responses\"\n",
+    "accounts:\n  openai-responses:\n    env:\n",
+    "      OPENAI_BASE_URL: \"{relay_url}\"\n      OPENAI_API_KEY: \"{token}\"\n",
+);
+const CHAT_LAUNCH_MANIFEST: &str = concat!(
+    "schema: 1\nkind: harness\nid: \"chat-launch\"\nname: \"Chat Launch\"\n",
+    "binaries:\n  - \"chat-launch\"\nheadless: \"chat-launch for the T22 rows\"\n",
+    "model_selection: true\naccount_kinds:\n  - \"api_key\"\n",
+    "  - \"open_ai_compatible_url\"\n  - \"local\"\n",
+    "roles:\n  - \"agent\"\nsub_agents: \"app\"\npiped:\n  driver: \"jsonl-turn\"\n",
+    "account_protocols:\n  - \"openai-chat\"\n",
+    "accounts:\n  openai-chat:\n    env:\n",
+    "      OPENAI_BASE_URL: \"{relay_url}\"\n      OPENAI_API_KEY: \"{token}\"\n",
+);
+const LAUNCH_ACCESS: &str = "chatgpt-launch-access-0123456789abcdef";
+
+fn launch_source() -> std::sync::Arc<crate::model_gateway::relay::chatgpt::ChatGptSource> {
+    use crate::model_gateway::relay::chatgpt::{ChatGptSource, ChatGptTokens};
+    let tokens = ChatGptTokens {
+        access: crate::credentials::SecretString::bearer(LAUNCH_ACCESS.as_bytes().to_vec())
+            .unwrap(),
+        account_id: Some("acct-launch".to_owned()),
+        expires: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            + std::time::Duration::from_secs(3600),
+    };
+    std::sync::Arc::new(ChatGptSource::new(
+        tokens,
+        Box::new(|_: std::time::Duration, _: &dyn Fn() -> bool| {
+            Err(crate::engine::EngineError("no renewal expected".into()))
+        }),
+    ))
+}
+
+fn chatgpt_request(harness: &str, account: AccountBinding) -> LaunchRequest {
+    retry_request(
+        harness,
+        account,
+        crate::provider_retry::ProviderRetry::HarnessDefault,
+    )
+}
+
+fn sign_in_home() -> AccountBinding {
+    AccountBinding::Subscription {
+        home: PathBuf::from("/tmp/chatgpt-launch-home"),
+    }
+}
+
+/// T22 R5: a listed harness that lists `openai-responses`, launched on a ChatGPT sign-in,
+/// is routed through a ChatGPT relay: the request it launches with names only the relay's
+/// loopback URL and placeholder, never the access token, the account id or the ChatGPT
+/// backend, and keeps the sign-in's own home.
+#[test]
+fn a_chatgpt_launch_of_a_listed_harness_names_only_the_chatgpt_relay_and_its_placeholder() {
+    let registry = crate::harnesses::registry::Registry::build(&[(
+        "responses-launch",
+        RESPONSES_LAUNCH_MANIFEST,
+    )])
+    .expect("responses launch manifest loads");
+    let harness = registry.get("responses-launch").unwrap();
+    let routed = super::route_chatgpt(
+        chatgpt_request("responses-launch", sign_in_home()),
+        harness,
+        launch_source(),
+    );
+    let (request, relay) = match routed {
+        Ok(routed) => routed,
+        Err(problem) => panic!("the ChatGPT launch was not routed: {}", problem.0),
+    };
+    assert!(relay.is_chatgpt());
+    match &request.account {
+        AccountBinding::Url {
+            home,
+            base_url,
+            key,
+        } => {
+            assert_eq!(home, &PathBuf::from("/tmp/chatgpt-launch-home"));
+            assert_eq!(base_url, &relay.base_url());
+            assert!(base_url.starts_with("http://127.0.0.1:"));
+            assert_eq!(key.as_ref().map(|key| key.reveal()), Some(relay.token()));
+        }
+        other => panic!("the launch kept {other:?}"),
+    }
+    let shown = format!("{request:?}");
+    for secret in [LAUNCH_ACCESS, "acct-launch", "chatgpt.com"] {
+        assert!(!shown.contains(secret), "{shown}");
+    }
+}
+
+/// T22 R5: Codex and Claude Code keep their own sign-in paths, so a ChatGPT relay is never
+/// started for an own adapter, for a listed harness that does not list `openai-responses`,
+/// or for a launch that is not bound to a sign-in's home.
+#[test]
+fn a_chatgpt_relay_is_refused_for_own_adapters_other_formats_and_keyed_launches() {
+    let registry = crate::harnesses::registry::Registry::build(&[
+        ("responses-launch", RESPONSES_LAUNCH_MANIFEST),
+        ("chat-launch", CHAT_LAUNCH_MANIFEST),
+    ])
+    .expect("launch manifests load");
+    let code = |name: &str, harness: &crate::harnesses::registry::Harness, account| {
+        super::route_chatgpt(chatgpt_request(name, account), harness, launch_source())
+            .err()
+            .map(|problem| problem.0)
+    };
+    let bundled = crate::harnesses::registry::registry();
+    for own in ["codex", "claude-code", "rcli"] {
+        assert_eq!(
+            code(own, bundled.get(own).unwrap(), sign_in_home()).as_deref(),
+            Some("launch_chatgpt_unsupported"),
+            "{own}"
+        );
+    }
+    assert_eq!(
+        code(
+            "chat-launch",
+            registry.get("chat-launch").unwrap(),
+            sign_in_home()
+        )
+        .as_deref(),
+        Some("launch_chatgpt_unsupported")
+    );
+    let keyed = AccountBinding::ApiKey {
+        home: PathBuf::from("/tmp/chatgpt-launch-home"),
+        key: super::Secret::new("sk-launch-key".to_owned()).unwrap(),
+        base_url: None,
+    };
+    assert_eq!(
+        code(
+            "responses-launch",
+            registry.get("responses-launch").unwrap(),
+            keyed
+        )
+        .as_deref(),
+        Some("launch_chatgpt_unsupported")
+    );
+}

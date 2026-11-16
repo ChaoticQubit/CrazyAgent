@@ -147,6 +147,17 @@ impl NativeProfileUse {
     }
 }
 
+impl NativeProfileUse {
+    /// Matches the Unix ChatGPT sign-in source for a ChatGPT relay. No value is ever made
+    /// here. Input: the Codex executable, unused. Output: none.
+    pub(crate) fn chatgpt_source(
+        &self,
+        _executable: &Path,
+    ) -> Result<crate::model_gateway::relay::chatgpt::ChatGptSource, EngineError> {
+        match *self {}
+    }
+}
+
 impl Drop for NativeProfileUse {
     /// Matches the Unix lease, which releases its profile locks when dropped, so the
     /// callers that end a lease at a chosen point mean the same on every target.

@@ -342,6 +342,24 @@ pub fn handover(
     })
 }
 
+/// Hands a ChatGPT sign-in to a listed harness that lists `openai-responses`, through the
+/// ChatGPT relay started for it (DEC-180 addendum 2, answer 2): the harness gets the
+/// relay's loopback URL, its placeholder and the model chosen for the run, filled into the
+/// manifest's `openai-responses` entry; the sign-in's stored `native-default` is never
+/// handed out. Inputs: the harness, the stored sign-in, its ChatGPT relay and the run's
+/// model. Output: the hand-over; `account_not_compatible` for another account or harness,
+/// `account_chatgpt_relay_missing` for a relay that is not a ChatGPT relay,
+/// `account_model_missing` for a blank model, or `account_handover_missing`.
+pub fn chatgpt_handover(
+    harness: &Harness,
+    connection: &ModelConnection,
+    relay: &Relay,
+    model: &str,
+) -> Result<Handover, EngineError> {
+    let _ = (harness, connection, relay, model);
+    Err(failure("account_not_compatible"))
+}
+
 /// Whether accounts made by one Add account choice fit a harness, by the same rule as
 /// `Harness::account_fits`: a sign-in only the harness it was made with, when that harness
 /// lists subscription accounts; an endpoint account any harness that speaks its wire format.

@@ -318,3 +318,160 @@ fn a_listed_harness_names_the_kinds_of_account_that_fit_it_when_its_pool_has_non
         "No account in this project's pool can run Row Harness, and no kind of account CrazyAgent can add fits it yet"
     );
 }
+
+const CHATGPT_ACCESS: &str = "chatgpt-sentinel-access-0123456789abcdef";
+const RESPONSES_ENV: &str = concat!(
+    "accounts:\n",
+    "  openai-responses:\n",
+    "    env:\n",
+    "      OPENAI_BASE_URL: \"{relay_url}\"\n",
+    "      OPENAI_API_KEY: \"{token}\"\n",
+    "      OPENAI_MODEL: \"{model}\"\n",
+);
+
+/// A ChatGPT sign-in as the Add account screens store it: made with Codex, native wire
+/// format, the engine's managed profile and no model of its own.
+fn chatgpt_sign_in() -> ModelConnection {
+    serde_json::from_value(serde_json::json!({
+        "id": "row-chatgpt",
+        "provider": "openai",
+        "harness": "codex",
+        "protocol": "native",
+        "account_ref": "row-chatgpt-login",
+        "endpoint": {"kind": "native"},
+        "model": {"id": "native-default", "author": "openai"},
+        "auth": {"method": "native_managed", "profile_ref": "row-chatgpt-profile"},
+    }))
+    .unwrap()
+}
+
+fn chatgpt_relay() -> Relay {
+    use crate::model_gateway::relay::chatgpt::{ChatGptSource, ChatGptTokens};
+    let tokens = ChatGptTokens {
+        access: SecretString::bearer(CHATGPT_ACCESS.as_bytes().to_vec()).unwrap(),
+        account_id: Some("acct-row".to_owned()),
+        expires: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            + std::time::Duration::from_secs(3600),
+    };
+    let source = ChatGptSource::new(
+        tokens,
+        Box::new(|_: std::time::Duration, _: &dyn Fn() -> bool| {
+            Err(crate::engine::EngineError("no renewal expected".into()))
+        }),
+    );
+    Relay::start_chatgpt(std::sync::Arc::new(source)).expect("ChatGPT relay starts")
+}
+
+/// T22 R7: a ChatGPT sign-in is handed to a listed harness that lists `openai-responses` as
+/// the ChatGPT relay's loopback URL, its placeholder and the model chosen for the run,
+/// filled into the manifest's `openai-responses` entry; the access token and the stored
+/// `native-default` model are in no value it is given and in nothing it prints.
+#[test]
+fn a_chatgpt_sign_in_is_handed_over_as_the_chatgpt_relay_url_its_placeholder_and_the_run_model() {
+    let registry = built(&["openai-responses"], RESPONSES_ENV);
+    let harness = &registry.all()[0];
+    let relay = chatgpt_relay();
+    let given = super::chatgpt_handover(harness, &chatgpt_sign_in(), &relay, "gpt-5-codex");
+    assert_eq!(
+        given.as_ref().err().map(|problem| problem.0.as_str()),
+        None,
+        "the ChatGPT sign-in was not handed over"
+    );
+    let given = given.unwrap();
+    assert_eq!(given.base_url(), relay.base_url());
+    assert!(given.base_url().starts_with("http://127.0.0.1:"));
+    assert!(given.base_url().ends_with("/backend-api/codex"));
+    assert_eq!(given.token(), relay.token());
+    assert!(is_relay_token(given.token()));
+    assert_eq!(given.model(), "gpt-5-codex");
+    assert_eq!(
+        given.env(),
+        [
+            ("OPENAI_BASE_URL".to_owned(), relay.base_url()),
+            ("OPENAI_API_KEY".to_owned(), relay.token().to_owned()),
+            ("OPENAI_MODEL".to_owned(), "gpt-5-codex".to_owned()),
+        ]
+    );
+    let shown = format!("{given:?}");
+    let mut seen = vec![shown];
+    seen.extend(
+        given
+            .env()
+            .iter()
+            .flat_map(|(name, value)| [name.clone(), value.clone()]),
+    );
+    for text in &seen {
+        assert!(!text.contains(CHATGPT_ACCESS), "{text}");
+        assert!(!text.contains("acct-row"), "{text}");
+        assert!(!text.contains("native-default"), "{text}");
+        assert!(!text.contains("chatgpt.com"), "{text}");
+    }
+}
+
+/// T22 R7: a ChatGPT sign-in goes over only with a ChatGPT relay, a run model and a
+/// harness that lists `openai-responses`; the Task 17 hand-over never hands it out with
+/// its stored `native-default`; and a keyed account is never handed a ChatGPT relay.
+#[test]
+fn a_chatgpt_hand_over_needs_its_own_relay_a_run_model_and_a_responses_harness() {
+    let responses = built(&["openai-responses"], RESPONSES_ENV);
+    let harness = &responses.all()[0];
+    let chatgpt = chatgpt_relay();
+    let keyed = sentinel_relay("https://api.openai.com/v1");
+    let code = |harness: &crate::harnesses::registry::Harness,
+                connection: &ModelConnection,
+                relay: &Relay,
+                model: &str| {
+        super::chatgpt_handover(harness, connection, relay, model)
+            .err()
+            .map(|problem| problem.0)
+    };
+    assert_eq!(
+        code(harness, &chatgpt_sign_in(), &keyed, "gpt-5-codex").as_deref(),
+        Some("account_chatgpt_relay_missing")
+    );
+    assert_eq!(
+        code(harness, &chatgpt_sign_in(), &chatgpt, "").as_deref(),
+        Some("account_model_missing")
+    );
+    assert_eq!(
+        code(
+            harness,
+            &account("openai-responses", "https://api.openai.com/v1", true),
+            &chatgpt,
+            "gpt-5-codex"
+        )
+        .as_deref(),
+        Some("account_not_compatible")
+    );
+    let mut claude = chatgpt_sign_in();
+    claude.harness = crate::protocol::CredentialRef::new("claude").unwrap();
+    assert_eq!(
+        code(harness, &claude, &chatgpt, "gpt-5-codex").as_deref(),
+        Some("account_not_compatible")
+    );
+    let chat = built(&["openai-chat"], OPENAI_ENV);
+    assert_eq!(
+        code(&chat.all()[0], &chatgpt_sign_in(), &chatgpt, "gpt-5-codex").as_deref(),
+        Some("account_not_compatible")
+    );
+    assert_eq!(
+        handover(harness, &chatgpt_sign_in(), Some(&chatgpt))
+            .err()
+            .map(|problem| problem.0)
+            .as_deref(),
+        Some("account_not_compatible")
+    );
+    assert_eq!(
+        handover(
+            harness,
+            &account("openai-responses", "https://api.openai.com/v1", true),
+            Some(&chatgpt)
+        )
+        .err()
+        .map(|problem| problem.0)
+        .as_deref(),
+        Some("account_key_relay_missing")
+    );
+}

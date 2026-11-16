@@ -451,6 +451,22 @@ impl NativeProfileUse {
     }
 }
 
+impl NativeProfileUse {
+    /// Makes the ChatGPT sign-in source a ChatGPT relay forwards with: the account's access
+    /// token and account id, read from its record into engine memory, renewed shortly
+    /// before they lapse only through the engine's own renewal under this account's lease.
+    /// Input: the Codex executable the renewal runs. Output: the source;
+    /// `native_profile_codex_api_key` or `native_profile_codex_token_unreadable` for a
+    /// record without usable ChatGPT tokens, or the unavailable refusal.
+    pub(crate) fn chatgpt_source(
+        &self,
+        executable: &Path,
+    ) -> Result<crate::model_gateway::relay::chatgpt::ChatGptSource, EngineError> {
+        let _ = executable;
+        Err(unavailable())
+    }
+}
+
 /// Opens an agent's home without following a link and checks it is this user's private
 /// folder. Input: the home path. Output: its descriptor, or `native_profile_agent_home_unsafe`.
 fn open_agent_home(path: &Path) -> Result<File, EngineError> {
@@ -648,6 +664,18 @@ fn poll_credential(
         account_id: account_id.map(str::to_owned),
         plan: plan.map(str::to_owned),
     })
+}
+
+/// Reads a ChatGPT sign-in from a Codex `auth.json` record or an agent's copy of one: the
+/// access token, the account id when the record has one, and the access token's expiry.
+/// The refresh and id tokens are never read. Input: the record. Output: the sign-in;
+/// `native_profile_codex_api_key` for an API-key sign-in without ChatGPT tokens, or
+/// `native_profile_codex_token_unreadable` for a malformed record or token.
+pub(crate) fn chatgpt_tokens(
+    record: &[u8],
+) -> Result<crate::model_gateway::relay::chatgpt::ChatGptTokens, EngineError> {
+    let _ = record;
+    Err(codex_unreadable())
 }
 
 /// Reads the `exp` claim of a ChatGPT access token without checking its signature, which

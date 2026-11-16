@@ -603,6 +603,23 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     Ok((request, Some(relay)))
 }
 
+/// Routes a launch of a listed harness on a ChatGPT sign-in through a ChatGPT relay on
+/// 127.0.0.1: the relay holds the sign-in's access token in engine memory and forwards
+/// only Responses requests to the ChatGPT backend, and the returned request names the
+/// relay's base URL and a random placeholder instead. Codex and Claude Code keep their own
+/// sign-in paths. Inputs: the request bound to the sign-in's home, the harness and the
+/// sign-in source. Output: the request to launch and the relay, which must live as long as
+/// the agent; `launch_chatgpt_unsupported` for an own adapter, a harness that does not list
+/// `openai-responses` or a request not bound to a sign-in.
+pub fn route_chatgpt(
+    request: LaunchRequest,
+    harness: &super::registry::Harness,
+    source: std::sync::Arc<crate::model_gateway::relay::chatgpt::ChatGptSource>,
+) -> Result<(LaunchRequest, Relay), LaunchError> {
+    let _ = (request, harness, source);
+    Err(failure("launch_chatgpt_unsupported"))
+}
+
 /// Builds the exact command a launch would spawn, without spawning it.
 /// Input: the launch request. Output: the command, or a plain refusal code when an
 /// input is unsafe or the harness has no launch adapter.
