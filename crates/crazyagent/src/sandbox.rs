@@ -270,8 +270,32 @@ pub(crate) fn power_helper_denies() -> String {
 
 /// The same lines for sockets at other paths, which only rows use. Input: the socket paths.
 /// Output: the text.
-pub(crate) fn power_helper_denies_for(_sockets: &[&str]) -> String {
-    String::new()
+pub(crate) fn power_helper_denies_for(sockets: &[&str]) -> String {
+    assert!(!sockets.is_empty());
+    assert!(
+        sockets
+            .iter()
+            .all(|socket| socket.starts_with('/') && !socket.contains('"'))
+    );
+    let mut text = String::from("(deny network-outbound");
+    for socket in sockets {
+        text.push_str(&format!("\n  (remote unix-socket (path-literal \"{socket}\"))"));
+    }
+    text.push_str(&format!(
+        ")\n(deny mach-lookup (global-name \"{POWER_HELPER_LABEL}\"))\n"
+    ));
+    text
+}
+
+/// Tells whether a socket grant names the lid helper's socket: either spelling in any letter
+/// case (the system volume ignores case), or a path that resolves to it. Input: the path.
+/// Output: true for the helper's socket.
+fn power_helper_socket(path: &Path) -> bool {
+    let spelled = path.to_string_lossy().to_ascii_lowercase();
+    POWER_HELPER_SPELLINGS
+        .iter()
+        .any(|spelling| Path::new(&spelled) == Path::new(spelling))
+        || fs::canonicalize(path).is_ok_and(|resolved| resolved == Path::new(POWER_HELPER_SOCKET))
 }
 
 const KEYCHAIN_SERVICES: &[&str] = &[
@@ -1149,6 +1173,11 @@ impl ProjectSandbox {
                     if !cfg!(target_os = "macos") {
                         return Err(invalid("unix socket grants need Seatbelt"));
                     }
+                    if power_helper_socket(path) {
+                        return Err(invalid(
+                            "a socket grant cannot name the Keep awake lid helper",
+                        ));
+                    }
                     let folder = path.parent().filter(|folder| {
                         fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir())
                     });
@@ -1192,6 +1221,7 @@ impl ProjectSandbox {
             }
         }
         assert!(self.granted.len() <= policy::GRANT_SOCKETS_MAX);
+        assert!(!self.granted.iter().any(|socket| power_helper_socket(socket)));
         Ok(self)
     }
 
@@ -2683,7 +2713,8 @@ impl ProjectSandbox {
     /// sysctl is refused only with both the named sysctl deny and the explicit `process-info*`
     /// deny. What stays open: every read of a process of the same sandbox, the list of process
     /// ids, which carries only ids, and for `nohup`, by its own path, the one read of a process
-    /// outside that it needs to detach from the console. Output: the text.
+    /// outside that it needs to detach from the console. The last lines deny the Keep awake lid
+    /// helper's socket and label, after every allow. Output: the text.
     pub fn profile(&self) -> String {
         let mut text = String::from("(version 1)\n(deny default)\n");
         text.push_str("(allow process-exec)\n(allow process-fork)\n");
@@ -3004,6 +3035,9 @@ impl ProjectSandbox {
                 .iter()
                 .all(|service| !KEYCHAIN_SERVICES.contains(service))
         );
+        let helper = power_helper_denies();
+        text.push_str(&helper);
+        assert!(text.ends_with(&helper) && text.matches(POWER_HELPER_SOCKET).count() == 1);
         text
     }
 
@@ -3964,6 +3998,9 @@ pub(crate) fn priming_profile(folder: &Path, uv: &Path) -> String {
     );
     assert!(text.starts_with("(version 1)\n(deny default)\n"));
     assert!(!text.contains("(allow network") && text.matches("file-write*").count() == 1);
+    let helper = power_helper_denies();
+    text.push_str(&helper);
+    assert!(text.ends_with(&helper));
     text
 }
 

@@ -366,12 +366,17 @@ pub(super) struct Repo {
 /// system, its own toolchain, the work tree, the repository's git folder and the owner's
 /// ignore file, and writes only what the step names and the worktree's index, never the
 /// repository's `hooks` or `config`, whatever an agent swaps a path for during the step.
-/// Paths reach it as parameters, so no path text is read as profile text.
+/// Paths reach it as parameters, so no path text is read as profile text. It ends with the
+/// Keep awake lid helper deny, as every profile does (`sandbox::power_helper_denies`).
 #[cfg(target_os = "macos")]
 pub(super) const WORK_TREE_PROFILE: &str = "(version 1)\n\
 (allow default)\n\
 (deny file-read-data (require-not (require-any (literal \"/\") (subpath \"/System\") (subpath \"/usr/lib\") (subpath \"/usr/share\") (subpath \"/dev\") (subpath (param \"TOOLS\")) (subpath (param \"WORK\")) (subpath (param \"COMMON\")) (literal (param \"EXCLUDES\")))))\n\
-(deny file-write* (require-not (require-any (literal \"/dev/null\") (subpath (param \"WRITE\")) (literal (param \"INDEX\")) (literal (param \"INDEX_LOCK\")))))\n";
+(deny file-write* (require-not (require-any (literal \"/dev/null\") (subpath (param \"WRITE\")) (literal (param \"INDEX\")) (literal (param \"INDEX_LOCK\")))))\n\
+(deny network-outbound\n  \
+(remote unix-socket (path-literal \"/var/run/dev.crazyagent.power.sock\"))\n  \
+(remote unix-socket (path-literal \"/private/var/run/dev.crazyagent.power.sock\")))\n\
+(deny mach-lookup (global-name \"dev.crazyagent.power\"))\n";
 
 /// What one confined git step may write besides the worktree's index: the object store,
 /// for a step that only reads the work tree, or the work tree, for one that fills it.

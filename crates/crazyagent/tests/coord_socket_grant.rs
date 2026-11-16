@@ -127,7 +127,7 @@ fn the_profile_holds_exact_rules_for_each_granted_socket() {
         .allow_unix_socket(&two)
         .unwrap()
         .profile();
-    assert_eq!(profile.matches("unix-socket").count(), 4);
+    assert_eq!(profile.matches("unix-socket").count(), 4 + 2, "two grants and the lid helper deny");
     for socket in [&one, &two] {
         let path = socket.display();
         for rule in [

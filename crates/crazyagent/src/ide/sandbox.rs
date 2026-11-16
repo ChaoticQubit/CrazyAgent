@@ -166,6 +166,9 @@ pub fn profile(
         data.display()
     )));
     assert!(text.ends_with("(global-name \"com.apple.FSEvents\"))\n"));
+    let helper = crate::sandbox::power_helper_denies();
+    text.push_str(&helper);
+    assert!(text.ends_with(&helper));
     assert!(!closed || !text.contains("(remote ip"));
     assert!(crate::sandbox::denies_follow_write_allows(
         &text,
