@@ -7,7 +7,7 @@ use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
     AccountBinding, CLAUDE_TOOLS_OFF, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
-    Session, rate_limited,
+    RunLogs, Session, rate_limited,
 };
 #[cfg(unix)]
 use crate::harnesses::launch::{await_group_exit, kill_group};
@@ -198,8 +198,9 @@ const LISTED_TOOLS_OFF: &str = "This harness can't switch its tools off, so this
 
 /// The plain line a research job on a listed harness ends with before it starts, for a run
 /// its harness can never take (T19b 19b-4, QUESTION-0100 Q6): Full access, which has no
-/// sandbox for its account to go over through, or tools off on a harness whose tools cannot
-/// be switched off. Inputs: the manifest, the access level, the tools switch and whether the
+/// sandbox for its account to go over through, tools on in a project whose hooks refuse a
+/// listed launch (QUESTION-0151), or tools off on a harness whose tools cannot be switched
+/// off. Inputs: the manifest, the access level, the tools switch and whether the
 /// project's hooks refuse a listed launch. Output: the line, none for a run it can take.
 fn listed_refusal(
     manifest: &crate::harnesses::manifest::Manifest,
@@ -207,9 +208,11 @@ fn listed_refusal(
     tools: bool,
     hooks: bool,
 ) -> Option<&'static str> {
-    let _ = hooks;
     if access == AgentAccess::Full {
         return Some(LISTED_FULL_ACCESS);
+    }
+    if hooks {
+        return Some(LISTED_HOOKS);
     }
     (!tools && manifest.tools_limited.is_some()).then_some(LISTED_TOOLS_OFF)
 }
@@ -1262,7 +1265,12 @@ impl ResearchRunner {
             })
         };
         let Some(installed) = installed else {
-            let session = listed_session(account, &home, relay, context, request)?;
+            let logs = RunLogs {
+                events: create_private(&agent, &agent.join(EVENTS_LOG))?,
+                errors: create_private(&agent, &agent.join("stderr.log"))?,
+                bytes_max: self.limits.output_bytes_max,
+            };
+            let session = listed_session(account, &home, relay, context, request, logs)?;
             let output = agent.join("output.md");
             let session = AgentSession::Piped(Box::new(session));
             return self.follow(
@@ -2727,8 +2735,9 @@ fn claude_arguments(
 /// Starts a research job's turn on a listed ACP harness, headless on pipes (T19b 19b-4,
 /// QUESTION-0100 Q3 and Q4): in its private home `<agent home>/<id>/<account>`, with the agent
 /// home as its tool home and the pool account handed over by the manifest's `accounts` entry
-/// for the account's wire format. Inputs: the account, the agent home, the key relay of a
-/// keyed account, the project context and the request for a binding home. Output: the
+/// for the account's wire format, its raw output kept in the run's logs as a run on pipes
+/// keeps it (QUESTION-0151). Inputs: the account, the agent home, the key relay of a keyed
+/// account, the project context, the request for a binding home and the logs. Output: the
 /// running session, or the refusal.
 fn listed_session(
     account: &ResearchAccount,
@@ -2736,6 +2745,7 @@ fn listed_session(
     relay: Option<&crate::model_gateway::relay::Relay>,
     context: AgentContext,
     request: impl FnOnce(&Path) -> Result<LaunchRequest, RunError>,
+    logs: RunLogs,
 ) -> Result<Session, RunError> {
     let ResearchAccount::Listed {
         harness,
@@ -2756,7 +2766,7 @@ fn listed_session(
     let handover = crate::harnesses::accounts::handover(listed, connection, relay)
         .map_err(|problem| RunError::Invalid(problem.0))?;
     let context = context.with_tool_home(home).with_handover(handover);
-    Session::start_with_context(request(&own)?, context).map_err(listed_start_failure)
+    Session::start_logged(request(&own)?, context, logs).map_err(listed_start_failure)
 }
 
 /// The failure of a listed harness's research session that would not start: the plain

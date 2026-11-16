@@ -1473,8 +1473,11 @@ impl AgentContext {
     /// runs none (T19b 19b-4, rv-secreview note 1). Input: the tools switch. Output: the
     /// answer.
     pub fn listed_hooks_refused(&self, tools: bool) -> bool {
-        let _ = tools;
-        false
+        tools
+            && self
+                .process
+                .as_ref()
+                .is_some_and(|process| !process.hooks.is_empty())
     }
 
     /// The text a listed harness's `instructions` render gets: this context's startup
@@ -1484,12 +1487,12 @@ impl AgentContext {
     /// started with them dropped. Input: the tools switch. Output: the text,
     /// `launch_listed_hooks_unsupported`, or the owner text's read failure.
     fn listed_instructions(&self, tools: bool) -> Result<String, LaunchError> {
+        if self.listed_hooks_refused(tools) {
+            return Err(failure("launch_listed_hooks_unsupported"));
+        }
         let Some(process) = &self.process else {
             return Ok(self.instructions.clone());
         };
-        if tools && !process.hooks.is_empty() {
-            return Err(failure("launch_listed_hooks_unsupported"));
-        }
         let given = process_text(process)?;
         let mut text = self.instructions.clone();
         if !given.text.is_empty() {
