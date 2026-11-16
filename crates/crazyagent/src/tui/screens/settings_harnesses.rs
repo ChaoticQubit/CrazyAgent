@@ -8,7 +8,9 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, Screen, SettingsSection};
 use crate::harnesses::finding::{self, Found};
-use crate::harnesses::update::{HarnessVersions, Latest, Method, UpdateMode, UpdateSettings};
+use crate::harnesses::update::{
+    HarnessVersions, Latest, Method, UpdateMode, UpdateSettings, needs_newer_line,
+};
 use crate::harnesses::{AccountKind, HarnessEntry, HarnessStatus, ToolControl};
 use crate::setup::{Dependency, DependencyState, SetupStatus};
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
@@ -1187,6 +1189,9 @@ impl Harnesses {
                 }
                 if let Some(versions) = versions.filter(|_| needs.is_none() && !off) {
                     let mut text = version_line(versions);
+                    if let Some(old) = needs_newer_line(&entry.name, versions) {
+                        text = format!("{old} {text}");
+                    }
                     if let Some(state) = update_state(versions, &entry.name) {
                         text = format!("{text} {state}");
                     }

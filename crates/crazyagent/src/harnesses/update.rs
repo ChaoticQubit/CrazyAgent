@@ -788,8 +788,17 @@ pub fn below(installed: &str, minimum: &str) -> bool {
 /// Output: the line, or None without a plain floor, without an installed version, or for an
 /// installed version not known to be below the floor.
 pub fn needs_newer_line(harness: &str, versions: &HarnessVersions) -> Option<String> {
-    let _ = (harness, versions);
-    None
+    let minimum = versions
+        .run_min
+        .as_deref()
+        .filter(|minimum| plain_version(minimum))?;
+    let installed = versions.installed.as_deref()?;
+    if !below(installed, minimum) {
+        return None;
+    }
+    Some(format!(
+        "{harness} {installed} is too old for CrazyAgent; it needs {minimum} or newer."
+    ))
 }
 
 fn unreadable() -> Latest {
