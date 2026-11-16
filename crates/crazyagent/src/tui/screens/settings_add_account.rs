@@ -227,6 +227,7 @@ fn url_problem(provider: Provider, text: &str) -> Option<&'static str> {
         Err(error) if error.0 == "account_local_url_required" => {
             Some("Use an http address on this Mac, such as http://127.0.0.1:11434/v1.")
         }
+        Err(error) if error.0 == "account_url_port_refused" => Some(plain(&error.0)),
         Err(_) => Some("Use an https address. Plain http works only on this Mac."),
     }
 }

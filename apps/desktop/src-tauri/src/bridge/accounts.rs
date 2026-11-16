@@ -9,6 +9,7 @@ const ACCOUNT_CODES: &[&str] = &[
     "owner_grant_stale_or_revoked",
     "account_name_invalid",
     "account_url_invalid",
+    "account_url_port_refused",
     "account_url_required",
     "account_url_not_allowed",
     "account_url_unreachable",

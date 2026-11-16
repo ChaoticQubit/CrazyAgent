@@ -24,18 +24,30 @@ fn authority(url: &url::Url) -> Option<String> {
     Some(format!("{host}:{port}"))
 }
 
-/// The resolved addresses a probe dials, in order: every one it was given.
-/// Input: the resolved addresses. Output: the addresses to dial.
+/// The resolved addresses a probe dials, in order: every one but a cloud's metadata or
+/// credential service ([`crate::sandbox::metadata_address`]), so an account's host name
+/// cannot steer the engine there. This machine and private networks stay, for local models
+/// and servers on the owner's network (ACCOUNTS-PROBE-MAY-DIAL). Input: the resolved
+/// addresses. Output: the addresses to dial.
 fn dialed(resolved: impl IntoIterator<Item = SocketAddr>) -> Vec<SocketAddr> {
-    resolved.into_iter().collect()
+    resolved
+        .into_iter()
+        .filter(|address| !crate::sandbox::metadata_address(address.ip()))
+        .collect()
 }
 
 /// Resolves `address` and connects to the first of its [`dialed`] addresses that accepts,
 /// each socket made inside the spawn gate. Input: the `host:port` text. Output: the
-/// stream, or the last error.
+/// stream, PermissionDenied when every address the name gave was refused, or the last
+/// error.
 async fn connect(address: &str) -> std::io::Result<tokio::net::TcpStream> {
     let resolved: Vec<SocketAddr> = tokio::net::lookup_host(address).await?.collect();
-    crate::spawn_gate::connect_tcp(&dialed(resolved)[..]).await
+    let allowed = dialed(resolved.iter().copied());
+    assert!(allowed.len() <= resolved.len());
+    if allowed.is_empty() && !resolved.is_empty() {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    crate::spawn_gate::connect_tcp(&allowed[..]).await
 }
 
 /// Opens and closes one TCP connection to the URL's host and port within the timeout.

@@ -811,29 +811,19 @@ pub(crate) fn may_dial(address: IpAddr) -> bool {
 }
 
 /// Tells whether a tunnel may dial `address`, one a model host's name resolved to: not
-/// loopback, unspecified, link-local, in 0.0.0.0/8 or a cloud's metadata service
-/// ([`super::CLOUD_METADATA`]), also as an IPv4 address inside an IPv6 one. The engine dials
-/// outside the sandbox, so a host's DNS must not steer it to this machine or its cloud's
-/// metadata (CS-4); private network addresses stay allowed for an owner's endpoint on another
-/// machine of the local network. Input: the address. Output: true when the proxy may dial it.
+/// loopback, unspecified, in 0.0.0.0/8 or a cloud's metadata service, link-local included
+/// ([`super::metadata_address`]), also as an IPv4 address inside an IPv6 one. The engine
+/// dials outside the sandbox, so a host's DNS must not steer it to this machine or its
+/// cloud's metadata (CS-4); private network addresses stay allowed for an owner's endpoint on
+/// another machine of the local network. Input: the address. Output: true when the proxy may
+/// dial it.
 fn dialable(address: IpAddr) -> bool {
-    let v4 = |ip: Ipv4Addr| {
-        !(ip.is_loopback()
-            || ip.is_unspecified()
-            || ip.is_link_local()
-            || ip.octets()[0] == 0
-            || super::CLOUD_METADATA.contains(&IpAddr::V4(ip)))
-    };
-    match address {
+    let v4 = |ip: Ipv4Addr| !(ip.is_loopback() || ip.is_unspecified() || ip.octets()[0] == 0);
+    let elsewhere = match address {
         IpAddr::V4(ip) => v4(ip),
-        IpAddr::V6(ip) => {
-            !(ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_unicast_link_local()
-                || super::CLOUD_METADATA.contains(&address))
-                && ip.to_ipv4().is_none_or(v4)
-        }
-    }
+        IpAddr::V6(ip) => !(ip.is_loopback() || ip.is_unspecified()) && ip.to_ipv4().is_none_or(v4),
+    };
+    elsewhere && !super::metadata_address(address)
 }
 
 /// Tells whether one of this machine's interfaces holds `address`, such as its own LAN
