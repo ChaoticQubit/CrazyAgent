@@ -627,7 +627,7 @@ impl AgentContext {
         let claude = match drivers::piped(harness).ok()? {
             Piped::Codex => false,
             Piped::Claude => true,
-            Piped::Acp => return None,
+            Piped::Acp | Piped::JsonlTurn | Piped::TextTurn => return None,
         };
         let names = context_mode_names(claude, &self.off_tools);
         let context_mode = !names.is_empty()
@@ -1052,11 +1052,11 @@ impl AgentContext {
     }
 
     /// Writes this context into one agent's private home for one launch of `harness`.
-    /// Input: a harness id or alias whose manifest names the Codex, Claude Code or ACP driver
-    /// ([`drivers::piped`]), else `launch_harness_unsupported`, an ACP harness written as its
-    /// manifest asks ([`Self::install_listed`]), the agent's 0700 home (its CODEX_HOME,
-    /// CLAUDE_CONFIG_DIR or private home) and the tools switch; with tools off no skill or
-    /// MCP server is given. On macOS the files hold the agent's own `getconf`
+    /// Input: a harness id or alias whose manifest names the Codex, Claude Code, ACP,
+    /// jsonl-turn or text-turn driver ([`drivers::piped`]), else `launch_harness_unsupported`,
+    /// a harness of the last three written as its manifest asks ([`Self::install_listed`]),
+    /// the agent's 0700 home (its CODEX_HOME, CLAUDE_CONFIG_DIR or private home) and the
+    /// tools switch; with tools off no skill or MCP server is given. On macOS the files hold the agent's own `getconf`
     /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
     /// and the harness arguments, or `launch_home_busy` while another launch uses the home.
     pub fn install(
@@ -1068,7 +1068,7 @@ impl AgentContext {
         let codex = match drivers::piped(harness)? {
             Piped::Codex => true,
             Piped::Claude => false,
-            Piped::Acp => {
+            Piped::Acp | Piped::JsonlTurn | Piped::TextTurn => {
                 let listed = crate::harnesses::registry::registry()
                     .get(harness)
                     .ok_or_else(|| failure("launch_harness_unsupported"))?;
