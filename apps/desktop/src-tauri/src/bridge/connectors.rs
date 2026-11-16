@@ -93,22 +93,31 @@ impl NativeBridge {
         &self,
         project: Option<String>,
     ) -> Result<Unlocked<ConnectorsView>, BridgeError> {
-        let _ = project;
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client.connectors(project).await.map_err(connector_error)
+        }))
     }
 
     /// Reads the trust screen of a picked or pasted connector manifest without saving it,
     /// run without the bridge lock. Input: the manifest text. Output: ready or refused.
     pub fn connector_preview(&self, yaml: String) -> Result<Unlocked<Preview>, BridgeError> {
-        let _ = yaml;
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_preview(yaml)
+                .await
+                .map_err(connector_error)
+        }))
     }
 
     /// Reads the trust screen of a listed connector that needs review, run without the
     /// bridge lock. Input: the name. Output: ready or refused.
     pub fn connector_review(&self, name: String) -> Result<Unlocked<Preview>, BridgeError> {
-        let _ = name;
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client.connector_review(name).await.map_err(connector_error)
+        }))
     }
 
     /// Adds a connector manifest the owner confirmed on its trust screen, run without the
@@ -120,8 +129,13 @@ impl NativeBridge {
         sha256: String,
         replace: bool,
     ) -> Result<Unlocked<ConnectorsView>, BridgeError> {
-        let _ = (yaml, sha256, replace);
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_add(yaml, sha256, replace)
+                .await
+                .map_err(connector_error)
+        }))
     }
 
     /// Trusts a reviewed connector file, run without the bridge lock. Inputs: the name and
@@ -131,15 +145,22 @@ impl NativeBridge {
         name: String,
         sha256: String,
     ) -> Result<Unlocked<ConnectorsView>, BridgeError> {
-        let _ = (name, sha256);
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_trust(name, sha256)
+                .await
+                .map_err(connector_error)
+        }))
     }
 
     /// Removes one of the owner's connectors, run without the bridge lock. Input: the name.
     /// Output: the page.
     pub fn connector_remove(&self, name: String) -> Result<Unlocked<ConnectorsView>, BridgeError> {
-        let _ = name;
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client.connector_remove(name).await.map_err(connector_error)
+        }))
     }
 
     /// Saves a key the owner typed for one of a connector's secrets; it goes to the engine
@@ -151,8 +172,14 @@ impl NativeBridge {
         secret: String,
         key: String,
     ) -> Result<Unlocked<ConnectorsView>, BridgeError> {
-        let _ = (name, secret, key);
-        Err(failure("connector_outcome_unknown"))
+        let key = super::app_plugins::entered_key(key)?;
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_set_key(name, secret, key)
+                .await
+                .map_err(connector_error)
+        }))
     }
 
     /// Deletes the key saved for one of a connector's secrets, run without the bridge lock.
@@ -162,8 +189,13 @@ impl NativeBridge {
         name: String,
         secret: String,
     ) -> Result<Unlocked<ConnectorsView>, BridgeError> {
-        let _ = (name, secret);
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_clear_key(name, secret)
+                .await
+                .map_err(connector_error)
+        }))
     }
 
     /// Turns a connector on or off for one project and says who it reaches, run without the
@@ -176,8 +208,13 @@ impl NativeBridge {
         enabled: bool,
         who: Who,
     ) -> Result<Unlocked<ConnectorsView>, BridgeError> {
-        let _ = (project, connector, enabled, who);
-        Err(failure("connector_outcome_unknown"))
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_grant(project, connector, enabled, who)
+                .await
+                .map_err(connector_error)
+        }))
     }
 }
 

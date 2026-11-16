@@ -3515,6 +3515,132 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state) .await? .connector_settings_set(settings, version)?; call.await }.await;
             routed(result)
         }
+        "desktop_connectors" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: Option<String>,
+            }
+            let Args { project } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connectors(project)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_preview" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                yaml: String,
+            }
+            let Args { yaml } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_preview(yaml)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_review" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+            }
+            let Args { name } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_review(name)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_add" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                yaml: String,
+                sha256: String,
+                replace: bool,
+            }
+            let Args { yaml, sha256, replace } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_add(yaml, sha256, replace)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_trust" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+                sha256: String,
+            }
+            let Args { name, sha256 } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_trust(name, sha256)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_remove" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+            }
+            let Args { name } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_remove(name)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_set_key" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+                secret: String,
+                key: String,
+            }
+            let Args { name, secret, key } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_set_key(name, secret, key)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_clear_key" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+                secret: String,
+            }
+            let Args { name, secret } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_clear_key(name, secret)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_grant" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+                connector: String,
+                enabled: bool,
+                who: crazyagent::connectors::Who,
+            }
+            let Args { project, connector, enabled, who } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .connector_grant(project, connector, enabled, who)?; call.await }.await;
+            routed(result)
+        }
         "desktop_app_plugins" => {
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugins()?; call.await }.await;
             routed(result)
