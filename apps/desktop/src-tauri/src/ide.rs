@@ -1604,6 +1604,51 @@ mod tests {
     }
 
     #[test]
+    fn a_preload_while_an_ide_is_loaded_neither_opens_nor_closes_it() {
+        let alpha = ProjectId::new("alpha").unwrap();
+        let beta = ProjectId::new("beta").unwrap();
+
+        let views = IdeViews::default();
+        views.lock().loaded.insert(
+            "alpha".to_owned(),
+            kept_view("ide-616c706861-1", "http://127.0.0.1:41000/", PANEL),
+        );
+        assert!(
+            views.begin_preload(&alpha).is_none(),
+            "a page reload preloads the project whose IDE is kept: nothing opens"
+        );
+        assert!(
+            views.begin_preload(&beta).is_none(),
+            "nor another project while one is kept"
+        );
+        assert!(
+            views.lock().opening.is_empty() && views.lock().engine.is_empty(),
+            "no ticket and no turn were taken"
+        );
+        let (late, _) = views.begin(&alpha);
+        assert_eq!(
+            views.lock().preload_admit(&alpha, late),
+            Preload::Superseded,
+            "a preload that finds its own project loaded never stops that server"
+        );
+        assert!(views.lock().loaded.contains_key("alpha"));
+
+        let views = IdeViews::default();
+        let (owner, _) = views.begin(&beta);
+        assert!(
+            views.begin_preload(&alpha).is_none(),
+            "an open in flight wins before any engine call"
+        );
+        assert!(views.lock().admit(&beta, owner));
+
+        let views = IdeViews::default();
+        assert!(
+            views.begin_preload(&alpha).is_some(),
+            "with nothing loaded or opening the preload begins"
+        );
+    }
+
+    #[test]
     fn a_left_note_kept_by_a_preload_is_handed_out_once() {
         let views = IdeViews::default();
         let alpha = ProjectId::new("alpha").unwrap();

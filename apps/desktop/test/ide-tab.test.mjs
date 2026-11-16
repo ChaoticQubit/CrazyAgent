@@ -545,7 +545,8 @@ test("showing a kept IDE asks the engine nothing, and a preload takes no focus a
   assert.doesNotMatch(show, /read\(&state\)|lock\(&state\)|ide_open|workbench\(/, "no engine call and no token read on a show");
   const preload = command(lib, "desktop_ide_preload");
   assert.match(preload, /main_window\(&webview\)\?/, "only the main window may preload");
-  assert.match(preload, /let \(ticket, turn\) = views\.begin\(&project\);/, "a preload is an open: same ticket, same turn, same engine checks");
+  assert.match(preload, /let Some\(\(ticket, turn\)\) = views\.begin_preload\(&project\) else \{\s*return Ok\(false\);\s*\};/, "a preload is an open, same ticket and turn, but none begins while an IDE is loaded or opening");
+  assert.ok(preload.indexOf("views.begin_preload(&project)") < preload.indexOf("ide_open(project"), "the guard comes before any engine call");
   assert.ok(preload.indexOf("ide::preload(") >= 0 && preload.indexOf("ide::preload(") < preload.lastIndexOf("close_ide("), "a refused preload stops the server it started");
   const build = read("src-tauri/build.rs");
   for (const name of ["desktop_ide_show", "desktop_ide_preload"]) assert.match(build, new RegExp(`"${name}"`), `${name} is listed`);
