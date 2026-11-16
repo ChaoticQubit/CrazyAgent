@@ -9,8 +9,8 @@ fn shown(text: &str, version: u64) -> ProcessText {
     ProcessText {
         text: text.into(),
         version,
+        outside: false,
     }
-    outside: false,
 }
 
 fn private_root(prefix: &str) -> tempfile::TempDir {
