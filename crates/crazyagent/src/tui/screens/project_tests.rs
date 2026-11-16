@@ -5415,3 +5415,44 @@ fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
     let shown = text(&project_screen(&mut screen, 80, 40, &look).rows);
     assert!(!shown.contains("until they end:"), "{shown}");
 }
+
+/// SA-VID14-R2-N2 r1: while engine runs are listed the Settings tab reads the hidden folders
+/// again each refresh, so a run that ended leaves the page; with none listed it reads them
+/// once.
+#[test]
+fn settings_read_the_hidden_folders_again_while_runs_are_listed() {
+    use crate::sandbox::hidden_paths::RunKind;
+    let look = Look::plain();
+    let project = ProjectId::new("hidden-runs-poll").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.jobs = Some(Vec::new());
+    let view = |runs: Vec<RunKind>| {
+        Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
+            paths: vec!["/Users/owner/secret".into()],
+            version: 1,
+            runs,
+        }))
+    };
+    let first = next_hidden_read(&mut screen, 20);
+    screen.apply(&first, view(vec![RunKind::Research]));
+    let shown = text(&project_screen(&mut screen, 120, 40, &look).rows);
+    assert!(shown.contains("until they end: research job"), "{shown}");
+    let again = next_hidden_read(&mut screen, 40 + REFRESH_MS);
+    screen.apply(&again, view(Vec::new()));
+    let shown = text(&project_screen(&mut screen, 120, 40, &look).rows);
+    assert!(
+        !shown.contains("until they end:"),
+        "the ended run left the page: {shown}"
+    );
+    for now in 60 + 2 * REFRESH_MS..66 + 2 * REFRESH_MS {
+        let Some(query) = screen.next_query(now) else {
+            break;
+        };
+        assert!(
+            !matches!(query, SetupQuery::HiddenPaths { .. }),
+            "with no run listed the folders are read once"
+        );
+        screen.apply(&query, Err("trusted_connection_unavailable".into()));
+    }
+}

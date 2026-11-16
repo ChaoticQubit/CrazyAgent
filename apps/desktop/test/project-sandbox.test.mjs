@@ -97,5 +97,9 @@ test("the hidden folders section names the engine runs that can still open a hid
   const source = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   const start = source.indexOf("function HiddenSection(");
   const hidden = source.slice(start, source.indexOf("\n}\n", start));
-  assert.match(hidden, /\{!fullAccess && hiddenRunsLine\(saved\) !== null && <p className="pj-note warn" role="status">\{hiddenRunsLine\(saved\)\}<\/p>\}/, "Full access hides nothing, so it lists no run");
+  assert.match(hidden, /\{!fullAccess && hiddenRunsLine\(latest\) !== null && <p className="pj-note warn" role="status">\{hiddenRunsLine\(latest\)\}<\/p>\}/, "Full access hides nothing, so it lists no run");
+  assert.equal(settings.HIDDEN_RUNS_POLL_MS, 3000);
+  assert.match(hidden, /if \(!listed\) return;/, "it reads again only while a run is listed");
+  assert.match(hidden, /setInterval\(/, "a run that ended leaves the page without a reload");
+  assert.match(hidden, /setLatest\(result\.value\)/);
 });

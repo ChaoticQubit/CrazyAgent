@@ -818,7 +818,12 @@ mod tests {
             assert_eq!(runs_seeing(project, &saved), vec![RunKind::Onboarding]);
             panic!("the run ended in a panic");
         });
-        assert!(panicked.is_err());
+        let payload = panicked.unwrap_err();
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"the run ended in a panic"),
+            "the run panicked after it was listed, not in an assert"
+        );
         assert!(runs_seeing(project, &saved).is_empty(), "a panic");
     }
 
