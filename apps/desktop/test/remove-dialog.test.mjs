@@ -35,6 +35,19 @@ test("the remove dialog preselects Remove from dashboard and offers Delete every
   assert.doesNotMatch(outside, /Delete everything/, "a project outside the projects home has no Delete option");
 });
 
+const REMOVE_WORDS = "Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk, with every file in it.";
+const DELETE_WORDS = "Stops its agents, moves its folders to the Trash and removes its records, your notes, imports and saved selections for it included. Its token counts stay under Removed projects.";
+
+test("each removal choice says in the owner's words what it keeps and what it forgets (DEC-178 addendum 1)", () => {
+  const html = view({ preview: preview(), choice: "dashboard" });
+  assert.ok(html.includes(REMOVE_WORDS), "Remove from dashboard says the notes come back with the same folder");
+  assert.ok(html.includes(DELETE_WORDS), "Delete everything says the notes go and the token counts stay");
+  assert.doesNotMatch(html, /CrazyAgent forgets it\./, "the old Remove words are gone");
+  const outside = view({ preview: preview({ can_delete: false }), choice: "dashboard" });
+  assert.ok(outside.includes(REMOVE_WORDS));
+  assert.ok(!outside.includes(DELETE_WORDS), "no Delete words where Delete is not offered");
+});
+
 test("Delete everything lists what is lost and stays disabled until the exact project name is typed", () => {
   assert.deepEqual(lossLines(preview()), [
     "Builder 2 is running and will be stopped",
@@ -106,10 +119,19 @@ test("a refused Delete everything reads as its own plain sentence, never the gen
     "project_delete_interrupted",
     "delete_in_progress",
     "delete_not_recorded",
+    "projects_removed_full",
   ]) {
     assert.doesNotMatch(failureCopy(code), /Something went wrong/, code);
   }
   assert.match(failureCopy("delete_not_recorded"), /Nothing was deleted\..*restart CrazyAgent/);
+});
+
+test("a full removal record refuses Remove and Delete everything with the reason in words (leader 01:11)", async () => {
+  const { failureCopy } = await import("../src/api-projects.ts");
+  assert.equal(failureCopy("projects_removed_full"),
+    "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash.");
+  assert.equal(failureCopy("project_id_removed"),
+    "This project's id belonged to a project you removed, so it can't be used again. Try again to get a new one.");
 });
 
 test("at the app's smallest and default windows the Delete everything dialog fits its frame, and the top choice, the whole loss list and the Delete button stay in view while the name is typed (AL20)", async () => {

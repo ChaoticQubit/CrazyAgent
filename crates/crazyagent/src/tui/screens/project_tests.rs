@@ -5019,6 +5019,11 @@ fn every_delete_refusal_reads_its_own_sentence() {
         unrecorded.contains("Nothing was deleted") && unrecorded.contains("restart CrazyAgent"),
         "{unrecorded}"
     );
+    assert_eq!(
+        plain_problem("projects_removed_full"),
+        "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash.",
+        "leader 01:11: a full record says in words why Remove and Delete everything are refused"
+    );
 }
 
 /// Delete again from the banner never opens the remove ask over another open box, whose keys

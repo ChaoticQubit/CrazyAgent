@@ -87,6 +87,15 @@ test("intake failures read as plain sentences", () => {
   assert.equal(api.intakeCopy({ code: "setup_busy", cause: "engine_detail" }), "Setup is already running. Wait for it to finish. (engine_detail)");
 });
 
+test("an id a removal holds and a folder name with every id taken read as plain sentences (DEC-178 addendum 1)", () => {
+  assert.equal(api.intakeCopy("onboarding_project_ids_used"),
+    "Every id this folder's name can get, 99 in all, is taken by your projects or ones you removed. Rename the folder first.");
+  assert.equal(api.intakeCopy("project_id_removed"),
+    "This project's id belonged to a project you removed, so it can't be used again. Try again to get a new one.");
+  assert.equal(api.intakeCopy("projects_removed_full"),
+    "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash.");
+});
+
 test("setup takes at most 64 pack entries and its failures read as plain sentences", async () => {
   assert.throws(() => api.runSetup(Array.from({ length: 65 }, (_, index) => `entry-${index}`)), /64/);
   assert.equal((await api.runSetup(["superpowers"])).code, "engine_unreachable");

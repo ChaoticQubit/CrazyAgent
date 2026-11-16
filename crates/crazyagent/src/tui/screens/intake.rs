@@ -449,6 +449,18 @@ mod tests {
             copy("home_move_partial"),
             crate::projects_home::plain_problem("home_move_partial").unwrap()
         );
+        assert_eq!(
+            copy("onboarding_project_ids_used"),
+            "Every id this folder's name can get, 99 in all, is taken by your projects or ones you removed. Rename the folder first."
+        );
+        assert_eq!(
+            copy("project_id_removed"),
+            "This project's id belonged to a project you removed, so it can't be used again. Try again to get a new one."
+        );
+        assert_eq!(
+            copy("projects_removed_full"),
+            "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash."
+        );
         assert_eq!(known("something_new_and_odd"), None);
         assert_eq!(
             copy("something_new_and_odd"),
