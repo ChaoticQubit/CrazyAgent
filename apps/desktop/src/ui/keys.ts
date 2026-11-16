@@ -11,6 +11,13 @@ export function isMac(platform: string = typeof navigator === "undefined" ? "" :
   return /^Mac/i.test(platform);
 }
 
+/** Whether this window runs on Windows, where the engine takes drive paths such as
+ * `C:\Program Files\nodejs\npx.cmd`. Input: the platform name, by default the window's.
+ * Output: true on Windows. */
+export function isWindows(platform: string = typeof navigator === "undefined" ? "" : navigator.platform): boolean {
+  return /^Win/i.test(platform);
+}
+
 /** Whether a key event holds the app's shortcut key and nothing else: Cmd on macOS, Ctrl on
  * Windows and Linux, never Alt. Off Mac, keys typed into a terminal stay with the terminal.
  * Inputs: the event and whether this is macOS. Output: true when the shortcut applies. */

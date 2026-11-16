@@ -1,6 +1,7 @@
 import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
+import { isWindows } from "./ui/keys";
 
 /** Retries a bridge call the native side refused with "busy" because another call held
  * the bridge; such a refusal happens before any action, so repeating it is safe. Each pause
@@ -220,6 +221,28 @@ export function withCode(sentence: string, code: string): string {
   return `${sentence}${stop} (${PLAIN_CODE.test(code) ? code : "unknown"})`;
 }
 
+const COMMAND_PATH_BYTES_MAX = 1024;
+const WINDOWS_NAME_REFUSED = /["'/:<>|?*\p{Cc}]/u;
+
+/** Whether a typed MCP server command is a full path the engine takes on this system, as
+ * its server check does: on Windows a plain drive path (no `/`, UNC, verbatim, device,
+ * stream, `.` or `..` part, at most 1024 bytes), elsewhere a path starting with `/`.
+ * Inputs: the command and whether this is Windows. Output: true when the engine takes it. */
+export function fullCommandPath(command: string, windows: boolean): boolean {
+  if (!windows) return command.startsWith("/");
+  if (new TextEncoder().encode(command).length > COMMAND_PATH_BYTES_MAX || !/^[A-Za-z]:\\./.test(command)) return false;
+  return command.slice(3).split("\\").every((part) =>
+    part !== "" && part !== "." && part !== ".." && !part.endsWith(" ") && !part.endsWith(".") && !WINDOWS_NAME_REFUSED.test(part));
+}
+
+/** The sentence for a command the engine does not take as a full path on this system.
+ * Input: whether this is Windows. Output: the sentence. */
+export function commandPathCopy(windows: boolean): string {
+  return windows
+    ? "Enter the full path to the command, such as C:\\Program Files\\nodejs\\npx.cmd."
+    : "Enter the full path to the command, starting with /.";
+}
+
 export function errorMessage(error: unknown): string {
   const code = typeof error === "object" && error !== null && "code" in error
     ? String(error.code) : "unknown";
@@ -268,7 +291,7 @@ export function errorMessage(error: unknown): string {
     server_name_taken: "An MCP server with this name already exists here.",
     server_limit: "You can add up to 50 MCP servers here.",
     server_not_found: "This MCP server was removed.",
-    server_command_invalid: "Enter the full path to the command, starting with /.",
+    server_command_invalid: commandPathCopy(isWindows()),
     server_args_invalid: "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.",
     server_url_invalid: "Use an https address. Plain http works only for this Mac, and the address can't hold a password.",
     server_secret_name_invalid: "Use letters, digits, _ or - for the secret name, starting with a letter.",

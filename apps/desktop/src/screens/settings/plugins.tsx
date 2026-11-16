@@ -5,12 +5,13 @@ import {
   type ImportCandidate, type ImportedSkill, type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope,
   type Result, type SkillDetail, type SkillView, type Failure,
 } from "../../api";
-import { BARE_NO_HOOKS, CODEX_HOOK_EVENTS_ONLY, RCLI_NO_HOOKS } from "../../engine-client";
+import { BARE_NO_HOOKS, CODEX_HOOK_EVENTS_ONLY, RCLI_NO_HOOKS, commandPathCopy, fullCommandPath } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
   Button, Checkbox, ConfirmDialog, Dialog, EmptyState, LoadError, NotReady, Notice, Panel, SecretField, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, Switch, TextArea,
   TextField,
 } from "../../ui";
+import { isWindows } from "../../ui/keys";
 import { navigate } from "../../ui/router";
 import { SkillTag } from "../skill-tag";
 import { displayText } from "../conversation";
@@ -21,7 +22,6 @@ const ARGS_MAX = 32;
 const SECRETS_MAX = 16;
 const NAME_COPY = "Use 1 to 64 lowercase letters, digits, - or _ for the name.";
 const SECRET_NAME_COPY = "Use letters, digits, _ or - for the secret name, starting with a letter.";
-const COMMAND_COPY = "Enter the full path to the command, starting with /.";
 const ARGS_COPY = "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.";
 const URL_COPY = "Use an https address. Plain http works only for this Mac, and the address can't hold a password.";
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -92,16 +92,17 @@ export interface ServerForm {
   url: string;
 }
 
-/** Turns the Add MCP server form into the engine's spec: a full command path with one
- * argument per line, or an https URL (plain http only on this Mac).
- * Input: the typed form. Output: the spec, or the plain error for the field at fault. */
-export function serverSpecInput(form: ServerForm): { spec: McpServerSpec } | { error: { command?: string; args?: string; url?: string } } {
+/** Turns the Add MCP server form into the engine's spec: a full command path on this system
+ * ({@link fullCommandPath}) with one argument per line, or an https URL (plain http only on this
+ * Mac). Inputs: the typed form and whether this is Windows, by default this window's.
+ * Output: the spec, or the plain error for the field at fault. */
+export function serverSpecInput(form: ServerForm, windows: boolean = isWindows()): { spec: McpServerSpec } | { error: { command?: string; args?: string; url?: string } } {
   if (form.kind === "http") {
     const url = form.url.trim();
     return httpAllowed(url) ? { spec: { kind: "http", url } } : { error: { url: URL_COPY } };
   }
   const command = form.command.trim();
-  if (!command.startsWith("/")) return { error: { command: COMMAND_COPY } };
+  if (!fullCommandPath(command, windows)) return { error: { command: commandPathCopy(windows) } };
   const args = form.args.split("\n").map((line) => line.replace(/\r$/, "")).filter((line) => line.trim() !== "");
   if (args.length > ARGS_MAX) return { error: { args: ARGS_COPY } };
   return { spec: { kind: "stdio", command, args } };
