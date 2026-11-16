@@ -303,7 +303,8 @@ fn a_raw_written_private_index_never_reaches_the_real_one() {
 }
 
 /// Hostile files in the private folder change nothing: a link, a FIFO that must not hang
-/// the engine, the folder swapped for a link, and a file past the bound, with the real
+/// the engine, a file at the bound of zeros only, which git refuses whatever index the
+/// seed copied, a file past the bound and the folder swapped for a link, with the real
 /// index byte-identical and no copy left in the engine's folder after each.
 #[test]
 fn hostile_private_files_leave_the_real_index_alone() {
@@ -344,9 +345,7 @@ fn hostile_private_files_leave_the_real_index_alone() {
     refused("2", "index_unreadable");
 
     let work = case.seed("3");
-    fs::OpenOptions::new()
-        .write(true)
-        .open(&work)
+    fs::File::create(&work)
         .unwrap()
         .set_len(INDEX_BYTES_MAX)
         .unwrap();
