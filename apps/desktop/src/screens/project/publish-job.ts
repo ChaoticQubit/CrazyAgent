@@ -1,3 +1,4 @@
+import { intakeCopy } from "../../api-intake";
 import type { GitHubPublishJob, GitHubPublishLeft } from "../../engine-client";
 
 /**
@@ -32,26 +33,72 @@ export const RULE_LABELS: Readonly<Record<string, string>> = {
   security_policy: "Security policy (SECURITY.md)",
 };
 
-export const DRAFT_POLL_MS = 0;
-export const DRAFT_AGENT = "";
-export const DRAFT_STOPPED = "";
-export const DRAFT_BASELINE = "";
-export const PART_WAY = "";
+export const DRAFT_POLL_MS = 2000;
+export const DRAFT_AGENT = "The project's agent drafted these lines from file names only. Check them before you approve.";
+export const DRAFT_STOPPED = "The draft stopped, so CrazyAgent's standard lines are shown.";
+export const DRAFT_BASELINE = "No agent drafted these lines, so CrazyAgent's standard lines are shown.";
+export const PART_WAY = "Publishing stopped part way. Try again to go on from there.";
 
-/** Where a publish stands, as the Overview card shows it. */
-export type PublishView = { kind: "none" };
+const FINDING_KINDS: Readonly<Record<string, string>> = {
+  token: "looks like an access token",
+  private_key: "looks like a private key",
+  named_value: "looks like a secret value",
+};
 
-/** Turns a publish job into what the Overview card shows. Input: the job, or null. Output: the view. */
-export function publishView(_job: GitHubPublishJob | null): PublishView {
-  return { kind: "none" };
+/** Where a publish stands, as the Overview card shows it: nothing, the draft running, the
+ * lines to approve with who drafted them, the secrets that block it, a stop with its
+ * reason, or the finished repository with the rules it could not set. */
+export type PublishView =
+  | { kind: "none" }
+  | { kind: "drafting" }
+  | { kind: "lines"; lines: string[]; note: string }
+  | { kind: "blocked"; findings: string[]; paths: string[]; truncated: boolean }
+  | { kind: "stopped"; reason: string }
+  | { kind: "done"; line: string; missed: string[] };
+
+/** Turns a publish job into what the Overview card shows. A finding names its file, line
+ * and kind only, never the value. Input: the job, or null. Output: the view. */
+export function publishView(job: GitHubPublishJob | null): PublishView {
+  if (!job) return { kind: "none" };
+  const step = job.step;
+  switch (step.step) {
+    case "drafting":
+      return { kind: "drafting" };
+    case "lines":
+      return { kind: "lines", lines: step.lines, note: step.draft.by === "agent" ? DRAFT_AGENT : step.draft.reason === "github_publish_draft_stopped" ? DRAFT_STOPPED : DRAFT_BASELINE };
+    case "blocked":
+      return {
+        kind: "blocked",
+        findings: step.scan.findings.map((finding) => `${finding.path}, line ${finding.line}: ${FINDING_KINDS[finding.kind] ?? FINDING_KINDS.named_value}`),
+        paths: [...new Set(step.scan.findings.map((finding) => finding.path))],
+        truncated: step.scan.truncated,
+      };
+    case "done": {
+      const wanted = step.outcomes.filter((outcome) => outcome.on);
+      const set = wanted.filter((outcome) => outcome.state.state === "applied").length;
+      return {
+        kind: "done",
+        line: `Published as ${step.full_name}. ${set} of ${wanted.length} rules set.`,
+        missed: wanted.filter((outcome) => outcome.state.state !== "applied").map((outcome) => RULE_LABELS[outcome.rule] ?? outcome.rule),
+      };
+    }
+    default:
+      return { kind: "stopped", reason: job.stopped ? intakeCopy(job.stopped) : PART_WAY };
+  }
 }
 
-/** Says what a discarded publish left on GitHub. Input: the discard's answer. Output: the sentence. */
-export function leftLine(_left: GitHubPublishLeft | null): string {
-  return "";
+/** Says what a discarded publish left on GitHub. Input: the discard's answer. Output: the
+ * sentence, or "" when it left nothing. */
+export function leftLine(left: GitHubPublishLeft | null): string {
+  if (!left) return "";
+  return left.left === "made"
+    ? `The empty repository ${left.full_name} stays on GitHub. Delete it there if you don't want it.`
+    : `GitHub may have made ${left.full_name}. Check GitHub and delete it if you don't want it.`;
 }
 
-/** Tells whether Discard is offered. Input: the job, or null. Output: true before the push. */
-export function discardable(_job: GitHubPublishJob | null): boolean {
-  return false;
+/** Tells whether Discard is offered: any publish before its push, since a pushed one keeps
+ * its code on GitHub and goes on with Try again. Input: the job, or null. Output: true when
+ * Discard is offered. */
+export function discardable(job: GitHubPublishJob | null): boolean {
+  return job !== null && job.step.step !== "pushed" && job.step.step !== "done";
 }
