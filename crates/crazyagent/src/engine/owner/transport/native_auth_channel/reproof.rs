@@ -31,15 +31,34 @@ impl OwnerRuntimeHandle {
                 return;
             }
         };
+        let engine_start = session.is_none();
+        if engine_start {
+            self.authority.reproof_listed(
+                starts
+                    .iter()
+                    .filter(|start| self.unreprovable(start.method).is_none())
+                    .map(|start| start.scope.connection.clone())
+                    .collect(),
+            );
+        }
         for start in starts {
-            if !self.reprovable(start.method) {
-                continue;
+            let harness = start.method.harness();
+            let connection = start.scope.connection.clone();
+            match self.unreprovable(start.method) {
+                Some(cause) => {
+                    eprintln!("native_auth_reproof_skipped harness={harness} cause={cause}")
+                }
+                None => {
+                    if let Err(error) = self.reprove(&admission, start).await {
+                        eprintln!(
+                            "native_auth_reproof_unsettled harness={harness} cause={}",
+                            plain_cause(&error, "native_auth_reproof_error_redacted")
+                        );
+                    }
+                }
             }
-            if let Err(error) = self.reprove(&admission, start).await {
-                eprintln!(
-                    "native_auth_reproof_unsettled cause={}",
-                    plain_cause(&error, "native_auth_reproof_error_redacted")
-                );
+            if engine_start {
+                self.authority.reproof_checked(&connection);
             }
         }
     }
@@ -67,17 +86,14 @@ impl OwnerRuntimeHandle {
         self.authority.reproving.clone()
     }
 
-    fn reprovable(&self, method: NativeAuthMethod) -> bool {
+    /// Names why this run's account-check host cannot re-prove a sign-in of this method, so
+    /// a skipped re-proof is logged by cause instead of passing unseen. Input: the method.
+    /// Output: the cause code, or none when the host can run it.
+    fn unreprovable(&self, method: NativeAuthMethod) -> Option<&'static str> {
         let Ok(registration) = self.authority.native_auth_host.lock() else {
-            return false;
+            return Some("native_auth_recovery_required");
         };
-        !registration.disabled
-            && registration.executable.is_some()
-            && match method {
-                NativeAuthMethod::ClaudeExisting => registration.claude_executable.is_some(),
-                NativeAuthMethod::CodexExisting => registration.codex_executable.is_some(),
-                _ => false,
-            }
+        skip_cause(&registration, method)
     }
 
     /// Re-proves one earlier sign-in, waiting for the account-check host to be free first
@@ -105,7 +121,7 @@ impl OwnerRuntimeHandle {
                 }
                 return settled;
             }
-            if Instant::now() >= deadline || !self.reprovable(attempt.method) {
+            if Instant::now() >= deadline || self.unreprovable(attempt.method).is_some() {
                 return settled;
             }
             tokio::time::sleep(REPROOF_POLL).await;
@@ -178,6 +194,30 @@ fn unrun(settled: &Result<NativeAuthPhase, EngineError>) -> bool {
     })
 }
 
+/// Names why a registration cannot re-prove a sign-in of this method: only an existing
+/// Claude Code or Codex sign-in is re-proved, by an enabled account-check host registered
+/// with that harness's executable. Inputs: the registration and the method. Output: the
+/// cause code, or none when it can.
+pub(super) fn skip_cause(
+    registration: &NativeAuthHostRegistration,
+    method: NativeAuthMethod,
+) -> Option<&'static str> {
+    let harness = match method {
+        NativeAuthMethod::ClaudeExisting => &registration.claude_executable,
+        NativeAuthMethod::CodexExisting => &registration.codex_executable,
+        _ => return Some("native_auth_method_not_reprovable"),
+    };
+    if registration.disabled {
+        Some("native_auth_host_disabled")
+    } else if registration.executable.is_none() {
+        Some("native_auth_host_unregistered")
+    } else if harness.is_none() {
+        Some("native_auth_harness_unregistered")
+    } else {
+        None
+    }
+}
+
 /// Clears the engine-start re-proof flag when its task ends or is dropped unpolled, so no
 /// account waits on a re-check that no longer runs.
 struct ReproofEnded(Arc<std::sync::atomic::AtomicBool>);
@@ -206,5 +246,38 @@ impl Authority {
             .iter()
             .find(|slot| slot.registration.active)
             .map(|slot| slot.registration.admission.clone())
+    }
+
+    /// Records the connections this run's engine-start re-proof will still check, once it
+    /// has read them, so an account it skips stops reading as being checked at once.
+    /// Input: the connections. Output: none.
+    fn reproof_listed(&self, left: std::collections::BTreeSet<crate::protocol::CredentialRef>) {
+        if let Ok(mut current) = self.reproof_left.lock() {
+            *current = Some(left);
+        }
+    }
+
+    /// Marks one connection's engine-start re-proof as ended, settled or not, so it stops
+    /// reading as being checked. Input: the connection. Output: none.
+    fn reproof_checked(&self, connection: &crate::protocol::CredentialRef) {
+        if let Ok(mut current) = self.reproof_left.lock()
+            && let Some(left) = current.as_mut()
+        {
+            left.remove(connection);
+        }
+    }
+
+    /// Tells whether this run's engine-start re-proof still has a connection's sign-in to
+    /// check: it runs, and it has not yet read which sign-ins it checks or still lists this
+    /// one (SIGNOUT-AFTER-RESTART). Input: the connection. Output: true while pending.
+    pub(in crate::engine) fn reproof_pending(
+        &self,
+        connection: &crate::protocol::CredentialRef,
+    ) -> bool {
+        self.reproving.load(std::sync::atomic::Ordering::SeqCst)
+            && self
+                .reproof_left
+                .lock()
+                .is_ok_and(|left| left.as_ref().is_none_or(|left| left.contains(connection)))
     }
 }

@@ -34,6 +34,7 @@ pub(crate) struct Listed {
     pub(crate) sign_in: Option<NativeAuthPhase>,
     pub(crate) launchable: bool,
     pub(crate) rejected: bool,
+    pub(crate) rechecking: bool,
 }
 
 pub(crate) enum ResultValue {
@@ -720,10 +721,12 @@ fn list(
     Ok(ResultValue::Page(items, next))
 }
 
-/// Lists one account with its latest sign-in, whether the provider rejected it, and whether
-/// it passes the launch check every master, team and research turn uses on this engine run,
-/// so status never shows an account as signed in when a launch or the master would refuse
-/// it. Inputs: the transaction, the admitted owner, the connection and its details.
+/// Lists one account with its latest sign-in, whether the provider rejected it, whether it
+/// passes the launch check every master, team and research turn uses on this engine run, so
+/// status never shows an account as signed in when a launch or the master would refuse it,
+/// and whether a sign-in that fails only that check waits for this run's re-check (DEC-108);
+/// a re-check that cannot be read counts as none, so one account never fails the list.
+/// Inputs: the transaction, the admitted owner, the connection and its details.
 /// Output: the listed account.
 fn listed(
     tx: &Transaction<'_>,
@@ -744,12 +747,18 @@ fn listed(
         && !rejected
         && crate::storage::native_sign_in(tx, &host, &connection, None).is_ok();
     assert!(!launchable || sign_in == Some(NativeAuthPhase::AuthenticatedObserved));
+    let rechecking = sign_in == Some(NativeAuthPhase::AuthenticatedObserved)
+        && !launchable
+        && !rejected
+        && crate::storage::sign_in_rechecking(tx, &host, &connection).unwrap_or(false);
+    assert!(!(launchable && rechecking));
     Ok(Listed {
         connection,
         details,
         sign_in,
         launchable,
         rejected,
+        rechecking,
     })
 }
 
