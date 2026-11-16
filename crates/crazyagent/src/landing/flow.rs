@@ -786,10 +786,10 @@ pub(super) fn agent(db: &Connection, record: &Record) -> Result<Agent, EngineErr
 }
 
 /// Says whether an agent worktree holds exactly a commit: nothing staged or changed in
-/// tracked files and no untracked file outside its ignore rules. A submodule counts by
-/// the commit it records, never by its own content, so no git runs inside it under
-/// config the engine did not write. Inputs: the worktree and the commit. Output: true
-/// when it holds nothing else.
+/// tracked files, as its confined step reads them ([`Repo::reading`]), and no untracked file
+/// outside its ignore rules. A submodule counts by the commit it records, never by its own
+/// content, so no git runs inside it under config the engine did not write. Inputs: the
+/// worktree and the commit. Output: true when it holds nothing else.
 pub(super) fn holds_only(repo: &Repo, commit: &str) -> Result<bool, EngineError> {
     holds_only_except(repo, commit, &[])
 }
@@ -804,8 +804,9 @@ pub(super) fn holds_only_except(
     commit: &str,
     excluded: &[&str],
 ) -> Result<bool, EngineError> {
-    repo.run(&["update-index", "-q", "--refresh"])?;
-    if !repo.test(&[
+    let reading = repo.reading()?;
+    reading.run(&["update-index", "-q", "--refresh"])?;
+    if !reading.test(&[
         "diff-index",
         "--quiet",
         "--ignore-submodules=all",
@@ -899,9 +900,11 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
     if agent.head()? != from {
         return Ok(false);
     }
-    let refreshed = agent
-        .repo
-        .exec(&["update-index", "-q", "--refresh"], None, &[], 4096)?;
+    let refreshed =
+        agent
+            .repo
+            .reading()?
+            .exec(&["update-index", "-q", "--refresh"], None, &[], 4096)?;
     if refreshed.code != 0 {
         return Ok(false);
     }

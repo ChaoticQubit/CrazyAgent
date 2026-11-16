@@ -15431,6 +15431,69 @@ fn a_confined_git_step_cannot_read_the_owners_ignore_file_behind_a_link() {
     );
 }
 
+/// LINUX-LANDING part 2 (rv-sa241 fixcheck of 613dd77a4), a mechanism row: the check that an
+/// agent worktree holds only a commit refreshes its index and compares it with the commit
+/// under the confined step, as a turn end's add is, never with the engine's own rights, so a
+/// link an agent swaps in meanwhile leads neither git outside the step's read set. Only the
+/// untracked listing, which applies the owner's ignore rules, still runs unconfined.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_holds_only_check_refreshes_and_compares_the_index_only_confined() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Master,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let head = agent.head().unwrap();
+    git::UNCONFINED_WORK.with(|runs| runs.borrow_mut().clear());
+
+    let held = flow::holds_only(&agent.repo, &head).map_err(|refused| refused.0);
+    let unconfined = git::UNCONFINED_WORK.with(|runs| runs.take());
+
+    assert_eq!(held, Ok(true));
+    for step in ["update-index", "diff-index"] {
+        assert!(
+            !unconfined.iter().any(|run| run == step),
+            "{step} read the work tree unconfined: {unconfined:?}"
+        );
+    }
+}
+
+/// LINUX-LANDING part 2, a mechanism row: a reset refreshes the agent worktree's index under
+/// the confined step before its read-tree, never with the engine's own rights, and the reset
+/// still moves the worktree.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_reset_refreshes_the_agents_index_only_confined() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Master,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let from = agent.head().unwrap();
+    let target = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    git::UNCONFINED_WORK.with(|runs| runs.borrow_mut().clear());
+
+    let reset = flow::reset_agent(&agent, &from, &target).map_err(|refused| refused.0);
+    let unconfined = git::UNCONFINED_WORK.with(|runs| runs.take());
+
+    assert_eq!(reset, Ok(true));
+    assert!(
+        !unconfined.iter().any(|run| run == "update-index"),
+        "the reset's refresh read the work tree unconfined: {unconfined:?}"
+    );
+}
+
 /// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree, with no timing: a step writes
 /// only what it names. Neither step reaches the owner's hooks or anywhere outside, a step
 /// filling the work tree writes no git metadata, and a step adding the work tree writes
