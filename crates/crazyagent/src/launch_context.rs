@@ -1539,6 +1539,7 @@ impl Installed {
             model_proxy: None,
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
+            native_connectors_off: false,
             _lock: lock,
         })
     }
