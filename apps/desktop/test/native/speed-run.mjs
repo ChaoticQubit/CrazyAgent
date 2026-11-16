@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { endTerminals, start, stop } from "./e2e-harness.mjs";
 import {
-  KEPT_MIN, REFUSED_EXIT, incomplete, joinSample, judge, noiseShares, privateFolder, quiet, readQuiet, sampleMetrics, schedule,
-  stayedQuiet,
+  KEPT_MIN, REFUSED_EXIT, SPEED_STATE, incomplete, joinSample, judge, noiseShares, privateFolder, quiet, readQuiet, runSchedule,
+  sampleMetrics, stayedQuiet,
 } from "./speed-budget.mjs";
 import { PROJECT } from "./speed-seed.mjs";
 
@@ -18,10 +18,8 @@ const RUN = join(appRoot, "test", "native", "run.mjs");
 const TUI = resolve(appRoot, "../../scripts/qualification/tui_speed.py");
 const QUIET_WAIT_MS = 10 * 60000;
 const QUIET_LOOK_MS = 15000;
-const TAINTED_MAX = 3;
 const RUN_MS_MAX = 20 * 60000;
 const OUTPUT_BYTES_MAX = 1 << 20;
-const STATE = /^\/private\/tmp\/cas-(noise|compare)-(base|candidate)-[0-9a-f]{8}-[A-Za-z0-9]{6}$/;
 
 /** One side's artifacts as build-speed-base.sh lays them out, and the digest of its manifest
  * that names the build. Input: the folder. Output: the side. */
@@ -41,7 +39,7 @@ function artifacts(folder) {
  * mode, the side's label and its artifacts. Output: the state folder. */
 function freshState(mode, label, side) {
   const state = realpathSync(mkdtempSync(`/tmp/cas-${mode}-${label}-${side.digest.slice(0, 8)}-`));
-  assert.match(state, STATE, "a speed state folder");
+  assert.match(state, SPEED_STATE, "a speed state folder");
   privateFolder(state);
   mkdirSync(join(state, "home"), { mode: 0o700 });
   return state;
@@ -139,39 +137,37 @@ function refuse(out, reasons, runs) {
   process.exit(REFUSED_EXIT);
 }
 
-/** Runs every scheduled launch, each only on a quiet Mac and kept only when the Mac stayed
- * quiet through it. Inputs: the mode, both sides, kept runs and the output folder. Output: the
- * kept samples per side. */
+/** One scheduled launch of a side: the app run, then the TUI run on the same state. Inputs: the
+ * side, its state and whether it is a warm-up. Output: its record and, unless a warm-up, its
+ * sample. */
+async function launchOnce(side, state, warm) {
+  const run = await runOnce(side, state);
+  const tui = await tuiOnce(side, state, run.evidence);
+  return { run: { state, evidence: run.evidence }, sample: warm ? null : joinSample(sampleMetrics(run.engine, run.app), tui) };
+}
+
+/** Runs every scheduled launch through `runSchedule`, each on a quiet Mac. Inputs: the mode,
+ * both sides, kept runs and the output folder. Output: `{ samples, failed, runs }`. */
 async function collect(mode, sides, kept, out) {
   const states = {
     base: freshState(mode, "base", sides.base),
     candidate: freshState(mode, "candidate", sides.candidate),
   };
   assert.notEqual(states.base, states.candidate, "each side keeps its own state");
-  const samples = { base: [], candidate: [] };
-  const runs = [];
+  const progress = { samples: { base: [], candidate: [] }, failed: { base: 0, candidate: 0 }, runs: [] };
+  let refused;
   try {
-    for (const { side, warm } of schedule(kept)) {
-      for (let tainted = 0; ; tainted += 1) {
-        if (tainted >= TAINTED_MAX) refuse(out, [`${TAINTED_MAX} runs in a row saw the Mac get busy`], runs);
-        const busy = await waitQuiet();
-        if (busy) refuse(out, busy, runs);
-        const run = await runOnce(sides[side], states[side]);
-        const tui = await tuiOnce(sides[side], states[side], run.evidence);
-        const after = stayedQuiet(readQuiet());
-        runs.push({ side, warm, state: states[side], evidence: run.evidence, quiet_after: after.quiet, reasons: after.reasons });
-        if (!after.quiet) continue;
-        if (!warm) samples[side].push(joinSample(sampleMetrics(run.engine, run.app), tui));
-        break;
-      }
-    }
+    refused = await runSchedule(kept, {
+      quietBefore: waitQuiet,
+      launch: (side, warm) => launchOnce(sides[side], states[side], warm),
+      quietAfter: () => stayedQuiet(readQuiet()),
+    }, progress);
   } finally {
-    record(out, "runs.json", runs);
-    record(out, "samples.json", samples);
+    record(out, "runs.json", progress.runs);
+    record(out, "samples.json", progress.samples);
   }
-  assert.equal(samples.base.length, kept);
-  assert.equal(samples.candidate.length, kept);
-  return samples;
+  if (refused) refuse(out, refused, progress.runs);
+  return progress;
 }
 
 /** The speed driver (DEC-169). `noise` runs the base against itself and writes noise.json;
@@ -192,7 +188,7 @@ async function main() {
   const shares = mode === "compare" ? readNoise(values.noise, base, candidate) : null;
   mkdirSync(values.out, { recursive: true, mode: 0o700 });
   assert.equal(readdirSync(values.out).length, 0, "--out is empty");
-  const samples = await collect(mode, { base, candidate }, kept, values.out);
+  const { samples } = await collect(mode, { base, candidate }, kept, values.out);
   if (mode === "noise") {
     const noise = { base: base.digest, shares: noiseShares(samples.base, samples.candidate) };
     record(values.out, "noise.json", noise);

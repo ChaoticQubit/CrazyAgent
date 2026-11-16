@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { lstatSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 /** Exit code of a speed run the Mac was too busy to judge: EX_TEMPFAIL, so a gate reads it as
  * not run, never as a pass or a failure. */
@@ -19,6 +19,14 @@ export const QUIET_LIMITS = { load1_max: 2, memory_level_min: 50 };
 /** Processes whose presence means a build is running and timings are noise. */
 export const COMPILERS = ["rustc", "cargo", "clang", "ld", "ld64", "swift-frontend", "xcodebuild"];
 const COUNT_SLACK = 1;
+/** A speed run's kept engine state folder, as speed-run.mjs makes it: new, private and short
+ * enough for the engine's socket address. */
+export const SPEED_STATE = /^\/private\/tmp\/cas-(noise|compare)-(base|candidate)-[0-9a-f]{8}-[A-Za-z0-9]{6}$/;
+/** Most runs in a row the Mac may get busy through before a speed run is refused. */
+const TAINTED_MAX = 3;
+/** Most characters of a failed run's error its record keeps: the tail, where run.mjs puts the
+ * child's stderr. */
+export const FAILURE_TEXT_MAX = 4000;
 
 const round = (value) => Number(value.toFixed(2));
 
@@ -226,6 +234,37 @@ export function schedule(kept) {
   for (let index = 0; index < kept; index += 1) order.push({ side: "base", warm: false }, { side: "candidate", warm: false });
   assert.equal(order.length, 2 * kept + 2);
   return order;
+}
+
+/** Runs every scheduled launch (`schedule`), each only once the Mac is quiet and kept only when
+ * the Mac stayed quiet through it; a run it got busy through runs again, and `TAINTED_MAX` in a
+ * row refuse. Inputs: kept runs per side, `{ quietBefore, launch, quietAfter }` (null or the
+ * busy reasons; `{ run, sample }` for a side and whether it is a warm-up; `{ quiet, reasons }`)
+ * and the progress it fills: `{ samples, failed, runs }`. Output: null, or the refusal's reasons. */
+export async function runSchedule(kept, { quietBefore, launch, quietAfter }, progress) {
+  const { samples, runs } = progress;
+  for (const { side, warm } of schedule(kept)) {
+    for (let tainted = 0; ; tainted += 1) {
+      if (tainted >= TAINTED_MAX) return [`${TAINTED_MAX} runs in a row saw the Mac get busy`];
+      const busy = await quietBefore();
+      if (busy) return busy;
+      const done = await launch(side, warm);
+      const after = quietAfter();
+      runs.push({ side, warm, ...done.run, quiet_after: after.quiet, reasons: after.reasons });
+      if (!after.quiet) continue;
+      if (!warm) samples[side].push(done.sample);
+      break;
+    }
+  }
+  assert.equal(samples.base.length, kept);
+  assert.equal(samples.candidate.length, kept);
+  return null;
+}
+
+/** Gives a new speed state home its own keychain (DEC-146). Input: the home. Output: the
+ * keychain's path. */
+export function prepareKeychain(home) {
+  return join(home, "Library", "Keychains", "login.keychain-db");
 }
 
 /** The values one metric has across a side's samples. Inputs: the samples and the metric.

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { KEPT_MIN, REFUSED_EXIT, REQUIRED, clickUntilUsable, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, privateFolder, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
+import { FAILURE_TEXT_MAX, KEPT_MIN, REFUSED_EXIT, REQUIRED, clickUntilUsable, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, prepareKeychain, privateFolder, quiet, runSchedule, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
 
 const QUIET = { load1: 0.8, compilers: [], memoryLevel: 80, onAC: true, screenLocked: false, busy: false };
 
@@ -289,4 +289,160 @@ test("the page's click clicks an enabled target once and times it until the page
   assert.equal(answer.error, undefined, JSON.stringify(answer));
   assert.ok(Number.isFinite(answer.ms) && answer.ms >= 0, JSON.stringify(answer));
   assert.equal(target.clicks, 1);
+});
+
+const calm = { quietBefore: async () => null, quietAfter: () => ({ quiet: true, reasons: [] }) };
+const progressOf = () => ({ samples: { base: [], candidate: [] }, failed: { base: 0, candidate: 0 }, runs: [] });
+
+/** A stand-in launch that numbers its calls and fails the ones `fails` picks. Input: the pick,
+ * from the call's number, side and warm-up flag. Output: the launch and its call count. */
+function launches(fails) {
+  const seen = { calls: 0 };
+  seen.launch = async (side, warm) => {
+    seen.calls += 1;
+    if (fails(seen.calls, side, warm)) throw new Error(`run.mjs speed failed (1): run ${seen.calls} never showed Home`);
+    return { run: { evidence: `/evidence/${seen.calls}` }, sample: warm ? null : { page_ms: seen.calls } };
+  };
+  return seen;
+}
+
+test("a failed run is recorded and counted, the schedule goes on, and the medians come only from good runs (SPEED-RUN-ABORT)", async () => {
+  const kept = KEPT_MIN + 2;
+  const progress = progressOf();
+  const seen = launches((call) => call === 3);
+  assert.equal(await runSchedule(kept, { ...calm, launch: seen.launch }, progress), null);
+  assert.equal(seen.calls, 2 * kept + 2, "every slot ran once and the failed one was not run again");
+  assert.deepEqual(progress.failed, { base: 1, candidate: 0 });
+  assert.equal(progress.samples.base.length, kept - 1);
+  assert.equal(progress.samples.candidate.length, kept);
+  assert.ok(progress.samples.base.every((sample) => sample.page_ms !== 3), "the failed run gives no sample");
+  assert.equal(progress.runs.length, 2 * kept + 2);
+  assert.deepEqual(progress.runs.filter((run) => Object.hasOwn(run, "failed")), [
+    { side: "base", warm: false, failed: "run.mjs speed failed (1): run 3 never showed Home" },
+  ]);
+  const rows = judge(progress.samples.base, progress.samples.candidate, { page_ms: 0.05 });
+  assert.deepEqual(rows.map((row) => [row.metric, row.status]), [["page_ms", "pass"]], "the good runs alone are judged");
+});
+
+test("a failed warm-up is counted and the schedule goes on to every kept run", async () => {
+  const progress = progressOf();
+  const seen = launches((call) => call === 1);
+  assert.equal(await runSchedule(KEPT_MIN, { ...calm, launch: seen.launch }, progress), null);
+  assert.equal(seen.calls, 2 * KEPT_MIN + 2);
+  assert.deepEqual(progress.failed, { base: 1, candidate: 0 });
+  assert.equal(progress.samples.base.length, KEPT_MIN);
+  assert.equal(progress.samples.candidate.length, KEPT_MIN);
+});
+
+test("a side that can no longer reach KEPT_MIN good runs ends the schedule there instead of running on to no verdict", async () => {
+  const progress = progressOf();
+  const seen = launches((_, side, warm) => side === "candidate" && !warm);
+  assert.equal(await runSchedule(KEPT_MIN, { ...calm, launch: seen.launch }, progress), null);
+  assert.equal(seen.calls, 4, "both warm-ups, one base run and the candidate's first failed run");
+  assert.deepEqual(progress.failed, { base: 0, candidate: 1 });
+  assert.equal(progress.samples.base.length, 1);
+  assert.equal(progress.samples.candidate.length, 0);
+});
+
+test("a failed run's record keeps the tail of its error, bounded", async () => {
+  const progress = progressOf();
+  const long = `${"x".repeat(FAILURE_TEXT_MAX)} the stderr tail`;
+  let calls = 0;
+  const launch = async (side, warm) => {
+    calls += 1;
+    if (calls === 1) throw new Error(long);
+    return { run: {}, sample: warm ? null : { page_ms: 1 } };
+  };
+  await runSchedule(KEPT_MIN, { ...calm, launch }, progress);
+  const failed = progress.runs[0].failed;
+  assert.equal(failed.length, FAILURE_TEXT_MAX);
+  assert.ok(failed.endsWith(" the stderr tail"));
+});
+
+test("a run the Mac got busy through runs again, three in a row refuse, and a busy Mac before a run refuses at once", async () => {
+  const busyAfter = progressOf();
+  const seen = launches(() => false);
+  const refused = await runSchedule(KEPT_MIN, { quietBefore: async () => null, launch: seen.launch, quietAfter: () => ({ quiet: false, reasons: ["load 4"] }) }, busyAfter);
+  assert.deepEqual(refused, ["3 runs in a row saw the Mac get busy"]);
+  assert.equal(seen.calls, 3);
+  assert.equal(busyAfter.runs.length, 3);
+  const busyBefore = progressOf();
+  const none = launches(() => false);
+  assert.deepEqual(await runSchedule(KEPT_MIN, { quietBefore: async () => ["a build runs"], launch: none.launch, quietAfter: calm.quietAfter }, busyBefore), ["a build runs"]);
+  assert.equal(none.calls, 0);
+});
+
+/** A stand-in keychain tool: records each call and answers the two reads with the listing
+ * given. Inputs: the search list and default keychain it prints for a home. Output: the tool and
+ * its calls. */
+function keychainTool(searchList = (keychain) => [keychain], effect = () => {}) {
+  const calls = [];
+  const tool = (home, args) => {
+    calls.push([home, ...args]);
+    effect(args);
+    const keychain = join(home, "Library", "Keychains", "login.keychain-db");
+    if (args.length === 3 && args[0] === "list-keychains") return searchList(keychain).map((path) => `    "${path}"`).join("\n") + "\n";
+    if (args.length === 3 && args[0] === "default-keychain") return `    "${keychain}"\n`;
+    return "";
+  };
+  return { tool, calls };
+}
+
+/** Runs `check` with a new speed state home under /private/tmp and an owner home stand-in, then
+ * removes both. Input: the check, given the home and the owner home. Output: none. */
+function withStateHome(check) {
+  const state = realpathSync(mkdtempSync("/private/tmp/cas-noise-base-0123abcd-"));
+  const owner = realpathSync(mkdtempSync(join(tmpdir(), "ca-speed-owner-")));
+  try {
+    const home = join(state, "home");
+    mkdirSync(home, { mode: 0o700 });
+    mkdirSync(join(owner, "Library", "Preferences"), { recursive: true, mode: 0o700 });
+    check(home, owner);
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+    rmSync(owner, { recursive: true, force: true });
+  }
+}
+
+const MAC_ONLY = { skip: process.platform !== "darwin" && "a speed state home lies under /private/tmp on macOS" };
+
+test("a new speed state home gets its own empty login keychain as its default and its only search entry, as the gate prepared by hand (DEC-146)", MAC_ONLY, () => {
+  withStateHome((home, owner) => {
+    const { tool, calls } = keychainTool();
+    const keychain = join(home, "Library", "Keychains", "login.keychain-db");
+    assert.equal(prepareKeychain(home, owner, tool), keychain);
+    assert.deepEqual(calls, [
+      [home, "create-keychain", "-p", "", keychain],
+      [home, "set-keychain-settings", keychain],
+      [home, "list-keychains", "-d", "user", "-s", keychain],
+      [home, "default-keychain", "-d", "user", "-s", keychain],
+      [home, "list-keychains", "-d", "user"],
+      [home, "default-keychain", "-d", "user"],
+    ]);
+    for (const folder of ["Library", "Library/Keychains", "Library/Preferences"]) {
+      assert.equal(lstatSync(join(home, folder)).mode & 0o777, 0o700, folder);
+    }
+  });
+});
+
+test("a keychain is prepared only in a new speed state home, only as its own, and never with the owner's keychain settings changed", MAC_ONLY, () => {
+  withStateHome((home, owner) => {
+    const outside = keychainTool();
+    assert.throws(() => prepareKeychain(owner, owner, outside.tool), /a speed state home/);
+    assert.deepEqual(outside.calls, [], "no keychain tool runs outside a state home");
+    const shared = keychainTool((keychain) => [keychain, join(owner, "Library", "Keychains", "login.keychain-db")]);
+    assert.throws(() => prepareKeychain(home, owner, shared.tool), /only its own keychain/);
+    assert.throws(() => prepareKeychain(home, owner, keychainTool().tool), /no Library yet/, "a home is prepared once");
+  });
+  withStateHome((home, owner) => {
+    const settings = join(owner, "Library", "Preferences", "com.apple.security.plist");
+    const leaky = keychainTool(undefined, (args) => { if (args[0] === "create-keychain") writeFileSync(settings, "changed"); });
+    assert.throws(() => prepareKeychain(home, owner, leaky.tool), /the owner's keychain settings/);
+    assert.ok(existsSync(settings));
+  });
+});
+
+test("speed-run gives each state home its prepared keychain as it makes the home", () => {
+  const runner = readFileSync(new URL("./speed-run.mjs", import.meta.url), "utf8");
+  assert.match(runner, /mkdirSync\(join\(state, "home"\), \{ mode: 0o700 \}\);\s*prepareKeychain\(join\(state, "home"\)\);/);
 });
