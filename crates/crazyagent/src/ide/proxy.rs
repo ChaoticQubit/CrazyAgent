@@ -551,7 +551,8 @@ async fn connection(mut client: TcpStream, site: Arc<Site>) {
 /// Opens one request's connection to the IDE server. Nothing goes upstream before the open
 /// has seen the server ready, and each connection is checked before anything is sent on it
 /// ([`super::server::served_by`]), so a process that took the port after the server exited
-/// gets no request and no token (rv-sa241 LEAD-1). Input: the site. Output: the connection.
+/// gets no request and no token (rv-sa241 LEAD-1), and the site is flagged ([`Site::refused`])
+/// so the launch is stopped. Input: the site. Output: the connection.
 async fn upstream(site: &Site) -> io::Result<TcpStream> {
     let Some(served) = site.served.get() else {
         return Err(io::Error::other("ide_proxy_not_ready"));
@@ -562,9 +563,13 @@ async fn upstream(site: &Site) -> io::Result<TcpStream> {
     )
     .await
     .map_err(|_| io::Error::other("ide_proxy_upstream_timeout"))??;
-    super::server::served_by(site.upstream, served)
-        .await
-        .map_err(|refused| io::Error::other(refused.0))?;
+    if let Err(refused) = super::server::served_by(site.upstream, served).await {
+        if refused.0 == "ide_server_port_taken" {
+            site.refused
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        return Err(io::Error::other(refused.0));
+    }
     assert_eq!(server.peer_addr()?.port(), site.upstream);
     Ok(server)
 }
