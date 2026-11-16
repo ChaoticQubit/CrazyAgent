@@ -34,6 +34,12 @@ const DEADLINE_CHECK_LOOPS: u32 = 30;
 /// How many deadline reads in a row must find the deadline passed before the holder ends
 /// its server, about five awake minutes, so an engine waking with the machine renews first.
 const DEADLINE_LATE_CHECKS: u32 = 5;
+/// How long [`listener`] tries again a listener whose queue of unaccepted connections is
+/// full before it refuses it, so a full queue never holds the spawn gate or a freeze
+/// (kept-cap QUESTION-04:15 point 2).
+const LISTENER_FULL_WAIT: Duration = Duration::from_millis(50);
+/// The pause between two of [`listener`]'s tries at a full queue, taken outside the gate.
+const LISTENER_FULL_STEP: Duration = Duration::from_millis(5);
 /// The command that prints a file's modification time in seconds, following a socket alias.
 #[cfg(target_os = "macos")]
 const MODIFIED: &str = "stat -L -f %m";
@@ -206,23 +212,32 @@ enum Pending {
 /// The process the kernel names as the listener bound at one socket, read from a raw
 /// connection, never a tmux client, through the short address a long path needs (T17b).
 /// The name the kernel gives the peer must be that address, so a link swapped in at the
-/// path names nothing, and tmux pads the name with zero bytes after its end. Input: the
-/// socket path. Output: its pid, none when nothing listens there, or
-/// `terminal_unavailable` when something answers that cannot be named.
+/// path names nothing, and tmux pads the name with zero bytes after its end. The connect
+/// never waits: a full queue is tried again for at most `LISTENER_FULL_WAIT`, outside the
+/// gate, then refused. Input: the socket path. Output: its pid, none when nothing listens
+/// there, or `terminal_unavailable` when something answers that cannot be named.
 pub fn listener(socket: &Path) -> Result<Option<u32>, HostError> {
     let unnamed = || failure("terminal_unavailable");
     let address = crate::socket_address::address(socket).map_err(|_| unnamed())?;
-    let stream = match crate::spawn_gate::connect_unix_std(&address) {
-        Ok(stream) => stream,
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return Ok(None);
+    let until = Instant::now() + LISTENER_FULL_WAIT;
+    let stream = loop {
+        match crate::spawn_gate::try_connect_unix_std(&address) {
+            Ok(stream) => break stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until =>
+            {
+                std::thread::sleep(LISTENER_FULL_STEP);
+            }
+            Err(_) => return Err(unnamed()),
         }
-        Err(_) => return Err(unnamed()),
     };
     let peer = stream.peer_addr().map_err(|_| unnamed())?;
     let named = peer

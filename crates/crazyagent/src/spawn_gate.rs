@@ -263,6 +263,37 @@ pub fn connect_unix_std(
     guarded(|| std::os::unix::net::UnixStream::connect(&address))
 }
 
+/// Tries one Unix stream connect inside the gate without waiting, through the short address
+/// of a path too long for a socket address. A listener whose queue of unaccepted
+/// connections is full answers `WouldBlock` at once, where a blocking connect on Linux
+/// waits for room with no bound, the gate held. Input: the socket path. Output: the
+/// stream, blocking once connected, or the connect's error.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn try_connect_unix_std(
+    path: impl AsRef<std::path::Path>,
+) -> io::Result<std::os::unix::net::UnixStream> {
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, connect, socket};
+    use std::os::fd::AsRawFd;
+    let address = crate::socket_address::address(path.as_ref())?;
+    let unix = UnixAddr::new(address.as_path()).map_err(io::Error::from)?;
+    let stream = guarded(|| -> io::Result<std::os::unix::net::UnixStream> {
+        let fd = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::empty(),
+            None,
+        )?;
+        rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
+        let stream = std::os::unix::net::UnixStream::from(fd);
+        stream.set_nonblocking(true)?;
+        connect(stream.as_raw_fd(), &unix)?;
+        Ok(stream)
+    })?;
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
 /// Connects a blocking Unix stream to a Linux abstract socket name inside the gate, as a
 /// D-Bus session bus started outside systemd may listen on. Input: the name without its
 /// leading NUL. Output: the stream.

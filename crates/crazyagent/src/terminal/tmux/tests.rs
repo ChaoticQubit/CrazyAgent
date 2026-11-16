@@ -2198,3 +2198,61 @@ fn a_layout_names_the_panes_of_every_leaf_cell() {
     assert!(ids("").is_empty());
     assert!(ids("not a layout").is_empty());
 }
+
+/// Leader 04:16 (kept-cap QUESTION-04:15 point 2): a listener whose queue of unaccepted
+/// connections is full is answered at once, never waited on: on Linux a blocking connect
+/// waits for room with no end, inside the spawn gate, so every spawn in the engine would
+/// wait too. Such a listener cannot be named, so it is refused and nothing trusts it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_listener_whose_queue_is_full_is_answered_at_once_not_waited_on() {
+    use nix::errno::Errno;
+    use nix::sys::socket::{
+        AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, connect, listen, socket,
+    };
+    use std::os::fd::AsRawFd;
+    const FILL_MAX: usize = 64;
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("full.sock");
+    let address = UnixAddr::new(&path).unwrap();
+    let server = socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .unwrap();
+    bind(server.as_raw_fd(), &address).unwrap();
+    listen(&server, Backlog::new(0).unwrap()).unwrap();
+    let mut queued = Vec::new();
+    let full = loop {
+        assert!(queued.len() < FILL_MAX, "the queue never fills");
+        let client = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+            None,
+        )
+        .unwrap();
+        match connect(client.as_raw_fd(), &address) {
+            Ok(()) => queued.push(client),
+            Err(Errno::EAGAIN) => break true,
+            Err(other) => panic!("{other}"),
+        }
+    };
+    assert!(full);
+
+    let (answer, answered) = std::sync::mpsc::channel();
+    let asked = path.clone();
+    std::thread::spawn(move || {
+        let _ = answer.send(listener(&asked));
+    });
+    let reply = answered.recv_timeout(Duration::from_secs(5));
+    assert_eq!(
+        reply.map_err(|_| "still waiting after five seconds"),
+        Ok(Err(failure("terminal_unavailable"))),
+        "a full queue is answered at once and refused"
+    );
+    drop(queued);
+    drop(server);
+}
