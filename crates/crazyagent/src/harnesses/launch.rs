@@ -1922,10 +1922,10 @@ impl Session {
                 self.stop_group();
                 return Err(failure("launch_deadline"));
             }
+            self.flush_input()?;
             if now >= until {
                 return Ok(None);
             }
-            self.flush_input()?;
             let wait = until.min(self.deadline) - now;
             let wait = if self.pending.is_empty() {
                 wait
