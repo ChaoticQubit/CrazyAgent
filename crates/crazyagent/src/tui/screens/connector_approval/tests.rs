@@ -86,6 +86,7 @@ fn opened() -> Shell {
 fn page(read: ApprovalView) -> Shell {
     let mut shell = opened();
     arrive(&mut shell, approval_event(Ok(read)));
+    render(&mut shell, 80, 24);
     shell
 }
 
@@ -387,4 +388,37 @@ fn a_stacked_page_takes_only_the_answer_for_its_own_write() {
     }
     assert!(over.stored.ready().is_some_and(|view| view.id == 8));
     assert!(matches!(under.stored, Load::Failed(_)));
+}
+
+/// rv-sec2 T13d F2: at the 80x24 minimum a write with the notice and the longest names and
+/// preview runs below the page, and a or d answer nothing, saying why in words, until the
+/// page has been scrolled down to its time left.
+#[test]
+fn a_and_d_answer_only_once_the_write_has_been_read_down_to_its_time_left() {
+    let fill = |bytes: usize| "abc ".repeat(bytes / 4);
+    let mut long = waiting();
+    long.hidden = true;
+    long.title = fill(64);
+    long.tool = fill(108);
+    long.agent = fill(128);
+    long.preview = fill(480);
+    let mut shell = page(long);
+    assert!(
+        !shows(&mut shell, "Time left"),
+        "the time left is below the page"
+    );
+    keys(&mut shell, &[Key::Char('a'), Key::Char('d')]);
+    assert!(
+        requests(&mut shell).is_empty(),
+        "nothing is answered unread"
+    );
+    assert!(said(&shell).contains(READ_FIRST));
+    assert!(shows(&mut shell, READ_TO_ANSWER));
+    keys(&mut shell, &[Key::End]);
+    assert!(shows(&mut shell, "Time left"));
+    keys(&mut shell, &[Key::Home, Key::Char('a')]);
+    assert!(
+        answers(&one(&mut shell), true),
+        "once read down to its time left, a answers"
+    );
 }

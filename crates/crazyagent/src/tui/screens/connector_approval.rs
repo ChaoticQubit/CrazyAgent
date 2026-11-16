@@ -36,6 +36,11 @@ pub(in crate::tui) const ALLOWED: &str = "Write allowed.";
 pub(in crate::tui) const DENIED: &str = "Write denied.";
 /// The line of a write whose wait ran out (APPROVAL_PAGE.expired).
 pub(in crate::tui) const EXPIRED: &str = "Expired";
+/// The line an a or d says before the whole write has been on screen (rv-sec2 T13d F2).
+pub(in crate::tui) const READ_FIRST: &str =
+    "Read the whole write to its time left first, with Down, PgDn or End.";
+/// The Scroll hint while the end of the write is still below the page (rv-sec2 T13d F2).
+const READ_TO_ANSWER: &str = "Read to the end to answer";
 const CLOSED: &str = "connector_approval_closed";
 
 /// One agent- or vendor-supplied text as the page shows it (approvalText): each typed
@@ -106,8 +111,9 @@ enum Pending {
 
 /// The approval page the ConnectorWrite notice opens (DEC-168 addendum 32): what asks and
 /// what it sends, the time left with a and d while it waits, else where it stands, and the
-/// full arguments under a fold Enter opens. An answer the engine took shows with no keys
-/// until the re-read lands, and the end of the wait reads the write once more.
+/// full arguments under a fold Enter opens. a and d answer only once every line down to the
+/// time left has been drawn. An answer the engine took shows with no keys until the re-read
+/// lands, and the end of the wait reads the write once more.
 pub(in crate::tui) struct ConnectorApprovalPage {
     id: i64,
     stored: Load<ApprovalView>,
@@ -118,6 +124,7 @@ pub(in crate::tui) struct ConnectorApprovalPage {
     top: usize,
     last_top: usize,
     room: usize,
+    read_end: bool,
 }
 
 impl ConnectorApprovalPage {
@@ -134,6 +141,7 @@ impl ConnectorApprovalPage {
             top: 0,
             last_top: 0,
             room: 1,
+            read_end: false,
         }
     }
 
@@ -164,7 +172,7 @@ impl ConnectorApprovalPage {
         self.kept.as_ref().or_else(|| self.stored.ready())
     }
 
-    fn answerable(&self, now: i64) -> bool {
+    fn waiting(&self, now: i64) -> bool {
         self.pending.is_none()
             && self.kept.is_none()
             && self
@@ -173,8 +181,16 @@ impl ConnectorApprovalPage {
                 .is_some_and(|view| shown_state(view, now) == State::Waiting)
     }
 
+    fn answerable(&self, now: i64) -> bool {
+        self.waiting(now) && self.read_end
+    }
+
     fn answer(&mut self, allow: bool, ctx: &mut Ctx) {
-        if !self.answerable(now_ms()) {
+        if !self.waiting(now_ms()) {
+            return;
+        }
+        if !self.read_end {
+            ctx.say(Message::warning("Not yet.", READ_FIRST));
             return;
         }
         self.ask(ConnectorsJob::Answer { id: self.id, allow }, ctx);
@@ -227,8 +243,9 @@ impl ConnectorApprovalPage {
     }
 
     /// The page's lines. Inputs: the width and the context. Output: every line, the
-    /// arguments included while their fold is open.
-    fn body(&self, width: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    /// arguments included while their fold is open, and how many of them run down to the
+    /// time left or where the write stands, none while no write is shown.
+    fn body(&self, width: usize, ctx: &Ctx) -> (Vec<Line<'static>>, Option<usize>) {
         let theme = &ctx.theme;
         let paint = |text: &str, role: Role| {
             wrap(text, width)
@@ -248,7 +265,7 @@ impl ConnectorApprovalPage {
                     theme,
                 )),
             }
-            return lines;
+            return (lines, None);
         };
         if view.hidden {
             lines.extend(paint(HIDDEN, Role::Warning));
@@ -266,6 +283,7 @@ impl ConnectorApprovalPage {
             State::Waiting => Line::raw(format!("Time left: {}", time_left(now, view.expires_ms))),
             state => styled(answered_line(view, state, offset), Role::Muted, theme),
         });
+        let summary = lines.len();
         lines.push(Line::default());
         let mark = if self.open {
             ctx.glyphs.down
@@ -282,7 +300,8 @@ impl ConnectorApprovalPage {
                     .map(|part| Line::raw(format!("  {part}"))),
             );
         }
-        lines
+        assert!(summary < lines.len());
+        (lines, Some(summary))
     }
 }
 
@@ -306,9 +325,10 @@ impl Screen for ConnectorApprovalPage {
         }
         let mut hints = Vec::new();
         if self.last_top > 0 {
+            let unread = self.waiting(now_ms()) && !self.read_end;
             hints.push(hint(
                 &format!("{}{}", ctx.glyphs.up, ctx.glyphs.down),
-                "Scroll",
+                if unread { READ_TO_ANSWER } else { "Scroll" },
             ));
         }
         if self.answerable(now_ms()) {
@@ -387,10 +407,13 @@ impl Screen for ConnectorApprovalPage {
         };
         let width = usize::from(inner.width).max(8);
         let room = usize::from(inner.height).max(1);
-        let lines = self.body(width, ctx);
+        let (lines, summary) = self.body(width, ctx);
         self.room = room;
         self.last_top = lines.len().saturating_sub(room);
         self.top = self.top.min(self.last_top);
+        if let Some(summary) = summary {
+            self.read_end |= self.top + room >= summary;
+        }
         let shown: Vec<_> = lines.into_iter().skip(self.top).take(room).collect();
         draw_lines(frame.buffer_mut(), inner, &shown);
         None
