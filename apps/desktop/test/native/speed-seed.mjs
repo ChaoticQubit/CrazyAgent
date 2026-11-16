@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
@@ -196,9 +196,9 @@ export async function speedSide(app) {
 
 /** Times one onboarding start of a new folder in the projects folder, the step that picks the
  * folder's project id past held ids and leftover rows (rv-code4 r2 F2), then removes that
- * project from the dashboard so the app's rows read the same projects every run. Inputs: the
- * bridge, the projects folder and the first client generation free. Output: the ms from asking
- * to the engine's receipt. */
+ * project from the dashboard and deletes its folder, so the app's rows read the same projects
+ * and found folders every run. Inputs: the bridge, the projects folder and the first client
+ * generation free. Output: the ms from asking to the engine's receipt. */
 async function onboardStart(bridge, projects, generation) {
   assert.ok(Number.isSafeInteger(generation) && generation >= 1, "a client generation");
   const name = `speed-onboard-${Date.now()}`;
@@ -211,6 +211,8 @@ async function onboardStart(bridge, projects, generation) {
   assert.equal(started.project_id, name, "the new folder gets its own name's id");
   const removed = await value(bridge, "desktop_remove_project", { id: started.project_id, generation: generation + 1 });
   assert.equal(removed?.outcome, "applied", `the timed project leaves the dashboard: ${JSON.stringify(removed)}`);
+  rmSync(folder, { recursive: true, force: true });
+  assert.ok(!existsSync(folder), "the timed folder is gone");
   assert.ok(Number.isFinite(ms) && ms >= 0, "an onboarding start time");
   return ms;
 }
