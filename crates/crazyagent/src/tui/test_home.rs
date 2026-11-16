@@ -64,34 +64,31 @@ pub(in crate::tui) fn engine_config() -> crate::config::EffectiveConfig {
 }
 
 /// Stands for the seeded local account's address in test settings. A test engine swaps it
-/// for a loopback port that refuses every connection, so no row reaches a model server the
-/// host runs (a host Ollama on 127.0.0.1:11434 made the account read ready).
+/// for a loopback port that refuses every connect at once, so no row reaches a model server
+/// the host runs (a host Ollama on 127.0.0.1:11434 made the account read ready).
 pub(in crate::tui) const LOCAL_ADDRESS: &str = "LOCAL_ADDRESS";
 
-/// Binds a loopback port without listening on it, so every connection to it is refused
-/// while the socket lives and no other process can take the port. Output: the socket, which
-/// the test engine holds, and its address.
-pub(in crate::tui) fn refusing_port() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
-    let socket =
-        crate::spawn_gate::bind_tcp_unlistened(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .unwrap();
-    let address = socket.local_addr().unwrap();
-    assert!(
-        address.ip().is_loopback() && address.port() != 0,
-        "{address}"
-    );
-    (socket, address)
+/// Holds a loopback port that refuses every connect at once on macOS and Linux, through
+/// `spawn_gate::refusing_tcp_port`: one connection of this process keeps the port in use with
+/// nothing listening on it, so no port-0 bind gets it and a bind naming it without
+/// `SO_REUSEADDR` fails. Output: the connection's two ends, which the test engine holds while
+/// it runs, and the port's address.
+pub(in crate::tui) fn refusing_port() -> ([std::net::TcpStream; 2], std::net::SocketAddr) {
+    let (held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    assert!(port != 0, "{address}");
+    (held, address)
 }
 
 /// Swaps `LOCAL_ADDRESS` in test engine settings for a loopback port that refuses every
-/// connection. Input: settings that name `LOCAL_ADDRESS`. Output: the bound socket, which
-/// the caller holds for as long as its engine runs, and the settings to start it with.
-pub(in crate::tui) fn refusing_settings(settings: &str) -> (tokio::net::TcpSocket, String) {
+/// connect at once. Input: settings that name `LOCAL_ADDRESS`. Output: the port's held ends,
+/// which the caller keeps for as long as its engine runs, and the settings to start it with.
+pub(in crate::tui) fn refusing_settings(settings: &str) -> ([std::net::TcpStream; 2], String) {
     assert!(settings.contains(LOCAL_ADDRESS), "{settings}");
-    let (socket, address) = refusing_port();
+    let (held, address) = refusing_port();
     let settings = settings.replace(LOCAL_ADDRESS, &address.to_string());
     assert!(!settings.contains(LOCAL_ADDRESS), "{settings}");
-    (socket, settings)
+    (held, settings)
 }
 
 /// rv-sec2 L388 F1: the port a TUI test engine seeds turns a connect away at once on macOS

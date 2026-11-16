@@ -46,7 +46,7 @@ struct Engine {
     user: tempfile::TempDir,
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
-    _refusing: tokio::net::TcpSocket,
+    _refusing: [std::net::TcpStream; 2],
     controller: OwnerController,
     #[cfg(target_os = "macos")]
     _keychain: crate::credentials::test_keychain::TestKeychain,

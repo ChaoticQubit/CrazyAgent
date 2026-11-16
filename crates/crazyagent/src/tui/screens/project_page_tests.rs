@@ -246,7 +246,7 @@ struct Engine {
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
     controller: OwnerController,
-    _refusing: tokio::net::TcpSocket,
+    _refusing: [std::net::TcpStream; 2],
 }
 
 impl Engine {
