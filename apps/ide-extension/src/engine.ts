@@ -128,8 +128,9 @@ export function readCapability(path: string): Buffer {
  * launch and is swapped again. `request` sends one call on its own connection; `on`
  * delivers events from one shared subscription that reconnects after a drop and stops
  * for good once the capability is refused or revoked. A swap the engine refuses with
- * `ide_session_taken` calls `taken` once: something else in this IDE used the capability
- * first (CA-SEC-004). Dispose it to close the subscription.
+ * `ide_session_taken` calls `taken` once: the capability was used twice, by something else
+ * in this IDE or by a second swap of this IDE's own (CA-SEC-004). Dispose it to close the
+ * subscription.
  */
 export class Engine implements Disposable {
   readonly project: string;
