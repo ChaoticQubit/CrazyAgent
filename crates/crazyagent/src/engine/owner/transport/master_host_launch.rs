@@ -1213,7 +1213,12 @@ fn turn_sandbox(
     hidden: &[PathBuf],
     connector: Option<ConnectorTurn<'_>>,
 ) -> Result<InstalledSandbox, EngineError> {
-    let _ = connector;
+    if let (Some(engine), Some(connector)) = (engine, connector) {
+        assert_eq!(
+            engine, connector.engine,
+            "a tools-on turn's connector server is its own engine"
+        );
+    }
     if policy.access.unavailable().is_some() {
         return Err(failure("agent_access_unavailable"));
     }
@@ -1253,7 +1258,7 @@ fn turn_sandbox(
         &ToolHomes::owner().map_err(refused)?,
         &policy.allowed(repository),
     );
-    let sandbox = match engine {
+    let sandbox = match engine.or(connector.map(|connector| connector.engine)) {
         None => ProjectSandbox::new(worktree, &home, &tmp, network)
             .and_then(|sandbox| sandbox.allow_read(repository)),
         Some(engine) => {
@@ -1267,6 +1272,10 @@ fn turn_sandbox(
     .and_then(|sandbox| sandbox.allow_exec(&program))
     .and_then(|sandbox| sandbox.allow_read(&runtime.path))
     .and_then(|sandbox| sandbox.allow_tools(&tools))
+    .and_then(|sandbox| match connector {
+        Some(connector) => sandbox.allow_connector_launch(engine_root, connector.folder),
+        None => Ok(sandbox),
+    })
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
     .and_then(|sandbox| sandbox.guard_engine_around(engine_root, &root.path))
     .and_then(|sandbox| match enforcement.repo_config_as_text {
