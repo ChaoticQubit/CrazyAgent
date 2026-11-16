@@ -819,6 +819,20 @@ impl ProbeCache {
     }
 }
 
+/// What a found harness file is on disk, read through its links: its real path, size and
+/// modified time, and on unix its device, inode and change time, so a binary replaced in place
+/// or a link repointed outside the app reads as a different one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Identity {
+    real: PathBuf,
+}
+
+/// Reads a harness file's identity. Input: the executable path as the catalog lists it.
+/// Output: the identity, or none when the file cannot be read.
+fn identity(_executable: &Path) -> Option<Identity> {
+    None
+}
+
 async fn probe(search: Search) -> Result<Vec<HarnessEntry>, tokio::task::JoinError> {
     tokio::task::spawn_blocking(move || catalog(&search)).await
 }

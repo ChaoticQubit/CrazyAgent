@@ -2184,6 +2184,43 @@ fn a_harness_the_resolver_refuses_as_changeable_is_never_asked_its_version() {
     assert!(!ran.exists(), "a refused harness file is never run");
 }
 
+/// PROBE-CACHE: on macOS, where the resolver trusts a file the administrators can also
+/// write, a harness file mode 0o775 with group admin passes the resolver but not trusted(),
+/// so it is never run for its version, as an update never runs it. Skipped for a user who is
+/// not an administrator, who cannot give a file that group.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_harness_file_trusted_refuses_is_never_asked_its_version_on_macos() {
+    if !user_groups().contains(&ADMIN_GROUP) {
+        return;
+    }
+    let machine = Machine::new();
+    let roots = machine.roots();
+    std::fs::create_dir_all(&roots.home).unwrap();
+    let ran = machine.root.path().join("ran");
+    let file = machine.root.path().join("bin/codex");
+    executable(
+        &file,
+        &format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        ),
+    );
+    std::os::unix::fs::chown(&file, None, Some(ADMIN_GROUP)).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o775)).unwrap();
+    assert!(
+        crate::tools::resolve_entry(&file, &roots.places).is_ok(),
+        "the resolver passes a file only the administrators can also write"
+    );
+    assert_eq!(super::trusted(&file), Err(TOOL_UNSAFE));
+    let version = super::state::version_if_runs(&file, &roots.home, &roots.places);
+    assert_eq!(version, None);
+    assert!(
+        !ran.exists(),
+        "a file trusted() refuses is never run for its version"
+    );
+}
+
 /// security-audit vid 1 (NEXT-02:50 step 1), on macOS, where the owner's cache folder lies
 /// outside every temp folder: an entry there that leads to a harness file in the temp folder
 /// is refused on the engine's places as one in a temp folder, is never run for its version,
