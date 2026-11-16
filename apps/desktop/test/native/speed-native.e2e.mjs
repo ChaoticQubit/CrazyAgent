@@ -10,6 +10,7 @@ const LOOK_MS = 10;
 const LAUNCH_MS_MAX = 60000;
 const USABLE_MS_MAX = 25000;
 const SETTLE_MS = 1000;
+const IDLE_MS = 60000;
 const HOME_HASHES = ["", "#/", "#/home"];
 const PROJECT_LINK = ".sidebar .nav-projects a.nav-item";
 const SWITCHES = [
@@ -110,12 +111,21 @@ describe("speed rows on the real desktop app and the real engine (DEC-169)", () 
       for (const [page, selector] of SWITCHES) store[page] = await timedClick(selector);
       await pause(SETTLE_MS);
     }
-    const helpers = webkitHelpers().filter((helper) => !launch.helpers.includes(helper));
+    const helpers = webkitHelpers().filter((helper) => !launch.helpers.includes(helper.pid));
+    const app = appPid();
     result.memory = {
       engine_mb: footprintMb(Number(process.env.SPEED_ENGINE_PID)),
-      app_mb: footprintMb(appPid()),
-      webkit_mb: helpers.map((helper) => footprintMb(helper)),
-      webkit_pids: helpers,
+      app_mb: footprintMb(app),
+      webkit_mb: helpers.map((helper) => footprintMb(helper.pid)),
+      webkit_pids: helpers.map((helper) => helper.pid),
+      webkit_kinds: helpers.map((helper) => helper.kind),
+    };
+    await pause(IDLE_MS);
+    assert.ok(HOME_HASHES.includes(await browser.execute(() => location.hash)), "the idle wait stays on Home");
+    const running = new Set(webkitHelpers().map((helper) => helper.pid));
+    result.memory.idle = {
+      app_mb: footprintMb(app),
+      webkit_mb: helpers.map((helper) => running.has(helper.pid) ? footprintMb(helper.pid) : 0),
     };
     writeFileSync(join(evidence, "speed-app.json"), JSON.stringify(result, null, 1), { flag: "wx", mode: 0o600 });
   });
