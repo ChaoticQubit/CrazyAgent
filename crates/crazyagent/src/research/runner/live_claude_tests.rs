@@ -160,6 +160,7 @@ fn a_real_tools_off_claude_run_stops_every_request_at_its_output_cap_and_ends_on
     let run = ReadOnlyRun {
         name,
         agent: "onboarding",
+        kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
         project: None,
         folder: &folder,
         prompt: CUT_PROMPT,

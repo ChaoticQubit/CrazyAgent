@@ -606,6 +606,13 @@ fn graph_step(
         Ok(hidden) => hidden,
         Err(_) => return Step::failed("project hidden folders unreadable"),
     };
+    let Some(_listed) = crate::sandbox::hidden_paths::running(
+        crate::sandbox::hidden_paths::RunKind::CodeGraph,
+        &claimed.project,
+        &hidden,
+    ) else {
+        return Step::failed("project hidden folders unreadable");
+    };
     #[cfg(unix)]
     let tip = if work.main_graphs {
         main_tip(database, &claimed.project, &claimed.repo)
@@ -910,6 +917,13 @@ fn refresh_build(
     let Ok(graphify) = (work.graphify)() else {
         return Refreshed::Failed;
     };
+    let Some(_listed) = crate::sandbox::hidden_paths::running(
+        crate::sandbox::hidden_paths::RunKind::CodeGraph,
+        project,
+        hidden,
+    ) else {
+        return Refreshed::Failed;
+    };
     let name = refresh_name(project, now_ms());
     let ending = graph::update(
         &graphify,
@@ -1132,6 +1146,8 @@ fn mapping_step(
             name: &name,
             #[cfg(unix)]
             agent: "onboarding",
+            #[cfg(unix)]
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
             #[cfg(unix)]
             project: project.as_ref(),
             #[cfg(unix)]

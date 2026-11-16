@@ -353,10 +353,10 @@ fn regenerated(
         return Ok(Regenerated::Refused);
     };
     let uv_clash = paths.iter().any(|path| program_for(path) == Some("uv"));
-    let sandbox = match confined(
+    let (sandbox, _listed) = match confined(
         db, &record, &root, &runtime, &worktree, &scratch, settings, uv_clash,
     ) {
-        Ok(sandbox) => sandbox,
+        Ok(confined) => confined,
         Err(code) => {
             eprintln!("landing_regenerate_unconfined code={code}");
             return Ok(Regenerated::Refused);
@@ -607,8 +607,8 @@ const REGENERATE_CACHE: &str = "regenerate";
 /// SM1-R rule allows (T8); another lockfile's clash never waits on uv priming. Installs its
 /// profile. Inputs: the store, the change set, the owner checkout's canonical root, the
 /// engine runtime folder, the temporary worktree, the scratch folders, the owner's settings
-/// files and whether a uv.lock clashes. Output: the sandbox, or the plain code of what
-/// refused it.
+/// files and whether a uv.lock clashes. Output: the sandbox with the hidden folders list's
+/// guard, held while the tools run (SA-VID14-R2-N2), or the plain code of what refused it.
 #[allow(clippy::too_many_arguments)]
 fn confined(
     db: &Connection,
@@ -619,7 +619,7 @@ fn confined(
     scratch: &Scratch,
     settings: Option<&(PathBuf, PathBuf)>,
     uv_clash: bool,
-) -> Result<ProjectSandbox, &'static str> {
+) -> Result<(ProjectSandbox, crate::sandbox::hidden_paths::HiddenRun), &'static str> {
     let kept = match settings {
         Some((global, project)) => crate::sandbox::settings_owner_ports(global, project)?,
         None => Vec::new(),
@@ -628,6 +628,12 @@ fn confined(
     let policy = crate::sandbox::policy::load(db, project).map_err(|_| "agent_access_unread")?;
     let hidden =
         crate::sandbox::hidden_paths::load(db, project).map_err(|_| "hidden_paths_unread")?;
+    let listed = crate::sandbox::hidden_paths::running(
+        crate::sandbox::hidden_paths::RunKind::Lockfiles,
+        project,
+        &hidden,
+    )
+    .ok_or("hidden_paths_unread")?;
     let homes = ToolHomes::owner().map_err(|_| "tool_homes_unread")?;
     let tmp = toolchains::make_tmp(&scratch.home).map_err(|_| "tmp_unmade")?;
     toolchains::prepare_cargo_home(&scratch.home, &homes).map_err(|_| "cargo_home_unmade")?;
@@ -664,7 +670,7 @@ fn confined(
     sandbox
         .install(&scratch.folder.join("profile.sb"))
         .map_err(|_| "sandbox_refused")?;
-    Ok(sandbox)
+    Ok((sandbox, listed))
 }
 
 /// Runs one program through `/usr/bin/env` in the tool sandbox, from a folder of the

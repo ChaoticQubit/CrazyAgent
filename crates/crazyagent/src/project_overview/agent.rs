@@ -149,6 +149,7 @@ pub(super) fn answer(
     let run = ReadOnlyRun {
         name: &name,
         agent: "overview",
+        kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
         project: Some(project),
         folder: root,
         prompt: &prompt,

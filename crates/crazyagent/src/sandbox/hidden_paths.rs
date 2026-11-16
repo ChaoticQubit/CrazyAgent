@@ -162,8 +162,9 @@ pub fn restarts(connection: &Connection, project: &str) -> rusqlite::Result<BTre
 const RUNS_MAX: usize = 256;
 
 /// One kind of engine run, not a team agent, that hides a project's saved folders from its
-/// own start (SA-VID14-R2-N2): research jobs, the overview, roadmap, onboarding and
-/// instructions cleanup agents, code graph builds and lockfile rebuilds.
+/// own start (SA-VID14-R2-N2): research jobs, the overview, roadmap and onboarding agents,
+/// code graph builds and lockfile rebuilds. An instructions cleanup run reads only an empty
+/// engine folder, so it never sees a project folder and is not one.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -173,7 +174,6 @@ pub enum RunKind {
     Overview,
     Roadmap,
     Onboarding,
-    InstructionsCleanup,
     CodeGraph,
     Lockfiles,
 }
@@ -201,22 +201,40 @@ impl Registry {
         }
     }
 
-    /// Stub: records nothing yet. Input: the run. Output: a key.
+    /// Lists one run under a key never handed out before. Input: the run. Output: its key,
+    /// or none when the list is full or the keys ran out.
     fn add(&mut self, running: Running) -> Option<u64> {
-        let _ = running;
-        Some(self.next)
+        assert!(digest_plain(&running.project));
+        assert!(running.hidden.len() <= HIDDEN_PATHS_MAX);
+        if self.runs.len() >= RUNS_MAX {
+            return None;
+        }
+        let key = self.next;
+        self.next = key.checked_add(1)?;
+        let fresh = self.runs.insert(key, running).is_none();
+        assert!(fresh);
+        assert!(self.runs.len() <= RUNS_MAX);
+        Some(key)
     }
 
-    /// Stub: removes nothing yet. Input: the key.
+    /// Takes one run off the list. Input: the key [`Registry::add`] gave it.
     fn remove(&mut self, key: u64) {
-        let _ = key;
+        let removed = self.runs.remove(&key);
+        assert!(removed.is_some());
     }
 
-    /// Stub: lists nothing yet. Inputs: the project digest and the saved folders.
-    /// Output: no kinds.
+    /// Names the kinds of one project's runs whose start hid neither a saved folder nor a
+    /// folder above it, each once. Inputs: the project digest and the saved folders.
+    /// Output: the kinds in their order.
     fn seeing(&self, project: &str, saved: &[PathBuf]) -> Vec<RunKind> {
-        let _ = (project, saved, &self.runs);
-        Vec::new()
+        assert!(digest_plain(project));
+        let kinds: BTreeSet<RunKind> = self
+            .runs
+            .values()
+            .filter(|run| run.project == project && !covers(Some(&run.hidden), saved))
+            .map(|run| run.kind)
+            .collect();
+        kinds.into_iter().collect()
     }
 }
 
@@ -810,12 +828,7 @@ mod tests {
     fn the_run_list_holds_digests_and_kinds_only() {
         let project = "n2-plain-project";
         let secret = PathBuf::from("/tmp/n2-plain/secret-plain");
-        let _run = running(
-            RunKind::InstructionsCleanup,
-            project,
-            std::slice::from_ref(&secret),
-        )
-        .unwrap();
+        let _run = running(RunKind::CodeGraph, project, std::slice::from_ref(&secret)).unwrap();
         let runs = RUNS.lock().unwrap_or_else(PoisonError::into_inner);
         let ours: Vec<&Running> = runs
             .runs
@@ -824,7 +837,7 @@ mod tests {
             .collect();
         assert_eq!(ours.len(), 1, "the run is kept while it runs");
         let run = ours[0];
-        assert_eq!(run.kind, RunKind::InstructionsCleanup);
+        assert_eq!(run.kind, RunKind::CodeGraph);
         assert!(digest_plain(&run.project));
         assert_eq!(run.hidden, vec![digest(&secret)]);
         for kept in std::iter::once(&run.project).chain(&run.hidden) {

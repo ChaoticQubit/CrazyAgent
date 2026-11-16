@@ -199,6 +199,7 @@ pub(super) fn answer(
     let run = ReadOnlyRun {
         name: &name,
         agent: "roadmap-status",
+        kind: Some(crate::sandbox::hidden_paths::RunKind::Roadmap),
         project: Some(project),
         folder: root,
         prompt: &check.prompt,

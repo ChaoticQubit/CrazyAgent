@@ -2,7 +2,7 @@ import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api"
 import type { Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, restartHiddenSeers, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type ReadPaths } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, restartHiddenSeers, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type HiddenRunKind, type ReadPaths } from "../../api-projects";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
 import type { IntakeJob, IntentReceipt, MessageSettings, SwitchApply, TeamAgent, TeamStatus } from "../../engine-client";
 import { loadIntakeJob } from "../../api-intake";
@@ -504,8 +504,8 @@ function SandboxSection({ data }: { data: ProjectData }) {
 
 /** What the hidden folders section says its list of agents that can still open a hidden
  * folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A r1): team
- * agents, taken-over ones included, and not the engine's other sandboxed runs. */
-export const HIDDEN_SEERS_COVER = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named here with Restart them. A research, overview, roadmap, onboarding or lockfile rebuild run that started before keeps its access until it ends.";
+ * agents, taken-over ones included, and the engine runs that started before (SA-VID14-R2-N2). */
+export const HIDDEN_SEERS_COVER = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named here with Restart them. Research jobs and overview, roadmap, onboarding, code graph and lockfile rebuild runs that started before are named here too, and keep their access until they end.";
 
 /** The running agents a team status lists as able to open a folder hidden after they
  * started (SA-VID14-A). Input: the team status, or null before it is read. Output: those
@@ -514,12 +514,24 @@ export function hiddenSeers(status: TeamStatus | null): TeamAgent[] {
   return status === null ? [] : status.agents.filter((agent) => agent.sees_hidden === true);
 }
 
+const RUN_WORDS: Record<HiddenRunKind, string> = {
+  research: "research job",
+  overview: "overview run",
+  roadmap: "roadmap run",
+  onboarding: "onboarding run",
+  code_graph: "code graph build",
+  lockfiles: "lockfile rebuild run",
+};
+
 /** What the hidden folders section says about the engine runs still running that started
- * before a folder was hidden (SA-VID14-R2-N2). Stub: nothing yet. Input: the saved folders,
- * or null before they are read. Output: the line, or null while none is listed. */
+ * before a folder was hidden (SA-VID14-R2-N2), each kind once; a kind this app does not know
+ * is still named. Input: the saved folders, or null before they are read. Output: the line,
+ * or null while none is listed. */
 export function hiddenRunsLine(saved: HiddenPaths | null): string | null {
-  void saved;
-  return null;
+  const runs = saved?.runs ?? [];
+  if (runs.length === 0) return null;
+  const named = new Set(runs.map((kind) => Object.hasOwn(RUN_WORDS, kind) ? RUN_WORDS[kind] : "another CrazyAgent run"));
+  return `Runs that can still open a hidden folder until they end: ${[...named].join(", ")}.`;
 }
 
 /** What the hidden folders section says about the agents that can still open a hidden
