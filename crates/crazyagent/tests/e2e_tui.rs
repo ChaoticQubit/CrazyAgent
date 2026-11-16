@@ -52,17 +52,37 @@ const LIVE_PROJECT: &str = "CRAZYAGENT_E2E_LIVE_PROJECT";
 struct Pty {
     tmux: PathBuf,
     socket: PathBuf,
+    home: Option<PathBuf>,
     _folder: tempfile::TempDir,
 }
 
 impl Pty {
     fn launch(tmux: PathBuf, engine_socket: &Path) -> Self {
+        Self::start(tmux, engine_socket, None)
+    }
+
+    /// Starts the TUI under its own tmux server whose HOME, and so the TUI's, is `home`, a
+    /// private folder, never the runner's (rv-sec3 S4 F1); checks tmux holds that HOME.
+    /// Inputs: tmux, the engine's socket and the HOME. Output: the running TUI.
+    fn launch_at(tmux: PathBuf, engine_socket: &Path, home: &Path) -> Self {
+        let pty = Self::start(tmux, engine_socket, Some(home));
+        let shown = pty.run(&["show-environment", "-g", "HOME"]);
+        assert_eq!(
+            String::from_utf8_lossy(&shown.stdout).trim(),
+            format!("HOME={}", home.display()),
+            "the TUI runs with the private HOME"
+        );
+        pty
+    }
+
+    fn start(tmux: PathBuf, engine_socket: &Path, home: Option<&Path>) -> Self {
         let engine_socket = engine_socket.to_str().unwrap();
         assert!(!ENGINE.contains('\'') && !engine_socket.contains('\''));
         let folder = scratch("ca-e2e-pty-");
         let pty = Self {
             tmux,
             socket: folder.path().join("pty.sock"),
+            home: home.map(Path::to_path_buf),
             _folder: folder,
         };
         let command = format!("'{ENGINE}' tui '{engine_socket}'");
@@ -83,17 +103,19 @@ impl Pty {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let output = crazyagent::spawn_gate::output(
-            Command::new(&self.tmux)
-                .arg("-S")
-                .arg(&self.socket)
-                .args(args)
-                .env_remove("TMUX")
-                .stdin(Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped()),
-        )
-        .expect(TMUX);
+        let mut command = Command::new(&self.tmux);
+        command
+            .arg("-S")
+            .arg(&self.socket)
+            .args(args)
+            .env_remove("TMUX")
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(home) = &self.home {
+            command.env("HOME", home).env_remove("XDG_CONFIG_HOME");
+        }
+        let output = crazyagent::spawn_gate::output(&mut command).expect(TMUX);
         assert!(
             output.status.success(),
             "tmux {args:?}: {}",
@@ -2778,6 +2800,21 @@ fn harnesses_with_an_unknown_version_sign_in_from_the_tui_as_before() {
 
 const NOTE: &str = "Deploys go out on Tuesdays.";
 
+/// A private HOME for the engine and the TUI, never the runner's (rv-sec3 S4 F1), with the
+/// TUI's Shift-Enter question already answered so Home opens. Input: a scratch prefix.
+/// Output: the HOME.
+fn private_home(prefix: &str) -> tempfile::TempDir {
+    let home = scratch(prefix);
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    home
+}
+
 /// Makes the project `gone-app` the way New project does, saves the owner's note on it, then
 /// removes it from the dashboard, or with its files when `everything`, as both apps do.
 /// Inputs: the engine, the projects home and the choice. Output: the project's folder.
@@ -2882,9 +2919,16 @@ fn set_up_here(pty: &Pty, folder: &Path) -> String {
 /// project, `gone-app-2`, with none of the note; the TUI opens each by the id the engine gave.
 #[test]
 fn a_removed_project_comes_back_only_from_its_own_folder_in_the_tui() {
+    let user = private_home("ca-e2e-return-home-");
     let mut engine = Engine::new("ca-e2e-return-");
+    engine.home = Some(user.path().to_path_buf());
     let _provider = unreachable_provider(&engine);
     engine.launch();
+    assert_eq!(
+        engine.home.as_deref(),
+        Some(user.path()),
+        "the engine runs with the private HOME"
+    );
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-return-disk-");
     let home = disk.path().join("Projects");
@@ -2899,7 +2943,7 @@ fn a_removed_project_comes_back_only_from_its_own_folder_in_the_tui() {
         "the folder stays on disk"
     );
 
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     reach_home(&pty, |screen| screen.contains("No projects yet."));
     set_up_here(&pty, &folder);
     assert_eq!(
@@ -2989,9 +3033,16 @@ impl Drop for Volume {
 #[cfg(target_os = "macos")]
 #[test]
 fn after_delete_everything_the_same_folder_is_a_new_project_in_the_tui() {
+    let user = private_home("ca-e2e-deleted-home-");
     let mut engine = Engine::new("ca-e2e-deleted-");
+    engine.home = Some(user.path().to_path_buf());
     let _provider = unreachable_provider(&engine);
     engine.launch();
+    assert_eq!(
+        engine.home.as_deref(),
+        Some(user.path()),
+        "the engine runs with the private HOME"
+    );
     let tmux = installed(engine.path()).expect(TMUX);
     let volume = Volume::attach();
     let home = volume.mount.join("Projects");
@@ -3020,7 +3071,7 @@ fn after_delete_everything_the_same_folder_is_a_new_project_in_the_tui() {
     std::fs::create_dir(&folder).unwrap();
     std::fs::write(folder.join("notes.md"), "made again\n").unwrap();
 
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     reach_home(&pty, |screen| screen.contains("No projects yet."));
     set_up_here(&pty, &folder);
     assert_eq!(
