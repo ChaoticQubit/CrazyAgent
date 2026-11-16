@@ -576,19 +576,35 @@ impl GitHub {
     /// the commit, "create sent" before the create request, the repository, the push and
     /// the rules. A step that fails leaves the job at the last one finished. A push refused
     /// because HEAD moved since the commit checks the project again and commits on the new
-    /// HEAD once per call, reusing the repository made. Inputs: the job and the owner's
-    /// home folder. Output: `()`, or the failure.
+    /// HEAD once per call, reusing the repository made. A commit that finds a secret or a
+    /// moved HEAD checks the project again once per call (rv-sec2 s2c N3). Inputs: the job
+    /// and the owner's home folder. Output: `()`, or the failure.
     fn advance(&self, job: &mut GitHubPublishJob, owner_home: &Path) -> Result<(), EngineError> {
         let mut rechecked = false;
+        let mut recommitted = false;
         loop {
             let next = match &job.step {
                 GitHubPublishStep::Drafting
                 | GitHubPublishStep::Lines { .. }
                 | GitHubPublishStep::Blocked { .. }
                 | GitHubPublishStep::Done { .. } => return Ok(()),
-                GitHubPublishStep::Checked => GitHubPublishStep::Committed {
-                    committed: self.publish_commit(&job.project, owner_home, &job.written)?,
-                },
+                GitHubPublishStep::Checked => {
+                    match self.publish_commit(&job.project, owner_home, &job.written) {
+                        Err(error)
+                            if !recommitted
+                                && matches!(
+                                    error.0.as_str(),
+                                    "github_publish_secret_found" | "github_publish_head_moved"
+                                ) =>
+                        {
+                            recommitted = true;
+                            GitHubPublishStep::Checked
+                        }
+                        committed => GitHubPublishStep::Committed {
+                            committed: committed?,
+                        },
+                    }
+                }
                 GitHubPublishStep::Committed { committed } => GitHubPublishStep::Creating {
                     committed: committed.clone(),
                     sent_at: now()?,
@@ -649,7 +665,10 @@ impl GitHub {
                 }
             };
             if next == GitHubPublishStep::Checked {
-                assert!(rechecked && matches!(job.step, GitHubPublishStep::Created { .. }));
+                assert!(
+                    (rechecked && matches!(job.step, GitHubPublishStep::Created { .. }))
+                        || (recommitted && job.step == GitHubPublishStep::Checked)
+                );
                 self.checked(job)?;
                 continue;
             }

@@ -3477,3 +3477,38 @@ fn a_broken_defaults_file_stops_start_before_the_agent_drafts_anything() {
             .is_none()
     );
 }
+
+/// rv-sec2 s2c N3: a secret written into a project with no history after the check and
+/// before the commit is found in the commit's own tree, so the job is blocked on it with
+/// nothing committed, made or pushed.
+#[test]
+fn publish_job_blocks_on_a_secret_written_after_its_check() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    git(&["init", "--quiet", "--initial-branch=main"], &project);
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    let note = project.join("notes.txt");
+    publish::COMMIT_STEPS.lock().unwrap().push((
+        project.clone(),
+        "add",
+        Box::new(move || std::fs::write(note, format!("token {LEAKED}\n")).unwrap()),
+    ));
+    let blocked = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    match &blocked.step {
+        GitHubPublishStep::Blocked { scan } => {
+            assert!(scan.findings.iter().any(|found| found.path == "notes.txt"));
+        }
+        other => panic!("not blocked: {other:?} {:?}", blocked.stopped),
+    }
+    assert!(!project.join(".git/refs/heads/main").exists());
+    assert!(creates(&server).is_empty());
+}
