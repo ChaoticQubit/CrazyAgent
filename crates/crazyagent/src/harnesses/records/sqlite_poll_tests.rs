@@ -2,6 +2,7 @@ use super::*;
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Instant;
 
 static SCHEMA: Schema = Schema {
     tables: &["meta", "facts"],
@@ -400,4 +401,48 @@ fn the_row_past_the_read_text_bound_waits_for_the_next_read() {
     assert_eq!(after_first, i64::try_from(first.len()).unwrap());
     assert_eq!(second, vec![TranscriptEvent::Text { text: long }]);
     assert_eq!(reader.after(), after_first + 1);
+}
+
+/// Review t15-r2 sec F1: a schema too large to load within the read budget, here 300 000
+/// views written straight into `sqlite_master`, is refused as unreadable once the budget
+/// passes, rather than parsed for tens of seconds at every read.
+#[test]
+fn a_schema_too_large_to_load_in_the_read_budget_is_refused() {
+    let tmp = root();
+    let path = tmp.path().join("views.db");
+    let writer = database(&path, 3);
+    add(&writer, &turn());
+    writer
+        .set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, false)
+        .unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA writable_schema = ON;
+             WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < 300000)
+             INSERT INTO sqlite_master(type, name, tbl_name, rootpage, sql)
+             SELECT 'view', 'v' || i, 'v' || i, 0,
+                    'CREATE VIEW v' || i || ' AS SELECT ' || i || ' AS a, ' || i || ' AS b'
+             FROM n;
+             PRAGMA writable_schema = OFF;",
+        )
+        .unwrap();
+    drop(writer);
+    let started = Instant::now();
+
+    let read = SqlitePoll::new(path, &SCHEMA, 0).read();
+    let took = started.elapsed();
+
+    assert_eq!(read, Err(failure(UNREADABLE)));
+    assert!(took < READ_TIME_MAX + Duration::from_secs(3), "{took:?}");
+}
+
+/// Review t15-r2 code F1 and sec N2: a SQLite library before 3.39.0 does not refuse a link in
+/// a folder part of the path, so the reader refuses to read on one, with its own sentence;
+/// the library this binary uses passes.
+#[test]
+fn a_sqlite_library_older_than_3_39_is_refused_with_its_own_sentence() {
+    assert!(!library_supported(3_038_999));
+    assert!(library_supported(3_039_000));
+    assert!(library_supported(rusqlite::version_number()));
+    assert!(sentence(OLD_LIBRARY).is_some());
 }

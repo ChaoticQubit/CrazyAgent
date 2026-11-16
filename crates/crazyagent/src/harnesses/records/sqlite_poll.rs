@@ -30,6 +30,16 @@ pub const VERSION_UNKNOWN: &str = "record_version_unknown";
 pub const UNREADABLE: &str = "record_database_unreadable";
 /// The code of a database larger than [`DATABASE_BYTES_MAX`].
 pub const TOO_LARGE: &str = "record_database_too_large";
+/// The code of a SQLite library too old to refuse a link in a folder part of the path.
+pub const OLD_LIBRARY: &str = "record_sqlite_too_old";
+/// The longest one read may run SQLite's work, the schema load included.
+pub const READ_TIME_MAX: Duration = Duration::from_secs(2);
+
+/// Whether a SQLite library refuses a link in every part of a record path. Input: the
+/// library's version number. Output: whether this reader may use it.
+fn library_supported(_version: i32) -> bool {
+    true
+}
 
 /// A read-only query set for one known harness database, written as engine code and never
 /// read from a manifest. `tables` must all be real tables before any query runs, `version`
