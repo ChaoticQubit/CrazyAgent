@@ -10,6 +10,13 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+account_protocols:
+  - "openai-chat"
+accounts:
+  openai-chat:
+    env:
+      OPENAI_BASE_URL: "{relay_url}"
+      OPENAI_API_KEY: "{token}"
 home:
   env_prefixes:
     - "STANDIN_APPEND_"

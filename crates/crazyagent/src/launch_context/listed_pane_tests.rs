@@ -1,7 +1,7 @@
 use super::*;
 use crate::harnesses::interactive::settings::TerminalSettings;
 use crate::harnesses::interactive::{Run, command_with};
-use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, failure};
+use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest};
 
 const APPEND: &str = include_str!("../../tests/fixtures/harness/standin-jsonl-append.yaml");
 const REWRITE: &str = include_str!("../../tests/fixtures/harness/standin-json-rewrite.yaml");
@@ -71,4 +71,54 @@ fn a_listed_pane_takes_its_team_context_only_when_its_manifest_renders_mcp_serve
     let request = pane_request("standin-json-rewrite", &plain, &work, &profile);
     let refused = command_with(&request, Some(&installed), &run, Some(&settings));
     assert_eq!(refused.err(), Some(failure("launch_context_unsupported")));
+}
+
+/// DEC-180 T20 M8 (T19b 19b-2): a live master's pane on a terminal-only listed harness is
+/// handed its keyless account as its piped launch is: the account's address and the local
+/// placeholder under the names its manifest's accounts entry lists, the placeholder the one
+/// exception to the variable guard. A hand-over made for another address is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_listed_pane_is_handed_its_keyless_account_and_refuses_one_for_another_address() {
+    use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    let (_folder, home) = harness_home("standin-jsonl-append");
+    let scratch = tempfile::tempdir().unwrap();
+    let work = scratch.path().canonicalize().unwrap();
+    let profile = work.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let run = Run {
+        session_id: "standin-1",
+        key_file: None,
+        resume: false,
+    };
+    let appended = parse(APPEND.as_bytes()).unwrap();
+    let settings = TerminalSettings::read(&appended).unwrap();
+    let registry = crate::harnesses::registry::registry();
+    let harness = registry.get("standin-jsonl-append").unwrap();
+    let connection = openai_chat(KEYLESS_URL, false);
+    let handover = crate::harnesses::accounts::handover(harness, &connection, None);
+    assert!(handover.is_ok(), "{:?}", handover.as_ref().err());
+    let context = context().with_handover(handover.unwrap());
+    let installed = context.install_listed(&appended, &home, true).unwrap();
+    let request = pane_request("standin-jsonl-append", &home, &work, &profile);
+
+    let built = command_with(&request, Some(&installed), &run, Some(&settings));
+
+    assert!(built.is_ok(), "{:?}", built.as_ref().err());
+    let env = built.unwrap().env;
+    let value = |name: &str| {
+        let found = env.iter().find(|pair| pair.0 == name);
+        found.map(|pair| pair.1.as_str())
+    };
+    assert_eq!(value("OPENAI_BASE_URL"), Some(KEYLESS_URL));
+    assert_eq!(value("OPENAI_API_KEY"), Some(LOCAL_PLACEHOLDER));
+    let mut other = pane_request("standin-jsonl-append", &home, &work, &profile);
+    other.account = AccountBinding::Url {
+        home: home.clone(),
+        base_url: "http://127.0.0.1:9/v1".into(),
+        key: None,
+    };
+    let refused = command_with(&other, Some(&installed), &run, Some(&settings));
+    let mismatch = failure("launch_account_handover_mismatch");
+    assert_eq!(refused.err(), Some(mismatch));
 }
