@@ -106,10 +106,52 @@ test("a discarded publish says what it left on GitHub, and Discard is offered on
 
 test("the Overview mounts the publish card, which drives every publish action", () => {
   const overview = read("src/screens/project/overview.tsx");
-  assert.match(overview, /<GitHubPublishCard projectId=\{data\.id\} \/>/);
+  assert.match(overview, /<GitHubPublishCard projectId=\{data\.id\}[ />]/);
   const card = read("src/screens/project/github-publish.tsx");
   for (const name of ["loadGitHubPublish", "approveGitHubPublish", "excludeFromGitHubPublish", "recheckGitHubPublish", "continueGitHubPublish", "discardGitHubPublish", "ConfirmDialog", "publishView", "leftLine", "discardable", "DRAFT_POLL_MS"]) {
     assert.ok(card.includes(name), name);
   }
   assert.equal(publishJob.DRAFT_POLL_MS, 2000);
+});
+
+test("the Overview asks to publish a project with no publish through two bridge commands, and Publish opens the New Project form", async () => {
+  assert.equal(publishJob.PROMPT_LINE, "This project is not on GitHub. Publish it?");
+  assert.deepEqual([publishJob.PROMPT_PUBLISH, publishJob.PROMPT_NOT_NOW, publishJob.PROMPT_NEVER], ["Publish", "Not now", "Don't ask again"]);
+  const none = { kind: "ok", value: null };
+  const ask = { kind: "ok", value: true };
+  assert.equal(publishJob.noticeShown(none, ask), true);
+  assert.equal(publishJob.noticeShown(none, { kind: "ok", value: false }), false);
+  assert.equal(publishJob.noticeShown({ kind: "ok", value: job({ step: "drafting" }) }, ask), false, "never over a publish");
+  assert.equal(publishJob.noticeShown(unreachable, ask), false);
+  assert.equal(publishJob.noticeShown(none, unreachable), false);
+  assert.equal(publishJob.noticeShown(null, ask), false);
+  assert.equal(publishJob.noticeShown(none, null), false);
+  const client = read("src/engine-client.ts");
+  assert.match(client, /export type GitHubPromptAnswer = "not_now" \| "never";/);
+  assert.match(client, /invoke<boolean>\("desktop_github_publish_prompt", \{ project \}\)/);
+  assert.match(client, /invoke<null>\("desktop_github_publish_prompt_set", \{ project, answer \}\)/);
+  for (const name of ["loadGitHubPublishPrompt", "answerGitHubPublishPrompt"]) assert.equal(typeof api[name], "function", name);
+  assert.deepEqual(await api.loadGitHubPublishPrompt("p"), unreachable);
+  assert.deepEqual(await api.answerGitHubPublishPrompt("p", "not_now"), unreachable);
+  const native = read("src-tauri/src/lib.rs");
+  const build = read("src-tauri/build.rs");
+  const allowed = read("src-tauri/capabilities/main-window.json");
+  const routes = read("src-tauri/e2e_bridge/routes.rs");
+  const bridge = read("src-tauri/src/bridge/intake.rs");
+  for (const command of ["prompt", "prompt_set"]) {
+    assert.match(native, new RegExp(`async fn desktop_github_publish_${command}\\(\\n    webview: Webview,`), command);
+    assert.match(native, new RegExp(`\\n    desktop_github_publish_${command},\\n`), command);
+    assert.ok(build.includes(`"desktop_github_publish_${command}",`), command);
+    assert.ok(allowed.includes(`"allow-desktop-github-publish-${command.replace("_", "-")}",`), command);
+    assert.ok(routes.includes(`"desktop_github_publish_${command}" => {`), command);
+    assert.match(bridge, new RegExp(`pub fn github_publish_${command}\\(`), command);
+  }
+  const card = read("src/screens/project/github-publish.tsx");
+  for (const name of ["loadGitHubPublishPrompt", "noticeShown", "PROMPT_LINE", "PublishFields", "useGitHubPublish", "createWait", "startPublish", "publishOutcome"]) {
+    assert.ok(card.includes(name), name);
+  }
+  assert.match(card, /answerGitHubPublishPrompt\(projectId, "not_now"\)/);
+  assert.match(card, /answerGitHubPublishPrompt\(projectId, "never"\)/);
+  const overview = read("src/screens/project/overview.tsx");
+  assert.match(overview, /<GitHubPublishCard projectId=\{data\.id\} name=\{data\.name\} about=\{setup\?\.about \?\? ""\} \/>/);
 });

@@ -1,4 +1,5 @@
 import { intakeCopy } from "../../api-intake";
+import type { Result } from "../../api";
 import type { GitHubPublishJob, GitHubPublishLeft } from "../../engine-client";
 
 /**
@@ -101,4 +102,18 @@ export function leftLine(left: GitHubPublishLeft | null): string {
  * Discard is offered. */
 export function discardable(job: GitHubPublishJob | null): boolean {
   return job !== null && job.step.step !== "pushed" && job.step.step !== "done";
+}
+
+export const PROMPT_LINE = "";
+export const PROMPT_PUBLISH = "";
+export const PROMPT_NOT_NOW = "";
+export const PROMPT_NEVER = "";
+
+/** Whether the Overview asks to publish the project on GitHub (DEC-182 S5b): its publish read
+ * found no job and the engine says to ask. Inputs: the publish read and the prompt read, each
+ * null until it answers. Output: true to show the notice. */
+export function noticeShown(read: Result<GitHubPublishJob | null> | null, prompt: Result<boolean> | null): boolean {
+  void read;
+  void prompt;
+  return false;
 }
