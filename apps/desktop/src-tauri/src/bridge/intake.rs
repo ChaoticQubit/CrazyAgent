@@ -48,6 +48,8 @@ pub const INTAKE_CODES: [&str; 116] = [
     "home_copy_too_large",
     "home_copy_failed",
     "home_copy_unverified",
+    "home_copy_names_fold",
+    "home_copy_entry_swapped",
     "home_copy_linked_checkout",
     "home_move_failed",
     "home_move_source_left",

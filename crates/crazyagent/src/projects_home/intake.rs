@@ -1,6 +1,6 @@
 use super::platform::{
-    SourceFolder, Stamp, copy_link, open_seen, permission_bits, private_folder, set_mode, stamp,
-    writable_folder,
+    SourceFolder, Stamp, copy_link, is_swapped, open_seen, permission_bits, private_folder,
+    set_mode, stamp, writable_folder,
 };
 use super::{AddMode, holds_owner_home, owner_home, path_text, real_folder, refused};
 use crate::engine::EngineError;
@@ -657,7 +657,7 @@ fn restore(copy: &Path, source: &Path) -> Result<(), EngineError> {
 /// Output: Ok, or the refusal codes of `copy_tree`; entries still in `target`
 /// are kept for `verify_tree` to compare.
 fn fill_tree(copy: &Path, target: &Path) -> Result<(), EngineError> {
-    let failed = |e: std::io::Error| failed_step("refill", &e, "home_copy_failed");
+    let failed = |e: std::io::Error| copy_failed("refill", &e, false);
     if fs::symlink_metadata(target).is_err() {
         return copy_tree(copy, target);
     }
@@ -781,6 +781,27 @@ fn failed_step(step: &str, error: &std::io::Error, other: &'static str) -> Engin
     let errno = error.raw_os_error().unwrap_or(0);
     eprintln!("home_add_step_failed step={step} code={code} errno={errno}");
     refused(code)
+}
+
+/// The refusal for one failed step of a copy or a refill, logged as [`failed_step`] logs:
+/// `home_copy_entry_swapped` for an entry replaced or swapped for a link while the walk ran,
+/// and for anything a refill met where nothing was; `home_copy_names_fold` for a copy that
+/// met a name its target holds already, a second source name the target folds into one by
+/// case or normalization; else [`failed_step`]'s code. Inputs: the step, the error and
+/// whether a name held already is a fold. Output: the refusal.
+fn copy_failed(step: &str, error: &std::io::Error, fold: bool) -> EngineError {
+    assert!(!step.is_empty());
+    let errno = error.raw_os_error().unwrap_or(0);
+    let held = error.kind() == std::io::ErrorKind::AlreadyExists;
+    if is_swapped(error) || (held && !fold) {
+        eprintln!("home_add_step_failed step={step} code=home_copy_entry_swapped errno={errno}");
+        return refused("home_copy_entry_swapped");
+    }
+    if held {
+        eprintln!("home_add_step_failed step={step} code=home_copy_names_fold errno={errno}");
+        return refused("home_copy_names_fold");
+    }
+    failed_step(step, error, "home_copy_failed")
 }
 
 /// The refusal for a placeholder an add step met: its data lives only in iCloud, and
@@ -978,7 +999,7 @@ fn copy_entries(
     bounds: CopyBounds,
     tally: &Tally,
 ) -> Result<(), EngineError> {
-    let failed = |e: std::io::Error| failed_step("copy", &e, "home_copy_failed");
+    let failed = |e: std::io::Error| copy_failed("copy", &e, true);
     let root = fs::symlink_metadata(source).map_err(failed)?;
     if !root.is_dir() || root.file_type().is_symlink() {
         return Err(refused("home_source_not_folder"));

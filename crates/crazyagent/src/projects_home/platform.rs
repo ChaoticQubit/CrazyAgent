@@ -159,6 +159,46 @@ pub(super) fn copy_link(original: &Path, target: PathBuf, copy: &Path) -> std::i
     }
 }
 
+/// What a copy, a refill or the walk that makes a tree writable met when an entry it listed
+/// was no longer the one it opened: replaced, or swapped for a link (RV-DS241-41,
+/// DS-INTAKE). It rides inside an `io::Error`, so the refusal can name it.
+#[derive(Debug)]
+pub(super) struct EntrySwapped;
+
+impl std::fmt::Display for EntrySwapped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an entry was replaced while the walk ran")
+    }
+}
+
+impl std::error::Error for EntrySwapped {}
+
+/// The error for an entry replaced while a walk ran. Output: an `io::Error` holding
+/// [`EntrySwapped`].
+pub(super) fn swapped() -> std::io::Error {
+    std::io::Error::other(EntrySwapped)
+}
+
+/// Whether an error is [`swapped`]'s. Input: the error. Output: the answer.
+pub(super) fn is_swapped(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<EntrySwapped>())
+}
+
+/// The error for a no-follow open of a listed entry: a link, or something other than a
+/// folder, met where a part was listed as a folder (ELOOP, ENOTDIR) is [`swapped`].
+/// Input: the open's error. Output: the error to answer.
+#[cfg(unix)]
+fn met_link(error: rustix::io::Errno) -> std::io::Error {
+    use rustix::io::Errno;
+    if matches!(error, Errno::LOOP | Errno::NOTDIR) {
+        swapped()
+    } else {
+        error.into()
+    }
+}
+
 /// A source folder a copy reads from, opened from the copy's root one plain name at a time
 /// with no link followed in any part and checked to be the folder its listing showed, so a
 /// folder swapped for a link is refused, never read through (RV-DS241-41). Unix: the open
@@ -180,7 +220,8 @@ impl SourceFolder {
     pub(super) fn open(root: &Path, below: &Path, seen: &fs::Metadata) -> std::io::Result<Self> {
         use rustix::fs::OFlags;
         let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let folder = fs::File::from(crate::platform::open_beneath(root, below, flags)?);
+        let folder = crate::platform::open_beneath(root, below, flags).map_err(met_link)?;
+        let folder = fs::File::from(folder);
         same_entry(&folder, seen)?;
         Ok(Self(folder))
     }
@@ -203,10 +244,16 @@ impl SourceFolder {
     }
 
     /// Reads the link `name` in this folder without following it. Output: its target text,
-    /// or the I/O error.
+    /// or the I/O error, [`swapped`] when `name` is no longer a link.
     pub(super) fn read_link(&self, name: &std::ffi::OsStr) -> std::io::Result<PathBuf> {
         use std::os::unix::ffi::OsStringExt;
-        let target = rustix::fs::readlinkat(&self.0, name, Vec::new())?;
+        let target = rustix::fs::readlinkat(&self.0, name, Vec::new()).map_err(|error| {
+            if error == rustix::io::Errno::INVAL {
+                swapped()
+            } else {
+                error.into()
+            }
+        })?;
         Ok(PathBuf::from(std::ffi::OsString::from_vec(
             target.into_bytes(),
         )))
@@ -224,7 +271,8 @@ impl SourceFolder {
     ) -> std::io::Result<()> {
         use rustix::fs::{Mode, OFlags};
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-        let source = fs::File::from(rustix::fs::openat(&self.0, name, flags, Mode::empty())?);
+        let source = rustix::fs::openat(&self.0, name, flags, Mode::empty()).map_err(met_link)?;
+        let source = fs::File::from(source);
         same_entry(&source, seen)?;
         copy_opened(&source, seen, copy)
     }
@@ -239,7 +287,7 @@ impl SourceFolder {
         let path = root.join(below);
         let metadata = fs::symlink_metadata(&path)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(std::io::Error::other("source folder replaced"));
+            return Err(swapped());
         }
         Ok(Self(path))
     }
@@ -275,7 +323,7 @@ impl SourceFolder {
 
 /// Fails unless an opened entry is the one its listing's metadata describes: the same
 /// device, inode and type. Inputs: the open entry and the listed metadata. Output: Ok, or
-/// an I/O error naming the replaced entry.
+/// [`swapped`].
 #[cfg(unix)]
 fn same_entry(opened: &fs::File, seen: &fs::Metadata) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
@@ -283,9 +331,7 @@ fn same_entry(opened: &fs::File, seen: &fs::Metadata) -> std::io::Result<()> {
     if now.dev() == seen.dev() && now.ino() == seen.ino() && now.file_type() == seen.file_type() {
         Ok(())
     } else {
-        Err(std::io::Error::other(
-            "source entry replaced during the copy",
-        ))
+        Err(swapped())
     }
 }
 
