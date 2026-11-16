@@ -13,7 +13,7 @@ use std::ffi::OsStr;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub const KEY_FILE: &str = ".crazyagent-key";
@@ -875,7 +875,9 @@ pub fn claude_project_folder(cwd: &Path) -> Option<String> {
 
 /// Writes a keyed account's key into `<home>/.crazyagent-key`, readable only by this user,
 /// replacing an earlier one, so the key reaches the harness without argv or environment.
-/// Inputs: the account home, already checked by the launch, and the key. Output: the path.
+/// Sets the mode itself, so no inherited umask narrows it, and removes the file when the write
+/// fails or the written file is not this user's private copy of the key. Inputs: the account
+/// home, already checked by the launch, and the key. Output: the path.
 #[cfg(unix)]
 pub fn write_key(home: &Path, key: &Secret) -> Result<PathBuf, LaunchError> {
     super::launch::validate_home(home)?;
@@ -894,15 +896,23 @@ pub fn write_key(home: &Path, key: &Secret) -> Result<PathBuf, LaunchError> {
         .mode(0o600)
         .open(&path)
         .map_err(|_| failure("launch_key_file_unavailable"))?;
-    file.write_all(key.reveal().as_bytes())
+    let written = file
+        .set_permissions(std::fs::Permissions::from_mode(0o600))
+        .and_then(|()| file.write_all(key.reveal().as_bytes()))
         .and_then(|()| file.sync_all())
-        .map_err(|_| failure("launch_key_file_unavailable"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| failure("launch_key_file_unavailable"))?;
-    assert_eq!(metadata.mode() & 0o777, 0o600);
-    assert_eq!(metadata.len(), key.reveal().len() as u64);
-    Ok(path)
+        .and_then(|()| file.metadata());
+    let refusal = match written {
+        Ok(metadata)
+            if metadata.mode() & 0o777 == 0o600 && metadata.len() == key.reveal().len() as u64 =>
+        {
+            return Ok(path);
+        }
+        Ok(_) => "launch_key_file_unsafe",
+        Err(_) => "launch_key_file_unavailable",
+    };
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+    Err(failure(refusal))
 }
 
 /// Puts the folder of the tmux program a native-team lead splits teammate panes with at the
