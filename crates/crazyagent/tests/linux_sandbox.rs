@@ -3461,6 +3461,44 @@ fn a_supervised_agent_sets_no_time_on_a_held_entry_and_sets_its_own() {
     );
 }
 
+const PATH_ONLY: &str = "import os, sys
+own = sys.argv[1]
+def said(name, work):
+    try:
+        work()
+        print(name + '=0')
+    except OSError as error:
+        print(name + '=' + str(error.errno))
+path_only = os.open(own, os.O_PATH)
+said('mode', lambda: os.chmod(path_only, 0o600))
+said('owner', lambda: os.chown(path_only, -1, -1))
+";
+
+/// `fchmod` and `fchown` on an `O_PATH` descriptor of the agent's own file answer 9 and
+/// leave its mode under the held guard, as the kernel answers them with no guard
+/// (SUPERVISOR-OPATH-EBADF).
+#[test]
+fn a_supervised_agent_changes_no_mode_or_owner_through_a_path_only_descriptor() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    let admin = case.project.join(".git").join("worktrees").join("one");
+    fs::create_dir_all(&admin).unwrap();
+    let held = admin.join("gitdir");
+    fs::write(&held, "/elsewhere/one/.git\n").unwrap();
+    let own = case.project.join("own.txt");
+    fs::write(&own, "own\n").unwrap();
+    fs::set_permissions(&own, fs::Permissions::from_mode(0o644)).unwrap();
+    let script = ["-I", "-c", PATH_ONLY, own.to_str().unwrap()];
+    let held_guard = ["--guard-held", held.to_str().unwrap()];
+    let guards: [&[&str]; 2] = [&held_guard, &[]];
+    for guard in guards {
+        let output = finished(supervised(&case, guard, "/usr/bin/python3", &script));
+        assert_eq!(told(&output), "mode=9\nowner=9\n", "{guard:?}");
+        let mode = fs::metadata(&own).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "the mode stays {guard:?}");
+    }
+}
+
 const OPENS: &str = "import ctypes, os
 libc = ctypes.CDLL(None, use_errno=True)
 refused = libc.syscall(437, -100, b'never', ctypes.create_string_buffer(24), 24)
