@@ -232,7 +232,7 @@ allowed_destinations = []
 [model_access]
 accounts = ["local-1"]
 connections = [
-  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
+  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://LOCAL_ADDRESS/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
 ]
 pools = [
   { id = "pool-a", name = "Main", members = ["local-a"], projects = [], roles = [], fallback_allowed = false },
@@ -246,6 +246,7 @@ struct Engine {
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
     controller: OwnerController,
+    _refusing: tokio::net::TcpSocket,
 }
 
 impl Engine {
@@ -255,8 +256,9 @@ impl Engine {
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (refusing, settings) = crate::tui::test_home::refusing_settings(SETTINGS);
         let global = root.path().join("global.toml");
-        std::fs::write(&global, SETTINGS).unwrap();
+        std::fs::write(&global, &settings).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -283,6 +285,7 @@ impl Engine {
             _service: service,
             _stop: stop,
             controller,
+            _refusing: refusing,
         }
     }
 
@@ -337,6 +340,7 @@ impl Engine {
             _service: mut service,
             _stop: stop,
             controller,
+            _refusing: refusing,
         } = self;
         drop(controller);
         service.shutdown().await.unwrap();
@@ -366,6 +370,7 @@ impl Engine {
             _service: service,
             _stop: stop,
             controller,
+            _refusing: refusing,
         }
     }
 
