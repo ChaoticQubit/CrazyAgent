@@ -1187,3 +1187,39 @@ fn a_status_an_ended_ask_or_an_off_helper_left_clears_on_a_step_that_asks_nothin
     let not_here = low_power_not_available(LOW_POWER_NOT_ON_THIS_MAC);
     assert_eq!(bare.line.low_power(), not_here, "a fact of this Mac outlives the ask");
 }
+
+#[test]
+fn a_lid_hold_that_fails_while_low_power_alone_holds_is_never_held() {
+    let refused = Reply::Refused {
+        reason: Refusal::Pmset,
+    };
+    let unanswered = Err(CallError::Exchange(io::ErrorKind::TimedOut));
+    for answer in [Ok(refused), unanswered] {
+        let mut rig = Rig::enabled();
+        rig.answer(Ok(held()), power_view(Some(true), true));
+        rig.line.step(LOW_POWER_ONLY, NOW_MS);
+        rig.answer(answer.clone(), power_view(Some(true), true));
+        let support = rig.line.step(WANTED_LOW_POWER, NOW_MS + READING_MS);
+        let why = "a power-only lease never keeps sleep off (advisor 02:04)";
+        assert_ne!(support, LidSupport::Held, "{answer:?}: {why}");
+    }
+}
+
+#[test]
+fn a_power_only_lease_refused_after_a_lid_hold_lets_the_lid_go() {
+    let refused = Reply::Refused {
+        reason: Refusal::Unpinned,
+    };
+    let unanswered = Err(CallError::Exchange(io::ErrorKind::TimedOut));
+    for answer in [Ok(refused), unanswered] {
+        let mut rig = Rig::enabled();
+        assert_eq!(rig.line.step(WANTED, NOW_MS), LidSupport::Held);
+        rig.answer(answer.clone(), power_view(Some(false), false));
+        rig.line.step(LOW_POWER_ONLY, NOW_MS + READING_MS);
+        let calls = rig.calls();
+        let at = calls.iter().position(|call| *call == POWER_ONLY);
+        let why = "the lid is no longer wanted and nothing replaced its lease";
+        assert!(at.is_some(), "{answer:?}");
+        assert!(calls[at.unwrap()..].contains(&Request::Release), "{answer:?}: {why}");
+    }
+}
