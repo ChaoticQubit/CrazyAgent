@@ -25,7 +25,8 @@ GEMINI.md
 !**/LICENSE*
 !**/tests/**/*.md
 !**/fixtures/**/*.md
-docs/
+docs/*
+!docs/harness-manifests.md
 research_notes/
 reports/
 apps/desktop/src-tauri/binaries/
