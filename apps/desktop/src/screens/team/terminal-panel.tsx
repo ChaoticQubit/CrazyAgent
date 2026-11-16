@@ -609,7 +609,8 @@ export class KeptView implements Held {
     const terminal = this.terminal;
     if (!terminal || !this.link?.live || !this.size) return;
     const size = terminalSize(terminal.cols, terminal.rows);
-    if (size) void resizeTerminal(this.key.terminal, size.cols, size.rows, this.key.pane);
+    const { terminal: name, pane } = this.key;
+    if (size) void resizeTerminal(name, size.cols, size.rows, pane);
   }
 
   private output(bytes: Uint8Array): void {
