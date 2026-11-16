@@ -1066,8 +1066,9 @@ impl Lineage {
     }
 
     /// Applies one table read: keeps each known process still running with the same start,
-    /// under the name it was last read by, then adds this user's processes in the leader's
-    /// session, those whose parent is kept, and on macOS those forked from a process known
+    /// under the name it was last read by and with the unique ids an earlier read found when
+    /// this one could not read them, as for a process that exited between the listing and
+    /// that read, then adds this user's processes in the leader's session, those whose parent is kept, and on macOS those forked from a process known
     /// before this read or kept in it, by the forking parent's unique id, which the kernel
     /// keeps after that parent exits and never reuses (SETSID-A-RESIDUAL). Session members
     /// join only while the leader runs with the start its first read found, so a stranger that
@@ -1087,6 +1088,8 @@ impl Lineage {
                     .find(|known| same(known, process))
                     .map(|known| Process {
                         program: known.program.clone(),
+                        unique: process.unique.or(known.unique),
+                        forked_from: process.forked_from.or(known.forked_from),
                         ..process.clone()
                     })
             })
