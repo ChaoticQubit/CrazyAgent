@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 export const USE_IT_OR_LOSE_IT = "use_it_or_lose_it";
 const WINDOWS = ["5-hour", "Weekly"];
 const USED = /^\d{1,3}% used$/;
-const RESETS = /^Resets in (?:under a minute|\d+ min|\d+ h \d+ min|\d+ d \d+ h)(?: \(your time\))?$/;
+const RESETS = /^Resets at (?:(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat) )?\d\d:\d\d, in (?:under a minute|\d+ min|\d+ h \d+ min|\d+ d \d+ h)(?: \(your time\))?$/;
 
 /** The sentence the Usage card shows for an API-key Codex account, which has no windows. */
 export const API_KEY_READING = "An API-key account has no 5-hour or weekly window.";
