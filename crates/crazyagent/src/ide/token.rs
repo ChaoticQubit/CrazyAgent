@@ -45,13 +45,21 @@ pub fn issue(folder: &Path) -> io::Result<(PathBuf, String)> {
         .create_new(true)
         .mode(0o600)
         .open(&path)?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    let metadata = file.metadata()?;
-    assert_eq!(metadata.mode() & 0o777, 0o600);
-    assert_eq!(metadata.len(), text.len() as u64);
-    Ok((path, text))
+    let written = file
+        .set_permissions(fs::Permissions::from_mode(0o600))
+        .and_then(|()| file.write_all(text.as_bytes()))
+        .and_then(|()| file.sync_all())
+        .and_then(|()| file.metadata());
+    let refusal = match written {
+        Ok(metadata) if metadata.mode() & 0o777 == 0o600 && metadata.len() == text.len() as u64 => {
+            return Ok((path, text));
+        }
+        Ok(_) => io::Error::other("ide_token_unsafe"),
+        Err(error) => error,
+    };
+    drop(file);
+    let _ = fs::remove_file(&path);
+    Err(refusal)
 }
 
 /// Removes a project's token file, once its server has stopped or before a new launch.

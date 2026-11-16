@@ -2869,14 +2869,23 @@ fn write_private(_path: &Path, _bytes: &[u8]) -> Result<(), LaunchError> {
 #[cfg(unix)]
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), LaunchError> {
     let mut file = create(path)?;
-    file.write_all(bytes)
+    let written = file
+        .set_permissions(std::fs::Permissions::from_mode(0o600))
+        .and_then(|()| file.write_all(bytes))
         .and_then(|()| file.sync_all())
-        .map_err(|_| failure("launch_context_unwritable"))?;
-    assert_eq!(
-        file.metadata().map(|m| m.permissions().mode() & 0o777).ok(),
-        Some(0o600)
-    );
-    Ok(())
+        .and_then(|()| file.metadata());
+    let refusal = match written {
+        Ok(metadata)
+            if metadata.mode() & 0o777 == 0o600 && metadata.len() == bytes.len() as u64 =>
+        {
+            return Ok(());
+        }
+        Ok(_) => "launch_context_unsafe",
+        Err(_) => "launch_context_unwritable",
+    };
+    drop(file);
+    let _ = std::fs::remove_file(path);
+    Err(failure(refusal))
 }
 
 fn write_secret(path: &Path, text: String) -> Result<(), LaunchError> {

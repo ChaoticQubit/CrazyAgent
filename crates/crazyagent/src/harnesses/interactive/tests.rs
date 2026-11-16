@@ -2291,3 +2291,57 @@ fn the_claude_sign_in_floor_never_falls_below_the_first_claude_with_the_snapshot
         "the sign-in floor {floor} has the flag"
     );
 }
+
+/// Runs only in the process the row below starts: builds a native lead's command, then
+/// writes its teammate command under umask 0277, which clears the owner's write bit, and
+/// reports what it got. Input: the folder named in `ROW_FOLDER`; without it, nothing.
+#[test]
+#[ignore]
+fn a_teammate_command_written_under_a_narrow_umask_in_its_own_process() {
+    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+        return;
+    };
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let lead = project_context(&case, "lead")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&lead), &run(None)).unwrap();
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
+    let written = write_teammate_command(&case.home(), &built, &request, lead.native().unwrap());
+    let outcome = match written {
+        Ok(()) => format!(
+            "ok {:o}",
+            std::fs::metadata(crate::launch_context::teammate_command(&case.home()))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        ),
+        Err(error) => format!("err {}", error.0),
+    };
+    std::fs::write(Path::new(&folder).join("outcome"), outcome).unwrap();
+}
+
+/// UMASK-MODE-ASSERTS: an engine that inherited a umask clearing the owner's write bit
+/// still writes a native lead's teammate command as a private 0700 program, where it used
+/// to panic on the file's mode after writing.
+#[test]
+fn a_teammate_command_written_under_a_narrow_umask_is_a_private_program() {
+    let folder = tempfile::tempdir().unwrap();
+    let status = crate::spawn_gate::row_alone(
+        "harnesses::interactive::tests::a_teammate_command_written_under_a_narrow_umask_in_its_own_process",
+        ":",
+        folder.path(),
+    );
+    assert!(
+        status.success(),
+        "the write under umask 0277 ended in {status}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.path().join("outcome")).unwrap(),
+        "ok 700"
+    );
+}
