@@ -118,6 +118,7 @@ pub(super) struct MasterHostLaunch {
     pub(super) tool_record: Option<std::path::PathBuf>,
     pub(super) access: crate::sandbox::policy::AgentAccess,
     pub(super) toolchains: Vec<crate::sandbox::toolchains::Toolchain>,
+    pub(super) connector: Option<super::master_host_launch::MasterConnector>,
 }
 
 pub(super) struct Capture {
@@ -807,6 +808,7 @@ impl OwnerRuntimeHandle {
         let (profile, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let launch = self.prepare_master_host(prepared, &profile, settings, model.as_deref())?;
         let _folder = launch.folder;
+        let _connector = launch.connector;
         let _credential = launch.credential;
         let tool_record = launch.tool_record;
         let (access, toolchains) = (launch.access, launch.toolchains);

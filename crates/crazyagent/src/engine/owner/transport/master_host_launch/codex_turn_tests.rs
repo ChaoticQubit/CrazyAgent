@@ -173,6 +173,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         None,
         &[],
         crate::provider_retry::ProviderRetry::RetryBriefly,
+        None,
     )
     .unwrap();
     let off_turn = runtime.join(format!("master-runtime-{}", off_ref.as_str()));
@@ -211,6 +212,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         drop: &engine,
         mailbox: &engine,
         off: &[],
+        connector: None,
     };
     assert!(require_master_tool_policy(&command, Some(unused)).is_err());
     let caches = default_master_tool_caches(root.engine_root().unwrap(), &repository);
@@ -252,6 +254,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         Some(&engine),
         &[crate::team::tool::RECALL_TOOL.to_owned()],
         crate::provider_retry::ProviderRetry::RetryBriefly,
+        None,
     )
     .unwrap();
     let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));
@@ -270,6 +273,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         drop: &record,
         mailbox: &turn.join("tmp").join(crate::team::tool::MAILBOX_FOLDER),
         off: &off,
+        connector: None,
     };
     let envs: Vec<(String, String)> = command
         .get_envs()
@@ -545,7 +549,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     };
     let checked_off = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>, off: &[String]| {
         let engine = engine.map(registered);
-        require_master_delegate(backend, turn, engine.as_ref(), off).map_err(|error| error.0)
+        require_master_delegate(backend, turn, engine.as_ref(), off, None).map_err(|error| error.0)
     };
     let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
         checked_off(backend, turn, engine, &off)
@@ -644,6 +648,7 @@ fn the_installed_codex_reads_a_tools_on_master_with_its_own_sub_agents_off() {
         drop: &drop,
         mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
         off: &[],
+        connector: None,
     };
     let command = master_command(
         &codex,

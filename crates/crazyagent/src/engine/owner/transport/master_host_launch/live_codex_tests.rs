@@ -59,6 +59,7 @@ async fn a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox() {
         None,
         &[],
         crate::provider_retry::ProviderRetry::RetryBriefly,
+        None,
     )
     .unwrap();
     assert_ne!(home, managed);
@@ -182,6 +183,7 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
         Some(&engine),
         &[],
         crate::provider_retry::ProviderRetry::RetryBriefly,
+        None,
     )
     .unwrap();
     assert_ne!(home, managed);
@@ -193,6 +195,7 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
             drop: &record,
             mailbox: &record.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
+            connector: None,
         }),
     )
     .unwrap();
@@ -413,6 +416,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
         Some(&engine),
         &[],
         crate::provider_retry::ProviderRetry::RetryBriefly,
+        None,
     )
     .unwrap();
     let record = tool_record.unwrap();

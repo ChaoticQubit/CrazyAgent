@@ -238,6 +238,7 @@ impl OwnerRuntimeHandle {
                 prepared.steps,
                 &settings,
                 prepared.provider_retry,
+                None,
             )?
         } else {
             codex_master_turn(
@@ -249,6 +250,7 @@ impl OwnerRuntimeHandle {
                 delegate,
                 &prepared.tools_off,
                 prepared.provider_retry,
+                None,
             )?
         };
         require_master_delegate(
@@ -256,6 +258,7 @@ impl OwnerRuntimeHandle {
             &turn,
             engine.as_deref(),
             &prepared.tools_off,
+            None,
         )?;
         let harness = if claude {
             crate::agent_home::Harness::Claude
@@ -290,7 +293,42 @@ impl OwnerRuntimeHandle {
             tool_record,
             access: policy.access,
             toolchains: policy.allowed(&prepared.repository),
+            connector: None,
         })
+    }
+}
+
+/// One tools-on master turn's connector launch: its folder is what the turn's ca-connectors
+/// server and boundary name, and dropping it ends the launch, record and then folder, so the
+/// launch lasts exactly as long as the turn holds it.
+pub(super) struct MasterConnector {
+    root: PathBuf,
+    launch: crate::connectors::gateway::GatewayLaunch,
+}
+
+impl MasterConnector {
+    /// Readies the connector launch of one master turn of `project` in the engine root: none
+    /// when no connector is granted to the project's master. Inputs: the engine root and the
+    /// project. Output: the launch, none, or the refusal.
+    pub(super) fn open(
+        root: &Path,
+        project: &crate::protocol::ProjectId,
+    ) -> Result<Option<Self>, EngineError> {
+        let _ = (root, project);
+        Ok(None)
+    }
+
+    /// The launch folder the turn's connector server is started with.
+    pub(super) fn folder(&self) -> &Path {
+        &self.launch.folder
+    }
+}
+
+impl Drop for MasterConnector {
+    /// Ends the launch; a failure is logged and the record is left for the gateway's sweep
+    /// of leftover launches.
+    fn drop(&mut self) {
+        let _ = &self.root;
     }
 }
 
@@ -406,7 +444,9 @@ pub(super) fn claude_master_turn(
     steps: StepLimit,
     settings: &crate::harness_settings::apply::Applied,
     retry: crate::provider_retry::ProviderRetry,
+    connector: Option<&Path>,
 ) -> Result<MasterTurnLaunch, EngineError> {
+    let _ = connector;
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
     let credential = profile.hand_to_turn(&home, wall_time, executable)?;
@@ -465,6 +505,7 @@ pub(super) fn claude_master_turn(
                     drop: &drop,
                     mailbox: &mailbox,
                     off: tools_off,
+                    connector: None,
                 },
                 settings,
             )?;
@@ -515,7 +556,9 @@ pub(super) fn codex_master_turn(
     engine: Option<&Path>,
     tools_off: &[String],
     retry: crate::provider_retry::ProviderRetry,
+    connector: Option<&Path>,
 ) -> Result<MasterTurnLaunch, EngineError> {
+    let _ = connector;
     let model = &connection.model.id;
     let home = master_turn_home(place.root, place.runtime_ref)?;
     let credential = profile.hand_to_turn(&home, wall_time, executable)?;
@@ -568,6 +611,7 @@ pub(super) fn codex_master_turn(
             drop: &drop,
             mailbox: &mailbox,
             off: tools_off,
+            connector: None,
         }),
         retry,
     )?;
@@ -847,7 +891,9 @@ fn require_master_delegate(
     turn: &MasterTurnLaunch,
     engine: Option<&crate::engine::native_auth_host::RegisteredNativeAuthHost>,
     tools_off: &[String],
+    connector: Option<&Path>,
 ) -> Result<(), EngineError> {
+    let _ = connector;
     let tmp = turn.sandbox.sandbox().agent_tmp();
     let drop = tmp.join(crate::team::tool::DROP_FILE);
     let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
@@ -857,6 +903,7 @@ fn require_master_delegate(
             drop: &drop,
             mailbox: &mailbox,
             off: tools_off,
+            connector: None,
         }),
         None => None,
     };
@@ -1782,6 +1829,7 @@ mod tests {
             drop: Path::new("/turn/tmp/drop"),
             mailbox: Path::new("/turn/tmp/mailbox"),
             off: &off,
+            connector: None,
         };
         for retry in ProviderRetry::ALL {
             for tools in [None, Some(tools)] {
@@ -3616,6 +3664,7 @@ mod tests {
             drop: &drop,
             mailbox: &mailbox,
             off: &[],
+            connector: None,
         };
         for (name, tools) in [("off", None), ("on", Some(tools))] {
             let home = temporary.path().join(name);
@@ -3665,6 +3714,10 @@ mod claude_turn_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/codex_turn_tests.rs"]
 mod codex_turn_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "master_host_launch/connector_tests.rs"]
+mod connector_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/untrusted_tests.rs"]

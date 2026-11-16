@@ -75,14 +75,16 @@ const DENY_FLAG_SPELLINGS: [&str; 2] = [CLAUDE_DENY_FLAG, "--disallowed-tools"];
 /// What a Claude Code or Codex master turn with its tools on is given beyond the team agents'
 /// tool set: the engine executable that serves its team server, the absolute drop file in the
 /// turn's private temporary folder where its `delegate` tool records each proposed task, the
-/// mailbox beside it where its `remember` and `recall` calls wait for the engine, and the team
-/// tools the owner switched off, which the server leaves out.
+/// mailbox beside it where its `remember` and `recall` calls wait for the engine, the team
+/// tools the owner switched off, which the server leaves out, and the turn's connector launch
+/// folder, whose ca-connectors server the same engine executable runs.
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct MasterTools<'a> {
     pub(in crate::engine) engine: &'a Path,
     pub(in crate::engine) drop: &'a Path,
     pub(in crate::engine) mailbox: &'a Path,
     pub(in crate::engine) off: &'a [String],
+    pub(in crate::engine) connector: Option<&'a Path>,
 }
 
 impl MasterTools<'_> {
@@ -1025,6 +1027,7 @@ fn validate_command(
                 drop,
                 mailbox,
                 off,
+                connector: None,
             }),
         &settings,
     )
