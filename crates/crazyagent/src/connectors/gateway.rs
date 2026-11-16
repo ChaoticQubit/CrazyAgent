@@ -735,19 +735,20 @@ impl Gateway {
         answered + self.settle_at(&db, crate::semantic::now_ms())
     }
 
-    /// Settles the held writes whose approval was answered or ran out by `now_ms`, whose
-    /// server stopped waiting or whose launch ended. An Allow runs once the engine claims the
-    /// call from its server, every check passes again and it can still finish before that
-    /// server gives up; a Deny or an end answers its refusal; a write nobody waits for ends
-    /// expired with no answer. Inputs: the database and the time now. Output: how many.
+    /// Settles held writes answered or run out by `now_ms`, whose server stopped waiting or
+    /// whose launch ended; a failed launch read settles nothing. An Allow runs once claimed
+    /// from its server, if every check passes again and it can finish before that server
+    /// gives up; a Deny or an expiry answers its refusal; a write nobody waits for ends
+    /// expired, unanswered. Inputs: the database and the time now. Output: how many answered.
     pub(crate) fn settle_at(&self, db: &Connection, now_ms: i64) -> usize {
         if locked(&self.parked).is_empty() {
             return 0;
         }
         let _ = approvals::expire(db, now_ms);
-        let live: Option<BTreeSet<String>> = launches(db)
-            .ok()
-            .map(|found| found.into_iter().map(|launch| launch.id).collect());
+        let Ok(found) = launches(db) else {
+            return 0;
+        };
+        let live: BTreeSet<String> = found.into_iter().map(|launch| launch.id).collect();
         let taken: Vec<(i64, Parked, Option<State>, Waiter)> = {
             let mut parked = locked(&self.parked);
             let ids: Vec<i64> = parked.keys().copied().collect();
@@ -757,13 +758,10 @@ impl Gateway {
                     continue;
                 };
                 let entry = &parked[&id];
-                let gone = live
-                    .as_ref()
-                    .is_none_or(|live| !live.contains(&entry.launch.id));
-                let waiter = if gone {
-                    Waiter::Ended
-                } else {
+                let waiter = if live.contains(&entry.launch.id) {
                     waiter(&self.root, &entry.launch.id, &entry.call)
+                } else {
+                    Waiter::Ended
                 };
                 if waiter != Waiter::Waits || state != Some(State::Waiting) {
                     let entry = parked.remove(&id).expect("a parked id is in the map");
