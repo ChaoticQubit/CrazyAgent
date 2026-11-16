@@ -1645,7 +1645,7 @@ impl LinuxSandbox {
             if let LinuxBackend::Nested { bwrap, helper } = &detected.backend
                 && let Some(routed) = detected.sandbox.routed()
             {
-                if route_held(bwrap, helper) {
+                if route_held(bwrap, helper, false) {
                     detected.routed = Some(routed);
                 } else {
                     eprintln!("linux_route_not_started: this agent keeps the shared network");
@@ -1909,8 +1909,10 @@ fn kept_route(
     bwrap: &Path,
     helper: &Path,
     refused: bool,
+    again: bool,
     probe: impl FnOnce() -> bool,
 ) -> bool {
+    let _ = again;
     if refused {
         return false;
     }
@@ -1935,7 +1937,7 @@ static ROUTE_READ: KeptRoute = Mutex::new(None);
 /// the probe, so a kept answer never changes for a key: a tool removed after a true answer
 /// gives a routed launch whose setup fails, which the go byte refuses. Inputs: bubblewrap
 /// and the helper. Output: true when the agent is routed.
-fn route_held(bwrap: &Path, helper: &Path) -> bool {
+fn route_held(bwrap: &Path, helper: &Path, again: bool) -> bool {
     let root = rustix::process::geteuid().is_root();
     let probe = || {
         let tools = SLIRP_PATHS
@@ -1944,7 +1946,7 @@ fn route_held(bwrap: &Path, helper: &Path) -> bool {
             .all(|path| Path::new(path).is_file());
         tools && routes(bwrap, helper)
     };
-    kept_route(&ROUTE_READ, bwrap, helper, root, probe)
+    kept_route(&ROUTE_READ, bwrap, helper, root, again, probe)
 }
 
 /// The bubblewrap and the helper [`kept_nest`] found a nest for.
@@ -2018,7 +2020,7 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let root = rustix::process::geteuid().is_root();
     let nest = bwrap.filter(|_| nested);
     let supervised = held && data.is_some_and(|data| supervises(helper, nest, data, root));
-    let routed = held && nest.is_some_and(|bwrap| route_held(bwrap, helper));
+    let routed = held && nest.is_some_and(|bwrap| route_held(bwrap, helper, true));
     let setting = fs::read_to_string(APPARMOR_USERNS).ok();
     let armored = !nested && !root && restricts(setting.as_deref());
     assert!(!routed || nested);
@@ -3914,35 +3916,95 @@ mod tests {
         };
         let (bwrap, helper) = (Path::new(BWRAP_PATHS[0]), helper());
         assert!(
-            !kept_route(&kept, bwrap, &helper, true, probe(true)),
+            !kept_route(&kept, bwrap, &helper, true, false, probe(true)),
             "as root"
         );
         assert_eq!(probes.get(), 0, "a refusal starts no probe");
-        assert!(kept_route(&kept, bwrap, &helper, false, probe(true)));
+        assert!(kept_route(&kept, bwrap, &helper, false, false, probe(true)));
         assert!(
-            kept_route(&kept, bwrap, &helper, false, probe(false)),
+            kept_route(&kept, bwrap, &helper, false, false, probe(false)),
             "kept"
         );
         assert_eq!(probes.get(), 1, "page, notice and launch read one answer");
         assert!(
-            !kept_route(&kept, bwrap, &helper, true, probe(true)),
+            !kept_route(&kept, bwrap, &helper, true, false, probe(true)),
             "refused while kept"
         );
         assert!(
-            kept_route(&kept, bwrap, &helper, false, probe(false)),
+            kept_route(&kept, bwrap, &helper, false, false, probe(false)),
             "still kept"
         );
         assert_eq!(probes.get(), 1);
         let other = Path::new("/usr/local/bin/bwrap");
         assert!(
-            !kept_route(&kept, other, &helper, false, probe(false)),
+            !kept_route(&kept, other, &helper, false, false, probe(false)),
             "another bubblewrap"
         );
         assert!(
-            !kept_route(&kept, other, &helper, false, probe(true)),
+            !kept_route(&kept, other, &helper, false, false, probe(true)),
             "a failed answer too"
         );
         assert_eq!(probes.get(), 2);
+    }
+
+    /// rv-sa241 SBX-2-R2 N1: the host read asks a kept false route answer again, so one
+    /// failed probe (a timeout while the engine starts under load) leaves no launch unrouted
+    /// until a restart; a launch reads what is kept and never waits on the probe, a true
+    /// answer is never asked again, and a false probe never replaces a true another caller
+    /// kept meanwhile.
+    #[test]
+    fn a_false_route_answer_is_asked_again_by_the_host_read_and_a_true_one_is_kept() {
+        let kept: KeptRoute = Mutex::new(None);
+        let probes = &std::cell::Cell::new(0u32);
+        let probe = |answer: bool| {
+            move || {
+                probes.set(probes.get() + 1);
+                answer
+            }
+        };
+        let (bwrap, helper) = (Path::new(BWRAP_PATHS[0]), helper());
+        assert!(
+            !kept_route(&kept, bwrap, &helper, false, false, probe(false)),
+            "the first probe failed"
+        );
+        assert!(
+            !kept_route(&kept, bwrap, &helper, false, false, probe(true)),
+            "a launch reads the kept false"
+        );
+        assert_eq!(probes.get(), 1, "a launch never asks a kept answer again");
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, true, probe(true)),
+            "the host read asks a false answer again"
+        );
+        assert_eq!(probes.get(), 2);
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, false, probe(false)),
+            "a launch reads the new true"
+        );
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, true, probe(false)),
+            "a true answer is never asked again"
+        );
+        assert_eq!(probes.get(), 2);
+        assert!(
+            !kept_route(&kept, bwrap, &helper, true, true, probe(true)),
+            "refused as root whatever is kept"
+        );
+        assert_eq!(probes.get(), 2);
+        let asked = (bwrap.to_path_buf(), helper.clone());
+        let racing: KeptRoute = Mutex::new(Some((asked.0.clone(), asked.1.clone(), false)));
+        let found_meanwhile = || {
+            *racing.lock().unwrap() = Some((asked.0.clone(), asked.1.clone(), true));
+            false
+        };
+        assert!(
+            kept_route(&racing, bwrap, &helper, false, true, found_meanwhile),
+            "a true another caller kept while this probe failed holds"
+        );
+        assert!(
+            kept_route(&racing, bwrap, &helper, false, false, probe(false)),
+            "and stays kept"
+        );
     }
 
     /// rv-sa241 SBX-2-R2 LOW-1: the nest answer the page and every launch read keeps a nest
