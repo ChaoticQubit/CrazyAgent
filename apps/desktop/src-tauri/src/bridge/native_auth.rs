@@ -277,11 +277,7 @@ impl NativeBridge {
             operation_id,
         };
         let read = self.controller()?.read_native_auth(request).await;
-        let settled = if keep_ended && Self::ends_it(&read) {
-            Ok(false)
-        } else {
-            self.settle_auth(read)
-        };
+        let settled = self.running_answer(read, keep_ended);
         if let Some(operation) = self.native_auth.as_mut() {
             operation.claude_prompt = prompt;
         }
@@ -354,6 +350,38 @@ impl NativeBridge {
         Ok(())
     }
 
+    /// Applies the engine's answer to a re-read of a held running sign-in: with `keep_ended`,
+    /// one that ends it stays held for the drawer's own read once it passes the same check as
+    /// any other answer; any other answer settles it ([`Self::settle_auth`]). Inputs: the
+    /// answer and whether an ended one stays held. Output: true once it ended and is dropped,
+    /// false while it stays held, or the refusal.
+    fn running_answer(
+        &mut self,
+        read: Result<NativeAuthReply, EngineError>,
+        keep_ended: bool,
+    ) -> Result<bool, BridgeError> {
+        if keep_ended && Self::ends_it(&read) {
+            if let Ok(reply) = &read {
+                self.validated(reply)?;
+            }
+            return Ok(false);
+        }
+        self.settle_auth(read)
+    }
+
+    /// Checks one engine answer about the held sign-in against it; one that fails leaves the
+    /// sign-in stuck, no longer counted as running, and returns that refusal, so no answer the
+    /// bridge cannot match is kept. Input: the answer. Output: Ok, or the refusal.
+    fn validated(&mut self, reply: &NativeAuthReply) -> Result<(), BridgeError> {
+        if let Err(error) = self.validate_auth_reply(reply) {
+            if let Some(operation) = self.native_auth.as_mut() {
+                operation.running = false;
+            }
+            return Err(self.auth_failure(error));
+        }
+        Ok(())
+    }
+
     /// Says whether an answer means the engine no longer runs the held sign-in. Input: the
     /// answer. Output: true for a finished phase or a refusal that ends the operation.
     fn ends_it(read: &Result<NativeAuthReply, EngineError>) -> bool {
@@ -388,12 +416,7 @@ impl NativeBridge {
                 return Err(self.auth_failure(error));
             }
         };
-        if let Err(error) = self.validate_auth_reply(&reply) {
-            if let Some(operation) = self.native_auth.as_mut() {
-                operation.running = false;
-            }
-            return Err(self.auth_failure(error));
-        }
+        self.validated(&reply)?;
         if reply.fact.phase.unfinished() {
             let operation = self.native_auth.as_mut().expect("validated auth operation");
             operation.generation = Some(reply.fact.generation);
