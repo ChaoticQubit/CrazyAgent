@@ -1,6 +1,7 @@
 use super::intake_job;
 use super::new_project::harness_name;
 use super::new_project_page::{hints_of, key_event, look, paint, pool_choices_from};
+use super::new_project_publish::{PUBLISH_NOT_STARTED, PUBLISH_STARTED};
 use super::new_project_view::{Row, Screen as View};
 use super::project::{
     MasterStatus, OpenRequest, ProjectReply, ProjectScreen, Speaker, Tab, Transcript,
@@ -9,12 +10,14 @@ use super::project::{
 use super::project_markdown::sanitize;
 use super::project_master::{MasterRead, master_problem, transcript_from};
 use super::project_plugins::PluginsReply;
+use super::project_publish::{DRAFT_POLL_MS, PaneKey, PublishPane, left_line, opens, query};
 use super::project_time::local_offset;
 use super::project_view::project_screen;
 use super::settings_accounts::send as send_settings;
 use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage, ToolsPage};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{ImportFile, OwnerResponse, OwnerResult};
+use crate::github::{GitHubPublishPlan, GitHubPublishStep};
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
@@ -54,6 +57,7 @@ const CHANGED_MISSING: &str =
     "That file isn't in your project folder yet. It lands there when you accept the change.";
 const CHANGED_NOTE: &str =
     "That was your copy in the project folder. The agent's version lands there when you accept.";
+const ANSWER_NOT_TAKEN: &str = "The publish answer wasn't taken.";
 const IMPORT_MODAL_WIDTH: u16 = 72;
 const IMPORT_ROWS_MAX: usize = 12;
 pub(in crate::tui) const BANNER_ROWS_MAX: usize = 3;
@@ -237,6 +241,11 @@ pub(in crate::tui) struct ProjectPage {
     uncommitted_branch: Option<String>,
     uncommitted_asked: bool,
     job_sent: Option<IntakeQuery>,
+    publish_sent: Option<IntakeQuery>,
+    publish_pane: Option<PublishPane>,
+    publish_asked: Option<IntakeQuery>,
+    publish_later: bool,
+    publish_read_ms: Option<i64>,
     moving: Option<RequestId>,
 }
 
@@ -339,6 +348,11 @@ impl ProjectPage {
             uncommitted_branch: None,
             uncommitted_asked: false,
             job_sent: None,
+            publish_sent: None,
+            publish_pane: None,
+            publish_asked: None,
+            publish_later: false,
+            publish_read_ms: None,
             moving: None,
         };
         page.refresh_pool(ctx);
@@ -362,6 +376,162 @@ impl ProjectPage {
             },
             ctx,
         );
+    }
+
+    /// Starts publishing the project the owner just made on GitHub with the plan from New
+    /// project (DEC-182). The engine answers once its checks pass and drafts the .gitignore
+    /// lines after, and the reply says the publish started or why not.
+    /// Takes the plan and the context. Returns nothing; the reply arrives later.
+    pub(in crate::tui) fn start_publish(&mut self, plan: GitHubPublishPlan, ctx: &mut Ctx) {
+        assert!(self.publish_sent.is_none());
+        let query = IntakeQuery::GitHubPublishStart {
+            project: self.screen.project.clone(),
+            plan,
+        };
+        self.publish_sent = Some(query.clone());
+        super::intake::ask(ctx, query);
+    }
+
+    /// Reads where the project's GitHub publish stands while the Overview shows and no
+    /// publish request waits, so the pane opens on a publish the owner can act on or follow.
+    /// Takes the context. Returns nothing; the reply arrives later.
+    fn ask_publish(&mut self, ctx: &mut Ctx) {
+        if self.screen.tab != Tab::Overview
+            || self.publish_asked.is_some()
+            || self.publish_sent.is_some()
+        {
+            return;
+        }
+        let status = IntakeQuery::GitHubPublishStatus {
+            project: self.screen.project.clone(),
+        };
+        self.publish_asked = Some(status.clone());
+        self.publish_read_ms = Some(now_ms());
+        super::intake::ask(ctx, status);
+    }
+
+    /// Reads the publish again while its pane shows the draft running, at most every
+    /// `DRAFT_POLL_MS`. Takes the context. Returns nothing.
+    fn poll_publish(&mut self, ctx: &mut Ctx) {
+        let drafting = self
+            .publish_pane
+            .as_ref()
+            .is_some_and(|pane| pane.job().step == GitHubPublishStep::Drafting);
+        let due = self
+            .publish_read_ms
+            .is_none_or(|at| now_ms() - at >= DRAFT_POLL_MS);
+        if drafting && due && !self.publish_later {
+            self.ask_publish(ctx);
+        }
+    }
+
+    /// Takes the engine's answer to this page's publish read or one of the pane's answers:
+    /// a read opens the pane on a publish the owner can act on or follow, an answer shows
+    /// where the publish now stands, a discard says what it left on GitHub, and a refused
+    /// answer says why with the pane kept. A failed read stays quiet. Takes the reply and the
+    /// context. Returns nothing.
+    fn publish_answered(&mut self, event: &IntakeEvent, ctx: &mut Ctx) {
+        let read = matches!(event.query, IntakeQuery::GitHubPublishStatus { .. });
+        self.publish_asked = None;
+        match &event.result {
+            Ok(IntakeView::PublishStatus(job)) => {
+                self.publish_pane = job
+                    .as_deref()
+                    .filter(|job| opens(job))
+                    .cloned()
+                    .map(PublishPane::new);
+            }
+            Ok(IntakeView::Publish(job)) => {
+                self.publish_pane = Some(PublishPane::new((**job).clone()));
+            }
+            Ok(IntakeView::Discarded(left)) => {
+                self.publish_pane = None;
+                ctx.say(Message::success(
+                    "The publish was discarded.",
+                    &left_line(left.as_ref()),
+                ));
+            }
+            Err(_) if read => {}
+            Err(code) => ctx.say(Message::warning(
+                ANSWER_NOT_TAKEN,
+                &super::intake::copy(code),
+            )),
+            Ok(_) => ctx.say(Message::warning(
+                ANSWER_NOT_TAKEN,
+                &super::intake::copy("github_outcome_unknown"),
+            )),
+        }
+    }
+
+    /// Handles a key while the publish pane shows: one answer goes to the engine at a time,
+    /// and Esc closes the pane until the page shows again, or for good once it is finished.
+    /// Takes the key and the context. Returns handled, so no key reaches the page meanwhile.
+    fn publish_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Some(pane) = self.publish_pane.as_mut() else {
+            return Flow::Handled;
+        };
+        if self.publish_asked.is_some() {
+            self.publish_later |= *key == Key::Esc;
+            return Flow::Handled;
+        }
+        match pane.key(key) {
+            PaneKey::Handled => {}
+            PaneKey::Later => {
+                self.publish_later = true;
+                if !opens(pane.job()) {
+                    self.publish_pane = None;
+                }
+            }
+            PaneKey::Ask(ask) => {
+                let sent = query(&self.screen.project, ask);
+                self.publish_asked = Some(sent.clone());
+                super::intake::ask(ctx, sent);
+            }
+        }
+        Flow::Handled
+    }
+
+    fn publish_shows(&self) -> bool {
+        self.publish_pane.is_some() && !self.publish_later
+    }
+
+    /// The publish pane as a modal: where the publish stands and the keys for it, with the
+    /// keys hidden while an answer is on its way. Takes the context. Returns the modal and
+    /// its keys, or none while the pane is closed.
+    fn publish_modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        if !self.publish_shows() {
+            return None;
+        }
+        let text = self.publish_pane.as_ref()?.text();
+        let room = usize::from(IMPORT_MODAL_WIDTH) - 4;
+        let mut body: Vec<Line<'static>> = text
+            .body
+            .iter()
+            .flat_map(|line| wrap(line, room))
+            .map(Line::raw)
+            .collect();
+        let hints = if self.publish_asked.is_some() {
+            body.push(styled(
+                "Sending your answer...".into(),
+                Role::Muted,
+                &ctx.theme,
+            ));
+            Vec::new()
+        } else {
+            text.hints
+                .iter()
+                .map(|(key, label)| hint(key, label))
+                .collect()
+        };
+        Some((
+            Modal {
+                width: IMPORT_MODAL_WIDTH,
+                title: text.title.into(),
+                body,
+                top: None,
+            },
+            hints,
+        ))
     }
 
     fn send_created_access(&mut self, access: AgentAccess, version: u64, ctx: &mut Ctx) {
@@ -1030,6 +1200,29 @@ impl ProjectPage {
     /// for its new folder; a started delete is followed on Home, where the page goes. Takes the
     /// reply and the context. Returns whether the page changed.
     fn intake_arrived(&mut self, event: &IntakeEvent, ctx: &mut Ctx) -> bool {
+        if self.publish_asked.as_ref() == Some(&event.query) {
+            self.publish_answered(event, ctx);
+            return true;
+        }
+        if self.publish_sent.as_ref() == Some(&event.query) {
+            self.publish_sent = None;
+            if let Ok(IntakeView::Publish(job)) = &event.result {
+                self.publish_pane = Some(PublishPane::new((**job).clone()));
+                self.publish_read_ms = Some(now_ms());
+            }
+            ctx.say(match &event.result {
+                Ok(IntakeView::Publish(_)) => {
+                    Message::success(&format!("{} is ready.", self.screen.name), PUBLISH_STARTED)
+                }
+                Ok(_) => Message::warning(
+                    PUBLISH_NOT_STARTED,
+                    &super::intake::copy("github_outcome_unknown"),
+                ),
+                Err(code) => Message::warning(PUBLISH_NOT_STARTED, &super::intake::copy(code)),
+            });
+            return true;
+        }
+        self.poll_publish(ctx);
         let answered = self.job_sent.as_ref() == Some(&event.query);
         if answered {
             self.job_sent = None;
@@ -1702,6 +1895,7 @@ impl Screen for ProjectPage {
     fn typing(&self) -> bool {
         self.import.is_some()
             || self.moved.is_some()
+            || self.publish_shows()
             || self.screen.edit.is_some()
             || self.screen.adding.is_some()
             || self.screen.folders.is_some()
@@ -1720,6 +1914,9 @@ impl Screen for ProjectPage {
         }
         if self.import.is_some() {
             return self.import_key(key, ctx);
+        }
+        if self.publish_shows() {
+            return self.publish_key(key, ctx);
         }
         if !self.uncommitted.is_empty() && *key == Key::Ctrl('g') {
             self.commit_move(ctx);
@@ -1856,6 +2053,8 @@ impl Screen for ProjectPage {
                 }
                 self.uncommitted_asked = false;
                 self.job_sent = None;
+                self.publish_sent = None;
+                self.publish_asked = None;
                 self.sent.clear();
                 self.screen.schedule = None;
                 self.schedule_asked = false;
@@ -1924,6 +2123,8 @@ impl Screen for ProjectPage {
         self.refresh_pool(ctx);
         self.sync_master(ctx);
         self.pump(ctx);
+        self.publish_later = false;
+        self.ask_publish(ctx);
         self.say_problem(ctx);
         self.redraw(ctx);
     }
@@ -1968,7 +2169,9 @@ impl Screen for ProjectPage {
         if let Some(moved) = &self.moved {
             return Some(self.moved_modal(moved, ctx));
         }
-        let files = self.import.as_ref()?;
+        let Some(files) = self.import.as_ref() else {
+            return self.publish_modal(ctx);
+        };
         let theme = &ctx.theme;
         let room = usize::from(IMPORT_MODAL_WIDTH) - 4;
         let mut body: Vec<Line<'static>> = wrap(
@@ -2044,6 +2247,7 @@ impl Screen for ProjectPage {
 
     fn busy(&self, _ctx: &Ctx) -> bool {
         self.import_sent.is_some()
+            || self.publish_asked.is_some()
             || self.screen.counts().0 > 0
             || self.master.has_pending()
             || self.waiting.is_some()

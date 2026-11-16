@@ -73,8 +73,7 @@ impl Action {
     pub(super) fn time(&self) -> Duration {
         match self {
             Self::Clone { .. } => CLONE_TIME,
-            Self::PublishStart { .. }
-            | Self::PublishApprove { .. }
+            Self::PublishApprove { .. }
             | Self::PublishExclude { .. }
             | Self::PublishRecheck { .. }
             | Self::PublishContinue { .. } => PUBLISH_TIME,
@@ -182,8 +181,8 @@ impl OwnerClient {
     }
 
     /// Starts publishing a project on GitHub: the engine checks the plan, the sign-in and
-    /// the project's git and records the .gitignore lines to show first. Inputs: the
-    /// project and the plan. Output: the job at its lines.
+    /// the project's git, answers with the job at Drafting and drafts the .gitignore lines
+    /// to show first after. Inputs: the project and the plan. Output: the job at Drafting.
     pub async fn github_publish_start(
         &self,
         project: ProjectId,
@@ -505,22 +504,28 @@ async fn handle(
             },
             Action::PublishStart { project, plan } => {
                 let (settings, codex, claude) = drafting.ok_or_else(unknown)?;
-                let folder = project_folder(&root, &project)?;
-                let job = account.publish_start(&folder, &plan, |prompt| {
-                    let (global, local) = settings
-                        .as_ref()
-                        .ok_or(crate::instruction_cleanup::UNAVAILABLE)?;
-                    crate::instruction_cleanup::run(&crate::instruction_cleanup::Request {
-                        root: &root,
-                        settings: (global, local),
-                        codex: codex.as_deref(),
-                        claude: claude.as_deref(),
-                        project: Some(&project),
-                        pool: None,
-                        prompt,
-                        agent: DRAFT_AGENT,
-                    })
-                })?;
+                let draft = account.publish_begin(&project_folder(&root, &project)?, &plan)?;
+                let job = draft.job().clone();
+                let draft_root = root.clone();
+                let _ = std::thread::Builder::new()
+                    .name("github-draft".into())
+                    .spawn(move || {
+                        let _ = draft.run(|prompt| {
+                            let (global, local) = settings
+                                .as_ref()
+                                .ok_or(crate::instruction_cleanup::UNAVAILABLE)?;
+                            crate::instruction_cleanup::run(&crate::instruction_cleanup::Request {
+                                root: &draft_root,
+                                settings: (global, local),
+                                codex: codex.as_deref(),
+                                claude: claude.as_deref(),
+                                project: Some(&project),
+                                pool: None,
+                                prompt,
+                                agent: DRAFT_AGENT,
+                            })
+                        });
+                    });
                 Reply::Publish { job }
             }
             Action::PublishApprove { project, lines } => Reply::Publish {

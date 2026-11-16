@@ -7,7 +7,10 @@ export const PUBLISH_LINE = "Standard secure setup; agents can propose changes l
 export const PUBLISH_DOCS = "Also publish the docs folder (plans, research)";
 export const SIGN_IN_WAIT = "Sign in to GitHub, or turn publishing off.";
 export const DETAILS_WAIT = "Fix the GitHub details in Basics first.";
+export const CHECKING_WAIT = "Checking your GitHub sign-in. Create waits for it, or turn publishing off.";
 export const PUBLISH_STARTED = "Publishing on GitHub has started.";
+export const PUBLISH_NOT_STARTED = "Publishing on GitHub didn't start.";
+const ENGINE_STARTING = "CrazyAgent's engine is still starting.";
 export const REPO_NAME_BYTES_MAX = 100;
 export const OWNER_BYTES_MAX = 39;
 export const DESCRIPTION_CHARS_MAX = 350;
@@ -136,11 +139,13 @@ export function publishPlan(publish: PublishDraft, projectName: string, about: s
   return { owner: shown.owner, name: shown.name, description: shown.description, private: publish.private, docs: publish.docs };
 }
 
-/** Says why Create project waits on the publish block: no GitHub sign-in, or a field the
- * engine would refuse. Inputs: the block, the project name, its about text, the accounts
- * offered and whether CrazyAgent is signed in to GitHub. Output: the sentence, or null
- * while publishing is off or the block is valid. */
-export function createWait(publish: PublishDraft, projectName: string, about: string, owners: GitHubOwner[], signedIn: boolean): string | null {
+/** Says why Create project waits on the publish block: the GitHub sign-in or accounts
+ * still being read, no sign-in, or a field the engine would refuse. Inputs: the block, the
+ * project name, its about text, the accounts offered, whether CrazyAgent is signed in to
+ * GitHub and whether those reads are still going. Output: the sentence, or null while
+ * publishing is off or the block is valid. */
+export function createWait(publish: PublishDraft, projectName: string, about: string, owners: GitHubOwner[], signedIn: boolean, checking = false): string | null {
+  if (publish.on && checking) return CHECKING_WAIT;
   const errors = publishErrors(publish, projectName, about, owners, signedIn);
   if (errors.sign_in) return errors.sign_in;
   return Object.keys(errors).length > 0 ? DETAILS_WAIT : null;
@@ -152,4 +157,13 @@ export function createWait(publish: PublishDraft, projectName: string, about: st
 export function startPublish(projectId: string, publish: PublishDraft, projectName: string, about: string, owners: GitHubOwner[]): Promise<Result<GitHubPublishJob>> | null {
   const plan = publishPlan(publish, projectName, about, owners);
   return plan ? startGitHubPublish(projectId, plan) : null;
+}
+
+/** Words what a made project's publish Start answered, for the message Create shows.
+ * Input: the Start's result, or null when nothing was started. Output: the sentence, or
+ * "" when nothing was started. */
+export function publishOutcome(result: Result<GitHubPublishJob> | null): string {
+  if (!result) return "";
+  if (result.kind === "ok") return PUBLISH_STARTED;
+  return `${PUBLISH_NOT_STARTED} ${result.kind === "error" ? result.message : ENGINE_STARTING}`;
 }

@@ -2,8 +2,8 @@ use super::settings::connection_lost;
 use super::*;
 use crate::engine::owner::{AccountSecret, OwnerResult};
 use crate::github::{
-    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan,
-    GitHubRepoPage, GitHubStatus,
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
+    GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
 };
 use crate::onboarding::OnboardingView;
 use crate::projects_home::job::{JobSubject, JobView};
@@ -46,6 +46,26 @@ pub(in crate::tui) enum IntakeQuery {
     GitHubPublishStart {
         project: ProjectId,
         plan: GitHubPublishPlan,
+    },
+    GitHubPublishStatus {
+        project: ProjectId,
+    },
+    GitHubPublishApprove {
+        project: ProjectId,
+        lines: Vec<String>,
+    },
+    GitHubPublishExclude {
+        project: ProjectId,
+        path: String,
+    },
+    GitHubPublishRecheck {
+        project: ProjectId,
+    },
+    GitHubPublishContinue {
+        project: ProjectId,
+    },
+    GitHubPublishDiscard {
+        project: ProjectId,
     },
     CloneRepo {
         full_name: String,
@@ -97,6 +117,8 @@ pub(in crate::tui) enum IntakeView {
     Repos(GitHubRepoPage),
     Owners(GitHubOwners),
     Publish(Box<GitHubPublishJob>),
+    PublishStatus(Option<Box<GitHubPublishJob>>),
+    Discarded(Option<GitHubPublishLeft>),
     Cloned(CloneReceipt),
     Changed(OwnerResult),
     Job(Option<JobView>),
@@ -248,6 +270,43 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             )),
+            IntakeQuery::GitHubPublishStatus { project } => IntakeView::PublishStatus(
+                controller
+                    .github_publish_status(project)
+                    .await
+                    .map_err(problem)?
+                    .map(Box::new),
+            ),
+            IntakeQuery::GitHubPublishApprove { project, lines } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_approve(project, lines)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishExclude { project, path } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_exclude(project, path)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishRecheck { project } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_recheck(project)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishContinue { project } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_continue(project)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::GitHubPublishDiscard { project } => IntakeView::Discarded(
+                controller
+                    .github_publish_discard(project)
+                    .await
+                    .map_err(problem)?,
+            ),
             IntakeQuery::CloneRepo { full_name } => {
                 IntakeView::Cloned(controller.clone_repo(full_name).await.map_err(problem)?)
             }

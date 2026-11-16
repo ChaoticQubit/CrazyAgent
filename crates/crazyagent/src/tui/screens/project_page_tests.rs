@@ -10,7 +10,10 @@ use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::OwnerMutation;
 use crate::engine::owner::{OwnerClientKind, OwnerData, OwnerRead, OwnerResponse};
-use crate::github::{GitHubMethod, GitHubOwner, GitHubOwners, GitHubStatus};
+use crate::github::{
+    GitHubIgnoreDraft, GitHubMethod, GitHubOwner, GitHubOwners, GitHubPublishJob,
+    GitHubPublishPlan, GitHubPublishStep, GitHubRuleOutcome, GitHubStatus,
+};
 use crate::master_session::{
     MasterOwnerAction, MasterSessionPhase, MasterSessionView, MasterTurnView,
 };
@@ -163,6 +166,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         IntakeQuery::JobStatus => "job status",
                         IntakeQuery::Found => "found",
                         IntakeQuery::GitHubPublishStart { .. } => "github publish",
+                        IntakeQuery::GitHubPublishStatus { .. } => "github publish status",
                         _ => "intake",
                     });
                     connection.intake(*job).unwrap();
@@ -717,6 +721,17 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     );
     let mut shell = Shell::with(ctx, screen);
     let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        sent.iter()
+            .filter(|label| **label == "github publish status")
+            .count(),
+        1,
+        "the Overview reads the project's GitHub publish once: {sent:?}"
+    );
+    let sent: Vec<&str> = sent
+        .into_iter()
+        .filter(|label| *label != "github publish status")
+        .collect();
     assert_eq!(
         sent,
         [
@@ -5983,7 +5998,7 @@ fn github_signed_in(shell: &mut Shell) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_made_project_starts_its_github_publish_once_its_pool_is_assigned() {
+async fn a_made_project_starts_its_github_publish_once_its_pool_is_assigned_and_says_its_reply() {
     let engine = Engine::start().await;
     let mut connection = engine.connect();
     let mut ctx = ctx(80, 24);
@@ -6012,9 +6027,12 @@ async fn a_made_project_starts_its_github_publish_once_its_pool_is_assigned() {
         1,
         "{sent:?}"
     );
-    let message = shell.ctx.message().expect("the made project is announced");
-    assert_eq!(message.lead, "Tidepool is ready.");
-    assert_eq!(message.rest, "Publishing on GitHub has started.");
+    let message = shell
+        .ctx
+        .message()
+        .expect("the publish Start's reply is said");
+    assert_eq!(message.lead, "Publishing on GitHub didn't start.");
+    assert_eq!(message.rest, "Sign in with GitHub first.");
 }
 
 /// Hands the page one creation reply from the engine worker. Takes the shell, the
@@ -6974,4 +6992,162 @@ fn a_delete_cut_short_offers_keep_the_project_and_delete_again_on_the_banner() {
     assert_eq!(project, &notes);
     assert_eq!(serde_json::to_value(kind).unwrap(), "project_delete");
     assert_eq!(*id, 9);
+}
+
+fn publish_job(step: GitHubPublishStep) -> GitHubPublishJob {
+    GitHubPublishJob {
+        project: std::path::PathBuf::from("/p"),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: "tool".into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+        lines: Vec::new(),
+        written: Vec::new(),
+        step,
+        stopped: None,
+        made: None,
+    }
+}
+
+/// Takes the GitHub publish queries the page queued, oldest first, dropping every other
+/// request. Takes the shell. Returns the queries.
+fn publish_asks(shell: &mut Shell) -> Vec<IntakeQuery> {
+    std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::Intake(job) => Some(job.query()),
+            _ => None,
+        })
+        .filter(|query| {
+            matches!(
+                query,
+                IntakeQuery::GitHubPublishStatus { .. }
+                    | IntakeQuery::GitHubPublishApprove { .. }
+                    | IntakeQuery::GitHubPublishExclude { .. }
+                    | IntakeQuery::GitHubPublishRecheck { .. }
+                    | IntakeQuery::GitHubPublishContinue { .. }
+                    | IntakeQuery::GitHubPublishDiscard { .. }
+            )
+        })
+        .collect()
+}
+
+fn publish_reply(shell: &mut Shell, query: IntakeQuery, result: Result<IntakeView, String>) {
+    shell.arrive(owner_arrival(OwnerEvent::Intake(Box::new(IntakeEvent {
+        query,
+        result,
+    }))));
+}
+
+#[test]
+fn the_overview_reads_the_github_publish_and_its_pane_sends_the_owners_answer() {
+    let mut ctx = ctx(100, 30);
+    let project = ProjectId::new("notes").unwrap();
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status.clone(),
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Lines {
+                lines: vec![".env*".into(), "target/".into()],
+                draft: GitHubIgnoreDraft::Agent,
+            },
+        ))))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("Publish on GitHub"), "{shown}");
+    assert!(shown.contains("[x] target/"), "{shown}");
+    shell.key(Key::Down);
+    shell.key(Key::Char(' '));
+    shell.key(Key::Enter);
+    let approve = IntakeQuery::GitHubPublishApprove {
+        project: project.clone(),
+        lines: vec![".env*".into()],
+    };
+    assert_eq!(publish_asks(&mut shell), [approve.clone()]);
+    shell.key(Key::Enter);
+    assert!(publish_asks(&mut shell).is_empty(), "one answer at a time");
+    publish_reply(
+        &mut shell,
+        approve,
+        Ok(IntakeView::Publish(Box::new(publish_job(
+            GitHubPublishStep::Done {
+                full_name: "me/tool".into(),
+                outcomes: Vec::<GitHubRuleOutcome>::new(),
+            },
+        )))),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("Published as me/tool."), "{shown}");
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 100, 30);
+    assert!(!shown.contains("Published as me/tool."), "{shown}");
+    assert!(publish_asks(&mut shell).is_empty());
+}
+
+#[test]
+fn a_project_without_a_publish_shows_no_pane_and_a_refused_answer_is_said() {
+    let project = ProjectId::new("notes").unwrap();
+    let opened = |project: &ProjectId| {
+        let mut context = ctx(100, 30);
+        let screen = open(
+            &Place::Project {
+                id: project.clone(),
+                name: "Notes".into(),
+                tab: ProjectTab::Overview,
+            },
+            &mut context,
+        );
+        Shell::with(context, screen)
+    };
+    let mut shell = opened(&project);
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status.clone(),
+        Ok(IntakeView::PublishStatus(None)),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(!shown.contains("Publish on GitHub"), "{shown}");
+    let mut shell = opened(&project);
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(
+        &mut shell,
+        status,
+        Ok(IntakeView::PublishStatus(Some(Box::new(publish_job(
+            GitHubPublishStep::Lines {
+                lines: vec![".env*".into()],
+                draft: GitHubIgnoreDraft::Agent,
+            },
+        ))))),
+    );
+    shell.key(Key::Enter);
+    let approve = IntakeQuery::GitHubPublishApprove {
+        project,
+        lines: vec![".env*".into()],
+    };
+    assert_eq!(publish_asks(&mut shell), [approve.clone()]);
+    publish_reply(&mut shell, approve, Err("github_publish_running".into()));
+    let message = shell.ctx.message().expect("the refusal is said");
+    assert_eq!(message.lead, "The publish answer wasn't taken.");
+    assert_eq!(message.rest, super::intake::copy("github_publish_running"));
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("[x] .env*"), "the pane stays: {shown}");
 }
