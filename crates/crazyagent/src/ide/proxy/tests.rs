@@ -844,6 +844,33 @@ async fn a_wildcard_listener_beside_the_server_fails_no_request() {
     );
 }
 
+/// rv-sa241 LOW-1 (ide-port follow-up r2), rv-ds241 r2 F2: a process the open never saw
+/// ready listening on the server port at an address other than 127.0.0.1, here [::1] as an
+/// agent of another project may bind, can take no 127.0.0.1 connection. So it fails no
+/// request: the request is served and the launch is kept.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_listener_off_127_0_0_1_the_open_never_saw_fails_no_request() {
+    let (upstream, server_port) = bind(None).await.unwrap();
+    let beside = crate::spawn_gate::bind_tcp_std(("::1", server_port)).unwrap();
+    let holder = Holder::of(beside.into());
+    let held = crate::ide::server::listeners(server_port).unwrap();
+    assert!(
+        held.contains(&(holder.pid(), format!("[::1]:{server_port}"))),
+        "a process the open never saw holds [::1]: {held:?}"
+    );
+    let ours = vec![i32::try_from(std::process::id()).unwrap()];
+    let (proxy, refused) = proxy_to(server_port, Some(ours)).await;
+    let served = tokio::spawn(fetched(proxy));
+    let head = answer_once(&upstream).await;
+    assert!(
+        head.starts_with("GET /static/app.js HTTP/1.1\r\n"),
+        "{head}"
+    );
+    assert!(served.await.unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(!flagged(&refused), "the launch is kept");
+}
+
 /// A launch can list more than one process on its port at ready. One of them ending while
 /// another still listens on 127.0.0.1 fails no request and flags nothing: a served process
 /// that is gone holds no listener, so the listing names only the live one.

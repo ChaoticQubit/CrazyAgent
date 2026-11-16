@@ -162,6 +162,34 @@ async fn a_listener_outside_the_servers_group_refuses_the_open() {
     assert_eq!(gone.0, "ide_server_port_taken");
 }
 
+/// rv-sa241 LOW-1 (ide-port follow-up r2): only a listener on exactly 127.0.0.1 at the server
+/// port can take the proxy's connection. Every other form that can bind beside the server
+/// prints another address (probed: `*:P`, `[::1]:P`, a LAN address), and a v4-mapped bind,
+/// which lsof prints as 127.0.0.1, cannot. So at ready a listener outside the group refuses
+/// the open only there, a group listener elsewhere is `ide_server_not_loopback`, and the
+/// processes the proxy serves are the group's alone.
+#[test]
+fn only_a_listener_outside_the_group_on_127_0_0_1_refuses_the_open() {
+    let port = 4100;
+    let at = |address: &str| format!("{address}:{port}");
+    let owns = |pid: i32| pid == 7;
+    let beside = [
+        (7, at("127.0.0.1")),
+        (9, at("[::1]")),
+        (9, at("192.0.2.4")),
+        (11, at("*")),
+    ];
+    let shared = [(7, at("127.0.0.1")), (9, at("127.0.0.1"))];
+    let wide = [(7, at("127.0.0.1")), (7, at("*"))];
+    let elsewhere = [(9, at("[::1]"))];
+    let refused = |listeners: &[(i32, String)]| judged(listeners, port, owns).map_err(|e| e.0);
+    assert_eq!(refused(&beside), Ok(vec![7]));
+    assert_eq!(refused(&shared), Err("ide_server_port_taken".to_owned()));
+    assert_eq!(refused(&wide), Err("ide_server_not_loopback".to_owned()));
+    assert_eq!(refused(&elsewhere), Err("ide_server_port_taken".to_owned()));
+    assert_eq!(refused(&[]), Err("ide_server_port_taken".to_owned()));
+}
+
 /// rv-ds241 L1: a port a wildcard listener of this user holds is not free, so the open picks
 /// another server port instead of recording one the server would only bind beside it, which
 /// would refuse every later open of the project.

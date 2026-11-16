@@ -1511,13 +1511,11 @@ async fn owned_listener(port: u16, group: Pid) -> Result<Vec<i32>, EngineError> 
     let listeners = tokio::task::spawn_blocking(move || listeners(port))
         .await
         .map_err(|_| failure("ide_server_check_failed"))??;
-    judged(&listeners, port, |pid| {
+    let pids = judged(&listeners, port, |pid| {
         Pid::from_raw(pid).is_some_and(|pid| rustix::process::getpgid(Some(pid)) == Ok(group))
     })?;
-    let mut pids: Vec<i32> = listeners.iter().map(|(pid, _)| *pid).collect();
-    pids.sort_unstable();
-    pids.dedup();
     assert!(!pids.is_empty());
+    assert!(pids.windows(2).all(|pair| pair[0] < pair[1]));
     Ok(pids)
 }
 
@@ -1549,13 +1547,14 @@ pub(super) async fn served_by(port: u16, served: &[i32]) -> Result<(), EngineErr
 
 /// Judges the listeners on the server's port: `ide_server_port_taken` when none listens or
 /// one is not `owns`, `ide_server_not_loopback` when one binds anything but 127.0.0.1.
-/// Inputs: the listeners, the port and the rule. Output: done, or the refusal.
+/// Inputs: the listeners, the port and the rule. Output: the listening processes, sorted,
+/// or the refusal.
 #[cfg(target_os = "macos")]
 fn judged(
     listeners: &[(i32, String)],
     port: u16,
     owns: impl Fn(i32) -> bool,
-) -> Result<(), EngineError> {
+) -> Result<Vec<i32>, EngineError> {
     assert_ne!(port, 0);
     if listeners.is_empty() || listeners.iter().any(|(pid, _)| !owns(*pid)) {
         return Err(failure("ide_server_port_taken"));
@@ -1564,8 +1563,11 @@ fn judged(
     if listeners.iter().any(|(_, address)| *address != loopback) {
         return Err(failure("ide_server_not_loopback"));
     }
-    assert!(!listeners.is_empty());
-    Ok(())
+    let mut pids: Vec<i32> = listeners.iter().map(|(pid, _)| *pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    assert!(!pids.is_empty());
+    Ok(pids)
 }
 
 /// Refuses where no listener check is qualified.
