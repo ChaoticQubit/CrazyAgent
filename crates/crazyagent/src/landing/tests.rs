@@ -16849,6 +16849,10 @@ fn a_filter_driver_is_still_switched_off_after_the_listing_narrows() {
     assert_eq!(overrides.len(), 3 * 8);
 }
 
+/// One way an owner config includes a file: its name and the step that writes the include
+/// into the case's owner repository.
+type ConfigInclude = (&'static str, fn(&Case));
+
 /// rv-sec2 git-config-hooks-241 N1: engine git never opens a repository whose config
 /// includes a file placed in the owner checkout, which a landing writes, whether the file is
 /// there yet or not, named relative or in full, by a section of any condition, from a file
@@ -16856,7 +16860,7 @@ fn a_filter_driver_is_still_switched_off_after_the_listing_narrows() {
 /// and a file outside both still opens.
 #[test]
 fn engine_git_refuses_an_owner_config_that_includes_a_file_in_the_project_folder() {
-    let plants: [(&str, fn(&Case)); 5] = [
+    let plants: [ConfigInclude; 5] = [
         ("relative, not there yet", |case| {
             case.owner(&["config", "include.path", "../.gitconfig"]);
         }),
