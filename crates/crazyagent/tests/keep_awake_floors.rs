@@ -55,7 +55,7 @@ fn pmset_battery_text_parses_into_source_and_percent() {
 #[cfg(target_os = "macos")]
 #[test]
 fn this_macs_own_pmset_and_thermal_text_is_understood() {
-    let batt = crazyagent::spawn_gate::output(
+    let batt = crazyagent::spawn_gate::collected(
         std::process::Command::new("/usr/bin/pmset").args(["-g", "batt"]),
     )
     .unwrap();
@@ -63,7 +63,7 @@ fn this_macs_own_pmset_and_thermal_text_is_understood() {
     let (source, _) = power_macos::battery(&String::from_utf8(batt.stdout).unwrap());
     assert_ne!(source, PowerSource::Unknown);
 
-    let therm = crazyagent::spawn_gate::output(
+    let therm = crazyagent::spawn_gate::collected(
         std::process::Command::new("/usr/bin/notifyutil").args(["-g", power_macos::THERMAL_KEY]),
     )
     .unwrap();

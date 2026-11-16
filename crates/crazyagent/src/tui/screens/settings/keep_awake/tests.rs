@@ -382,11 +382,28 @@ fn a_refused_save_keeps_the_picks_and_says_why() {
     assert_eq!(picks.mode, Some(Mode::Manual), "Enter saves again");
 }
 
+/// A Mac honours every setting, so no setting line gives a reason; its Lid helper line still
+/// says the helper is not set up yet, since that tells where the helper stands, not why a
+/// setting cannot hold (90f118552).
 #[test]
 fn a_setting_this_computer_cannot_honour_says_why() {
     let text = shown(&mut page(resting()));
+    let helper: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("Lid helper"))
+        .collect();
+    assert_eq!(helper.len(), 1, "{text}");
+    assert!(
+        helper[0].contains("Lid helper  Not set up on this computer yet"),
+        "{text}"
+    );
+    let settings: String = text
+        .lines()
+        .filter(|line| !line.contains("Lid helper"))
+        .collect::<Vec<_>>()
+        .join("\n");
     for reason in ["Not available on Windows", "Only on macOS", "Not set up"] {
-        assert!(!text.contains(reason), "{reason}: {text}");
+        assert!(!settings.contains(reason), "{reason}: {text}");
     }
     let mut windows = resting();
     windows.platform = Platform::Windows;

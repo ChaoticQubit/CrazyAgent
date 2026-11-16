@@ -61,12 +61,21 @@ fn change_set(connection: &Connection, id: &str, state: &str) {
         .unwrap();
 }
 
+/// Adds one master turn in a phase, in a session of its own, since a session holds at most
+/// one outstanding turn (storage/master_session.rs `master_outstanding`). Inputs: the
+/// engine connection, the turn's number and its phase.
 fn master_turn(connection: &Connection, ordinal: i64, phase: &str) {
+    assert!(ordinal > 0);
     connection
         .execute(
             "INSERT INTO master_turns(session,ordinal,id,input,phase,body)
-             VALUES ('s1',?1,?2,?3,?4,'{}')",
-            params![ordinal, format!("turn-{ordinal}"), ordinal + 100, phase],
+             VALUES (?1,1,?2,?3,?4,'{}')",
+            params![
+                format!("s{ordinal}"),
+                format!("turn-{ordinal}"),
+                ordinal + 100,
+                phase
+            ],
         )
         .unwrap();
 }
@@ -1256,12 +1265,17 @@ mod with_a_real_hold {
     }
 
     /// Counts the running caffeinate children that hold for one engine pid. Input: the pid.
-    /// Output: how many `pgrep` finds by their exact command line; an exited child that
-    /// nobody reaped yet has no command line and is not counted.
+    /// Output: how many `pgrep` finds by their exact command line, read from its collected
+    /// output; an exited child that nobody reaped yet has no command line and is not counted.
     fn holders(engine: u32) -> usize {
         let line = format!("^/usr/bin/caffeinate (-d )?-i -w {engine}$");
         let output =
-            crate::spawn_gate::output(Command::new("/usr/bin/pgrep").args(["-f", &line])).unwrap();
+            crate::spawn_gate::collected(Command::new("/usr/bin/pgrep").args(["-f", &line]))
+                .unwrap();
+        assert!(
+            output.status.code().is_some_and(|code| code <= 1),
+            "{output:?}"
+        );
         String::from_utf8(output.stdout).unwrap().lines().count()
     }
 
