@@ -154,6 +154,8 @@ export const CONNECTORS_PAGE = {
   nativeHelp: "Connectors from the harness's own account (claude.ai connectors in Claude Code, ChatGPT apps in Codex). The engine neither filters nor logs them.",
   sizeCap: "Tool result size cap",
   sizeCapHelp: "A longer tool result is cut to this size, with a note, before an agent reads it.",
+  harnesses: "Harnesses",
+  harnessesAbout: "Which harnesses reach connectors through the engine.",
   locked: "Tool list check and third-party label",
   lockedValue: "Always on",
   lockedReason: "A connector whose vendor tools changed stops and shows a notice, and every vendor result starts with a line saying it is content, not instructions.",
@@ -342,6 +344,12 @@ export function saveConnectorSettings(settings: ConnectorSettings, version: numb
  * Output: every connector, the settings with their version and that project's switches. */
 export function loadConnectors(project: string | null): Promise<Result<ConnectorsView>> {
   return connectorCall<ConnectorsView>("desktop_connectors", { project });
+}
+
+/** Reads what each harness reaches through the gateway, in the engine crate's words, from
+ * the bridge with no engine call. Output: one row per harness. */
+export function loadConnectorReach(): Promise<Result<string[]>> {
+  return Promise.resolve({ kind: "ok", value: [] });
 }
 
 /** Reads the trust screen of a picked or pasted connector manifest without saving it.

@@ -111,8 +111,9 @@ const CATALOG = {
   connectors: [...VIEW.connectors, connector("broken", "Broken", { kind: "refused", problem: PROBLEM }, { origin: "user" })],
 };
 const actions = new Proxy({}, { get: () => forbidden });
+const REACH = ["Harness A: yes", "Harness B: yes", "Harness C: yes (master)"];
 const page = (patch = {}) => renderToStaticMarkup(createElement(settingsPage.ConnectorsSettingsView, {
-  view: { kind: "ok", value: CATALOG }, open: null, dialog: { kind: "none" }, native: null, sizeCap: null,
+  view: { kind: "ok", value: CATALOG }, reach: { kind: "ok", value: REACH }, open: null, dialog: { kind: "none" }, native: null, sizeCap: null,
   busy: false, saving: false, failure: "", problem: "", actions, ...patch,
 }));
 const pageLink = (markup, name, title) => new RegExp(`<a[^>]*href="#/settings/connectors\\?connector=${name}"[^>]*>${title}</a>`, "u").test(markup);
@@ -357,7 +358,7 @@ test("Every refusal the Connectors protocol answers, past the owner codes, has a
   assert.deepEqual([...engineWorded, ...pageWorded].sort(), Object.keys(words).sort(), "no code has a sentence of its own elsewhere");
 });
 
-test("Characterization: the nine Connectors commands are built, registered and granted, and each call names only its own arguments", () => {
+test("The Connectors commands, the harness rows' one included, are built, registered and granted, and each call names only its own arguments", () => {
   const lib = source("../src-tauri/src/lib.rs");
   const built = source("../src-tauri/build.rs");
   const granted = JSON.parse(source("../src-tauri/capabilities/main-window.json")).permissions;
@@ -371,6 +372,7 @@ test("Characterization: the nine Connectors commands are built, registered and g
     desktop_connector_set_key: "{ name, secret, key }",
     desktop_connector_clear_key: "{ name, secret }",
     desktop_connector_grant: "{ project, connector, enabled, who }",
+    desktop_connector_reach: "{}",
   };
   const apiSource = source("../src/api-connectors.ts");
   for (const [command, args] of Object.entries(calls)) {
@@ -392,4 +394,24 @@ test("The key is read from the masked field, the field is cleared, and only then
   assert.match(screen, /function close\(\) \{\s*if \(keyRef\.current !== null\) keyRef\.current\.value = "";/u);
   assert.match(screen, /<SecretField id="connector-key"/u);
   assert.doesNotMatch(screen, /showToast\([^)]*\bkey\b[^)]*\)/u, "no toast names the key");
+});
+
+test("Settings, Connectors lists each harness row after the catalog, in the order the bridge gives them, and only on the main page", () => {
+  const markup = page();
+  const shown = text(markup);
+  assert.ok(shown.includes(`Harnesses ${api.CONNECTORS_PAGE.harnessesAbout}`), shown);
+  const rows = [...(markup.match(/<ul[^>]*aria-label="Harnesses"[^>]*>(.*?)<\/ul>/su)?.[1] ?? "").matchAll(/<li[^>]*>(.*?)<\/li>/gsu)].map((match) => text(match[1]));
+  assert.deepEqual(rows, REACH);
+  assert.ok(shown.indexOf("Catalog") < shown.indexOf("Harnesses"), "the harness rows come after the catalog");
+  assert.ok(!text(page({ reach: { kind: "loading" } })).includes("Harnesses"), "no harness section before its rows are read");
+  assert.ok(!text(page({ open: "linear" })).includes("Harnesses"), "a connector's own page has no harness rows");
+});
+
+test("No TypeScript spells a harness row: the words come only from connectors::launch::reach", () => {
+  const engine = source("../../../crates/crazyagent/src/connectors/launch.rs");
+  const words = [...engine.matchAll(/HarnessKind::\w+ => "([^"]+)"/gu)].map((match) => match[1]);
+  assert.ok(words.length >= 3, "the engine words every harness");
+  for (const file of ["../src/api-connectors.ts", "../src/screens/settings/connectors.tsx", "../src/screens/settings/connector-detail.tsx"]) {
+    for (const word of words) assert.ok(!source(file).includes(word), `${file} never spells ${word}`);
+  }
 });

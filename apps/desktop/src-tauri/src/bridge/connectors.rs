@@ -216,6 +216,13 @@ impl NativeBridge {
                 .map_err(connector_error)
         }))
     }
+
+    /// What the Connectors page says each harness reaches, one row per harness kind in
+    /// settings order, in the engine crate's own words (DEC-141), with no engine call.
+    /// Output: the rows.
+    pub fn connector_reach(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +255,20 @@ mod tests {
             serde_json::to_value(ConnectorSettingsSave::Saved).unwrap(),
             serde_json::json!({"kind": "saved"})
         );
+    }
+
+    /// The harness rows come from connectors::launch::reach for every harness kind, in
+    /// order, on a bridge with no engine at all.
+    #[test]
+    fn connector_reach_names_every_harness_in_the_engine_crates_words_without_an_engine() {
+        use crazyagent::coord::settings::HarnessKind;
+        let rows = NativeBridge::new(None).connector_reach();
+        let words: Vec<&'static str> = HarnessKind::ALL
+            .into_iter()
+            .map(crazyagent::connectors::launch::reach)
+            .collect();
+        assert_eq!(rows.len(), HarnessKind::ALL.len());
+        assert_eq!(rows, words);
     }
 
     /// The code a bridge call refused with before any engine call. Input: the call's

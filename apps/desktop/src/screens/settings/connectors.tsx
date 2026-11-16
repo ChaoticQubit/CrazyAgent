@@ -193,11 +193,12 @@ function SettingsForm({ page, native, sizeCap, saving, problem, actions }: {
 /** Settings, Connectors as a view of its state: the title in every state, then the catalog
  * with each connector's state, hosts and page, Add connector, and the connector settings
  * with the locked line; or the open connector's own page; over either the open dialog.
- * Inputs: the page read, the connector the route opened, the open dialog, the picked
+ * Inputs: the page read, the harness rows, the connector the route opened, the open dialog, the picked
  * settings, busy and saving flags, the last failure and save problem, the key field and
  * the actions. Output: the tab. */
-export function ConnectorsSettingsView({ view, open, dialog, native, sizeCap, busy, saving, failure, problem, keyRef, actions }: {
+export function ConnectorsSettingsView({ view, reach, open, dialog, native, sizeCap, busy, saving, failure, problem, keyRef, actions }: {
   view: Loaded<ConnectorsView>;
+  reach: Loaded<string[]>;
   open: string | null;
   dialog: ConnectorDialog;
   native: NativeConnectors | null;
@@ -213,6 +214,7 @@ export function ConnectorsSettingsView({ view, open, dialog, native, sizeCap, bu
   if (view.kind === "not_ready") return <>{TOP}<NotReady what={CONNECTORS_PAGE.title} /></>;
   if (view.kind === "error") return <>{TOP}<LoadError message={`Couldn't load the connectors. ${view.message}`} onRetry={actions.onRetry} /></>;
   const page = view.value;
+  void reach;
   const dialogs = <ConnectorDialogs dialog={dialog} busy={busy} failure={failure} keyRef={keyRef} actions={actions} />;
   if (open !== null) {
     const connector = page.connectors.find((listed) => listed.name === open) ?? null;
