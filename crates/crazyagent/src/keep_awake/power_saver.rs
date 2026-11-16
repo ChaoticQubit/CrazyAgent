@@ -153,10 +153,7 @@ fn not_available(problem: &SaverError) -> LowPowerSupport {
         SaverError::Refused => REFUSED.to_owned(),
         SaverError::Failed(text) => {
             let shown = text.chars().filter(|character| !character.is_control());
-            format!(
-                "{FAILED}{}",
-                shown.take(REASON_CHARS_MAX).collect::<String>()
-            )
+            format!("{FAILED}{}", shown.take(REASON_CHARS_MAX).collect::<String>())
         }
     };
     assert!(reason.starts_with("Not available: "));
