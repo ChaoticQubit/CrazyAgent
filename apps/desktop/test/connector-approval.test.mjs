@@ -145,7 +145,7 @@ test("The approval page's four commands are built, registered and granted, and e
     assert.ok(lib.split(command).length >= 3, `${command} is registered with the window`);
     assert.ok(built.includes(`"${command}",`), `${command} is in the app's built commands`);
     assert.ok(granted.includes(`allow-${command.replaceAll("_", "-")}`), `${command} is granted to the main window`);
-    assert.ok(apiSource.includes(`("${command}", ${args})`), `${command} is called with ${args}`);
+    assert.match(apiSource, new RegExp(`\\("${command}", ${args.replace(/[{}]/gu, "\\$&")}(?:\\)|, approvalShown\\))`, "u"), `${command} is called with ${args}`);
   }
 });
 

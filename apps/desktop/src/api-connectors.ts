@@ -369,13 +369,17 @@ function shown<T>(value: T): T {
  * the character it names, as the engine shows the full arguments. Input: the text the engine
  * answered. Output: the text to show. */
 export function approvalText(text: string): string {
-  return displayText(text);
+  return displayText(text.replaceAll("\\", "\\\\"));
 }
 
-async function connectorCall<T>(command: string, args: Record<string, unknown>): Promise<Result<T>> {
+function approvalShown(view: ApprovalView): ApprovalView {
+  return { ...shown(view), title: approvalText(view.title), tool: approvalText(view.tool), agent: approvalText(view.agent), preview: approvalText(view.preview) };
+}
+
+async function connectorCall<T>(command: string, args: Record<string, unknown>, show: (value: T) => T = shown): Promise<Result<T>> {
   const result = await call<T>(command, args);
   if (result.kind === "error") return { ...result, message: connectorProblem(result) };
-  return result.kind === "ok" ? { kind: "ok", value: shown(result.value) } : result;
+  return result.kind === "ok" ? { kind: "ok", value: show(result.value) } : result;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -557,13 +561,13 @@ export function answeredLine(view: ApprovalView): string {
 
 /** Reads one connector write by the id its notice carries. Input: the id. Output: the approval. */
 export function loadApproval(id: number): Promise<Result<ApprovalView>> {
-  return connectorCall<ApprovalView>("desktop_connector_approval", { id });
+  return connectorCall<ApprovalView>("desktop_connector_approval", { id }, approvalShown);
 }
 
 /** Answers one waiting connector write once. Inputs: the id and whether the owner allows it.
  * Output: the approval after the answer. */
 export function answerApproval(id: number, allow: boolean): Promise<Result<ApprovalView>> {
-  return connectorCall<ApprovalView>("desktop_connector_answer", { id, allow });
+  return connectorCall<ApprovalView>("desktop_connector_answer", { id, allow }, approvalShown);
 }
 
 /** Reads the connectors a project may write with without asking again. Input: the project.
