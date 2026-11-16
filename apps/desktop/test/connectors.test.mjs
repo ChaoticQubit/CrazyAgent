@@ -426,7 +426,7 @@ test("A refused connector file is listed under its file name with its reason and
   const markup = page();
   const userRow = (name) => text(markup.match(new RegExp(`<li[^>]*data-connector="${name}" data-origin="user"[^>]*>.*?</li>`, "su"))?.[0] ?? "");
   assert.ok(userRow("broken").includes("broken. Added by you. Refused The address must start with https://. (app_plugin_url_not_https, line 7, connector.url)"), userRow("broken"));
-  assert.ok(userRow("linear").includes("linear. Added by you. Refused a plugin with this name already exists; remove it or choose replace. (app_plugin_name_taken, name)"), userRow("linear"));
+  assert.ok(userRow("linear").includes("linear. Added by you. Refused linear.yaml is set aside: a built-in plugin or connector now has the name linear. The file stays in your plugins folder, and its keys and switches were cleared. Rename the file and the name in it to use it."), userRow("linear"));
   for (const name of ["broken", "linear"]) {
     assert.ok(userRow(name).includes(api.CONNECTORS_PAGE.refusedFile), `${name} says where its file can be removed: ${userRow(name)}`);
     for (const absent of ["Reaches", "version"]) assert.ok(!userRow(name).includes(absent), `${name} shows no ${absent}`);

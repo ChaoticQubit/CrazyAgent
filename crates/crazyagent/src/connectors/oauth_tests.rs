@@ -2283,6 +2283,11 @@ fn every_group_p_connector_asks_for_the_owners_own_app_before_sign_in() {
             probe.preview,
             "{name}"
         );
+        assert_eq!(
+            manifest.description.contains("so that sign-in can write"),
+            oauth.scopes_read.iter().any(|scope| scope == "repo"),
+            "{name}: a read scope that can write is said in its description (rv-ds241 L1)"
+        );
 
         let stand_in = vendor(Shape {
             servers: if probe.slash {

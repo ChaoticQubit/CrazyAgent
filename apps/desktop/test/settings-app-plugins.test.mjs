@@ -38,6 +38,17 @@ const render = (patch = {}) => renderToStaticMarkup(createElement(screen.AppPlug
 const text = (markup) => markup.replace(/<[^>]*>/gu, " ").replace(/&#x27;/gu, "'").replace(/&quot;/gu, "\"").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
 const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 
+test("App plugins: an owner's file a built-in plugin or connector took the name of says which file is set aside, why, that it stays on disk and how to use it again", () => {
+  const TAKEN = { code: "app_plugin_name_taken", line: null, field: "name", message: "a plugin with this name already exists; remove it or choose replace." };
+  const mine = plugin({ name: "slack", title: "slack", origin: "user", runs: null, status: { kind: "refused", problem: TAKEN }, enabled: false });
+  assert.deepEqual(api.pluginState(mine), {
+    word: "Refused", tone: "danger",
+    detail: "slack.yaml is set aside: a built-in plugin or connector now has the name slack. The file stays in your plugins folder, and its keys and switches were cleared. Rename the file and the name in it to use it.",
+  });
+  const other = plugin({ name: "broken", title: "broken", origin: "user", runs: null, status: { kind: "refused", problem: PROBLEM }, enabled: false });
+  assert.ok(!api.pluginState(other).detail.includes("set aside"), "another refusal keeps its own reason");
+});
+
 test("App plugins (A1): every status reads as one label, Refused before Needs review before Needs a key before Enabled or Off", () => {
   const word = (patch) => api.pluginState(plugin(patch)).word;
   assert.equal(word({ status: { kind: "refused", problem: PROBLEM }, enabled: true }), "Refused");

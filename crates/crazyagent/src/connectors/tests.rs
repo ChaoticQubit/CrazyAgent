@@ -526,6 +526,92 @@ fn a_bundled_connector_never_inherits_an_older_plugin_of_its_name() {
     );
 }
 
+/// An owner's own connector file named like a connector Task 15 ships is set aside, not
+/// deleted: after the update its file stays in the plugins folder byte for byte and is
+/// listed as the owner's, refused with `app_plugin_name_taken` on its name, while its key,
+/// its trust record and its project grants are cleared so none reaches the built-in one.
+#[test]
+fn an_owners_file_named_like_a_new_built_in_connector_is_set_aside_and_kept_on_disk() {
+    for name in [
+        "slack",
+        "asana",
+        "box",
+        "canva",
+        "dropbox",
+        "gmail",
+        "google-drive",
+        "google-calendar",
+    ] {
+        let case = case();
+        add(&case, BOARD, false);
+        grants::of_project(&case.db, PROJECT).unwrap();
+        let text = BOARD.replacen("name: board\n", &format!("name: {name}\n"), 1);
+        assert!(text.contains(&format!("name: {name}\n")));
+        let file = case.root.join(FOLDER).join(format!("{name}.yaml"));
+        std::fs::write(&file, &text).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let old_key = CredentialRef::new("plugin-key-00112233445566ff").unwrap();
+        accounts::replace_key_in(
+            &case.root,
+            PLUGIN_KEYS,
+            &old_key,
+            b"sk-owner-own-file-key".to_vec(),
+        )
+        .unwrap();
+        case.db
+            .execute(
+                "INSERT INTO app_plugin_trust (name, sha256, hosts, trusted_ms)
+                 VALUES (?1, ?2, 'mcp mcp.board.example', 1)",
+                [name, sha(&text).as_str()],
+            )
+            .unwrap();
+        case.db
+            .execute(
+                "INSERT INTO app_plugin_secrets (plugin, secret, source, reference)
+                 VALUES (?1, 'api_key', 'key', 'plugin-key-00112233445566ff')",
+                [name],
+            )
+            .unwrap();
+        case.db
+            .execute(
+                "INSERT INTO connector_grants (project, connector, enabled, who, changed_ms)
+                 VALUES ('alpha', ?1, 1, 'both', 1)",
+                [name],
+            )
+            .unwrap();
+
+        let listing = store::list(&case.db, &case.root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).ok().as_deref(),
+            Some(text.as_str()),
+            "{name}: the owner's file stays in the plugins folder as it was"
+        );
+        let mine = listing
+            .plugins
+            .iter()
+            .find(|plugin| plugin.name == name && plugin.origin == Origin::User);
+        assert!(
+            mine.is_some_and(
+                |plugin| matches!(&plugin.status, PluginStatus::Refused { problem }
+                if problem.code == "app_plugin_name_taken")
+            ),
+            "{name}: listed as the owner's, set aside for its name: {mine:?}"
+        );
+        assert!(
+            !accounts::key_saved_in(&case.root, PLUGIN_KEYS, &old_key).unwrap(),
+            "{name}: its key is cleared"
+        );
+        for sql in [
+            "SELECT COUNT(*) FROM app_plugin_trust WHERE name=?1",
+            "SELECT COUNT(*) FROM app_plugin_secrets WHERE plugin=?1",
+            "SELECT COUNT(*) FROM connector_grants WHERE connector=?1",
+        ] {
+            let left: i64 = case.db.query_row(sql, [name], |row| row.get(0)).unwrap();
+            assert_eq!(left, 0, "{name}: {sql}");
+        }
+    }
+}
+
 #[test]
 fn a_refused_connector_file_is_listed_with_its_reason_and_one_whose_kind_cannot_be_read_is_not() {
     let case = case();

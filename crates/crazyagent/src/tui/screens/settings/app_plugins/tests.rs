@@ -393,6 +393,53 @@ fn said(shell: &Shell) -> String {
         .unwrap_or_default()
 }
 
+/// An owner's file that a built-in plugin or connector took the name of says, in the
+/// desktop's words, which file is set aside, why, that it stays on disk and how to use it
+/// again; another refusal keeps its own reason.
+#[test]
+fn an_owners_file_set_aside_for_a_built_in_name_says_which_file_why_and_that_it_stays() {
+    let taken = problem(
+        "app_plugin_name_taken",
+        None,
+        Some("name"),
+        "a plugin with this name already exists; remove it or choose replace.",
+    );
+    let mine = plugin(
+        "slack",
+        "slack",
+        Origin::User,
+        PluginStatus::Refused { problem: taken },
+        false,
+    );
+    let (word, _, detail) = plugin_state(&mine);
+    assert_eq!(word, "Refused");
+    assert_eq!(
+        detail.as_deref(),
+        Some(
+            "slack.yaml is set aside: a built-in plugin or connector now has the name slack. The file stays in your plugins folder, and its keys and switches were cleared. Rename the file and the name in it to use it."
+        )
+    );
+    let other = plugin(
+        "broken",
+        "broken",
+        Origin::User,
+        PluginStatus::Refused {
+            problem: problem(
+                "app_plugin_url_not_https",
+                Some(7),
+                Some("http.url"),
+                "The address must start with https://.",
+            ),
+        },
+        false,
+    );
+    let (_, _, detail) = plugin_state(&other);
+    assert!(
+        detail.is_some_and(|detail| !detail.contains("set aside")),
+        "another refusal keeps its own reason"
+    );
+}
+
 #[test]
 fn a1_every_plugin_shows_one_status_label_where_it_came_from_and_how_it_runs() {
     let mut fake = Fake::new();
