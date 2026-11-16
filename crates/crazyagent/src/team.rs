@@ -1287,21 +1287,33 @@ pub enum TeamReach {
     },
 }
 
+/// Tells how an agent of the launch harness reaches its model through one connection, as
+/// [`reach_in`] does for the bundled registry. Takes the connection and the launch harness
+/// identifier. Returns the reach, or none.
+fn reach(connection: &crate::config::ModelConnection, harness: &str) -> Option<TeamReach> {
+    reach_in(crate::harnesses::registry::registry(), connection, harness)
+}
+
 /// Tells how an agent of the launch harness reaches its model through one connection, by
 /// the one account rule every harness shares (DEC-141 PA-4): an endpoint whose wire format
 /// the harness speaks, with its key reference when it has one, or a native managed profile
 /// of that harness. A ChatGPT sign-in that fits a listed harness only through the ChatGPT
 /// relay is no managed reach, since a managed launch hands the agent the sign-in's own
-/// credential copy (T22). Takes the connection and the launch harness identifier. Returns
-/// the reach, or none when the harness runs no team agents or cannot run on that connection.
-fn reach(connection: &crate::config::ModelConnection, harness: &str) -> Option<TeamReach> {
-    let harness = launch_harness(harness)?;
-    if !crate::harnesses::account_fits(harness, connection) {
+/// credential copy (T22). Takes the registry the harness is found in, the connection and
+/// the launch harness identifier. Returns the reach, or none when the harness runs no team
+/// agents or cannot run on that connection.
+fn reach_in(
+    registry: &crate::harnesses::registry::Registry,
+    connection: &crate::config::ModelConnection,
+    harness: &str,
+) -> Option<TeamReach> {
+    let own = registry.get(harness).filter(|listed| listed.runnable())?;
+    if !own.account_fits(connection) {
         return None;
     }
     match (&connection.endpoint, &connection.auth) {
         (ModelEndpoint::Http { url }, auth) => Some(TeamReach::Endpoint {
-            base_url: crate::harnesses::endpoint_base_url(harness, url).to_owned(),
+            base_url: crate::harnesses::endpoint_base_url(&own.manifest().id, url).to_owned(),
             model: connection.model.id.clone(),
             key: match auth {
                 ModelAuthentication::ApiKey { credential_ref } => Some(credential_ref.clone()),
@@ -1309,9 +1321,7 @@ fn reach(connection: &crate::config::ModelConnection, harness: &str) -> Option<T
             },
         }),
         (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { profile_ref })
-            if crate::harnesses::registry::registry()
-                .get(harness)
-                .is_some_and(|own| own.signs_in_natively(connection)) =>
+            if own.signs_in_natively(connection) =>
         {
             Some(TeamReach::Managed {
                 profile_ref: profile_ref.clone(),
@@ -5794,3 +5804,6 @@ fn teammates(
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod reach_tests;
