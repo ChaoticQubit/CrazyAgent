@@ -27,8 +27,8 @@ const READ_WAIT: Duration = Duration::from_secs(5);
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
 const STOP_POLL: Duration = Duration::from_millis(100);
 
-/// How a wait for the browser ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How a wait for the browser ended. Its debug text never holds the code.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Waited {
     /// The answer carried the sign-in's state and a code, with the issuer when sent.
     Code { code: String, iss: Option<String> },
@@ -40,6 +40,23 @@ pub enum Waited {
     Flooded,
     /// The owner cancelled the sign-in.
     Stopped,
+}
+
+impl std::fmt::Debug for Waited {
+    /// Names how the wait ended and the issuer, never the code, which is a one-time secret.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Code { iss, .. } => f
+                .debug_struct("Code")
+                .field("code", &"<redacted>")
+                .field("iss", iss)
+                .finish(),
+            Self::Refused => f.write_str("Refused"),
+            Self::Expired => f.write_str("Expired"),
+            Self::Flooded => f.write_str("Flooded"),
+            Self::Stopped => f.write_str("Stopped"),
+        }
+    }
 }
 
 /// One sign-in's loopback listener and the address the browser is sent back to.

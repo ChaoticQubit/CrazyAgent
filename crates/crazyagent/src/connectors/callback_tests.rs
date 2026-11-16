@@ -240,7 +240,8 @@ fn the_debug_text_of_an_answer_never_holds_its_code() {
     let code = "code-c0ffee-5".to_owned();
     let shown = format!("{:?}", Waited::Code { code, iss });
     assert!(!shown.contains("c0ffee"), "{shown}");
-    assert!(shown.contains("Code") && shown.contains("https://auth.example"), "{shown}");
+    assert!(shown.starts_with("Code"), "{shown}");
+    assert!(shown.contains("https://auth.example"), "{shown}");
     assert_eq!(format!("{:?}", Waited::Expired), "Expired");
 }
 
