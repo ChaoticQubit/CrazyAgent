@@ -1360,3 +1360,33 @@ fn a_jsonl_append_record_line_is_read_for_messages() {
     assert!(maybe_message("standin-jsonl-append", &line));
     assert!(!maybe_message("no-such-harness", &line));
 }
+
+/// DEC-180 T20 (b): a search finds the words a listed agent's jsonl-append record holds,
+/// read only from the folder its manifest's record path names in each account's private
+/// home, typed and agent lines as its rules tell them, and the record's page reads them.
+#[test]
+fn a_search_finds_words_in_a_listed_agent_s_jsonl_append_record() {
+    let fixture = Fixture::new();
+    let (agent, home) = fixture.agent("standin-jsonl-append");
+    let private = home.join("standin-jsonl-append").join("account-1");
+    record(
+        &private.join("standin").join("records").join("s-7.jsonl"),
+        &[
+            json!({"type": "started", "prompt": "Find the zebra plan"}).to_string(),
+            json!({"type": "tool", "name": "zebra plan"}).to_string(),
+            json!({"type": "text", "delta": "The zebra plan is done"}).to_string(),
+        ],
+    );
+    let elsewhere = json!({"type": "text", "delta": "zebra plan elsewhere"}).to_string();
+    record(&private.join("config").join("other.jsonl"), &[elsewhere]);
+
+    let text = fixture.sessions("zebra plan");
+
+    let hits = hit_lines(&text);
+    let has = |prefix: String| hits.iter().any(|hit| hit.starts_with(&prefix));
+    assert!(has(format!("- agent-{agent}/s-7 #0 typed")), "{text}");
+    assert!(has(format!("- agent-{agent}/s-7 #1 agent")), "{text}");
+    assert!(hits.iter().all(|hit| !hit.contains("/other #")), "{text}");
+    let (page, _) = fixture.session(&format!("agent-{agent}/s-7"), 0);
+    assert!(page.contains("The zebra plan is done"), "{page}");
+}
