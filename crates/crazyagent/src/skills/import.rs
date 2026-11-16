@@ -181,12 +181,20 @@ fn planned_digest(planned: &[PlannedFile]) -> Option<[u8; 32]> {
     Some(hash.finalize().into())
 }
 
+/// Reads one folder under a skills folder as an import candidate: none when it holds no
+/// SKILL.md, checked before any other rule so a folder that is not a skill is never listed
+/// as one that cannot be imported (RV-DS241-92), else its state under the import rules.
+/// Inputs: where it was found, the folder, its name and the app's skills. Output: the
+/// candidate, none, or `skill_import_home_unknown` for a folder path that is not UTF-8.
 fn candidate(
     from: ImportFrom,
     folder: &Path,
     name: &str,
     added: &[SkillInfo],
 ) -> Result<Option<ImportCandidate>, EngineError> {
+    if std::fs::symlink_metadata(folder.join("SKILL.md")).is_err() {
+        return Ok(None);
+    }
     let shown = folder
         .to_str()
         .ok_or_else(|| error("skill_import_home_unknown"))?
