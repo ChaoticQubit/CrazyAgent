@@ -1227,7 +1227,7 @@ test("a failed IDE state read shows the failure with Retry instead of falling ba
   assert.ok(markup.includes("IDE unavailable on ") && markup.includes("CrazyAgent&#x27;s engine isn&#x27;t ready yet."), markup);
   assert.match(markup, />Retry</);
   const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
-  assert.match(index, /useState<Result<IdeView>>\(\)/, "the page keeps a failed read, not only a good one");
+  assert.match(index, /useState<Result<IdeView> \| undefined>\(cachedIdeView\)/, "the page keeps a failed read, not only a good one, and starts from the last read (DEC-187)");
   assert.match(index, /failure=\{failure\}/);
   assert.match(index, /failure \? readIde\(\) : fetchIde\(\)/, "Retry after a failed read reads again and starts no download");
 });
