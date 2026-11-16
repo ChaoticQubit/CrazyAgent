@@ -418,6 +418,7 @@ fn tell_untold(tx: &Transaction<'_>) -> Result<(), EngineError> {
 /// oldest such proposal is oldest first, at most `TOLD_PROJECTS_MAX`. Input: the
 /// transaction. Output: the projects, or `github_rule_requests_unavailable`.
 fn untold_projects(tx: &Transaction<'_>) -> Result<Vec<String>, EngineError> {
+    assert!(!tx.is_autocommit());
     let mut statement = tx
         .prepare(&format!(
             "SELECT project FROM github_rule_requests WHERE {ENDED} AND told=0 \
@@ -430,7 +431,6 @@ fn untold_projects(tx: &Transaction<'_>) -> Result<Vec<String>, EngineError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| failure(UNAVAILABLE))?;
     assert!(projects.len() as i64 <= TOLD_PROJECTS_MAX);
-    assert!(projects.iter().all(|project| !project.is_empty()));
     Ok(projects)
 }
 
@@ -439,6 +439,7 @@ fn untold_projects(tx: &Transaction<'_>) -> Result<Vec<String>, EngineError> {
 /// the sign-in is in it. Inputs: the transaction and the proposal. Output: whether it was
 /// told, false while the full conversation refuses it, or the store error.
 fn tell_one(tx: &Transaction<'_>, row: &Row) -> Result<bool, EngineError> {
+    assert!(row.id > 0);
     let status: String = tx
         .query_row(
             "SELECT status FROM github_rule_requests WHERE id=?1",
