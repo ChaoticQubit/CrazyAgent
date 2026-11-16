@@ -195,6 +195,13 @@ const CONFINED_NEEDS_HELPER: &str = "an agent confined to its own worktree needs
      helper on Linux, and this computer has only the bubblewrap backend, which cannot give \
      the git folders their own rights";
 
+/// The entries of a linked worktree's admin folder that Seatbelt keeps out of agent hands by
+/// name (the admin `HEAD` deny and `git_link_denies`) and that Landlock cannot carve out of
+/// the admin folder's git grant, so a launch stays refused until the call supervisor and the
+/// nested binds hold each one (DEC-185 S1, rv-ds241 F1, rv-sa241 LOW-1). Linux only: macOS
+/// lets a worktree-adding profile create `commondir` and `gitdir` once.
+const ADMIN_HELD: [&str; 4] = ["HEAD", "commondir", "gitdir", "config.worktree"];
+
 const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/null",
     "/dev/zero",
@@ -2067,6 +2074,9 @@ impl Sandbox for LinuxSandbox {
             ));
         }
         let grants = Grants::of(&self.sandbox)?;
+        if !grants.git_write.is_empty() && matches!(self.backend, LinuxBackend::Bubblewrap { .. }) {
+            return Err(SandboxError::Unavailable(CONFINED_NEEDS_HELPER.into()));
+        }
         if !grants.guarded.is_empty() {
             return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
         }
@@ -2117,9 +2127,10 @@ impl Sandbox for LinuxSandbox {
 }
 
 /// What a launch's Landlock rules grant: folders read, folders written whole, git folders
-/// written with [`git_folder_rights`], and `guarded`, the protected paths inside a git
-/// folder grant that Landlock cannot keep read-only there, which the call supervisor and
-/// the nested backend's binds must hold before a confined launch starts (DEC-185 S1).
+/// written with [`git_folder_rights`], and `guarded`, the entries Landlock cannot keep
+/// read-only under those grants (protected paths in a git grant, [`ADMIN_HELD`] and the
+/// worktree's `.git` link), which the call supervisor and the nested binds must hold before
+/// a confined launch starts (DEC-185 S1).
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
@@ -2197,11 +2208,19 @@ impl Grants {
         {
             return Err(invalid("a writable root sits inside a protected path"));
         }
-        let guarded: Vec<PathBuf> = protected
+        let mut guarded: Vec<PathBuf> = protected
             .iter()
             .filter(|item| git_write.iter().any(|root| item.starts_with(root)))
             .cloned()
             .collect();
+        if let Some(checkout) = checkout {
+            if git_write.contains(&checkout.admin) {
+                guarded.extend(ADMIN_HELD.iter().map(|name| checkout.admin.join(name)));
+            }
+            if write.contains(&checkout.worktree) {
+                guarded.push(checkout.worktree.join(".git"));
+            }
+        }
         let secrets = sandbox.secret_paths();
         let carved = sandbox.carved_home.as_ref();
         assert!(read.iter().chain(&write).chain(&git_write).all(|grant| {
