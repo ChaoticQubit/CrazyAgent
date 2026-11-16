@@ -485,6 +485,50 @@ fn every_served_limited_reason_reads_once_word_for_word_in_the_control_sentence(
     assert!(limited >= 10, "the bundled manifests limit most harnesses");
 }
 
+/// T21-1: a harness whose only limit is its tools, which no bundled manifest gives (each one
+/// that limits its tools also names why it cannot start), is Limited by that reason once it
+/// is found, and its Control sentence names the reason once. A row manifest reaches the
+/// catalog's tools-only status and the sentence's dedupe, which the sweep above cannot.
+#[test]
+fn a_harness_limited_only_by_its_tools_names_that_reason_once_in_the_control_sentence() {
+    const TOOLS_ONLY: &str = "schema: 1\nkind: harness\nid: \"toolsonly\"\nname: \"Tools only\"\nbinaries:\n  - \"toolsonly\"\nheadless: \"toolsonly --json\"\nmodel_selection: true\naccount_kinds:\n  - \"api_key\"\ntools_limited: \"runs without tools.\"\n";
+    let built = crate::harnesses::registry::Registry::build(&[("toolsonly", TOOLS_ONLY)]);
+    let registry: &'static crate::harnesses::registry::Registry =
+        Box::leak(Box::new(built.expect("the row manifest loads")));
+    let harness = &registry.all()[0];
+    assert!(harness.manifest().cannot_start.is_none());
+    let root = tempfile::Builder::new()
+        .prefix("ca-th-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let path = root.path().join("toolsonly");
+    std::fs::write(&path, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let entry = crate::harnesses::entry(
+        harness,
+        &Search::new(vec![root.path().to_path_buf()], None, Vec::new()),
+    );
+
+    assert!(entry.executable.is_some(), "{entry:?}");
+    assert_eq!(
+        entry.status,
+        HarnessStatus::Limited {
+            reason: "runs without tools.".into()
+        }
+    );
+    assert_eq!(
+        entry.tools,
+        ToolControl::Limited {
+            reason: "runs without tools.".into()
+        }
+    );
+    assert_eq!(
+        control_sentence(&entry),
+        "Limited control: runs without tools."
+    );
+}
+
 #[test]
 fn u_shows_the_exact_command_and_updates_only_after_y() {
     let found = found();
