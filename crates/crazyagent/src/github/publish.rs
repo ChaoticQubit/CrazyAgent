@@ -45,6 +45,7 @@ const MESSAGE: &str = "Publish with CrazyAgent";
 const AUTHOR_BYTES_MAX: usize = 256;
 const PUSH_TIME: Duration = Duration::from_secs(1800);
 const STAGE: &str = "stage.git";
+const PRIVATE_INDEX: &str = "publish-index";
 const FETCH: &str = "+refs/heads/*:refs/remotes/origin/*";
 const DOCS_OFF: [&str; 2] = ["/.crazyagent/", "/graphify-out/"];
 const DOCS_ON: [&str; 4] = [
@@ -994,97 +995,114 @@ fn findings_within(
     if !plain_repository(project)? {
         return Err(failure("github_publish_not_plain_repo"));
     }
+    if history == GitHubHistory::Owner {
+        return tree_findings(git, home, project, "HEAD", files_max, bytes_max, limit);
+    }
     let mut findings = Vec::new();
     let mut truncated = false;
     let mut total: u64 = 0;
-    if history == GitHubHistory::Owner {
-        let listed = listing(
-            project_git(git, home, project).args([
-                "ls-tree",
-                "-r",
-                "-z",
-                "-l",
-                "--full-tree",
-                "HEAD",
-            ]),
-            limit,
-        )?;
-        let mut blobs: Vec<(String, String)> = Vec::new();
-        for entry in listed
-            .split(|byte| *byte == 0)
-            .filter(|entry| !entry.is_empty())
-        {
-            let tab = entry
-                .iter()
-                .position(|byte| *byte == b'\t')
-                .ok_or_else(failed)?;
-            let meta = std::str::from_utf8(&entry[..tab]).map_err(|_| failed())?;
-            let mut words = meta.split_whitespace();
-            let (mode, kind, object, size) =
-                (words.next(), words.next(), words.next(), words.next());
-            if kind != Some("blob") || mode == Some("120000") {
-                continue;
-            }
-            let size: u64 = size.and_then(|size| size.parse().ok()).ok_or_else(failed)?;
-            total = total.saturating_add(size);
-            let object = object.ok_or_else(failed)?.to_owned();
-            blobs.push((
-                object,
-                String::from_utf8_lossy(&entry[tab + 1..]).into_owned(),
-            ));
-            if total > bytes_max || blobs.len() > files_max {
-                return Err(too_large());
-            }
+    let listed = listing(
+        project_git(git, home, project).args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ]),
+        limit,
+    )?;
+    let paths: Vec<&[u8]> = listed
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .collect();
+    if paths.len() > files_max {
+        return Err(too_large());
+    }
+    for path in paths {
+        let relative = listed_path(path).ok_or_else(failed)?;
+        let file = match crate::platform::open_plain_beneath(project, &relative) {
+            Ok(file) => file,
+            Err(error) if passed_over(&error) => continue,
+            Err(_) => return Err(failed()),
+        };
+        let metadata = file.metadata().map_err(|_| failed())?;
+        if !metadata.is_file() {
+            continue;
         }
-        read_blobs(
-            git,
-            home,
-            project,
-            &blobs,
-            &mut findings,
-            &mut truncated,
-            limit,
-        )?;
-    } else {
-        let listed = listing(
-            project_git(git, home, project).args([
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ]),
-            limit,
-        )?;
-        let paths: Vec<&[u8]> = listed
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-            .collect();
-        if paths.len() > files_max {
+        total = total.saturating_add(metadata.len());
+        if total > bytes_max {
             return Err(too_large());
         }
-        for path in paths {
-            let relative = listed_path(path).ok_or_else(failed)?;
-            let file = match crate::platform::open_plain_beneath(project, &relative) {
-                Ok(file) => file,
-                Err(error) if passed_over(&error) => continue,
-                Err(_) => return Err(failed()),
-            };
-            let metadata = file.metadata().map_err(|_| failed())?;
-            if !metadata.is_file() {
-                continue;
-            }
-            total = total.saturating_add(metadata.len());
-            if total > bytes_max {
-                return Err(too_large());
-            }
-            let mut head = Vec::new();
-            file.take(SCAN_FILE_BYTES_MAX)
-                .read_to_end(&mut head)
-                .map_err(|_| failed())?;
-            truncated |= scan(&String::from_utf8_lossy(path), &head, &mut findings);
+        let mut head = Vec::new();
+        file.take(SCAN_FILE_BYTES_MAX)
+            .read_to_end(&mut head)
+            .map_err(|_| failed())?;
+        truncated |= scan(&String::from_utf8_lossy(path), &head, &mut findings);
+    }
+    findings.sort();
+    Ok(GitHubSecretScan {
+        findings,
+        truncated,
+    })
+}
+
+/// Finds the secret lines in the files of one tree as git holds them, within the bounds:
+/// HEAD's for a project with owner history, or the tree a publish commit is about to take.
+/// Inputs: git, its empty home, the project, the tree, the most files, the most bytes and
+/// the limit. Output: the findings, or `github_publish_too_large`, `github_publish_failed`.
+fn tree_findings(
+    git: &Path,
+    home: &Path,
+    project: &Path,
+    tree: &str,
+    files_max: usize,
+    bytes_max: u64,
+    limit: Duration,
+) -> Result<GitHubSecretScan, EngineError> {
+    let too_large = || failure("github_publish_too_large");
+    let failed = || failure("github_publish_failed");
+    let mut findings = Vec::new();
+    let mut truncated = false;
+    let mut total: u64 = 0;
+    let listed = listing(
+        project_git(git, home, project).args(["ls-tree", "-r", "-z", "-l", "--full-tree", tree]),
+        limit,
+    )?;
+    let mut blobs: Vec<(String, String)> = Vec::new();
+    for entry in listed
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let tab = entry
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or_else(failed)?;
+        let meta = std::str::from_utf8(&entry[..tab]).map_err(|_| failed())?;
+        let mut words = meta.split_whitespace();
+        let (mode, kind, object, size) = (words.next(), words.next(), words.next(), words.next());
+        if kind != Some("blob") || mode == Some("120000") {
+            continue;
+        }
+        let size: u64 = size.and_then(|size| size.parse().ok()).ok_or_else(failed)?;
+        total = total.saturating_add(size);
+        let object = object.ok_or_else(failed)?.to_owned();
+        blobs.push((
+            object,
+            String::from_utf8_lossy(&entry[tab + 1..]).into_owned(),
+        ));
+        if total > bytes_max || blobs.len() > files_max {
+            return Err(too_large());
         }
     }
+    read_blobs(
+        git,
+        home,
+        project,
+        &blobs,
+        &mut findings,
+        &mut truncated,
+        limit,
+    )?;
     findings.sort();
     Ok(GitHubSecretScan {
         findings,
@@ -1417,14 +1435,11 @@ pub(super) fn noreply_author(login: &str, id: Option<u64>) -> Author {
     }
 }
 
-/// Makes the publish commit, "Publish with CrazyAgent", by the author. With no history,
-/// or only the engine's start commit, it takes everything the ignore rules keep. With
-/// owner history it takes only the files publish wrote, and only when they changed, so
-/// the owner's work in progress, staged or not, stays as it is and is counted.
-/// Inputs: git, its empty home, the project, the paths prepare wrote and the author.
-/// Output: the commit to push, or `github_publish_file_invalid` for a path publish does
-/// not write, `github_publish_detached`, `github_publish_not_plain_repo`,
-/// `github_publish_hooks_set`, `github_publish_too_large`, `github_publish_failed`.
+/// Makes the publish commit, "Publish with CrazyAgent", by the author: everything the
+/// ignore rules keep with no owner history, else only the files publish wrote when they
+/// changed. Its tree is checked for secrets again and the branch moves to it only from the
+/// HEAD it was built on. Inputs: git, its empty home, the project, the paths prepare wrote
+/// and the author. Output: the commit, or the refusal, such as `github_publish_secret_found`.
 pub(super) fn commit(
     git: &Path,
     home: &Path,
@@ -1436,12 +1451,10 @@ pub(super) fn commit(
 }
 
 /// Makes the publish commit as [`commit`] does, reading at most `status_max` bytes of the
-/// status that counts what the commit leaves out. The status is read before anything is
-/// staged or committed, so a count that cannot be made leaves HEAD and the index as they
-/// were. A written path gone from disk and not tracked is left out of the add, so a file
-/// the owner deleted since publish wrote it never stops the commit. Inputs: as
-/// [`commit`], and the cap. Output: as [`commit`], or `github_publish_too_large` past the
-/// cap.
+/// status that counts what it leaves out. The tree is built on a private index and scanned
+/// before any ref or the project's index changes (rv-sec2 s2c N3), and a written path gone
+/// and untracked is left out. Inputs: as [`commit`], and the cap. Output: as [`commit`],
+/// `github_publish_head_moved` when HEAD moved meanwhile, or `github_publish_too_large`.
 fn commit_within(
     git: &Path,
     home: &Path,
@@ -1499,10 +1512,6 @@ fn commit_within(
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty() && !taken(*entry))
         .count();
-    #[cfg(test)]
-    commit_step(project, "add");
-    #[cfg(test)]
-    commit_step(project, "ref");
     let succeeded = |command: &mut Command| -> Result<(), EngineError> {
         let output = work(command)?;
         if output.status.success() {
@@ -1511,41 +1520,109 @@ fn commit_within(
             Err(failed())
         }
     };
-    let committing = || {
+    let base = match history {
+        GitHubHistory::Empty => None,
+        GitHubHistory::EngineStart | GitHubHistory::Owner => Some(head_commit(git, home, project)?),
+    };
+    if let (Some(base), GitHubHistory::Owner) = (&base, history)
+        && paths.is_empty()
+    {
+        return Ok(GitHubCommitted {
+            branch,
+            commit: base.clone(),
+            left_out,
+        });
+    }
+    #[cfg(test)]
+    commit_step(project, "add");
+    let index = home.join(PRIVATE_INDEX);
+    let _ = std::fs::remove_file(&index);
+    let indexed = || {
         let mut command = project_git(git, home, project);
-        command
-            .env("GIT_AUTHOR_NAME", &author.name)
-            .env("GIT_AUTHOR_EMAIL", &author.email)
-            .env("GIT_COMMITTER_NAME", &author.name)
-            .env("GIT_COMMITTER_EMAIL", &author.email)
-            .args(["-c", "commit.gpgSign=false", "-c", "gc.auto=0"])
-            .args(["-c", "maintenance.auto=false"])
-            .args(["commit", "-q", "--no-verify", "-m", MESSAGE]);
+        command.env("GIT_INDEX_FILE", &index);
         command
     };
-    if history == GitHubHistory::Owner {
-        if !paths.is_empty() {
+    match (&base, history) {
+        (Some(base), GitHubHistory::Owner) => {
+            succeeded(indexed().args(["read-tree", base.as_str()]))?;
+            succeeded(indexed().args(["add", "-f", "--"]).args(&paths))?;
+        }
+        _ => {
+            seed_index(project, &index)?;
+            succeeded(indexed().args(["add", "-A"]))?;
+        }
+    }
+    let tree = object_id(&work(indexed().arg("write-tree"))?)?;
+    if let (Some(base), GitHubHistory::Owner) = (&base, history) {
+        let kept = object_id(&run(project_git(git, home, project).args([
+            "rev-parse",
+            "-q",
+            "--verify",
+            &format!("{base}^{{tree}}"),
+        ]))?)?;
+        if kept == tree {
+            return Ok(GitHubCommitted {
+                branch,
+                commit: base.clone(),
+                left_out,
+            });
+        }
+    }
+    let scan = tree_findings(
+        git,
+        home,
+        project,
+        &tree,
+        SCAN_FILES_MAX,
+        SCAN_BYTES_MAX,
+        WORK_TIME,
+    )?;
+    if !scan.findings.is_empty() {
+        return Err(failure("github_publish_secret_found"));
+    }
+    let mut making = project_git(git, home, project);
+    making
+        .env("GIT_AUTHOR_NAME", &author.name)
+        .env("GIT_AUTHOR_EMAIL", &author.email)
+        .env("GIT_COMMITTER_NAME", &author.name)
+        .env("GIT_COMMITTER_EMAIL", &author.email)
+        .args(["-c", "commit.gpgSign=false", "commit-tree", "--no-gpg-sign"])
+        .args(["-m", MESSAGE]);
+    if let Some(base) = &base {
+        making.args(["-p", base.as_str()]);
+    }
+    let commit = object_id(&work(making.arg(&tree))?)?;
+    #[cfg(test)]
+    commit_step(project, "ref");
+    let moved = work(project_git(git, home, project).args([
+        "update-ref",
+        "-m",
+        MESSAGE,
+        "HEAD",
+        commit.as_str(),
+        base.as_deref().unwrap_or(""),
+    ]))?;
+    if !moved.status.success() {
+        let now =
+            run(project_git(git, home, project).args(["rev-parse", "-q", "--verify", "HEAD"]))?;
+        return Err(if object_id(&now).ok() == base {
+            failed()
+        } else {
+            failure("github_publish_head_moved")
+        });
+    }
+    match history {
+        GitHubHistory::Owner => {
             succeeded(
                 project_git(git, home, project)
-                    .args(["add", "-f", "--"])
+                    .args(["reset", "-q", "--"])
                     .args(&paths),
             )?;
-            let changed = work(
-                project_git(git, home, project)
-                    .args(["diff", "--cached", "--quiet", "HEAD", "--"])
-                    .args(&paths),
-            )?;
-            match changed.status.code() {
-                Some(0) => {}
-                Some(1) => succeeded(committing().args(["--only", "--"]).args(&paths))?,
-                _ => return Err(failed()),
-            }
         }
-    } else {
-        succeeded(project_git(git, home, project).args(["add", "-A"]))?;
-        succeeded(committing().arg("--allow-empty"))?;
+        GitHubHistory::Empty | GitHubHistory::EngineStart => {
+            succeeded(project_git(git, home, project).args(["reset", "-q"]))?;
+        }
     }
-    let commit = head_commit(git, home, project)?;
     Ok(GitHubCommitted {
         branch,
         commit,
@@ -1553,19 +1630,52 @@ fn commit_within(
     })
 }
 
+/// Copies the project's index to the private index a publish commit builds its tree on, so
+/// what the owner staged counts as it does for `add -A` on that index, which itself stays
+/// untouched until the commit is made. A project with no index gives an empty copy. Inputs:
+/// the project and the private index. Output: `()`, or `github_publish_failed`.
+fn seed_index(project: &Path, index: &Path) -> Result<(), EngineError> {
+    let failed = || failure("github_publish_failed");
+    let mut from = match crate::platform::open_plain_beneath(project, Path::new(".git/index")) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(failed()),
+    };
+    if !from.metadata().map_err(|_| failed())?.is_file() {
+        return Err(failed());
+    }
+    let mut to = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(index)
+        .map_err(|_| failed())?;
+    std::io::copy(&mut from, &mut to).map_err(|_| failed())?;
+    Ok(())
+}
+
 /// Reads the commit HEAD points at. Inputs: git, its empty home and the project.
 /// Output: the commit id, or `github_publish_failed`.
 fn head_commit(git: &Path, home: &Path, project: &Path) -> Result<String, EngineError> {
-    let output =
-        run(project_git(git, home, project).args(["rev-parse", "--verify", "-q", "HEAD"]))?;
-    let commit = String::from_utf8(output.stdout)
+    object_id(&run(project_git(git, home, project).args([
+        "rev-parse",
+        "--verify",
+        "-q",
+        "HEAD",
+    ]))?)
+}
+
+/// The object id a git command printed on its one line: 40 or 64 hex digits. Input: the
+/// command's output. Output: the id, or `github_publish_failed` when the command failed or
+/// printed anything else.
+fn object_id(output: &Output) -> Result<String, EngineError> {
+    let id = std::str::from_utf8(&output.stdout)
         .ok()
         .filter(|_| output.status.success())
         .map(|text| text.trim_end().to_owned())
-        .filter(|commit| {
-            matches!(commit.len(), 40 | 64) && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        .filter(|id| {
+            matches!(id.len(), 40 | 64) && id.bytes().all(|byte| byte.is_ascii_hexdigit())
         });
-    commit.ok_or_else(|| failure("github_publish_failed"))
+    id.ok_or_else(|| failure("github_publish_failed"))
 }
 
 /// Tells whether a commit's tree holds GitHub Actions workflows, which a push needs the
