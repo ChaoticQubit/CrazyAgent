@@ -1217,7 +1217,7 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
 /// every name that begins `LD_`, in that case, and `GLIBC_TUNABLES`. Input: the name.
 /// Output: true when it does, so a nest refuses to start bubblewrap with it
 /// ([`LOADER_REFUSED`]).
-fn loader_variable(name: &OsStr) -> bool {
+pub fn loader_variable(name: &OsStr) -> bool {
     let name = name.as_bytes();
     name.starts_with(b"LD_") || name == b"GLIBC_TUNABLES"
 }
@@ -3233,17 +3233,18 @@ mod tests {
         }
     }
 
-    /// A nest refuses every variable the dynamic loader reads and no other: a name that only
-    /// starts with `LD`, holds `LD_` later, or differs in case still passes (DEC-179 SBX-3
-    /// fold, rv-sa241 MED-1).
+    /// The helper refuses every variable that makes glibc load code, the dynamic loader's
+    /// and gconv's, and no other: a name that only starts with `LD`, holds `LD_` later, or
+    /// differs in case still passes (DEC-179 SBX-3 fold, rv-sa241 MED-1, rv-ds241 F2).
     #[test]
-    fn a_nest_refuses_only_the_dynamic_loaders_variables() {
+    fn the_helper_refuses_only_the_variables_that_load_code() {
         for name in [
             "LD_PRELOAD",
             "LD_AUDIT",
             "LD_LIBRARY_PATH",
             "LD_BIND_NOW",
             "GLIBC_TUNABLES",
+            "GCONV_PATH",
         ] {
             assert!(loader_variable(OsStr::new(name)), "{name}");
         }

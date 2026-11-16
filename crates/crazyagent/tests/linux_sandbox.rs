@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 use crazyagent::sandbox::linux::{
     BWRAP_PATHS, HelperRequest, LOADER_REFUSED, LinuxBackend, LinuxSandbox, NEST_ARGS,
+    loader_variable,
 };
 
 use crazyagent::sandbox::{
@@ -23,6 +24,17 @@ use std::process::{Child, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const HELPER: &str = env!("CARGO_BIN_EXE_crazyagent-landlock");
+
+/// The helper as a row starts it: with this test's environment, less every variable the
+/// helper refuses ([`loader_variable`]), such as the `LD_LIBRARY_PATH` cargo sets for
+/// tests (DEC-179 SBX-3 fold, rv-ds241 F2). No input. Output: the command.
+fn helper_command() -> Command {
+    let mut command = Command::new(HELPER);
+    for (name, _) in std::env::vars_os().filter(|(name, _)| loader_variable(name)) {
+        command.env_remove(name);
+    }
+    command
+}
 
 struct Case {
     _temp: tempfile::TempDir,
@@ -213,7 +225,7 @@ fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
 
     let refused = case.tmp.join("refused");
     let status = crazyagent::spawn_gate::status(
-        Command::new(HELPER)
+        helper_command()
             .args([
                 "--die-with",
                 &i32::MAX.to_string(),
@@ -232,7 +244,7 @@ fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     assert_eq!(status.code(), Some(3), "a parent id that is not the parent");
     assert!(!refused.exists(), "nothing started for a wrong parent id");
     let first = crazyagent::spawn_gate::status(
-        Command::new(HELPER)
+        helper_command()
             .args(["--die-with", "1", "--read", "/", "--", "/bin/true"])
             .stdin(Stdio::null())
             .stderr(Stdio::null()),
@@ -1085,7 +1097,7 @@ fn a_closed_bubblewrap_agent_opens_no_socket_its_network_namespace_does_not_hold
     );
     let expected = "unix=refused\nvsock=refused\nbluetooth=refused\npacket=refused\n\
                     alg=refused\nudp=refused\naudit=refused\ntcp=ok\nroute=ok\n";
-    let mut filtered = Command::new(HELPER);
+    let mut filtered = helper_command();
     filtered
         .args([
             "--filter-sockets",
@@ -1323,7 +1335,7 @@ fn a_limited_network_with_a_kept_port_linux_could_pick_is_refused_at_launch() {
         }
     }
     let direct = crazyagent::spawn_gate::output(
-        Command::new(HELPER)
+        helper_command()
             .args([
                 "--limit-network",
                 "--keep-free",
@@ -1471,7 +1483,7 @@ fn an_open_network_with_a_kept_port_linux_could_pick_is_refused_at_launch() {
         other => panic!("a kept port Linux could pick must refuse the launch: {other:?}"),
     }
     let direct = crazyagent::spawn_gate::output(
-        Command::new(HELPER)
+        helper_command()
             .args(["--keep-free", &low.to_string(), "--", "/bin/true"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -2390,7 +2402,7 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
         .scope(Scope::Signal)
         .is_ok();
     let asked = crazyagent::spawn_gate::status(
-        Command::new(HELPER)
+        helper_command()
             .arg("--scoped")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -2440,33 +2452,35 @@ fn the_host_report_names_apparmor_only_where_it_restricts_and_nothing_nests() {
     assert_eq!(absent.armored, restricted && !absent.root, "{absent:?}");
 }
 
-/// The helper starts no bubblewrap while its environment holds a variable the dynamic
-/// loader reads, and says why: bubblewrap would run in the helper's own AppArmor profile
-/// with it. The refusal comes first, so it holds on a machine that cannot nest too
-/// (DEC-179 SBX-3 fold, rv-sa241 MED-1).
+/// The helper runs no mode while its environment holds a variable that makes glibc load
+/// code, and says why: in any mode it runs in its own AppArmor profile, and even a static
+/// glibc still loads NSS and gconv modules. The refusal comes first, so it holds on a
+/// machine that cannot nest too (DEC-179 SBX-3 fold, rv-sa241 MED-1, rv-ds241 F2).
 #[test]
-fn a_nest_refuses_the_dynamic_loaders_variables() {
+fn the_helper_refuses_the_variables_that_load_code_in_every_mode() {
     let bwrap = BWRAP_PATHS
         .iter()
         .map(Path::new)
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
-    for name in ["LD_LIBRARY_PATH", "GLIBC_TUNABLES"] {
-        let output = crazyagent::spawn_gate::output(
-            Command::new(HELPER)
-                .arg("--nest")
-                .arg("--")
-                .arg(bwrap)
-                .args(NEST_ARGS)
-                .args(["--", HELPER, "--probe"])
-                .env_clear()
-                .env(name, "/nonexistent")
-                .stdin(Stdio::null()),
-        )
-        .unwrap();
-        let said = String::from_utf8_lossy(&output.stderr);
-        assert!(!output.status.success(), "{name}: {said}");
-        assert!(said.contains(LOADER_REFUSED), "{name}: {said}");
+    let mut nest = vec![OsString::from("--nest"), "--".into(), bwrap.into()];
+    nest.extend(NEST_ARGS.iter().map(OsString::from));
+    nest.extend(["--".into(), HELPER.into(), "--probe".into()]);
+    let modes = [nest, vec!["--probe".into()], vec!["--scoped".into()]];
+    for mode in &modes {
+        for name in ["LD_LIBRARY_PATH", "GLIBC_TUNABLES", "GCONV_PATH"] {
+            let output = crazyagent::spawn_gate::output(
+                Command::new(HELPER)
+                    .args(mode)
+                    .env_clear()
+                    .env(name, "/nonexistent")
+                    .stdin(Stdio::null()),
+            )
+            .unwrap();
+            let said = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{mode:?} {name}: {said}");
+            assert!(said.contains(LOADER_REFUSED), "{mode:?} {name}: {said}");
+        }
     }
 }
 
@@ -2697,7 +2711,7 @@ fn a_nested_agent_ends_with_its_harness_and_leaves_nothing_it_started() {
 /// and guard flags, the program and its arguments. Output: the launch, not yet started.
 fn supervised(case: &Case, flags: &[&str], program: &str, args: &[&str]) -> Command {
     let root = case.project.parent().unwrap();
-    let mut command = Command::new(HELPER);
+    let mut command = helper_command();
     command
         .args(["--read", "/", "--write", "/dev", "--write"])
         .arg(root)
@@ -2738,7 +2752,7 @@ fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_superv
             .stderr(Stdio::null());
         crazyagent::spawn_gate::status(silenced).unwrap()
     };
-    let probe = quiet(Command::new(HELPER).arg("--probe-supervisor"));
+    let probe = quiet(helper_command().arg("--probe-supervisor"));
     assert!(
         probe.success(),
         "Linux test machines need Linux 5.19 or newer and a ptrace scope below 2: {probe:?}"
@@ -2746,7 +2760,7 @@ fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_superv
     let case = case();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port().to_string();
-    let mut check = Command::new(HELPER);
+    let mut check = helper_command();
     check.arg("--probe-supervised").arg(&port).arg(&case.tmp);
     assert_eq!(
         quiet(&mut check).code(),
