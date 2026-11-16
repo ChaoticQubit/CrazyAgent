@@ -320,10 +320,9 @@ impl Helper {
                 ffi::log(&format!("entry not removed: {error:?}"));
             }
         }
-        if was_holding && sleep_back && lid.is_some_and(Lid::sleeps_now) {
-            if let Err(error) = self.pmset.sleep_now() {
-                ffi::log(&format!("sleepnow failed: {error:?}"));
-            }
+        let sleeps = was_holding && sleep_back && lid.is_some_and(Lid::sleeps_now);
+        if sleeps && let Err(error) = self.pmset.sleep_now() {
+            ffi::log(&format!("sleepnow failed: {error:?}"));
         }
     }
 }
