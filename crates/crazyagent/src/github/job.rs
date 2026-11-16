@@ -199,7 +199,11 @@ impl GitHubDraft {
         ask: impl FnOnce(&str) -> Result<String, &'static str> + Send + 'static,
     ) -> GitHubPublishJob {
         let job = self.job().clone();
-        let _ = self.run(ask);
+        let _ = std::thread::Builder::new()
+            .name("github-draft".into())
+            .spawn(move || {
+                let _ = self.run(ask);
+            });
         job
     }
 }

@@ -434,28 +434,24 @@ async fn handle(
             Action::PublishStart { project, plan } => {
                 let (settings, codex, claude) = drafting.ok_or_else(unknown)?;
                 let draft = account.publish_begin(&project_folder(&root, &project)?, &plan)?;
-                let job = draft.job().clone();
                 let draft_root = root.clone();
-                let _ = std::thread::Builder::new()
-                    .name("github-draft".into())
-                    .spawn(move || {
-                        let _ = draft.run(|prompt| {
-                            let (global, local) = settings
-                                .as_ref()
-                                .ok_or(crate::instruction_cleanup::UNAVAILABLE)?;
-                            crate::instruction_cleanup::run(&crate::instruction_cleanup::Request {
-                                root: &draft_root,
-                                settings: (global, local),
-                                codex: codex.as_deref(),
-                                claude: claude.as_deref(),
-                                project: Some(&project),
-                                pool: None,
-                                prompt,
-                                agent: DRAFT_AGENT,
-                            })
-                        });
-                    });
-                Reply::Publish { job }
+                Reply::Publish {
+                    job: draft.spawn(move |prompt| {
+                        let (global, local) = settings
+                            .as_ref()
+                            .ok_or(crate::instruction_cleanup::UNAVAILABLE)?;
+                        crate::instruction_cleanup::run(&crate::instruction_cleanup::Request {
+                            root: &draft_root,
+                            settings: (global, local),
+                            codex: codex.as_deref(),
+                            claude: claude.as_deref(),
+                            project: Some(&project),
+                            pool: None,
+                            prompt,
+                            agent: DRAFT_AGENT,
+                        })
+                    }),
+                }
             }
             Action::PublishApprove { project, lines } => Reply::Publish {
                 job: account.publish_approve(
