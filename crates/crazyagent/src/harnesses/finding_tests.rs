@@ -820,3 +820,59 @@ fn a_chain_through_the_system_run_folder_passes_as_a_nix_darwin_profile_does() {
     assert_eq!(std::fs::canonicalize(&entry).unwrap(), real);
     assert_eq!(case.check("codex", &entry), Ok(entry.clone()));
 }
+
+/// rv-sa241 B1 L2, rv-sec2 B1 N1: engine start's agent space and the tool resolver's places
+/// read the agent tables through one reader. A row that parses but names no folder is not a
+/// bad row. A body that is not JSON or not text is: the reader skips it alone and counts it,
+/// or refuses the read, as its caller says.
+#[test]
+fn one_reader_names_the_agent_folders_and_its_caller_says_what_a_bad_row_does() {
+    let case = Case::new();
+    let db = rusqlite::Connection::open(case.engine.join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+    let project = case.root.join("projects/harbor");
+    let repository = case.root.join("repos/api");
+    let setup = serde_json::json!({ "folder": text(&project.join(".crazyagent")) });
+    let declared = serde_json::json!({
+        "project_id": "api",
+        "spec": { "name": "Api", "repositories": [text(&repository)] },
+    });
+    db.execute(
+        "INSERT INTO project_setups(project, body) VALUES('harbor', ?1)",
+        [setup.to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO project_setups(project, body) VALUES('bare', '{}')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO projects(id, body) VALUES('api', ?1)",
+        [declared.to_string()],
+    )
+    .unwrap();
+    let read = |bad| finding::named_folders(&db, bad).map_err(|error| error.0);
+    let named = (vec![project.clone(), repository.clone()], 0);
+    assert_eq!(read(finding::BadRow::Fail), Ok(named.clone()));
+    assert_eq!(read(finding::BadRow::Skip), Ok(named));
+    db.execute(
+        "INSERT INTO projects(id, body) VALUES('broken', 'not json')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO projects(id, body) VALUES('bytes', X'7b7d')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        read(finding::BadRow::Skip),
+        Ok((vec![project, repository], 2))
+    );
+    assert_eq!(
+        read(finding::BadRow::Fail),
+        Err(finding::PATH_UNREADABLE.to_owned())
+    );
+}

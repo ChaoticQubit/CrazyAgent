@@ -258,6 +258,27 @@ pub(crate) fn folders_in(names: Names, text: &str) -> Result<Vec<PathBuf>, Engin
     Ok(folders)
 }
 
+/// What a reader of the agent tables does with a row it cannot read: a body that is not
+/// JSON, a value that is not text, or a project declaring more than
+/// [`PROJECT_REPOSITORIES_MAX`] repositories. Engine start's [`AgentSpace`] fails the whole
+/// read on one; the tool resolver's places skip the row alone and count it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BadRow {
+    Skip,
+    Fail,
+}
+
+/// Reads every folder the agent tables name, as stored ([`AGENT_TABLES`]): the one reader
+/// for engine start and the tool resolver. Inputs: the database and what a bad row does.
+/// Output: the folders and the rows skipped, or `harness_path_unreadable`.
+pub(crate) fn named_folders(
+    db: &Connection,
+    bad: BadRow,
+) -> Result<(Vec<PathBuf>, usize), EngineError> {
+    let _ = (db, bad);
+    Ok((Vec::new(), 0))
+}
+
 /// Opens the engine database without making it, as engine start reads it before the
 /// engine opens it. Input: the engine folder. Output: the connection, or none when there
 /// is no database or it cannot be opened.
