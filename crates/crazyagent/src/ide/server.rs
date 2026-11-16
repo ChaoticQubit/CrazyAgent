@@ -1502,10 +1502,10 @@ fn recorded_group(path: &Path) -> Option<(Pid, Option<String>)> {
     Some((group, (!started.is_empty()).then(|| started.to_owned())))
 }
 
-/// Checks that every listener on the server's port belongs to its process group and binds
-/// 127.0.0.1 only, through `lsof`. Inputs: the port and the group. Output: the listening
-/// processes, which the proxy holds every later connection to ([`served_by`]), or
-/// `ide_server_port_taken` or `ide_server_not_loopback`.
+/// Checks through `lsof` that the server's process group listens on its port at 127.0.0.1
+/// only and that no other process listens there at 127.0.0.1 ([`judged`]). Inputs: the port
+/// and the group. Output: the group's listening processes, which the proxy holds every later
+/// connection to ([`served_by`]), or `ide_server_port_taken` or `ide_server_not_loopback`.
 #[cfg(target_os = "macos")]
 async fn owned_listener(port: u16, group: Pid) -> Result<Vec<i32>, EngineError> {
     let listeners = tokio::task::spawn_blocking(move || listeners(port))
@@ -1520,10 +1520,10 @@ async fn owned_listener(port: u16, group: Pid) -> Result<Vec<i32>, EngineError> 
 }
 
 /// Checks, before anything is sent on a proxied connection, that a process the open saw ready
-/// still listens on 127.0.0.1 at the server port and that every other holder of a listener
-/// there is one of them too, a process sharing the socket included (rv-sa241 LEAD-1, LEAD-2);
-/// a wildcard listener gets no 127.0.0.1 connection, so it fails nothing (LOW-1). Inputs:
-/// the port and those processes. Output: done, `ide_server_port_taken` or a check failure.
+/// still listens at 127.0.0.1 on the server port and that no other process does, one sharing
+/// the socket included (rv-sa241 LEAD-1, LEAD-2). A listener at any other address takes no
+/// 127.0.0.1 connection, so it fails nothing ([`judged`], LOW-1). Inputs: the port and those
+/// processes. Output: done, `ide_server_port_taken` or a check failure.
 #[cfg(target_os = "macos")]
 pub(super) async fn served_by(port: u16, served: &[i32]) -> Result<(), EngineError> {
     assert!(!served.is_empty());
@@ -1531,13 +1531,12 @@ pub(super) async fn served_by(port: u16, served: &[i32]) -> Result<(), EngineErr
         .await
         .map_err(|_| failure("ide_server_check_failed"))??;
     let loopback = format!("127.0.0.1:{port}");
-    let wildcard = format!("*:{port}");
     let held = listeners
         .iter()
         .any(|(pid, address)| served.contains(pid) && *address == loopback);
     let foreign = listeners
         .iter()
-        .any(|(pid, address)| *address != wildcard && !served.contains(pid));
+        .any(|(pid, address)| !served.contains(pid) && *address == loopback);
     if !held || foreign {
         return Err(failure("ide_server_port_taken"));
     }
@@ -1545,10 +1544,11 @@ pub(super) async fn served_by(port: u16, served: &[i32]) -> Result<(), EngineErr
     Ok(())
 }
 
-/// Judges the listeners on the server's port: `ide_server_port_taken` when none listens or
-/// one is not `owns`, `ide_server_not_loopback` when one binds anything but 127.0.0.1.
-/// Inputs: the listeners, the port and the rule. Output: the listening processes, sorted,
-/// or the refusal.
+/// Judges the listeners on the server's port. Only one at exactly 127.0.0.1 can take the
+/// proxy's connection: a wildcard, [::1] or LAN listener binds beside the server but takes
+/// no 127.0.0.1 connect, and a v4-mapped one cannot bind there (probed). So one outside the
+/// `owns` rule refuses only there. Inputs: the listeners, the port and the rule. Output:
+/// the owned processes, sorted, or `ide_server_port_taken` or `ide_server_not_loopback`.
 #[cfg(target_os = "macos")]
 fn judged(
     listeners: &[(i32, String)],
@@ -1556,17 +1556,31 @@ fn judged(
     owns: impl Fn(i32) -> bool,
 ) -> Result<Vec<i32>, EngineError> {
     assert_ne!(port, 0);
-    if listeners.is_empty() || listeners.iter().any(|(pid, _)| !owns(*pid)) {
+    let loopback = format!("127.0.0.1:{port}");
+    let seen: Vec<(i32, bool, bool)> = listeners
+        .iter()
+        .map(|(pid, address)| (*pid, owns(*pid), *address == loopback))
+        .collect();
+    if seen.iter().any(|(_, owned, at)| !owned && *at) {
         return Err(failure("ide_server_port_taken"));
     }
-    let loopback = format!("127.0.0.1:{port}");
-    if listeners.iter().any(|(_, address)| *address != loopback) {
+    if seen.iter().any(|(_, owned, at)| *owned && !at) {
         return Err(failure("ide_server_not_loopback"));
     }
-    let mut pids: Vec<i32> = listeners.iter().map(|(pid, _)| *pid).collect();
+    let mut pids: Vec<i32> = seen
+        .iter()
+        .filter(|(_, owned, _)| *owned)
+        .map(|(pid, _, _)| *pid)
+        .collect();
     pids.sort_unstable();
     pids.dedup();
-    assert!(!pids.is_empty());
+    if pids.is_empty() {
+        return Err(failure("ide_server_port_taken"));
+    }
+    assert!(
+        seen.iter()
+            .all(|(pid, owned, at)| !owned || (*at && pids.contains(pid)))
+    );
     Ok(pids)
 }
 

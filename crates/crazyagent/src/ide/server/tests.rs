@@ -145,8 +145,9 @@ fn group_listeners(group: i32) -> Vec<String> {
 
 /// IDE-PORT-TOCTOU: the engine picks the server port and drops it before the server binds
 /// it, so another local process can take it first. The open catches that before it returns:
-/// every listener on the port must be in the server's process group, so a listener of
-/// another group, or none, refuses with `ide_server_port_taken`, and one in the group passes.
+/// every listener at 127.0.0.1 on the port must be in the server's process group, so one of
+/// another group there, or none, refuses with `ide_server_port_taken`, and one in the group
+/// passes.
 #[tokio::test]
 async fn a_listener_outside_the_servers_group_refuses_the_open() {
     let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
