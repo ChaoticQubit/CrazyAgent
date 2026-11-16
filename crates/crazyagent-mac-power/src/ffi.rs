@@ -11,7 +11,7 @@ use core_foundation::string::{CFString, CFStringRef};
 use security_framework::os::macos::code_signing::SecCode;
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const NOTIFY_STATUS_OK: u32 = 0;
@@ -193,8 +193,8 @@ fn registry_bool(service: u32, name: &'static str) -> Option<bool> {
     value.downcast::<CFBoolean>().map(bool::from)
 }
 
-/// The one socket launchd made for `name` in the helper's plist. Output: the socket, or why
-/// there was not exactly one.
+/// The one socket launchd made for `name` in the helper's plist, marked close-on-exec so no
+/// `pmset` child inherits it. Output: the socket, or why there was not exactly one usable.
 pub fn launch_socket(name: &str) -> io::Result<OwnedFd> {
     let name = CString::new(name).map_err(io::Error::other)?;
     let mut fds: *mut c_int = std::ptr::null_mut();
@@ -204,17 +204,33 @@ pub fn launch_socket(name: &str) -> io::Result<OwnedFd> {
         return Err(io::Error::from_raw_os_error(status));
     }
     assert!(!fds.is_null() || count == 0);
+    if count > LAUNCH_FDS_MAX {
+        unsafe { libc::free(fds.cast()) };
+        return Err(io::Error::other(format!("launchd gave {count} sockets")));
+    }
     let owned: Vec<OwnedFd> = (0..count)
         .map(|index| unsafe { OwnedFd::from_raw_fd(*fds.add(index)) })
         .collect();
     unsafe { libc::free(fds.cast()) };
-    if owned.len() != 1 || count > LAUNCH_FDS_MAX {
+    let mut owned = owned.into_iter();
+    let (Some(socket), None) = (owned.next(), owned.next()) else {
         return Err(io::Error::other(format!("launchd gave {count} sockets")));
+    };
+    close_on_exec(socket.as_fd())?;
+    Ok(socket)
+}
+
+/// Sets `FD_CLOEXEC` on `fd`, keeping its other descriptor flags. Output: the system error.
+fn close_on_exec(fd: BorrowedFd<'_>) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
     }
-    owned
-        .into_iter()
-        .next()
-        .ok_or_else(|| io::Error::other("no socket"))
+    let set = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    if set != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Milliseconds on `CLOCK_MONOTONIC`, which keeps counting while the Mac sleeps.
