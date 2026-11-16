@@ -102,6 +102,7 @@ pub fn cleanup_pool<'a>(
 /// plan stores it. Output: the harness to run on, none when Edit with AI cannot run on it.
 pub fn edit_harness(master: &str) -> Option<ResearchHarness> {
     ResearchHarness::of(crate::harnesses::canonical(master))
+        .filter(|harness| !matches!(harness, ResearchHarness::Listed(_)))
 }
 
 /// Reads the harness a project's Edit with AI runs on: its master's, by `edit_harness`.

@@ -891,6 +891,11 @@ test("a finding names the whole file, one line or each line it covers", () => {
   assert.deepEqual(Object.keys(client.FINDING_KINDS).sort(), ["broken_reference", "contradiction", "duplicate", "over_budget"]);
 });
 
+test("Edit with AI refused for a project's master harness names the harness kinds it runs on (T19b 19b-4)", () => {
+  assert.equal(client.processMessage({ kind: "error", code: "instructions_cleanup_master_harness", message: "raw engine words" }),
+    "Edit with AI runs on a Codex or Claude Code master, and this project's master is neither, so nothing was sent.");
+});
+
 test("every Edit with AI refusal reads as a plain sentence that says nothing changed or what to do", () => {
   const codes = ["instructions_cleanup_master_harness", "instructions_cleanup_pool_needed", "instructions_cleanup_pool_not_asked", "instructions_cleanup_pool_unknown", "instructions_cleanup_project_pool_missing",
     "instructions_cleanup_no_account", "instructions_cleanup_paused", "instructions_cleanup_busy", "instructions_cleanup_empty", "instructions_cleanup_failed",

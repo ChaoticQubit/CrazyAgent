@@ -2025,12 +2025,13 @@ fn a_proposal_says_when_the_check_found_nothing_and_shows_findings_on_an_unchang
 }
 
 /// A project whose master harness cannot run Edit with AI is refused with one sentence
-/// that says nothing was sent (DEC-172 Q1).
+/// that names the harness kinds it runs on and says nothing was sent (DEC-172 Q1; T19b
+/// 19b-4, leader 01:01).
 #[test]
 fn an_edit_with_ai_run_on_a_master_harness_it_cannot_run_on_says_nothing_was_sent() {
     assert_eq!(
         message(crate::instruction_cleanup::MASTER_HARNESS),
-        "Edit with AI runs on this project's master harness, and it can't run on that one yet, so nothing was sent."
+        "Edit with AI runs on a Codex or Claude Code master, and this project's master is neither, so nothing was sent."
     );
 }
 

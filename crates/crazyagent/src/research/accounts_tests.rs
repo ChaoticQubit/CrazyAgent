@@ -213,3 +213,20 @@ fn the_log_line_of_a_passed_over_member_names_it_and_its_providers_host_and_port
         )
     );
 }
+
+/// T19b 19b-4: a listed ACP harness whose manifest names research takes an endpoint account
+/// of the wire format its `accounts` block names, and that account names the harness, so a
+/// job on it never starts Codex; an account of another wire format is not its own.
+#[test]
+fn a_listed_research_harness_takes_an_endpoint_of_its_wire_format_and_the_account_names_it() {
+    let local = picked("local", "standin-acp");
+    assert!(matches!(local, AccountPick::Account { .. }), "{local:?}");
+    if let AccountPick::Account { account, .. } = local {
+        assert_eq!(account.harness().id(), "standin-acp");
+    }
+    let anthropic = picked("anthropic-keyed", "standin-acp");
+    assert!(
+        !matches!(anthropic, AccountPick::Account { .. }),
+        "{anthropic:?}"
+    );
+}
