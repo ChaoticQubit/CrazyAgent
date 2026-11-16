@@ -767,6 +767,7 @@ mod tests {
         "-A OUTPUT -o lo -j ACCEPT\n",
         "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
         "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
+        "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
         "COMMIT\n",
     );
@@ -789,6 +790,7 @@ mod tests {
         "-A OUTPUT -o lo -j ACCEPT\n",
         "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
         "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
+        "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
         "COMMIT\n",
         "# Completed on Sun Nov 15 23:10:00 2026\n",
@@ -830,9 +832,10 @@ mod tests {
     }
 
     #[test]
-    fn no_route_port_rule_reaches_the_slirp_network_and_only_dns_reaches_its_resolver() {
+    fn no_route_port_rule_reaches_the_slirp_network_or_loopback_and_only_dns_reaches_its_resolver() {
         let dns = "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT";
         let fence = "-A OUTPUT -d 10.0.2.0/24 -j DROP";
+        let belt = "-A OUTPUT -d 127.0.0.0/8 -j DROP";
         for ports in [&[443][..], &[53, 443], &[1, 8443, 65535]] {
             let rules = egress_rules(ports);
             let lines: Vec<&str> = rules.lines().collect();
@@ -846,10 +849,11 @@ mod tests {
                 .filter(|line| line.starts_with("-A "))
                 .collect();
             assert_eq!(before, ["-A OUTPUT -o lo -j ACCEPT", dns], "{rules}");
+            assert_eq!(lines.get(fenced + 1), Some(&belt), "{rules}");
             for port in ports {
                 let line = format!("-A OUTPUT -o tap0 -p tcp -m tcp --dport {port} -j ACCEPT");
                 let at = lines.iter().position(|kept| *kept == line);
-                assert!(at.is_some_and(|at| at > fenced), "{port}: {rules}");
+                assert!(at.is_some_and(|at| at > fenced + 1), "{port}: {rules}");
             }
             assert!(!rules.contains("10.0.2.2"), "the fence covers the gateway: {rules}");
             assert_eq!(rules.matches("10.0.2.3").count(), 1, "{rules}");
@@ -866,6 +870,7 @@ mod tests {
             "-A OUTPUT -o lo -j ACCEPT\n",
             "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
             "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
+            "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
             "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
             "COMMIT\n",
         );
