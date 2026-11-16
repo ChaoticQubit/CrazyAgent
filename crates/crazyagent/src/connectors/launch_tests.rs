@@ -382,3 +382,23 @@ fn every_engine_launch_readies_its_connectors_through_the_served_gate() {
         );
     }
 }
+
+/// The engine starts its gateway before its team, whose first tick can launch a run: a run
+/// launched before the gateway served the root would go without connectors for its whole
+/// life under the served gate.
+#[test]
+fn the_engine_starts_its_gateway_before_its_team() {
+    let boot = include_str!("../bin/crazyagent.rs");
+    let gateway = boot
+        .find("connectors::gateway::start(")
+        .expect("the engine starts a gateway");
+    let team = boot
+        .find("team::runtime::start_for_engine(")
+        .expect("the engine starts a team");
+    assert!(gateway < team, "the gateway serves before the team ticks");
+    assert_eq!(
+        boot.matches("connectors::gateway::start(").count(),
+        1,
+        "one gateway per engine"
+    );
+}
