@@ -484,6 +484,39 @@ pub fn agent_env<'a>(
     built_env(base, harness, &AGENT_HOME_ENV)
 }
 
+/// One launch's exception to the agent variable guard (DEC-180 Task 20, rv-sa241 ruling
+/// t20-q1): the names a listed master's manifest gives its account key, each allowed to
+/// hold only this launch's own relay token or the keyless placeholder.
+#[derive(Clone, Copy, Debug)]
+pub struct Handed<'a> {
+    names: &'a [&'a str],
+    value: &'a str,
+}
+
+impl<'a> Handed<'a> {
+    /// Builds one launch's exception, on macOS only, where the agent profile keeps every
+    /// other sandbox from reading the launch's environment. Inputs: the names, from the
+    /// manifest's accounts entry for the account's wire format, and the one value they may
+    /// hold. Output: the exception, or `Invalid` for a value that is neither a relay token
+    /// nor the keyless placeholder, and off macOS.
+    pub fn new(names: &'a [&'a str], value: &'a str) -> Result<Self, SandboxError> {
+        Ok(Self { names, value })
+    }
+}
+
+/// Builds the environment [`agent_env`] does, letting the harness variables `handed` names
+/// hold its one value; every other variable meets [`agent_variable_allowed`], and the
+/// engine's fixed variables still come last and win. Inputs: the base and harness variables
+/// and the launch's exception. Output: the variables, or `Invalid`.
+pub fn agent_env_handing<'a>(
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    handed: Handed<'_>,
+) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+    let _ = handed;
+    agent_env(base, harness)
+}
+
 /// Builds the environment of the owner's confined IDE terminal as [`agent_env`] does for an
 /// agent, but without [`AGENT_HOME_ENV`]: its home is the owner's own, kept across
 /// terminals, so the global git config, Python user site and npm config the owner sets up
@@ -4531,6 +4564,74 @@ pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
         return Ok(PathBuf::from(plain));
     }
     Ok(resolved)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod handed_tests {
+    use super::*;
+    use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+
+    const NAMES: [&str; 1] = ["OPENAI_API_KEY"];
+
+    fn token(fill: char) -> String {
+        format!("crazyagent-relay-{}", fill.to_string().repeat(64))
+    }
+
+    /// Builds one launch's environment with one harness variable, with the launch's
+    /// exception or, as for a teammate, with none. Inputs: the exception, the name and the
+    /// value. Output: the variables, or the refusal.
+    fn with(
+        handed: Option<Handed<'_>>,
+        name: &str,
+        value: &str,
+    ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+        let base = [("HOME", OsStr::new("/agent/home"))];
+        let harness = [(OsStr::new(name), Some(OsStr::new(value)))];
+        match handed {
+            Some(handed) => agent_env_handing(&base, harness, handed),
+            None => agent_env(&base, harness),
+        }
+    }
+
+    /// DEC-180 Task 20 (rv-sa241 ruling t20-q1, condition 6): a listed master's launch hands
+    /// its harness its own relay token only in the names its manifest lists. Another
+    /// launch's token, any other relay value, an unlisted key name and a launch with no
+    /// exception, such as a teammate's, are refused.
+    #[test]
+    fn a_launch_hands_its_own_relay_token_only_in_the_names_its_manifest_lists() {
+        let (own, other) = (token('a'), token('b'));
+        let handed = Handed::new(&NAMES, &own);
+        assert!(handed.is_ok(), "{handed:?}");
+        let handed = handed.unwrap();
+        let given = with(Some(handed), "OPENAI_API_KEY", &own);
+        assert!(given.is_ok(), "{given:?}");
+        let pair = (OsString::from("OPENAI_API_KEY"), OsString::from(&own));
+        assert!(given.unwrap().contains(&pair));
+        let refused = [
+            ("OPENAI_API_KEY", other.as_str()),
+            ("OPENAI_API_KEY", "crazyagent-relay-0"),
+            ("OTHER_API_KEY", own.as_str()),
+        ];
+        for (name, value) in refused {
+            assert!(with(Some(handed), name, value).is_err(), "{name}={value}");
+        }
+        assert!(with(None, "OPENAI_API_KEY", &own).is_err());
+    }
+
+    /// DEC-180 Task 20 (rv-sa241 ruling t20-q1, condition 3): a keyless launch hands only
+    /// the placeholder, and no exception is ever built for a saved key or a relay value that
+    /// is no token.
+    #[test]
+    fn a_keyless_launch_hands_only_the_placeholder_and_never_a_saved_key() {
+        let keyless = Handed::new(&NAMES, LOCAL_PLACEHOLDER);
+        assert!(keyless.is_ok(), "{keyless:?}");
+        let given = with(Some(keyless.unwrap()), "OPENAI_API_KEY", LOCAL_PLACEHOLDER);
+        assert!(given.is_ok(), "{given:?}");
+        assert!(with(None, "OPENAI_API_KEY", LOCAL_PLACEHOLDER).is_err());
+        for value in ["sk-saved", "crazyagent-relay-0", ""] {
+            assert!(Handed::new(&NAMES, value).is_err(), "{value}");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -90,13 +90,16 @@ impl Turns {
     }
 }
 
-/// The process of the running turn, its sandbox warden, its output lines and when its
-/// process group was asked to stop, if it was.
+/// The process of the running turn, its sandbox warden, its output lines, when its
+/// process group was asked to stop, if it was, and on an engine key relay the engine's
+/// lifeline, which ends the group if the engine dies first.
 struct Running {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
     lines: Receiver<Line>,
     stopping: Option<Instant>,
+    #[cfg(unix)]
+    lifeline: Option<crate::research::runner::Lifeline>,
 }
 
 impl TurnSession {
@@ -321,6 +324,8 @@ impl TurnSession {
             warden,
             lines,
             stopping: None,
+            #[cfg(unix)]
+            lifeline: None,
         });
         let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
             self.end_turn(true, self.request.limits.stop_grace);
