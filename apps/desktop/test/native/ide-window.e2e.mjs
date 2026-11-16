@@ -471,6 +471,17 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     await until(() => browser.execute(() => location.hash === "#/"), 60000, "the page never left the project");
   });
 
+  it("a project removed with its terminal wall open: the wall's own read in WKWebView finds it gone and the wall closes itself (UI-5-F1)", async () => {
+    const name = "Wall own close";
+    const walls = () => Number(onApp(`count (every window whose title contains "${name}")`));
+    const project = await newProject("wall-own-close");
+    await invoke("desktop_open_terminal_windows", { id: project, name, count: 1, focus: false });
+    await until(() => walls() === 1, OWN_WINDOW_MS, "the project's terminal wall never opened");
+    const removal = await invoke("desktop_remove_project", { id: project, generation: ++generation });
+    assert.equal(removal.outcome, "applied", JSON.stringify(removal));
+    await until(() => walls() === 0, OWN_WINDOW_MS, "the wall stayed open after its project was removed");
+  });
+
   it("moves to its own window with no reload, comes back, and closes with its project and the main window", async () => {
     const first = await newProject("ide-own-one");
     const second = await newProject("ide-own-two");
