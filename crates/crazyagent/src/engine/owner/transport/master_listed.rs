@@ -12,8 +12,10 @@ use crate::harnesses::launch::{
 };
 use crate::harnesses::registry::Harness;
 use crate::launch_context::EngineServer;
+use crate::master_session::{MasterReply, MasterReplyProvenance, fitted_reply};
 use crate::model_gateway::relay::Relay;
 use crate::plugins::LaunchServer;
+use crate::storage::MasterRuntimeObservation;
 use crate::usage::capture::Tokens;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -351,8 +353,17 @@ pub(super) fn listed_program(
     entry: Option<&std::path::Path>,
     installed: Option<&str>,
 ) -> Result<PathBuf, EngineError> {
-    let _ = (harness, entry, installed);
-    Err(failure(UNSUPPORTED))
+    let entry = entry
+        .filter(|entry| entry.is_absolute())
+        .ok_or_else(|| failure(NOT_INSTALLED))?;
+    let path = std::env::var_os("PATH");
+    let program = crate::paths::launch_executable(entry, path.as_deref())
+        .map_err(|_| failure(NOT_INSTALLED))?;
+    if crate::harnesses::too_old(harness, installed) {
+        return Err(failure(TOO_OLD));
+    }
+    assert!(program.is_absolute());
+    Ok(program)
 }
 
 /// What one listed master turn its harness ended stores: the reply, fitted to its room with
@@ -362,8 +373,23 @@ pub(super) fn listed_program(
 /// Output: the observation, or the stop code.
 pub(super) fn turn_outcome(
     collected: Collected,
-    provenance: crate::master_session::MasterReplyProvenance,
-) -> Result<crate::storage::MasterRuntimeObservation, EngineError> {
-    let _ = (collected, provenance);
-    Err(failure(UNSUPPORTED))
+    provenance: MasterReplyProvenance,
+) -> Result<MasterRuntimeObservation, EngineError> {
+    let Some(ended) = collected.ended else {
+        return Err(failure(TURN_FAILED));
+    };
+    match ended {
+        Ok(()) if collected.text.contains('\0') => Err(failure("master_capture_incomplete")),
+        Ok(()) if collected.text.trim().is_empty() => Err(failure("master_empty_reply")),
+        Ok(()) => {
+            let text = fitted_reply(&collected.text, collected.dropped);
+            assert!(!text.trim().is_empty());
+            Ok(MasterRuntimeObservation::Response {
+                reply: MasterReply { text, provenance },
+                delegations: Vec::new(),
+            })
+        }
+        Err(CANCELLED) => Ok(MasterRuntimeObservation::Cancelled),
+        Err(code) => Err(failure(code)),
+    }
 }
