@@ -511,10 +511,14 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     .unwrap()
     .allow_read(installed_claude().parent().unwrap())
     .unwrap();
-    let profile = root.path().join("master.sb");
-    let sandbox =
-        InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off)
-            .unwrap();
+    let sandbox_profile = root.path().join("master.sb");
+    let sandbox = InstalledSandbox::install(
+        sandbox,
+        &sandbox_profile,
+        LinuxSupervisor::On,
+        LinuxStrict::Off,
+    )
+    .unwrap();
     assert!(
         !sandbox
             .sandbox()

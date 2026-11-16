@@ -650,7 +650,7 @@ impl ProjectPage {
             (None, None) => None,
         };
         let hints = if let Some(words) = waiting {
-            body.push(styled(words.into(), Role::Muted, &ctx.theme));
+            body.push(styled(words, Role::Muted, &ctx.theme));
             Vec::new()
         } else {
             text.hints
@@ -685,11 +685,7 @@ impl ProjectPage {
             .map(Line::raw)
             .collect();
         let hints = if self.publish_asked.is_some() {
-            body.push(styled(
-                "Sending your answer...".into(),
-                Role::Muted,
-                &ctx.theme,
-            ));
+            body.push(styled("Sending your answer...", Role::Muted, &ctx.theme));
             Vec::new()
         } else {
             text.hints

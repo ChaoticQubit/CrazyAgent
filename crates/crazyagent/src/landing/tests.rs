@@ -16786,6 +16786,99 @@ fn a_filter_driver_is_still_switched_off_after_the_listing_narrows() {
     assert_eq!(overrides.len(), 3 * 8);
 }
 
+/// rv-sec2 git-config-hooks-241 N1: engine git never opens a repository whose config
+/// includes a file placed in the owner checkout, which a landing writes, whether the file is
+/// there yet or not, named relative or in full, by a section of any condition, from a file
+/// outside or through a link; the agent's work tree counts for an open of that work tree,
+/// and a file outside both still opens.
+#[test]
+fn engine_git_refuses_an_owner_config_that_includes_a_file_in_the_project_folder() {
+    let plants: [(&str, fn(&Case)); 5] = [
+        ("relative, not there yet", |case| {
+            case.owner(&["config", "include.path", "../.gitconfig"]);
+        }),
+        ("relative, there", |case| {
+            write(
+                &case.repo.join(".gitconfig"),
+                "[core]\n\tquotePath = false\n",
+            );
+            case.owner(&["config", "include.path", "../.gitconfig"]);
+        }),
+        ("in full, by a condition", |case| {
+            let file = case.repo.join("conf").join("extra.config");
+            case.owner(&["config", "includeIf.gitdir:/.path", file.to_str().unwrap()]);
+        }),
+        ("from a file outside", |case| {
+            let outer = case.home.join("outer.config");
+            let inner = case.repo.join(".gitconfig");
+            write(
+                &outer,
+                &format!("[include]\n\tpath = {}\n", inner.display()),
+            );
+            case.owner(&["config", "include.path", outer.to_str().unwrap()]);
+        }),
+        ("through a link", |case| {
+            let linked = case.home.join("linked");
+            std::os::unix::fs::symlink(&case.repo, &linked).unwrap();
+            let file = linked.join(".gitconfig");
+            case.owner(&["config", "include.path", file.to_str().unwrap()]);
+        }),
+    ];
+    let opens = |case: &Case| {
+        [
+            git::Repo::open(&case.repo, &case.repo.join(".git"), Some(&case.repo)).err(),
+            git::Repo::open(&case.repo, &case.repo.join(".git"), None).err(),
+            git::Repo::open(
+                &case.repo,
+                &case.workspace.git_dir,
+                Some(&case.workspace.worktree),
+            )
+            .err(),
+        ]
+        .map(|refused| refused.map(|error| error.0))
+    };
+    let included = Some("changes_git_include".to_owned());
+    for (name, plant) in plants {
+        let case = Case::new();
+        plant(&case);
+        assert_eq!(opens(&case), [(); 3].map(|_| included.clone()), "{name}");
+    }
+    let case = Case::new();
+    let file = case.workspace.worktree.join("agent.config");
+    case.owner(&["config", "include.path", file.to_str().unwrap()]);
+    assert_eq!(opens(&case), [None, None, included.clone()]);
+    let case = Case::new();
+    let outside = case.home.join("outside.config");
+    write(&outside, "[core]\n\tquotePath = false\n");
+    case.owner(&["config", "include.path", outside.to_str().unwrap()]);
+    assert_eq!(opens(&case), [None, None, None]);
+}
+
+/// rv-sec2 git-config-hooks-241 N1: with the owner's config including `../.gitconfig`, a
+/// file in the work tree, an agent change that writes a config hook there is refused at
+/// Accept before any engine git could read it: the hook never runs, and the checkout and
+/// the branch stay as they were.
+#[test]
+fn accept_refuses_an_agent_change_to_a_file_the_owner_config_includes() {
+    let case = Case::new();
+    let marker = case.home.join("hook-ran");
+    case.edit(
+        ".gitconfig",
+        &format!(
+            "[hook \"landed\"]\n\tevent = reference-transaction\n\tevent = post-index-change\n\tcommand = touch '{}'\n",
+            marker.display()
+        ),
+    );
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner(&["config", "include.path", "../.gitconfig"]);
+    let (before, tip) = (case.checkout(), case.tip());
+    let accepted = case.accept(&id);
+    assert!(!marker.exists(), "the included hook ran");
+    assert_eq!(refused(accepted), "changes_git_include");
+    assert_eq!(case.checkout(), before);
+    assert_eq!(case.tip(), tip);
+}
+
 /// While a project move is pending for the folder a change set's repository is in, an owner
 /// action on the change set is refused and writes nothing; it goes through once the move is
 /// finished or forgotten.

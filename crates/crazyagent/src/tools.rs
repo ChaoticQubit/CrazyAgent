@@ -92,6 +92,7 @@ pub fn record_engine_root(root: &Path) {
 
 /// The data root this process's engine recorded at its start ([`record_engine_root`]),
 /// none in a process that runs no engine. No input. Output: the absolute root.
+#[cfg(target_os = "linux")]
 pub(crate) fn engine_root() -> Option<&'static Path> {
     let root = ENGINE_ROOT.get().map(PathBuf::as_path);
     assert!(root.is_none_or(Path::is_absolute));

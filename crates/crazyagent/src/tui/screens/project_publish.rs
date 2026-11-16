@@ -41,6 +41,7 @@ pub(in crate::tui) const STATUS_FAILED: &str = "CrazyAgent couldn't read your Gi
 /// more, close the pane, keep Not now or Don't ask again, send a GitHub read, open the
 /// GitHub sign-in, or start the publish with the plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub(in crate::tui) enum AskKey {
     Handled,
     Close,

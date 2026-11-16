@@ -31,6 +31,7 @@ pub enum JobKind {
 /// exact name the owner typed, or build a New Project from the owner's answers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(clippy::large_enum_variant)]
 pub enum JobSubject {
     Add {
         path: String,

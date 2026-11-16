@@ -226,16 +226,19 @@ pub(crate) fn decide(
 /// writes the repository's record, so two at once could lose one's record.
 static APPLYING: Mutex<()> = Mutex::new(());
 
+/// The rule change a pass sends with the owner's sign-in. Inputs: the project folder, the
+/// repository kept at ask time, the rule and its on value. Output: GitHub's fresh rules page
+/// for that repository, or the refusal.
+pub type RuleSetter<'a> =
+    dyn FnMut(&Path, &str, GitHubRule, bool) -> Result<GitHubRepoRules, EngineError> + 'a;
+
 /// Applies every approved proposal, each with the rule, the on value and the repository
 /// kept at ask time, and tells each agent how it ended. A proposal is claimed before its
 /// change is sent, so two passes never send one twice, and no transaction is open while
 /// GitHub answers. One whose project no longer has that repository published at Done is
 /// refused with nothing sent. Inputs: the engine connection and the rule change, which
 /// runs with the owner's sign-in. Output: how many proposals ended, or the store error.
-pub fn apply_approved(
-    db: &Connection,
-    set: &mut dyn FnMut(&Path, &str, GitHubRule, bool) -> Result<GitHubRepoRules, EngineError>,
-) -> Result<usize, EngineError> {
+pub fn apply_approved(db: &Connection, set: &mut RuleSetter<'_>) -> Result<usize, EngineError> {
     let _one = APPLYING.lock().unwrap_or_else(PoisonError::into_inner);
     table(db).map_err(|_| failure(UNAVAILABLE))?;
     let root = crate::sandbox::grants::data_root(db).ok_or_else(|| failure(UNAVAILABLE))?;
@@ -360,12 +363,7 @@ pub fn waiting(db: &Connection) -> bool {
 /// Applies one claimed proposal and says how it ended: refused, with nothing sent, when
 /// the project's publish record no longer names the repository kept at ask time at Done;
 /// otherwise applied only when GitHub's fresh page shows the rule as wanted and applied.
-fn applied(
-    root: &Path,
-    db: &Connection,
-    row: &Row,
-    set: &mut dyn FnMut(&Path, &str, GitHubRule, bool) -> Result<GitHubRepoRules, EngineError>,
-) -> Ended {
+fn applied(root: &Path, db: &Connection, row: &Row, set: &mut RuleSetter<'_>) -> Ended {
     let Ok(folder) = folder(db, &row.project) else {
         return Ended::Refused;
     };

@@ -15,6 +15,7 @@ fn refused_page(name: &str) -> NewProjectPage {
         creation: None,
         checking: false,
         asked: false,
+        carried: false,
     }
 }
 

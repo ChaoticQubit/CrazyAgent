@@ -438,8 +438,10 @@ pub(super) fn inspect(
 /// `github_publish_hooks_set`, `github_publish_failed`.
 fn refuse_hooks(git: &Path, home: &Path, project: &Path) -> Result<(), EngineError> {
     let listed = run(project_git(git, home, project).args(crate::research::runner::FILTER_KEYS))?;
-    let keys = Some(listed.stdout.as_slice())
-        .filter(|_| listed.status.success())
+    let keys = listed
+        .status
+        .success()
+        .then_some(listed.stdout.as_slice())
         .and_then(crate::research::runner::listed_filter_keys)
         .ok_or_else(|| failure("github_publish_failed"))?;
     if crate::research::runner::listed_hook(keys).is_some() {
@@ -730,7 +732,7 @@ pub(super) fn prepare(
     let text = existing.unwrap_or_default();
     let stale = |line: &str| DOCS_ON_ONLY.contains(&line.trim_end());
     if !older && !choices.docs && text.lines().any(stale) {
-        let mut kept: Vec<&str> = text.lines().filter(|line| !stale(*line)).collect();
+        let mut kept: Vec<&str> = text.lines().filter(|line| !stale(line)).collect();
         for line in lines {
             if !kept.iter().any(|present| present.trim_end() == line) {
                 kept.push(line);
@@ -1518,7 +1520,7 @@ fn commit_within(
     };
     let left_out = status
         .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty() && !taken(*entry))
+        .filter(|entry| !entry.is_empty() && !taken(entry))
         .count();
     let succeeded = |command: &mut Command| -> Result<(), EngineError> {
         let output = work(command)?;
