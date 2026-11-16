@@ -156,13 +156,15 @@ test("Settings, Connectors lists every connector with its state word and line, w
   assert.ok(text(page({ view: { kind: "ok", value: { ...CATALOG, more: true } } })).includes("Showing the first 7 connectors."));
 });
 
-test("A connector's state is checked in a fixed order, Refused, Needs review, Unavailable, Needs a key, Ready, and matches the project section's word", () => {
+test("A connector's state is checked in a fixed order, Refused, Needs review, Unavailable, Needs a key, Needs sign-in, Ready, and matches the project section's word", () => {
   const states = [
     [connector("a", "A", { kind: "refused", problem: PROBLEM }), { word: "Refused", tone: "danger", detail: "The address must start with https://. (app_plugin_url_not_https, line 7, connector.url)" }],
     [connector("b", "B", { kind: "needs_review" }), { word: "Needs review", tone: "warn", detail: "Review this connector before a project can use it." }],
     [connector("c", "C", { kind: "needs_key" }), { word: "Needs a key", tone: "warn", detail: "Set a key for each secret it needs." }],
     [connector("d", "D", { kind: "ready" }, { sign_in: "not_yet", secrets: [] }), { word: "Unavailable", tone: "warn", detail: "Signs in with OAuth, which this build does not have." }],
     [connector("f", "F", { kind: "needs_review" }, { sign_in: "not_yet", secrets: [] }), { word: "Needs review", tone: "warn", detail: "Review this connector before a project can use it." }],
+    [connector("g", "G", { kind: "needs_sign_in" }, { sign_in: "browser", secrets: [] }), { word: "Needs sign-in", tone: "warn", detail: "Sign in on its page before a project can use it." }],
+    [connector("h", "H", { kind: "needs_sign_in" }, { sign_in: "not_yet", secrets: [] }), { word: "Unavailable", tone: "warn", detail: "Signs in with OAuth, which this build does not have." }],
     [connector("e", "E", { kind: "ready" }), { word: "Ready", tone: "ok", detail: null }],
   ];
   for (const [shown, state] of states) {

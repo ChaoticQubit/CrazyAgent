@@ -230,7 +230,7 @@ pub(in crate::tui) fn state(connector: &ConnectorView) -> (&'static str, Role, O
             Role::Warning,
             Some("Set a key for each secret it needs.".into()),
         ),
-        PluginStatus::Ready => (READY, Role::Success, None),
+        PluginStatus::NeedsSignIn | PluginStatus::Ready => (READY, Role::Success, None),
     }
 }
 

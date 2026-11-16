@@ -1000,7 +1000,7 @@ fn the_page_shows_how_each_connector_signs_in() {
     let (_tmp, root, view) = added(BOARD_OAUTH);
     let board = named(&view, "board");
     assert_eq!(board.sign_in, SignIn::Browser);
-    assert_eq!(board.status, PluginStatus::Ready);
+    assert_eq!(board.status, PluginStatus::NeedsSignIn, "Ready only once signed in");
     let mut browser = OAuthView {
         signed_in: false,
         own_app_allowed: true,
@@ -1023,6 +1023,7 @@ fn the_page_shows_how_each_connector_signs_in() {
     browser.signed_in = true;
     let read = ask(&root, json!({"kind": "view", "project": null}));
     assert_eq!(named(&read, "board").oauth.as_ref(), Some(&browser));
+    assert_eq!(named(&read, "board").status, PluginStatus::Ready);
 
     let (_both_tmp, _both, both) = added(BOARD_BOTH);
     assert_eq!(named(&both, "board").sign_in, SignIn::Both);
@@ -1033,9 +1034,9 @@ fn the_page_shows_how_each_connector_signs_in() {
 }
 
 /// DEC-168 addendum 30, 23:36 Q1 A: a connector whose file offers a key and a browser
-/// sign-in signs in with the key until the owner chooses Browser. Only the chosen way is
-/// needed to be ready and is loaded to call; switching keeps both saved, removing the
-/// connector forgets the choice, and a file that offers one way refuses a choice.
+/// sign-in signs in with the key until the owner chooses Browser. It is Ready once the
+/// chosen way is complete (rv-code FINDINGS-01:26 F1) and only that way is loaded to call;
+/// switching keeps both saved, removing it forgets the choice, and a one-way file refuses.
 #[test]
 fn the_owner_chooses_key_or_browser_for_a_connector_that_offers_both() {
     let (_tmp, root, view) = added(BOARD_BOTH);
@@ -1048,10 +1049,17 @@ fn the_owner_chooses_key_or_browser_for_a_connector_that_offers_both() {
 
     let choose = |way: &str| json!({"kind": "set_sign_in_with", "name": "board", "way": way});
     let browser = ask(&root, choose("browser"));
-    assert_eq!(named(&browser, "board").status, PluginStatus::Ready);
+    assert_eq!(named(&browser, "board").status, PluginStatus::NeedsSignIn);
     assert_eq!(using(&browser), Some(SignInWith::Browser));
     let loaded = store::connector_ready(&db, &root, "board").unwrap();
     assert!(loaded.browser && loaded.bindings.is_empty());
+    let name = "connector-signin-board";
+    let record = crate::protocol::CredentialRef::new(name).unwrap();
+    let keys = crate::storage::accounts::PLUGIN_KEYS;
+    let saved = crate::storage::accounts::replace_key_in(&root, keys, &record, b"{}".to_vec());
+    saved.unwrap();
+    let signed = ask(&root, json!({"kind": "view", "project": null}));
+    assert_eq!(named(&signed, "board").status, PluginStatus::Ready);
 
     page(set_key(&root, "board").unwrap());
     let keyed = ask(&root, choose("key"));

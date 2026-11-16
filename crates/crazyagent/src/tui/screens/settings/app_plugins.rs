@@ -195,6 +195,11 @@ pub(in crate::tui) fn plugin_state(plugin: &PluginView) -> (&'static str, Role, 
             Role::Warning,
             Some("Set a key for each secret it needs.".into()),
         ),
+        PluginStatus::NeedsSignIn => (
+            "Needs sign-in",
+            Role::Warning,
+            Some("Sign in on its page before it runs.".into()),
+        ),
         PluginStatus::Ready if plugin.enabled => ("Enabled", Role::Success, None),
         PluginStatus::Ready => ("Off", Role::Muted, None),
     }

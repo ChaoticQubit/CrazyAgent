@@ -2161,14 +2161,16 @@ fn a_connector_with_a_key_and_a_sign_in_calls_the_way_the_owner_chose() {
     let choose = |way: crate::connectors::SignInWith| {
         crate::connectors::sign_in::choose(&bench.case.db, &bench.case.root, "shelf", way)
     };
-    choose(crate::connectors::SignInWith::Browser).unwrap();
+    let chosen = choose(crate::connectors::SignInWith::Browser);
+    assert!(chosen.is_ok(), "{chosen:?}");
     let (text, error) = called(&bench, &launch, "shelf__echo_token", json!({}));
     assert!(!error && text.contains("you sent at-shelf-1"), "{text}");
     assert_eq!(
         bearers(&vendor).last().map(String::as_str),
         Some("Bearer at-shelf-1")
     );
-    choose(crate::connectors::SignInWith::Key).unwrap();
+    let chosen = choose(crate::connectors::SignInWith::Key);
+    assert!(chosen.is_ok(), "{chosen:?}");
     called(&bench, &launch, "shelf__echo_token", json!({}));
     assert_eq!(bearers(&vendor).last().map(String::as_str), Some(keyed));
 }
@@ -2188,7 +2190,8 @@ fn a_connector_set_to_browser_with_no_sign_in_never_falls_back_to_its_key() {
     let choose = |way: crate::connectors::SignInWith| {
         crate::connectors::sign_in::choose(&bench.case.db, &bench.case.root, "shelf", way)
     };
-    choose(crate::connectors::SignInWith::Browser).unwrap();
+    let chosen = choose(crate::connectors::SignInWith::Browser);
+    assert!(chosen.is_ok(), "{chosen:?}");
     let launch = launch(&bench);
     for _ in 0..2 {
         let (text, error) = called(&bench, &launch, "shelf__echo_token", json!({}));
@@ -2204,7 +2207,8 @@ fn a_connector_set_to_browser_with_no_sign_in_never_falls_back_to_its_key() {
         .any(|sent| sent.contains("sk-shelf-key-0002"));
     assert!(!keyed, "the vendor never sees the key while Browser is chosen");
     assert!(bearers(&vendor).is_empty(), "nothing reaches the vendor's MCP address");
-    choose(crate::connectors::SignInWith::Key).unwrap();
+    let chosen = choose(crate::connectors::SignInWith::Key);
+    assert!(chosen.is_ok(), "{chosen:?}");
     called(&bench, &launch, "shelf__echo_token", json!({}));
     assert_eq!(
         bearers(&vendor).last().map(String::as_str),

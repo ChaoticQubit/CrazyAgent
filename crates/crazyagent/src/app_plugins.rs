@@ -140,13 +140,15 @@ pub struct SecretView {
 }
 
 /// Whether a plugin can be used: ready, a user file the owner has not reviewed since it
-/// changed, a plugin whose declared secrets are not all bound, or a file the engine refuses.
+/// changed, a plugin whose declared secrets are not all bound, a connector that signs in
+/// through the browser and is not signed in yet, or a file the engine refuses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginStatus {
     Ready,
     NeedsReview,
     NeedsKey,
+    NeedsSignIn,
     Refused { problem: Problem },
 }
 
