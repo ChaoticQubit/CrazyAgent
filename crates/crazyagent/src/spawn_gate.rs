@@ -266,8 +266,9 @@ pub fn connect_unix_std(
 /// Tries one Unix stream connect inside the gate without waiting, through the short address
 /// of a path too long for a socket address. A listener whose queue of unaccepted
 /// connections is full answers `WouldBlock` at once, where a blocking connect on Linux
-/// waits for room with no bound, the gate held. Input: the socket path. Output: the
-/// stream, blocking once connected, or the connect's error.
+/// waits for room with no bound, the gate held. The socket is close-on-exec from its
+/// creation on Linux (rv-sec3 N1) and by fcntl inside the gate everywhere. Input: the
+/// socket path. Output: the stream, blocking once connected, or the connect's error.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub fn try_connect_unix_std(
@@ -277,13 +278,12 @@ pub fn try_connect_unix_std(
     use std::os::fd::AsRawFd;
     let address = crate::socket_address::address(path.as_ref())?;
     let unix = UnixAddr::new(address.as_path()).map_err(io::Error::from)?;
+    #[cfg(target_os = "linux")]
+    let flags = SockFlag::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = SockFlag::empty();
     let stream = guarded(|| -> io::Result<std::os::unix::net::UnixStream> {
-        let fd = socket(
-            AddressFamily::Unix,
-            SockType::Stream,
-            SockFlag::empty(),
-            None,
-        )?;
+        let fd = socket(AddressFamily::Unix, SockType::Stream, flags, None)?;
         rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
         let stream = std::os::unix::net::UnixStream::from(fd);
         stream.set_nonblocking(true)?;
