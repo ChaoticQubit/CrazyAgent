@@ -223,6 +223,24 @@ mod tests {
     }
 
     #[test]
+    fn the_engine_s_stale_refusal_reaches_the_retry_unchanged() {
+        let mut lost = false;
+        let refused = applied(
+            Ok(crate::engine::owner::OwnerResponse::Rejected {
+                code: STALE_CODE.into(),
+            }),
+            OUTCOME_UNKNOWN,
+            &mut lost,
+        );
+        assert_eq!(refused, Err(STALE_CODE.to_owned()));
+        assert!(
+            again(&refused, 1),
+            "the worker reads again on what the engine sent"
+        );
+        assert!(!lost);
+    }
+
+    #[test]
     #[should_panic]
     fn an_attempt_count_past_the_bound_is_a_worker_mistake() {
         again(&Err(STALE_CODE.to_owned()), SAVE_ATTEMPTS + 1);

@@ -71,8 +71,12 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS keep_awake_state (
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum KeepAwakeAction {
-    Start { minutes: u16 },
-    Extend { minutes: u16 },
+    Start {
+        minutes: u16,
+    },
+    Extend {
+        minutes: u16,
+    },
     End,
     Set {
         settings: KeepAwakeSettings,
