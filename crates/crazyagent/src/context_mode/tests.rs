@@ -891,3 +891,34 @@ fn an_agent_launch_runs_the_checked_shared_install_or_no_context_mode_never_npx(
         assert_eq!(for_launch(&case.root, other.clone()), Ok(other));
     }
 }
+
+/// DEC-185, WIN-CONTEXT-MODE r1 F1: the node check and npm's install step take the owner's
+/// stored Linux choices, strict included, and a store that cannot be read refuses them on
+/// Linux; off Linux they take the defaults, strict off, which those boundaries ignore.
+#[test]
+fn the_install_steps_take_the_owners_stored_strict_choice_on_linux() {
+    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
+    use crate::sandbox_settings::SandboxSettings;
+    let case = case("/usr/bin/false");
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        os::boundary_settings(&case.root),
+        Err(InstallError("context_mode_sandbox_unavailable")),
+        "no readable store, no step"
+    );
+    let connection = rusqlite::Connection::open(case.root.join("engine.db")).unwrap();
+    crate::sandbox_settings::initialize(&connection).unwrap();
+    let strict = SandboxSettings {
+        linux_supervisor: LinuxSupervisor::Off,
+        linux_strict: LinuxStrict::On,
+        ..SandboxSettings::default()
+    };
+    crate::sandbox_settings::save(&connection, &strict).unwrap();
+    drop(connection);
+    #[cfg(target_os = "linux")]
+    let wanted = strict;
+    #[cfg(not(target_os = "linux"))]
+    let wanted = SandboxSettings::default();
+    assert_eq!(os::boundary_settings(&case.root), Ok(wanted));
+    assert_eq!(SandboxSettings::default().linux_strict, LinuxStrict::Off);
+}

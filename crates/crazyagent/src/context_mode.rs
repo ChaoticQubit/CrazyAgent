@@ -389,16 +389,8 @@ fn node_command(
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
-    #[cfg(target_os = "linux")]
-    let (calls, strict) = {
-        let settings = crate::sandbox_settings::stored(root).map_err(refused)?;
-        (settings.linux_supervisor, settings.linux_strict)
-    };
-    #[cfg(not(target_os = "linux"))]
-    let (calls, strict) = (
-        crate::sandbox::LinuxSupervisor::On,
-        crate::sandbox::LinuxStrict::Off,
-    );
+    let settings = os::boundary_settings(root)?;
+    let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
     let profile = scratch.join("node.sb");
     let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(refused)?;
     let mut node = std::process::Command::new(bin.join(NODE));

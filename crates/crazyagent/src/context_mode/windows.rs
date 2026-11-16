@@ -128,6 +128,19 @@ pub(super) fn run_quiet(mut command: Command, limit: Duration) -> Result<bool, I
     passed(run_bounded(&mut command, limit, false)).map(|(ok, _)| ok)
 }
 
+/// The sandbox settings a context-mode step's boundary takes on Windows: the defaults,
+/// strict off and the call supervisor's default, whatever the owner stored, since only Linux
+/// reads them (DEC-185). Input: the engine root, unread. Output: the defaults.
+pub(super) fn boundary_settings(
+    _root: &Path,
+) -> Result<crate::sandbox_settings::SandboxSettings, InstallError> {
+    Ok(crate::sandbox_settings::SandboxSettings {
+        linux_supervisor: LinuxSupervisor::On,
+        linux_strict: crate::sandbox::LinuxStrict::Off,
+        ..Default::default()
+    })
+}
+
 /// npm's command before its boundary: `node.exe` with npm's `npm-cli.js`, in npm's working
 /// folder, with npm's update check off. Inputs: npx's folder and npm's working folder.
 /// Output: the command.
@@ -150,9 +163,8 @@ pub(super) fn npm_wrap(
     bin: &Path,
     cwd: &Path,
 ) -> Result<Command, InstallError> {
-    let _ = root;
-    let strict = crate::sandbox::LinuxStrict::Off;
-    let sandbox = InstalledSandbox::install(sandbox, profile, LinuxSupervisor::On, strict)
-        .map_err(refused)?;
+    let settings = boundary_settings(root)?;
+    let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
+    let sandbox = InstalledSandbox::install(sandbox, profile, calls, strict).map_err(refused)?;
     sandbox.wrap(&npm_invocation(bin, cwd)).map_err(refused)
 }

@@ -1,6 +1,7 @@
 use super::refused;
 use crate::file_lock::HeldLock;
 use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crate::sandbox_settings::SandboxSettings;
 use crate::setup::InstallError;
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use std::fs::File;
@@ -70,6 +71,22 @@ pub(super) fn lock(path: &Path) -> Result<Lock, InstallError> {
     HeldLock::take(file, FlockOperation::LockExclusive).map_err(|_| unavailable)
 }
 
+/// The owner's sandbox settings a context-mode step's boundary takes on Linux (DEC-185): the
+/// stored ones, call supervisor and strict choice included, so a store that cannot be read
+/// refuses the step. Input: the engine root. Output: the settings, or
+/// `context_mode_sandbox_unavailable`.
+#[cfg(target_os = "linux")]
+pub(super) fn boundary_settings(root: &Path) -> Result<SandboxSettings, InstallError> {
+    crate::sandbox_settings::stored(root).map_err(refused)
+}
+
+/// The sandbox settings a context-mode step's boundary takes off Linux: the defaults, strict
+/// off, which macOS ignores. Input: the engine root, unread. Output: the defaults.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn boundary_settings(_root: &Path) -> Result<SandboxSettings, InstallError> {
+    Ok(SandboxSettings::default())
+}
+
 /// Builds the install's npm command inside its installed boundary: Seatbelt on macOS, the
 /// owner's socket and call supervisor choices on Linux. npx's folder leads PATH, because npm
 /// is a script that `env` finds `node` for. Inputs: the boundary, the engine root, the
@@ -89,7 +106,7 @@ pub(super) fn npm_wrap(
     };
     #[cfg(target_os = "linux")]
     let mut command = {
-        let settings = crate::sandbox_settings::stored(root).map_err(refused)?;
+        let settings = boundary_settings(root)?;
         let sandbox = sandbox.limit_sockets(settings.linux_sockets);
         let calls = settings.linux_supervisor;
         let strict = settings.linux_strict;
