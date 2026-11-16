@@ -272,12 +272,20 @@ pub(super) fn problem(code: &'static str, field: &str) -> Problem {
     Problem::new(code, None, Some(field))
 }
 
-/// The kind a manifest's text declares, read with no other field checked, so a file
-/// refused for a later field is still listed on its own kind's page. Input: the manifest
-/// text. Output: the kind, or none when the text is not the YAML subset or `kind` is not a
-/// known word.
+/// The kind a manifest's text declares, read with no other field checked and, when the
+/// YAML breaks at a line, from the lines before it, so a file refused after its `kind` is
+/// still listed on its own kind's page. Input: the manifest text. Output: the kind, or
+/// none when `kind` is not a known word read before any break.
 pub fn declared_kind(text: &str) -> Option<PluginKind> {
-    let value = yaml::parse(text).ok()?;
+    let value = match yaml::parse(text) {
+        Ok(value) => value,
+        Err(error) if error.line > 1 => {
+            let kept = usize::try_from(error.line - 1).ok()?;
+            let before: String = text.split_inclusive('\n').take(kept).collect();
+            yaml::parse(&before).ok()?
+        }
+        Err(_) => return None,
+    };
     match Fields::new(&value, "").ok()?.optional("kind") {
         Some(Value::Str(kind)) if kind == "embedding" => Some(PluginKind::Embedding),
         Some(Value::Str(kind)) if kind == CONNECTOR => Some(PluginKind::Connector),

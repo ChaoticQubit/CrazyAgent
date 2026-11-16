@@ -123,12 +123,17 @@ export type ProjectRow = { name: string; title: string; ready: boolean; word: st
 
 /** What a project's Connectors section shows: every Ready connector and every one with an
  * enabled grant, in the page's order then the grants whose connector is gone, and the titles
- * of the rest (DEC-168 addendum 20). Input: the page. Output: the rows and the others. */
+ * of the rest (DEC-168 addendum 20). One row per name: the first listed wins, so a built-in
+ * connector hides the owner's refused file it shadows. Input: the page. Output: the rows and
+ * the others. */
 export function projectRows(view: ConnectorsView): { rows: ProjectRow[]; others: string[] } {
   const grantOf = new Map(view.grants.map((grant) => [grant.connector, grant]));
   const rows: ProjectRow[] = [];
   const others: string[] = [];
+  const seen = new Set<string>();
   for (const connector of view.connectors) {
+    if (seen.has(connector.name)) continue;
+    seen.add(connector.name);
     const grant = grantOf.get(connector.name) ?? null;
     const ready = connector.status.kind === "ready";
     if (ready || grant?.enabled) rows.push({ name: connector.name, title: connector.title, ready, word: connectorWord(connector), grant });
