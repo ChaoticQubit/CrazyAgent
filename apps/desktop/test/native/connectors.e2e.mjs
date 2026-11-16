@@ -17,6 +17,7 @@ const AGES = [3, 10, 45];
 const SETTINGS = { write: "ask_every_time", wait: "minutes10", native: "off", size_cap: "kib256", keep_log: "days30" };
 const LINEAR_KEY = "lin_api_e2e_synthetic_0000";
 const BOARD_KEY = "board_e2e_synthetic_key_0000";
+const DESK_APP_SECRET = "desk_e2e_synthetic_app_secret";
 const BOARD = "schema: 1\nkind: connector\nname: board\ntitle: Board\nversion: 1\nmcp:\n  url: https://mcp.board.invalid/mcp\n  hosts: [mcp.board.invalid]\nkey:\n  secret: api_key\n  header: Authorization\n  scheme: Bearer\n";
 const DESK = "schema: 1\nkind: connector\nname: desk\ntitle: Desk\nversion: 1\nmcp:\n  url: https://mcp.desk.invalid/mcp\n  hosts: [mcp.desk.invalid]\nkey:\n  secret: api_key\n  header: Authorization\n  scheme: Bearer\noauth:\n  hosts: [auth.desk.invalid]\n  registration: [own, dcr]\n  scopes_read: [read]\n  scopes_write: [write]\n";
 const SCHEMES = ["light", "dark"];
@@ -499,6 +500,17 @@ test("Connectors: Settings, Connectors saves each option through the page, adds 
   };
   await t.test("conn sign_in_with browser", () => signInWith("Browser", "browser"));
   await t.test("conn sign_in_with key", () => signInWith("Key", "key"));
+  await t.test("conn own_app", async () => {
+    const secret = DESK_APP_SECRET;
+    const view = await value(bridge, "desktop_connector_set_own_app", { name: "desk", clientId: "desk-e2e-client", secret });
+    assert.ok(!JSON.stringify(view).includes(secret), "the page read never holds the secret");
+    await until("Desk's own app in the engine", { client_id: "desk-e2e-client", secret_saved: true }, async () => (await listedConnector("desk"))?.oauth?.own_app ?? null);
+    await connectorPage("desk", "Desk", (text) => text.includes("Client id: desk-e2e-client") && text.includes("Client secret: saved"));
+    assert.ok(!(await page.evaluate("document.body.innerText")).includes(secret), "the page never shows the secret");
+    await me.capture("conn-own-app");
+    await value(bridge, "desktop_connector_clear_own_app", { name: "desk" });
+    await until("Desk's own app removed", null, async () => (await listedConnector("desk"))?.oauth?.own_app ?? null);
+  });
   await t.test("conn sign_in_with remove", async () => {
     await value(bridge, "desktop_connector_remove", { name: "desk" });
     await until("Desk gone", null, () => listedConnector("desk"));
@@ -539,4 +551,4 @@ test("Connectors: Settings, Connectors saves each option through the page, adds 
     });
   }
   await scheme(page, "light");
-}, [BOARD_KEY]));
+}, [BOARD_KEY, DESK_APP_SECRET]));

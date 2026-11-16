@@ -487,6 +487,8 @@ test("The Connectors commands, the harness rows' one included, are built, regist
     desktop_connector_sign_in_state: "{ name }",
     desktop_connector_cancel_sign_in: "{ name }",
     desktop_connector_sign_out: "{ name }",
+    desktop_connector_set_own_app: "{ name, clientId, secret }",
+    desktop_connector_clear_own_app: "{ name }",
     desktop_connector_reach: "{}",
   };
   const apiSource = source("../src/api-connectors.ts");
@@ -794,4 +796,81 @@ test("While one connector's sign-in waits, every other connector's Sign in is di
   assert.equal(api.signInFirstLine?.("Notion"), "Finish or cancel the Notion sign-in first.");
   const tui = source("../../../crates/crazyagent/src/tui/screens/settings/connectors/words.rs");
   assert.ok(tui.includes("\"Finish or cancel the {} sign-in first.\""), "the TUI says the same line");
+});
+
+const ownSaved = (allowed, way = "browser") => ({ ...both(way), oauth: { ...both(way).oauth, own_app_allowed: allowed, own_app: { client_id: "Iv1.app", secret_saved: true } } });
+
+test("A connector whose file offers an own app shows its section with the redirect and any port and Use my own app, and Remove my app once one is saved, also where the file no longer offers one, in the TUI's words (addendum 30 Q4 A)", () => {
+  const none = signInPage(both("browser"));
+  const shown = text(none);
+  assert.ok(none.includes("data-setting=\"own_app\""), "the section is on the page");
+  for (const said of [api.CONNECTORS_PAGE.ownApp, "Redirect: http://127.0.0.1/callback (any port)", api.CONNECTORS_PAGE.ownAppNone, api.CONNECTORS_PAGE.ownAppHelp]) {
+    assert.ok(typeof said === "string" && shown.includes(said), `the section says ${said}`);
+  }
+  assert.ok(api.CONNECTORS_PAGE.ownAppHelp.includes("signs the connector out"), "the help says what saving does");
+  assert.ok(none.includes("aria-label=\"Use my own app for Board\"") && !none.includes("aria-label=\"Remove my app from Board\""));
+  const saved = signInPage(ownSaved(true));
+  assert.ok(text(saved).includes("Client id: Iv1.app") && text(saved).includes("Client secret: saved"));
+  assert.ok(saved.includes("aria-label=\"Remove my app from Board\"") && saved.includes("aria-label=\"Use my own app for Board\""));
+  const stale = signInPage(ownSaved(false, "key"));
+  assert.ok(stale.includes("aria-label=\"Remove my app from Board\""), "a stale secret can always be removed, under Key too");
+  assert.ok(!stale.includes("aria-label=\"Use my own app for Board\""), "a file that no longer offers one sets none up");
+  assert.ok(!page({ open: "linear" }).includes("data-setting=\"own_app\""), "a connector with no own app has no section");
+  assert.equal(api.redirectLine?.("http://127.0.0.1/callback"), "Redirect: http://127.0.0.1/callback (any port)");
+  assert.equal(api.ownAppSavedLine?.("Board"), "Board signs in with your own app.");
+  assert.equal(api.ownAppRemovedLine?.("Board"), "Board no longer uses your own app.");
+  const tui = source("../../../crates/crazyagent/src/tui/screens/settings/connectors/words.rs");
+  const keys = ["ownApp", "ownAppHelp", "ownAppNone", "clientId", "clientSecret", "clientSecretHelp", "enterClientId", "retypeSecret", "useOwnApp", "removeOwnApp"];
+  for (const said of keys.map((key) => api.CONNECTORS_PAGE[key])) assert.ok(typeof said === "string" && tui.includes(`"${said}"`), `the TUI says ${said}`);
+  for (const format of ["Redirect: {} (any port)", "{} signs in with your own app.", "{} no longer uses your own app.", "Your own OAuth app for {}", "Client id: {}"]) {
+    assert.ok(tui.includes(`"${format}"`), `the TUI says ${format}`);
+  }
+});
+
+test("The own app dialog shows the redirect, a client id field and a masked secret field; the client id is trimmed, and the secret is read, cleared and only then sent, like a key", () => {
+  const dialog = { kind: "own_app", connector: "board", title: "Board", redirect: "http://127.0.0.1/callback", clientId: "" };
+  const markup = page({ view: { kind: "ok", value: { ...CATALOG, connectors: [both("browser")] } }, open: "board", dialog });
+  assert.ok(text(markup).includes("Your own OAuth app for Board") && text(markup).includes("Redirect: http://127.0.0.1/callback (any port)"), text(markup));
+  assert.match(markup, /<input[^>]*id="connector-client-id"/u);
+  assert.match(markup, /<input id="connector-app-secret"[^>]*type="password"/u);
+  const screen = source("../src/screens/settings/connectors.tsx");
+  const read = screen.indexOf("const secret = keyRef.current.value;");
+  const cleared = screen.indexOf("keyRef.current.value = \"\";", read);
+  const sent = screen.indexOf("setConnectorOwnApp(", read);
+  assert.ok(read > 0 && cleared > read && sent > cleared, "read, clear, then send");
+  assert.match(screen, /<SecretField id="connector-app-secret"/u);
+  assert.match(screen, /const clientId = dialog\.clientId\.trim\(\);/u, "the client id is trimmed as in the TUI");
+  assert.doesNotMatch(screen, /showToast\([^)]*\bsecret\b[^)]*\)/u, "no toast names the secret");
+  assert.match(screen, /onRemoveApp: \(shown\) => \{ if \(!busy\) void changed\(\(\) => clearConnectorOwnApp\(shown\.name\), ownAppRemovedLine\(shown\.title\)\); \}/u);
+});
+
+test("Save app sends the name, the client id and the secret once, Remove my app only the name, and both route in the e2e bridge", async () => {
+  for (const name of ["setConnectorOwnApp", "clearConnectorOwnApp"]) assert.equal(typeof api[name], "function", name);
+  await bridged(CATALOG, async (sent) => {
+    assert.equal((await api.setConnectorOwnApp("board", "Iv1.app", "s3cret-app")).kind, "ok");
+    assert.equal((await api.clearConnectorOwnApp("board")).kind, "ok");
+    assert.deepEqual(sent, [["desktop_connector_set_own_app", { name: "board", clientId: "Iv1.app", secret: "s3cret-app" }], ["desktop_connector_clear_own_app", { name: "board" }]]);
+  });
+  assert.equal(source("../src/api-connectors.ts").split("clientId, secret }").length, 2, "only Save app carries a client secret");
+  const routes = source("../src-tauri/e2e_bridge/routes.rs");
+  assert.ok(routes.includes("\"desktop_connector_set_own_app\" =>") && routes.includes("\"desktop_connector_clear_own_app\" =>"));
+});
+
+test("After a refusal the own app dialog asks for the secret again instead of saving a public app, which would remove the saved secret; a dialog opened again saves a public app on purpose (rv-code2 F1)", () => {
+  assert.equal(api.CONNECTORS_PAGE.retypeSecret, "Type the client secret again.");
+  const screen = source("../src/screens/settings/connectors.tsx");
+  assert.match(screen, /kind: "own_app"; connector: string; title: string; redirect: string; clientId: string; secretSent: boolean \}/u, "the dialog remembers a sent secret");
+  assert.match(screen, /setDialog\(\{ kind: "own_app", [^}]*clientId: "", secretSent: false \}\)/u, "a dialog opened again starts with none sent");
+  const start = screen.indexOf("async function saveApp()");
+  const end = screen.indexOf("\n  }\n", start);
+  assert.ok(start > 0 && end > start, "saveApp is found");
+  const saveApp = screen.slice(start, end);
+  const cleared = saveApp.indexOf("keyRef.current.value = \"\";");
+  const refused = saveApp.indexOf("if (secret === \"\" && dialog.secretSent) {");
+  const said = saveApp.indexOf("setFailure(CONNECTORS_PAGE.retypeSecret);", refused);
+  const marked = saveApp.indexOf("secretSent: true");
+  const sent = saveApp.indexOf("setConnectorOwnApp(");
+  assert.ok(cleared > 0 && refused > cleared && said > refused, "an empty field after a sent secret is refused with the line");
+  assert.ok(saveApp.slice(said, sent).includes("return;"), "and nothing is sent");
+  assert.ok(marked > refused && sent > marked, "a typed secret is marked sent before it goes");
 });

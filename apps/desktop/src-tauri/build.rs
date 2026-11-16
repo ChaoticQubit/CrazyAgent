@@ -356,6 +356,8 @@ fn main() {
         "desktop_connector_sign_in_state",
         "desktop_connector_cancel_sign_in",
         "desktop_connector_sign_out",
+        "desktop_connector_set_own_app",
+        "desktop_connector_clear_own_app",
         "desktop_connector_reach",
         "desktop_connector_approval",
         "desktop_connector_answer",

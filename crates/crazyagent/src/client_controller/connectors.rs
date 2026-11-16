@@ -140,6 +140,31 @@ impl OwnerController {
         self.connectors_client()?.connector_sign_out(name).await
     }
 
+    /// Saves the owner's own OAuth app for a connector, the secret of a confidential app
+    /// in its own frame; saving signs the connector out. Inputs: the connector, the client
+    /// id and the secret if any. Output: the page, which never holds the secret.
+    pub async fn connector_set_own_app(
+        &self,
+        name: String,
+        client_id: String,
+        secret: Option<AccountSecret>,
+    ) -> Result<ConnectorsView, EngineError> {
+        self.connectors_client()?
+            .connector_set_own_app(name, client_id, secret)
+            .await
+    }
+
+    /// Removes the owner's own OAuth app for a connector, which then signs in the automatic
+    /// way and is signed out. Input: the connector. Output: the page.
+    pub async fn connector_clear_own_app(
+        &self,
+        name: String,
+    ) -> Result<ConnectorsView, EngineError> {
+        self.connectors_client()?
+            .connector_clear_own_app(name)
+            .await
+    }
+
     /// Saves the connector settings. Inputs: the settings and the version read. Output:
     /// saved with the page, or stale.
     pub async fn set_connector_settings(

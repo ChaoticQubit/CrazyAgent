@@ -5,7 +5,7 @@ use crazyagent::connectors::audit::ActivityView;
 use crazyagent::connectors::sign_in::SignInState;
 use crazyagent::connectors::{ConnectorSettings, ConnectorsView, SignInWith, Who};
 use crazyagent::engine::EngineError;
-use crazyagent::engine::owner::{CONNECTORS_CODES, ConnectorsSaved, OwnerClient};
+use crazyagent::engine::owner::{AccountSecret, CONNECTORS_CODES, ConnectorsSaved, OwnerClient};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -349,6 +349,46 @@ impl NativeBridge {
         }))
     }
 
+    /// Saves the owner's own OAuth app for a connector, run without the bridge lock; an
+    /// empty secret is a public app's none, and a secret that is not one is refused here,
+    /// before any engine call, holding no part of it. Inputs: the connector, the client id
+    /// and the secret typed. Output: the page, which never holds the secret.
+    pub fn connector_set_own_app(
+        &self,
+        name: String,
+        client_id: String,
+        secret: String,
+    ) -> Result<Unlocked<ConnectorsView>, BridgeError> {
+        let secret = if secret.is_empty() {
+            None
+        } else {
+            let typed = AccountSecret::new(secret.into_bytes());
+            Some(typed.map_err(|_| failure("connector_oauth_client_invalid"))?)
+        };
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_set_own_app(name, client_id, secret)
+                .await
+                .map_err(connector_error)
+        }))
+    }
+
+    /// Removes the owner's own OAuth app for a connector, run without the bridge lock.
+    /// Input: the connector. Output: the page.
+    pub fn connector_clear_own_app(
+        &self,
+        name: String,
+    ) -> Result<Unlocked<ConnectorsView>, BridgeError> {
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_clear_own_app(name)
+                .await
+                .map_err(connector_error)
+        }))
+    }
+
     /// What the Connectors page says each harness reaches, one row per harness kind in
     /// settings order, in the engine crate's own words (DEC-141), with no engine call.
     /// Output: the rows.
@@ -506,5 +546,23 @@ mod tests {
             "not_connected"
         );
         assert_eq!(refused(bridge.connector_sign_out(text())), "not_connected");
+        let app = || "Iv1.app".to_string();
+        assert_eq!(
+            refused(bridge.connector_set_own_app(text(), app(), String::new())),
+            "not_connected",
+            "an empty secret is a public app's none"
+        );
+        let bad = bridge.connector_set_own_app(text(), app(), "gh-app-e2e\nline".into());
+        let bad = match bad {
+            Ok(_) => panic!("a bridge readied a secret with a line break"),
+            Err(error) => error,
+        };
+        assert_eq!(bad.code, "connector_oauth_client_invalid");
+        assert!(!format!("{bad:?}").contains("gh-app"));
+        assert!(!serde_json::to_string(&bad).unwrap().contains("gh-app"));
+        assert_eq!(
+            refused(bridge.connector_clear_own_app(text())),
+            "not_connected"
+        );
     }
 }

@@ -12,8 +12,8 @@ use crate::tui::screens::settings_add_account::open_page;
 use std::path::PathBuf;
 
 /// One Connectors request a Settings page, a project's Connectors page or the approval page
-/// sends. A typed key travels only inside `SetKey`, as the engine's secret type, and is never
-/// printed.
+/// sends. A typed key travels only inside `SetKey`, and an own app's client secret only inside
+/// `SetOwnApp`, as the engine's secret type, and neither is ever printed.
 pub(in crate::tui) enum ConnectorsJob {
     Activity {
         connector: Option<String>,
@@ -90,6 +90,14 @@ pub(in crate::tui) enum ConnectorsJob {
         name: String,
     },
     SignOut {
+        name: String,
+    },
+    SetOwnApp {
+        name: String,
+        client_id: String,
+        secret: Option<AccountSecret>,
+    },
+    ClearOwnApp {
         name: String,
     },
 }
@@ -169,7 +177,9 @@ fn failed(job: &ConnectorsJob, code: String) -> ConnectorsEvent {
         | ConnectorsJob::ClearKey { .. }
         | ConnectorsJob::Grant { .. }
         | ConnectorsJob::SetSignInWith { .. }
-        | ConnectorsJob::SignOut { .. } => ConnectorsEvent::Page(Err(code)),
+        | ConnectorsJob::SignOut { .. }
+        | ConnectorsJob::SetOwnApp { .. }
+        | ConnectorsJob::ClearOwnApp { .. } => ConnectorsEvent::Page(Err(code)),
         ConnectorsJob::Approval { id } | ConnectorsJob::Answer { id, .. } => {
             ConnectorsEvent::Approval {
                 id: *id,
@@ -220,6 +230,8 @@ pub(in crate::tui) fn job_name(job: &ConnectorsJob) -> &'static str {
         ConnectorsJob::SignInState { .. } => "ConnectorSignInState",
         ConnectorsJob::CancelSignIn { .. } => "ConnectorCancelSignIn",
         ConnectorsJob::SignOut { .. } => "ConnectorSignOut",
+        ConnectorsJob::SetOwnApp { .. } => "ConnectorSetOwnApp",
+        ConnectorsJob::ClearOwnApp { .. } => "ConnectorClearOwnApp",
     }
 }
 
@@ -387,6 +399,16 @@ async fn page(
             controller.connector_set_sign_in_with(name, way).await
         }
         ConnectorsJob::SignOut { name } => controller.connector_sign_out(name).await,
+        ConnectorsJob::SetOwnApp {
+            name,
+            client_id,
+            secret,
+        } => {
+            controller
+                .connector_set_own_app(name, client_id, secret)
+                .await
+        }
+        ConnectorsJob::ClearOwnApp { name } => controller.connector_clear_own_app(name).await,
         ConnectorsJob::Activity { .. }
         | ConnectorsJob::SaveSettings { .. }
         | ConnectorsJob::Preview { .. }
@@ -417,6 +439,23 @@ mod tests {
         };
         assert_eq!(format!("{job:?}"), "ConnectorSetKey");
         assert!(!format!("{job:?}").contains("lin-test"));
+        let app = ConnectorsJob::SetOwnApp {
+            name: "github".into(),
+            client_id: "Iv1.app".into(),
+            secret: Some(AccountSecret::new(b"gh-app-never-printed".to_vec()).unwrap()),
+        };
+        assert_eq!(format!("{app:?}"), "ConnectorSetOwnApp");
+        assert!(!format!("{app:?}").contains("gh-app") && !format!("{app:?}").contains("Iv1"));
+        let clear = ConnectorsJob::ClearOwnApp {
+            name: "github".into(),
+        };
+        assert_eq!(format!("{clear:?}"), "ConnectorClearOwnApp");
+        for job in [&app, &clear] {
+            assert_eq!(
+                ConnectorsEvent::unavailable(job),
+                ConnectorsEvent::Page(Err("trusted_connection_unavailable".into()))
+            );
+        }
         assert_eq!(
             ConnectorsEvent::unavailable(&job),
             ConnectorsEvent::Page(Err("trusted_connection_unavailable".into()))
