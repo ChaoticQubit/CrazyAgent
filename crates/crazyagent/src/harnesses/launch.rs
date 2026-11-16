@@ -1,3 +1,4 @@
+use super::accounts::Handover;
 use super::drivers::acp::Acp;
 use super::drivers::{self, Piped};
 use super::interactive::KEY_FILE;
@@ -805,18 +806,27 @@ fn acp_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> {
 
 /// Wraps a harness command line in the launch's sandbox, with the agent's own environment:
 /// its home, temporary folder, tool path, plain locale, the model proxy and git identity of
-/// an installed context, the harness's own variables and those a listed harness's home block
-/// sets. Inputs: the checked request, the installed context, if any, the harness arguments
-/// and variables. Output: the command with piped standard streams in the working folder, or
-/// `launch_sandbox_unavailable` off macOS and `launch_environment_refused` when the
-/// environment cannot be built.
+/// an installed context, whose tool home, if any, holds the temporary folder, own `git` and
+/// cargo home in place of the binding's home (rv-code4 T19b F2), the harness's own variables, those a listed harness's home block
+/// sets and those of its account hand-over (T19b 19b-2), whose placeholder goes through the
+/// one exception to the variable guard, as a listed master's does. Inputs: the checked
+/// request, the installed context, if any, the harness arguments and variables. Output: the
+/// command with piped standard streams in the working folder, or
+/// `launch_sandbox_unavailable` off macOS, `launch_account_handover_mismatch` for a
+/// hand-over of another account than the binding's and `launch_environment_refused` when
+/// the environment cannot be built, which includes a hand-over at Full access.
 fn sandboxed(
     request: &LaunchRequest,
     installed: Option<&Installed>,
     arguments: &[OsString],
     environment: &[(&'static str, OsString)],
 ) -> Result<Command, LaunchError> {
+    let handover = installed.and_then(Installed::handover);
+    if let Some(handover) = handover {
+        handover_fits(request, handover)?;
+    }
     let listed = installed.map(Installed::environment).unwrap_or_default();
+    let handed_env = handover.map(Handover::env).unwrap_or_default();
     let harness_env = environment
         .iter()
         .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())))
@@ -824,8 +834,46 @@ fn sandboxed(
             listed
                 .iter()
                 .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str()))),
+        )
+        .chain(
+            handed_env
+                .iter()
+                .map(|(name, value)| (OsStr::new(name), Some(OsStr::new(value)))),
         );
-    confined(request, installed, arguments, harness_env, None)
+    let names: Vec<&str> = handed_env
+        .iter()
+        .filter(|(_, value)| handover.is_some_and(|handover| value == handover.token()))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let handed = handover
+        .map(|handover| crate::sandbox::Handed::new(&names, handover.token()))
+        .transpose()
+        .map_err(|_| failure("launch_environment_refused"))?;
+    assert_eq!(handed.is_some(), handover.is_some());
+    confined(request, installed, arguments, harness_env, handed)
+}
+
+/// Refuses an account hand-over made for another account than the launch is bound to: its
+/// address must be the binding's and its placeholder the binding's relay token, or the
+/// local placeholder for a keyless binding. The terminal path checks its hand-over with it
+/// too. Inputs: the request and the hand-over. Output: Ok, or
+/// `launch_account_handover_mismatch`.
+pub(super) fn handover_fits(
+    request: &LaunchRequest,
+    handover: &Handover,
+) -> Result<(), LaunchError> {
+    let address = request
+        .account
+        .base_url()
+        .map(|url| url.trim_end_matches('/'));
+    let token = request
+        .account
+        .key()
+        .map_or(LOCAL_PLACEHOLDER_KEY, Secret::reveal);
+    if address != Some(handover.base_url().trim_end_matches('/')) || token != handover.token() {
+        return Err(failure("launch_account_handover_mismatch"));
+    }
+    Ok(())
 }
 
 /// Builds the command one listed master turn spawns (DEC-180 Task 20): the request's sandbox
@@ -858,21 +906,22 @@ fn confined<'a>(
     handed: Option<crate::sandbox::Handed<'_>>,
 ) -> Result<Command, LaunchError> {
     let home = request.account.home();
+    let tool_home = installed.and_then(Installed::tool_home).unwrap_or(home);
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
     }
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
     let path = toolchains::with_agent_git(
-        home,
+        tool_home,
         if request.tools {
             toolchains::agent_path(&homes, TOOLS_ON_PATH)
         } else {
             TOOLS_OFF_PATH.to_owned()
         },
     );
-    let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
+    let tmp = toolchains::existing_tmp(tool_home).unwrap_or_else(|| home.to_path_buf());
     let tools = if request.tools {
-        toolchains::agent_env(home, &homes)
+        toolchains::agent_env(tool_home, &homes)
     } else {
         Vec::new()
     };

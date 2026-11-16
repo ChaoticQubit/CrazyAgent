@@ -253,7 +253,7 @@ struct Grant {
 /// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
 /// and `tmux` is that server's program, which its teammates are split off with;
 /// `native_threads` is a native-mode Codex lead's sub-agent thread cap (PA-7); `hookless`
-/// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks);
+/// marks a launch that fires no hooks, as [`starts_hookless`] says (DEC-104 bare-hooks);
 /// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
 /// `proxy` is the model proxy an agent with tools under the None network reaches its model
 /// through, the only network its profile allows (S4b); `relay` is the key relay a keyed
@@ -384,9 +384,7 @@ impl Plan {
         }
         assert_eq!(
             self.hookless,
-            crate::coord::settings::HarnessKind::from_harness(&self.harness)
-                == Some(crate::coord::settings::HarnessKind::ClaudeCode)
-                && claude_bare(&account),
+            starts_hookless(&self.harness, claude_bare(&account)),
             "an agent's recorded hooks state is the one its launch gets"
         );
         Ok(LaunchRequest {
@@ -9275,6 +9273,17 @@ impl TeamRuntime {
             .map(|relay| Secret::new(relay.token().to_owned()))
             .transpose()
             .map_err(|e| with_code(key_relay_sentence(&e.0), Some(&e.0)))?;
+        let handover = match (&kind, &account.reach) {
+            (Some(crate::coord::settings::HarnessKind::Listed(_)), TeamReach::Endpoint { .. }) => {
+                listed_handover(
+                    &(self.access)().unwrap_or_default(),
+                    launch,
+                    &account.connection,
+                    relay.as_deref(),
+                )?
+            }
+            _ => None,
+        };
         let (home, remote, model) = match &account.reach {
             TeamReach::Endpoint {
                 base_url, model, ..
@@ -9294,11 +9303,7 @@ impl TeamRuntime {
             }
         };
         let endpoint = matches!(account.reach, TeamReach::Endpoint { .. });
-        let hookless =
-            crate::coord::settings::HarnessKind::from_harness(launch).is_some_and(|kind| {
-                kind.lacks(endpoint, crate::coord::settings::Protection::Receipts)
-                    .is_some()
-            });
+        let hookless = starts_hookless(launch, endpoint);
         self.connection
             .execute(
                 "UPDATE team_agents SET hookless=?2 WHERE id=?1",
@@ -9702,15 +9707,28 @@ impl TeamRuntime {
             terminal_display,
             task_start,
         };
+        let listed = matches!(kind, Some(crate::coord::settings::HarnessKind::Listed(_)));
         let mode = match &account.reach {
-            TeamReach::Endpoint { base_url, .. } => Mode::Kept {
-                account: AccountBinding::Url {
-                    home,
-                    base_url: relay_url.unwrap_or_else(|| base_url.clone()),
-                    key: relay_token,
-                },
-                context: Box::new(context),
-            },
+            TeamReach::Endpoint { base_url, .. } => {
+                let (binding, context) = match listed {
+                    true => (
+                        listed_home(&home, launch, &account.connection)?,
+                        context.with_tool_home(&home),
+                    ),
+                    false => (home, context),
+                };
+                Mode::Kept {
+                    account: AccountBinding::Url {
+                        home: binding,
+                        base_url: relay_url.unwrap_or_else(|| base_url.clone()),
+                        key: relay_token,
+                    },
+                    context: Box::new(match handover {
+                        Some(handover) => context.with_handover(handover),
+                        None => context,
+                    }),
+                }
+            }
             TeamReach::Managed { .. } => Mode::PerTurn { home },
         };
         made.keep();
@@ -14002,6 +14020,79 @@ pub fn agent_home(state: &Path, id: i64) -> PathBuf {
         .join("agents")
         .join(format!("agent-{id}"))
         .join("home")
+}
+
+/// Tells whether an agent of one launch harness starts with no hooks, so with no receipts,
+/// owner hooks or edit guard (DEC-141 PA-12): what its harness kind lacks for receipts on
+/// that account kind, true for Claude Code on an API key or URL account and for every
+/// listed harness. `prepare` records it and every start of the plan checks it. Inputs: the
+/// launch harness and whether the account is anything but a signed-in subscription.
+/// Output: the answer.
+fn starts_hookless(harness: &str, endpoint: bool) -> bool {
+    crate::coord::settings::HarnessKind::from_harness(harness).is_some_and(|kind| {
+        kind.lacks(endpoint, crate::coord::settings::Protection::Receipts)
+            .is_some()
+    })
+}
+
+/// The private home a team agent of a listed harness runs in on one account (T18 LEAD-1),
+/// `<agent home>/<harness id>/<account>`, made 0700 through no-follow steps inside the agent
+/// home its sandbox allows. Inputs: the agent home, the launch harness and the account.
+/// Output: the home, or the owner line with the private home's refusal code.
+fn listed_home(own: &Path, launch: &str, account: &CredentialRef) -> Result<PathBuf, String> {
+    let home = crate::harnesses::home::prepare(own, launch, account).map_err(|error| {
+        with_code(
+            "the agent's private harness home could not be made",
+            Some(&error.0),
+        )
+    })?;
+    assert!(home.starts_with(own) && home != own);
+    Ok(home)
+}
+
+/// The account hand-over a team agent of a listed harness starts with (T19b 19b-2): the
+/// stored connection's wire format picks the manifest's `accounts` entry, filled with the
+/// relay of a keyed account or the address and local placeholder of a keyless one, for a
+/// piped and a terminal-only harness alike. A harness with no `accounts` block reads no
+/// connection here. Inputs: the live access, the launch harness, the account and its relay.
+/// Output: the hand-over, none for a harness with no entry for the format, or the owner
+/// line with the refusal code.
+fn listed_handover(
+    access: &ModelAccess,
+    launch: &str,
+    account: &CredentialRef,
+    relay: Option<&crate::model_gateway::relay::Relay>,
+) -> Result<Option<crate::harnesses::accounts::Handover>, String> {
+    let harness = crate::harnesses::registry::registry()
+        .get(launch)
+        .ok_or("harness has no launch adapter")?;
+    if harness.manifest().block("accounts").is_none() {
+        return Ok(None);
+    }
+    let connection = access
+        .connections
+        .iter()
+        .find(|connection| &connection.id == account)
+        .ok_or_else(|| {
+            with_code(
+                "the agent's account is no longer in its pool",
+                Some("team_account_left_pool"),
+            )
+        })?;
+    if !crate::harnesses::accounts::hands_over(harness, connection.protocol.as_str()) {
+        return Ok(None);
+    }
+    let handover =
+        crate::harnesses::accounts::handover(harness, connection, relay).map_err(|error| {
+            with_code(
+                "the account could not be handed to the agent's harness",
+                Some(&error.0),
+            )
+        })?;
+    assert!(crate::model_gateway::relay::is_placeholder(
+        handover.token()
+    ));
+    Ok(Some(handover))
 }
 
 /// The most bytes of a worktree's `.gitignore` read to see whether it ignores the graph.

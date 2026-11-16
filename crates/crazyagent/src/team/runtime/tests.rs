@@ -29,6 +29,10 @@ mod lead_takeover_tests;
 mod keyed_relay_tests;
 
 #[cfg(target_os = "macos")]
+#[path = "listed_agent_tests.rs"]
+mod listed_agent_tests;
+
+#[cfg(target_os = "macos")]
 #[path = "live_terminal_probe_tests.rs"]
 mod live_terminal_probe_tests;
 

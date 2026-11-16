@@ -2147,9 +2147,12 @@ fn detail_row(
     let room = width
         .saturating_sub(crate::tui::text::width(&prefix))
         .max(1);
-    let hookless = node
-        .hookless
-        .then(|| format!("Receipts {}", crate::coord::adoption::HOOKLESS_WORDS));
+    let hookless = node.hookless.then(|| {
+        format!(
+            "Receipts {}",
+            crate::coord::adoption::hookless_words(&node.harness)
+        )
+    });
     for words in live
         .into_iter()
         .chain(hookless)
