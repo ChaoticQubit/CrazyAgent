@@ -942,6 +942,16 @@ async fn a_demo_made_again_inherits_nothing_of_the_old_one() {
         1,
         "the deleted demo's id is held until a demo is made again"
     );
+    db.execute_batch(
+        "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,model,
+            input,output,cache_read,cache_write,cost_nanos)
+         VALUES (3600000,'master','crazyagent-demo','pool-codex','account-codex','master',
+            'codex','late-session','native-default',7001,0,0,0,0);",
+    )
+    .unwrap();
+    let removed_before = rows(
+        "SELECT coalesce(sum(input),0) FROM usage_tokens WHERE project='<removed>'",
+    );
     let response = owner.create_demo(pool, next()).await.unwrap();
     assert_eq!(
         result(response),
@@ -964,6 +974,16 @@ async fn a_demo_made_again_inherits_nothing_of_the_old_one() {
     ] {
         assert_eq!(rows(sql), 0, "{why}");
     }
+    assert_eq!(
+        rows("SELECT count(*) FROM usage_tokens WHERE project='crazyagent-demo'"),
+        0,
+        "the old demo's token counts never merge into the new demo"
+    );
+    assert_eq!(
+        rows("SELECT coalesce(sum(input),0) FROM usage_tokens WHERE project='<removed>'"),
+        removed_before + 7001,
+        "the old demo's token counts stay under Removed projects (leader 01:02, N1 C)"
+    );
     drop(db);
     drop(owner);
     engine.stop().await;
