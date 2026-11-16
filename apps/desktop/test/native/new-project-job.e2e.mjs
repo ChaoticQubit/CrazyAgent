@@ -95,7 +95,7 @@ async function create(page, me, name, documents = false) {
   await me.type("#np-name", name);
   await me.type("#np-about", `${name} for the New Project job`);
   await me.follow("#np-publish");
-  assert.equal(await page.evaluate(`document.querySelector("#np-publish")?.checked ?? null`), false, "publishing on GitHub is off for this run");
+  assert.equal(await page.evaluate(`document.querySelector("#np-publish")?.getAttribute("aria-checked") ?? null`), "false", "publishing on GitHub is off for this run");
   await me.click("Next", "button");
   await me.waitFor("the Documents step", (text) => text.includes("Choose files"));
   if (documents) {
