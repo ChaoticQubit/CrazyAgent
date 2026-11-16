@@ -98,6 +98,7 @@ fn sensors(power: PowerSource, battery_pct: Option<u8>) -> Sensors {
         battery_unread_twice: false,
         heat: Heat::Nominal,
         lid_closed: Some(false),
+        external_display: Some(false),
         lid_support: LidSupport::Held,
         low_power: LowPowerSupport::Unread,
     }

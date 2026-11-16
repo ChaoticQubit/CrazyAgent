@@ -80,6 +80,11 @@ fn this_macs_own_pmset_and_thermal_text_is_understood() {
         lid.map(|lid| lid.closed),
         "the lid is read in process with no helper (fix5 ASK-01:41, leader 01:42)"
     );
+    assert_eq!(
+        reading.external_display,
+        lid.map(|lid| lid.external_display),
+        "an external display in use (fix5 QUESTION-01:45 A, leader 01:45)"
+    );
 }
 
 #[test]
@@ -342,6 +347,41 @@ fn the_lid_state_files_say_open_closed_or_nothing() {
 }
 
 #[test]
+fn linux_drm_connectors_say_whether_an_external_display_is_in_use() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    assert_eq!(power_linux::external_display(root), None, "no connector says nothing");
+    put(&root.join("card0"), "dev", "226:0");
+    put(&root.join("renderD128"), "dev", "226:128");
+    put(&root.join("card0-eDP-1"), "status", "connected");
+    put(&root.join("card0-HDMI-A-1"), "status", "disconnected");
+    assert_eq!(
+        power_linux::external_display(root),
+        Some(false),
+        "the built-in panel is not an external display"
+    );
+    put(&root.join("card1-LVDS-1"), "status", "connected");
+    put(&root.join("card1-DSI-1"), "status", "connected");
+    assert_eq!(power_linux::external_display(root), Some(false));
+    put(&root.join("card0-DP-2"), "status", "connected");
+    assert_eq!(
+        power_linux::external_display(root),
+        Some(true),
+        "DP is not eDP"
+    );
+    let unread = tempfile::tempdir().unwrap();
+    put(&unread.path().join("card0-HDMI-A-1"), "status", "unknown");
+    assert_eq!(power_linux::external_display(unread.path()), Some(false));
+    let long = format!("connected{}", " ".repeat(200));
+    put(&unread.path().join("card0-DP-1"), "status", &long);
+    assert_eq!(
+        power_linux::external_display(unread.path()),
+        Some(false),
+        "a value longer than a sysfs value is not read"
+    );
+}
+
+#[test]
 fn the_linux_reader_reads_one_root_folder_and_no_bus() {
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
@@ -374,6 +414,7 @@ fn the_linux_reader_reads_one_root_folder_and_no_bus() {
         "state",
         "state:      closed",
     );
+    put(&root.join("sys/class/drm/card0-HDMI-A-1"), "status", "connected");
     assert_eq!(
         power_linux::read_under(root),
         PowerReading {
@@ -381,6 +422,7 @@ fn the_linux_reader_reads_one_root_folder_and_no_bus() {
             battery_pct: Some(31),
             heat: Heat::Serious,
             lid_closed: Some(true),
+            external_display: Some(true),
             lid_support: unknown.lid_support.clone(),
             low_power: unknown.low_power.clone(),
         },

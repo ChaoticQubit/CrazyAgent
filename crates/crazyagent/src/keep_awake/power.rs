@@ -24,15 +24,16 @@ const THREAD_NAME: &str = "keep-awake-sensors";
 type Ask = (LidAsk, Option<LidCommand>, i64);
 
 /// One reading of the platform: where the power comes from, the battery charge, the heat,
-/// whether the lid is closed, whether this platform can hold with the lid closed, and
-/// whether it can turn on low power mode, each unknown or none where the platform does not
-/// say.
+/// whether the lid is closed, whether an external display is in use (fix5 QUESTION-01:45
+/// A, leader 01:45), whether this platform can hold with the lid closed, and whether it can
+/// turn on low power mode, each unknown or none where the platform does not say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PowerReading {
     pub source: PowerSource,
     pub battery_pct: Option<u8>,
     pub heat: Heat,
     pub lid_closed: Option<bool>,
+    pub external_display: Option<bool>,
     pub lid_support: LidSupport,
     pub low_power: LowPowerSupport,
 }
@@ -53,6 +54,7 @@ impl PowerReading {
             battery_pct: None,
             heat: Heat::Unknown,
             lid_closed: None,
+            external_display: None,
             lid_support,
             low_power,
         }
@@ -191,6 +193,7 @@ pub fn sensors(reading: &PowerReading, battery_unread_twice: bool, lid_refused: 
         battery_unread_twice,
         heat: reading.heat,
         lid_closed: reading.lid_closed,
+        external_display: reading.external_display,
         lid_support,
         low_power: reading.low_power.clone(),
     }

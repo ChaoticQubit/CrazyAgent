@@ -52,6 +52,7 @@ fn on_ac() -> PowerReading {
         battery_pct: Some(80),
         heat: Heat::Nominal,
         lid_closed: Some(false),
+        external_display: Some(false),
         lid_support: LidSupport::Held,
         low_power: LowPowerSupport::Unread,
     }

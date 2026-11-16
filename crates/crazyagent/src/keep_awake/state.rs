@@ -82,7 +82,8 @@ impl LowPowerSupport {
 }
 
 /// What the platform readers last saw: power source, battery percent, whether the battery
-/// could not be read twice in a row, heat, lid position, lid support and low power support.
+/// could not be read twice in a row, heat, lid position, whether an external display is in
+/// use (none when unread, which counts as none in use), lid support and low power support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sensors {
@@ -91,6 +92,8 @@ pub struct Sensors {
     pub battery_unread_twice: bool,
     pub heat: Heat,
     pub lid_closed: Option<bool>,
+    #[serde(default)]
+    pub external_display: Option<bool>,
     pub lid_support: LidSupport,
     #[serde(default)]
     pub low_power: LowPowerSupport,
@@ -113,6 +116,7 @@ impl Sensors {
             battery_unread_twice: false,
             heat: Heat::Unknown,
             lid_closed: None,
+            external_display: None,
             lid_support,
             low_power: LowPowerSupport::at_start(Platform::CURRENT),
         }

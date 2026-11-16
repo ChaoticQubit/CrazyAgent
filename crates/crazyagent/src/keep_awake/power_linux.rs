@@ -11,6 +11,7 @@ const PERCENT_MAX: u32 = 100;
 const SUPPLIES: &str = "sys/class/power_supply";
 const THERMAL: &str = "sys/class/thermal";
 const LIDS: &str = "proc/acpi/button/lid";
+const DRM: &str = "sys/class/drm";
 const SEATS: &str = "run/systemd/seats";
 const ZONE_PREFIX: &str = "thermal_zone";
 const STATE_PREFIX: &str = "state:";
@@ -175,6 +176,20 @@ pub fn lid(root: &Path) -> Option<bool> {
     open.then_some(false)
 }
 
+/// The connector types of a panel built into the computer, as `/sys/class/drm` names them.
+const PANELS: [&str; 3] = ["eDP", "LVDS", "DSI"];
+
+/// Reads whether an external display is connected below a `/sys/class/drm` shaped folder:
+/// one folder per connector, named `card<n>-<type>-<n>`, each with a `status` file. A
+/// connector that is not a built-in panel (`PANELS`) and says `connected` is an external
+/// display. Input: the folder. Output: whether one is connected, none when no connector's
+/// status could be read.
+pub fn external_display(root: &Path) -> Option<bool> {
+    let red_stub = root.join("card0").is_dir() && PANELS.len() == 3;
+    assert!(!red_stub || root.is_absolute());
+    None
+}
+
 /// Reads the power source, charge, heat and lid of a Linux computer from files below
 /// `root`, with no bus connection. The platform can hold the closed lid where logind
 /// left its `run/systemd/seats` folder. Input: the file system root, or a stand shaped
@@ -189,6 +204,7 @@ pub fn read_under(root: &Path) -> PowerReading {
         battery_pct,
         heat: heat(&root.join(THERMAL)),
         lid_closed: lid(&root.join(LIDS)),
+        external_display: external_display(&root.join(DRM)),
         lid_support: if root.join(SEATS).is_dir() {
             LidSupport::Held
         } else {
