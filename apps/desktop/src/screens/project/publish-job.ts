@@ -167,12 +167,12 @@ export type LostStep = "idle" | "seen" | "over" | "read";
  * once the latest read answered with no publish after the Start's budget. Inputs: when the
  * reply was lost, this mount's answered reads, the read kept, whether the latest read
  * failed, and now in epoch milliseconds. Output: the step. */
-export function lostStartStep(since: number | null, answered: number, read: Result<GitHubPublishJob | null> | null, _failed: boolean, now: number): LostStep {
+export function lostStartStep(since: number | null, answered: number, read: Result<GitHubPublishJob | null> | null, failed: boolean, now: number): LostStep {
   assert(Number.isSafeInteger(answered), "lost Start reads answered is not a count");
   assert(answered >= 0, "lost Start reads answered is below zero");
   if (since === null || answered === 0) return "idle";
   if (publishView(read?.kind === "ok" ? read.value : null).kind !== "none") return "seen";
-  const noJob = read?.kind === "ok" && read.value === null;
+  const noJob = !failed && read?.kind === "ok" && read.value === null;
   if (noJob && lostStartOver(since, now)) return "over";
   return "read";
 }
