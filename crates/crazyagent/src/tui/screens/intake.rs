@@ -455,7 +455,7 @@ mod tests {
         );
         assert_eq!(
             copy("project_id_removed"),
-            "This project's id belonged to a project you removed, so it can't be used again. Try again to get a new one."
+            "A project you removed used this name, so it can't be used again. Choose another project name."
         );
         assert_eq!(
             copy("projects_removed_full"),

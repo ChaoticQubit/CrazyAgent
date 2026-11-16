@@ -130,8 +130,6 @@ test("a full removal record refuses Remove and Delete everything with the reason
   const { failureCopy } = await import("../src/api-projects.ts");
   assert.equal(failureCopy("projects_removed_full"),
     "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash.");
-  assert.equal(failureCopy("project_id_removed"),
-    "This project's id belonged to a project you removed, so it can't be used again. Try again to get a new one.");
 });
 
 test("at the app's smallest and default windows the Delete everything dialog fits its frame, and the top choice, the whole loss list and the Delete button stay in view while the name is typed (AL20)", async () => {

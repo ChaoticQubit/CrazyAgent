@@ -91,7 +91,7 @@ test("an id a removal holds and a folder name with every id taken read as plain 
   assert.equal(api.intakeCopy("onboarding_project_ids_used"),
     "Every id this folder's name can get, 99 in all, is taken by your projects or ones you removed. Rename the folder first.");
   assert.equal(api.intakeCopy("project_id_removed"),
-    "This project's id belonged to a project you removed, so it can't be used again. Try again to get a new one.");
+    "A project you removed used this name, so it can't be used again. Choose another project name.");
   assert.equal(api.intakeCopy("projects_removed_full"),
     "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash.");
 });
