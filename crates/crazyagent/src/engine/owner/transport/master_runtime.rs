@@ -1432,6 +1432,16 @@ pub(super) fn account_failure(read: &AuthControl) -> Result<(), EngineError> {
     }
 }
 
+/// Puts one headless master turn on its project's hidden folders list for the whole turn,
+/// from the folders its sandbox hides (SA-VID14-MASTER-TURNS). Stub: refuses every turn.
+/// Input: the prepared turn. Output: the guard, or `master_sandbox_unavailable`.
+fn listed_master_turn(
+    prepared: &PreparedMasterTurn,
+) -> Result<crate::sandbox::hidden_paths::HiddenRun, EngineError> {
+    let _ = prepared;
+    Err(failure("master_sandbox_unavailable"))
+}
+
 fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
 }

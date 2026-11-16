@@ -719,7 +719,7 @@ export function saveReadPaths(id: string, paths: string[], version: number, gene
 /** The folders a project's agents are kept out of in saved order and the version a change
  * sends back. */
 /** The kinds of engine runs, not team agents, that hide a project's folders from their start (SA-VID14-R2-N2). */
-export type HiddenRunKind = "research" | "overview" | "roadmap" | "onboarding" | "code_graph" | "lockfiles";
+export type HiddenRunKind = "master" | "research" | "overview" | "roadmap" | "onboarding" | "code_graph" | "lockfiles";
 export type HiddenPaths = { paths: string[]; version: number; runs?: HiddenRunKind[] };
 
 /** Reads the folders this project's agents are kept out of, read, write and run.

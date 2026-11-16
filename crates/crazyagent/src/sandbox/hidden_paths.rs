@@ -162,14 +162,16 @@ pub fn restarts(connection: &Connection, project: &str) -> rusqlite::Result<BTre
 const RUNS_MAX: usize = 256;
 
 /// One kind of engine run, not a team agent, that hides a project's saved folders from its
-/// own start (SA-VID14-R2-N2): research jobs, the overview, roadmap and onboarding agents,
-/// code graph builds and lockfile rebuilds. An instructions cleanup run reads only an empty
+/// own start (SA-VID14-R2-N2): headless master turns (SA-VID14-MASTER-TURNS), research
+/// jobs, the overview, roadmap and onboarding agents, code graph builds and lockfile
+/// rebuilds. An instructions cleanup run reads only an empty
 /// engine folder, so it never sees a project folder and is not one.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {
+    Master,
     Research,
     Overview,
     Roadmap,
@@ -890,6 +892,10 @@ mod tests {
             ("landing/lockfiles.rs", &["RunKind::Lockfiles"][..]),
             ("onboarding/service.rs", &["RunKind::CodeGraph"][..]),
             ("research/runner.rs", &["RunKind::Research", "run.kind"][..]),
+            (
+                "engine/owner/transport/master_runtime.rs",
+                &["RunKind::Master", "listed_master_turn(&prepared)?"][..],
+            ),
         ]);
         let classified = BTreeSet::from([
             "demo.rs",

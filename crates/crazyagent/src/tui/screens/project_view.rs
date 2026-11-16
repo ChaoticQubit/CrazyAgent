@@ -2681,6 +2681,7 @@ fn runs_lines(screen: &ProjectScreen, width: usize, look: &Look) -> Vec<Row> {
 fn run_words(kind: crate::sandbox::hidden_paths::RunKind) -> &'static str {
     use crate::sandbox::hidden_paths::RunKind;
     match kind {
+        RunKind::Master => "",
         RunKind::Research => "research job",
         RunKind::Overview => "overview run",
         RunKind::Roadmap => "roadmap run",

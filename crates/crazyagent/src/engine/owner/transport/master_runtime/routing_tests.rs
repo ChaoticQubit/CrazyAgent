@@ -1617,6 +1617,47 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
     case.finish().await;
 }
 
+/// SA-VID14-MASTER-TURNS: a headless master turn is on its project's hidden folders list
+/// from the folders its prepared sandbox hides while its guard is held, named by a folder
+/// hidden after its start and not by one its start hid, and leaves the list when the guard
+/// drops. A project id of its own keeps other tests' turns off this list.
+#[tokio::test]
+async fn a_headless_master_turn_is_on_the_hidden_folders_list_while_it_runs() {
+    use crate::sandbox::hidden_paths::{RunKind, runs_seeing};
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    case.register().await;
+    let result = case
+        .command(MasterRuntimeCommand::Prepare {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+        })
+        .await
+        .unwrap();
+    let MasterRuntimeResult::Prepared(prepared) = result else {
+        panic!("the master turn was prepared");
+    };
+    let mut prepared = *prepared;
+    let project = ProjectId::new("sa-vid14-master-turn").unwrap();
+    prepared.session.project_id = project.clone();
+    let (hid, later) = (prepared.cwd.join("vault"), prepared.cwd.join("dump"));
+    prepared.hidden_paths = vec![hid.clone()];
+    let listed = listed_master_turn(&prepared).unwrap();
+    assert_eq!(
+        runs_seeing(project.as_str(), &[hid.join("keys"), later.clone()]),
+        vec![RunKind::Master],
+        "a folder hidden after the turn started names it"
+    );
+    assert!(
+        runs_seeing(project.as_str(), std::slice::from_ref(&hid)).is_empty(),
+        "a folder its start hid does not"
+    );
+    drop(listed);
+    assert!(runs_seeing(project.as_str(), &[later]).is_empty());
+    case.finish().await;
+}
+
 #[tokio::test]
 async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_guard() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;

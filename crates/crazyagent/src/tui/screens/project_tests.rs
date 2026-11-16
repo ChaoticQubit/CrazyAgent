@@ -5359,9 +5359,10 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them(
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     for line in [
         "Team agents that started before you hid a folder,",
-        "Research jobs and overview, roadmap, onboarding, code",
-        "graph and lockfile rebuild runs that started before are",
-        "named there too, and keep their access until they end.",
+        "Master turns, research jobs and overview, roadmap,",
+        "onboarding, code graph and lockfile rebuild runs that",
+        "started before are named there too, and keep their",
+        "access until they end.",
     ] {
         assert!(
             shown.contains(line),
@@ -5386,6 +5387,7 @@ fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
         runs,
     };
     screen.hidden_paths = Some(saved(vec![
+        RunKind::Master,
         RunKind::Research,
         RunKind::Overview,
         RunKind::Roadmap,
@@ -5395,9 +5397,9 @@ fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
     ]));
     let shown = text(&project_screen(&mut screen, 80, 40, &look).rows);
     for line in [
-        "          Runs that can still open a hidden folder until they end: research",
-        "          job, overview run, roadmap run, onboarding run, code graph build,",
-        "          lockfile rebuild run",
+        "          Runs that can still open a hidden folder until they end: master",
+        "          turn, research job, overview run, roadmap run, onboarding run,",
+        "          code graph build, lockfile rebuild run",
     ] {
         assert!(shown.contains(line), "wrapped to the page: {shown}");
     }

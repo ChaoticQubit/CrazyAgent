@@ -519,6 +519,7 @@ export function hiddenSeers(status: TeamStatus | null): TeamAgent[] {
 export const HIDDEN_RUNS_POLL_MS = 3000;
 
 const RUN_WORDS: Record<HiddenRunKind, string> = {
+  master: "",
   research: "research job",
   overview: "overview run",
   roadmap: "roadmap run",
