@@ -6593,7 +6593,8 @@ auth = { method = "none" }"#;
     /// Saves one account key in the fixture's engine folder, as the owner's key store does.
     /// Inputs: the fixture, the key reference and the key.
     fn save_key(case: &Fixture, reference: &str, key: &[u8]) {
-        let folder = case.root.path().join(crate::storage::accounts::ACCOUNT_KEYS);
+        let keys = crate::storage::accounts::ACCOUNT_KEYS;
+        let folder = case.root.path().join(keys);
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
         private_file(&folder.join(reference), key);
