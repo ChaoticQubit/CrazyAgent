@@ -2242,18 +2242,23 @@ pub fn codex_pinned_keys(home: &Path) -> Result<Vec<String>, HookKeysUnread> {
     serde_json::from_slice(&bytes).map_err(|_| HookKeysUnread::Unreadable)
 }
 
-/// Opens a launch file for reading without following a link in its place, so a link planted
-/// there fails to open instead of being read (#166 N1). Input: the path. Output: the file,
-/// or the error, `NotFound` when nothing is there.
+/// Opens a launch file for reading without following a link in its place or waiting on a
+/// FIFO there, so a link, FIFO, folder or device planted there is refused instead of read or
+/// left holding the caller (#166 N1, #168 F1). Input: the path. Output: the plain file, or
+/// the error, `NotFound` when nothing is there.
 #[cfg(unix)]
 fn open_unfollowed(path: &Path) -> std::io::Result<File> {
-    rustix::fs::open(
+    let file = rustix::fs::open(
         path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
-    .map_err(std::io::Error::from)
+    .map_err(std::io::Error::from)?;
+    if !plain_file(&file) {
+        return Err(std::io::Error::other("launch_file_not_plain"));
+    }
+    Ok(file)
 }
 
 /// Opens a launch file for reading where no-follow opening does not exist; no launch writes
