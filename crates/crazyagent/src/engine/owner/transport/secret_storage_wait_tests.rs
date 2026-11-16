@@ -893,3 +893,93 @@ async fn a_key_replaced_after_its_connection_was_removed_stays_for_the_other_on_
     );
     busy.stop().await;
 }
+
+/// Removes one connection from the settings through the owner's ModelAccess edit, as the
+/// model-access screen does, on the basis the engine reads back, and asserts it applies.
+/// Inputs: the engine and the connection id.
+async fn remove_connection(busy: &Busy, id: &str) {
+    let read = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new(format!("read-{id}")).unwrap(),
+        expected_revision: Cursor::new(0),
+        operation: OwnerOperation::Read {
+            query: OwnerRead::ModelAccessPage {
+                collection: ModelAccessCollection::Connections,
+                cursor: None,
+                limit: 16,
+            },
+        },
+    };
+    let reply = busy.client.request(read).await.unwrap();
+    let OwnerResponse::Read { state } = reply.response else {
+        panic!("the model access page reads: {reply:?}");
+    };
+    let OwnerData::ModelAccessPage { source_hash, .. } = state.data else {
+        panic!("the read answers with the model access page");
+    };
+    let change = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new(format!("remove-{id}")).unwrap(),
+        expected_revision: state.revision,
+        operation: OwnerOperation::Apply {
+            mutation: OwnerMutation::ModelAccess {
+                expected_config_id: state.config_id,
+                expected_source_hash: source_hash,
+                edit: crate::config::ModelAccessEdit::RemoveConnection {
+                    id: CredentialRef::new(id).unwrap(),
+                },
+            },
+        },
+    };
+    let reply = busy.client.request(change).await.unwrap();
+    let OwnerResponse::Applied { operation } = &reply.response else {
+        panic!("the removal is applied: {reply:?}");
+    };
+    assert_eq!(operation.result, OwnerResult::Applied);
+}
+
+/// ACCOUNT-REMOVE-KEY rv-secreview F1: an API key whose connections leave the settings
+/// through the model-access edit stays while one still names it, and goes with its
+/// generated home once the last one leaves, so no secret stays on disk with nothing naming
+/// it and no note to sweep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_whose_last_connection_leaves_the_settings_goes_with_its_generated_home() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::DirBuilderExt;
+    let (_refusing, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let busy = Busy::with_settings(&shared_key_settings(port)).await;
+    let secret = format!("sk-shared-edit-{}", std::process::id());
+    let key = planted_key(&busy.engine_root(), SHARED_KEY, &secret);
+    let home = busy
+        .engine_root()
+        .join("configured-sdk-homes")
+        .join(format!("{:x}", Sha256::digest(SHARED_KEY.as_bytes())));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(home.join(".backboard"))
+        .unwrap();
+    std::fs::write(home.join(".backboard/keys.json"), secret.as_bytes()).unwrap();
+    std::fs::set_permissions(
+        home.join(".backboard/keys.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 2);
+
+    remove_connection(&busy, "lab-first").await;
+    assert_eq!(
+        std::fs::read(&key).ok().as_deref(),
+        Some(secret.as_bytes()),
+        "the key the other connection still names stays"
+    );
+    assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 2);
+
+    remove_connection(&busy, "lab-second").await;
+    assert!(
+        none_hold(&busy.engine_root(), secret.as_bytes()).await,
+        "the key goes once the last connection naming it leaves the settings"
+    );
+    assert!(!home.exists(), "its generated home goes whole");
+    busy.stop().await;
+}
