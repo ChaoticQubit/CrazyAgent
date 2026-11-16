@@ -340,3 +340,30 @@ pub(super) fn listed_home(
 ) -> Result<PathBuf, EngineError> {
     Err(failure("launch_account_home_unavailable"))
 }
+
+/// The real file a listed master turn runs: the one its harness's catalog entry leads to now,
+/// as a team agent's launch resolves it, refused when the harness is found nowhere or its
+/// installed version is below the manifest's `version.minimum`. Inputs: the harness, its
+/// catalog entry, if found, and its installed version, if known. Output: the file, or
+/// [`NOT_INSTALLED`] or [`TOO_OLD`].
+pub(super) fn listed_program(
+    harness: &Harness,
+    entry: Option<&std::path::Path>,
+    installed: Option<&str>,
+) -> Result<PathBuf, EngineError> {
+    let _ = (harness, entry, installed);
+    Err(failure(UNSUPPORTED))
+}
+
+/// What one listed master turn its harness ended stores: the reply, fitted to its room with
+/// the bytes left out counted, under the provenance given, for a turn that answered;
+/// cancelled for a turn stopped; else the turn's stop code, as for a turn with no end or a
+/// reply holding a NUL byte. Inputs: what the turn gathered and the reply's provenance.
+/// Output: the observation, or the stop code.
+pub(super) fn turn_outcome(
+    collected: Collected,
+    provenance: crate::master_session::MasterReplyProvenance,
+) -> Result<crate::storage::MasterRuntimeObservation, EngineError> {
+    let _ = (collected, provenance);
+    Err(failure(UNSUPPORTED))
+}

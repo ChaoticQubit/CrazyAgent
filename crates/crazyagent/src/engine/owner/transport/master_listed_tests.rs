@@ -195,6 +195,95 @@ fn a_listed_master_session_runs_in_a_private_home_of_its_own() {
     assert_eq!(refused, Err(failure("launch_account_home_holds_sign_in")));
 }
 
+/// DEC-180 Task 20 Step 4: a listed master runs the real file its catalog entry leads to;
+/// a harness found nowhere, an entry whose file is gone or is not absolute and an install
+/// older than the manifest's `version.minimum` are refused with the listed codes, and an
+/// unknown version is never too old.
+#[cfg(unix)]
+#[test]
+fn a_listed_master_runs_its_installed_program_or_says_it_is_missing_or_too_old() {
+    use crate::harnesses::registry::Registry;
+    use std::os::unix::fs::PermissionsExt;
+    let folder = tempfile::Builder::new()
+        .prefix("ca-listed-program-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = folder.path().canonicalize().unwrap();
+    let program = base.join("standin-acp");
+    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let text = include_str!("../../../../tests/fixtures/harness/standin-acp.yaml");
+    let floored = format!("{text}version:\n  minimum: \"2.4.0\"\n");
+    let built = Registry::build(&[("standin-acp", floored.as_str())]);
+    assert!(built.is_ok(), "{:?}", built.as_ref().err());
+    let registry = built.unwrap();
+    let harness = registry.get("standin-acp").unwrap();
+    assert_eq!(harness.minimum_version(), Some("2.4.0"));
+    for installed in [Some("2.4.0"), Some("2.5.1"), None] {
+        let found = listed_program(harness, Some(&program), installed);
+        assert_eq!(found, Ok(program.clone()), "{installed:?}");
+    }
+    let old = listed_program(harness, Some(&program), Some("2.3.9"));
+    assert_eq!(old, Err(failure(TOO_OLD)));
+    let gone = base.join("standin-acp-gone");
+    let relative = std::path::Path::new("standin-acp");
+    for entry in [None, Some(gone.as_path()), Some(relative)] {
+        let missing = listed_program(harness, entry, Some("2.5.1"));
+        assert_eq!(missing, Err(failure(NOT_INSTALLED)), "{entry:?}");
+    }
+}
+
+/// One listed master turn as its harness left it. Inputs: the reply text, the bytes left
+/// out after it and the end, if any. Output: what the turn gathered.
+fn ended(text: &str, dropped: usize, end: Option<Result<(), &'static str>>) -> Collected {
+    Collected {
+        text: text.into(),
+        dropped,
+        ended: end,
+        ..Collected::default()
+    }
+}
+
+/// DEC-180 Task 20 Step 4: a listed master turn its harness answered stores the reply,
+/// fitted to its room with the bytes left out counted, under the provenance it was given; a
+/// stopped turn is cancelled, and any other end, a turn with no end and a reply holding a
+/// NUL byte stop with their code.
+#[test]
+fn a_listed_master_turn_ends_as_its_reply_its_cancel_or_its_stop_code() {
+    use crate::master_session::{MasterReplyProvenance, fitted_reply};
+    use crate::storage::MasterRuntimeObservation;
+    let id = |text: &str| crate::protocol::RequestId::new(text).unwrap();
+    let provenance = MasterReplyProvenance {
+        attempt_id: id("attempt-1"),
+        runtime_ref: id("runtime-1"),
+        capture_ref: id("capture-1"),
+        capture_sequence: 4,
+    };
+    for (text, dropped) in [("Hello there.", 0), ("Cut short.", 9)] {
+        let outcome = turn_outcome(ended(text, dropped, Some(Ok(()))), provenance.clone());
+        let Ok(MasterRuntimeObservation::Response { reply, delegations }) = outcome else {
+            panic!("{text} gave no reply");
+        };
+        assert_eq!(reply.text, fitted_reply(text, dropped));
+        assert_eq!(reply.text == text, dropped == 0);
+        assert_eq!(reply.provenance, provenance);
+        assert!(delegations.is_empty());
+    }
+    let stopped = turn_outcome(ended("hi", 0, Some(Err(CANCELLED))), provenance.clone());
+    assert!(matches!(stopped, Ok(MasterRuntimeObservation::Cancelled)));
+    let limited = "gateway_rate_limited";
+    let nul = "master_capture_incomplete";
+    for (collected, code) in [
+        (ended("hi", 0, Some(Err(limited))), limited),
+        (ended("hi", 0, Some(Err(TURN_FAILED))), TURN_FAILED),
+        (ended("hi", 0, None), TURN_FAILED),
+        (ended("a\0b", 0, Some(Ok(()))), nul),
+    ] {
+        let outcome = turn_outcome(collected, provenance.clone());
+        assert_eq!(outcome.err(), Some(failure(code)), "{code}");
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod launch {
     use super::*;
