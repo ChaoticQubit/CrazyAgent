@@ -5762,7 +5762,7 @@ mod tests {
             .invoke_handler(admit_pages(tauri::generate_handler![
                 desktop_ide_place,
                 desktop_ide_hide,
-                desktop_ide_close,
+                desktop_ide_show,
             ]))
             .build(mock_context(noop_assets()))
             .unwrap();
@@ -5786,7 +5786,7 @@ mod tests {
         let calls = [
             ("desktop_ide_place", &placed),
             ("desktop_ide_hide", &project),
-            ("desktop_ide_close", &project),
+            ("desktop_ide_show", &placed),
         ];
         for (command, args) in calls {
             assert_eq!(

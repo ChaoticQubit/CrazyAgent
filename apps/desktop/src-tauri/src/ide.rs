@@ -1265,33 +1265,171 @@ mod tests {
     fn own_window(window: &str) -> Out {
         Out {
             window: window.to_owned(),
-            page_closed: false,
+        }
+    }
+
+    const PANEL: Bounds = Bounds {
+        x: 0.0,
+        y: 80.0,
+        width: 900.0,
+        height: 600.0,
+        viewport: 720.0,
+    };
+
+    fn kept_view(label: &str, url: &str, at: Bounds) -> Loaded {
+        Loaded {
+            label: label.to_owned(),
+            url: Url::parse(url).unwrap(),
+            at,
+            left: None,
             beat: tauri::async_runtime::spawn(async {}),
         }
     }
 
     #[test]
-    fn an_ide_in_its_own_window_outlives_its_page_and_its_close_is_noted() {
+    fn an_ide_in_its_own_window_is_known_by_its_project() {
         let views = IdeViews::default();
         let alpha = ProjectId::new("alpha").unwrap();
         let beta = ProjectId::new("beta").unwrap();
         assert!(!views.in_own_window(&alpha), "no window yet");
-        assert!(
-            !views.keep_for_own_window(&alpha),
-            "a page close with no own window goes on as before"
-        );
         views
             .lock()
             .out
             .insert("alpha".to_owned(), own_window("ide-window-61"));
         assert!(views.in_own_window(&alpha));
         assert!(!views.in_own_window(&beta), "only that project's window");
-        assert!(views.keep_for_own_window(&alpha), "the page close is kept");
+    }
+
+    #[test]
+    fn a_kept_ide_shows_again_with_no_open_and_moves_only_when_its_panel_moved() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
         assert!(
-            views.lock().out["alpha"].page_closed,
-            "and noted, so closing the window stops the server"
+            views.lock().kept(&alpha, PANEL).is_none(),
+            "nothing is loaded, so the tab opens it"
         );
-        assert!(!views.keep_for_own_window(&beta));
+        views.lock().loaded.insert(
+            "alpha".to_owned(),
+            kept_view("ide-616c706861-1", "http://127.0.0.1:41000/", PANEL),
+        );
+        let same = views.lock().kept(&alpha, PANEL).unwrap();
+        assert_eq!(
+            same.label, "ide-616c706861-1",
+            "the loaded webview, not a new one"
+        );
+        assert!(!same.resize, "the same panel needs no resize, so no layout");
+        let taller = Bounds {
+            height: 640.0,
+            ..PANEL
+        };
+        assert!(
+            views.lock().kept(&alpha, taller).unwrap().resize,
+            "a panel that moved is placed once"
+        );
+        views
+            .lock()
+            .out
+            .insert("alpha".to_owned(), own_window("ide-window-616c706861"));
+        assert!(
+            views.lock().kept(&alpha, PANEL).is_none(),
+            "an IDE in its own window is not shown over the panel"
+        );
+    }
+
+    #[test]
+    fn opening_one_projects_ide_drops_every_other_ide_but_one_in_its_own_window() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        {
+            let mut held = views.lock();
+            for (name, port) in [("alpha", 41000), ("beta", 41001), ("gamma", 41002)] {
+                held.loaded.insert(
+                    name.to_owned(),
+                    kept_view(
+                        &format!("ide-{name}-1"),
+                        &format!("http://127.0.0.1:{port}/"),
+                        PANEL,
+                    ),
+                );
+            }
+            held.out
+                .insert("gamma".to_owned(), own_window("ide-window-67616d6d61"));
+        }
+        let others = views.lock().others(&alpha);
+        let names: Vec<&str> = others.iter().map(ProjectId::as_str).collect();
+        assert_eq!(
+            names,
+            ["beta"],
+            "only the last used project stays, and an own window is left alone"
+        );
+        views.lock().loaded.remove("beta");
+        assert!(views.lock().others(&alpha).is_empty());
+    }
+
+    #[test]
+    fn a_preload_gives_way_to_any_open_and_stops_only_its_own_server() {
+        let alpha = ProjectId::new("alpha").unwrap();
+        let beta = ProjectId::new("beta").unwrap();
+
+        let views = IdeViews::default();
+        let (ticket, _) = views.begin(&alpha);
+        assert_eq!(
+            views.lock().preload_admit(&alpha, ticket),
+            Preload::Admitted,
+            "nothing else is loaded or opening"
+        );
+
+        let views = IdeViews::default();
+        let (preload, _) = views.begin(&alpha);
+        let (owner, _) = views.begin(&alpha);
+        assert_eq!(
+            views.lock().preload_admit(&alpha, preload),
+            Preload::Superseded,
+            "the owner opened the same project, whose server must not stop"
+        );
+        assert!(
+            views.lock().admit(&alpha, owner),
+            "the owner's open still shows"
+        );
+
+        let views = IdeViews::default();
+        let (preload, _) = views.begin(&alpha);
+        let (owner, _) = views.begin(&beta);
+        assert_eq!(
+            views.lock().preload_admit(&alpha, preload),
+            Preload::Refused,
+            "another project is opening, so the preload's own server stops"
+        );
+        assert!(views.lock().admit(&beta, owner));
+        assert!(
+            !views.lock().admit(&alpha, preload),
+            "a refused preload leaves no open behind"
+        );
+
+        let views = IdeViews::default();
+        views.lock().loaded.insert(
+            "beta".to_owned(),
+            kept_view("ide-62657461-1", "http://127.0.0.1:41001/", PANEL),
+        );
+        let (preload, _) = views.begin(&alpha);
+        assert_eq!(
+            views.lock().preload_admit(&alpha, preload),
+            Preload::Refused,
+            "another project's IDE is already loaded"
+        );
+    }
+
+    #[test]
+    fn a_left_note_kept_by_a_preload_is_handed_out_once() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        let beta = ProjectId::new("beta").unwrap();
+        let mut view = kept_view("ide-616c706861-1", "http://127.0.0.1:41000/", PANEL);
+        view.left = Some("node".to_owned());
+        views.lock().loaded.insert("alpha".to_owned(), view);
+        assert_eq!(views.lock().take_left(&alpha).as_deref(), Some("node"));
+        assert_eq!(views.lock().take_left(&alpha), None, "named once");
+        assert_eq!(views.lock().take_left(&beta), None);
     }
 
     #[test]
@@ -1309,32 +1447,20 @@ mod tests {
             let mut held = views.lock();
             held.loaded.insert(
                 "alpha".to_owned(),
-                Loaded {
-                    label: "ide-616c706861-1".to_owned(),
-                    url: launch.clone(),
-                },
+                kept_view("ide-616c706861-1", launch.as_str(), PANEL),
             );
-            let mut out = own_window("ide-window-61");
-            out.page_closed = true;
-            held.out.insert("alpha".to_owned(), out);
+            held.out
+                .insert("alpha".to_owned(), own_window("ide-window-61"));
         }
         assert_eq!(
             views.lock().own_window(&alpha, &later),
             OwnWindow::Stale,
             "an access restart gives a new URL, so the window shows a server that has gone"
         );
-        assert!(
-            views.lock().out["alpha"].page_closed,
-            "a stale window does not bring the page back"
-        );
         assert_eq!(
             views.lock().own_window(&alpha, &launch),
             OwnWindow::Stays,
             "the same launch stays in its window"
-        );
-        assert!(
-            !views.lock().out["alpha"].page_closed,
-            "the page is back, so closing the window must not stop the server"
         );
     }
 
@@ -1349,29 +1475,6 @@ mod tests {
             title_inset(false),
             if cfg!(target_os = "macos") { 32.0 } else { 0.0 },
             "the title bar is there whatever the main window is doing"
-        );
-    }
-
-    #[test]
-    fn a_removal_owes_the_server_stop_only_when_the_page_had_already_closed() {
-        let views = IdeViews::default();
-        let alpha = ProjectId::new("alpha").unwrap();
-        assert!(
-            !views.page_left(&alpha),
-            "with no window nothing was skipped"
-        );
-        views
-            .lock()
-            .out
-            .insert("alpha".to_owned(), own_window("ide-window-61"));
-        assert!(
-            !views.page_left(&alpha),
-            "the page is open, so it does its own stop"
-        );
-        assert!(views.keep_for_own_window(&alpha));
-        assert!(
-            views.page_left(&alpha),
-            "the page's stop was skipped, so the removal owes it"
         );
     }
 
@@ -1395,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn a_window_gone_home_stops_its_beat() {
+    fn a_dropped_ide_stops_its_beat() {
         use std::sync::atomic::{AtomicU64, Ordering};
         let ticks = Arc::new(AtomicU64::new(0));
         let counted = Arc::clone(&ticks);
@@ -1408,9 +1511,11 @@ mod tests {
         while ticks.load(Ordering::SeqCst) == 0 {
             std::thread::sleep(Duration::from_millis(1));
         }
-        drop(Out {
-            window: "ide-window-61".to_owned(),
-            page_closed: false,
+        drop(Loaded {
+            label: "ide-616c706861-1".to_owned(),
+            url: Url::parse("http://127.0.0.1:41000/").unwrap(),
+            at: PANEL,
+            left: None,
             beat,
         });
         std::thread::sleep(Duration::from_millis(50));
@@ -1440,10 +1545,7 @@ mod tests {
         assert!(!views.any_loaded(), "no IDE webview yet");
         views.lock().loaded.insert(
             "alpha".to_owned(),
-            Loaded {
-                label: "ide-616c706861-1".to_owned(),
-                url: Url::parse("http://127.0.0.1:41000/").unwrap(),
-            },
+            kept_view("ide-616c706861-1", "http://127.0.0.1:41000/", PANEL),
         );
         assert!(views.any_loaded(), "a hidden IDE still listens for reveals");
         views.lock().loaded.remove("alpha");
