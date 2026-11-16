@@ -1,10 +1,6 @@
-#[cfg(not(windows))]
-use super::keep_awake::LID_JOURNAL_TEXT;
-#[cfg(windows)]
-use super::keep_awake::LID_SETTING_TEXT;
 use super::keep_awake::{
-    APPROVAL_TEXT, apps_not_paused, apps_not_paused_text, ended_text, hot_text, left_over,
-    lid_closed_left, lid_journal,
+    APPROVAL_TEXT, LID_JOURNAL_TEXT, LID_SETTING_TEXT, apps_not_paused, apps_not_paused_text,
+    ended_text, hot_text, left_over, lid_closed_left, lid_journal,
 };
 use super::*;
 use crate::config::ModelAccess;
@@ -392,6 +388,11 @@ fn the_lid_closed_lane_items_change_only_their_own_rows() {
     let (_folder, mut connection) = store();
     let freeze = crate::keep_awake::freeze::KIND;
     let mute = crate::keep_awake::mute::KIND;
+    let lid = if cfg!(windows) {
+        LID_SETTING_TEXT
+    } else {
+        LID_JOURNAL_TEXT
+    };
     lid_journal(&connection, true).unwrap();
     left_over(&connection, &kinds(&["sleep_disabled"])).unwrap();
 
@@ -415,7 +416,7 @@ fn the_lid_closed_lane_items_change_only_their_own_rows() {
             .any(|text| text.contains("could not put the sound back"))
     );
     assert!(texts.iter().any(|text| text == NOT_PUT_BACK));
-    assert!(texts.iter().any(|text| text == LID_JOURNAL_TEXT));
+    assert!(texts.iter().any(|text| text == lid));
 
     lid_closed_left(&connection, &[mute]).unwrap();
     reconciled(&mut connection, NOW_MS + 1);
@@ -429,5 +430,5 @@ fn the_lid_closed_lane_items_change_only_their_own_rows() {
         .collect();
     assert_eq!(texts.len(), 2, "{texts:?}");
     assert!(texts.iter().any(|text| text == NOT_PUT_BACK));
-    assert!(texts.iter().any(|text| text == LID_JOURNAL_TEXT));
+    assert!(texts.iter().any(|text| text == lid));
 }
