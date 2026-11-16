@@ -2,6 +2,9 @@ use super::*;
 use crate::harnesses::manifest::parse;
 use crate::plugins::SecretValue;
 
+#[path = "listed_walk_tests.rs"]
+mod walk_tests;
+
 const SMALL: &str = "schema: 1\nkind: harness\nid: \"sample\"\nname: \"Sample\"\nbinaries:\n  - \"sample\"\nheadless: \"sample --json\"\nmodel_selection: true\naccount_kinds:\n  - \"api_key\"\n";
 
 const BLOCKS: &str = "home:\n  env_prefixes:\n    - \"SAMPLE_\"\n  env:\n    SAMPLE_CONFIG: \"{home}/agent\"\n    SAMPLE_UPDATES: \"off\"\n  set_home: true\nmcp:\n  render: \"json-mcp-servers\"\n  path: \"{home}/agent/mcp.json\"\ninstructions:\n  render: \"file\"\n  path: \"{home}/agent/AGENTS.md\"\n";
@@ -12,11 +15,24 @@ fn manifest(blocks: &str) -> crate::harnesses::manifest::Manifest {
     parse(format!("{SMALL}{blocks}").as_bytes()).unwrap()
 }
 
-fn private_home() -> (tempfile::TempDir, PathBuf) {
+/// A listed launch's private home as T18 lays it out, `<agent home>/<harness id>/account-1`,
+/// each folder 0700. Input: the harness id. Output: the agent home's guard and the private
+/// home.
+fn harness_home(id: &str) -> (tempfile::TempDir, PathBuf) {
     let folder = tempfile::tempdir().unwrap();
-    let home = folder.path().canonicalize().unwrap();
-    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+    let base = folder.path().canonicalize().unwrap();
+    let home = base.join(id).join("account-1");
+    fs::create_dir_all(&home).unwrap();
+    for path in [base.clone(), base.join(id), home.clone()] {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     (folder, home)
+}
+
+/// The private home [`harness_home`] lays out for the sample manifest's harness.
+/// Output: the agent home's guard and the private home.
+fn private_home() -> (tempfile::TempDir, PathBuf) {
+    harness_home("sample")
 }
 
 fn context() -> AgentContext {
@@ -221,9 +237,7 @@ fn a_team_agent_launch_of_a_listed_harness_is_refused_and_writes_nothing() {
 /// runs through a link planted in the home is left alone, and so is what the link names.
 #[test]
 fn an_adopted_listed_launch_removes_only_its_own_files_inside_the_home() {
-    let folder = tempfile::tempdir().unwrap();
-    let home = folder.path().canonicalize().unwrap().join("home");
-    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let (_folder, home) = private_home();
     let outside = tempfile::tempdir().unwrap();
     let kept = outside.path().join("mcp.json");
     fs::write(&kept, "kept").unwrap();
@@ -241,6 +255,7 @@ fn an_adopted_listed_launch_removes_only_its_own_files_inside_the_home() {
             "agent".to_owned(),
             "linked/mcp.json".to_owned(),
         ],
+        listed: true,
     };
 
     let adopted = Installed::adopt(&files);
@@ -344,7 +359,7 @@ fn an_owner_server_under_the_team_server_name_never_reaches_an_acp_session() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_acp_launch_in_a_project_starts_with_its_manifest_arguments_and_home_variables() {
-    let (_folder, home) = private_home();
+    let (_folder, home) = harness_home("standin-acp");
     let work = tempfile::tempdir().unwrap();
     let work = work.path().canonicalize().unwrap();
     let profiles = tempfile::tempdir().unwrap();
@@ -432,4 +447,91 @@ fn an_acp_harness_renders_only_the_owners_servers_and_takes_the_team_server_in_i
             "files".to_owned()
         ])
     );
+}
+
+/// T19b 19b-3: a started ACP agent's session opens with the engine's team server its
+/// installed context carries, as the stand-in's own log of its input shows, and with no owner
+/// secret; this covers the line that hands those servers from the launch to its driver.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_started_acp_agent_opens_its_session_with_the_engines_team_server_and_no_owner_secret() {
+    let (_folder, home) = harness_home("standin-acp");
+    let base = tempfile::Builder::new()
+        .prefix("ca-acp-team-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let work = base.path().canonicalize().unwrap().join("work");
+    fs::DirBuilder::new().mode(0o700).create(&work).unwrap();
+    let profile = base.path().canonicalize().unwrap().join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let install = tempfile::tempdir().unwrap();
+    let program = install.path().canonicalize().unwrap().join("standin-acp");
+    fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/harness/standin.sh"
+        ),
+        &program,
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let mailbox = home.join("mailbox");
+    let context = context()
+        .with_agent_team_tool(Path::new(ENGINE), &mailbox, &[], false)
+        .unwrap();
+    let request = crate::harnesses::launch::LaunchRequest {
+        harness: "standin-acp".into(),
+        executable: program,
+        working_dir: work,
+        account: crate::harnesses::launch::AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:11434".into(),
+            key: None,
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile),
+        unconfined: false,
+        git_identity: None,
+        limits: crate::harnesses::launch::LaunchLimits::default(),
+    };
+
+    let started = crate::harnesses::launch::Session::start_with_context(request, context);
+
+    assert!(started.is_ok(), "{:?}", started.as_ref().err());
+    let mut session = started.unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut events = Vec::new();
+    while !events
+        .iter()
+        .any(|event| matches!(event, crate::harnesses::launch::LaunchEvent::Ready { .. }))
+    {
+        assert!(std::time::Instant::now() < deadline, "{events:?}");
+        if let Some(event) = session
+            .next_event(std::time::Duration::from_millis(200))
+            .unwrap()
+        {
+            events.push(event);
+        }
+    }
+    let log = fs::read_to_string(home.join("standin").join("stdin-1")).unwrap_or_default();
+    let opened = log
+        .lines()
+        .find(|line| line.contains("\"session/new\""))
+        .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+    assert_eq!(
+        opened.map(|frame| frame["params"]["mcpServers"].clone()),
+        Some(serde_json::json!([{
+            "name": crate::team::tool::SERVER_NAME,
+            "command": ENGINE,
+            "args": [crate::team::tool::AGENT_SERVER_COMMAND, mailbox.to_str().unwrap()],
+            "env": []
+        }])),
+        "{log}"
+    );
+    assert!(
+        !log.contains("s3cret") && !log.contains("FILES_TOKEN"),
+        "{log}"
+    );
+    session.stop().unwrap();
 }

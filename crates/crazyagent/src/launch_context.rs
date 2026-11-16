@@ -247,8 +247,10 @@ pub struct NativeTeam {
 
 /// Where one launch wrote its files, as a pane record keeps it, so an engine that adopts
 /// the pane later deletes them when the pane stops: the agent home, whether the launch
-/// was for Codex, which also writes `config.toml` and the skill copies there, and the files
-/// a listed harness's manifest had written, as paths inside the home.
+/// was for Codex, which also writes `config.toml` and the skill copies there, the files
+/// a listed harness's manifest had written, as paths inside the home, and whether the home
+/// is a listed harness's private home, `<agent home>/<harness id>/<account>`, which is
+/// only ever reached by a no-follow walk from the agent home.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstalledFiles {
@@ -256,6 +258,8 @@ pub struct InstalledFiles {
     pub codex: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rendered: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub listed: bool,
 }
 
 struct Budget {
@@ -1098,6 +1102,7 @@ impl AgentContext {
                 home: home.to_path_buf(),
                 codex,
                 rendered: Vec::new(),
+                listed: false,
             }),
             transcripts: self.transcripts,
             hooks: false,
@@ -1355,8 +1360,7 @@ impl AgentContext {
         let invalid = |_: crate::harnesses::manifest::Refused| failure("launch_manifest_invalid");
         let renders = crate::harnesses::render::read(manifest).map_err(invalid)?;
         let asked = crate::harnesses::home::read(manifest).map_err(invalid)?;
-        crate::harnesses::launch::validate_home(home)?;
-        let lock = lock(home)?;
+        let lock = lock_listed(home, Some(manifest.id.as_str()))?;
         let rendered: Vec<String> = [
             renders.mcp.as_ref().map(|file| file.path.clone()),
             renders.instructions.as_ref().map(|file| file.path.clone()),
@@ -1371,6 +1375,7 @@ impl AgentContext {
                 home: home.to_path_buf(),
                 codex: false,
                 rendered,
+                listed: true,
             }),
             transcripts: self.transcripts,
             hooks: false,
@@ -1505,8 +1510,12 @@ impl Installed {
     /// Output: the guard, a `launch_account_home_*` code for a home that is no longer a
     /// private agent home, or `launch_home_busy` while another launch uses it.
     pub fn adopt(files: &InstalledFiles) -> Result<Self, LaunchError> {
-        crate::harnesses::launch::validate_home(&files.home)?;
-        let lock = lock(&files.home)?;
+        let lock = if files.listed {
+            lock_listed(&files.home, None)?
+        } else {
+            crate::harnesses::launch::validate_home(&files.home)?;
+            lock(&files.home)?
+        };
         Ok(Self {
             arguments: Vec::new(),
             files: Some(files.clone()),
@@ -1533,8 +1542,13 @@ impl Installed {
 }
 
 impl InstalledFiles {
-    /// Lists the generated file and folder paths a launch deletes, all inside its home.
+    /// Lists the generated file and folder paths a launch deletes by path, all inside its
+    /// home; none for a listed harness's private home, whose files go only through a
+    /// no-follow walk from the agent home.
     fn removals(&self) -> Vec<PathBuf> {
+        if self.listed {
+            return Vec::new();
+        }
         let mut paths = vec![self.home.join(STATE)];
         if self.codex {
             paths.push(self.home.join("config.toml"));
@@ -2407,6 +2421,13 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
         crate::team::cleanup::release_acls([home, path.as_path()]);
         open()
     });
+    held(opened)
+}
+
+/// Locks a home's launch lock once opened, only one [`lock_kept`] passes. Input: the open.
+/// Output: the locked file, `launch_context_unsafe` or `launch_home_busy`.
+#[cfg(unix)]
+fn held(opened: rustix::io::Result<std::os::fd::OwnedFd>) -> Result<File, LaunchError> {
     let file = File::from(opened.map_err(|_| failure("launch_context_unsafe"))?);
     let found = rustix::fs::fstat(&file).map_err(|_| failure("launch_context_unsafe"))?;
     if !lock_kept(&found) {
@@ -2415,6 +2436,31 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
     rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| failure("launch_home_busy"))?;
     Ok(file)
+}
+
+/// Opens and locks a listed launch's private home's launch lock as [`lock`] does, relative
+/// to the home walked to from the agent home without following a link
+/// ([`crate::harnesses::home::listed_folder`]); no flag or ACL is cleared, as that works by
+/// path. Inputs: the private home and the harness id it must name when known. Output: the
+/// locked file, a `launch_account_home_*` refusal, `launch_context_unsafe` or
+/// `launch_home_busy`.
+#[cfg(unix)]
+fn lock_listed(home: &Path, id: Option<&str>) -> Result<File, LaunchError> {
+    use crate::harnesses::home::{Walk, listed_folder};
+    let folder = listed_folder(home, id, &[], Walk::Check)?;
+    held(rustix::fs::openat(
+        &folder,
+        LOCK,
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    ))
+}
+
+/// Refuses a listed launch's lock where owner-only no-follow creation does not exist.
+/// Takes its inputs, all unused. Returns `launch_context_unavailable`.
+#[cfg(not(unix))]
+fn lock_listed(_home: &Path, _id: Option<&str>) -> Result<File, LaunchError> {
+    Err(failure("launch_context_unavailable"))
 }
 
 /// Whether a home's launch lock is held and kept: this user's plain file, on macOS with no
@@ -2439,15 +2485,27 @@ pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
 }
 
 /// Takes a context-less launch's hold on an agent home: the same per-home lock a full
-/// install takes, installing no files. The guard keeps a second launch out of the home
-/// while this one runs, so writing the launch key never lands on a home an agent already
-/// runs on. A Codex home also loses the skills an earlier run left in it, as a full install
-/// does (CTXM1-R2-L1). Inputs: the agent's home and the harness id. Output: the lock guard,
-/// `launch_home_busy` or [`SKILLS_KEPT`].
+/// install takes, installing no files, and for a listed harness's private home only through
+/// its no-follow walk from the agent home ([`lock_listed`]). The guard keeps a second launch
+/// out of the home while this one runs, so writing the launch key never lands on a home an
+/// agent already runs on. A Codex home also loses the skills an earlier run left in it, as a
+/// full install does (CTXM1-R2-L1). Inputs: the agent's home and the harness id. Output: the
+/// lock guard, a `launch_account_home_*` refusal, `launch_home_busy` or [`SKILLS_KEPT`].
 pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
-    crate::harnesses::launch::validate_home(home)?;
-    let lock = lock(home)?;
-    if drivers::piped(harness) == Ok(Piped::Codex) {
+    let piped = drivers::piped(harness);
+    let lock = match piped {
+        Ok(Piped::Acp | Piped::JsonlTurn | Piped::TextTurn) => {
+            let listed = crate::harnesses::registry::registry()
+                .get(harness)
+                .ok_or_else(|| failure("launch_harness_unsupported"))?;
+            lock_listed(home, Some(listed.manifest().id.as_str()))?
+        }
+        _ => {
+            crate::harnesses::launch::validate_home(home)?;
+            lock(home)?
+        }
+    };
+    if piped == Ok(Piped::Codex) {
         remove_copies(home)?;
     }
     Ok(Installed {

@@ -190,9 +190,10 @@ pub(crate) fn plain(path: &str) -> bool {
 }
 
 /// Writes the files a manifest asks for into one launch's private home, each 0600, made new
-/// through no-follow steps from 0700 folders, so a link planted in the home is replaced or
-/// refused, never written through. Inputs: the files, the private home, the MCP servers the
-/// launch gives and its instruction text. Output: the paths written, or the refusal.
+/// through no-follow steps from the agent home through 0700 folders, so a link planted in
+/// the home or at its harness or account folder is replaced or refused, never written
+/// through. Inputs: the files, the private home, the MCP servers the launch gives and its
+/// instruction text. Output: the paths written, or the refusal.
 #[cfg(unix)]
 pub fn write<'a>(
     renders: &Renders,
@@ -236,10 +237,10 @@ pub fn write<'a>(
 }
 
 /// Writes one file below the private home: its folders through
-/// [`super::home::private_folder`], any entry at its name removed, then the file made new,
-/// 0600, never through a link. The text is zeroed once written, as it may hold MCP secrets.
-/// Inputs: the home, the path below it and the text. Output: the file's path, or the
-/// refusal.
+/// [`super::home::listed_folder`] from the agent home, any entry at its name removed, then
+/// the file made new, 0600, never through a link. The text is zeroed once written, as it
+/// may hold MCP secrets. Inputs: the home, the path below it and the text. Output: the
+/// file's path, or the refusal.
 #[cfg(unix)]
 fn put(home: &Path, path: &str, text: String) -> Result<PathBuf, LaunchError> {
     use rustix::fs::{AtFlags, Mode, OFlags};
@@ -250,7 +251,8 @@ fn put(home: &Path, path: &str, text: String) -> Result<PathBuf, LaunchError> {
         None => (Vec::new(), path),
     };
     let mut bytes = text.into_bytes();
-    let written = super::home::private_folder(home, &folders).and_then(|folder| {
+    let walked = super::home::listed_folder(home, None, &folders, super::home::Walk::Make);
+    let written = walked.and_then(|folder| {
         match rustix::fs::unlinkat(&folder, name, AtFlags::empty()) {
             Ok(()) | Err(rustix::io::Errno::NOENT) => {}
             Err(_) => return Err(failure("launch_account_home_unsafe")),
@@ -270,12 +272,13 @@ fn put(home: &Path, path: &str, text: String) -> Result<PathBuf, LaunchError> {
 }
 
 /// Deletes one file a render wrote, by its path inside the private home, through no-follow
-/// steps from the home: a path that is not [`plain`], a folder on the way that is a link or
-/// is missing, and a name that is a folder are each left alone; a link at the name itself
-/// is removed, never what it names. Inputs: the home and the path inside it.
+/// steps from the agent home ([`super::home::listed_folder`]): a path that is not [`plain`],
+/// a home of another shape, a folder on the way that is a link or is missing, and a name
+/// that is a folder are each left alone; a link at the name itself is removed, never what
+/// it names. Inputs: the home and the path inside it.
 #[cfg(unix)]
 pub(crate) fn remove(home: &Path, path: &str) {
-    use rustix::fs::{AtFlags, Mode, OFlags};
+    use rustix::fs::AtFlags;
     if !plain(path) {
         return;
     }
@@ -283,16 +286,10 @@ pub(crate) fn remove(home: &Path, path: &str) {
         Some((folders, name)) => (folders.split('/').collect::<Vec<_>>(), name),
         None => (Vec::new(), path),
     };
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let Ok(mut folder) = rustix::fs::open(home, flags, Mode::empty()) else {
+    let Ok(folder) = super::home::listed_folder(home, None, &folders, super::home::Walk::Open)
+    else {
         return;
     };
-    for part in folders {
-        let Ok(child) = rustix::fs::openat(&folder, part, flags, Mode::empty()) else {
-            return;
-        };
-        folder = child;
-    }
     let _ = rustix::fs::unlinkat(&folder, name, AtFlags::empty());
 }
 
