@@ -1075,6 +1075,23 @@ async fn home_shell(connection: &mut Connection) -> Shell {
     shell
 }
 
+/// Puts the focus of a Home that a page went to on its list, where Enter acts on the job
+/// card. Once its checks land, Home moves the focus to Get set up, since setup is never done
+/// here (see `home_shell`), and its key bar then starts with that panel's Enter; Tab moves it
+/// back. No reply arrives before the next key, so the focus holds. Input: the shell on Home.
+fn list_focus(shell: &mut Shell) {
+    let setup_keys = |shell: &mut Shell| {
+        render(shell, 120, 30)
+            .lines()
+            .last()
+            .is_some_and(|keys| keys.trim_start().starts_with("Enter Add an account"))
+    };
+    if setup_keys(shell) {
+        shell.key(Key::Tab);
+    }
+    assert!(!setup_keys(shell), "Home's focus is on its list");
+}
+
 /// DEC-177: a project move whose name is taken in the projects folder ends failed with the
 /// reason, the project and the folder already there untouched; a terminal started again shows
 /// the ended move on Home and d forgets it.
@@ -1613,6 +1630,7 @@ async fn a_delete_whose_trash_move_fails_says_why_on_home_and_enter_reopens_the_
         "{rows}"
     );
     assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
+    list_focus(&mut shell);
     shell.key(Key::Home);
     shell.key(Key::Enter);
     assert_eq!(
