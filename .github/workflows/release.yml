@@ -361,6 +361,10 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release --locked --target "$TARGET" -p crazyagent --bins
+          if [ "$PLATFORM" = linux ]; then
+            RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --locked --target "$TARGET" -p crazyagent --bin crazyagent-landlock --target-dir "${CARGO_TARGET_DIR:-target}/crt-static"
+            install -m 0755 "${CARGO_TARGET_DIR:-target}/crt-static/$TARGET/release/crazyagent-landlock" "${CARGO_TARGET_DIR:-target}/$TARGET/release/crazyagent-landlock"
+          fi
           if [ "$PLATFORM" = windows ]; then
             cargo build --release --locked --target "$TARGET" -p crazyagent-win-sandbox --bin crazyagent-win-boundary
           fi
