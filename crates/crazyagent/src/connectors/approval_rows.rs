@@ -709,16 +709,16 @@ fn held_calls(launch: &GatewayLaunch) -> Vec<String> {
     held.into_iter().map(|(_, id)| id).collect()
 }
 
-/// Makes the launch read on the database fail, or read again, by renaming the column it
-/// reads, while every approval still reads. Inputs: the database and whether it fails.
+/// Makes the launch read on this connection fail, or read again, with a temporary table of
+/// the same name that hides the real one, while every approval still reads and every launch
+/// record stays. Inputs: the database and whether the read fails.
 fn launch_read_fails(db: &rusqlite::Connection, fails: bool) {
-    let (from, to) = if fails {
-        ("connectors", "unread")
+    let sql = if fails {
+        "CREATE TEMP TABLE connector_launches (unread INTEGER)"
     } else {
-        ("unread", "connectors")
+        "DROP TABLE temp.connector_launches"
     };
-    let sql = format!("ALTER TABLE connector_launches RENAME {from} TO {to}");
-    db.execute_batch(&sql).unwrap();
+    db.execute_batch(sql).unwrap();
 }
 
 /// DEC-168 Task 12, code r1 CT12-1: a settle whose launch read fails settles nothing, so a
