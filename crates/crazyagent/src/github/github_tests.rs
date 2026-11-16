@@ -3399,4 +3399,3 @@ fn publish_job_refuses_a_bad_plan_a_wrong_step_and_a_second_run() {
         "github_publish_step_invalid"
     );
 }
-
