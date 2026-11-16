@@ -1014,6 +1014,12 @@ pub(super) fn forget_keys(root: &Path, name: &str) -> Result<(), OAuthError> {
     let lock = renewal_lock(root, name);
     let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
     flows().retain(|flow| !(flow.root == root && flow.connector == name));
+    removed(root, |key| saved_for(key, name))
+}
+
+/// Removes every plugin key `which` picks. Inputs: engine root and the pick. Output: Ok,
+/// or the key store's refusal.
+fn removed(root: &Path, which: impl Fn(&str) -> bool) -> Result<(), OAuthError> {
     let folder = match std::fs::read_dir(root.join(PLUGIN_KEYS)) {
         Ok(folder) => folder,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1022,7 +1028,7 @@ pub(super) fn forget_keys(root: &Path, name: &str) -> Result<(), OAuthError> {
     let mut keys = Vec::new();
     for entry in folder {
         let file = entry.map_err(|_| key_store())?.file_name();
-        if let Some(key) = file.to_str().filter(|key| saved_for(key, name)) {
+        if let Some(key) = file.to_str().filter(|&key| which(key)) {
             keys.push(key.to_owned());
         }
     }
@@ -1030,6 +1036,16 @@ pub(super) fn forget_keys(root: &Path, name: &str) -> Result<(), OAuthError> {
         accounts::remove_key_in(root, PLUGIN_KEYS, key).map_err(|_| key_store())?;
     }
     Ok(())
+}
+
+/// Whether a key a connector's sign-ins saved is one a sign-out removes: the record, or an
+/// access or refresh token at any issuer; the owner's own app, a registered client and the
+/// issuer bindings stay. Input: a key [`saved_for`] the connector. Output: true to remove.
+fn signed_out_key(key: &str) -> bool {
+    let kind = key
+        .strip_prefix("connector-")
+        .and_then(|rest| rest.split_once('-'));
+    matches!(kind, Some(("signin" | "token" | "refresh", _)))
 }
 
 /// Runs `save`, which saves or clears the owner's own app for a connector, under its
@@ -1057,17 +1073,16 @@ pub(super) fn own_replaced(
     save()
 }
 
-/// Ends a connector's sign-in at the owner's ask, whichever client made it, and drops every
-/// sign-in begun for it, under its renewal lock; its "Sign in again" is cleared, since the
+/// Ends a connector's sign-in at the owner's ask, whichever client made it: every token at
+/// every issuer and the record go, even one that cannot be read, and every sign-in begun
+/// for it is dropped, under its renewal lock; its "Sign in again" is cleared, since the
 /// owner chose this. Inputs: database, engine root and connector. Output: Ok, or the key
 /// store's or database's refusal.
 pub(super) fn signed_out(db: &Connection, root: &Path, name: &str) -> Result<(), OAuthError> {
     let lock = renewal_lock(root, name);
     let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
     flows().retain(|flow| !(flow.root == root && flow.connector == name));
-    if let Some(record) = record_of(root, name)? {
-        ended(root, name, &record.issuer)?;
-    }
+    removed(root, |key| saved_for(key, name) && signed_out_key(key))?;
     signed_in(db, name)
 }
 

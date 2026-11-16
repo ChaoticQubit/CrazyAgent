@@ -205,8 +205,9 @@ where
 }
 
 /// Ends a sign-in's cell with how its wait ended. An answer is claimed first, unless a
-/// cancel came before it, and then redeemed; any other end is written only while the
-/// sign-in still waits. Inputs: the cell, how the wait ended and the redeem step.
+/// cancel came before it, and then redeemed, and a redeem that panics ends refused; any
+/// other end is written only while the sign-in still waits. Inputs: the cell, how the wait
+/// ended and the redeem step.
 fn settle(
     cell: &Mutex<Cell>,
     waited: Waited,
@@ -221,9 +222,13 @@ fn settle(
                 }
                 held.claimed = true;
             }
-            match finish(&code, iss.as_deref()) {
-                Ok(()) => SignInState::SignedIn,
-                Err(refusal) => failed(refusal.0),
+            let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                finish(&code, iss.as_deref())
+            }));
+            match finished {
+                Ok(Ok(())) => SignInState::SignedIn,
+                Ok(Err(refusal)) => failed(refusal.0),
+                Err(_) => failed("connector_oauth_refused"),
             }
         }
         Waited::Refused => failed("connector_oauth_refused"),
@@ -308,21 +313,26 @@ pub fn state_of(root: &Path, name: &str) -> SignInState {
         .map_or(SignInState::Idle, |flow| locked(&flow.cell).state.clone())
 }
 
-/// Clears a connector's sign-in once its record or sign-in identity changed: a waiting one
-/// is cancelled and reads cancelled, one whose answer is being redeemed is left to finish,
-/// and one that already ended is forgotten, so it never reads signed in after. Inputs: the
-/// engine root and the connector.
-fn replaced(root: &Path, name: &str) {
+/// Clears a connector's sign-in before its record or sign-in identity changes, in one hold
+/// of the registry: a waiting one is cancelled and reads cancelled, one that ended is
+/// forgotten, and one whose answer is being redeemed refuses the change, so no answer saves
+/// tokens after it. Inputs: the engine root and the connector. Output: Ok, or
+/// `connector_oauth_sign_in_finishing`.
+fn replaced(root: &Path, name: &str) -> Result<(), EngineError> {
     let mut flows = flows();
     prune(&mut flows);
     let same = |flow: &Flow| flow.root == root && flow.name == name;
     let Some(at) = flows.iter().position(same) else {
-        return;
+        return Ok(());
     };
-    if locked(&flows[at].cell).state == SignInState::Waiting {
-        stopped(&flows[at]);
-    } else {
-        flows.remove(at);
+    let waiting = locked(&flows[at].cell).state == SignInState::Waiting;
+    match stopped(&flows[at]) {
+        SignInState::Waiting => Err(EngineError(FINISHING.into())),
+        SignInState::Cancelled if waiting => Ok(()),
+        _ => {
+            flows.remove(at);
+            Ok(())
+        }
     }
 }
 
@@ -344,8 +354,9 @@ fn refusal(error: OAuthError) -> EngineError {
 
 /// Saves the owner's own OAuth app for a connector that allows one, which then signs in
 /// with that app alone; a waiting sign-in is cancelled first, since it began with another
-/// client, and an ended one forgotten. Inputs: the engine database and root, the connector,
-/// the client id and the client secret of a confidential app. Output: Ok, or the refusal.
+/// client, an ended one forgotten, and one being redeemed refuses it. Inputs: the engine
+/// database and root, the connector, the client id and the secret of a confidential app.
+/// Output: Ok, or the refusal.
 pub fn save_own_app(
     db: &Connection,
     root: &Path,
@@ -357,24 +368,26 @@ pub fn save_own_app(
         .map(std::str::from_utf8)
         .transpose()
         .map_err(|_| EngineError("connector_oauth_client_invalid".into()))?;
-    replaced(root, name);
+    replaced(root, name)?;
     oauth::set_own_client(db, root, name, client_id, secret)
         .map_err(refusal)
 }
 
 /// Removes the owner's own OAuth app for a connector, which then signs in the automatic
-/// way; a waiting sign-in is cancelled first and an ended one forgotten. Inputs: the engine
-/// database and root and the connector. Output: Ok, or the refusal.
+/// way; a waiting sign-in is cancelled first, an ended one forgotten, and one being
+/// redeemed refuses it. Inputs: the engine database and root and the connector. Output:
+/// Ok, or the refusal.
 pub fn clear_own_app(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
-    replaced(root, name);
+    replaced(root, name)?;
     oauth::clear_own_client(db, root, name).map_err(refusal)
 }
 
-/// Signs a connector out at the owner's ask: a waiting sign-in is cancelled first and an
-/// ended one forgotten, then the sign-in ends with no "Sign in again" after. Inputs: the
-/// engine database and root and the connector. Output: Ok, or the refusal.
+/// Signs a connector out at the owner's ask: a waiting sign-in is cancelled first, an ended
+/// one forgotten, and one being redeemed refuses it; then the sign-in ends with no "Sign in
+/// again" after. Inputs: the engine database and root and the connector. Output: Ok, or the
+/// refusal.
 pub fn sign_out(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
-    replaced(root, name);
+    replaced(root, name)?;
     oauth::sign_out(db, root, name).map_err(refusal)
 }
 
