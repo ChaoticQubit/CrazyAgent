@@ -6,21 +6,23 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// An account key typed or pasted for one profile save. Its bytes are zeroed where they lie
-/// when it is dropped, and a refused value is zeroed before the refusal returns, so no copy
-/// is left in freed memory; `into_bytes` hands the buffer over whole (rv-sa241 T5 N1).
+/// when it is dropped, a refused value included, since `new` holds the bytes as a secret
+/// before it checks them, so no copy is left in freed memory; `into_bytes` hands the buffer
+/// over whole (rv-sa241 T5 N1).
 pub struct AccountSecret(Vec<u8>);
 
 impl AccountSecret {
-    pub fn new(mut bytes: Vec<u8>) -> Result<Self, EngineError> {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, EngineError> {
+        let secret = Self(bytes);
+        let bytes = &secret.0;
         if bytes.is_empty()
             || bytes.len() > 8192
             || bytes.iter().any(|byte| matches!(byte, 0 | b'\r' | b'\n'))
-            || std::str::from_utf8(&bytes).is_err()
+            || std::str::from_utf8(bytes).is_err()
         {
-            bytes.fill(0);
             return Err(EngineError("account_secret_invalid".into()));
         }
-        Ok(Self(bytes))
+        Ok(secret)
     }
 
     pub(in crate::engine) fn into_bytes(mut self) -> Vec<u8> {
