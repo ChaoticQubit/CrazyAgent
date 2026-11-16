@@ -555,21 +555,6 @@ async fn desktop_project_catalog(
 }
 
 #[tauri::command]
-async fn desktop_setup_project(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    spec: ProjectSpec,
-    setup: ProjectSetup,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
-    main_window(&webview)?;
-    lock(&state)
-        .await?
-        .setup_project(spec, setup, generation)
-        .await
-}
-
-#[tauri::command]
 async fn desktop_project_setup(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -2238,6 +2223,18 @@ async fn desktop_delete_project_job(
 ) -> Result<crazyagent::projects_home::job::JobView, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.delete_project_job(&id, name)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_setup_project_job(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    spec: ProjectSpec,
+    setup: ProjectSetup,
+) -> Result<crazyagent::projects_home::job::JobView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.setup_project_job(spec, setup)?;
     call.await
 }
 
@@ -5032,7 +5029,6 @@ native_commands! {
     desktop_project_list,
     desktop_create_project,
     desktop_project_catalog,
-    desktop_setup_project,
     desktop_project_setup,
     desktop_research_jobs,
     desktop_project_activity,
@@ -5118,6 +5114,7 @@ native_commands! {
     desktop_create_demo,
     desktop_move_project_home,
     desktop_delete_project_job,
+    desktop_setup_project_job,
     desktop_cancel_research,
     desktop_retry_research,
     desktop_plan_roadmap,

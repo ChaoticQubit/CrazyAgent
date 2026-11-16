@@ -195,7 +195,7 @@ impl AddFolder {
                 page.kept = Some((view.source.clone(), view.mode, view.overrides.clone()));
                 page.moving = match view.kind {
                     JobKind::MoveProject => view.project_id.clone(),
-                    JobKind::Add | JobKind::Delete => None,
+                    JobKind::Add | JobKind::Delete | JobKind::Setup => None,
                 };
                 page.pending = Some(code);
                 page.focus = Focus::Add;
@@ -540,6 +540,7 @@ impl AddFolder {
             JobKind::Add => "Adding",
             JobKind::MoveProject => "Moving",
             JobKind::Delete => "Deleting",
+            JobKind::Setup => "Setting up",
         };
         ctx.say(Message::success(
             &format!("{verb} {name}."),

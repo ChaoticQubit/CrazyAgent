@@ -20,7 +20,8 @@ pub(in crate::tui) enum JobAction {
 }
 
 /// Whether the job is still at work: downloading, waiting for agents to stop, copying,
-/// moving folders to the Trash or clearing. Takes the job. Returns true while it runs.
+/// moving folders to the Trash, clearing or building a New Project. Takes the job. Returns
+/// true while it runs.
 pub(in crate::tui) fn running(job: &JobView) -> bool {
     matches!(
         job.state,
@@ -29,7 +30,18 @@ pub(in crate::tui) fn running(job: &JobView) -> bool {
             | JobState::Copying { .. }
             | JobState::Trashing { .. }
             | JobState::Clearing
+            | JobState::Building { .. }
     )
+}
+
+/// The verb a job's kind is named by while it runs. Takes the kind. Returns the verb.
+fn verb(kind: JobKind) -> &'static str {
+    match kind {
+        JobKind::Add => "Adding",
+        JobKind::MoveProject => "Moving",
+        JobKind::Delete => "Deleting",
+        JobKind::Setup => "Setting up",
+    }
 }
 
 /// The few words for a count of agents still stopping. Takes the count. Returns the words.
@@ -46,13 +58,9 @@ fn agents(left: u64) -> String {
 pub(in crate::tui) fn busy(held: Option<&JobView>) -> String {
     let line = match held.filter(|job| running(job)) {
         Some(job) => {
-            let verb = match job.kind {
-                JobKind::Add => "Adding",
-                JobKind::MoveProject => "Moving",
-                JobKind::Delete => "Deleting",
-            };
             format!(
-                "{verb} {} is running. Wait for it to finish on Home.",
+                "{} {} is running. Wait for it to finish on Home.",
+                verb(job.kind),
                 name(job)
             )
         }
@@ -72,9 +80,10 @@ pub(in crate::tui) fn refusal(code: &str, held: Option<&JobView>) -> String {
     }
 }
 
-/// The folder's own name, or the whole path when it has none; a delete's project name whole.
+/// The folder's own name, or the whole path when it has none; a delete's or a New Project's
+/// project name whole.
 pub(in crate::tui) fn name(job: &JobView) -> String {
-    if job.kind == JobKind::Delete {
+    if matches!(job.kind, JobKind::Delete | JobKind::Setup) {
         return job.source.clone();
     }
     let path = std::path::Path::new(&job.source);
@@ -95,6 +104,9 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
     }
     if job.kind == JobKind::Delete {
         return delete_line(job, &name);
+    }
+    if job.kind == JobKind::Setup {
+        return setup_line(job, &name);
     }
     let (verb, done) = match job.mode {
         AddMode::Move => ("Moving", "moved"),
@@ -136,6 +148,32 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
             format!("{name} needs your answer before it is {done}.")
         }
         JobState::Trashing { .. } | JobState::CutShort { .. } => delete_line(job, &name),
+        JobState::Building { .. } => setup_line(job, &name),
+    }
+}
+
+/// What a New Project does now or how it ended, with the project's name and how many of its
+/// documents it copied. Takes the New Project and its name. Returns one sentence.
+fn setup_line(job: &JobView, name: &str) -> String {
+    match &job.state {
+        JobState::Building { done, total } if *total > 0 => {
+            assert!(done <= total, "copied {done} past {total}");
+            let noun = if *total == 1 { "document" } else { "documents" };
+            format!("Setting up {name}: {done} of {total} {noun} copied")
+        }
+        JobState::Done => format!("{name} is set up in your projects folder."),
+        JobState::Cancelled { .. } => {
+            format!("Setting up {name} stopped. Nothing was kept.")
+        }
+        JobState::Failed { code, .. } => format!("{name}: {}", copy(code)),
+        JobState::Building { .. }
+        | JobState::Downloading { .. }
+        | JobState::Stopping { .. }
+        | JobState::Copying { .. }
+        | JobState::Clearing
+        | JobState::Trashing { .. }
+        | JobState::NeedsAnswer { .. }
+        | JobState::CutShort { .. } => format!("Setting up {name}..."),
     }
 }
 
@@ -168,9 +206,10 @@ fn delete_line(job: &JobView, name: &str) -> String {
                 folders(*total)
             )
         }
-        JobState::Downloading { .. } | JobState::Copying { .. } | JobState::NeedsAnswer { .. } => {
-            format!("Deleting {name}...")
-        }
+        JobState::Downloading { .. }
+        | JobState::Copying { .. }
+        | JobState::NeedsAnswer { .. }
+        | JobState::Building { .. } => format!("Deleting {name}..."),
     }
 }
 
@@ -180,14 +219,18 @@ fn delete_line(job: &JobView, name: &str) -> String {
 /// it ended. Takes the job. Returns the actions, the one Enter does first.
 pub(in crate::tui) fn actions(job: &JobView) -> Vec<JobAction> {
     let offered = match &job.state {
-        JobState::Downloading { .. } | JobState::Stopping { .. } | JobState::Copying { .. }
+        JobState::Downloading { .. }
+        | JobState::Stopping { .. }
+        | JobState::Copying { .. }
+        | JobState::Building { .. }
             if job.stopping =>
         {
             vec![]
         }
-        JobState::Downloading { .. } | JobState::Stopping { .. } | JobState::Copying { .. } => {
-            vec![JobAction::Stop]
-        }
+        JobState::Downloading { .. }
+        | JobState::Stopping { .. }
+        | JobState::Copying { .. }
+        | JobState::Building { .. } => vec![JobAction::Stop],
         JobState::Clearing | JobState::Trashing { .. } => vec![],
         JobState::Done => vec![JobAction::Dismiss],
         JobState::Failed {
@@ -223,11 +266,7 @@ pub(in crate::tui) fn end_line(
 pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
     assert!(running(job), "an ended job has no brief: {:?}", job.state);
     let name = cut(&name(job), BRIEF_NAME_CELLS_MAX, ellipsis);
-    let verb = match job.kind {
-        JobKind::Add => "Adding",
-        JobKind::MoveProject => "Moving",
-        JobKind::Delete => "Deleting",
-    };
+    let verb = verb(job.kind);
     let brief = match &job.state {
         _ if job.stopping => format!("Stopping {name}..."),
         JobState::Downloading { progress } if progress.total > 0 => {
@@ -247,6 +286,10 @@ pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
         JobState::Copying { copied, .. } if *copied > 0 => format!("{verb} {name}: {copied} files"),
         JobState::Copying { .. } => format!("{verb} {name}..."),
         JobState::Trashing { done, total } => format!("{verb} {name}: {done} of {total}"),
+        JobState::Building { done, total } if *total > 0 => {
+            format!("{verb} {name}: {done} of {total}")
+        }
+        JobState::Building { .. } => format!("{verb} {name}..."),
         _ => format!("Finishing {name}..."),
     };
     assert!(brief.contains(&name));
@@ -258,7 +301,9 @@ pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
 pub(in crate::tui) fn badge(job: &JobView) -> (Status, &'static str) {
     let moving = job.kind == JobKind::MoveProject;
     let deleting = job.kind == JobKind::Delete;
+    let building = job.kind == JobKind::Setup;
     let badge = match &job.state {
+        JobState::Building { .. } => (Status::Active, "Setting up"),
         JobState::Downloading { .. } => (Status::Active, "Downloading"),
         JobState::Stopping { .. } => (Status::Active, "Waiting"),
         JobState::Copying { .. } | JobState::Trashing { .. } if deleting => {
@@ -269,6 +314,7 @@ pub(in crate::tui) fn badge(job: &JobView) -> (Status, &'static str) {
         JobState::Clearing | JobState::Trashing { .. } => (Status::Active, "Finishing"),
         JobState::Done if deleting => (Status::Ok, "Deleted"),
         JobState::Done if moving => (Status::Ok, "Moved"),
+        JobState::Done if building => (Status::Ok, "Set up"),
         JobState::Done => (Status::Ok, "Added"),
         JobState::CutShort { .. } => (Status::Needs, "Cut short"),
         JobState::Failed { .. } => (Status::Fail, "Failed"),

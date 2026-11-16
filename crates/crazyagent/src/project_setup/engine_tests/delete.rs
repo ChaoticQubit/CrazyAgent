@@ -228,6 +228,55 @@ async fn delete_everything_of_a_project_whose_folder_is_gone_removes_its_records
     engine.stop().await;
 }
 
+/// The projects one pool serves in the engine's saved settings, as the next start reads
+/// them. Inputs: the engine and the pool. Output: the project ids.
+#[cfg(target_os = "macos")]
+fn pool_projects(engine: &Engine, pool: &str) -> Vec<String> {
+    let global = std::fs::read_to_string(engine.root.path().join("global.toml")).unwrap();
+    let config = crate::config::resolve_config_bytes(&global, "").unwrap();
+    config
+        .settings
+        .model_access
+        .expect("the test engine saves model access")
+        .pools
+        .into_iter()
+        .find(|saved| saved.id.as_str() == pool)
+        .expect("the pool stays saved")
+        .projects
+        .iter()
+        .map(|project| project.as_str().to_owned())
+        .collect()
+}
+
+/// rv-sec2 bgjobs-3b F2: Delete everything forgets the project in its pool too, so the
+/// pool no longer lists it and its project cap no longer counts it; the pool stays.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn delete_everything_takes_the_project_out_of_its_pool() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    assert_eq!(
+        pool_projects(&engine, "pool-team"),
+        vec![PROJECT.to_owned()]
+    );
+    std::fs::remove_dir_all(&folder).unwrap();
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(kept(&engine), 0);
+    assert_eq!(
+        pool_projects(&engine, "pool-team"),
+        Vec::<String>::new(),
+        "the deleted project leaves its pool"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
 /// Delete everything removes the project's master, its lands and its catch-up choices.
 /// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
 #[cfg(target_os = "macos")]

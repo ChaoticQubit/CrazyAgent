@@ -557,10 +557,6 @@ export function projectCatalog(pool: string | null, research: ResearchKind[]): P
   return invoke<ProjectCatalog>("desktop_project_catalog", { pool, research });
 }
 
-export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
-}
-
 export function projectSetup(id: string): Promise<StoredSetup | null> {
   return invoke<StoredSetup | null>("desktop_project_setup", { id });
 }
@@ -1338,6 +1334,12 @@ export function deleteProjectJob(id: string, name: string): Promise<IntakeJob> {
   return invoke<IntakeJob>("desktop_delete_project_job", { id, name });
 }
 
+/** Starts the engine's job that sets up a New Project: its folder, documents, team plan and
+ * research jobs (DEC-177 add.2). Inputs: the name spec and the setup. Output: the started job. */
+export function setupProjectJob(spec: ProjectSpec, setup: ProjectSetup): Promise<IntakeJob> {
+  return invoke<IntakeJob>("desktop_setup_project_job", { spec, setup });
+}
+
 /** Stops one research job; a running agent's whole process group stops.
  * Inputs: project id, job id and a generation. Output: the engine receipt. */
 export function cancelResearch(id: string, job: number, generation: number): Promise<IntentReceipt> {
@@ -1649,14 +1651,15 @@ export function icloudCancel(): Promise<boolean> {
 }
 
 /** The part of a job that was running when it ended. */
-export type IntakePhase = "downloading" | "stopping" | "copying" | "clearing" | "trashing";
+export type IntakePhase = "downloading" | "stopping" | "copying" | "clearing" | "trashing" | "building";
 
 /** What the engine's job is doing, or how it ended. A project move or a delete waits for its
  * agents to stop first; copying counts the files copied, then the files checked; clearing
  * removes a moved folder's old place, or a deleted project's records, and never stops; a delete
  * moves its folders to the Trash in trashing, with no stop once the first one moves, and
  * cut_short is a delete an engine stop cut short, with how many of its folders reached the
- * Trash. */
+ * Trash; a New Project builds its folder in building, with how many of its documents it copied
+ * once it counted them. */
 export type IntakeJobState =
   | { state: "downloading"; progress: IcloudProgress }
   | { state: "stopping"; agents_left: number }
@@ -1667,11 +1670,13 @@ export type IntakeJobState =
   | { state: "failed"; code: string; phase: IntakePhase }
   | { state: "cancelled"; phase: IntakePhase }
   | { state: "needs_answer"; code: string }
-  | { state: "cut_short"; trashed: number; total: number };
+  | { state: "cut_short"; trashed: number; total: number }
+  | { state: "building"; done: number; total: number };
 
-/** What a job does: adds a folder, moves a project kept elsewhere into the projects folder, or
- * deletes a project, its folders to the Trash (DEC-177 add.1). */
-export type ProjectJobKind = "add" | "move_project" | "delete";
+/** What a job does: adds a folder, moves a project kept elsewhere into the projects folder,
+ * deletes a project, its folders to the Trash (DEC-177 add.1), or sets up a New Project, its
+ * name in place of the folder (add.2). */
+export type ProjectJobKind = "add" | "move_project" | "delete" | "setup";
 
 /** The engine's one job, which adds a folder or moves a project into the projects folder apart
  * from the window: its id, its kind, the project a move takes, the folder, move or copy, the

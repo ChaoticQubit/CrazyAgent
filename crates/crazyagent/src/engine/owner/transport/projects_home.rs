@@ -170,8 +170,8 @@ impl Work {
         }
     }
 
-    /// Runs the disk work. Input: the tally an add, a project move or a delete reports into
-    /// and obeys.
+    /// Runs the disk work. Input: the tally an add, a project move, a delete or a New Project
+    /// reports into and obeys.
     /// Output: the step to record and, for a project move, what it leaves for after the
     /// record.
     fn run(self, tally: &Tally) -> (Step, After) {
@@ -201,8 +201,8 @@ impl Work {
                     Err(e) => (Step::Record(Err(e.0)), After::default()),
                 };
             }
-            Self::New(plan) => Step::Staged(plan.run()),
-            Self::Demo(plan) => Step::Staged(plan.run().and_then(seeded)),
+            Self::New(plan) => Step::Staged(plan.run(tally)),
+            Self::Demo(plan) => Step::Staged(plan.run(tally).and_then(seeded)),
             Self::Delete(plan, research) => Step::Deleted(plan.run(tally).map(|()| {
                 let files = plan.engine_files(&research);
                 (plan.database, files)
@@ -313,10 +313,11 @@ pub(super) fn disk_changed(
 /// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, DeleteProject, SetupProject,
 /// CreateDemo and FolderSize for one owner. A client's change claims its request id first: a
 /// resend of one this engine still runs answers `InProgress` and plans nothing (DEC-159); the
-/// intake job holds its own claim. A client's AddExistingFolder, MoveProjectHome or
-/// DeleteProject then holds the job slot until it ends, so no job starts beside it; while a
-/// job runs it answers its record when the request was already recorded, else `job_busy`,
-/// and plans nothing. Input: the sink (the client's stream, or the intake job, which
+/// intake job holds its own claim. A client's AddExistingFolder, MoveProjectHome,
+/// DeleteProject, SetupProject or CreateDemo then holds the job slot until it ends, so no job
+/// starts beside it (DEC-177 addendum 2, Q2 A); while a job runs it answers its record when
+/// the request was already recorded, else `job_busy`, and plans nothing. Input: the sink (the
+/// client's stream, or the intake job, which
 /// keeps the reply and lends its tally to the copy), engine, authority, owner packet and
 /// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
@@ -378,6 +379,8 @@ pub(super) async fn serve(
             mutation: OwnerMutation::AddExistingFolder { .. }
                 | OwnerMutation::MoveProjectHome { .. }
                 | OwnerMutation::DeleteProject { .. }
+                | OwnerMutation::SetupProject { .. }
+                | OwnerMutation::CreateDemo { .. }
         }
     );
     let (_direct, recorded) = match client && folder {

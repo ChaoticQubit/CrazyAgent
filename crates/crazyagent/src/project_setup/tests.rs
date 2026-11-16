@@ -1725,3 +1725,75 @@ fn a_pool_with_only_an_anthropic_api_key_leads_with_claude_code_not_codex() {
         Some(NEEDS_ACCOUNT)
     );
 }
+
+/// A New Project plan for a home inside `runtime`, building `name` from the documents given,
+/// as `plan_new` makes one. Inputs: the engine folder, the home, the folder name and the
+/// documents. Output: the plan.
+#[cfg(unix)]
+fn new_plan(runtime: &Path, home: &Path, name: &str, documents: Vec<String>) -> NewProjectPlan {
+    NewProjectPlan {
+        database: runtime.join("engine.db"),
+        staging: home.join(format!(".crazyagent-new-{}", "a".repeat(64))),
+        folder: home.join(name),
+        documents,
+    }
+}
+
+/// DEC-177 add.2: a New Project build counts each document it copies into its job's tally, so
+/// the job reads "copying documents 2 of 2", and leaves the built folder staged.
+#[cfg(unix)]
+#[test]
+fn a_new_project_build_counts_each_document_it_copies() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().canonicalize().unwrap();
+    let home = runtime.join("home");
+    let sources = runtime.join("sources");
+    for folder in [&home, &sources] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    let documents: Vec<String> = ["scope.md", "notes.txt"]
+        .iter()
+        .map(|name| {
+            let path = sources.join(name);
+            std::fs::write(&path, name).unwrap();
+            path.to_str().unwrap().to_owned()
+        })
+        .collect();
+    let plan = new_plan(&runtime, &home, "notes", documents);
+    let staging = plan.staging.clone();
+    let tally = crate::projects_home::Tally::default();
+    let staged = plan.run(&tally).unwrap();
+    assert_eq!(tally.building(), (2, 2));
+    assert_eq!(staged.documents.len(), 2);
+    assert_eq!(staged.staging(), staging.as_path());
+    assert!(
+        staging
+            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join(CONTEXT_DIRECTORY)
+            .join("documents")
+            .join("scope.md")
+            .is_file()
+    );
+}
+
+/// DEC-177 add.2: a stop asked before a New Project builds ends the build cancelled with
+/// nothing counted and no staging folder left, as Stop on its job does.
+#[cfg(unix)]
+#[test]
+fn a_new_project_build_stopped_before_it_starts_leaves_no_staging_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().canonicalize().unwrap();
+    let home = runtime.join("home");
+    std::fs::create_dir(&home).unwrap();
+    let plan = new_plan(&runtime, &home, "notes", vec![]);
+    let staging = plan.staging.clone();
+    let tally = crate::projects_home::Tally::default();
+    assert!(tally.stop());
+    assert_eq!(plan.run(&tally).unwrap_err(), "home_add_cancelled");
+    assert_eq!(tally.building(), (0, 0));
+    assert!(
+        !staging.exists(),
+        "a stopped build leaves no staging folder"
+    );
+    assert!(!home.join("notes").exists());
+}

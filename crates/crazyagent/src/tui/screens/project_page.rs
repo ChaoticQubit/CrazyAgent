@@ -364,34 +364,63 @@ impl ProjectPage {
         );
     }
 
-    fn send_created_access(&mut self, access: AgentAccess, version: u64, ctx: &mut Ctx) {
+    /// The write that saves the agent access picked in New project at the version the
+    /// project's policy read found, for an open project page or a New Project carried in the
+    /// background (DEC-177 add.3 decision 4). Inputs: the project, the picked level, the
+    /// read's reply and the context, which numbers the write. Output: the write and its
+    /// generation, or why the project stays Sandboxed.
+    pub(in crate::tui) fn created_access_write(
+        project: &ProjectId,
+        access: AgentAccess,
+        read: &Result<SetupView, String>,
+        ctx: &mut Ctx,
+    ) -> Result<(SetupQuery, u64), String> {
+        assert_ne!(access, AgentAccess::Sandboxed);
+        let version = match read {
+            Ok(SetupView::AgentPolicy(view)) => view.version,
+            Err(code) => return Err(plain_problem(code)),
+            Ok(_) => return Err(plain_problem("change_outcome_unknown")),
+        };
         let generation = ctx.next_generation();
-        self.created_access = Some(generation);
-        self.send(
-            SetupQuery::Change {
-                action: SetupAction::SetAgentPolicy {
-                    project_id: self.screen.project.clone(),
-                    version,
-                    policy: AgentPolicy {
-                        access,
-                        toolchains: Vec::new(),
-                        ide_git_hooks: false,
-                        tool_cache: Default::default(),
-                        home_caches: Default::default(),
-                        ide_agent_files: Default::default(),
-                        shared_folders: Default::default(),
-                        network: crate::sandbox::policy::AgentNetwork::default(),
-                        apply_changes: Default::default(),
-                        grants: Vec::new(),
-                    },
+        let write = SetupQuery::Change {
+            action: SetupAction::SetAgentPolicy {
+                project_id: project.clone(),
+                version,
+                policy: AgentPolicy {
+                    access,
+                    toolchains: Vec::new(),
+                    ide_git_hooks: false,
+                    tool_cache: Default::default(),
+                    home_caches: Default::default(),
+                    ide_agent_files: Default::default(),
+                    shared_folders: Default::default(),
+                    network: crate::sandbox::policy::AgentNetwork::default(),
+                    apply_changes: Default::default(),
+                    grants: Vec::new(),
                 },
-                generation,
             },
-            ctx,
-        );
+            generation,
+        };
+        Ok((write, generation))
     }
 
-    fn stays_sandboxed(why: &str, ctx: &mut Ctx) {
+    /// Why the write that saves New project's agent access did not land. Input: the write's
+    /// reply. Output: none when it was applied, else the reason in plain words.
+    pub(in crate::tui) fn created_access_unsaved(
+        reply: &Result<SetupView, String>,
+    ) -> Option<String> {
+        match reply {
+            Ok(SetupView::Changed(OwnerResult::Applied)) => None,
+            Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code) => {
+                Some(plain_problem(code))
+            }
+            Ok(_) => Some(plain_problem("change_outcome_unknown")),
+        }
+    }
+
+    /// Says a made project's picked agent access was not saved, so its agents stay
+    /// Sandboxed. Inputs: the reason and the context. Output: none.
+    pub(in crate::tui) fn stays_sandboxed(why: &str, ctx: &mut Ctx) {
         ctx.say(Message::warning(
             "The project is made, but its agents stay Sandboxed.",
             &format!("{why} Choose Agent access again on the Settings tab with c."),
@@ -1079,12 +1108,12 @@ impl ProjectPage {
         if matches!(query, SetupQuery::AgentPolicy { .. })
             && let Some(access) = self.access_wanted.take()
         {
-            match &event.result {
-                Ok(SetupView::AgentPolicy(view)) => {
-                    self.send_created_access(access, view.version, ctx);
+            match Self::created_access_write(&self.screen.project, access, &event.result, ctx) {
+                Ok((write, generation)) => {
+                    self.created_access = Some(generation);
+                    self.send(write, ctx);
                 }
-                Err(code) => Self::stays_sandboxed(&plain_problem(code), ctx),
-                Ok(_) => Self::stays_sandboxed(&plain_problem("change_outcome_unknown"), ctx),
+                Err(why) => Self::stays_sandboxed(&why, ctx),
             }
             return;
         }
@@ -1118,12 +1147,7 @@ impl ProjectPage {
         }
         if self.created_access == Some(*generation) {
             self.created_access = None;
-            if !applied {
-                let why = match &event.result {
-                    Err(code) => plain_problem(code),
-                    Ok(SetupView::Changed(OwnerResult::Rejected { code })) => plain_problem(code),
-                    Ok(_) => plain_problem("change_outcome_unknown"),
-                };
+            if let Some(why) = Self::created_access_unsaved(&event.result) {
                 Self::stays_sandboxed(&why, ctx);
             }
             return;

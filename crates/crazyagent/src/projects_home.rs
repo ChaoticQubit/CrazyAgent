@@ -7,6 +7,7 @@ mod move_project;
 #[cfg(all(test, unix))]
 mod move_tests;
 mod platform;
+pub(crate) mod setup_mark;
 mod watch;
 
 pub use intake::{
@@ -1358,6 +1359,12 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "This engine cannot delete projects. Remove it from the dashboard instead."
         }
         "home_new_project_failed" => "The project folder could not be created. Nothing was kept.",
+        "home_new_project_interrupted" => {
+            "Setting up the project stopped part way. Nothing was kept; set it up again from New Project."
+        }
+        "setup_cannot_stop" => {
+            "The project is being saved, so it cannot stop now. Wait for it to finish on Home."
+        }
         "home_source_missing" => "That folder is no longer there.",
         "home_source_not_folder" => "Pick a folder, not a file or a link.",
         "home_source_in_home" => "That folder is already in your projects folder.",

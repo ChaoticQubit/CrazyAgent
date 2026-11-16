@@ -54,6 +54,9 @@ const COPY: Record<string, string> = {
   home_move_research_running: "A research job is running in a project in this folder, and moving it would cut the job off. Wait for the job to finish or cancel it, then try again. Nothing was moved.",
   home_folder_name_invalid: "Give the project a name with letters or digits, and no folder by that name.",
   home_new_project_failed: "The project folder couldn't be created. Nothing was kept.",
+  home_new_project_interrupted: "Setting up the project stopped part way. Nothing was kept; set it up again from New Project.",
+  setup_cannot_stop: "The project is being saved, so it can't stop now. Wait for it to finish on Home.",
+  project_folder_unavailable: "Documents can't be copied into a project on this computer yet. Create it without documents.",
   home_add_unverified: "The folder didn't arrive in your projects folder. Check it and try again.",
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
   home_add_cancelled: "Adding the folder stopped. Nothing was moved or copied.",
@@ -234,6 +237,20 @@ export function moveCopy(failure: string | { code: string; cause?: string }): st
   const code = typeof failure === "string" ? failure : failure.code;
   return Object.hasOwn(MOVE_COPY, code) ? MOVE_COPY[code] : intakeCopy(failure);
 }
+
+/** Plain sentence for one refusal or end of a New Project job (DEC-177 add.2), New Project's
+ * own words first. Input: the code, or the failure with the engine cause behind it. Output: the
+ * New Project copy, else the intake and app copy. */
+export function newProjectCopy(failure: string | { code: string; cause?: string }): string {
+  const code = typeof failure === "string" ? failure : failure.code;
+  return Object.hasOwn(NEW_PROJECT_COPY, code) ? NEW_PROJECT_COPY[code] : intakeCopy(failure);
+}
+
+const NEW_PROJECT_COPY: Record<string, string> = {
+  home_add_cancelled: "Setting up the project stopped. Nothing was kept.",
+  home_destination_exists: "Your projects folder already has a folder with this name. Choose another project name.",
+  project_exists: "This project already exists.",
+};
 
 function failure<T>(code: string): Result<T> {
   return { kind: "error", code, message: intakeCopy(code) };

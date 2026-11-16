@@ -50,8 +50,8 @@ struct Held {
 
 impl Held {
     /// Whether this job does what `subject` asks: an add of the same real folder, a move of
-    /// the same project, or a delete of the same project. Inputs: the subject and its real
-    /// folder. Output: the answer.
+    /// the same project, a delete of the same project, or a New Project of the same project.
+    /// Inputs: the subject and its real folder. Output: the answer.
     fn same(&self, subject: &JobSubject, real: &Path) -> bool {
         match subject {
             JobSubject::Add { .. } => self.job.kind() == JobKind::Add && self.real == real,
@@ -60,6 +60,9 @@ impl Held {
             }
             JobSubject::Delete { project_id, .. } => {
                 self.job.kind() == JobKind::Delete && self.job.project() == Some(project_id)
+            }
+            JobSubject::Setup { project_id, .. } => {
+                self.job.kind() == JobKind::Setup && self.job.project() == Some(project_id)
             }
         }
     }
@@ -86,9 +89,10 @@ fn found(
 impl Intake {
     /// Starts a job that runs apart from any client, or attaches to the job already running
     /// for the same subject or with the same id. A project move is checked before it starts,
-    /// as far as it can be without reading inside the folder, and a delete as its plan checks
-    /// it before its mark (the exact name included), so a change the engine refuses is
-    /// answered at once and the held job stays as it was. Inputs: the engine, the
+    /// as far as it can be without reading inside the folder, a delete as its plan checks
+    /// it before its mark (the exact name included) and a New Project as its plan checks it
+    /// before it builds anything, so a change the engine refuses is answered at once and the
+    /// held job stays as it was. Inputs: the engine, the
     /// authority, the client packet, its admission and what to do. Output: the job's view,
     /// `job_busy` while another job, a direct client add or project move, or the id as a
     /// client change runs, or the folder, override or move check's code.
@@ -155,6 +159,38 @@ impl Intake {
                     PathBuf::from(folder),
                 )
             }
+            JobSubject::Setup {
+                project_id,
+                spec,
+                setup,
+            } => {
+                if !asked.overrides.is_empty() {
+                    return Err(failure("job_request_invalid"));
+                }
+                let early = {
+                    let held = authority.intake.lock();
+                    found(
+                        held.as_ref(),
+                        &asked.request_id,
+                        &asked.subject,
+                        Path::new(""),
+                    )
+                };
+                if let Some(answer) = early {
+                    return answer;
+                }
+                let action = crate::project_setup::SetupAction::Create {
+                    project_id: project_id.clone(),
+                    spec: spec.clone(),
+                    setup: Box::new(setup.clone()),
+                };
+                let folder = check_setup(engine, a, action).await?;
+                (
+                    Some(project_id.clone()),
+                    spec.name.clone(),
+                    PathBuf::from(folder),
+                )
+            }
         };
         assert!(real.is_absolute());
         let mut held = authority.intake.lock();
@@ -182,6 +218,7 @@ impl Intake {
             *packet,
             a.clone(),
             Arc::clone(&job),
+            asked.subject,
             claim,
             replaced,
         ));
@@ -199,7 +236,8 @@ impl Intake {
 
     /// Asks the running job to stop between files. Input: its id. Output: whether that job
     /// was running; its view then reads cancelled, or done when its folder had landed; or
-    /// `delete_cannot_stop` for a delete that committed to its first Trash move.
+    /// `delete_cannot_stop` for a delete that committed to its first Trash move, or
+    /// `setup_cannot_stop` for a New Project whose record started.
     pub(super) fn stop(&self, id: &RequestId) -> Result<bool, EngineError> {
         let held = self.lock();
         match held.as_ref() {
@@ -207,20 +245,26 @@ impl Intake {
                 if current.job.stop() {
                     return Ok(true);
                 }
-                assert_eq!(current.job.kind(), JobKind::Delete);
-                Err(failure("delete_cannot_stop"))
+                match current.job.kind() {
+                    JobKind::Delete => Err(failure("delete_cannot_stop")),
+                    JobKind::Setup => Err(failure("setup_cannot_stop")),
+                    kind => panic!("a {kind:?} job always takes a stop"),
+                }
             }
             _ => Ok(false),
         }
     }
 
-    /// Reads the job an engine stop cut short, a project move first, else the newest add, so
-    /// status shows how it ended until the owner dismisses it or a new job starts. Runs at
-    /// server start, after the storage start finished any cut move from disk; a job a client
-    /// started first wins. Inputs: the engine and the wait. Output: none; a failed read is
-    /// logged and shows nothing.
+    /// Reads the job an engine stop cut short, a project move first, then a delete, then the
+    /// newest add, else a New Project, so status shows how it ended until the owner dismisses
+    /// it or a new job starts. The New Project read comes first whatever is shown, since it
+    /// ends every New Project mark an earlier engine process left. Runs at server start, after
+    /// the storage start finished any cut move from disk; a job a client started first wins.
+    /// Inputs: the engine and the wait. Output: none; a failed read is logged and shows
+    /// nothing.
     pub(super) async fn restore(&self, engine: &Engine, wait: Duration) {
-        let Some((job, real)) = restored(engine, wait).await else {
+        let setup = setup_restored(engine, wait).await;
+        let Some((job, real)) = restored(engine, wait).await.or(setup) else {
             return;
         };
         assert!(job.ended());
@@ -318,6 +362,29 @@ impl Intake {
     }
 }
 
+/// The New Project an engine stop cut short: the read ends every mark an earlier engine
+/// process left and gives the newest whose project was never recorded. Inputs: the engine and
+/// the wait. Output: the ended job and an empty real folder, never compared, or None when
+/// there is none or the read failed, which is logged.
+async fn setup_restored(engine: &Engine, wait: Duration) -> Option<(IntakeJob, PathBuf)> {
+    let cut = engine.owner_job(Job::HomeSetupCutShort);
+    match tokio::time::timeout(wait, cut).await {
+        Ok(Ok(Some(found))) => {
+            let job = IntakeJob::setup_interrupted(found.request, found.project, found.name);
+            Some((job, PathBuf::new()))
+        }
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            eprintln!("home_new_project_not_restored cause={}", e.0);
+            None
+        }
+        Err(_) => {
+            eprintln!("home_new_project_not_restored cause=timeout");
+            None
+        }
+    }
+}
+
 /// The job an engine stop cut short, as the storage start kept it: a project move, else a
 /// Delete everything (whose real folder is never compared, so it is left empty), else the
 /// newest add. Inputs: the engine and the wait for each read. Output: the ended job and its
@@ -385,17 +452,20 @@ async fn restored(engine: &Engine, wait: Duration) -> Option<(IntakeJob, PathBuf
 /// Runs one job: forgets the ended job it replaced, does the job's work, then records how
 /// the job ended. The claim on the job's id is dropped before the end is recorded, so a new
 /// job that may start then never finds two job claims held. Inputs: the engine, the
-/// authority, the packet and admission of the client that started it, the job, its claim
-/// and the ended job it replaced.
+/// authority, the packet and admission of the client that started it, the job, the subject
+/// that started it, its claim and the ended job it replaced.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     engine: Arc<Engine>,
     authority: Arc<Authority>,
     packet: [u8; 37],
     a: Admission,
     job: Arc<IntakeJob>,
+    subject: JobSubject,
     claim: Running,
     replaced: Option<RequestId>,
 ) {
+    assert_eq!(subject.kind(), job.kind());
     let ending = Ending(Arc::clone(&job));
     if let Some(old) = replaced
         && let Err(e) = engine
@@ -404,7 +474,7 @@ async fn run(
     {
         eprintln!("job_not_forgotten cause={}", e.0);
     }
-    let result = worked(&engine, &authority, &packet, &a, &job).await;
+    let result = worked(&engine, &authority, &packet, &a, &job, &subject).await;
     drop(claim);
     ending.end(result);
     assert!(job.ended());
@@ -415,25 +485,48 @@ async fn run(
 /// of the project's folder is only in iCloud, then the move planned in full, which waits
 /// for the project's agents before anything moves. A delete, checked at its start: the
 /// delete planned in full, which waits for the agents, then moves the folders to the Trash.
-/// Inputs: as [`run`]. Output: Ok once the change is recorded as applied, else the first
-/// step's code.
+/// A New Project, checked at its start: its mark, the New Project planned in full, built
+/// and recorded, then its mark ended, which an engine stop leaves for the next start to show.
+/// Inputs: as [`run`], the subject by reference. Output: Ok once the change is recorded as
+/// applied, else the first step's code.
 async fn worked(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
     a: &Admission,
     job: &Arc<IntakeJob>,
+    subject: &JobSubject,
 ) -> Result<(), EngineError> {
     if job.kind() == JobKind::Delete {
         job.copying();
-        return served(engine, authority, packet, a, job).await;
+        return served(engine, authority, packet, a, job, subject).await;
+    }
+    if job.kind() == JobKind::Setup {
+        job.copying();
+        let project = job
+            .project()
+            .cloned()
+            .expect("a New Project job names its project");
+        let (id, name) = (job.id().clone(), job.source().to_owned());
+        let mark = engine.owner_job(|reply| Job::HomeSetupMark(project.clone(), id, name, reply));
+        tokio::time::timeout(engine.timeout, mark)
+            .await
+            .map_err(|_| failure(UNKNOWN))??;
+        let result = served(engine, authority, packet, a, job, subject).await;
+        let end = engine.owner_job(|reply| Job::HomeSetupMarkEnd(project, reply));
+        match tokio::time::timeout(engine.timeout, end).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => eprintln!("home_new_project_mark_not_ended cause={}", e.0),
+            Err(_) => eprintln!("home_new_project_mark_not_ended cause=timeout"),
+        }
+        return result;
     }
     if job.kind() == JobKind::Add {
         check(engine, a, job).await?;
     }
     fetch(authority, job).await?;
     job.copying();
-    served(engine, authority, packet, a, job).await
+    served(engine, authority, packet, a, job, subject).await
 }
 
 /// Checks the job's add before its download, so a folder the add refuses is not downloaded
@@ -467,6 +560,24 @@ async fn check_delete(
     let ask = engine.owner_job(|reply| {
         Job::HomeDeleteCheck(a.clone(), project.clone(), name.to_owned(), reply)
     });
+    let checked = tokio::time::timeout(engine.timeout, ask)
+        .await
+        .map_err(|_| failure(UNKNOWN))?;
+    assert!(!matches!(&checked, Err(e) if e.0.is_empty()));
+    assert!(!matches!(&checked, Ok(folder) if folder.is_empty()));
+    checked
+}
+
+/// Checks a New Project before its job starts, writing nothing. Inputs: the engine, the
+/// client's admission and the Create action. Output: the folder it would land in, the
+/// refusal code, or the unknown-outcome code when storage does not answer in time.
+async fn check_setup(
+    engine: &Engine,
+    a: &Admission,
+    action: crate::project_setup::SetupAction,
+) -> Result<String, EngineError> {
+    let action = Box::new(action);
+    let ask = engine.owner_job(|reply| Job::HomeSetupCheck(a.clone(), action, reply));
     let checked = tokio::time::timeout(engine.timeout, ask)
         .await
         .map_err(|_| failure(UNKNOWN))?;
@@ -534,17 +645,19 @@ async fn fetch(authority: &Arc<Authority>, job: &Arc<IntakeJob>) -> Result<(), E
 
 /// Serves the job's change, planning it again while another change moved the revision
 /// between the read and the plan. Inputs: the engine, the authority, the packet, the
-/// admission and the job. Output: Ok once the change is recorded as applied, else its code.
+/// admission, the job and its subject. Output: Ok once the change is recorded as applied,
+/// else its code.
 async fn served(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
     a: &Admission,
     job: &IntakeJob,
+    subject: &JobSubject,
 ) -> Result<(), EngineError> {
     let mut result = Err(failure("stale_revision"));
     for _ in 0..REVISION_TRIES {
-        result = served_once(engine, authority, packet, a, job).await;
+        result = served_once(engine, authority, packet, a, job, subject).await;
         if !matches!(&result, Err(e) if e.0 == "stale_revision") {
             break;
         }
@@ -554,21 +667,36 @@ async fn served(
 
 /// Reads the current revision and serves the job's change once, with a fresh owner deadline
 /// taken after the download: an AddExistingFolder for an add, a MoveProjectHome for a
-/// project move, a DeleteProject with the typed name for a delete. Inputs: as [`served`].
-/// Output: as [`served`], `stale_revision` included.
+/// project move, a DeleteProject with the typed name for a delete, a SetupProject with the
+/// owner's answers for a New Project. Inputs: as [`served`]. Output: as [`served`],
+/// `stale_revision` included.
 async fn served_once(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
     a: &Admission,
     job: &IntakeJob,
+    subject: &JobSubject,
 ) -> Result<(), EngineError> {
+    assert_eq!(subject.kind(), job.kind());
     let deadline = Instant::now() + engine.timeout;
     let read = engine.owner_job(|reply| Job::OwnerRead(a.clone(), OwnerRead::ProjectsHome, reply));
     let current = tokio::time::timeout_at(deadline, read)
         .await
         .map_err(|_| failure(UNKNOWN))??;
     let mutation = match (job.kind(), job.project()) {
+        (JobKind::Setup, _) => match subject {
+            JobSubject::Setup {
+                project_id,
+                spec,
+                setup,
+            } => OwnerMutation::SetupProject {
+                project_id: project_id.clone(),
+                spec: spec.clone(),
+                setup: setup.clone(),
+            },
+            other => panic!("a New Project job runs its own subject, not {other:?}"),
+        },
         (JobKind::Delete, Some(project)) => OwnerMutation::DeleteProject {
             project_id: project.clone(),
             name: job.source().to_owned(),
@@ -591,6 +719,10 @@ async fn served_once(
     assert_eq!(
         matches!(mutation, OwnerMutation::DeleteProject { .. }),
         job.kind() == JobKind::Delete
+    );
+    assert_eq!(
+        matches!(mutation, OwnerMutation::SetupProject { .. }),
+        job.kind() == JobKind::Setup
     );
     let request = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,

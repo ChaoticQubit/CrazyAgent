@@ -115,10 +115,6 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         .shell(ShellRequest::EditPool { change, generation })
                         .unwrap();
                 }
-                Request::Creation(job) => {
-                    sent.push("create");
-                    connection.creation(*job).unwrap();
-                }
                 Request::Master(job) => {
                     sent.push("master");
                     connection.master(*job).unwrap();
@@ -160,6 +156,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push(match job.query() {
                         IntakeQuery::JobStart { .. } => "job start",
                         IntakeQuery::JobStatus => "job status",
+                        IntakeQuery::JobDismiss { .. } => "job dismiss",
                         IntakeQuery::Found => "found",
                         _ => "intake",
                     });
@@ -1704,6 +1701,175 @@ async fn a_delete_cut_short_shows_on_home_after_a_restart_and_d_keeps_the_projec
     assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
 }
 
+/// DEC-177 step 3c: while another project's move waits for its agents, Create on New project
+/// starts the engine's New Project job, which the held move refuses; the wizard keeps the
+/// draft and says another job runs, nothing is made and the move still waits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
+    let mut engine = Engine::start().await;
+    let (notes, origin) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
+    let next = crate::tui::test_home::projects_home(&mut engine.controller, 2).await;
+    let home = std::fs::canonicalize(next.path()).unwrap();
+    let copy = engine.root.path().join("agent-47");
+    engine_sql(
+        &engine,
+        &format!(
+            "INSERT OR IGNORE INTO team_paused_projects(project,since_ms) VALUES ('notes-cli',1);
+             INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
+             VALUES (47,'notes-cli','team','codex',1,'{}','working',0,0);",
+            copy.to_str().unwrap()
+        ),
+    );
+    let held = engine
+        .controller
+        .job_start(
+            RequestId::new("move-held-1").unwrap(),
+            JobSubject::MoveProject {
+                project_id: notes.clone(),
+            },
+            AddMode::Move,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert!(super::intake_job::running(&held), "{held:?}");
+
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        sent.iter().filter(|sent| **sent == "job start").count(),
+        1,
+        "one start, never sent again after the refusal: {sent:?}"
+    );
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Could not create the project."), "{shown}");
+    assert!(shown.contains("Another job is running."), "{shown}");
+    assert!(!home.join("tidepool").exists(), "nothing was made");
+    assert!(origin.is_dir(), "the move still waits: {origin:?}");
+    go_to(&mut shell, "home");
+    assert_eq!(
+        kept_draft().as_deref(),
+        Some("Tidepool"),
+        "leaving the refused wizard keeps its draft"
+    );
+    drop(shell);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let mut shell = home_shell(&mut connection).await;
+    let shown = shell.ctx.store.intake.clone().expect("the held move");
+    assert_eq!(shown.id, held.id, "the held move is still the engine's job");
+    assert!(super::intake_job::running(&shown), "{shown:?}");
+    shell.key(Key::Home);
+    shell.key(Key::Enter);
+    let (ended, _) = job_until(&mut shell, &mut connection, |job| {
+        !super::intake_job::running(job)
+    })
+    .await;
+    assert!(
+        matches!(ended.state, JobState::Cancelled { .. }),
+        "the held move still stops: {ended:?}"
+    );
+    assert!(origin.is_dir(), "nothing was moved: {origin:?}");
+}
+
+/// DEC-177 step 3c: a New Project an engine stop cut short shows on Home after the next start
+/// as stopped part way and never goes on by itself; Enter opens New project and starts
+/// nothing, and d forgets it. Runs on macOS, where the restart helper runs.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_project_cut_short_shows_on_home_after_a_restart_and_d_forgets_it() {
+    let engine = Engine::start().await;
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let engine = engine
+        .restart(|root| {
+            drop(crate::ledger::open(root).unwrap());
+            rusqlite::Connection::open(root.join("engine.db"))
+                .unwrap()
+                .execute_batch(&format!(
+                    "INSERT INTO ledger_actions(kind,action_key,payload,started_ms)
+                     VALUES ('project_setup','project-cut-tui',
+                             '{{\"project\":\"project-cut-tui\",\"request\":\"setup-cut-tui\",\"name\":\"Cut Short\"}}',{started});"
+                ))
+                .unwrap();
+        })
+        .await;
+    assert_eq!(
+        engine_count(
+            &engine,
+            "SELECT count(*) FROM ledger_actions WHERE kind='project_setup' AND outcome IS NULL"
+        ),
+        0,
+        "the start ends the mark"
+    );
+    let mut connection = engine.connect();
+    let mut shell = home_shell(&mut connection).await;
+    let cut = shell
+        .ctx
+        .store
+        .intake
+        .clone()
+        .expect("the New Project cut short");
+    assert_eq!(cut.kind, JobKind::Setup);
+    assert_eq!(cut.source, "Cut Short");
+    assert_eq!(
+        cut.state,
+        JobState::Failed {
+            code: "home_new_project_interrupted".into(),
+            phase: crate::projects_home::job::Phase::Building,
+        }
+    );
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        rows.contains("Cut Short: Setting up the project stopped part way."),
+        "{rows}"
+    );
+    shell.key(Key::Home);
+    shell.key(Key::Enter);
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(
+        !sent.contains(&"job start"),
+        "nothing starts in one key: {sent:?}"
+    );
+    drop(shell);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let mut shell = home_shell(&mut connection).await;
+    assert_eq!(
+        shell.ctx.store.intake.as_ref().map(|job| &job.id),
+        Some(&cut.id)
+    );
+    shell.key(Key::Home);
+    shell.key(Key::Char('d'));
+    pump(&mut shell, &mut connection).await;
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(shell.ctx.store.intake, None, "d forgets the job");
+    assert_eq!(
+        engine_count(
+            &engine,
+            "SELECT count(*) FROM projects WHERE id='project-cut-tui'"
+        ),
+        0,
+        "a cut-short New Project leaves no project"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_settings_pick_a_pool_and_the_engine_assigns_it() {
     let mut engine = Engine::start().await;
@@ -3068,9 +3234,15 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     assert!(shown.contains("Tidepool"), "{shown}");
     assert!(shown.contains("Main"), "{shown}");
     shell.key(Key::Enter);
-    let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(&sent[..2], ["create", "projects"], "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
+    assert!(sent.contains(&"projects"), "{sent:?}");
     assert!(sent.contains(&"edit pool"), "{sent:?}");
+    assert_eq!(
+        sent.iter().filter(|sent| **sent == "job dismiss").count(),
+        1,
+        "{sent:?}"
+    );
     let Some(Place::Project { id, name, tab }) = shell.place() else {
         panic!("the new project opens, got {:?}", shell.place());
     };
@@ -3091,6 +3263,24 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
             .any(|line| line.starts_with("  Tidepool  ") && line.trim_end().ends_with(&folder)),
         "the title row shows the name and the folder in the projects home: {shown}"
     );
+}
+
+/// Pumps the shell until the engine's job it keeps no longer runs, reading it again between
+/// pumps as the run loop does, so a New Project's start, its end and its follow-ups all go
+/// out. Takes the shell and its connection. Returns every request sent, oldest first.
+async fn pump_job(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut sent = pump(shell, connection).await;
+    while shell.read_running_job() {
+        assert!(
+            Instant::now() < deadline,
+            "the job never ended: {:?}",
+            shell.ctx.store.intake
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        sent.extend(pump(shell, connection).await);
+    }
+    sent
 }
 
 fn go_to(shell: &mut Shell, query: &str) {
@@ -3124,8 +3314,8 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
     assert_eq!(shell.place(), Some(Place::Home));
 
-    let sent = pump(&mut shell, &mut connection).await;
-    assert!(sent.contains(&"create"), "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"job start"), "{sent:?}");
     assert!(
         sent.contains(&"edit pool"),
         "the picked pool is assigned without the page: {sent:?}"
@@ -3167,8 +3357,8 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     shell.key(Key::Esc);
     go_to(&mut shell, "home");
     assert_eq!(shell.depth(), 1);
-    let sent = pump(&mut shell, &mut connection).await;
-    assert!(sent.contains(&"create"), "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"job start"), "{sent:?}");
     assert!(!sent.contains(&"edit pool"), "{sent:?}");
     let refused = shell.ctx.message().expect("the refusal is shown");
     assert!(
@@ -3199,7 +3389,7 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     shell.key(Key::Enter);
     shell.key(Key::Esc);
     go_to(&mut shell, "home");
-    pump(&mut shell, &mut connection).await;
+    pump_job(&mut shell, &mut connection).await;
     assert_eq!(
         shell.ctx.message().map(|message| message.lead.as_str()),
         Some("Tidepool is ready.")
@@ -3220,8 +3410,8 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     for character in "Harbor".chars() {
         shell.key(Key::Char(character));
     }
-    let sent = pump(&mut shell, &mut connection).await;
-    assert!(sent.contains(&"create"), "{sent:?}");
+    let sent = pump_job(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"job start"), "{sent:?}");
     let refused = shell.ctx.message().expect("the refusal is shown");
     assert!(
         refused.lead.starts_with("Could not create"),
@@ -3251,6 +3441,615 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Harbor"), "{shown}");
     assert_eq!(kept_draft().as_deref(), Some("Tidepool"));
+}
+
+/// Pool Main as the engine lists it, with one Claude account.
+fn main_pool() -> PoolSummary {
+    PoolSummary {
+        id: CredentialRef::new("pool-a").unwrap(),
+        name: "Main".into(),
+        summary: "1 Claude".into(),
+        members: vec![member("a-claude", MemberKind::Claude)],
+        project_count: 0,
+        provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+    }
+}
+
+/// Takes every request the shell queued. Takes the shell. Returns them, oldest first.
+fn drain(shell: &mut Shell) -> Vec<Request> {
+    std::iter::from_fn(|| shell.ctx.next_request()).collect()
+}
+
+/// The intake queries among queued requests. Takes the requests. Returns the queries in
+/// order.
+fn intake_asks(sent: &[Request]) -> Vec<IntakeQuery> {
+    sent.iter()
+        .filter_map(|request| match request {
+            Request::Intake(job) => Some(job.query()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The New Project job start among queued requests. Takes the requests. Returns the start's
+/// id, the project it makes and the query, or none when no such start was queued.
+fn setup_start(sent: &[Request]) -> Option<(RequestId, ProjectId, IntakeQuery)> {
+    sent.iter().find_map(|request| {
+        let Request::Intake(job) = request else {
+            return None;
+        };
+        let query = job.query();
+        let IntakeQuery::JobStart {
+            id,
+            subject: JobSubject::Setup { project_id, .. },
+            ..
+        } = &query
+        else {
+            return None;
+        };
+        Some((id.clone(), project_id.clone(), query.clone()))
+    })
+}
+
+/// The engine's New Project job for Tidepool as a read shows it. Takes its id, its project
+/// and its state. Returns the view.
+fn tidepool_job(id: &RequestId, project: &ProjectId, state: JobState) -> JobView {
+    JobView {
+        id: id.clone(),
+        kind: JobKind::Setup,
+        project_id: Some(project.clone()),
+        source: "Tidepool".into(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+        stopping: false,
+        state,
+    }
+}
+
+/// One intake reply from the owner worker. Takes the query it answers and the result.
+/// Returns the arrival.
+fn intake_reply(
+    query: IntakeQuery,
+    result: Result<crate::tui::client::intake::IntakeView, String>,
+) -> Arrival {
+    owner_arrival(OwnerEvent::Intake(Box::new(
+        crate::tui::client::intake::IntakeEvent { query, result },
+    )))
+}
+
+/// A status read that finds this job. Takes the job, or none for no job. Returns the arrival.
+fn job_status(job: Option<JobView>) -> Arrival {
+    intake_reply(
+        IntakeQuery::JobStatus,
+        Ok(crate::tui::client::intake::IntakeView::Job(job)),
+    )
+}
+
+/// The building New Project job a start reply carries. Takes the id and the project.
+/// Returns the view.
+fn building(id: &RequestId, project: &ProjectId) -> JobView {
+    tidepool_job(id, project, JobState::Building { done: 0, total: 0 })
+}
+
+/// How many dismisses of this job the requests hold. Takes the requests and the id.
+/// Returns the count.
+fn dismisses(sent: &[Request], id: &RequestId) -> usize {
+    intake_asks(sent)
+        .iter()
+        .filter(|query| **query == IntakeQuery::JobDismiss { id: id.clone() })
+        .count()
+}
+
+/// Whether the requests assign pool Main to this project. Takes the requests and the
+/// project. Returns true when one such pool edit is queued.
+fn assigns_main(sent: &[Request], project: &ProjectId) -> bool {
+    sent.iter().any(|request| {
+        matches!(
+            request,
+            Request::EditPool {
+                change: crate::tui::seam::PoolChange::Assign {
+                    pool: Some(pool),
+                    project: assigned,
+                },
+            } if pool.as_str() == "pool-a" && assigned == project
+        )
+    })
+}
+
+/// Opens New project, gives it pool Main, names the project `name` and presses Enter on
+/// Review. Takes the name. Returns the shell and the requests that Enter queued.
+fn create_named(name: &str) -> (Shell, Vec<Request>) {
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    shell.arrive(Arrival::Pools(Ok(vec![main_pool()])));
+    drain(&mut shell);
+    for character in name.chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let sent = drain(&mut shell);
+    (shell, sent)
+}
+
+/// DEC-177 step 3b: Create on New project starts the engine's New Project job with the
+/// draft and the picked pool under a fresh id and a new project id, as a move with no
+/// overrides; it is the one intake request Enter sends.
+#[test]
+fn create_starts_the_engines_new_project_job_with_the_draft_and_its_pool() {
+    let (shell, sent) = create_named("Tidepool");
+    let (id, project, query) = setup_start(&sent).expect("Create starts the New Project job");
+    let IntakeQuery::JobStart {
+        subject: JobSubject::Setup { spec, setup, .. },
+        mode,
+        overrides,
+        ..
+    } = query
+    else {
+        panic!("the start is a New Project job");
+    };
+    assert_eq!(spec.name, "Tidepool");
+    assert_eq!(
+        setup.pool.as_ref().map(CredentialRef::as_str),
+        Some("pool-a")
+    );
+    assert_eq!(mode, AddMode::Move);
+    assert!(overrides.is_empty());
+    assert!(project.as_str().starts_with("project-"), "{project:?}");
+    assert!(!id.as_str().is_empty());
+    assert_eq!(intake_asks(&sent).len(), 1, "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+}
+
+/// DEC-177 step 3b: the page follows its job by id in the job the shell keeps. Done assigns
+/// the picked pool, reads the projects and dismisses the job once; the empty read after
+/// that dismiss is not a lost job; the pool's answer opens the project.
+#[test]
+fn a_done_new_project_job_assigns_its_pool_dismisses_it_once_and_opens_the_project() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    assert_eq!(
+        dismisses(&drain(&mut shell), &id),
+        0,
+        "a running job is kept"
+    );
+
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(assigns_main(&sent, &project), "{sent:?}");
+    assert!(
+        sent.iter()
+            .any(|request| matches!(request, Request::Projects)),
+        "{sent:?}"
+    );
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+    assert_eq!(
+        shell.place(),
+        Some(Place::NewProject),
+        "the pool is assigned first"
+    );
+
+    shell.arrive(intake_reply(
+        IntakeQuery::JobDismiss { id: id.clone() },
+        Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
+    ));
+    shell.arrive(job_status(None));
+    let sent = drain(&mut shell);
+    assert_eq!(dismisses(&sent, &id), 0, "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(!shown.contains("could not confirm"), "{shown}");
+
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let Some(Place::Project {
+        id: opened,
+        name,
+        tab,
+    }) = shell.place()
+    else {
+        panic!("the new project opens, got {:?}", shell.place());
+    };
+    assert_eq!(
+        (opened, name.as_str(), tab),
+        (project, "Tidepool", ProjectTab::Overview)
+    );
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
+    assert_eq!(kept_draft(), None);
+    assert!(
+        setup_start(&drain(&mut shell)).is_none(),
+        "nothing starts again"
+    );
+}
+
+/// DEC-177 step 3b, add.3 decision 4: a New Project sent to the background and dropped by
+/// Home still follows its job, assigns its pool, dismisses the job and says it is ready.
+#[test]
+fn a_new_project_job_run_in_the_background_finishes_after_its_page_is_gone() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home), "Run in background");
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
+    drain(&mut shell);
+
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(
+        assigns_main(&sent, &project),
+        "the picked pool is assigned without the page: {sent:?}"
+    );
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+
+    shell.arrive(intake_reply(
+        IntakeQuery::JobDismiss { id: id.clone() },
+        Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
+    ));
+    shell.arrive(job_status(None));
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let sent = drain(&mut shell);
+    assert!(
+        sent.iter()
+            .any(|request| matches!(request, Request::PoolProjects)),
+        "{sent:?}"
+    );
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
+    assert_eq!(shell.place(), Some(Place::Home));
+    assert_eq!(kept_draft(), None, "a made project keeps no draft");
+}
+
+/// Sends a New Project to the background, drops its page with Home, ends its job done and
+/// answers its pool edit. Takes nothing. Returns the shell, the project and the requests the
+/// pool's answer queued.
+fn made_in_background() -> (Shell, ProjectId, Vec<Request>) {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
+    drain(&mut shell);
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    drain(&mut shell);
+    shell.arrive(intake_reply(
+        IntakeQuery::JobDismiss { id: id.clone() },
+        Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
+    ));
+    shell.arrive(job_status(None));
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let sent = drain(&mut shell);
+    (shell, project, sent)
+}
+
+/// One setup reply from the owner worker. Takes the query it answers and the result.
+/// Returns the arrival.
+fn setup_reply(query: SetupQuery, result: Result<SetupView, String>) -> Arrival {
+    owner_arrival(OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent { query, result },
+    )))
+}
+
+/// The agent policy writes the requests hold. Takes the requests. Returns the writes.
+fn access_writes(sent: &[Request]) -> Vec<SetupQuery> {
+    sent.iter()
+        .filter_map(|request| match request {
+            Request::Setup(
+                query @ SetupQuery::Change {
+                    action: crate::project_setup::SetupAction::SetAgentPolicy { .. },
+                    ..
+                },
+            ) => Some(query.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// DEC-177 add.3 decision 4 (rv-sec2 bgjobs-3b F1): a New Project carried in the background
+/// reads its project's agent policy once it is made and saves the picked access at the
+/// version read; a refused read or save says the project stays Sandboxed.
+#[test]
+fn a_new_project_carried_in_the_background_saves_its_agent_access_or_says_it_stays_sandboxed() {
+    use super::project_tests::access_view;
+    use crate::engine::owner::OwnerResult;
+    use crate::sandbox::policy::AgentAccess;
+    assert!(
+        AgentAccess::NEW_PROJECT.unavailable().is_none(),
+        "the wizard preselects a level it can save"
+    );
+    let sandboxed = "The project is made, but its agents stay Sandboxed.";
+
+    let (mut shell, project, sent) = made_in_background();
+    let read = SetupQuery::AgentPolicy {
+        project: project.clone(),
+    };
+    assert_eq!(
+        sent.iter()
+            .filter(|request| matches!(request, Request::Setup(query) if *query == read))
+            .count(),
+        1,
+        "{sent:?}"
+    );
+    shell.arrive(setup_reply(
+        read,
+        Ok(SetupView::AgentPolicy(access_view(
+            AgentAccess::Sandboxed,
+            7,
+        ))),
+    ));
+    let writes = access_writes(&drain(&mut shell));
+    let [write] = writes.as_slice() else {
+        panic!("the carried page saves the access once: {writes:?}");
+    };
+    let SetupQuery::Change {
+        action:
+            crate::project_setup::SetupAction::SetAgentPolicy {
+                project_id,
+                version,
+                policy,
+            },
+        ..
+    } = write
+    else {
+        unreachable!("access_writes keeps agent policy writes only");
+    };
+    assert_eq!(
+        (project_id, *version, policy.access),
+        (&project, 7, AgentAccess::NEW_PROJECT)
+    );
+    shell.arrive(setup_reply(
+        write.clone(),
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    ));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready."),
+        "a saved level adds nothing"
+    );
+    assert!(access_writes(&drain(&mut shell)).is_empty());
+
+    let (mut shell, project, _) = made_in_background();
+    shell.arrive(setup_reply(
+        SetupQuery::AgentPolicy { project },
+        Ok(SetupView::AgentPolicy(access_view(
+            AgentAccess::Sandboxed,
+            2,
+        ))),
+    ));
+    let writes = access_writes(&drain(&mut shell));
+    let [write] = writes.as_slice() else {
+        panic!("the carried page saves the access once: {writes:?}");
+    };
+    shell.arrive(setup_reply(
+        write.clone(),
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "agent_policy_version_conflict".into(),
+        })),
+    ));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some(sandboxed),
+        "a refused save is said"
+    );
+
+    let (mut shell, project, _) = made_in_background();
+    shell.arrive(setup_reply(
+        SetupQuery::AgentPolicy { project },
+        Err("owner_read_failed".into()),
+    ));
+    assert!(access_writes(&drain(&mut shell)).is_empty());
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some(sandboxed),
+        "a refused read is said"
+    );
+    assert_eq!(shell.place(), Some(Place::Home));
+}
+
+/// DEC-177 step 3b: a New Project job that failed keeps the open wizard's answers with the
+/// engine's sentence; one stopped in the background keeps the draft and says so in New
+/// project's words. Each ended job is dismissed once and assigns no pool.
+#[test]
+fn a_failed_or_stopped_new_project_job_keeps_the_draft_in_new_project_words() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Failed {
+            code: "home_new_project_failed".into(),
+            phase: crate::projects_home::job::Phase::Building,
+        },
+    ))));
+    let sent = drain(&mut shell);
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+    assert!(!assigns_main(&sent, &project), "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Could not create the project."), "{shown}");
+    assert!(
+        shown.contains("The project folder could not be created. Nothing was kept."),
+        "{shown}"
+    );
+
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Cancelled {
+            phase: crate::projects_home::job::Phase::Building,
+        },
+    ))));
+    let sent = drain(&mut shell);
+    assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
+    assert!(!assigns_main(&sent, &project), "{sent:?}");
+    let said = shell.ctx.message().expect("the stop is said");
+    assert_eq!(said.lead, "Setting up the project stopped.");
+    assert!(
+        said.rest.starts_with("Tidepool is kept as a draft."),
+        "{}",
+        said.rest
+    );
+    assert_eq!(kept_draft().as_deref(), Some("Tidepool"));
+}
+
+/// DEC-177 step 3b: a start whose reply is lost may have reached the engine, so the page
+/// reads the job before it says anything and never starts a second one. A failed read
+/// keeps it waiting; a read with its job follows that job to its end; a read without it
+/// says the start's own refusal.
+#[test]
+fn a_new_project_start_with_no_answer_follows_the_job_a_read_finds_and_never_starts_twice() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(start, Err("trusted_connection_lost".into())));
+    let asks = intake_asks(&drain(&mut shell));
+    assert!(asks.contains(&IntakeQuery::JobStatus), "{asks:?}");
+    assert!(
+        asks.iter()
+            .all(|query| !matches!(query, IntakeQuery::JobStart { .. })),
+        "{asks:?}"
+    );
+
+    shell.arrive(intake_reply(
+        IntakeQuery::JobStatus,
+        Err("trusted_connection_lost".into()),
+    ));
+    let shown = render(&mut shell, 80, 24);
+    assert!(!shown.contains("Could not create"), "{shown}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+
+    shell.arrive(job_status(Some(building(&id, &project))));
+    let shown = render(&mut shell, 80, 24);
+    assert!(!shown.contains("Could not create"), "{shown}");
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(assigns_main(&sent, &project), "{sent:?}");
+    assert!(setup_start(&sent).is_none(), "{sent:?}");
+
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, _, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(start, Err("project_exists".into())));
+    drain(&mut shell);
+    shell.arrive(job_status(None));
+    let sent = drain(&mut shell);
+    assert!(setup_start(&sent).is_none(), "{sent:?}");
+    assert_eq!(dismisses(&sent, &id), 0, "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Could not create the folder."), "{shown}");
+    assert!(
+        shown.contains("A folder for this project already exists."),
+        "{shown}"
+    );
+}
+
+/// DEC-177 step 3b: a status read concerns every New Project left running, so one page that
+/// follows its job and another whose start found the slot taken both read it: the first
+/// assigns its pool, the second keeps its draft.
+#[test]
+fn every_new_project_left_running_reads_each_job_status() {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    go_to(&mut shell, "new project");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    drain(&mut shell);
+    for character in "Harbor".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let (_, _, harbor) = setup_start(&drain(&mut shell)).expect("Harbor starts its job too");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    shell.arrive(intake_reply(harbor, Err("job_busy".into())));
+    drain(&mut shell);
+
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    let sent = drain(&mut shell);
+    assert!(assigns_main(&sent, &project), "{sent:?}");
+    let said = shell.ctx.message().expect("Harbor's refusal is said");
+    assert!(
+        said.rest.starts_with("Harbor is kept as a draft"),
+        "{}",
+        said.rest
+    );
+    assert_eq!(kept_draft().as_deref(), Some("Harbor"));
+
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
 }
 
 #[test]
@@ -3455,9 +4254,9 @@ async fn a_project_folder_the_engine_cannot_make_says_why_in_the_wizard() {
     assert!(shown.contains("Tidepool"), "{shown}");
     std::fs::set_permissions(engine.home.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
     shell.key(Key::Enter);
-    let sent = pump(&mut shell, &mut connection).await;
+    let sent = pump_job(&mut shell, &mut connection).await;
     std::fs::set_permissions(engine.home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(sent.first(), Some(&"create"), "{sent:?}");
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
     assert_eq!(shell.place(), Some(Place::NewProject));
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Could not create the project."), "{shown}");
@@ -5808,256 +6607,6 @@ async fn shift_arrows_walk_the_project_tabs_across_the_master_view() {
     until_place(&mut shell, &mut connection, &master).await;
     shell.key(Key::ShiftLeft);
     assert_eq!(shell.place(), Some(tab(ProjectTab::Overview)));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_creation_reconcile_the_full_queue_refuses_keeps_the_submission_and_reconciles_again() {
-    use crate::tui::client::{CreationEvent, MutationDelivery};
-    let engine = Engine::start().await;
-    let mut connection = engine.connect();
-    let mut ctx = ctx(80, 24);
-    ctx.store.pools = Load::Ready(Vec::new());
-    let screen = open(&Place::NewProject, &mut ctx);
-    let mut shell = Shell::with(ctx, screen);
-    pump(&mut shell, &mut connection).await;
-    for character in "Tidepool".chars() {
-        shell.key(Key::Char(character));
-    }
-    shell.key(Key::ShiftLeft);
-    shell.key(Key::Enter);
-    let submission = std::iter::from_fn(|| shell.ctx.next_request())
-        .find_map(|request| match request {
-            Request::Creation(job) => Some(job.submission),
-            _ => None,
-        })
-        .expect("Enter sends the creation");
-    let mut filled = 0;
-    while filled < 64
-        && shell.ctx.try_request(Request::EditPool {
-            change: crate::tui::seam::PoolChange::Remove {
-                id: CredentialRef::new("pool-a").unwrap(),
-                opened_projects: 0,
-            },
-        })
-    {
-        filled += 1;
-    }
-    assert!(filled < 64, "the request queue is bounded");
-
-    shell.arrive(owner_arrival(OwnerEvent::Creation(Box::new(
-        CreationEvent {
-            submission: submission.clone(),
-            operation: None,
-            result: Err("trusted_owner_connection_failed".into()),
-            retained: true,
-        },
-    ))));
-    assert_eq!(shell.place(), Some(Place::NewProject));
-    let shown = render(&mut shell, 80, 24);
-    assert!(
-        !shown.contains("create the project again"),
-        "a creation whose outcome is unknown is never offered as a fresh create: {shown}"
-    );
-
-    while shell.ctx.next_request().is_some() {}
-    shell.tick();
-    let reconciles = std::iter::from_fn(|| shell.ctx.next_request())
-        .filter_map(|request| match request {
-            Request::Creation(job) => Some(*job),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        reconciles.len(),
-        1,
-        "the refused reconcile goes out once the queue has room"
-    );
-    assert!(matches!(
-        reconciles[0].delivery,
-        MutationDelivery::Reconcile
-    ));
-    assert_eq!(
-        reconciles[0].submission, submission,
-        "the same submission and project id, never a second one"
-    );
-}
-
-/// Opens New project on a real engine, names the project Tidepool and presses Enter on
-/// Review, then takes every request that event made. Takes the engine. Returns the shell,
-/// its connection and the submission the creation sent.
-async fn submitted_creation(
-    engine: &Engine,
-) -> (Shell, Connection, crate::tui::client::CreationSubmission) {
-    let mut connection = engine.connect();
-    let mut ctx = ctx(80, 24);
-    ctx.store.pools = Load::Ready(Vec::new());
-    let screen = open(&Place::NewProject, &mut ctx);
-    let mut shell = Shell::with(ctx, screen);
-    pump(&mut shell, &mut connection).await;
-    for character in "Tidepool".chars() {
-        shell.key(Key::Char(character));
-    }
-    shell.key(Key::ShiftLeft);
-    shell.key(Key::Enter);
-    let submission = std::iter::from_fn(|| shell.ctx.next_request())
-        .find_map(|request| match request {
-            Request::Creation(job) => Some(job.submission),
-            _ => None,
-        })
-        .expect("Enter sends the creation");
-    while shell.ctx.next_request().is_some() {}
-    (shell, connection, submission)
-}
-
-/// Hands the page one creation reply from the engine worker. Takes the shell, the
-/// submission, the result and whether the worker still holds the submission. Returns the
-/// creation requests the page sent in answer, oldest first.
-fn creation_reply(
-    shell: &mut Shell,
-    submission: &crate::tui::client::CreationSubmission,
-    result: Result<Box<OwnerResponse>, String>,
-    retained: bool,
-) -> Vec<crate::tui::client::CreationJob> {
-    shell.arrive(owner_arrival(OwnerEvent::Creation(Box::new(
-        crate::tui::client::CreationEvent {
-            submission: submission.clone(),
-            operation: None,
-            result,
-            retained,
-        },
-    ))));
-    std::iter::from_fn(|| shell.ctx.next_request())
-        .filter_map(|request| match request {
-            Request::Creation(job) => Some(*job),
-            _ => None,
-        })
-        .collect()
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reconcile_that_finds_the_creation_unrecorded_retries_it_and_a_busy_retry_the_engine_dropped_says_busy()
- {
-    use crate::tui::client::MutationDelivery;
-    let engine = Engine::start().await;
-    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
-
-    let sent = creation_reply(
-        &mut shell,
-        &submission,
-        Err("trusted_owner_connection_failed".into()),
-        true,
-    );
-    assert_eq!(sent.len(), 1, "a lost reply is reconciled once");
-    assert!(matches!(sent[0].delivery, MutationDelivery::Reconcile));
-
-    let sent = creation_reply(
-        &mut shell,
-        &submission,
-        Ok(Box::new(OwnerResponse::NotRecordedAtBarrier {
-            revision: crate::protocol::Cursor::new(0),
-        })),
-        true,
-    );
-    assert_eq!(
-        sent.len(),
-        1,
-        "a creation the engine never recorded is sent again as the same request: {}",
-        render(&mut shell, 160, 24)
-    );
-    assert!(matches!(sent[0].delivery, MutationDelivery::Retry));
-    assert_eq!(
-        sent[0].submission, submission,
-        "the same submission and project id, never a second one"
-    );
-
-    let sent = creation_reply(
-        &mut shell,
-        &submission,
-        Ok(Box::new(OwnerResponse::Rejected {
-            code: crate::tui::seam::OWNER_BUSY.to_owned(),
-        })),
-        false,
-    );
-    assert!(sent.is_empty());
-    let shown = render(&mut shell, 160, 24);
-    assert!(
-        shown.contains("CrazyAgent is busy with other windows."),
-        "a busy retry the engine dropped changed nothing, so the page says busy: {shown}"
-    );
-    shell.tick();
-    assert!(
-        std::iter::from_fn(|| shell.ctx.next_request())
-            .all(|request| !matches!(request, Request::Creation(_))),
-        "nothing is held for the busy retry, so nothing is sent again"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_second_lost_reply_on_a_recovering_creation_says_the_project_is_unconfirmed() {
-    let engine = Engine::start().await;
-    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
-    let lost = || Err("trusted_owner_connection_failed".to_owned());
-
-    let sent = creation_reply(&mut shell, &submission, lost(), true);
-    assert_eq!(sent.len(), 1, "a lost reply is reconciled once");
-    let sent = creation_reply(&mut shell, &submission, lost(), true);
-    assert!(sent.is_empty(), "recovery runs once");
-    let shown = render(&mut shell, 160, 24);
-    assert!(
-        shown.contains("CrazyAgent could not confirm the new project."),
-        "the reconcile's reply was lost too, so the outcome is still unknown: {shown}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_creation_the_engine_still_runs_is_checked_again_on_each_tick_until_it_answers() {
-    use crate::tui::client::MutationDelivery;
-    let engine = Engine::start().await;
-    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
-    let late = || Err("owner_outcome_unknown_reconcile_same_identity".to_owned());
-    let running = || {
-        Ok(Box::new(OwnerResponse::InProgress {
-            operation_id: crate::protocol::RequestId::new("late-creation").unwrap(),
-        }))
-    };
-
-    let sent = creation_reply(&mut shell, &submission, late(), true);
-    assert_eq!(sent.len(), 1, "a late answer is reconciled once");
-    assert!(matches!(sent[0].delivery, MutationDelivery::Reconcile));
-
-    for _ in 0..2 {
-        let sent = creation_reply(&mut shell, &submission, running(), true);
-        assert!(
-            sent.is_empty(),
-            "a running creation waits for the next tick"
-        );
-        let shown = render(&mut shell, 160, 24);
-        assert!(
-            !shown.contains("could not confirm"),
-            "the engine still runs the creation, so it is not unconfirmed: {shown}"
-        );
-        assert_eq!(
-            shell.ctx.message().map(|message| message.lead.clone()),
-            Some("Still creating the project.".to_owned())
-        );
-        shell.tick();
-        let checks = std::iter::from_fn(|| shell.ctx.next_request())
-            .filter_map(|request| match request {
-                Request::Creation(job) => Some(*job),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            checks.len(),
-            1,
-            "each tick checks the running creation once"
-        );
-        assert!(matches!(checks[0].delivery, MutationDelivery::Reconcile));
-        assert_eq!(
-            checks[0].submission, submission,
-            "the same submission and project id, never a second one"
-        );
-    }
 }
 
 /// While the uncommitted-move banner takes rows above the tabs, the Changes tab offers

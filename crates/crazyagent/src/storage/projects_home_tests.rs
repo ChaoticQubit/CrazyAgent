@@ -976,3 +976,84 @@ fn a_move_whose_old_folder_is_left_is_told_until_it_is_cleared_or_dismissed() {
         "a start forgets a mark whose folder is gone"
     );
 }
+
+/// DEC-177 add.2 Q3 A: a New Project's ledger mark names the job's request and the project's
+/// name; a second build of the same project ends the first mark, the record ends the mark done,
+/// and an engine start ends every mark left: done when its project was recorded, else failed,
+/// returning the newest failed one so the start shows it as the job cut short. A second start
+/// finds none.
+#[test]
+fn a_setup_mark_ends_with_its_record_and_a_start_ends_the_rest_naming_the_newest_cut_short() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    connection
+        .execute_batch("INSERT INTO projects(id, body) VALUES ('kept','{}')")
+        .unwrap();
+    let mark = |project: &str, request: &str, name: &str| {
+        crate::projects_home::setup_mark::begin(
+            &connection,
+            &ProjectId::new(project).unwrap(),
+            &crate::protocol::RequestId::new(request).unwrap(),
+            name,
+        )
+        .unwrap()
+    };
+    let open = |key: &str| -> i64 {
+        connection
+            .query_row(
+                "SELECT count(*) FROM ledger_actions
+                 WHERE kind='project_setup' AND action_key=?1 AND outcome IS NULL",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let ended = |key: &str| -> Vec<String> {
+        let mut statement = connection
+            .prepare(
+                "SELECT outcome FROM ledger_actions
+                 WHERE kind='project_setup' AND action_key=?1 AND outcome IS NOT NULL ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([key], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    mark("meals", "setup-1", "Meal planner");
+    mark("meals", "setup-2", "Meal planner");
+    assert_eq!(open("meals"), 1, "a second build ends the first mark");
+    assert_eq!(ended("meals"), ["failed"]);
+    let meals = ProjectId::new("meals").unwrap();
+    assert!(crate::projects_home::setup_mark::end(&connection, &meals, true).unwrap());
+    assert_eq!(open("meals"), 0);
+    assert_eq!(ended("meals"), ["failed", "done"]);
+    assert!(!crate::projects_home::setup_mark::end(&connection, &meals, false).unwrap());
+
+    mark("older", "setup-3", "Older");
+    mark("newer", "setup-4", "Newer");
+    mark("kept", "setup-5", "Kept");
+    let cut = crate::projects_home::setup_mark::start(&connection)
+        .unwrap()
+        .expect("the newest New Project an engine stop cut short");
+    assert_eq!(cut.project, ProjectId::new("newer").unwrap());
+    assert_eq!(cut.request.as_str(), "setup-4");
+    assert_eq!(cut.name, "Newer");
+    for key in ["older", "newer", "kept"] {
+        assert_eq!(open(key), 0, "{key}");
+    }
+    assert_eq!(ended("older"), ["failed"]);
+    assert_eq!(ended("newer"), ["failed"]);
+    assert_eq!(
+        ended("kept"),
+        ["done"],
+        "a recorded project's mark ends done"
+    );
+    assert_eq!(
+        crate::projects_home::setup_mark::start(&connection).unwrap(),
+        None
+    );
+}
