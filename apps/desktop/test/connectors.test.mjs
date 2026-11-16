@@ -772,3 +772,10 @@ test("The page reads a waiting sign-in once a second through one rule, stops at 
   assert.match(screen, /onSignOut: \(shown\) => \{ if \(!busy\) void changed\(\(\) => signOutConnector\(shown\.name\), signedOutLine\(shown\.title\)\); \}/u);
   assert.match(screen, /onCancelSignIn: /u);
 });
+
+test("A waiting sign-in keeps Waiting for the browser and Cancel on its page while the connector reads Key, as the TUI does, so the reads never run with no way to stop them", () => {
+  const switched = signInPage(both("key"), "board");
+  assert.ok(text(switched).includes(api.CONNECTORS_PAGE.waiting), "the page still says it waits");
+  assert.ok(switched.includes("aria-label=\"Cancel the sign-in to Board\""), "Cancel stays");
+  assert.ok(!switched.includes("aria-label=\"Sign in to Board\""));
+});
