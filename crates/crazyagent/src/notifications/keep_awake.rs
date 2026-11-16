@@ -1,7 +1,9 @@
 //! The Keep awake notices (DEC-167 addendum 10): a hold that ended by itself and heat a
 //! hold runs on through, both Info items the keeper writes inside its own change, and the
 //! sleep changes an earlier engine could not put back, an Action kind whose state is the
-//! `keep_awake_restore` table the keeper fills after the engine start's undo.
+//! `keep_awake_restore` table the keeper fills after the engine start's undo and, under its
+//! own subject, while the lid helper cannot read its journal (QUESTION 36b). The approval
+//! source reads the Keep awake view while the lid helper waits for approval (QUESTION 35j).
 
 use super::reconcile::{Condition, SOURCE_ROWS_MAX};
 use super::sources::{Found, tables_exist};
@@ -9,7 +11,7 @@ use super::{InfoNotice, NoticeKind, NoticeTarget, TEXT_BYTES_MAX, error, note};
 use crate::config::ModelAccess;
 use crate::engine::EngineError;
 use crate::keep_awake::journal::ENTRIES_MAX;
-use crate::keep_awake::{EndReason, HeatEnd, Leftover};
+use crate::keep_awake::{EndReason, HeatEnd, Leftover, LidSupport};
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use std::collections::BTreeSet;
 
@@ -50,6 +52,10 @@ const _: () = assert!(NOT_PUT_BACK.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(NOT_READ.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(HOT_UNTIL_CRITICAL.len() <= TEXT_BYTES_MAX);
 const _: () = assert!(HOT_NEVER_ENDS.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(LID_JOURNAL_TEXT.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(APPROVAL_TEXT.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(LID_SUBJECT.len() <= 128);
+const _: () = assert!(APPROVAL_SUBJECT.len() <= 128);
 const _: () = assert!(ENTRY_SUBJECT.len() + 64 <= 128);
 
 /// Creates the restore state when missing. Input: the engine database. Output: Ok, or the
@@ -136,8 +142,9 @@ pub(crate) fn running_hot(connection: &Connection, heat_end: HeatEnd, since_ms: 
 
 /// Replaces the restore state with what the engine start's undo left: one row per kind of
 /// entry it could not undo, or one row when the journal could not be read, never shown by
-/// its kind. Inputs: the engine database outside any transaction and what was left.
-/// Output: Ok, or the SQLite failure, with nothing changed.
+/// its kind. The lid helper row is not the undo's and stays. Inputs: the engine database
+/// outside any transaction and what was left. Output: Ok, or the SQLite failure, with
+/// nothing changed.
 pub(crate) fn left_over(connection: &Connection, leftover: &Leftover) -> Result<(), EngineError> {
     assert!(connection.is_autocommit());
     let rows: Vec<(String, bool)> = match leftover {
@@ -152,8 +159,11 @@ pub(crate) fn left_over(connection: &Connection, leftover: &Leftover) -> Result<
     assert!(rows.len() <= ENTRIES_MAX);
     let tx =
         Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
-    tx.execute("DELETE FROM keep_awake_restore", [])
-        .map_err(error)?;
+    tx.execute(
+        "DELETE FROM keep_awake_restore WHERE subject != ?1",
+        [LID_SUBJECT],
+    )
+    .map_err(error)?;
     for (subject, unreadable) in &rows {
         tx.execute(
             "INSERT INTO keep_awake_restore(subject,unreadable) VALUES(?1,?2)",
@@ -170,7 +180,20 @@ pub(crate) fn left_over(connection: &Connection, leftover: &Leftover) -> Result<
 /// Output: Ok, or the SQLite failure, with nothing changed.
 pub(crate) fn lid_journal(connection: &Connection, unreadable: bool) -> Result<(), EngineError> {
     assert!(connection.is_autocommit());
-    let _ = unreadable;
+    let changed = if unreadable {
+        connection.execute(
+            "INSERT INTO keep_awake_restore(subject,unreadable) VALUES(?1,1) \
+             ON CONFLICT(subject) DO UPDATE SET unreadable=1",
+            [LID_SUBJECT],
+        )
+    } else {
+        connection.execute(
+            "DELETE FROM keep_awake_restore WHERE subject=?1",
+            [LID_SUBJECT],
+        )
+    }
+    .map_err(error)?;
+    assert!(changed <= 1);
     Ok(())
 }
 
@@ -182,14 +205,33 @@ pub(super) fn approvals(
     connection: &Connection,
     _access: &ModelAccess,
 ) -> Result<Option<Found>, EngineError> {
-    let _ = connection;
-    Ok(None)
+    if !tables_exist(connection, &["keep_awake_state", "configured_keep_awake"])? {
+        return Ok(None);
+    }
+    let view = crate::keep_awake::view(connection)?;
+    let waiting = view.lid_platform == LidSupport::NeedsApproval;
+    let conditions: Vec<Condition> = waiting
+        .then(|| Condition {
+            kind: NoticeKind::KeepAwakeApproval,
+            project_id: None,
+            subject: APPROVAL_SUBJECT.into(),
+            text: APPROVAL_TEXT.into(),
+            target: NoticeTarget::KeepAwake,
+        })
+        .into_iter()
+        .collect();
+    assert!(conditions.len() <= 1);
+    Ok(Some(Found::read(conditions, false, Vec::new())))
 }
 
-/// The line of a restore item. Input: whether the journal could not be read. Output: the
-/// line.
-fn restore_text(unreadable: bool) -> &'static str {
-    if unreadable { NOT_READ } else { NOT_PUT_BACK }
+/// The line of a restore item. Inputs: its subject and whether the journal could not be
+/// read. Output: the line; the lid helper row has the fix of threat model section 8.
+fn restore_text(subject: &str, unreadable: bool) -> &'static str {
+    match (subject == LID_SUBJECT, unreadable) {
+        (true, _) => LID_JOURNAL_TEXT,
+        (false, true) => NOT_READ,
+        (false, false) => NOT_PUT_BACK,
+    }
 }
 
 /// The restore source (DEC-136a decision 1): one condition per row of the restore state,
@@ -218,8 +260,8 @@ pub(super) fn restores(
         .map(|(subject, unreadable)| Condition {
             kind: NoticeKind::KeepAwakeRestore,
             project_id: None,
+            text: restore_text(&subject, unreadable).into(),
             subject,
-            text: restore_text(unreadable).into(),
             target: NoticeTarget::KeepAwake,
         })
         .collect();

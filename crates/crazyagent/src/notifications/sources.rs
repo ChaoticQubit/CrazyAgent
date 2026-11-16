@@ -64,13 +64,14 @@ pub(super) struct Live {
 /// Reads every Action source. Inputs: the engine database and the model access. Output:
 /// what holds now.
 pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
-    let sources: [(NoticeKind, Source); 6] = [
+    let sources: [(NoticeKind, Source); 7] = [
         (NoticeKind::Question, questions),
         (NoticeKind::AccountSignIn, accounts),
         (NoticeKind::ResearchPool, pools),
         (NoticeKind::MemoryReview, memories),
         (NoticeKind::ChangeSetReview, change_sets),
         (NoticeKind::KeepAwakeRestore, super::keep_awake::restores),
+        (NoticeKind::KeepAwakeApproval, super::keep_awake::approvals),
     ];
     let mut live = Live::default();
     for (kind, read) in sources {

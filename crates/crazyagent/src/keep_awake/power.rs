@@ -2,6 +2,7 @@ use super::state::{Heat, LidSupport, PowerSource, Sensors};
 use crate::paths::Platform;
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
+use std::time::{Duration, Instant};
 
 /// How often the keeper asks the platform for a reading.
 pub const READ_MS: i64 = 30_000;
@@ -13,6 +14,10 @@ pub const LID_REFUSED: &str = "The system did not allow the lid-closed hold";
 const PERCENT_MAX: u8 = 100;
 const LATE_READS: i64 = 2;
 const THREAD_NAME: &str = "keep-awake-sensors";
+
+/// One ask to the sensor thread: the keeper's lid ask, an owner command if one waits, and
+/// the engine time.
+type Ask = (LidAsk, Option<LidCommand>, i64);
 
 /// One reading of the platform: where the power comes from, the battery charge, the heat,
 /// whether the lid is closed, and whether this platform can hold with the lid closed, each
@@ -158,13 +163,15 @@ pub fn sensors(reading: &PowerReading, battery_unread_twice: bool, lid_refused: 
 
 /// The keeper's line to the sensor thread. The keeper asks for a reading and takes the
 /// answer on a later step, so a slow system tool, bus or lid helper never holds up the
-/// engine's team step. Each ask carries the keeper's lid ask for the lid line, if the
-/// thread runs one. The thread ends when this value is dropped.
+/// engine's team step. Each ask carries the keeper's lid ask, and an owner command when
+/// one waits, for the lid line, if the thread runs one. The thread ends when this value
+/// is dropped.
 #[derive(Debug)]
 pub(super) struct Sensing {
-    ask: SyncSender<(LidAsk, i64)>,
+    ask: SyncSender<Ask>,
     answers: Receiver<PowerReading>,
     lid: bool,
+    pending: Option<LidCommand>,
     asked_ms: Option<i64>,
     asked_with: Option<LidAsk>,
     waiting: bool,
@@ -178,16 +185,16 @@ impl Sensing {
     /// and the lid line, which the thread owns from here on. Output: the line to the
     /// thread, or the error of starting it.
     pub(super) fn start(mut reader: Reader, mut lid: Option<LidReader>) -> std::io::Result<Self> {
-        let (ask, asked) = sync_channel::<(LidAsk, i64)>(1);
+        let (ask, asked) = sync_channel::<Ask>(1);
         let (answer, answers) = sync_channel::<PowerReading>(1);
         let has_lid = lid.is_some();
         std::thread::Builder::new()
             .name(THREAD_NAME.into())
             .spawn(move || {
-                while let Ok((lid_ask, now_ms)) = asked.recv() {
+                while let Ok((lid_ask, command, now_ms)) = asked.recv() {
                     let mut reading = reader();
                     if let Some(lid) = lid.as_mut() {
-                        reading.lid_support = lid(lid_ask, None, now_ms);
+                        reading.lid_support = lid(lid_ask, command, now_ms);
                     }
                     assert_ne!(reading.lid_support, LidSupport::Off);
                     if answer.send(reading).is_err() {
@@ -199,6 +206,7 @@ impl Sensing {
             ask,
             answers,
             lid: has_lid,
+            pending: None,
             asked_ms: None,
             asked_with: None,
             waiting: false,
@@ -211,13 +219,42 @@ impl Sensing {
     /// unless a reading is under way; a later command before then replaces it. Input: the
     /// command.
     pub(super) fn order(&mut self, command: LidCommand) {
-        let _ = command;
+        if !self.lid {
+            eprintln!("keep awake: no lid line, the lid command {command:?} is dropped");
+            return;
+        }
+        self.pending = Some(command);
+        assert!(self.pending.is_some());
     }
 
     /// Sends a last ask and waits for its answer, at most `wait` in all, so a lid lease
-    /// is released before the engine stops. Inputs: the last ask and the longest wait.
-    pub(super) fn finish(&mut self, last: LidAsk, wait: std::time::Duration) {
-        let _ = (last, wait);
+    /// is released before the engine stops. A reading under way is waited for first; the
+    /// last ask goes only when the ask sent before it wanted the lid. It does nothing
+    /// without a lid line or before any ask. Inputs: the last ask and the longest wait.
+    pub(super) fn finish(&mut self, last: LidAsk, wait: Duration) {
+        assert!(!last.wanted);
+        assert!(!wait.is_zero());
+        let Some(asked_ms) = self.asked_ms.filter(|_| self.lid && !self.stopped) else {
+            return;
+        };
+        let until = Instant::now() + wait;
+        let left = || until.saturating_duration_since(Instant::now());
+        if self.waiting && self.answers.recv_timeout(left()).is_err() {
+            return;
+        }
+        self.waiting = false;
+        if !self.asked_with.is_some_and(|asked| asked.wanted) {
+            return;
+        }
+        if self.ask.try_send((last, None, asked_ms)).is_err() {
+            return;
+        }
+        let answered = self.answers.recv_timeout(left()).is_ok();
+        self.waiting = !answered;
+        self.asked_with = Some(last);
+        if !answered {
+            eprintln!("keep awake: the lid line did not answer the last ask in time");
+        }
     }
 
     /// Notes that the sensor thread is gone, once, and answers with a reading that knows
@@ -254,9 +291,14 @@ impl Sensing {
         }
         let since = self.asked_ms.map(|asked| now_ms - asked);
         let changed = self.lid && self.asked_with != Some(lid_ask);
-        let due = changed || since.is_none_or(|since| !(0..READ_MS).contains(&since));
+        let ordered = self.pending.is_some();
+        let due = changed || ordered || since.is_none_or(|since| !(0..READ_MS).contains(&since));
         if due && !self.waiting {
-            match self.ask.try_send((lid_ask, now_ms)) {
+            let sent = self.ask.try_send((lid_ask, self.pending, now_ms));
+            if sent.is_ok() {
+                self.pending = None;
+            }
+            match sent {
                 Ok(()) | Err(TrySendError::Full(_)) => {
                     self.waiting = true;
                     self.asked_ms = Some(now_ms);
@@ -270,6 +312,7 @@ impl Sensing {
         }
         assert!(self.waiting || self.asked_ms.is_some());
         assert_eq!(self.asked_with.is_some(), self.asked_ms.is_some());
+        assert!(self.lid || self.pending.is_none());
         answer
     }
 }

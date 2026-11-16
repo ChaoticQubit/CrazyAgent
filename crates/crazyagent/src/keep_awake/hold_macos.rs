@@ -17,6 +17,7 @@ const MACOS_MAJOR_MAX: u32 = 99;
 const VERSION_BYTES_MAX: usize = 32;
 const HELPER_PROGRAM: &str = "crazyagent-power-helper";
 const DAEMONS_FOLDER: &str = "../Library/LaunchDaemons";
+const REASON_CHARS_MAX: usize = 200;
 
 /// The lease each `Hold` asks the lid helper for: four readings, so a renewal or two that
 /// fail still hold, and an engine that stops lets the lid go within two minutes.
@@ -35,9 +36,6 @@ pub(super) const STATUS_UNREAD: &str = "The lid helper's state could not be read
 pub(super) const VERSION_UNREAD: &str = "The macOS version could not be read";
 /// The lid words when the helper gave no reply, or one that does not fit the call.
 pub(super) const HELPER_UNANSWERED: &str = "The lid helper did not answer";
-/// The lid words while the helper cannot read its journal (threat model section 8).
-pub(super) const SLEEP_NOT_RESTORED: &str =
-    "Sleep not restored: the lid helper cannot read its journal";
 /// The lid words while the helper's last-resort floor holds (threat model section 10).
 pub(super) const ENDED_TO_PROTECT: &str = "Ended to protect this Mac";
 /// The Remove lid helper reason when another account's uid is pinned.
@@ -160,9 +158,11 @@ pub(super) fn gate(connect: &mut dyn FnMut() -> io::Result<UnixStream>) -> io::R
 /// The lid hold on the sensor thread (DEC-167 addendum 18, QUESTION 35b-35d, 35f-35h). At
 /// each reading it reads the daemon's status. While the daemon is enabled it renews the
 /// helper's lease when the lid is wanted, releases it once it is not, and otherwise reads
-/// the helper at most every `READ_EVERY_MS`, and at once after an approval. It never
-/// connects while the lid rule is Off or the daemon is not enabled. `lease_until_ms` is
-/// when the last lease the helper granted runs out at the latest, none with no lease.
+/// the helper at most every `READ_EVERY_MS`, and at once after an approval or a command.
+/// It never connects while the lid rule is Off or the daemon is not enabled.
+/// `lease_until_ms` is when the last lease the helper granted runs out at the latest, none
+/// with no lease. `trouble` is what the last owner command could not do, with the daemon
+/// status after it, and stands as the lid support until that status changes.
 #[derive(Debug)]
 pub(super) struct LidLine {
     service: Box<dyn Service>,
@@ -171,6 +171,7 @@ pub(super) struct LidLine {
     lease_until_ms: Option<i64>,
     read_ms: Option<i64>,
     last: Option<LidSupport>,
+    trouble: Option<(Option<Status>, LidSupport)>,
 }
 
 impl LidLine {
@@ -190,14 +191,111 @@ impl LidLine {
             lease_until_ms: None,
             read_ms: None,
             last: None,
+            trouble: None,
         }
     }
 
     /// Runs one owner command behind the same gate as every step, so a Mac that cannot
-    /// hold the lid never reaches SMAppService. Inputs: the command and the engine time.
+    /// hold the lid never reaches SMAppService (QUESTION 35i, 35j, 36a). The next step
+    /// reads the helper again, and what the command could not do stands until the daemon
+    /// status changes or another command runs. Inputs: the command and the engine time.
     pub(super) fn run(&mut self, command: LidCommand, now_ms: i64) {
         assert!(now_ms > 0);
-        let _ = command;
+        if self.platform.refusal().is_some() {
+            eprintln!("keep awake: this Mac cannot hold the lid, {command:?} is dropped");
+            return;
+        }
+        let status = self.service.status();
+        let trouble = match command {
+            LidCommand::TurnOn => self.turn_on(status),
+            LidCommand::Remove => self.remove(status, now_ms),
+        };
+        self.read_ms = None;
+        self.last = None;
+        self.trouble = trouble.map(|support| (self.service.status(), support));
+        assert!(self.read_ms.is_none());
+        assert!(self.last.is_none());
+    }
+
+    /// Turn on: registers the daemon when it is not registered, then opens Login Items for
+    /// the approval, and opens them again while the approval waits. An enabled or missing
+    /// daemon is left alone. Input: the daemon status. Output: why it could not turn on.
+    fn turn_on(&self, status: Option<Status>) -> Option<LidSupport> {
+        match status {
+            None | Some(Status::NotRegistered) => {
+                if let Err(problem) = self.service.register() {
+                    let reason = format!("{TURN_ON_FAILED}{}", bounded(&problem));
+                    return Some(LidSupport::NotAvailable { reason });
+                }
+            }
+            Some(Status::RequiresApproval) => {}
+            Some(Status::Enabled | Status::NotFound) => return None,
+        }
+        if let Err(problem) = self.service.open_login_items() {
+            eprintln!("keep awake: Login Items did not open: {}", bounded(&problem));
+        }
+        None
+    }
+
+    /// Remove lid helper: an enabled daemon's helper forgets the pin and puts sleep back
+    /// first, and is unregistered only once it did; a daemon waiting for approval runs no
+    /// helper, so it holds no lease, and is unregistered at once. Inputs: the daemon status
+    /// and the time. Output: why it could not remove the helper.
+    fn remove(&mut self, status: Option<Status>, now_ms: i64) -> Option<LidSupport> {
+        match status {
+            Some(Status::Enabled) => self.forget_then_unregister(now_ms),
+            Some(Status::RequiresApproval) => {
+                self.lease_until_ms = None;
+                self.unregister()
+            }
+            None | Some(Status::NotRegistered | Status::NotFound) => None,
+        }
+    }
+
+    /// Sends Forget and unregisters on Forgotten. A Forget refused for the journal reads
+    /// the helper once: a journal it cannot read leaves the read to say so, else the pin
+    /// file stays. Input: the time. Output: why the helper stays, or none.
+    fn forget_then_unregister(&mut self, now_ms: i64) -> Option<LidSupport> {
+        let reason = match self.helper.call(&Request::Forget) {
+            Ok(Reply::Forgotten) => {
+                self.lease_until_ms = None;
+                return self.unregister();
+            }
+            Ok(Reply::Refused {
+                reason: Refusal::JournalUnreadable,
+            }) => match self.read(now_ms) {
+                LidSupport::SleepNotRestored => return None,
+                LidSupport::NotAvailable { reason } if reason == HELPER_UNANSWERED => {
+                    REMOVE_UNANSWERED
+                }
+                _ => PIN_FILE_KEPT,
+            },
+            Ok(Reply::Refused {
+                reason: Refusal::Pmset,
+            }) => REMOVE_NOT_PUT_BACK,
+            Ok(Reply::Refused {
+                reason: Refusal::Unpinned,
+            }) => REMOVE_NOT_YOURS,
+            Ok(Reply::Refused { reason }) => {
+                eprintln!("keep awake: the lid helper refused Forget: {reason:?}");
+                REMOVE_REFUSED
+            }
+            other => {
+                eprintln!("keep awake: the lid helper's Forget answer: {other:?}");
+                REMOVE_UNANSWERED
+            }
+        };
+        Some(LidSupport::RemoveHelper {
+            reason: reason.into(),
+        })
+    }
+
+    /// Unregisters the daemon; launchd then stops the helper. Output: why it could not.
+    fn unregister(&self) -> Option<LidSupport> {
+        assert!(self.lease_until_ms.is_none());
+        let problem = self.service.unregister().err()?;
+        let reason = format!("{REMOVE_UNFINISHED}{}", bounded(&problem));
+        Some(LidSupport::RemoveHelper { reason })
     }
 
     /// Takes one step at a reading. Inputs: the keeper's lid ask and the engine time.
@@ -223,6 +321,10 @@ impl LidLine {
             Some(Status::RequiresApproval) => LidSupport::NeedsApproval,
             Some(Status::Enabled) => self.enabled(ask, now_ms),
         };
+        if self.trouble.as_ref().is_some_and(|(after, _)| *after != status) {
+            self.trouble = None;
+        }
+        let support = self.trouble.as_ref().map_or(support, |(_, trouble)| trouble.clone());
         assert!(enabled || self.lease_until_ms.is_none());
         assert!(!matches!(support, LidSupport::Off | LidSupport::IdleOnlyOnBattery));
         support
@@ -332,7 +434,7 @@ impl Drop for LidLine {
 /// read first, then its floor, then the pin. Input: the view. Output: the lid support.
 fn support_of(view: &View) -> LidSupport {
     if !view.journal_ok {
-        return not_available(SLEEP_NOT_RESTORED);
+        return LidSupport::SleepNotRestored;
     }
     if view.floor != FloorView::None {
         return not_available(ENDED_TO_PROTECT);
@@ -346,6 +448,18 @@ fn support_of(view: &View) -> LidSupport {
             reason: PIN_NONE.into(),
         },
     }
+}
+
+/// A system error's words for the lid support: no control characters, at most
+/// `REASON_CHARS_MAX` characters. Input: the words. Output: the bounded words.
+fn bounded(text: &str) -> String {
+    let words: String = text
+        .chars()
+        .filter(|letter| !letter.is_control())
+        .take(REASON_CHARS_MAX)
+        .collect();
+    assert!(words.chars().count() <= REASON_CHARS_MAX);
+    words
 }
 
 fn not_available(reason: &str) -> LidSupport {

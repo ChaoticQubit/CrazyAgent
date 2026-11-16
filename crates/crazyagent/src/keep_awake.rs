@@ -98,6 +98,7 @@ pub fn refusal_words(code: &str) -> Option<&'static str> {
         "keep_awake_no_timer" => Some("The timer already ended. Start a new one."),
         "keep_awake_not_holding" => Some("Nothing is held right now."),
         "keep_awake_minutes_invalid" => Some("Enter whole minutes from 1 to 1440."),
+        "keep_awake_no_lid_helper" => Some("Lid-closed hold is set up only on macOS."),
         _ => None,
     }
 }
@@ -271,10 +272,12 @@ fn advance(settings: &KeepAwakeSettings, stored: &mut Stored, work: u32, now_ms:
     assert!(!holding || stored.decision.ended.is_none());
 }
 
-/// Applies one owner change to the settings and the run state in memory. Inputs: the
-/// change, the settings, the state and the time. Output: none when it applied, or the
+/// Applies one owner change to the settings and the run state in memory. A lid command
+/// waits in the run state, numbered, until the keeper hands it to the lid line. Inputs:
+/// the change, the settings, the state and the time. Output: none when it applied, or the
 /// plain code it is refused with: `keep_awake_off`, `keep_awake_no_timer`,
-/// `keep_awake_minutes_invalid` or `keep_awake_not_holding`.
+/// `keep_awake_minutes_invalid`, `keep_awake_not_holding` or `keep_awake_no_lid_helper`
+/// off macOS.
 fn change(
     action: &KeepAwakeAction,
     settings: &mut KeepAwakeSettings,
@@ -318,7 +321,20 @@ fn change(
             }
             *settings = chosen;
         }
-        KeepAwakeAction::TurnOnLidHold | KeepAwakeAction::RemoveLidHelper => {}
+        KeepAwakeAction::TurnOnLidHold | KeepAwakeAction::RemoveLidHelper => {
+            if !cfg!(target_os = "macos") {
+                return Some("keep_awake_no_lid_helper");
+            }
+            let command = match *action {
+                KeepAwakeAction::TurnOnLidHold => power::LidCommand::TurnOn,
+                _ => power::LidCommand::Remove,
+            };
+            let number = stored
+                .lid_order
+                .map_or(1, |order| order.number.wrapping_add(1).max(1));
+            stored.lid_order = Some(power::LidOrder { command, number });
+            assert!(number > 0);
+        }
     }
     None
 }
@@ -329,7 +345,7 @@ fn view_of(settings: KeepAwakeSettings, stored: &Stored) -> KeepAwakeView {
         settings,
         state: stored.decision,
         lid_support: lid_status(&settings, &stored.sensors),
-        lid_platform: Sensors::unread().lid_support,
+        lid_platform: stored.sensors.lid_support.clone(),
         platform: Platform::CURRENT,
         work: stored.work,
     }
@@ -345,6 +361,16 @@ pub fn evaluate(
     now_ms: i64,
     sensors: Option<&Sensors>,
 ) -> Result<KeepAwakeView, EngineError> {
+    evaluated(connection, now_ms, sensors).map(|(view, _)| view)
+}
+
+/// `evaluate`, with the last lid command the owner gave, which only the keeper reads.
+/// Inputs as `evaluate`. Output: the view and the last lid command, if any.
+fn evaluated(
+    connection: &Connection,
+    now_ms: i64,
+    sensors: Option<&Sensors>,
+) -> Result<(KeepAwakeView, Option<power::LidOrder>), EngineError> {
     assert!(now_ms > 0);
     assert!(connection.is_autocommit());
     let tx =
@@ -362,7 +388,8 @@ pub fn evaluate(
         noted(&tx, &settings, &before, &stored, now_ms);
     }
     tx.commit().map_err(error)?;
-    Ok(view_of(settings, &stored))
+    assert!(stored.lid_order.is_none_or(|order| order.number > 0));
+    Ok((view_of(settings, &stored), stored.lid_order))
 }
 
 /// Applies one owner change (DEC-167): a timer start, a timer move, End, or new settings,
@@ -521,7 +548,8 @@ fn noted(
 /// `TICK_MS` otherwise. After every evaluation it brings the platform hold, when it has
 /// one, in step with the decision. With a reader it asks a sensor thread for a reading
 /// every `power::READ_MS`; with a lid line there too, it hands the line what the lid
-/// wants with each ask, and at once when that changes.
+/// wants with each ask, and at once when that changes, each owner lid command once, and
+/// notes a lid helper journal the line cannot read for the notification center.
 #[derive(Debug, Default)]
 pub struct Keeper {
     looked_ms: Option<i64>,
@@ -532,6 +560,8 @@ pub struct Keeper {
     sensing: Option<power::Sensing>,
     lid_line: bool,
     lid_ask: power::LidAsk,
+    lid_order_sent: u32,
+    lid_journal: Option<bool>,
     reading: Option<power::PowerReading>,
     battery_unread: bool,
     battery_unread_twice: bool,
@@ -640,6 +670,50 @@ impl Keeper {
     /// the lease runs out by itself.
     pub fn stop(&mut self) {
         self.release();
+        assert!(!self.lid_ask.wanted);
+        if !self.lid_line {
+            return;
+        }
+        if let Some(sensing) = self.sensing.as_mut() {
+            sensing.finish(self.lid_ask, STOP_WAIT);
+        }
+    }
+
+    /// Hands the lid line the owner's last lid command once, on its next ask. Input: the
+    /// last lid command in the run state, if any.
+    fn hand_lid_order(&mut self, order: Option<power::LidOrder>) {
+        let Some(order) = order.filter(|order| order.number != self.lid_order_sent) else {
+            return;
+        };
+        assert!(order.number > 0);
+        match self.sensing.as_mut() {
+            Some(sensing) => sensing.order(order.command),
+            None => eprintln!("keep awake: no sensor thread, the lid command is dropped"),
+        }
+        self.lid_order_sent = order.number;
+    }
+
+    /// Writes the restore row while the lid line says the helper cannot read its journal,
+    /// and clears it once the helper holds the lid, the one support that shows its journal
+    /// reads; any other support, a rule Off or a daemon not enabled among them, leaves the
+    /// row as it is. A write that fails is logged and tried again after the next reading.
+    /// Input: the engine database outside any transaction.
+    fn note_lid_journal(&mut self, connection: &Connection) {
+        let Some(reading) = self.reading.as_ref().filter(|_| self.lid_line) else {
+            return;
+        };
+        let unreadable = match reading.lid_support {
+            LidSupport::SleepNotRestored => true,
+            LidSupport::Held => false,
+            _ => return,
+        };
+        if self.lid_journal == Some(unreadable) {
+            return;
+        }
+        match crate::notifications::keep_awake::lid_journal(connection, unreadable) {
+            Ok(()) => self.lid_journal = Some(unreadable),
+            Err(problem) => eprintln!("keep awake lid journal notice: {}", short(&problem.0)),
+        }
     }
 
     /// Brings the platform hold in step with the wanted state. A hold found lost is logged
@@ -713,11 +787,14 @@ impl Keeper {
         self.hand_on(connection);
         let work = work::count(connection)?;
         let sensed = self.sense(now_ms);
+        if sensed.is_some() {
+            self.note_lid_journal(connection);
+        }
         let settled = since(self.evaluated_ms, TICK_MS) && self.work == Some(work);
         if settled && sensed.is_none() && !dirty(connection)? {
             return Ok(None);
         }
-        let mut view = evaluate(connection, now_ms, sensed.as_ref())?;
+        let (mut view, lid_order) = evaluated(connection, now_ms, sensed.as_ref())?;
         let refused = self.lid_refused;
         let mut kept = self.keep(&view.state.want);
         if kept
@@ -737,6 +814,7 @@ impl Keeper {
         };
         self.evaluated_ms = Some(now_ms);
         self.work = Some(view.work);
+        self.hand_lid_order(lid_order);
         self.lid_ask = power::LidAsk {
             rule_on: view.settings.lid != LidRule::Off,
             wanted: matches!(view.state.want, Want::IdleAndLid { .. }),

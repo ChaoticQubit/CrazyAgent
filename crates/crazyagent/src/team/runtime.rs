@@ -3099,7 +3099,7 @@ impl TeamRuntime {
     /// panes left running. The Keep awake hold (DEC-167) is dropped first, before any step
     /// that can fail.
     pub fn shutdown(&mut self) -> Result<Vec<AgentId>, EngineError> {
-        self.keep_awake.release();
+        self.keep_awake.stop();
         let keep_panes = crate::quit_settings::load(&self.connection)
             .map_or(true, |settings| settings.keeps_team_agents());
         let mut kept = BTreeSet::new();
