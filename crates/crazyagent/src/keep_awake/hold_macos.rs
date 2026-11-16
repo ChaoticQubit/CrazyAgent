@@ -177,7 +177,8 @@ pub(super) fn gate(connect: &mut dyn FnMut() -> io::Result<UnixStream>) -> io::R
 /// `lease_until_ms` is when the last lease the helper granted runs out at the latest, none
 /// with no lease. `trouble` is what the last owner command could not do, with the daemon
 /// status after it, and stands as the lid support until that status changes. `low_power`
-/// is the low power support the last step left (QUESTION 40a).
+/// is the low power support the last step left (QUESTION 40a), `low_power_on_seen` says the
+/// running low power ask read it on, and `viewed` is the helper's last view with its time.
 #[derive(Debug)]
 pub(super) struct LidLine {
     service: Box<dyn Service>,
@@ -188,6 +189,8 @@ pub(super) struct LidLine {
     last: Option<LidSupport>,
     trouble: Option<(Option<Status>, LidSupport)>,
     low_power: LowPowerSupport,
+    low_power_on_seen: bool,
+    viewed: Option<(i64, View)>,
 }
 
 impl LidLine {
@@ -209,6 +212,8 @@ impl LidLine {
             last: None,
             trouble: None,
             low_power: LowPowerSupport::Unread,
+            low_power_on_seen: false,
+            viewed: None,
         }
     }
 
@@ -341,6 +346,7 @@ impl LidLine {
             Some(LidSupport::NotAvailable { reason }) if self.platform.bundled => Some(reason),
             Some(refused) => {
                 assert!(self.lease_until_ms.is_none());
+                self.needs_helper();
                 return refused;
             }
             None => None,
@@ -363,6 +369,11 @@ impl LidLine {
             (None, Some(Status::RequiresApproval)) => LidSupport::NeedsApproval,
             (None, Some(Status::Enabled)) => self.enabled(ask, now_ms),
         };
+        if enabled {
+            self.settle_low_power(ask.low_power, now_ms);
+        } else {
+            self.needs_helper();
+        }
         if self.trouble.as_ref().is_some_and(|(after, _)| *after != status) {
             self.trouble = None;
         }
@@ -373,20 +384,37 @@ impl LidLine {
     }
 
     /// The step while the daemon is enabled: forgets a lease that ran out, holds when the
-    /// lid is wanted, else lets go of a lease and reads when a read is due and the rule is
-    /// on. Inputs: the ask and the time. Output: the lid support.
+    /// lid is wanted, else keeps a power-only lease while low power is asked or lets go of
+    /// a lease, and reads when a read is due and the rule is on. A step that asks low power
+    /// reads the helper's view once if nothing else did (QUESTION 40c, 40d). Inputs: the ask
+    /// and the time. Output: the lid support.
     fn enabled(&mut self, ask: LidAsk, now_ms: i64) -> LidSupport {
         if self.lease_until_ms.is_some_and(|until| now_ms >= until) {
             self.lease_until_ms = None;
         }
-        if ask.wanted {
-            return self.hold(ask.sleep_display, now_ms);
+        let support = if ask.wanted {
+            self.hold(ask, now_ms)
+        } else {
+            if ask.low_power {
+                self.power_only(now_ms);
+            } else if self.lease_until_ms.is_some() {
+                self.release();
+            }
+            assert!(ask.low_power || self.lease_until_ms.is_none());
+            self.resting(ask.rule_on, now_ms)
+        };
+        let viewed = self.viewed.is_some_and(|(at_ms, _)| at_ms == now_ms);
+        if ask.low_power && !viewed {
+            self.view(now_ms);
         }
-        if self.lease_until_ms.is_some() {
-            self.release();
-        }
-        assert!(self.lease_until_ms.is_none());
-        if !ask.rule_on {
+        support
+    }
+
+    /// The lid support while the lid is not wanted: the last one while the rule is Off, else
+    /// a read when one is due. Inputs: whether the rule is on, and the time. Output: the lid
+    /// support.
+    fn resting(&mut self, rule_on: bool, now_ms: i64) -> LidSupport {
+        if !rule_on {
             return self.last.clone().unwrap_or_else(|| not_available(LID_UNREAD));
         }
         let due = self
@@ -398,16 +426,69 @@ impl LidLine {
         }
     }
 
+    /// Asks the helper for this engine's power-only lease of `LEASE_S` (QUESTION 40c): sent
+    /// while low power is asked and the lid is not wanted, with the lid rule on or Off. A
+    /// lease it gave keeps `lease_until_ms`, so a step that asks neither releases it. A
+    /// refusal or no answer is logged; the view this step reads says whether a lease asks.
+    /// Input: the time.
+    fn power_only(&mut self, now_ms: i64) {
+        let request = Request::LowPower { lease_s: LEASE_S };
+        match self.helper.call(&request) {
+            Ok(Reply::Held { lease_left_s }) if lease_left_s > 0 => {
+                let left_ms = i64::from(lease_left_s.min(LEASE_S)) * 1000;
+                self.lease_until_ms = Some(now_ms + left_ms);
+            }
+            other => eprintln!("keep awake: the lid helper's low power answer: {other:?}"),
+        }
+        let longest_ms = now_ms + i64::from(LEASE_S) * 1000;
+        assert!(self.lease_until_ms.is_none_or(|until| until <= longest_ms));
+    }
+
+    /// Says low power needs the lid helper, on every step that does not ask the helper
+    /// (QUESTION 39d A, 40a).
+    fn needs_helper(&mut self) {
+        self.low_power = LowPowerSupport::NotAvailable {
+            reason: LOW_POWER_NEEDS_HELPER.into(),
+        };
+        self.low_power_on_seen = false;
+        assert_ne!(self.low_power, LowPowerSupport::Held);
+    }
+
+    /// Brings the low power support up to date at the end of a step with the daemon enabled
+    /// (QUESTION 40a, 40d, 40e): from the view this step read, else what it was, with a hold
+    /// of it over once low power is no longer asked. Inputs: whether low power is asked, and
+    /// the time.
+    fn settle_low_power(&mut self, asked: bool, now_ms: i64) {
+        if !asked {
+            self.low_power_on_seen = false;
+        }
+        let seen = self.viewed.filter(|(at_ms, _)| *at_ms == now_ms);
+        self.low_power = match seen {
+            Some((_, view)) => low_power_of(&view, asked, self.low_power_on_seen, &self.low_power),
+            None if asked => self.low_power.clone(),
+            None => match &self.low_power {
+                LowPowerSupport::Held | LowPowerSupport::OwnerChanged => LowPowerSupport::Ready,
+                other => other.clone(),
+            },
+        };
+        self.low_power_on_seen |= asked && self.low_power == LowPowerSupport::Held;
+        let ours = matches!(self.low_power, LowPowerSupport::Held | LowPowerSupport::OwnerChanged);
+        assert!(asked || !ours);
+        assert!(asked || !self.low_power_on_seen);
+    }
+
     /// Asks the helper for a lease of `LEASE_S`, naming the owner's display pick (Task 12);
     /// a lease it gave counts as a read. While the last lease still runs, a renewal refused
     /// for `pmset` or with no answer keeps the lid held, and the next reading tries again
     /// (threat model sections 9 and 10). Any other refusal, or one once the lease ran out,
     /// reads the helper once and says why: the view's reason, or the refusal when the view
     /// shows none. A first hold with no answer counts as the last read. Inputs: whether the
-    /// display sleeps once per close, and the time. Output: the lid support.
-    fn hold(&mut self, sleep_display: bool, now_ms: i64) -> LidSupport {
+    /// display sleeps once per close and whether low power is asked (Task 16), and the time.
+    /// Output: the lid support.
+    fn hold(&mut self, ask: LidAsk, now_ms: i64) -> LidSupport {
+        assert!(ask.wanted);
         let running = self.lease_until_ms.is_some_and(|until| now_ms < until);
-        let lid_display = if sleep_display {
+        let lid_display = if ask.sleep_display {
             LidDisplay::Sleep
         } else {
             LidDisplay::LeaveOn
@@ -415,7 +496,7 @@ impl LidLine {
         let request = Request::Hold {
             lease_s: LEASE_S,
             lid_display,
-            low_power: false,
+            low_power: ask.low_power,
         };
         let support = match self.helper.call(&request) {
             Ok(Reply::Held { lease_left_s }) if lease_left_s > 0 => {
@@ -451,16 +532,28 @@ impl LidLine {
     /// Output: the support its view gives, or not available when it gave no view.
     fn read(&mut self, now_ms: i64) -> LidSupport {
         self.read_ms = Some(now_ms);
-        let support = match self.helper.call(&Request::Read) {
-            Ok(Reply::State(view)) => support_of(&view),
-            other => {
-                eprintln!("keep awake: the lid helper's read answer: {other:?}");
-                not_available(HELPER_UNANSWERED)
-            }
+        let support = match self.view(now_ms) {
+            Some(view) => support_of(&view),
+            None => not_available(HELPER_UNANSWERED),
         };
         self.last = Some(support.clone());
         assert_eq!(self.read_ms, Some(now_ms));
         support
+    }
+
+    /// Asks the helper for its view and keeps it with its time for the low power support.
+    /// Input: the time. Output: the view, or none when the helper gave none.
+    fn view(&mut self, now_ms: i64) -> Option<View> {
+        let view = match self.helper.call(&Request::Read) {
+            Ok(Reply::State(view)) => view,
+            other => {
+                eprintln!("keep awake: the lid helper's read answer: {other:?}");
+                return None;
+            }
+        };
+        self.viewed = Some((now_ms, view));
+        assert!(self.viewed.is_some_and(|(at_ms, _)| at_ms == now_ms));
+        Some(view)
     }
 
     /// Ends this engine's lease. A release the helper did not accept is logged; the lease
@@ -500,6 +593,37 @@ fn support_of(view: &View) -> LidSupport {
         PinView::None => LidSupport::RemoveHelper {
             reason: PIN_NONE.into(),
         },
+    }
+}
+
+/// The low power support a helper view gives (QUESTION 40a, 40d, 40e). Not asked: ready.
+/// Asked: not taken when no lease asks for it, held while it reads on, the owner's once it
+/// reads off after this ask read it on, else ready, since the helper sets it after its
+/// reply. A view with no value is a Mac without the key, unless the support before came
+/// from a value: one failed pmset run then changes nothing. Inputs: the view, whether low
+/// power is asked, whether this ask read it on, and the support before. Output: the support.
+fn low_power_of(
+    view: &View,
+    asked: bool,
+    on_seen: bool,
+    before: &LowPowerSupport,
+) -> LowPowerSupport {
+    let from_value = matches!(
+        before,
+        LowPowerSupport::Ready | LowPowerSupport::Held | LowPowerSupport::OwnerChanged
+    );
+    let unavailable = |reason: &str| LowPowerSupport::NotAvailable {
+        reason: reason.into(),
+    };
+    match view.low_power {
+        None if from_value && asked => before.clone(),
+        None if from_value => LowPowerSupport::Ready,
+        None => unavailable(LOW_POWER_NOT_ON_THIS_MAC),
+        Some(_) if !asked => LowPowerSupport::Ready,
+        Some(_) if !view.low_power_held => unavailable(LOW_POWER_NOT_TAKEN),
+        Some(true) => LowPowerSupport::Held,
+        Some(false) if on_seen => LowPowerSupport::OwnerChanged,
+        Some(false) => LowPowerSupport::Ready,
     }
 }
 
