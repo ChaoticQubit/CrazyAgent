@@ -857,6 +857,65 @@ fn the_key_file_is_private_and_replaced_never_followed() {
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
 }
 
+const NARROW_UMASK_HOME: &str = "CRAZYAGENT_TEST_NARROW_UMASK_HOME";
+
+/// Runs only in the process the row below starts: writes a key under umask 0277, which
+/// clears the owner's write bit as an owner's shell may, and records what it got beside
+/// the home. Input: the home named by `NARROW_UMASK_HOME`; without it the row does nothing.
+#[test]
+#[ignore]
+fn a_key_written_under_a_narrow_umask_in_its_own_process() {
+    let Some(home) = std::env::var_os(NARROW_UMASK_HOME) else {
+        return;
+    };
+    let home = PathBuf::from(home);
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
+    let key = Secret::new(KEY.into()).unwrap();
+    let outcome = match write_key(&home, &key) {
+        Ok(path) => format!(
+            "ok {:o}",
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777
+        ),
+        Err(error) => format!("err {}", error.0),
+    };
+    std::fs::write(home.parent().unwrap().join("outcome"), outcome).unwrap();
+}
+
+/// WRITE-KEY-ASSERT: an engine that inherited a umask clearing the owner's write bit still
+/// writes a private 0600 key file the harness reads, where it used to panic on the file's
+/// mode after writing.
+#[test]
+fn a_key_written_under_a_narrow_umask_is_still_a_private_file() {
+    let case = Case::new();
+    let status = crate::spawn_gate::status(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "harnesses::interactive::tests::a_key_written_under_a_narrow_umask_in_its_own_process",
+                "--ignored",
+                "--test-threads",
+                "1",
+            ])
+            .env(NARROW_UMASK_HOME, case.home())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(
+        status.success(),
+        "the key write under umask 0277 ended in {status}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.path().join("outcome")).unwrap(),
+        "ok 600"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.home().join(KEY_FILE)).unwrap(),
+        KEY
+    );
+}
+
 #[test]
 fn session_ids_are_fresh_version_four_uuids() {
     let first = session_id().unwrap();
