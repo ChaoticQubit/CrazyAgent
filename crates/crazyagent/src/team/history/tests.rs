@@ -1360,3 +1360,82 @@ fn a_jsonl_append_record_line_is_read_for_messages() {
     assert!(maybe_message("standin-jsonl-append", &line));
     assert!(!maybe_message("no-such-harness", &line));
 }
+
+/// DEC-180 T20 (b): a search finds the words a listed agent's jsonl-append record holds,
+/// read only from the folder its manifest's record path names in each account's private
+/// home, typed and agent lines as its rules tell them, and the record's page reads them.
+#[test]
+fn a_search_finds_words_in_a_listed_agent_s_jsonl_append_record() {
+    let fixture = Fixture::new();
+    let (agent, home) = fixture.agent("standin-jsonl-append");
+    let private = home.join("standin-jsonl-append").join("account-1");
+    record(
+        &private.join("standin").join("records").join("s-7.jsonl"),
+        &[
+            json!({"type": "started", "prompt": "Find the zebra plan"}).to_string(),
+            json!({"type": "tool", "name": "zebra plan"}).to_string(),
+            json!({"type": "text", "delta": "The zebra plan is done"}).to_string(),
+        ],
+    );
+    let elsewhere = json!({"type": "text", "delta": "zebra plan elsewhere"}).to_string();
+    record(&private.join("config").join("other.jsonl"), &[elsewhere]);
+
+    let text = fixture.sessions("zebra plan");
+
+    let hits = hit_lines(&text);
+    let has = |prefix: String| hits.iter().any(|hit| hit.starts_with(&prefix));
+    let id = format!("agent-{agent}/account-1/s-7");
+    assert!(has(format!("- {id} #0 typed")), "{text}");
+    assert!(has(format!("- {id} #1 agent")), "{text}");
+    assert!(hits.iter().all(|hit| !hit.contains("/other #")), "{text}");
+    let (page, _) = fixture.session(&id, 0);
+    assert!(page.contains("The zebra plan is done"), "{page}");
+}
+
+/// rv-ds241 t20trees nits: a listed agent's records are named with their account, so two
+/// accounts' records of the same name are both found, and only files its manifest's record
+/// path names are records, never another file in the record folder's subfolders.
+#[test]
+fn a_listed_agent_s_records_are_named_with_their_account_and_only_its_record_path_counts() {
+    let fixture = Fixture::new();
+    let (agent, home) = fixture.agent("standin-jsonl-append");
+    let listed = home.join("standin-jsonl-append");
+    for (account, said) in [("account-1", "zebra one"), ("account-2", "zebra two")] {
+        let records = listed.join(account).join("standin").join("records");
+        let line = json!({"type": "started", "prompt": said}).to_string();
+        record(&records.join("s-7.jsonl"), &[line]);
+    }
+    let stray = json!({"type": "started", "prompt": "zebra stray"}).to_string();
+    let old = listed.join("account-1").join("standin").join("records");
+    record(&old.join("old").join("s-9.jsonl"), &[stray]);
+
+    let text = fixture.sessions("zebra");
+
+    let hits = hit_lines(&text);
+    let has = |prefix: String| hits.iter().any(|hit| hit.starts_with(&prefix));
+    let typed = |account: &str| format!("- agent-{agent}/{account}/s-7 #0 typed");
+    assert!(has(typed("account-1")), "{text}");
+    assert!(has(typed("account-2")), "{text}");
+    assert!(hits.iter().all(|hit| !hit.contains("/s-9 #")), "{text}");
+}
+
+/// rv-secreview t20trees F1: listing a listed agent's accounts counts each entry it reads
+/// against the visit budget, as the walks below it do, so a harness home holding very many
+/// entries cannot make every search read them all.
+#[test]
+fn a_listed_agent_s_account_listing_counts_against_the_visit_budget() {
+    let fixture = Fixture::new();
+    let (_, home) = fixture.agent("standin-jsonl-append");
+    let listed = home.join("standin-jsonl-append");
+    let records = listed.join("account-1").join("standin").join("records");
+    let line = json!({"type": "started", "prompt": "zebra"}).to_string();
+    record(&records.join("s-7.jsonl"), &[line]);
+    for at in 0..3 {
+        std::fs::write(listed.join(format!("junk-{at}")), "").unwrap();
+    }
+
+    let (trees, visits) = record_trees(&fixture.db, &project(), &fixture.agents);
+
+    assert_eq!(trees.len(), 1);
+    assert_eq!(visits, 4);
+}
