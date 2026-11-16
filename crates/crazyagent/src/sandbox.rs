@@ -994,6 +994,23 @@ pub const ADMIN_LINKS: [&str; 2] = ["commondir", "gitdir"];
 /// and the Linux call supervisor holds each (DEC-185 S2a).
 pub const ADMIN_WRITES: [&str; 2] = ["HEAD", "config.worktree"];
 
+/// The files in an object store's `info` folder that send git to another store: no
+/// confined agent writes one. Seatbelt denies each by name in the project's store, the
+/// store its checkout shares and a clone's own, and the Linux call supervisor holds each
+/// in a clone (DEC-185 S2b).
+pub const STORE_ALTERNATES: [&str; 2] = ["alternates", "http-alternates"];
+
+/// The repository git serves beside a clone's git folder when that folder fails git's
+/// repository test (RL-1): nothing is made there. Seatbelt denies it by name and the Linux
+/// call supervisor holds it whole (DEC-185 S2b).
+pub const GIT_FALLBACK: &str = ".git.git";
+
+/// The pack folder's multi-pack-index, which can name a pack outside the store (RL-2): no
+/// confined agent makes one. Seatbelt denies every name it begins, and the Linux call
+/// supervisor holds the file and its `.d` chain folder, the two names git reads
+/// (DEC-185 S2b).
+pub const MULTI_PACK_INDEX: &str = "multi-pack-index";
+
 /// The lowest port a loopback bridge carries on Linux: inside a network namespace of its
 /// own an agent's helper has no capability to listen below it.
 pub const BRIDGE_PORT_MIN: u16 = 1024;
@@ -3545,12 +3562,11 @@ impl ProjectSandbox {
             any_case("info"),
             any_case("shallow")
         );
+        let [alternates, http_alternates] = STORE_ALTERNATES.map(any_case);
         let held = format!(
-            "{}{}?(/.*)?|{}|{}",
+            "{}{}?(/.*)?|{alternates}|{http_alternates}",
             any_case("commit-graph"),
-            any_case("s"),
-            any_case("alternates"),
-            any_case("http-alternates")
+            any_case("s")
         );
         for store in &stores {
             text.push_str(&format!(
@@ -4091,17 +4107,16 @@ fn app_exec_denies<'a>(
 /// before each launch (`landing::ready_agent_clone`). The engine's fetch checks the same
 /// store before it runs (w-landing). Input: the clone. Output: the rule text.
 fn clone_store_denies(clone: &Path) -> String {
-    let fallback = format!("{}/{}", seatbelt_pattern(clone), any_case(".git.git"));
+    let fallback = format!("{}/{}", seatbelt_pattern(clone), any_case(GIT_FALLBACK));
     let git = format!("{}/{}", seatbelt_pattern(clone), any_case(".git"));
     let objects = format!("{git}/{}", any_case("objects"));
     let info = format!("{objects}/{}", any_case("info"));
     let pack = format!("{objects}/{}", any_case("pack"));
-    let index = format!("{pack}/{}", any_case("multi-pack-index"));
+    let index = format!("{pack}/{}", any_case(MULTI_PACK_INDEX));
+    let [alternates, http_alternates] = STORE_ALTERNATES.map(any_case);
+    let [commondir, _] = ADMIN_LINKS.map(any_case);
     let text = format!(
-        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{fallback}(/.*)?$\")\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({}|{})$\")\n  (regex #\"^{git}/{}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n",
-        any_case("alternates"),
-        any_case("http-alternates"),
-        any_case("commondir")
+        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{fallback}(/.*)?$\")\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({alternates}|{http_alternates})$\")\n  (regex #\"^{git}/{commondir}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n"
     );
     assert_eq!(text.matches("(regex #\"^/").count(), 10);
     assert!(text.contains("(vnode-type SYMLINK)"));
