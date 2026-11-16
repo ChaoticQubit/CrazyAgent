@@ -188,6 +188,115 @@ fn delete_everything_forgets_the_publish_question_answer_and_remove_from_dashboa
     );
 }
 
+/// QUESTION-22:50 R, DEC-178 add.1: a Delete everything forgets the project's GitHub publish
+/// job, kept under its folder, so a New project that later lands in the same folder finds
+/// no old publish to show or go on with; Remove from dashboard keeps its job for a re-add
+/// of the same folder.
+#[test]
+fn delete_everything_forgets_the_github_publish_job_and_remove_from_dashboard_keeps_it() {
+    let root = tempfile::tempdir().unwrap();
+    let engine = root.path().canonicalize().unwrap();
+    let home = engine.join("home");
+    let mut connection = Connection::open(engine.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let job = |folder: &Path| crate::github::GitHubPublishJob {
+        project: folder.to_path_buf(),
+        plan: crate::github::GitHubPublishPlan {
+            owner: "me".into(),
+            name: "tool".into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+        lines: vec![".env*".into()],
+        written: Vec::new(),
+        step: crate::github::GitHubPublishStep::Drafting,
+        stopped: None,
+        made: None,
+    };
+    for id in ["kept", "gone"] {
+        let folder = home.join(id);
+        std::fs::create_dir_all(&folder).unwrap();
+        let project = ProjectId::new(id).unwrap();
+        let body = serde_json::to_string(&crate::protocol::StoredProject {
+            project_id: project.clone(),
+            spec: crate::protocol::ProjectSpec {
+                name: id.into(),
+                repositories: vec![],
+            },
+        })
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects(id, body) VALUES (?1, ?2)",
+                params![id, body],
+            )
+            .unwrap();
+        let setup = crate::project_setup::StoredSetup {
+            project_id: project,
+            name: id.into(),
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: crate::project_setup::TeamPlan {
+                master: "codex".into(),
+                master_tools: false,
+                sub_harnesses: vec![],
+                min_agents: 1,
+                max_agents: 16,
+            },
+            documents: vec![],
+            folder: folder.to_str().unwrap().into(),
+            created_ms: 1,
+            revision: 1,
+        };
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1, ?2)",
+                params![id, serde_json::to_string(&setup).unwrap()],
+            )
+            .unwrap();
+        crate::github::keep_job(&engine, &job(&folder));
+    }
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    let tx = connection.transaction().unwrap();
+    let removed = crate::project_setup::execute(
+        &tx,
+        &config,
+        &crate::project_setup::SetupAction::Remove {
+            project_id: ProjectId::new("kept").unwrap(),
+        },
+        2,
+    )
+    .unwrap();
+    assert!(matches!(removed, crate::protocol::Outcome::Applied));
+    let deleted = crate::project_setup::record_delete(
+        &tx,
+        &crate::project_setup::SetupAction::Delete {
+            project_id: ProjectId::new("gone").unwrap(),
+            name: "gone".into(),
+        },
+        &Ok(Vec::new()),
+        3,
+    )
+    .unwrap();
+    assert!(matches!(deleted, crate::protocol::Outcome::Applied));
+    tx.commit().unwrap();
+    let (kept, gone) = (home.join("kept"), home.join("gone"));
+    assert_eq!(
+        crate::github::kept_job(&engine, &kept),
+        Some(job(&kept)),
+        "Remove from dashboard keeps the publish job"
+    );
+    assert_eq!(
+        crate::github::kept_job(&engine, &gone),
+        None,
+        "Delete everything forgets it"
+    );
+}
+
 /// A Delete everything moves nothing while an agent of the project runs: past the wait it
 /// refuses `delete_agents_running`, and once the agent stops every move sees the Stop all row
 /// and no running agent of the project. A first failed move refuses `home_trash_failed`, a
