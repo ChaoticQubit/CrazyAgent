@@ -3030,6 +3030,15 @@ async fn the_wizard_waits_for_an_engine_slow_to_accept_its_connection() {
     })
     .join()
     .unwrap();
+    let github = sent.iter().filter(|label| **label == "intake").count();
+    assert_eq!(
+        github, 1,
+        "the wizard reads the GitHub sign-in once: {sent:?}"
+    );
+    let sent: Vec<&str> = sent
+        .into_iter()
+        .filter(|label| *label != "intake")
+        .collect();
     assert_eq!(sent, ["pools", "harnesses", "catalog", "catalog"]);
 }
 
@@ -3042,6 +3051,15 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     let screen = open(&Place::NewProject, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let sent = pump(&mut shell, &mut connection).await;
+    let github = sent.iter().filter(|label| **label == "intake").count();
+    assert_eq!(
+        github, 1,
+        "the wizard reads the GitHub sign-in once: {sent:?}"
+    );
+    let sent: Vec<&str> = sent
+        .into_iter()
+        .filter(|label| *label != "intake")
+        .collect();
     assert_eq!(sent, ["pools", "harnesses", "catalog", "catalog"]);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("New project  /  About"), "{shown}");

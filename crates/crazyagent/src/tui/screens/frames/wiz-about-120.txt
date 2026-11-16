@@ -13,10 +13,10 @@
   Esc keeps this draft    │ (*) Create a new folder     Made when you create the project
   and goes home.          │ ( ) Use an existing folder  Not ready yet
                           │ Agents can change files only inside this folder.
+                          │ [x] Publish this project on GitHub  Checking GitHub...
+                          │     Standard secure setup; agents can propose changes later.
                           │
                           │ [ Back ]   [ Continue ]
-                          │
-                          │
                           │
                           │
                           │
