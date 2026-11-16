@@ -576,10 +576,6 @@ const PLAIN: &[(&str, &str)] = &[
         "a tool name is 1 to 128 letters, digits, _ . or -, each once.",
     ),
     (
-        connector::OAUTH_NOT_YET,
-        "sign-in for this connector is not in this build yet; it needs a key.",
-    ),
-    (
         "app_plugin_connector_elsewhere",
         "this is a connector; connectors are not managed on this page.",
     ),

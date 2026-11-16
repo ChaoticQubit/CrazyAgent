@@ -9,8 +9,6 @@ use super::{ConnectorTrust, KeyTrust, OAuthTrust, Problem, ReadOnlyTrust};
 pub const SCOPES_MAX: usize = 16;
 /// The most read tool names a connector lists.
 pub const READ_TOOLS_MAX: usize = 256;
-/// The code of a connector whose only way in is an OAuth sign-in this build cannot do yet.
-pub const OAUTH_NOT_YET: &str = "app_plugin_connector_oauth_not_yet";
 const SCOPE_BYTES_MAX: usize = 128;
 const TOOL_BYTES_MAX: usize = 128;
 const WORD_BYTES_MAX: usize = 128;
@@ -165,14 +163,6 @@ impl ConnectorSpec {
             read_tools: self.read_tools.clone(),
         }
     }
-}
-
-/// Why a connector cannot run yet although its file is fine: one with OAuth and no key
-/// waits for a sign-in this build does not have. Input: the connector. Output: the
-/// refusal code, none when a key is its way in.
-pub fn sign_in_refusal(spec: &ConnectorSpec) -> Option<&'static str> {
-    assert!(spec.key.is_some() || spec.oauth.is_some());
-    spec.key.is_none().then_some(OAUTH_NOT_YET)
 }
 
 /// Reads and checks the connector part of a manifest: `mcp`, `key`, `oauth` and `tools`.

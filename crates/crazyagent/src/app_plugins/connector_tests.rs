@@ -445,7 +445,6 @@ fn every_connector_refusal_has_a_plain_sentence() {
         "app_plugin_connector_scope_invalid",
         "app_plugin_connector_tools_limit",
         "app_plugin_connector_tool_invalid",
-        "app_plugin_connector_oauth_not_yet",
         "app_plugin_connector_elsewhere",
     ] {
         assert!(plain_problem(code).is_some(), "{code}");

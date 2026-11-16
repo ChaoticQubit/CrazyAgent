@@ -1,5 +1,5 @@
+use crate::app_plugins::PluginKind;
 use crate::app_plugins::store::{self, Loaded};
-use crate::app_plugins::{PluginKind, connector};
 use crate::engine::EngineError;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -20,12 +20,11 @@ pub const GRANTS_PER_PROJECT_MAX: usize = 128;
 
 const _: () = assert!(GRANTS_PER_PROJECT_MAX > store::PLUGINS_MAX);
 
-const NOT_READY: [&str; 5] = [
+const NOT_READY: [&str; 4] = [
     "app_plugin_not_found",
     "app_plugin_refused",
     "app_plugin_needs_review",
     "app_plugin_needs_key",
-    connector::OAUTH_NOT_YET,
 ];
 
 /// Who in a project a connector reaches: the master and the agents whose tools are on,
