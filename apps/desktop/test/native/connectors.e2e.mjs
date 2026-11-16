@@ -82,7 +82,7 @@ async function listed(bridge, now) {
 /** Starts the real engine and the bridge on a fresh root with an owner profile and projects
  * folder, serves the built app to a browser page, runs the steps and stops everything.
  * Inputs: the test context, the folder prefix and the steps, given the bridge, the owner on
- * the page, a route opener and the engine root. Output: none. */
+ * the page, a route opener, the engine root, the page and the test HOME. Output: none. */
 async function onEngine(t, prefix, steps) {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -125,7 +125,7 @@ async function onEngine(t, prefix, steps) {
           await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/?visit=${visits}${hash}` });
           await me.waitFor(what, check);
         };
-        await steps({ bridge, me, open, runtime, page });
+        await steps({ bridge, me, open, runtime, page, home });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -172,9 +172,11 @@ test("Connectors: each Activity log keeps option is saved through the page, read
   await t.test("conn keep_log 90 days", () => keep("days30", "90 days", { keep: "days90", ages: [3, 10, 45], held: 3 }));
 }));
 
-test("Connectors: turning Linear on for a project shows On and the engine grant row exists, and each Who choice and Off are saved", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-grant-", async ({ bridge, me, open, runtime, page }) => {
+test("Connectors: turning Linear on for a project shows On and the engine grant row exists, and each Who choice and Off are saved", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-grant-", async ({ bridge, me, open, runtime, page, home }) => {
   await value(bridge, "desktop_connector_set_key", { name: "linear", secret: "api_key", key: LINEAR_KEY });
-  const receipt = await value(bridge, "desktop_create_project", { spec: { name: "Connector project", repositories: [] }, generation: 3 });
+  const repo = join(home, "connector-repo");
+  mkdirSync(repo, { mode: 0o700 });
+  const receipt = await value(bridge, "desktop_create_project", { spec: { name: "Connector project", repositories: [repo] }, generation: 3 });
   assert.equal(receipt.outcome, "applied", `the project is made: ${JSON.stringify(receipt)}`);
   const project = receipt.project_id;
   const section = () => open(`#/projects/${encodeURIComponent(project)}/settings?section=connectors`, "the project's Connectors section",
