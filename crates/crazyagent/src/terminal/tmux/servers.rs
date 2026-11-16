@@ -249,7 +249,12 @@ impl Servers {
     /// on its input whose closing, as at the engine's death, stops it (B6b). Starts, and the
     /// ends that take a keeper out of its map, run one at a time under `starts`; the map of
     /// either kind is held only to read or change it, never while a server binds, so a call
-    /// that reads it never waits on a start (MR-1).
+    /// that reads it never waits on a start (MR-1). Other leads' keepers stay, also exited
+    /// ones, so each lead's servers are still read through their keepers; only a full map
+    /// drops the keepers that exited cleanly, whose leads then read the socket alone, which
+    /// keeps a refused one theirs. A running keeper or one that exited otherwise is never
+    /// dropped here, since its lead would then read a gone socket as no server; a lead's end
+    /// takes it out (`end_kept_server`, `end_mates_keeper`).
     /// Takes the lead, its socket, which server and whether the lead is relayed. Returns
     /// whether a keeper started now, `terminal_folder_unsafe` for a socket path that is not
     /// this user's socket, or `terminal_unavailable`.
@@ -320,7 +325,9 @@ impl Servers {
                 let _ = earlier.kill();
                 let _ = earlier.wait();
             }
-            keepers.retain(|_, keeper| keeper_runs(keeper));
+            if keepers.len() >= LEADS_KEPT_MAX {
+                keepers.retain(|_, keeper| !ended_cleanly(keeper));
+            }
             if keepers.len() >= LEADS_KEPT_MAX {
                 return Err(failure("terminal_unavailable"));
             }
