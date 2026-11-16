@@ -313,6 +313,18 @@ pub fn prepare(
         .get(harness)
         .map(|found| found.id())
         .ok_or_else(|| failure("launch_harness_unsupported"))?;
+    private_home(base, id, account)
+}
+
+/// Makes the private home [`prepare`] makes, for a harness already found in its registry.
+/// Inputs: the agent's own 0700 home, the harness's manifest id and the account.
+/// Output: the home, or the refusal.
+#[cfg(unix)]
+pub(crate) fn private_home(
+    base: &Path,
+    id: &str,
+    account: &CredentialRef,
+) -> Result<PathBuf, LaunchError> {
     super::launch::validate_home(base)?;
     private_folder(base, &[id, account.as_str()])?;
     let home = base.join(id).join(account.as_str());

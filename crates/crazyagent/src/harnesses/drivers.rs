@@ -28,8 +28,8 @@ pub enum Piped {
 /// The one dispatch point of piped launches: the driver the engine runs for a driver kind.
 /// Input: the kind a manifest names. Output: the driver, or `launch_harness_unsupported`
 /// for RCLI, which runs only through its master host, and for every kind whose driver has
-/// not landed. An ACP or jsonl-rpc harness gets its driver here, while its launch arguments
-/// land with the launch task, so a launch of one is still refused when it is built.
+/// not landed. A jsonl-rpc harness gets its driver here, while its launch arguments land
+/// with the launch task, so a launch of one is still refused when it is built.
 pub fn of(kind: DriverKind) -> Result<Piped, LaunchError> {
     match kind {
         DriverKind::CodexAppServer => Ok(Piped::Codex),

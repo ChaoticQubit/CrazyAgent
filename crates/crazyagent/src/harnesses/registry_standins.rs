@@ -2,9 +2,8 @@ use super::{Harness, Registry};
 use std::sync::LazyLock;
 
 /// The Task 9 stand-in manifests a test build's `Registry::get` also finds, so in-crate rows
-/// reach listed harness kinds: the terminal one and the ACP master (Task 20).
-/// `Registry::all` never lists them, so catalog, count and snapshot rows see the bundled
-/// harnesses only.
+/// reach two listed harness kinds: the terminal one and the ACP one. `Registry::all` never
+/// lists them, so catalog, count and snapshot rows see the bundled harnesses only.
 const FILES: [(&str, &str); 2] = [
     (
         "standin-screen",
