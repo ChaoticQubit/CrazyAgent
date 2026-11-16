@@ -4339,6 +4339,15 @@ async fn desktop_connector_grant(
 }
 
 #[tauri::command]
+async fn desktop_connector_reach(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Vec<&'static str>, BridgeError> {
+    main_window(&webview)?;
+    Ok(read(&state).await?.connector_reach())
+}
+
+#[tauri::command]
 async fn desktop_app_plugins(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -6019,6 +6028,7 @@ native_commands! {
     desktop_connector_set_key,
     desktop_connector_clear_key,
     desktop_connector_grant,
+    desktop_connector_reach,
     desktop_app_plugins,
     desktop_app_plugin_preview,
     desktop_app_plugin_review,

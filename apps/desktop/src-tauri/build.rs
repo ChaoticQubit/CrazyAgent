@@ -351,6 +351,7 @@ fn main() {
         "desktop_connector_set_key",
         "desktop_connector_clear_key",
         "desktop_connector_grant",
+        "desktop_connector_reach",
         "desktop_search_settings",
         "desktop_set_search",
         "desktop_search_model_download",

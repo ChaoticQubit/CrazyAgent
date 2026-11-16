@@ -221,7 +221,10 @@ impl NativeBridge {
     /// settings order, in the engine crate's own words (DEC-141), with no engine call.
     /// Output: the rows.
     pub fn connector_reach(&self) -> Vec<&'static str> {
-        Vec::new()
+        crazyagent::coord::settings::HarnessKind::ALL
+            .into_iter()
+            .map(crazyagent::connectors::launch::reach)
+            .collect()
     }
 }
 

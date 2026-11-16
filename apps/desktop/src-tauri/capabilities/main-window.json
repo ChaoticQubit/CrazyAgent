@@ -301,6 +301,7 @@
     "allow-desktop-connector-set-key",
     "allow-desktop-connector-clear-key",
     "allow-desktop-connector-grant",
+    "allow-desktop-connector-reach",
     "allow-desktop-pick-app-plugin-file",
     "allow-desktop-search-settings",
     "allow-desktop-set-search",

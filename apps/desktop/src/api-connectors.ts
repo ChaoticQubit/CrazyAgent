@@ -349,7 +349,7 @@ export function loadConnectors(project: string | null): Promise<Result<Connector
 /** Reads what each harness reaches through the gateway, in the engine crate's words, from
  * the bridge with no engine call. Output: one row per harness. */
 export function loadConnectorReach(): Promise<Result<string[]>> {
-  return Promise.resolve({ kind: "ok", value: [] });
+  return connectorCall<string[]>("desktop_connector_reach", {});
 }
 
 /** Reads the trust screen of a picked or pasted connector manifest without saving it.

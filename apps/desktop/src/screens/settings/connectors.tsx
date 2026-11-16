@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type RefObject } from "rea
 import type { Result } from "../../api";
 import { pickAppPluginFile, problemText, type Problem } from "../../api-app-plugins";
 import {
-  CONNECTOR_DEFAULTS, CONNECTORS_PAGE, NATIVE_CHOICES, SIZE_CHOICES, addConnector, clearConnectorKey, connectorState, keyLine, loadConnectors,
+  CONNECTOR_DEFAULTS, CONNECTORS_PAGE, NATIVE_CHOICES, SIZE_CHOICES, addConnector, clearConnectorKey, connectorState, keyLine, loadConnectorReach, loadConnectors,
   originLine, reachesLine, removeConnector, reviewConnector, previewConnector, saveConnectorSettings, setConnectorKey, settingsToSave, trustConnector, trustLines,
   type ConnectorPreview, type ConnectorView, type ConnectorsView, type ConnectorTrustView, type NativeConnectors, type SizeCap,
 } from "../../api-connectors";
@@ -214,7 +214,6 @@ export function ConnectorsSettingsView({ view, reach, open, dialog, native, size
   if (view.kind === "not_ready") return <>{TOP}<NotReady what={CONNECTORS_PAGE.title} /></>;
   if (view.kind === "error") return <>{TOP}<LoadError message={`Couldn't load the connectors. ${view.message}`} onRetry={actions.onRetry} /></>;
   const page = view.value;
-  void reach;
   const dialogs = <ConnectorDialogs dialog={dialog} busy={busy} failure={failure} keyRef={keyRef} actions={actions} />;
   if (open !== null) {
     const connector = page.connectors.find((listed) => listed.name === open) ?? null;
@@ -235,6 +234,11 @@ export function ConnectorsSettingsView({ view, reach, open, dialog, native, size
         </div>
       </SettingSection>
     </div>
+    {reach.kind === "ok" && reach.value.length > 0 && <div className="pj set-groups">
+      <SettingSection title={CONNECTORS_PAGE.harnesses} about={CONNECTORS_PAGE.harnessesAbout}>
+        <ul className="set-body" aria-label={CONNECTORS_PAGE.harnesses}>{reach.value.map((row) => <li key={row}>{row}</li>)}</ul>
+      </SettingSection>
+    </div>}
     <SettingsForm page={page} native={native} sizeCap={sizeCap} saving={saving} problem={problem} actions={actions} />
     {dialogs}
   </>;
@@ -248,6 +252,7 @@ export function ConnectorsSettingsView({ view, reach, open, dialog, native, size
 export function ConnectorsSettings({ connector }: { connector?: string }) {
   const session = useAppSession();
   const [view, reload] = useLoad(() => loadConnectors(null));
+  const [reach] = useLoad(loadConnectorReach);
   const [dialog, setDialog] = useState<ConnectorDialog>({ kind: "none" });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
@@ -364,7 +369,7 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
   };
 
   return <div className="stack">
-    <ConnectorsSettingsView view={view} open={connector ?? null} dialog={dialog} native={native} sizeCap={sizeCap} busy={busy} saving={saving || reading}
+    <ConnectorsSettingsView view={view} reach={reach} open={connector ?? null} dialog={dialog} native={native} sizeCap={sizeCap} busy={busy} saving={saving || reading}
       failure={failure} problem={problem} keyRef={keyRef} actions={actions} />
   </div>;
 }
