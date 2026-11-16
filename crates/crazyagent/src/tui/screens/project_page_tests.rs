@@ -7769,7 +7769,7 @@ fn the_overview_reads_the_github_publish_and_its_pane_sends_the_owners_answer() 
     let status = IntakeQuery::GitHubPublishStatus {
         project: project.clone(),
     };
-    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&status));
     publish_reply(
         &mut shell,
         status.clone(),
@@ -7790,7 +7790,7 @@ fn the_overview_reads_the_github_publish_and_its_pane_sends_the_owners_answer() 
         project: project.clone(),
         lines: vec![".env*".into()],
     };
-    assert_eq!(publish_asks(&mut shell), [approve.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&approve));
     shell.key(Key::Enter);
     assert!(publish_asks(&mut shell).is_empty(), "one answer at a time");
     publish_reply(
@@ -7830,7 +7830,7 @@ fn a_project_without_a_publish_shows_no_pane_and_a_refused_answer_is_said() {
     let status = IntakeQuery::GitHubPublishStatus {
         project: project.clone(),
     };
-    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&status));
     publish_reply(
         &mut shell,
         status.clone(),
@@ -7839,7 +7839,7 @@ fn a_project_without_a_publish_shows_no_pane_and_a_refused_answer_is_said() {
     let shown = render(&mut shell, 100, 30);
     assert!(!shown.contains("Publish on GitHub"), "{shown}");
     let mut shell = opened(&project);
-    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&status));
     publish_reply(
         &mut shell,
         status,
@@ -7855,7 +7855,7 @@ fn a_project_without_a_publish_shows_no_pane_and_a_refused_answer_is_said() {
         project,
         lines: vec![".env*".into()],
     };
-    assert_eq!(publish_asks(&mut shell), [approve.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&approve));
     publish_reply(&mut shell, approve, Err("github_publish_running".into()));
     let message = shell.ctx.message().expect("the refusal is said");
     assert_eq!(message.lead, "The publish answer wasn't taken.");
@@ -7881,7 +7881,7 @@ fn unpublished() -> (Shell, ProjectId) {
     let status = IntakeQuery::GitHubPublishStatus {
         project: project.clone(),
     };
-    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&status));
     publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
     (shell, project)
 }
@@ -7893,7 +7893,7 @@ fn offered() -> (Shell, ProjectId) {
     let prompt = IntakeQuery::GitHubPublishPrompt {
         project: project.clone(),
     };
-    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&prompt));
     publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
     (shell, project)
 }
@@ -7915,7 +7915,7 @@ fn a_project_with_no_publish_shows_the_question_on_its_overview_and_keeps_not_no
         project: project.clone(),
         answer: crate::github::GitHubPromptAnswer::NotNow,
     };
-    assert_eq!(publish_asks(&mut shell), [kept.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&kept));
     shell.key(Key::Char('x'));
     assert!(publish_asks(&mut shell).is_empty(), "one answer at a time");
     publish_reply(&mut shell, kept, Ok(IntakeView::PromptKept));
@@ -7929,7 +7929,7 @@ fn a_project_with_no_publish_shows_the_question_on_its_overview_and_keeps_not_no
     assert!(!render(&mut shell, 100, 30).contains("Don't ask again"));
     let (mut quiet, project) = unpublished();
     let prompt = IntakeQuery::GitHubPublishPrompt { project };
-    assert_eq!(publish_asks(&mut quiet), [prompt.clone()]);
+    assert_eq!(publish_asks(&mut quiet), std::slice::from_ref(&prompt));
     publish_reply(&mut quiet, prompt, Err("github_store_unavailable".into()));
     assert!(
         quiet.ctx.message().is_none(),
@@ -7977,7 +7977,7 @@ fn publish_from_the_overview_question_starts_the_publish_the_form_shows_and_says
             docs: false,
         },
     };
-    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&start));
     shell.key(Key::Char('G'));
     shell.key(Key::Enter);
     assert!(
@@ -8021,7 +8021,7 @@ fn a_refused_publish_from_the_question_says_why_and_asks_again_at_once() {
             docs: false,
         },
     };
-    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&start));
     shell.key(Key::Esc);
     assert!(
         matches!(shell.place(), Some(Place::Project { .. })),
@@ -8039,12 +8039,12 @@ fn a_refused_publish_from_the_question_says_why_and_asks_again_at_once() {
     };
     assert_eq!(
         publish_asks(&mut shell),
-        [status.clone()],
+        std::slice::from_ref(&status),
         "a refused Start reads the publish again at once"
     );
     publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
     let prompt = IntakeQuery::GitHubPublishPrompt { project };
-    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&prompt));
     publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
     let shown = render(&mut shell, 100, 30);
     assert!(
@@ -8078,7 +8078,7 @@ fn a_refused_publish_from_the_question_keeps_the_form_with_what_was_typed_and_sa
             docs: false,
         },
     };
-    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&start));
     let shown = render(&mut shell, 100, 30);
     assert!(
         shown.contains("Starting the publish..."),
@@ -8109,10 +8109,10 @@ fn a_refused_publish_from_the_question_keeps_the_form_with_what_was_typed_and_sa
     let status = IntakeQuery::GitHubPublishStatus {
         project: project.clone(),
     };
-    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&status));
     publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
     let prompt = IntakeQuery::GitHubPublishPrompt { project };
-    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&prompt));
     publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(false)));
     let shown = render(&mut shell, 100, 30);
     assert!(
@@ -8167,7 +8167,7 @@ fn the_publish_question_and_a_refused_form_fit_an_80_by_24_window() {
             docs: false,
         },
     };
-    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&start));
     publish_reply(
         &mut shell,
         start,
@@ -8176,10 +8176,10 @@ fn the_publish_question_and_a_refused_form_fit_an_80_by_24_window() {
     let status = IntakeQuery::GitHubPublishStatus {
         project: project.clone(),
     };
-    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&status));
     publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
     let prompt = IntakeQuery::GitHubPublishPrompt { project };
-    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&prompt));
     publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
     let shown = render(&mut shell, 80, 24);
     for text in [
@@ -8218,10 +8218,10 @@ fn a_refused_publish_whose_read_finds_a_publish_closes_the_form_and_says_why_on_
             docs: false,
         },
     };
-    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&start));
     publish_reply(&mut shell, start, Err("github_publish_in_progress".into()));
     let status = IntakeQuery::GitHubPublishStatus { project };
-    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&status));
     publish_reply(
         &mut shell,
         status,
@@ -8286,7 +8286,7 @@ fn sign_in_from_the_publish_question_closes_it_so_g_reads_the_sign_in_again() {
     assert!(publish_asks(&mut shell).contains(&status));
     publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
     let prompt = IntakeQuery::GitHubPublishPrompt { project };
-    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&prompt));
     publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
     shell.key(Key::Char('G'));
     shell.key(Key::Enter);
@@ -8315,10 +8315,10 @@ fn g_on_an_overview_with_its_pool_picker_open_leaves_the_publish_question_closed
     let status = IntakeQuery::GitHubPublishStatus {
         project: project.clone(),
     };
-    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&status));
     publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
     let prompt = IntakeQuery::GitHubPublishPrompt { project };
-    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&prompt));
     publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
     shell.key(Key::Enter);
     let picker = "Agents of this project use its pool's accounts.";
@@ -8349,7 +8349,7 @@ fn a_refused_publish_answer_reads_the_publish_again_and_shows_where_it_stands() 
     let status = IntakeQuery::GitHubPublishStatus {
         project: project.clone(),
     };
-    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&status));
     publish_reply(
         &mut shell,
         status.clone(),
@@ -8365,13 +8365,13 @@ fn a_refused_publish_answer_reads_the_publish_again_and_shows_where_it_stands() 
         project,
         lines: vec![".env*".into()],
     };
-    assert_eq!(publish_asks(&mut shell), [approve.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&approve));
     publish_reply(&mut shell, approve, Err("github_outcome_unknown".into()));
     let message = shell.ctx.message().expect("the refusal is said");
     assert_eq!(message.lead, "The publish answer wasn't taken.");
     assert_eq!(
         publish_asks(&mut shell),
-        [status.clone()],
+        std::slice::from_ref(&status),
         "the publish is read again"
     );
     publish_reply(
@@ -8451,12 +8451,12 @@ fn a_start_whose_reply_was_lost_reads_the_publish_again_until_it_shows() {
             docs: false,
         },
     };
-    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&start));
     publish_reply(&mut shell, start, Err("github_outcome_unknown".into()));
     let status = IntakeQuery::GitHubPublishStatus {
         project: project.clone(),
     };
-    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&status));
     publish_reply(
         &mut shell,
         status.clone(),
@@ -8478,7 +8478,7 @@ fn a_start_whose_reply_was_lost_reads_the_publish_again_until_it_shows() {
     );
     assert_eq!(
         publish_asks(&mut shell),
-        [status.clone()],
+        std::slice::from_ref(&status),
         "the publish is read again after DRAFT_POLL_MS"
     );
     publish_reply(

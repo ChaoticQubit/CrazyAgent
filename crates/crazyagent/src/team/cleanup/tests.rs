@@ -1486,8 +1486,14 @@ fn removing_an_agent_tree_clears_folders_two_deep_that_deny_listing() {
     let (outer, inner) = (tree.join("a"), tree.join("a/b"));
     write(&inner.join("f"), b"the agent's\n");
     let _cleared = [AclCleared(inner.clone()), AclCleared(outer.clone())];
-    add_acl("everyone deny list,search,delete_child", &[inner.clone()]);
-    add_acl("everyone deny list,search,delete_child", &[outer.clone()]);
+    add_acl(
+        "everyone deny list,search,delete_child",
+        std::slice::from_ref(&inner),
+    );
+    add_acl(
+        "everyone deny list,search,delete_child",
+        std::slice::from_ref(&outer),
+    );
 
     let outcome = remove_agent_tree(&tree);
 

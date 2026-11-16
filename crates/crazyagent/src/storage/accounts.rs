@@ -576,7 +576,7 @@ pub(super) fn settle_demo_pool(
         );
         return Err(problem);
     }
-    assert_eq!(listing(&*config), [pool.clone()]);
+    assert_eq!(listing(&*config), std::slice::from_ref(&pool));
     Ok(())
 }
 

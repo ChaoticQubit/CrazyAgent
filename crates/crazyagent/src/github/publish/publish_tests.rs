@@ -710,7 +710,7 @@ fn commit_on_owner_history_takes_only_the_files_publish_wrote() {
     }
     assert_eq!(
         owned.lines(&["rev-parse", "HEAD"]),
-        [committed.commit.clone()]
+        std::slice::from_ref(&committed.commit)
     );
     git(&["checkout", "-q", "--detach"], &project);
     assert_eq!(owned.commit(&[]).unwrap_err().0, "github_publish_detached");

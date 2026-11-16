@@ -952,9 +952,7 @@ pub fn linux_unbridged_notice_on(
     choice: policy::AgentNetwork,
     sandbox: &ProjectSandbox,
 ) -> Option<String> {
-    let Some(host) = host.filter(|host| host.nested) else {
-        return None;
-    };
+    let host = host.filter(|host| host.nested)?;
     let SandboxNetwork::Only(remotes) = &sandbox.network else {
         return None;
     };
