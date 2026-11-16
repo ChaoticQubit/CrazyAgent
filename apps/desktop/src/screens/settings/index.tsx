@@ -83,15 +83,17 @@ export function SettingsFrame({ tab, children }: { tab: ListedSettingsTab; child
 
 /** Settings: the frame around the selected section's panel.
  * Inputs: the tab, optional action ("add" opens Add account, "new" opens a new pool,
- * "sign_in" opens the sign-in of the given account), the skill whose detail is open and the
- * harness whose settings page is open. */
-export function Settings({ tab, action, account, skill, harness }: { tab: ListedSettingsTab; action?: SettingsAction; account?: string; skill?: string; harness?: string }) {
+ * "sign_in" opens the sign-in of the given account), the skill whose detail is open, the
+ * harness whose settings page is open and the connector whose page is open. */
+export function Settings({ tab, action, account, skill, harness, connector }: {
+  tab: ListedSettingsTab; action?: SettingsAction; account?: string; skill?: string; harness?: string; connector?: string;
+}) {
   return <SettingsFrame tab={tab}>
     {tab === "accounts" ? <Accounts adding={action === "add"} signingIn={action === "sign_in" ? account : undefined} />
       : tab === "pools" ? <Pools creating={action === "new"} />
       : tab === "harnesses" ? <Harnesses harness={harness} />
       : tab === "plugins" ? <PluginsAndSkills skill={skill} />
-      : tab === "connectors" ? <ConnectorsSettings />
+      : tab === "connectors" ? <ConnectorsSettings connector={connector} />
       : tab === "process" ? <ProcessSettings />
       : tab === "tickets" ? <TicketSettings />
       : tab === "pack" ? <PackSettings />

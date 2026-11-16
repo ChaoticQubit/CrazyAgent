@@ -13,6 +13,7 @@ const PROJECT_ID_MAX = 256;
 const ACCOUNT_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const SKILL_ID = /^[a-z0-9-]{1,64}$/;
 const HARNESS_ID = /^[a-z0-9-]{1,32}$/;
+const CONNECTOR_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 
 export type SettingsTab = typeof SETTINGS_TABS[number];
 export type UserMenuTab = typeof USER_MENU_TABS[number];
@@ -47,7 +48,8 @@ export function isUserMenuTab(tab: SettingsTab): tab is UserMenuTab {
  * goes to the first one; Sign in again keeps its account only on Accounts and only when the id
  * has the engine's account id shape; an open skill stays only on Plugins and skills and only with
  * the engine's skill id shape; an open harness page stays only on Harnesses and only with the
- * engine's harness id shape. Input: a location hash such as "#/settings/pools".
+ * engine's harness id shape; an open connector page stays only on Connectors and only with
+ * the manifest name shape. Input: a location hash such as "#/settings/pools".
  * Output: a route. */
 export function parseRoute(hash: string): Route {
   const [path, query = ""] = hash.replace(/^#/, "").split("?", 2);
@@ -64,6 +66,8 @@ export function parseRoute(hash: string): Route {
     if (!action && tab === "plugins" && SKILL_ID.test(skill)) return { name: "settings", tab, skill };
     const harness = params.get("harness") ?? "";
     if (!action && tab === "harnesses" && HARNESS_ID.test(harness)) return { name: "settings", tab, harness };
+    const connector = params.get("connector") ?? "";
+    if (!action && tab === "connectors" && CONNECTOR_NAME.test(connector)) return { name: "settings", tab, connector };
     if (action !== "sign_in") return action ? { name: "settings", tab, action } : { name: "settings", tab };
     const account = params.get("account") ?? "";
     return tab === "accounts" && ACCOUNT_ID.test(account) ? { name: "settings", tab, action, account } : { name: "settings", tab };
@@ -102,6 +106,7 @@ export function formatRoute(route: Route): string {
       const account = route.action && route.account ? `&account=${encodeURIComponent(route.account)}` : "";
       if (!route.action && route.tab === "plugins" && route.skill) return `#/settings/plugins?skill=${encodeURIComponent(route.skill)}`;
       if (!route.action && route.tab === "harnesses" && route.harness) return `#/settings/harnesses?harness=${encodeURIComponent(route.harness)}`;
+      if (!route.action && route.tab === "connectors" && route.connector) return `#/settings/connectors?connector=${encodeURIComponent(route.connector)}`;
       return `#/settings/${route.tab}${route.action ? `?action=${route.action}${account}` : ""}`;
     }
   }

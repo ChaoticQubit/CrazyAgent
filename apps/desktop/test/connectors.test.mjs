@@ -250,7 +250,10 @@ test("Connector settings: Harness-native connectors and Tool result size cap lis
   const read = page();
   const shown = text(read);
   for (const words of ["Connector settings", "Harness-native connectors", api.CONNECTORS_PAGE.nativeHelp, "Tool result size cap", api.CONNECTORS_PAGE.sizeCapHelp,
-    `Tool list check and third-party label Always on`, api.CONNECTORS_PAGE.lockedReason]) assert.ok(shown.includes(words), `the settings show ${words}`);
+    "Tool list check and third-party label", api.CONNECTORS_PAGE.lockedReason]) assert.ok(shown.includes(words), `the settings show ${words}`);
+  const locked = read.match(/<div class="set-row"[^>]*data-setting="Tool list check and third-party label"[^>]*>.*?<\/div><\/div>/su)?.[0] ?? "";
+  assert.ok(text(locked).includes("Always on"), `the locked line says Always on: ${locked}`);
+  assert.doesNotMatch(locked, /<input|<button/u, "the locked line has no control");
   assert.deepEqual(radios(read, "connector-native"), [["off", true], ["on", false]]);
   assert.deepEqual(radios(read, "connector-size-cap"), [["kib64", false], ["kib256", true], ["mib1", false]]);
   assert.ok(!shown.includes("changed"), "the defaults are not marked");
@@ -348,7 +351,10 @@ test("Every refusal the Connectors protocol answers, past the owner codes, has a
   for (const [code, sentence] of Object.entries(words)) {
     assert.equal(api.connectorProblem({ code, cause: code, message: "Something went wrong. Try again." }), sentence, code);
   }
-  assert.deepEqual(Object.keys(api.CONNECTOR_REFUSALS).sort(), Object.keys(words).sort(), "no code has a sentence of its own elsewhere");
+  const engineWorded = Object.keys(api.CONNECTOR_REFUSALS);
+  const pageWorded = Object.keys(api.CONNECTOR_PAGE_REFUSALS);
+  assert.ok(engineWorded.every((code) => !pageWorded.includes(code)), "each code has one sentence");
+  assert.deepEqual([...engineWorded, ...pageWorded].sort(), Object.keys(words).sort(), "no code has a sentence of its own elsewhere");
 });
 
 test("Characterization: the nine Connectors commands are built, registered and granted, and each call names only its own arguments", () => {

@@ -146,7 +146,7 @@ export function Screen({ route, session }: { route: Route; session: Session }) {
   const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
   switch (route.name) {
     case "settings": return isUserMenuTab(route.tab) ? <Home />
-      : <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} harness={route.harness} />;
+      : <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} harness={route.harness} connector={route.connector} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
     case "demo": return <DemoPage />;

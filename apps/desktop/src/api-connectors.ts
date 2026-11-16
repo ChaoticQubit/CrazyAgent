@@ -1,5 +1,5 @@
 import { call, knownError, namedFailure, type Result } from "./api";
-import type { Origin, PluginStatus, Preview, Problem, SecretView } from "./api-app-plugins";
+import { problemText, type Origin, type PluginStatus, type Preview, type Problem, type SecretView } from "./api-app-plugins";
 import type { Tone } from "./ui";
 
 export type WritePolicy = "ask_every_time" | "ask_once_per_project" | "read_only";
@@ -172,9 +172,13 @@ export const CONNECTORS_PAGE = {
 } as const;
 
 /** The harness-native choices in the order both apps list them, the default first. */
-export const NATIVE_CHOICES: { choice: NativeConnectors; label: string }[] = [];
+export const NATIVE_CHOICES: { choice: NativeConnectors; label: string }[] = [{ choice: "off", label: "Off" }, { choice: "on", label: "On" }];
 /** The size cap choices in the order both apps list them; 256 KiB is the default. */
-export const SIZE_CHOICES: { choice: SizeCap; label: string }[] = [];
+export const SIZE_CHOICES: { choice: SizeCap; label: string }[] = [
+  { choice: "kib64", label: "64 KiB" }, { choice: "kib256", label: "256 KiB" }, { choice: "mib1", label: "1 MiB" },
+];
+const NOT_CONNECTOR: Problem = { code: "app_plugin_not_connector", line: null, field: "kind", message: "this is not a connector; add it on the App plugins page." };
+
 /** The settings an owner has until they pick others: the engine's `ConnectorSettings::DEFAULT`. */
 export const CONNECTOR_DEFAULTS: ConnectorSettings = { write: "ask_every_time", wait: "minutes10", native: "off", size_cap: "kib256", keep_log: "days30" };
 
@@ -182,29 +186,29 @@ export const CONNECTOR_DEFAULTS: ConnectorSettings = { write: "ask_every_time", 
  * shows replaced, so the write, wait and keep settings go back as they were. Inputs: the
  * settings read and the picked values. Output: the settings to save. */
 export function settingsToSave(read: ConnectorSettings, native: NativeConnectors, sizeCap: SizeCap): ConnectorSettings {
-  void native;
-  void sizeCap;
-  return read;
+  return { ...read, native, size_cap: sizeCap };
 }
 
 /** A connector's state word with its tone and the line under it, checked in a fixed order:
  * Refused (with its problem), Needs review, Needs a key, then Ready. Input: the connector.
  * Output: the word, its tone and the line, if any. */
 export function connectorState(connector: ConnectorView): { word: string; tone: Tone; detail: string | null } {
-  void connector;
-  return { word: "", tone: "neutral", detail: null };
+  const status = connector.status;
+  const word = connectorWord(connector);
+  if (status.kind === "refused") return { word, tone: "danger", detail: problemText(status.problem) };
+  if (status.kind === "needs_review") return { word, tone: "warn", detail: "Review this connector before a project can use it." };
+  if (status.kind === "needs_key") return { word, tone: "warn", detail: connector.sign_in === "not_yet" ? CONNECTORS_PAGE.oauthNotYet : "Set a key for each secret it needs." };
+  return { word, tone: "ok", detail: null };
 }
 
 /** Where a connector comes from and its version, one line. Input: the connector. Output: the line. */
 export function originLine(connector: { name: string; version: string; origin: Origin }): string {
-  void connector;
-  return "";
+  return `${connector.name}, version ${connector.version}. ${connector.origin === "bundled" ? "Built in" : "Added by you"}.`;
 }
 
 /** Every host a connector reaches, one line. Input: the hosts. Output: the line. */
 export function reachesLine(hosts: string[]): string {
-  void hosts;
-  return "";
+  return `Reaches ${hosts.join(", ")}`;
 }
 
 /** What a connector's trust screen says, in order and as plain text: version, address,
@@ -212,22 +216,34 @@ export function reachesLine(hosts: string[]): string {
  * says only read, the secrets it asks for and the SHA-256. Input: the trust view. Output:
  * the lines. */
 export function trustLines(trust: ConnectorTrustView): string[] {
-  void trust;
-  return [];
+  const listed = (items: string[]) => (items.length > 0 ? items.join(", ") : "none");
+  const { read_only: readOnly, key, oauth } = trust.connector;
+  const lines = [`Version ${trust.version}`, `Address: ${trust.runs.url}`, reachesLine(trust.runs.hosts)];
+  if (readOnly.kind === "url") lines.push(`Read-only address: ${readOnly.url}`);
+  else if (readOnly.kind === "header") lines.push(`Read-only header: ${readOnly.name}: ${readOnly.value}`);
+  else lines.push("Read-only mode at the vendor: none");
+  lines.push(key === null ? "Key: none" : `Key: the ${key.header} header${key.scheme ? ` with ${key.scheme}` : ""}, from ${key.secrets.join(", ")}`);
+  if (oauth !== null) {
+    lines.push(`Signs in on ${oauth.hosts.join(", ")}`, `Registers by ${oauth.registration.join(", then ")}`,
+      `Scopes while reading: ${listed(oauth.scopes_read)}`, `Scopes when writing: ${listed(oauth.scopes_write)}`);
+  }
+  lines.push(`Tools it says only read: ${listed(trust.connector.read_tools)}`, `Secrets it needs: ${listed(trust.secrets)}`, `SHA-256 ${trust.sha256}`);
+  return lines;
 }
 
 /** A connector preview as this page may show it: a ready answer that is not a connector's
  * (no connector block or address) reads as refused with the engine's own sentence. Input:
  * the engine's answer. Output: the preview. */
 export function connectorPreview(preview: Preview | ConnectorPreview): ConnectorPreview {
-  return preview as ConnectorPreview;
+  if (preview.kind === "refused") return preview;
+  const trust = preview.trust as Partial<ConnectorTrustView> & { kind: string; runs: { kind: string } };
+  if (trust.kind === "connector" && trust.runs.kind === "connector" && trust.connector) return preview as ConnectorPreview;
+  return { kind: "refused", problem: NOT_CONNECTOR };
 }
 
 /** The line in the key dialog. Inputs: the connector title and its hosts. Output: the line. */
 export function keyLine(title: string, hosts: string[]): string {
-  void title;
-  void hosts;
-  return "";
+  return `${title} sends this key to ${hosts.join(", ")}. Only the engine keeps it.`;
 }
 
 /** The keep choices in the order both apps list them, with their words. */
@@ -238,8 +254,8 @@ export const KEEP_CHOICES: { choice: KeepLog; label: string }[] = [
 /** The word for each call kind, the same in the TUI. */
 export const KIND_WORDS: Record<CallKind, string> = { read: "Read", write: "Write", list: "Tool list", unknown: "Unknown tool" };
 
-/** The engine's own sentence for each refusal the activity page can meet, first letter
- * raised, the words the TUI shows for the same code. */
+/** The engine's own sentence for each connector code it words, first letter raised, the
+ * words the TUI shows for the same code. */
 export const CONNECTOR_REFUSALS: Record<string, string> = {
   connectors_unavailable: "The engine could not be reached.",
   connector_request_invalid: "The request could not be read.",
@@ -247,10 +263,33 @@ export const CONNECTOR_REFUSALS: Record<string, string> = {
   connector_outcome_unknown: "The engine did not answer in time; check the list again.",
 };
 
+/** The app's sentence, in connector words, for each other refusal the Connectors protocol
+ * answers past the owner codes; the engine words these for app plugins. The TUI uses the
+ * same words. */
+export const CONNECTOR_PAGE_REFUSALS: Record<string, string> = {
+  connector_project_unknown: "That project is not set up here any more.",
+  app_plugin_bundled: "Built-in connectors can't be removed or replaced.",
+  app_plugin_changed: "The manifest changed after you checked it. Check it again before you trust it.",
+  app_plugin_connector_oauth_not_yet: "This connector signs in with OAuth, which this build does not have.",
+  app_plugin_folder_unavailable: "CrazyAgent couldn't open your plugins folder. Try again.",
+  app_plugin_folder_unsafe: "Your plugins folder isn't private to you, so CrazyAgent won't read it. Make it yours alone and try again.",
+  app_plugin_key_invalid: "That key can't be used: it is empty, too long or has spaces or control characters.",
+  app_plugin_key_store_unavailable: "CrazyAgent couldn't save the key. Nothing was saved; try again.",
+  app_plugin_name_taken: "A built-in plugin or connector already has that name. Give yours another name.",
+  app_plugin_needs_key: "This connector needs a key first. Set one on its page in Settings, Connectors.",
+  app_plugin_needs_review: "This connector's file changed or is new. Review it in Settings, Connectors first.",
+  app_plugin_not_found: "That connector is gone. The page now shows the current ones.",
+  app_plugin_refused: "CrazyAgent refused this manifest. Its reason is shown with it.",
+  app_plugin_secret_not_declared: "This connector doesn't declare that secret.",
+  app_plugins_unavailable: "Connectors aren't available in this engine yet.",
+  owner_entropy_unavailable: "This computer couldn't make a random value for the request. Nothing changed; try again.",
+};
+
 /** One plain sentence for a refused Connectors request: the engine's sentence for its own
  * codes, else the app's line for the code. Input: the refusal. Output: the sentence. */
 export function connectorProblem(refusal: { code: string; cause?: string; message?: string }): string {
   if (Object.hasOwn(CONNECTOR_REFUSALS, refusal.code)) return namedFailure(CONNECTOR_REFUSALS[refusal.code], refusal.code, refusal.cause);
+  if (Object.hasOwn(CONNECTOR_PAGE_REFUSALS, refusal.code)) return namedFailure(CONNECTOR_PAGE_REFUSALS[refusal.code], refusal.code, refusal.cause);
   return refusal.message ?? namedFailure(knownError(refusal.code), refusal.code, refusal.cause);
 }
 
