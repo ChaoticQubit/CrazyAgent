@@ -4766,6 +4766,56 @@ mod tests {
             "Owner, in the Codex terminal: Said later\n(No reply was kept.)"
         );
     }
+    /// DEC-180 Task 20 M7: a listed master's first turn after a Codex live terminal
+    /// conversation is a harness switch: under Carry over its history holds what was said
+    /// there and under Start fresh it does not; a change of mode alone on the listed
+    /// harness carries on whatever the setting says.
+    #[cfg(unix)]
+    #[test]
+    fn a_listed_master_after_a_codex_terminal_carries_or_starts_fresh_as_the_setting_says() {
+        use crate::team::SwitchMode;
+        let listed = crate::master_session::MasterBackend::Listed("standin-acp");
+        let project = crate::protocol::ProjectId::new("store-project").unwrap();
+        let session = crate::protocol::SessionId::new("s").unwrap();
+        let asked = super::Asked::Owner(Some("And the header?"));
+        let one_turn = super::MasterMode::OneTurn;
+        for (harness, fresh, mode, changed) in [
+            ("codex", false, SwitchMode::Carry, true),
+            ("codex", true, SwitchMode::Fresh, true),
+            ("standin-acp", true, SwitchMode::Carry, false),
+        ] {
+            let (_folder, connection) = store_fixture();
+            if fresh {
+                connection
+                    .execute(
+                        "INSERT INTO team_master_switch(project,mode) VALUES (?1,'fresh')",
+                        [project.as_str()],
+                    )
+                    .unwrap();
+            }
+            let draft = super::Draft {
+                speaker: super::MessageSpeaker::Owner,
+                mode: super::MasterMode::Live,
+                harness: Some(harness),
+                text: Some("Fix the footer"),
+                source: "terminal",
+                key: "1",
+            };
+            super::append(&connection, "store-project", "s", &draft).unwrap();
+            super::one_turn_asked(&connection, &project, &session, listed, "turn-1", &asked)
+                .unwrap();
+
+            let exchanges = super::live_exchanges(&connection, &session).unwrap();
+            let note = super::takeover_note(one_turn, "standin-acp", mode, changed);
+            let divider = format!("switch/one_turn/switch: {note}");
+            let carried = usize::from(mode == SwitchMode::Carry);
+            let lines = shown(&connection, "s");
+
+            assert_eq!(exchanges.len(), carried, "{harness}");
+            assert!(lines.contains(&divider), "{harness} {fresh}");
+        }
+    }
+
     /// A turn run in the live terminal is stored like any other master's: the owner's
     /// message when it starts, the master's reply when it ends, under the harness that ran
     /// in the terminal, one pair per turn.
