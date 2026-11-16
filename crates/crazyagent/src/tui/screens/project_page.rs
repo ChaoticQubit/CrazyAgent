@@ -1507,6 +1507,10 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::Connectors => Flow::Open(Place::ProjectConnectors {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
             ProjectReply::Notice(row) => {
                 self.screen.needs.refresh();
                 open_notice(&row, NoticeFilter::Pending, ctx)

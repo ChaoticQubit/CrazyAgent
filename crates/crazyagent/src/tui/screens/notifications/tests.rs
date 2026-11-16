@@ -334,6 +334,7 @@ fn enter_opens_each_items_page_and_marks_an_unread_item_read() {
             NoticeTarget::Harnesses,
             Place::Settings(SettingsSection::Harnesses),
         ),
+        (NoticeTarget::Connectors, Place::Connectors),
         (NoticeTarget::Home, Place::Home),
     ];
     for (target, place) in cases {

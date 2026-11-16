@@ -132,6 +132,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         place: Place::SearchSettings,
     });
     out.push(Target {
+        label: "Settings / Connectors".into(),
+        kind: "Settings",
+        place: Place::Connectors,
+    });
+    out.push(Target {
         label: "Settings / Connector activity".into(),
         kind: "Settings",
         place: Place::ConnectorActivity,

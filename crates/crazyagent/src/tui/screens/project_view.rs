@@ -2608,7 +2608,8 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
                 super::project_access::summary(screen.agent_policy.as_ref()),
                 look.fg,
             )
-            .push("   c Agent access", look.muted),
+            .push("   c Agent access", look.muted)
+            .push("   b Connectors", look.muted),
         ),
         entry(
             "Trust",

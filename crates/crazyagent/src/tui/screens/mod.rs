@@ -23,6 +23,7 @@ pub mod profile_form;
 pub(in crate::tui) mod project;
 pub(in crate::tui) mod project_access;
 pub(in crate::tui) mod project_activity;
+pub(in crate::tui) mod project_connectors;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_needs;
@@ -240,6 +241,10 @@ pub enum Place {
         id: ProjectId,
         name: String,
     },
+    ProjectConnectors {
+        id: ProjectId,
+        name: String,
+    },
     HomeFolder {
         first_run: bool,
     },
@@ -268,6 +273,7 @@ pub enum Place {
     },
     AppPlugins,
     SearchSettings,
+    Connectors,
     ConnectorActivity,
 }
 
@@ -441,7 +447,8 @@ pub trait Screen {
             | Place::Master { id, .. }
             | Place::ProjectProcess { id, .. }
             | Place::ProjectHarnesses { id, .. }
-            | Place::ProjectMemory { id, .. } => Some(id),
+            | Place::ProjectMemory { id, .. }
+            | Place::ProjectConnectors { id, .. } => Some(id),
             Place::Onboarding { project, .. } => project,
             Place::HarnessSettings { project, .. }
             | Place::Models { project, .. }
@@ -469,6 +476,7 @@ pub trait Screen {
             | Place::Demo
             | Place::AppPlugins
             | Place::SearchSettings
+            | Place::Connectors
             | Place::ConnectorActivity => None,
         }
     }
@@ -538,6 +546,9 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
             id.clone(),
             name.clone(),
         )),
+        Place::ProjectConnectors { id, name } => Box::new(
+            project_connectors::ProjectConnectorsPage::new(id.clone(), name.clone()),
+        ),
         Place::HomeFolder { first_run } => Box::new(home_folder::HomeFolder::new(*first_run, ctx)),
         Place::HarnessSetup => Box::new(harness_setup::HarnessSetup::new()),
         Place::FirstRunAccounts => Box::new(first_run_accounts::FirstRunAccounts::new()),
@@ -569,6 +580,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::Demo => Box::new(demo::DemoPage::new()),
         Place::AppPlugins => Box::new(settings::app_plugins::AppPluginsPage::new()),
         Place::SearchSettings => Box::new(settings::search::SearchPage::new()),
+        Place::Connectors => Box::new(settings::connectors::ConnectorsPage::new()),
         Place::ConnectorActivity => {
             Box::new(settings::connector_activity::ConnectorActivityPage::new())
         }

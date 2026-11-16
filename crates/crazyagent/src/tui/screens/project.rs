@@ -667,6 +667,7 @@ pub(in crate::tui) enum ProjectReply {
     Master,
     Process,
     Harnesses,
+    Connectors,
     Memory,
     Usage,
     Session(SessionsAction),
@@ -2777,6 +2778,7 @@ impl ProjectScreen {
             }
             KeyCode::Char('i') => ProjectReply::Process,
             KeyCode::Char('h') => ProjectReply::Harnesses,
+            KeyCode::Char('b') => ProjectReply::Connectors,
             KeyCode::Char('u') => match &self.schedule {
                 Some(schedule) => ProjectReply::AccountOrder(
                     crate::tui::screens::settings::account_choice::cycle(
