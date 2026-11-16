@@ -16798,7 +16798,10 @@ fn engine_git_refuses_an_owner_config_that_includes_a_file_in_the_project_folder
             case.owner(&["config", "include.path", "../.gitconfig"]);
         }),
         ("relative, there", |case| {
-            write(&case.repo.join(".gitconfig"), "[core]\n\tquotePath = false\n");
+            write(
+                &case.repo.join(".gitconfig"),
+                "[core]\n\tquotePath = false\n",
+            );
             case.owner(&["config", "include.path", "../.gitconfig"]);
         }),
         ("in full, by a condition", |case| {
@@ -16808,7 +16811,10 @@ fn engine_git_refuses_an_owner_config_that_includes_a_file_in_the_project_folder
         ("from a file outside", |case| {
             let outer = case.home.join("outer.config");
             let inner = case.repo.join(".gitconfig");
-            write(&outer, &format!("[include]\n\tpath = {}\n", inner.display()));
+            write(
+                &outer,
+                &format!("[include]\n\tpath = {}\n", inner.display()),
+            );
             case.owner(&["config", "include.path", outer.to_str().unwrap()]);
         }),
         ("through a link", |case| {
