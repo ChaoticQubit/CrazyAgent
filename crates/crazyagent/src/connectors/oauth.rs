@@ -7,10 +7,11 @@
 use crate::app_plugins::connector::Registration;
 use crate::app_plugins::store;
 use crate::connectors::mcp_client::Credential;
+use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use crate::provider_reach::ProviderReach;
 use crate::storage::accounts::{self, PLUGIN_KEYS};
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use std::path::Path;
 
 #[cfg(unix)]
@@ -45,6 +46,15 @@ pub const OAUTH_CODES: [&str; 15] = [
     "connector_oauth_token_invalid",
     "connector_oauth_trust_changed",
 ];
+
+/// Connectors whose sign-in ended because their vendor refused a renewal, each with the
+/// title its notice shows and the scopes a server asked for, until a sign-in ends.
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connector_sign_ins (
+    connector TEXT PRIMARY KEY CHECK(length(connector) BETWEEN 1 AND 40),
+    title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 120),
+    wanted TEXT CHECK(wanted IS NULL OR length(wanted) BETWEEN 1 AND 1024),
+    since_ms INTEGER NOT NULL
+);";
 
 /// The longest client id of the owner's own OAuth app or of a registered client.
 const OWN_ID_BYTES_MAX: usize = 255;
@@ -230,6 +240,73 @@ pub fn fresh(db: &Connection, root: &Path, name: &str) -> Result<Credential, OAu
         now_ms(),
         &ProviderReach::system(),
     )
+}
+
+fn unavailable(_: rusqlite::Error) -> EngineError {
+    EngineError("connectors_unavailable".into())
+}
+
+/// Marks a connector "Sign in again" after its vendor refused a renewal: one Action item
+/// asks the owner to sign in until a sign-in ends or the connector is removed, and marking
+/// it again changes nothing. Inputs: database, connector, its title and the time. Output:
+/// Ok, or `connectors_unavailable`.
+#[cfg(unix)]
+fn mark_sign_in(db: &Connection, name: &str, title: &str, now_ms: i64) -> Result<(), OAuthError> {
+    let title = crate::connectors::gateway::pins::short_title(title);
+    db.execute_batch(SCHEMA)
+        .and_then(|()| {
+            db.execute(
+                "INSERT INTO connector_sign_ins(connector,title,wanted,since_ms)
+                 VALUES(?1,?2,NULL,?3) ON CONFLICT(connector) DO NOTHING",
+                params![name, title, now_ms],
+            )
+        })
+        .map(|_| ())
+        .map_err(|_| OAuthError("connectors_unavailable"))
+}
+
+/// Clears a connector's "Sign in again" once a sign-in ended. Inputs: database and
+/// connector. Output: Ok, or `connectors_unavailable`.
+#[cfg(unix)]
+fn signed_in(db: &Connection, name: &str) -> Result<(), OAuthError> {
+    forget(db, name).map_err(|_| OAuthError("connectors_unavailable"))
+}
+
+/// Deletes a connector's "Sign in again": when it is signed in, removed or trusted again.
+/// Inputs: the engine database and the connector. Output: Ok, or `connectors_unavailable`.
+pub fn forget(db: &Connection, name: &str) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(unavailable)?;
+    db.execute("DELETE FROM connector_sign_ins WHERE connector=?1", [name])
+        .map_err(unavailable)?;
+    Ok(())
+}
+
+/// The connectors waiting for the owner to sign in again, each with its title, by name.
+/// Inputs: the engine database and the most to read. Output: the rows, none when the table
+/// does not exist yet, or `connectors_unavailable`.
+pub(crate) fn wanting(
+    db: &Connection,
+    max: usize,
+) -> Result<Option<Vec<(String, String)>>, EngineError> {
+    let exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='connector_sign_ins')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !exists {
+        return Ok(None);
+    }
+    let rows: Vec<(String, String)> = db
+        .prepare("SELECT connector, title FROM connector_sign_ins ORDER BY connector LIMIT ?1")
+        .map_err(unavailable)?
+        .query_map([max as i64], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(unavailable)?
+        .collect::<Result<_, _>>()
+        .map_err(unavailable)?;
+    assert!(rows.len() <= max);
+    Ok(Some(rows))
 }
 
 /// This computer's clock as Unix milliseconds, 0 before 1970.

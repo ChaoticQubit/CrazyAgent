@@ -109,7 +109,9 @@ pub(crate) fn digest(tools: &[VendorTool]) -> String {
     sha
 }
 
-fn short_title(title: &str) -> String {
+/// A connector's title as a notice keeps it: hidden characters out, trimmed, at most
+/// `TITLE_BYTES_MAX` bytes, and "A connector" for one left empty.
+pub(crate) fn short_title(title: &str) -> String {
     let mut title = crate::memory::without_hidden(title).trim().to_owned();
     if title.len() > TITLE_BYTES_MAX {
         let mut end = TITLE_BYTES_MAX;

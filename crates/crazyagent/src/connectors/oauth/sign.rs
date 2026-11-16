@@ -1,6 +1,6 @@
 use super::{
-    OAuthError, OWN_ID_BYTES_MAX, Pending, key_store, not_offered, now_ms, own_issuer_ref, own_ref,
-    own_secret_ref, visible,
+    OAuthError, OWN_ID_BYTES_MAX, Pending, key_store, mark_sign_in, not_offered, now_ms,
+    own_issuer_ref, own_ref, own_secret_ref, signed_in, visible,
 };
 use crate::app_plugins::connector::{ConnectorSpec, OAuthSpec, Registration};
 use crate::app_plugins::http::{self, Config, Ended};
@@ -777,7 +777,9 @@ pub(super) fn finish_trusted(
     if !trusted {
         return Err(OAuthError("connector_oauth_trust_changed"));
     }
-    redeem(root, flow, code, iss, reach)
+    let connector = flow.connector.clone();
+    redeem(root, flow, code, iss, reach)?;
+    signed_in(db, &connector)
 }
 
 /// [`finish_trusted`] without the trust read, for a sign-in begun with a file given.
@@ -914,6 +916,20 @@ fn keep_grant(
         )
         .map_err(|_| key_store()),
     }
+}
+
+/// Ends a connector's sign-in after its renewal was refused: the refresh token, the
+/// access token and the record are removed, so later calls ask the server nothing.
+/// Inputs: root, connector and issuer. Output: Ok, or the key store's refusal.
+fn ended(root: &Path, name: &str, issuer: &str) -> Result<(), OAuthError> {
+    for reference in [
+        token_ref("refresh", name, issuer)?,
+        token_ref("token", name, issuer)?,
+        record_ref(name)?,
+    ] {
+        accounts::remove_key_in(root, PLUGIN_KEYS, reference.as_str()).map_err(|_| key_store())?;
+    }
+    Ok(())
 }
 
 fn record_ref(name: &str) -> Result<CredentialRef, OAuthError> {
@@ -1107,7 +1123,6 @@ pub(crate) fn fresh_with(
     now_ms: i64,
     reach: &ProviderReach,
 ) -> Result<Credential, OAuthError> {
-    let _ = (db, title);
     let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
     let usable = |record: Option<Record>| {
         record
@@ -1120,8 +1135,18 @@ pub(crate) fn fresh_with(
         let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
         record = usable(record_of(root, name)?)?;
         if ends_soon(&record) {
-            record.expires_ms = renew(root, name, oauth, &record, now_ms, reach)?;
-            save_record(root, name, record_text(&record)?)?;
+            match renew(root, name, oauth, &record, now_ms, reach) {
+                Ok(ends_ms) => {
+                    record.expires_ms = ends_ms;
+                    save_record(root, name, record_text(&record)?)?;
+                }
+                Err(refused) if refused == sign_in_needed() => {
+                    ended(root, name, &record.issuer)?;
+                    mark_sign_in(db, name, title, now_ms)?;
+                    return Err(refused);
+                }
+                Err(other) => return Err(other),
+            }
         }
     }
     let refresh = token_ref("refresh", name, &record.issuer)?;
