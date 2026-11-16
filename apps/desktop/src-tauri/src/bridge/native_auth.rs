@@ -277,11 +277,7 @@ impl NativeBridge {
             operation_id,
         };
         let read = self.controller()?.read_native_auth(request).await;
-        let settled = if keep_ended && Self::ends_it(&read) {
-            Ok(false)
-        } else {
-            self.settle_auth(read)
-        };
+        let settled = self.running_answer(read, keep_ended);
         if let Some(operation) = self.native_auth.as_mut() {
             operation.claude_prompt = prompt;
         }
@@ -352,6 +348,21 @@ impl NativeBridge {
             return Err(self.held_refusal());
         }
         Ok(())
+    }
+
+    /// Applies the engine's answer to a re-read of a held running sign-in: with `keep_ended`,
+    /// one that ends it stays held for the drawer's own read; any other answer settles it
+    /// ([`Self::settle_auth`]). Inputs: the answer and whether an ended one stays held.
+    /// Output: true once it ended and is dropped, false while it stays held, or the refusal.
+    fn running_answer(
+        &mut self,
+        read: Result<NativeAuthReply, EngineError>,
+        keep_ended: bool,
+    ) -> Result<bool, BridgeError> {
+        if keep_ended && Self::ends_it(&read) {
+            return Ok(false);
+        }
+        self.settle_auth(read)
     }
 
     /// Says whether an answer means the engine no longer runs the held sign-in. Input: the
