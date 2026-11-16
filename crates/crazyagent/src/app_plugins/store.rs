@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS app_plugin_secrets (
     PRIMARY KEY (plugin, secret)
 );";
 
-const BUNDLED: [(&str, &str); 8] = [
+const BUNDLED: [(&str, &str); 16] = [
     ("local", include_str!("../../assets/app-plugins/local.yaml")),
     (
         "openai",
@@ -57,6 +57,38 @@ const BUNDLED: [(&str, &str); 8] = [
     (
         "notion",
         include_str!("../../assets/app-plugins/connectors/notion.yaml"),
+    ),
+    (
+        "slack",
+        include_str!("../../assets/app-plugins/connectors/slack.yaml"),
+    ),
+    (
+        "asana",
+        include_str!("../../assets/app-plugins/connectors/asana.yaml"),
+    ),
+    (
+        "box",
+        include_str!("../../assets/app-plugins/connectors/box.yaml"),
+    ),
+    (
+        "canva",
+        include_str!("../../assets/app-plugins/connectors/canva.yaml"),
+    ),
+    (
+        "dropbox",
+        include_str!("../../assets/app-plugins/connectors/dropbox.yaml"),
+    ),
+    (
+        "gmail",
+        include_str!("../../assets/app-plugins/connectors/gmail.yaml"),
+    ),
+    (
+        "google-drive",
+        include_str!("../../assets/app-plugins/connectors/google-drive.yaml"),
+    ),
+    (
+        "google-calendar",
+        include_str!("../../assets/app-plugins/connectors/google-calendar.yaml"),
     ),
 ];
 

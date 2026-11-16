@@ -1,0 +1,12 @@
+schema: 1
+kind: connector
+name: asana
+title: Asana
+version: 1.0.0
+description: Tasks, projects and goals in Asana through Asana's hosted MCP server. This connector takes only your own app. Create an app in the Asana developer console with the redirect URL http://127.0.0.1/callback, then save its client ID and client secret here.
+mcp:
+  url: https://mcp.asana.com/v2/mcp
+  hosts: [mcp.asana.com]
+oauth:
+  hosts: [app.asana.com]
+  registration: [own]

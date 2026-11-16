@@ -1,0 +1,14 @@
+schema: 1
+kind: connector
+name: dropbox
+title: Dropbox
+version: 1.0.0
+description: Files, folders and sharing in Dropbox through Dropbox's hosted MCP server. This connector takes only your own app. Create a scoped app in the Dropbox App Console with the redirect URI http://127.0.0.1/callback and the permissions it needs, then save its app key and app secret here.
+mcp:
+  url: https://mcp.dropbox.com/mcp
+  hosts: [mcp.dropbox.com]
+oauth:
+  hosts: [www.dropbox.com, api.dropboxapi.com]
+  registration: [own]
+  scopes_read: [account_info.read, files.metadata.read, files.content.read, sharing.read, file_requests.read]
+  scopes_write: [files.metadata.write, files.content.write, sharing.write, file_requests.write]

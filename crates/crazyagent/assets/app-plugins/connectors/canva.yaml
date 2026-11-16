@@ -1,0 +1,14 @@
+schema: 1
+kind: connector
+name: canva
+title: Canva
+version: 1.0.0
+description: Designs, folders, comments and assets in Canva through Canva's hosted MCP server. This connector takes only your own app. Create an integration in the Canva developer portal with the redirect URL http://127.0.0.1/callback, then save its client ID and client secret here.
+mcp:
+  url: https://mcp.canva.com/mcp
+  hosts: [mcp.canva.com]
+oauth:
+  hosts: [mcp.canva.com]
+  registration: [own]
+  scopes_read: [profile:read, design:meta:read, design:content:read, folder:read, brandtemplate:meta:read, brandtemplate:content:read, comment:read, asset:read, brandkit:read, help:answers:read]
+  scopes_write: [design:content:write, folder:write, brandtemplate:content:write, comment:write, asset:write]

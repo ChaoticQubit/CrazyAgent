@@ -1,0 +1,14 @@
+schema: 1
+kind: connector
+name: google-drive
+title: Google Drive
+version: 1.0.0
+description: Files in Google Drive through Google's hosted MCP server. Preview at Google. This connector takes only your own app. In Google Cloud enable drive.googleapis.com and drivemcp.googleapis.com, then in Google Auth Platform create an OAuth client of type Desktop app, which takes the redirect http://127.0.0.1/callback on any port, and save its client ID and client secret here.
+mcp:
+  url: https://drivemcp.googleapis.com/mcp/v1
+  hosts: [drivemcp.googleapis.com]
+oauth:
+  hosts: [accounts.google.com, oauth2.googleapis.com]
+  registration: [own]
+  scopes_read: [https://www.googleapis.com/auth/drive.readonly]
+  scopes_write: [https://www.googleapis.com/auth/drive.file]
