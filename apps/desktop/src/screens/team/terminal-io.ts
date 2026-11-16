@@ -118,27 +118,35 @@ export function terminalSize(cols: number, rows: number): { cols: number; rows: 
   return { cols: clamp(cols), rows: clamp(rows) };
 }
 
+type Job = () => Promise<boolean>;
+
+/** The last send each queue took, read through its queue function, so a lane's waiting batch
+ * can tell whether anything was queued after it. */
+const lastQueued = new WeakMap<(job: Job) => boolean, () => Job | null>();
+
 /** Runs a terminal's sends one at a time in the order queued, so a long paste never overtakes
  * later keys or a prompt. Input: a callback for the stop. Output: a function that queues one
  * send, which resolves false once nothing more can be delivered; it returns whether the send
  * was queued. After a stop, or past `QUEUED_CHUNKS_MAX` waiting sends, it refuses them and
  * reports the stop once. */
-export function jobQueue(stopped: () => void): (job: () => Promise<boolean>) => boolean {
+export function jobQueue(stopped: () => void): (job: Job) => boolean {
   let tail: Promise<void> = Promise.resolve();
   let waiting = 0;
   let stop = false;
+  let last: Job | null = null;
   const halt = () => {
     if (stop) return;
     stop = true;
     stopped();
   };
-  return (job) => {
+  const queue = (job: Job): boolean => {
     if (stop) return false;
     if (waiting >= QUEUED_CHUNKS_MAX) {
       halt();
       return false;
     }
     waiting += 1;
+    last = job;
     tail = tail
       .then(async () => { if (!stop && !await job()) halt(); })
       .catch(halt)
@@ -146,6 +154,8 @@ export function jobQueue(stopped: () => void): (job: () => Promise<boolean>) => 
     assert(waiting <= QUEUED_CHUNKS_MAX, "the send queue stays bounded");
     return true;
   };
+  lastQueued.set(queue, () => last);
+  return queue;
 }
 
 /** Queues typed bytes on a terminal's send queue as chunks the bridge accepts. Inputs: the
@@ -159,53 +169,53 @@ export function keyQueue(run: (job: () => Promise<boolean>) => boolean, send: (c
 }
 
 /** One lane's waiting batch on a shared send queue. Bytes that arrive while earlier input is
- * still being sent join the one batch that waits, up to `INPUT_BYTES_MAX`, and go out as one
- * send when the queue reaches it; nothing waits on a timer. Bytes over the limit close the
- * batch and go out in chunks. Inputs: the queue and the send call for one chunk. Output: `add`,
- * which queues bytes and closes the batch after them when told, and `close`. */
-function batchLane(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[]) => Promise<boolean>): { add: (bytes: Uint8Array, last: boolean) => void; close: () => void } {
+ * still being sent join the one batch that waits, up to `INPUT_BYTES_MAX`, but only while that
+ * batch is still the last send queued, so nothing queued after it, a prompt or the other
+ * lane's input, is ever overtaken; it goes out as one send when the queue reaches it, and
+ * nothing waits on a timer. Bytes over the limit go out in chunks. A queue that is not a
+ * `jobQueue` never merges. Inputs: the queue and the send call for one chunk. Output: a
+ * function that queues bytes and, when told, closes the batch after them. */
+function batchLane(run: (job: Job) => boolean, send: (chunk: number[]) => Promise<boolean>): (bytes: Uint8Array, last: boolean) => void {
   const chunks = keyQueue(run, send);
-  let waiting: number[] | null = null;
-  const add = (bytes: Uint8Array, last: boolean) => {
+  let waiting: { bytes: number[]; job: Job } | null = null;
+  return (bytes, last) => {
     if (bytes.length > INPUT_BYTES_MAX) {
       waiting = null;
       return chunks(bytes);
     }
-    if (waiting && waiting.length + bytes.length <= INPUT_BYTES_MAX) {
-      waiting.push(...bytes);
+    const joins = waiting !== null
+      && lastQueued.get(run)?.() === waiting.job
+      && waiting.bytes.length + bytes.length <= INPUT_BYTES_MAX;
+    if (joins && waiting) {
+      waiting.bytes.push(...bytes);
     } else {
       const batch = Array.from(bytes);
-      waiting = run(() => {
-        if (waiting === batch) waiting = null;
+      const job = () => {
+        if (waiting?.bytes === batch) waiting = null;
         return send(batch);
-      }) ? batch : null;
+      };
+      waiting = run(job) ? { bytes: batch, job } : null;
     }
     if (last) waiting = null;
-    assert(waiting === null || waiting.length <= INPUT_BYTES_MAX, "a waiting batch fits one send");
+    assert(waiting === null || waiting.bytes.length <= INPUT_BYTES_MAX, "a waiting batch fits one send");
   };
-  return { add, close: () => { waiting = null; } };
 }
 
 /** Splits a terminal's input into a typed lane and a wheel lane on one send queue. Keys typed
  * or wheel reports that arrive while earlier input is still being sent wait as one batch per
- * lane that later input of the same lane joins, so fast typing or a fast scroll costs one send
- * per round trip rather than one per key or wheel event, and never fills the queue. Input of
- * the other lane closes a lane's batch, so keys and scrolling keep their order. A lone Esc
- * closes its batch after it, so Esc and a quick key after it never reach the app as one Alt
- * key. Inputs: the queue and the send call for one chunk, told whether the wheel made it.
- * Output: the two lanes. */
-export function inputLanes(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[], wheel: boolean) => Promise<boolean>): { typed: (bytes: Uint8Array) => void; wheel: (bytes: Uint8Array) => void } {
+ * lane, so fast typing or a fast scroll costs one send per round trip rather than one per key
+ * or wheel event, and never fills the queue. A batch takes more input only while it is the last
+ * send queued, so keys, scrolling and prompts keep their order. A lone Esc closes its batch
+ * after it, so Esc and a quick key after it never reach the app as one Alt key. Inputs: the
+ * queue and the send call for one chunk, told whether the wheel made it. Output: the two
+ * lanes. */
+export function inputLanes(run: (job: Job) => boolean, send: (chunk: number[], wheel: boolean) => Promise<boolean>): { typed: (bytes: Uint8Array) => void; wheel: (bytes: Uint8Array) => void } {
   const keys = batchLane(run, (chunk) => send(chunk, false));
   const scrolls = batchLane(run, (chunk) => send(chunk, true));
-  const typed = (bytes: Uint8Array) => {
-    scrolls.close();
-    keys.add(bytes, bytes.length === 1 && bytes[0] === ESC);
+  return {
+    typed: (bytes) => keys(bytes, bytes.length === 1 && bytes[0] === ESC),
+    wheel: (bytes) => scrolls(bytes, false),
   };
-  const wheel = (bytes: Uint8Array) => {
-    keys.close();
-    scrolls.add(bytes, false);
-  };
-  return { typed, wheel };
 }
 
 /** Sends typed input in order, one chunk at a time, on a queue of its own. Inputs: the send
