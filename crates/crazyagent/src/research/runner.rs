@@ -141,8 +141,9 @@ const CLAUDE_USER_LINE: &[u8] = b"{\"type\":\"user\"";
 const CLAUDE_PARENT_KEY: &[u8] = b"\"parent_tool_use_id\":";
 /// The model name Claude Code gives the messages it writes itself, such as its API errors.
 const CLAUDE_OWN_MODEL: &str = "<synthetic>";
-/// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
-const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
+/// The `--settings` every research Claude Code gets, hooks and auto-memory off
+/// (RV-DS241-205); a keyed run adds its `apiKeyHelper`.
+const CLAUDE_SETTINGS: &str = "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}";
 
 /// The most bytes of one research report: the runner takes no longer report from an agent,
 /// and a reader of a stored report reads up to this many.
@@ -2512,7 +2513,11 @@ fn claude_arguments(
         .env("CLAUDE_CODE_TMPDIR", tmp)
         .env("TERM", "dumb")
         .env("DISABLE_TELEMETRY", "1")
-        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        .env(
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.0,
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.1,
+        );
     if tools {
         command
             .args([
