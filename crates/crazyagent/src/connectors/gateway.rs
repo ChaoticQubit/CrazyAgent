@@ -1160,9 +1160,7 @@ pub fn start(root: &Path) -> Result<Running, EngineError> {
     let root = root.to_path_buf();
     let thread = std::thread::Builder::new()
         .name("connector-gateway-serve".into())
-        .spawn(move || {
-            let _ = (root, flag);
-        })
+        .spawn(move || serve(&root, &flag))
         .map_err(|_| EngineError("connectors_unavailable".into()))?;
     Ok(Running { stop, thread })
 }

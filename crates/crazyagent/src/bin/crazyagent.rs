@@ -938,6 +938,17 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             } else {
                 None
             };
+            let connector_gateway = if team.is_some() {
+                match crazyagent::connectors::gateway::start(runtime_dir) {
+                    Ok(gateway) => Some(gateway),
+                    Err(problem) => {
+                        eprintln!("connector calls are not answered ({problem})");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let search_index = if team.is_some() {
                 match crazyagent::search_index::indexer::start_for_engine(runtime_dir) {
                     Ok(indexer) => Some(indexer),
@@ -969,6 +980,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             }
             if let Some(team) = team {
                 let _ = tokio::task::spawn_blocking(move || team.stop()).await;
+            }
+            if let Some(gateway) = connector_gateway {
+                let _ = tokio::task::spawn_blocking(move || gateway.stop()).await;
             }
             #[cfg(unix)]
             if let Some(renewal) = renewal {
