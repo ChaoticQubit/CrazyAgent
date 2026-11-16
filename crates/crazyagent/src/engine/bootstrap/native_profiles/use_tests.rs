@@ -1164,7 +1164,7 @@ fn a_listed_account_takes_an_execution_use_of_its_own_keyless_slot() {
     let prepared = custody.prepare_listed(&case.host, &listed);
     assert!(prepared.is_ok(), "{:?}", prepared.as_ref().err());
     let (custody_id, key) = prepared.unwrap();
-    assert_eq!(key, digest(b"unit-listed-connection"));
+    assert_eq!(key, digest(b"listed/unit-listed-connection"));
     let mut binding = case.binding.clone();
     binding.connection = listed;
     binding.custody_id = custody_id;
@@ -1206,6 +1206,26 @@ fn a_listed_slot_whose_home_holds_a_sign_in_record_gives_no_use() {
             "{record}"
         );
     }
+}
+
+/// DEC-180 T20 Q7: a listed account's slot key is its own, apart from every sign-in's and
+/// RCLI profile's, so a listed connection whose id is a sign-in's profile reference takes
+/// its own slot and leaves the sign-in's slot and use as they were.
+#[test]
+fn a_listed_slot_never_takes_the_slot_of_a_sign_in_whose_profile_shares_its_name() {
+    let mut case = UseCase::new();
+    let mut listed = listed_connection();
+    listed.id = reference("unit-profile");
+    let custody = case.custody.as_mut().unwrap();
+    let prepared = custody.prepare_listed(&case.host, &listed);
+    assert!(prepared.is_ok(), "{:?}", prepared.as_ref().err());
+    let (_, key) = prepared.unwrap();
+    assert_ne!(key, digest(b"unit-profile"));
+    let again = custody.prepare(&case.host, &case.binding.connection);
+    let kept = again.ok().map(|(id, _)| id);
+    assert_eq!(kept, Some(case.binding.custody_id.clone()));
+    let guard = case.acquire();
+    assert!(case.revalidate(&guard).is_ok());
 }
 
 mod agent_copy_tests;
