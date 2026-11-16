@@ -2344,6 +2344,70 @@ fn the_remove_ask_fits_80_by_24_with_the_owners_words_and_a_long_preview() {
     );
 }
 
+/// With the rows to spare, Delete everything wraps a long folder and a long loss as before, so
+/// the folder's last name and what would be lost both show; only a screen too short for every
+/// line cuts them to one line each.
+#[test]
+fn a_tall_remove_ask_wraps_a_long_folder_and_loss_instead_of_cutting_them() {
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    let read = screen.next_query(30).unwrap();
+    let mut preview = removal(true);
+    preview.folders =
+        vec!["/Users/owner/CrazyAgent/gone-app-worktrees/agent-1-a-long-branch-name".into()];
+    preview.running = Vec::new();
+    preview.open_change_sets = 0;
+    preview.losses = vec![crate::team::cleanup::AgentLoss {
+        id: 3,
+        label: "Tester 3 of the long running research team".into(),
+        code: "cleanup_commits_unlanded".into(),
+    }];
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(preview))));
+    assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+    assert_eq!(screen.remove_choice, RemoveChoice::Everything);
+    let shown = text(&project_screen(&mut screen, 120, 40, &Look::plain()).rows);
+    assert!(
+        shown.contains("branch-name"),
+        "the folder's last name shows: {shown}"
+    );
+    assert!(
+        shown.contains("never landed"),
+        "what would be lost shows: {shown}"
+    );
+}
+
+/// At the smallest terminal a refused Delete everything still shows the owner's Remove words,
+/// the engine's reason it is not offered and the buttons.
+#[test]
+fn a_refused_delete_everything_fits_the_remove_ask_at_80_by_24() {
+    const REMOVE_WORDS: &str = "Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk, with every file in it.";
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    let read = screen.next_query(30).unwrap();
+    let mut preview = removal(false);
+    preview.blocked = Some(
+        "Service A uses a folder of this project, so deleting it would delete that project's files too. Remove it from the dashboard instead."
+            .into(),
+    );
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(preview))));
+    let shown = text(&project_screen(&mut screen, 80, 24, &Look::plain()).rows);
+    for line in super::new_project_view::wrap_words(REMOVE_WORDS, 56) {
+        assert!(shown.contains(line.as_str()), "{line:?} missing: {shown}");
+    }
+    for words in [
+        "Service A uses a folder",
+        "the dashboard instead.",
+        "[ Remove project ]",
+        "[> Keep project ]",
+    ] {
+        assert!(shown.contains(words), "{words:?} missing: {shown}");
+    }
+}
+
 #[test]
 fn remove_asks_first_and_marks_the_project_removed_once_the_engine_forgets_it() {
     let project = ProjectId::new("gone").unwrap();
