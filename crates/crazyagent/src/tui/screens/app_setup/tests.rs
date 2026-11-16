@@ -458,7 +458,7 @@ fn first_run_offers_to_continue_without_installing_and_runs_nothing() {
         let rows = render(&mut shell, width, height);
         let help = bar(&rows);
         assert!(help.contains("Enter Install and continue"), "{help}");
-        assert!(help.contains("c Continue without them"), "{help}");
+        assert!(help.contains("c Skip for now"), "{help}");
         shell.key(Key::Char('c'));
         assert_eq!(shell.place(), Some(Place::HarnessSetup));
         let runs = jobs(&mut shell)
@@ -2247,7 +2247,9 @@ fn keeping_team_agents_says_an_agent_under_network_none_is_frozen_until_crazyage
 
 /// On a fresh Mac at the smallest window, 80x24, with every tool missing and its line under
 /// it, the Tools section is taller than the body; the top scrolls away so part of the pack
-/// list and the note naming the MCP servers Enter approves stay on screen.
+/// list and the note naming the MCP servers Enter approves stay on screen. The help bar keeps
+/// every key, Ctrl-Q Quit included, on its one last row, so no body row goes to a second bar
+/// row; c reads Skip for now, the desktop's words for leaving Set up tools without installing.
 #[test]
 fn at_80x24_with_every_tool_missing_the_approval_note_and_pack_rows_stay_on_screen() {
     let mut status = first_run_status();
@@ -2281,8 +2283,10 @@ fn at_80x24_with_every_tool_missing_the_approval_note_and_pack_rows_stay_on_scre
     let bar = rows.last().unwrap();
     assert!(
         bar.contains("Enter Install and continue")
-            && bar.contains("c Continue without them")
-            && bar.contains("Space Untick"),
+            && bar.contains("c Skip for now")
+            && bar.contains("Space Untick")
+            && bar.contains("Ctrl-Q Quit")
+            && bar.contains("? Help"),
         "the whole help bar fits one row at 80 columns: {rows:#?}"
     );
 }
