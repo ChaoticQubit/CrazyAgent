@@ -601,7 +601,12 @@ impl NativeProfileCustody {
         step()?;
         let profile = match profile {
             Some(profile) => {
-                staged.replace_into(&root.file, MANIFEST, &profile.file)?;
+                if let Err(stopped) = staged.replace_into(&root.file, MANIFEST, &profile.file) {
+                    if written.verify(&profile.file).is_ok() {
+                        remember_profile(&mut self.profiles, key, digest(&written.bytes));
+                    }
+                    return Err(stopped);
+                }
                 profile
             }
             None => staged.commit(&root.file, &key)?,
