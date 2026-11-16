@@ -64,6 +64,11 @@ fn arrive(shell: &mut Shell, event: ConnectorsEvent) {
     )))));
 }
 
+fn approval_event(result: Result<ApprovalView, String>) -> ConnectorsEvent {
+    let id = result.as_ref().map_or(ID, |view| view.id);
+    ConnectorsEvent::Approval { id, result }
+}
+
 fn reads(job: &ConnectorsJob) -> bool {
     matches!(job, ConnectorsJob::Approval { id } if *id == ID)
 }
@@ -80,7 +85,7 @@ fn opened() -> Shell {
 
 fn page(read: ApprovalView) -> Shell {
     let mut shell = opened();
-    arrive(&mut shell, ConnectorsEvent::Approval(Ok(read)));
+    arrive(&mut shell, approval_event(Ok(read)));
     shell
 }
 
@@ -168,7 +173,7 @@ fn the_notice_page_reads_its_write_shows_it_and_enter_only_folds_the_arguments()
     assert_eq!(shell.place(), Some(Place::ConnectorApproval { id: ID }));
     let mut read = waiting();
     read.arguments = format!("{{\"body\":\"{}tail-mark\"}}", "word ".repeat(400));
-    arrive(&mut shell, ConnectorsEvent::Approval(Ok(read)));
+    arrive(&mut shell, approval_event(Ok(read)));
     for text in [
         "Connector write",
         "An agent wants a connector to change something.",
@@ -212,15 +217,12 @@ fn a_allows_once_and_the_answer_stays_with_no_keys_until_the_re_read_lands() {
     assert!(requests(&mut shell).is_empty(), "one answer at a time");
     let mut other = answered(State::Denied);
     other.id = 7;
-    arrive(&mut shell, ConnectorsEvent::Approval(Ok(other)));
+    arrive(&mut shell, approval_event(Ok(other)));
     assert!(
         !shows(&mut shell, "Denied"),
         "another write's answer is not this page's"
     );
-    arrive(
-        &mut shell,
-        ConnectorsEvent::Approval(Ok(answered(State::Allowed))),
-    );
+    arrive(&mut shell, approval_event(Ok(answered(State::Allowed))));
     assert!(said(&shell).contains("Write allowed."));
     assert!(reads(&one(&mut shell)), "the page reads the write again");
     assert!(shows(&mut shell, "Allowed "));
@@ -228,7 +230,7 @@ fn a_allows_once_and_the_answer_stays_with_no_keys_until_the_re_read_lands() {
     assert!(!shows(&mut shell, "a Allow"));
     arrive(
         &mut shell,
-        ConnectorsEvent::Approval(Err("connectors_unavailable".into())),
+        approval_event(Err("connectors_unavailable".into())),
     );
     assert!(
         shows(&mut shell, "Allowed "),
@@ -242,16 +244,10 @@ fn a_allows_once_and_the_answer_stays_with_no_keys_until_the_re_read_lands() {
     let mut shell = page(waiting());
     keys(&mut shell, &[Key::Char('d')]);
     assert!(answers(&one(&mut shell), false));
-    arrive(
-        &mut shell,
-        ConnectorsEvent::Approval(Ok(answered(State::Denied))),
-    );
+    arrive(&mut shell, approval_event(Ok(answered(State::Denied))));
     assert!(said(&shell).contains("Write denied."));
     assert!(reads(&one(&mut shell)));
-    arrive(
-        &mut shell,
-        ConnectorsEvent::Approval(Ok(answered(State::Denied))),
-    );
+    arrive(&mut shell, approval_event(Ok(answered(State::Denied))));
     assert!(shows(&mut shell, "Denied "));
 }
 
@@ -262,14 +258,14 @@ fn a_closed_write_reads_again_and_a_wait_that_ran_out_shows_expired_and_reads_on
     assert!(answers(&one(&mut shell), false));
     arrive(
         &mut shell,
-        ConnectorsEvent::Approval(Err("connector_approval_closed".into())),
+        approval_event(Err("connector_approval_closed".into())),
     );
     assert!(said(&shell).contains("This write was already answered or its wait ran out."));
     assert!(reads(&one(&mut shell)), "a closed write is read again");
     let ended = now_ms() - 1;
     arrive(
         &mut shell,
-        ConnectorsEvent::Approval(Ok(approval(State::Waiting, ended))),
+        approval_event(Ok(approval(State::Waiting, ended))),
     );
     assert!(
         shows(&mut shell, "Expired"),
@@ -290,7 +286,7 @@ fn a_closed_write_reads_again_and_a_wait_that_ran_out_shows_expired_and_reads_on
     );
     arrive(
         &mut shell,
-        ConnectorsEvent::Approval(Ok(approval(State::Waiting, ended))),
+        approval_event(Ok(approval(State::Waiting, ended))),
     );
     shell.tick();
     assert!(
@@ -304,7 +300,7 @@ fn a_failed_read_says_why_and_r_tries_again() {
     let mut shell = opened();
     arrive(
         &mut shell,
-        ConnectorsEvent::Approval(Err("connector_approval_unknown".into())),
+        approval_event(Err("connector_approval_unknown".into())),
     );
     assert!(shows(&mut shell, "That approval is gone."));
     assert!(shows(&mut shell, "r Try again"));
@@ -350,4 +346,45 @@ fn a_long_preview_wraps_under_its_label_and_never_starts_a_row_like_another_line
         rows.iter().any(|row| row.starts_with("    Tool: forged")),
         "the preview's next row hangs under its label"
     );
+}
+
+fn owner(event: ConnectorsEvent) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::Connectors(Box::new(event)),
+    ))))
+}
+
+/// rv-code T13d F1: every stacked page sees every arrival, so a failed read names its write
+/// and only the page that asked takes it; the page on top keeps waiting for its own answer.
+#[test]
+fn a_stacked_page_takes_only_the_answer_for_its_own_write() {
+    let mut context = ready(80, 24);
+    let mut under = ConnectorApprovalPage::new(ID);
+    let mut over = ConnectorApprovalPage::new(8);
+    under.shown(&mut context);
+    over.shown(&mut context);
+    assert_eq!(std::iter::from_fn(|| context.next_request()).count(), 2);
+    let failed = owner(ConnectorsEvent::Approval {
+        id: ID,
+        result: Err("trusted_connection_unavailable".into()),
+    });
+    for page in [&mut over, &mut under] {
+        page.arrive(&failed, &mut context);
+    }
+    assert!(matches!(under.stored, Load::Failed(_)));
+    assert!(
+        over.pending.is_some() && over.stored.ready().is_none(),
+        "the page on top still waits for its own read"
+    );
+    let mut eight = waiting();
+    eight.id = 8;
+    let read = owner(ConnectorsEvent::Approval {
+        id: 8,
+        result: Ok(eight),
+    });
+    for page in [&mut over, &mut under] {
+        page.arrive(&read, &mut context);
+    }
+    assert!(over.stored.ready().is_some_and(|view| view.id == 8));
+    assert!(matches!(under.stored, Load::Failed(_)));
 }

@@ -352,7 +352,9 @@ impl ProjectConnectorsPage {
     fn take(&mut self, event: &ConnectorsEvent, ctx: &mut Ctx) {
         match event {
             ConnectorsEvent::Page(result) => self.page(result, ctx),
-            ConnectorsEvent::Writes(result) => self.allowed_writes(result, ctx),
+            ConnectorsEvent::Writes { project, result } if project == self.project.as_str() => {
+                self.allowed_writes(result, ctx);
+            }
             _ => {}
         }
     }

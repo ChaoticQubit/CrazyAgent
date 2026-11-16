@@ -85,7 +85,8 @@ impl std::fmt::Debug for ConnectorsJob {
 /// The engine's answer to one Connectors request: the activity view, how a settings save
 /// ended, the Connectors page every page change answers with, a trust screen (`read`
 /// carries the text a typed path held), one write approval as read or answered, or a
-/// project's standing write allows.
+/// project's standing write allows. The last two name the write or the project they answer
+/// for, failed or not, so only the page that asked takes them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ConnectorsEvent {
     Activity(Result<ActivityView, String>),
@@ -95,8 +96,14 @@ pub(in crate::tui) enum ConnectorsEvent {
         read: Option<String>,
         result: Result<Preview, String>,
     },
-    Approval(Result<ApprovalView, String>),
-    Writes(Result<AllowedWrites, String>),
+    Approval {
+        id: i64,
+        result: Result<ApprovalView, String>,
+    },
+    Writes {
+        project: String,
+        result: Result<AllowedWrites, String>,
+    },
 }
 
 impl ConnectorsEvent {
@@ -126,11 +133,17 @@ fn failed(job: &ConnectorsJob, code: String) -> ConnectorsEvent {
         | ConnectorsJob::SetKey { .. }
         | ConnectorsJob::ClearKey { .. }
         | ConnectorsJob::Grant { .. } => ConnectorsEvent::Page(Err(code)),
-        ConnectorsJob::Approval { .. } | ConnectorsJob::Answer { .. } => {
-            ConnectorsEvent::Approval(Err(code))
+        ConnectorsJob::Approval { id } | ConnectorsJob::Answer { id, .. } => {
+            ConnectorsEvent::Approval {
+                id: *id,
+                result: Err(code),
+            }
         }
-        ConnectorsJob::Writes { .. } | ConnectorsJob::Revoke { .. } => {
-            ConnectorsEvent::Writes(Err(code))
+        ConnectorsJob::Writes { project } | ConnectorsJob::Revoke { project, .. } => {
+            ConnectorsEvent::Writes {
+                project: project.clone(),
+                result: Err(code),
+            }
         }
     }
 }
@@ -216,30 +229,34 @@ impl NativeOwner {
                 trust(controller.connector_review(name).await, None, lost)
             }
             ConnectorsJob::ReadFile { .. } => unreachable!("a typed path is read above"),
-            ConnectorsJob::Approval { id } => ConnectorsEvent::Approval(
-                controller
+            ConnectorsJob::Approval { id } => ConnectorsEvent::Approval {
+                id,
+                result: controller
                     .connector_approval(id)
                     .await
                     .map_err(|error| problem(&error, lost)),
-            ),
-            ConnectorsJob::Answer { id, allow } => ConnectorsEvent::Approval(
-                controller
+            },
+            ConnectorsJob::Answer { id, allow } => ConnectorsEvent::Approval {
+                id,
+                result: controller
                     .answer_connector_write(id, allow)
                     .await
                     .map_err(|error| problem(&error, lost)),
-            ),
-            ConnectorsJob::Writes { project } => ConnectorsEvent::Writes(
-                controller
+            },
+            ConnectorsJob::Writes { project } => ConnectorsEvent::Writes {
+                project: project.clone(),
+                result: controller
                     .connector_writes(project)
                     .await
                     .map_err(|error| problem(&error, lost)),
-            ),
-            ConnectorsJob::Revoke { project, connector } => ConnectorsEvent::Writes(
-                controller
+            },
+            ConnectorsJob::Revoke { project, connector } => ConnectorsEvent::Writes {
+                project: project.clone(),
+                result: controller
                     .revoke_connector_writes(project, connector)
                     .await
                     .map_err(|error| problem(&error, lost)),
-            ),
+            },
             other => ConnectorsEvent::Page(
                 page(controller, other)
                     .await
@@ -323,23 +340,31 @@ mod tests {
     #[test]
     fn an_approval_or_writes_job_has_its_own_name_and_unavailable_answer() {
         let gone = || "trusted_connection_unavailable".to_owned();
+        let approval = || ConnectorsEvent::Approval {
+            id: 7,
+            result: Err(gone()),
+        };
+        let writes = || ConnectorsEvent::Writes {
+            project: "alpha".into(),
+            result: Err(gone()),
+        };
         let cases = [
             (
                 ConnectorsJob::Approval { id: 7 },
                 "ConnectorApproval",
-                ConnectorsEvent::Approval(Err(gone())),
+                approval(),
             ),
             (
                 ConnectorsJob::Answer { id: 7, allow: true },
                 "ConnectorAnswer",
-                ConnectorsEvent::Approval(Err(gone())),
+                approval(),
             ),
             (
                 ConnectorsJob::Writes {
                     project: "alpha".into(),
                 },
                 "ConnectorWrites",
-                ConnectorsEvent::Writes(Err(gone())),
+                writes(),
             ),
             (
                 ConnectorsJob::Revoke {
@@ -347,7 +372,7 @@ mod tests {
                     connector: "linear".into(),
                 },
                 "ConnectorRevokeWrites",
-                ConnectorsEvent::Writes(Err(gone())),
+                writes(),
             ),
         ];
         for (job, name, unavailable) in cases {

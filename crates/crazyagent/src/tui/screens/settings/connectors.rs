@@ -444,8 +444,8 @@ impl ConnectorsPage {
                 self.saved(result, ctx);
             }
             ConnectorsEvent::Activity(_)
-            | ConnectorsEvent::Approval(_)
-            | ConnectorsEvent::Writes(_) => {}
+            | ConnectorsEvent::Approval { .. }
+            | ConnectorsEvent::Writes { .. } => {}
         }
     }
 

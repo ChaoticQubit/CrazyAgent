@@ -278,8 +278,8 @@ impl ConnectorActivityPage {
             }
             ConnectorsEvent::Page(_)
             | ConnectorsEvent::Preview { .. }
-            | ConnectorsEvent::Approval(_)
-            | ConnectorsEvent::Writes(_) => {}
+            | ConnectorsEvent::Approval { .. }
+            | ConnectorsEvent::Writes { .. } => {}
         }
     }
 

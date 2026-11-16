@@ -361,6 +361,13 @@ fn allowed(project: &str, connectors: &[&str]) -> AllowedWrites {
     }
 }
 
+fn writes_event(result: Result<AllowedWrites, String>) -> ConnectorsEvent {
+    let project = result
+        .as_ref()
+        .map_or_else(|_| PROJECT.to_owned(), |writes| writes.project.clone());
+    ConnectorsEvent::Writes { project, result }
+}
+
 fn reads_writes(job: &ConnectorsJob) -> bool {
     matches!(job, ConnectorsJob::Writes { project } if project == PROJECT)
 }
@@ -389,7 +396,7 @@ fn allowed_writes_show_only_under_ask_once_and_x_revokes_one_at_a_time() {
     let mut shell = ask_once(vec![grant("linear", true, Who::Both)]);
     arrive(
         &mut shell,
-        ConnectorsEvent::Writes(Ok(allowed(PROJECT, &["linear", "gone"]))),
+        writes_event(Ok(allowed(PROJECT, &["linear", "gone"]))),
     );
     assert!(shows(&mut shell, "Allowed writes"));
     assert!(shows(
@@ -409,18 +416,12 @@ fn allowed_writes_show_only_under_ask_once_and_x_revokes_one_at_a_time() {
     ));
     keys(&mut shell, &[Key::Up, Key::Char('x'), Key::Char(' ')]);
     assert!(requests(&mut shell).is_empty(), "one request at a time");
-    arrive(
-        &mut shell,
-        ConnectorsEvent::Writes(Ok(allowed("beta", &["notion"]))),
-    );
+    arrive(&mut shell, writes_event(Ok(allowed("beta", &["notion"]))));
     assert!(
         !shows(&mut shell, "notion"),
         "another project's writes are not this page's"
     );
-    arrive(
-        &mut shell,
-        ConnectorsEvent::Writes(Ok(allowed(PROJECT, &["linear"]))),
-    );
+    arrive(&mut shell, writes_event(Ok(allowed(PROJECT, &["linear"]))));
     assert!(said(&shell).contains("gone asks again before its next write."));
     assert!(
         !render(&mut shell, 80, 24)
@@ -435,7 +436,7 @@ fn allowed_writes_show_only_under_ask_once_and_x_revokes_one_at_a_time() {
     ));
     arrive(
         &mut shell,
-        ConnectorsEvent::Writes(Err("connectors_unavailable".into())),
+        writes_event(Err("connectors_unavailable".into())),
     );
     assert!(said(&shell).contains("The connector was not changed."));
     keys(&mut shell, &[Key::Char('x')]);
@@ -443,10 +444,7 @@ fn allowed_writes_show_only_under_ask_once_and_x_revokes_one_at_a_time() {
         one(&mut shell),
         ConnectorsJob::Revoke { connector, .. } if connector == "linear"
     ));
-    arrive(
-        &mut shell,
-        ConnectorsEvent::Writes(Ok(allowed(PROJECT, &[]))),
-    );
+    arrive(&mut shell, writes_event(Ok(allowed(PROJECT, &[]))));
     assert!(shows(
         &mut shell,
         "No connector may change things here without asking."
@@ -459,7 +457,7 @@ fn allowed_writes_say_when_they_are_read_and_when_the_read_failed() {
     assert!(shows(&mut shell, "Reading allowed writes"));
     arrive(
         &mut shell,
-        ConnectorsEvent::Writes(Err("connectors_unavailable".into())),
+        writes_event(Err("connectors_unavailable".into())),
     );
     assert!(shows(&mut shell, "Couldn't load the allowed writes."));
     keys(&mut shell, &[Key::Char('r')]);
@@ -481,10 +479,7 @@ fn a_change_that_lands_under_ask_once_reads_the_allowed_writes_and_another_polic
         reads_writes(&one(&mut shell)),
         "the block's read goes out once the page shows it"
     );
-    arrive(
-        &mut shell,
-        ConnectorsEvent::Writes(Ok(allowed(PROJECT, &["linear"]))),
-    );
+    arrive(&mut shell, writes_event(Ok(allowed(PROJECT, &["linear"]))));
     assert!(shows(&mut shell, "Allowed writes"));
     keys(&mut shell, &[Key::Char('r')]);
     assert!(reads_project(&one(&mut shell)));

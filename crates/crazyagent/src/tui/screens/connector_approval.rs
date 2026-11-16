@@ -350,7 +350,8 @@ impl Screen for ConnectorApprovalPage {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         if let Some(SettingsEvent::Connectors(event)) = settings_event(arrival)
-            && let ConnectorsEvent::Approval(result) = &**event
+            && let ConnectorsEvent::Approval { id, result } = &**event
+            && *id == self.id
         {
             self.take(result, ctx);
         }
