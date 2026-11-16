@@ -709,7 +709,7 @@ fn chatgpt_home(
 /// a sign-in's tokens. Input: the folder. Output: Ok, or
 /// `launch_account_home_holds_sign_in`, also when the folder cannot be looked into.
 #[cfg(unix)]
-fn holds_no_sign_in(folder: &Path) -> Result<(), LaunchError> {
+pub(crate) fn holds_no_sign_in(folder: &Path) -> Result<(), LaunchError> {
     use crate::engine::bootstrap::{CLAUDE_RECORD, CODEX_RECORD};
     for record in [CODEX_RECORD, CLAUDE_RECORD] {
         match std::fs::symlink_metadata(folder.join(record)) {
