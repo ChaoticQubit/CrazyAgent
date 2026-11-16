@@ -1452,9 +1452,9 @@ pub(super) fn commit(
 
 /// Makes the publish commit as [`commit`] does, reading at most `status_max` bytes of the
 /// status that counts what it leaves out. The tree is built on a private index and scanned
-/// before any ref or the project's index changes (rv-sec2 s2c N3), and a written path gone
-/// and untracked is left out. Inputs: as [`commit`], and the cap. Output: as [`commit`],
-/// `github_publish_head_moved` when HEAD moved meanwhile, or `github_publish_too_large`.
+/// before the project's index takes it, then the branch moves to it (rv-sec2 s2c N3); a
+/// written path gone and untracked is left out. Inputs: as [`commit`], and the cap. Output:
+/// as [`commit`], `github_publish_head_moved` when HEAD moved meanwhile, or the cap's code.
 fn commit_within(
     git: &Path,
     home: &Path,
@@ -1590,6 +1590,13 @@ fn commit_within(
         making.args(["-p", base.as_str()]);
     }
     let commit = object_id(&work(making.arg(&tree))?)?;
+    let mut synced = project_git(git, home, project);
+    synced.args(["reset", "-q", commit.as_str(), "--"]);
+    match history {
+        GitHubHistory::Owner => synced.args(&paths),
+        GitHubHistory::Empty | GitHubHistory::EngineStart => synced.arg("."),
+    };
+    succeeded(&mut synced)?;
     #[cfg(test)]
     commit_step(project, "ref");
     let moved = work(project_git(git, home, project).args([
@@ -1608,18 +1615,6 @@ fn commit_within(
         } else {
             failure("github_publish_head_moved")
         });
-    }
-    match history {
-        GitHubHistory::Owner => {
-            succeeded(
-                project_git(git, home, project)
-                    .args(["reset", "-q", "--"])
-                    .args(&paths),
-            )?;
-        }
-        GitHubHistory::Empty | GitHubHistory::EngineStart => {
-            succeeded(project_git(git, home, project).args(["reset", "-q"]))?;
-        }
     }
     Ok(GitHubCommitted {
         branch,
