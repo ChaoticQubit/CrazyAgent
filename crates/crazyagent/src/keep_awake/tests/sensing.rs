@@ -507,7 +507,7 @@ fn the_keeper_hands_the_lid_line_what_the_lid_wants_and_leaves_the_lid_to_it() {
         lid: LidRule::Off,
         ..KeepAwakeSettings::default()
     };
-    let outcome = act(&connection, KeepAwakeAction::Set { settings }, now_ms);
+    let outcome = act(&connection, saved(&connection, settings), now_ms);
     assert_eq!(outcome, Outcome::Applied);
     let ruled_off = step_until(&mut keeper, &connection, &mut now_ms, |_| last() == Some(off));
     assert_eq!(ruled_off.lid_support, LidSupport::Off);
@@ -539,7 +539,7 @@ fn the_keeper_asks_the_lid_line_to_sleep_the_display_only_as_the_setting_says() 
         lid_display: LidDisplay::LeaveOn,
         ..KeepAwakeSettings::default()
     };
-    let outcome = act(&connection, KeepAwakeAction::Set { settings }, now_ms);
+    let outcome = act(&connection, saved(&connection, settings), now_ms);
     assert_eq!(outcome, Outcome::Applied);
     let left_on = LidAsk {
         sleep_display: false,
@@ -686,7 +686,7 @@ fn the_view_shows_the_platform_lid_support_whatever_the_lid_rule() {
         lid: LidRule::Off,
         ..KeepAwakeSettings::default()
     };
-    let outcome = act(&connection, KeepAwakeAction::Set { settings }, now_ms);
+    let outcome = act(&connection, saved(&connection, settings), now_ms);
     assert_eq!(outcome, Outcome::Applied);
 
     let view = step_until(&mut keeper, &connection, &mut now_ms, |view| {

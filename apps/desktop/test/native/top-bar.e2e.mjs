@@ -64,7 +64,7 @@ const CONTRAST = `(() => {
  * grace to 0 and waits until nothing works and nothing is held. Input: the bridge. Output:
  * none. */
 async function atRest(bridge) {
-  await engineAct(bridge, { set: { settings: { ...KEEP_AWAKE_DEFAULTS, grace: "min0" } } });
+  await engineAct(bridge, { set: { settings: { ...KEEP_AWAKE_DEFAULTS, grace: "min0" }, version: (await engineView(bridge)).version } });
   await until("the engine at rest after the project's research", ["nothing", 0, null], async () => {
     const view = await engineView(bridge);
     return [view.state.want.kind, view.work, view.state.ended];

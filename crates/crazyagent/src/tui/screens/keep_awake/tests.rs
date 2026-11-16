@@ -20,6 +20,7 @@ const MINUTE_MS: i64 = 60_000;
 pub(in crate::tui) fn resting() -> KeepAwakeView {
     KeepAwakeView {
         settings: KeepAwakeSettings::DEFAULT,
+        version: 0,
         state: Decision {
             want: Want::Nothing,
             reason: Reason::Idle,

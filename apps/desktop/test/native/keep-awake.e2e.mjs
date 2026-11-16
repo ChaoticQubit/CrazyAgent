@@ -172,7 +172,7 @@ async function panelButtonOff(page, label) {
 }
 
 test("Keep awake: in mode Off the panel's Starts are off and it says how to start a timer", { timeout: 600000 }, (t) => onEngine(t, "ca-ka-panel-off-", async ({ bridge, me, page, open }) => {
-  await engineAct(bridge, { set: { settings: { ...KEEP_AWAKE_DEFAULTS, mode: "off" } } });
+  await engineAct(bridge, { set: { settings: { ...KEEP_AWAKE_DEFAULTS, mode: "off" }, version: (await engineView(bridge)).version } });
   await open("#/home", "Home", (text) => text.includes("Projects"));
   await until("the control for mode off", IDLE.off, () => controlLabel(page));
   await openPanel(me, page);
@@ -207,7 +207,8 @@ test("Keep awake: a Settings save keeps a mode changed in the panel or by anothe
 
   await me.click(cap.label, `fieldset[data-setting="cap"] label`);
   await until("4 h picked", "h4", () => shown(page, "cap"));
-  await engineAct(bridge, { set: { settings: { ...(await engineView(bridge)).settings, mode: "manual" } } });
+  const theirs = await engineView(bridge);
+  await engineAct(bridge, { set: { settings: { ...theirs.settings, mode: "manual" }, version: theirs.version } });
   assert.equal(await shown(page, "cap"), "h4", "the pick is still on the page");
   await me.follow(SAVE);
   await until("the save kept the other client's mode", { mode: "manual", grace: "min30", cap: "h4" }, async () => {
