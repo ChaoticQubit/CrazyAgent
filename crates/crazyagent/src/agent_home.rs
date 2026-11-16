@@ -1331,6 +1331,16 @@ pub(crate) fn remove_shell_startup(home: &Path, engine_root: &Path) -> Result<()
     Ok(())
 }
 
+/// Removes from an rcli master's account profile, a home no turn resets by allowlist, its
+/// shell startup files ([`remove_shell_startup`]) and what its cargo home holds that cargo
+/// runs code from, since the master's `CARGO_HOME` is that home's `.cargo`
+/// (AGENT-HOME-CONFIG). Only a home the engine made, strictly below its data root, loses
+/// them. Inputs: the home and the engine's data root, both canonical. Output: unit, or
+/// `agent_home_unwritable` when one stays, refusing the turn.
+pub(crate) fn remove_home_code(home: &Path, engine_root: &Path) -> Result<(), AgentHomeError> {
+    remove_shell_startup(home, engine_root)
+}
+
 /// Removes one entry of an agent home, or of an engine folder no agent writes, with all it
 /// holds and without following a link, so a link goes and what it names stays. Its parent
 /// is opened by path without following a link in its last part ([`open_real_folder`]), so

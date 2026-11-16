@@ -2459,6 +2459,97 @@ fn an_owner_home_outside_the_engine_root_keeps_its_shell_startup_files() {
     }
 }
 
+/// An rcli master's kept home loses, besides its shell startup files, the entries of its
+/// cargo home cargo runs code from: `config.toml` and the older `config`, whose
+/// `build.rustc-wrapper`, linkers, runners and aliases name programs, as a file or a link,
+/// and `bin`, whose `cargo-<name>` programs run as subcommands (AGENT-HOME-CONFIG). Its
+/// crates and git checkouts stay, and so does what a link named outside the home.
+#[cfg(unix)]
+#[test]
+fn a_kept_rcli_home_loses_what_its_cargo_home_runs_code_from_and_keeps_its_crates() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    let cargo = home.join(".cargo");
+    fs::create_dir_all(cargo.join("bin")).unwrap();
+    fs::create_dir_all(cargo.join("registry").join("index")).unwrap();
+    fs::create_dir_all(cargo.join("git").join("db")).unwrap();
+    fs::write(cargo.join("registry").join("index").join("crate"), "kept\n").unwrap();
+    fs::write(cargo.join("git").join("db").join("checkout"), "kept\n").unwrap();
+    let wrapper = "[build]\nrustc-wrapper = \"/tmp/planted\"\n";
+    fs::write(cargo.join("config.toml"), wrapper).unwrap();
+    let outside = root.join("owner-config.toml");
+    fs::write(&outside, "the owner's\n").unwrap();
+    std::os::unix::fs::symlink(&outside, cargo.join("config")).unwrap();
+    fs::write(cargo.join("bin").join("cargo-build"), "#!/bin/sh\n").unwrap();
+    fs::write(home.join(".zshrc"), "echo planted\n").unwrap();
+
+    let removed = remove_home_code(&home, &root).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    let mut left: Vec<_> = fs::read_dir(&cargo)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["git", "registry"]);
+    assert_eq!(
+        fs::read_to_string(cargo.join("registry").join("index").join("crate")).unwrap(),
+        "kept\n"
+    );
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "the owner's\n");
+    assert!(fs::symlink_metadata(home.join(".zshrc")).is_err());
+}
+
+/// An rcli master's kept home whose `.cargo` is a link, which cargo would follow to a config
+/// the master keeps elsewhere, loses the link, and what it names stays (AGENT-HOME-CONFIG).
+#[cfg(unix)]
+#[test]
+fn a_kept_rcli_home_whose_cargo_home_is_a_link_loses_the_link_only() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    fs::create_dir(&home).unwrap();
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::write(elsewhere.join("config.toml"), "[alias]\nb = \"planted\"\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, home.join(".cargo")).unwrap();
+
+    let removed = remove_home_code(&home, &root).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    assert!(fs::symlink_metadata(home.join(".cargo")).is_err());
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("config.toml")).unwrap(),
+        "[alias]\nb = \"planted\"\n"
+    );
+}
+
+/// A home outside the engine's data root, such as the owner's own HOME picked as an rcli SDK
+/// home, keeps its cargo config: only a home the engine made loses it (rv-sec3 B2 r1 F1).
+#[cfg(unix)]
+#[test]
+fn an_owner_home_outside_the_engine_root_keeps_its_cargo_config() {
+    let (_directory, root) = folder();
+    let engine = root.join("engine");
+    let owner = root.join("owner-home");
+    for home in [&engine, &owner] {
+        fs::create_dir_all(home.join(".cargo")).unwrap();
+        fs::write(home.join(".cargo").join("config.toml"), "the owner's\n").unwrap();
+    }
+
+    let removed: Vec<_> = [&owner, &engine]
+        .into_iter()
+        .map(|home| remove_home_code(home, &engine).map_err(|error| error.0))
+        .collect();
+
+    assert_eq!(removed, [Ok(()), Ok(())]);
+    for home in [&owner, &engine] {
+        assert_eq!(
+            fs::read_to_string(home.join(".cargo").join("config.toml")).unwrap(),
+            "the owner's\n"
+        );
+    }
+}
+
 /// A home an agent filled with more entries than one listing of it takes still launches,
 /// and every entry it planted goes while what the harness keeps stays (RV-DS241-137), so a
 /// run that makes a hundred thousand files in its home never refuses every later launch.
