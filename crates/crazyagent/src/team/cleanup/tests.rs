@@ -1466,16 +1466,12 @@ fn removing_an_agent_tree_of_acl_pinned_files_clears_them_without_a_child() {
     let started = crate::spawn_gate::spawned() - before;
     assert_eq!(outcome, Ok(()));
     assert!(!tree.exists(), "the tree stayed");
-    assert_eq!(
-        started,
-        0,
-        "{started} children for {} entries",
-        files.len()
-    );
+    assert_eq!(started, 0, "{started} children for {} entries", files.len());
 }
 
 /// RV-DS241-181 guard: a folder two deep whose ACL denies listing and searching, under one
-/// that does the same, still goes, each opened once its ACL is cleared through its inode.
+/// that does the same, still goes, each opened once its ACL is cleared through its parent's
+/// handle.
 #[cfg(target_os = "macos")]
 #[test]
 fn removing_an_agent_tree_clears_folders_two_deep_that_deny_listing() {
