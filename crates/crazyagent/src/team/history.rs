@@ -460,7 +460,8 @@ struct Tree {
 fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> Vec<Tree> {
     let mut trees = Vec::new();
     for (agent, harness, role) in team_agents(connection, project).unwrap_or_default() {
-        let Some(harness) = crate::harnesses::spec(&harness).map(|spec| spec.id) else {
+        let found = crate::harnesses::registry::registry().get(&harness);
+        let Some(harness) = found.map(|found| found.manifest().id.as_str()) else {
             continue;
         };
         let folder = match harness {
