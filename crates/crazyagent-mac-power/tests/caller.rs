@@ -248,7 +248,7 @@ fn a_term_signal_puts_every_journaled_value_back() {
         .spawn()
         .unwrap();
     let mut lines = BufReader::new(server.stdout.take().unwrap()).lines();
-    let ready = lines.find(|line| line.as_deref().map(str::trim) == Ok("ready"));
+    let ready = lines.find(|line| matches!(line.as_deref().map(str::trim), Ok("ready")));
     assert!(ready.is_some(), "the server child never said ready");
     let mut stream = UnixStream::connect(&path).unwrap();
     let held = ask(&mut stream, &Request::Hold { lease_s: 120 });
