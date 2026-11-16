@@ -2206,41 +2206,10 @@ fn a_layout_names_the_panes_of_every_leaf_cell() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_listener_whose_queue_is_full_is_answered_at_once_not_waited_on() {
-    use nix::errno::Errno;
-    use nix::sys::socket::{
-        AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, connect, listen, socket,
-    };
-    use std::os::fd::AsRawFd;
-    const FILL_MAX: usize = 64;
     let folder = tempfile::tempdir().unwrap();
     let path = folder.path().join("full.sock");
-    let address = UnixAddr::new(&path).unwrap();
-    let server = socket(
-        AddressFamily::Unix,
-        SockType::Stream,
-        SockFlag::SOCK_CLOEXEC,
-        None,
-    )
-    .unwrap();
-    bind(server.as_raw_fd(), &address).unwrap();
-    listen(&server, Backlog::new(0).unwrap()).unwrap();
-    let mut queued = Vec::new();
-    let full = loop {
-        assert!(queued.len() < FILL_MAX, "the queue never fills");
-        let client = socket(
-            AddressFamily::Unix,
-            SockType::Stream,
-            SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
-            None,
-        )
-        .unwrap();
-        match connect(client.as_raw_fd(), &address) {
-            Ok(()) => queued.push(client),
-            Err(Errno::EAGAIN) => break true,
-            Err(other) => panic!("{other}"),
-        }
-    };
-    assert!(full);
+    let (server, queued) = crate::spawn_gate::full_unix_listener(&path).unwrap();
+    assert!(!queued.is_empty());
 
     let (answer, answered) = std::sync::mpsc::channel();
     let asked = path.clone();

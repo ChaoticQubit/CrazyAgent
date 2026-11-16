@@ -543,6 +543,52 @@ pub(crate) fn unconnected_unix_stream() -> io::Result<std::os::unix::net::UnixSt
     .map_err(io::Error::from)
 }
 
+/// Makes a Unix listener whose queue of unaccepted connections is full, every socket
+/// inside the gate, for checks that a connect never waits on one: the queue takes no room
+/// past the kernel's floor, and clients that never wait connect until one is turned away.
+/// Input: the socket path. Output: the listener and the queued clients, which keep the
+/// queue full while held.
+#[cfg(all(test, target_os = "linux"))]
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn full_unix_listener(
+    path: &std::path::Path,
+) -> io::Result<(std::os::fd::OwnedFd, Vec<std::os::fd::OwnedFd>)> {
+    use nix::errno::Errno;
+    use nix::sys::socket::{
+        AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, connect, listen, socket,
+    };
+    use std::os::fd::AsRawFd;
+    const QUEUED_MAX: usize = 64;
+    let address = UnixAddr::new(path)?;
+    let server = guarded(|| {
+        socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_CLOEXEC,
+            None,
+        )
+    })?;
+    bind(server.as_raw_fd(), &address)?;
+    listen(&server, Backlog::new(0)?)?;
+    let mut queued = Vec::new();
+    while queued.len() < QUEUED_MAX {
+        let client = guarded(|| {
+            socket(
+                AddressFamily::Unix,
+                SockType::Stream,
+                SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+                None,
+            )
+        })?;
+        match connect(client.as_raw_fd(), &address) {
+            Ok(()) => queued.push(client),
+            Err(Errno::EAGAIN) => return Ok((server, queued)),
+            Err(other) => return Err(other.into()),
+        }
+    }
+    Err(io::Error::other("the queue never filled"))
+}
+
 #[cfg(unix)]
 const ACCEPT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
