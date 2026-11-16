@@ -147,29 +147,36 @@ pub fn read_request(reader: &mut impl Read) -> Result<Request, Refusal> {
     checked(wire)
 }
 
-/// Checks a parsed line's version, its lease bounds and that only a hold names its lease and
-/// its display ask, which it must. Input: the line. Output: the request.
+/// Checks a parsed line's version and its lease bounds, that a hold names its lease, its
+/// display ask and its Low Power ask, that a power-only lease names its lease alone, and that
+/// no other call names any (threat model 15.1). Input: the line. Output: the request.
 fn checked(wire: Wire) -> Result<Request, Refusal> {
     if wire.version != VERSION {
         return Err(Refusal::Version);
     }
     let in_range = |lease_s: u16| (LEASE_S_MIN..=LEASE_S_MAX).contains(&lease_s);
-    let red_stub = wire.low_power.unwrap_or(false);
-    let request = match (wire.call, wire.lease_s, wire.lid_display) {
-        (Call::Hold, Some(lease_s), Some(lid_display)) if in_range(lease_s) => Request::Hold {
-            lease_s,
-            lid_display,
-            low_power: red_stub,
-        },
-        (Call::Hold, Some(lease_s), None) if in_range(lease_s) => return Err(Refusal::Malformed),
-        (Call::Hold, _, _) => return Err(Refusal::LeaseOutOfRange),
-        (Call::LowPower, _, _) => return Err(Refusal::Malformed),
-        (_, Some(_), _) | (_, _, Some(_)) => return Err(Refusal::Malformed),
-        (Call::Release, None, None) => Request::Release,
-        (Call::Read, None, None) => Request::Read,
-        (Call::Forget, None, None) => Request::Forget,
+    let request = match (wire.call, wire.lease_s, wire.lid_display, wire.low_power) {
+        (Call::Hold, Some(lease_s), Some(lid_display), Some(low_power)) if in_range(lease_s) => {
+            Request::Hold {
+                lease_s,
+                lid_display,
+                low_power,
+            }
+        }
+        (Call::Hold, Some(lease_s), _, _) if in_range(lease_s) => return Err(Refusal::Malformed),
+        (Call::Hold, _, _, _) => return Err(Refusal::LeaseOutOfRange),
+        (Call::LowPower, Some(lease_s), None, None) if in_range(lease_s) => {
+            Request::LowPower { lease_s }
+        }
+        (Call::LowPower, _, None, None) => return Err(Refusal::LeaseOutOfRange),
+        (_, Some(_), _, _) | (_, _, Some(_), _) | (_, _, _, Some(_)) => {
+            return Err(Refusal::Malformed);
+        }
+        (Call::Release, None, None, None) => Request::Release,
+        (Call::Read, None, None, None) => Request::Read,
+        (Call::Forget, None, None, None) => Request::Forget,
     };
-    if let Request::Hold { lease_s, .. } = request {
+    if let Request::Hold { lease_s, .. } | Request::LowPower { lease_s } = request {
         assert!(lease_s >= LEASE_S_MIN);
         assert!(lease_s <= LEASE_S_MAX);
     }

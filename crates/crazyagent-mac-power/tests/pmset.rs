@@ -100,7 +100,8 @@ fn pmset_runs_with_fixed_arguments_an_empty_environment_and_no_input() {
     assert!(
         fs::read_to_string(&probe)
             .unwrap()
-            .starts_with("-a lowpowermode 0|")
+            .starts_with("-b lowpowermode 0|"),
+        "r9.1 F2: Low Power Mode on the battery source only"
     );
 }
 

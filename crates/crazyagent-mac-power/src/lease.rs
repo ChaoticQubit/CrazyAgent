@@ -125,23 +125,31 @@ impl Leases {
 
     /// Whether any live lease keeps sleep off.
     pub fn sleep_off(&self) -> bool {
-        !self.held.is_empty()
+        let any = self.held.values().any(|(_, asked)| asked.sleep_off());
+        assert!(!any || !self.held.is_empty());
+        any
     }
 
     /// Whether any live lease asks Low Power Mode.
     pub fn asks_low_power(&self) -> bool {
-        false
+        let any = self.held.values().any(|(_, asked)| asked.low_power());
+        assert!(!any || !self.held.is_empty());
+        any
     }
 
     /// Whether `holder` has a live lease that keeps sleep off.
     pub fn holds_sleep_off(&self, holder: &Holder) -> bool {
-        self.held.contains_key(holder)
+        let held = self.held.get(holder);
+        held.is_some_and(|(_, asked)| asked.sleep_off())
     }
 
     /// Ends every sleep-off lease and keeps the power-only ones, for a floor (threat model
     /// 15.3, r9.1 F3).
     pub fn end_sleep_off(&mut self) {
-        self.held.clear();
+        let before = self.held.len();
+        self.held.retain(|_, (_, asked)| !asked.sleep_off());
+        assert!(!self.sleep_off());
+        assert!(self.held.len() <= before);
     }
 
     /// Whether `holder` has a live lease.

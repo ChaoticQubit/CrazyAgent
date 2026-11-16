@@ -45,10 +45,16 @@ impl Pmset {
         }
     }
 
-    /// Writes one journaled setting: `pmset -a <key> <0|1>`.
+    /// Writes one journaled setting: `SleepDisabled` on every source with `-a`, Low Power
+    /// Mode on the battery source only with `-b`, so an owner's AC value is never touched
+    /// (threat model 15.2, r9.1 F2).
     pub fn set(&self, key: Key, on: bool) -> Result<(), PmsetError> {
         let value = if on { "1" } else { "0" };
-        self.run(&["-a", key.pmset_name(), value]).map(drop)
+        let source = match key {
+            Key::SleepDisabled => "-a",
+            Key::LowPower => "-b",
+        };
+        self.run(&[source, key.pmset_name(), value]).map(drop)
     }
 
     /// Sleeps the Mac now: `pmset sleepnow`.
@@ -164,12 +170,34 @@ pub fn parse_values(text: &str) -> Values {
     values
 }
 
-/// Parses `pmset -g custom` for the battery source's `lowpowermode`, `0` or `1`. Input: the
-/// text, at most `OUTPUT_BYTES_MAX` bytes. Output: the value, or none when the battery section
-/// is missing or has no readable line.
+/// The header line `pmset -g custom` prints before the battery source's settings.
+const BATTERY_SECTION: &str = "Battery Power:";
+
+/// Parses `pmset -g custom` for the battery source's `lowpowermode`, `0` or `1`: a line
+/// that does not start with a space opens a section, and only the lines under
+/// `BATTERY_SECTION` count. Input: the text, at most `OUTPUT_BYTES_MAX` bytes. Output: the
+/// value, or none when the battery section is missing or has no readable line.
 pub fn parse_custom_low_power(text: &str) -> Option<bool> {
-    let red_stub = text.len() as u64 <= OUTPUT_BYTES_MAX;
-    assert!(red_stub);
+    assert!(text.len() as u64 <= OUTPUT_BYTES_MAX);
+    let mut in_battery = false;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !line.starts_with(char::is_whitespace) {
+            in_battery = line.trim_end() == BATTERY_SECTION;
+            continue;
+        }
+        let mut words = line.split_whitespace();
+        if !in_battery || words.next() != Some("lowpowermode") {
+            continue;
+        }
+        return match (words.next(), words.next()) {
+            (Some("0"), None) => Some(false),
+            (Some("1"), None) => Some(true),
+            _ => None,
+        };
+    }
     None
 }
 
