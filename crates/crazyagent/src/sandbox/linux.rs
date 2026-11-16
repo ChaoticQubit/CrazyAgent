@@ -659,22 +659,33 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     Ok(())
 }
 
-/// The bubblewrap options no caller names before the nest's `--`, beside stage 1's own
-/// descriptor flags: one reads more arguments from a descriptor, past every check here,
-/// and the others block on or write to a descriptor the caller holds (rv-code2 N5).
-const NEST_REFUSED: [&str; 4] = [
-    "--args",
-    "--userns-block-fd",
-    "--sync-fd",
-    "--json-status-fd",
-];
+/// Tells whether what follows [`NEST_ARGS`] is what the engine's own nests write: an
+/// optional `--unshare-net`, an optional `--chdir` with a clean absolute folder, then `--`
+/// and the command, so no caller adds a capability, filter, namespace, bind or descriptor
+/// option to the agent's bubblewrap (rv-sa241 SBX-2-R2 N2, rv-code2 N5). Input: the words
+/// after the fixed arguments. Output: true when they are.
+fn own_options(words: &[OsString]) -> bool {
+    let words = match words {
+        [unshare, rest @ ..] if unshare == bridge::UNSHARE_NET => rest,
+        _ => words,
+    };
+    let words = match words {
+        [chdir, folder, rest @ ..] if chdir == "--chdir" => {
+            if !clean_absolute(Path::new(folder)) {
+                return false;
+            }
+            rest
+        }
+        _ => words,
+    };
+    matches!(words, [end, _command, ..] if end == "--")
+}
 
 /// Reads what follows `--nest --`: bubblewrap at one of its fixed places, then exactly
-/// [`NEST_ARGS`], then at least the command bubblewrap starts, so the helper starts nothing
-/// else on a caller's word. No option before the nest's `--` is one of the descriptor
-/// flags stage 1 writes itself ([`egress::DESCRIPTOR_FLAGS`]) or [`NEST_REFUSED`]. Inputs:
-/// whether `--nest` was the only flag, and those arguments. Output: the request, or the
-/// reason they are refused.
+/// [`NEST_ARGS`], then only the options [`own_options`] allows and the command bubblewrap
+/// starts, so the helper starts nothing else on a caller's word and no caller names a
+/// descriptor flag stage 1 writes itself ([`egress::DESCRIPTOR_FLAGS`]). Inputs: whether
+/// `--nest` was the only flag, and those arguments. Output: the request, or the reason.
 fn nest_request(
     alone: bool,
     mut rest: impl Iterator<Item = OsString>,
@@ -698,16 +709,9 @@ fn nest_request(
             "{NEST} needs bubblewrap's fixed arguments and a command"
         ));
     }
-    let named = args[NEST_ARGS.len()..]
-        .iter()
-        .take_while(|arg| *arg != "--")
-        .any(|arg| {
-            let mut refused = egress::DESCRIPTOR_FLAGS.iter().chain(NEST_REFUSED.iter());
-            refused.any(|flag| arg == flag)
-        });
-    if named {
+    if !own_options(&args[NEST_ARGS.len()..]) {
         return Err(format!(
-            "{NEST} takes no descriptor flag; stage 1 writes its own"
+            "{NEST} takes only --unshare-net and an absolute --chdir before `--` and a command"
         ));
     }
     Ok(HelperRequest::Nest { bwrap, args })
