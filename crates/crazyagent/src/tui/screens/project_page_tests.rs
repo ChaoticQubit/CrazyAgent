@@ -5983,7 +5983,7 @@ fn github_signed_in(shell: &mut Shell) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_made_project_starts_its_github_publish_once_its_pool_is_assigned() {
+async fn a_made_project_starts_its_github_publish_once_its_pool_is_assigned_and_says_its_reply() {
     let engine = Engine::start().await;
     let mut connection = engine.connect();
     let mut ctx = ctx(80, 24);
@@ -6012,9 +6012,12 @@ async fn a_made_project_starts_its_github_publish_once_its_pool_is_assigned() {
         1,
         "{sent:?}"
     );
-    let message = shell.ctx.message().expect("the made project is announced");
-    assert_eq!(message.lead, "Tidepool is ready.");
-    assert_eq!(message.rest, "Publishing on GitHub has started.");
+    let message = shell
+        .ctx
+        .message()
+        .expect("the publish Start's reply is said");
+    assert_eq!(message.lead, "Publishing on GitHub didn't start.");
+    assert_eq!(message.rest, "Sign in with GitHub first.");
 }
 
 /// Hands the page one creation reply from the engine worker. Takes the shell, the

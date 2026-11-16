@@ -119,8 +119,15 @@ test("Create project waits on the publish block until it is off or valid", () =>
   assert.equal(publish.createWait(block({ name: "bad name" }), "My Project", "", owners, true), publish.DETAILS_WAIT);
   assert.equal(publish.createWait(block(), "My Project", "", [], true), publish.DETAILS_WAIT);
   assert.equal(publish.createWait(block(), "My Project", "A tool", owners, true), null);
+  assert.equal(publish.CHECKING_WAIT, "Checking your GitHub sign-in. Create waits for it, or turn publishing off.");
+  assert.equal(publish.createWait(block(), "My Project", "A tool", [], false, true), publish.CHECKING_WAIT);
+  assert.equal(publish.createWait(block(), "My Project", "A tool", owners, true, true), publish.CHECKING_WAIT);
+  assert.equal(publish.createWait(block({ on: false }), "My Project", "A tool", [], false, true), null);
+  assert.equal(publish.createWait(block(), "My Project", "A tool", owners, true, false), null);
+  const fields = read("src/screens/new-project/fields.tsx");
+  assert.match(fields, /const checking = status\.kind === "loading" \|\| \(signedIn && owners\.kind === "loading"\);/);
   const page = read("src/screens/new-project/index.tsx");
-  assert.match(page, /const publishWait = createWait\(/);
+  assert.match(page, /const publishWait = createWait\([^;]*github\.signedIn, github\.checking\);/);
   assert.match(page, /const canCreate = [^\n]*!publishWait/);
 });
 
@@ -134,4 +141,17 @@ test("a made project starts its publish with the block's plan, and nothing start
   assert.deepEqual(await started, unreachable);
   const page = read("src/screens/new-project/index.tsx");
   assert.match(page, /startPublish\(id, /);
+});
+
+test("the made project's message follows the publish Start's reply", () => {
+  assert.equal(typeof publish.publishOutcome, "function");
+  assert.equal(publish.publishOutcome(null), "");
+  assert.equal(publish.publishOutcome({ kind: "ok", value: { step: { step: "drafting" } } }), "Publishing on GitHub has started.");
+  assert.equal(publish.publishOutcome({ kind: "error", code: "github_not_signed_in", message: "Sign in with GitHub first." }), "Publishing on GitHub didn't start. Sign in with GitHub first.");
+  assert.equal(publish.publishOutcome({ kind: "not_ready" }), "Publishing on GitHub didn't start. CrazyAgent's engine is still starting.");
+  const page = read("src/screens/new-project/index.tsx");
+  assert.match(page, /const outcome = publishOutcome\(publishing \? await publishing : null\);/);
+  assert.doesNotMatch(page, /PUBLISH_STARTED/);
+  const client = read("src/engine-client.ts");
+  assert.match(client, /\| \{ step: "drafting" \}\n/);
 });
