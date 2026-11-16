@@ -1403,6 +1403,34 @@ fn the_engines_gateway_thread_answers_a_launchs_call_and_stops_when_told() {
     );
 }
 
+/// A started gateway serves its engine root, under any spelling that resolves to it, until
+/// it is stopped, and never another root, so a master turn in an engine with no gateway is
+/// handed no connector server that nobody answers.
+#[test]
+fn a_gateway_serves_its_root_only_while_it_runs() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().join("engine");
+    let other = folder.path().join("other");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let spelled = folder.path().join("engine-link");
+    std::os::unix::fs::symlink(&root, &spelled).unwrap();
+    assert!(
+        !super::serving(&root),
+        "no gateway serves a root before one starts"
+    );
+    let running = start(&root).unwrap();
+    assert!(super::serving(&root), "a started gateway serves its root");
+    assert!(
+        super::serving(&spelled),
+        "a spelling that resolves to the root is the same root"
+    );
+    assert!(!super::serving(&other), "another root is not served");
+    assert!(!super::serving(&folder.path().join("gone")));
+    running.stop();
+    assert!(!super::serving(&root), "a stopped gateway serves nothing");
+}
+
 #[test]
 fn an_idle_gateway_keeps_one_connection_and_a_new_launch_wakes_it() {
     let bench = bench();

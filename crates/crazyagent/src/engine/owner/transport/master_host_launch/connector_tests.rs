@@ -453,9 +453,11 @@ fn a_tools_off_master_turn_is_never_handed_a_connector() {
     let _ = bench.turn(&runtime_ref, None, Some(&folder));
 }
 
-#[test]
-fn a_master_connector_launch_lasts_as_long_as_its_turn_holds_it() {
-    let (_temporary, base) = temporary();
+/// An engine root whose project alpha grants the board connector, with its key saved, to
+/// its master and agents, and whose project beta grants nothing. Output: the folder guard,
+/// the engine root and its database.
+fn granted_engine() -> (tempfile::TempDir, PathBuf, rusqlite::Connection) {
+    let (temporary, base) = temporary();
     let root = base.join("engine");
     private_directory(&root);
     let db = crate::questions::open(&root).unwrap();
@@ -477,6 +479,13 @@ fn a_master_connector_launch_lasts_as_long_as_its_turn_holds_it() {
     crate::app_plugins::store::set_key(&db, &root, "board", "api_key", KEY.as_bytes().to_vec())
         .unwrap();
     grants::set(&db, &root, "alpha", "board", true, Who::Both, 2).unwrap();
+    (temporary, root, db)
+}
+
+#[test]
+fn a_master_connector_launch_lasts_as_long_as_its_turn_holds_it() {
+    let (_temporary, root, db) = granted_engine();
+    let gateway = crate::connectors::gateway::start(&root).unwrap();
     let launches = |db: &rusqlite::Connection| -> i64 {
         db.query_row("SELECT COUNT(*) FROM connector_launches", [], |row| {
             row.get(0)
@@ -508,4 +517,24 @@ fn a_master_connector_launch_lasts_as_long_as_its_turn_holds_it() {
         "a project with no connector granted gets no launch"
     );
     assert_eq!(launches(&db), 0);
+    gateway.stop();
+}
+
+/// With no gateway serving the engine root (an engine started without a team runtime, or one
+/// whose gateway did not start), a master granted a connector gets no launch, so its turn is
+/// handed no connector server that nobody would answer.
+#[test]
+fn a_master_turn_in_an_engine_with_no_gateway_gets_no_connector() {
+    let (_temporary, root, _db) = granted_engine();
+    assert!(!crate::connectors::gateway::serving(&root));
+    assert!(
+        MasterConnector::open(&root, &ProjectId::new("alpha").unwrap())
+            .unwrap()
+            .is_none(),
+        "a granted master gets no launch while no gateway serves its engine"
+    );
+    assert!(
+        !root.join(LAUNCHES_FOLDER).exists(),
+        "and no launch folder is made"
+    );
 }

@@ -1227,6 +1227,13 @@ pub fn start(root: &Path) -> Result<Running, EngineError> {
     Ok(Running { stop, thread })
 }
 
+/// Whether a gateway [`start`] began serves `root` in this process now, under any spelling
+/// that resolves to it, so a master turn is handed a connector server only when a call of it
+/// can be answered. Input: the engine root. Output: the answer.
+pub fn serving(_root: &Path) -> bool {
+    false
+}
+
 impl Running {
     /// Stops the gateway and waits for its loop to end; calls already being answered finish
     /// on their own threads. Input: the running gateway.
