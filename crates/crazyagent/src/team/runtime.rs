@@ -14040,9 +14040,10 @@ fn listed_home(own: &Path, launch: &str, account: &CredentialRef) -> Result<Path
 /// The account hand-over a team agent of a listed harness starts with (T19b 19b-2): the
 /// stored connection's wire format picks the manifest's `accounts` entry, filled with the
 /// relay of a keyed account or the address and local placeholder of a keyless one, for a
-/// piped and a terminal-only harness alike. Inputs: the live access, the launch harness, the
-/// account and its relay. Output: the hand-over, none for a harness with no entry for the
-/// format, or the owner line with the refusal code.
+/// piped and a terminal-only harness alike. A harness with no `accounts` block reads no
+/// connection here. Inputs: the live access, the launch harness, the account and its relay.
+/// Output: the hand-over, none for a harness with no entry for the format, or the owner
+/// line with the refusal code.
 fn listed_handover(
     access: &ModelAccess,
     launch: &str,
@@ -14052,6 +14053,9 @@ fn listed_handover(
     let harness = crate::harnesses::registry::registry()
         .get(launch)
         .ok_or("harness has no launch adapter")?;
+    if harness.manifest().block("accounts").is_none() {
+        return Ok(None);
+    }
     let connection = access
         .connections
         .iter()

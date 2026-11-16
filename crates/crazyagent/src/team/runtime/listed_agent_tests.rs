@@ -120,3 +120,34 @@ fn a_team_agent_of_a_listed_harness_starts_with_its_accounts_hand_over() {
         ]
     );
 }
+
+/// T19b 19b-2 guard row: a listed agent's hand-over is read from the stored connection, so
+/// an agent whose account is no longer in the live access is refused in plain words.
+#[test]
+fn a_team_agent_of_a_listed_harness_whose_account_left_the_pool_is_refused() {
+    let fixture = Fixture::new(1);
+    let runtime = listed_runtime(&fixture);
+    let account = TeamAccount {
+        connection: reference("gone-account"),
+        ..keyless_endpoint()
+    };
+    assert_eq!(
+        fixture.agent(AgentRole::Sub, "standin-acp", AgentStatus::Starting),
+        1
+    );
+
+    let prepared = runtime.prepare(
+        &fixture.setup,
+        1,
+        AgentRole::Sub,
+        "standin-acp",
+        false,
+        &account,
+        false,
+        crate::agent_git::Layout::Linked,
+        false,
+    );
+
+    let refused = prepared.err().unwrap_or_default();
+    assert!(refused.contains("team_account_left_pool"), "{refused}");
+}

@@ -846,9 +846,13 @@ fn sandboxed(
 
 /// Refuses an account hand-over made for another account than the launch is bound to: its
 /// address must be the binding's and its placeholder the binding's relay token, or the
-/// local placeholder for a keyless binding. Inputs: the request and the hand-over. Output:
-/// Ok, or `launch_account_handover_mismatch`.
-fn handover_fits(request: &LaunchRequest, handover: &Handover) -> Result<(), LaunchError> {
+/// local placeholder for a keyless binding. The terminal path checks its hand-over with it
+/// too. Inputs: the request and the hand-over. Output: Ok, or
+/// `launch_account_handover_mismatch`.
+pub(super) fn handover_fits(
+    request: &LaunchRequest,
+    handover: &Handover,
+) -> Result<(), LaunchError> {
     let address = request
         .account
         .base_url()

@@ -868,3 +868,64 @@ fn an_acp_launch_given_a_hand_over_is_refused_at_full_access() {
         Some("launch_environment_refused".to_owned())
     );
 }
+
+/// T19b 19b-2 guard row: Codex and Claude Code read no account hand-over, so an install of
+/// either given one is refused before it writes a file.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_install_given_a_hand_over_is_refused() {
+    let (_folder, home) = harness_home("standin-acp");
+    for native in ["codex", "claude-code"] {
+        let handover = crate::harnesses::accounts::handover(
+            standin_acp(),
+            &openai_chat(KEYLESS_URL, false),
+            None,
+        )
+        .unwrap();
+
+        let refused = context()
+            .with_handover(handover)
+            .install(native, &home, false);
+
+        assert_eq!(
+            refused.err().map(|problem| problem.0),
+            Some("launch_account_handover_mismatch".to_owned()),
+            "{native}"
+        );
+    }
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+}
+
+/// T19b 19b-2 guard row: a keyless hand-over given to a launch bound to a relay token at the
+/// same address is refused, so the placeholder the harness presents is always the binding's.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_acp_launch_refuses_a_keyless_hand_over_on_a_binding_with_a_relay_token() {
+    let (_folder, home) = harness_home("standin-acp");
+    let (_work, _profiles, working, profile) = work_and_profile();
+    let relay = crate::model_gateway::relay::Relay::start(
+        KEYED_URL,
+        crate::credentials::SecretString::new(SAVED_KEY.as_bytes().to_vec()).unwrap(),
+    )
+    .unwrap();
+    let handover =
+        crate::harnesses::accounts::handover(standin_acp(), &openai_chat(KEYLESS_URL, false), None)
+            .unwrap();
+    let context = context().with_handover(handover);
+    let request = acp_request(
+        &working,
+        Some(profile),
+        crate::harnesses::launch::AccountBinding::Url {
+            home,
+            base_url: KEYLESS_URL.into(),
+            key: Some(crate::harnesses::launch::Secret::new(relay.token().to_owned()).unwrap()),
+        },
+    );
+
+    let refused = crate::harnesses::launch::command_with_context(&request, &context);
+
+    assert_eq!(
+        refused.err().map(|problem| problem.0),
+        Some("launch_account_handover_mismatch".to_owned())
+    );
+}
