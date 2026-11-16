@@ -822,9 +822,9 @@ impl Servers {
         }
     }
     /// Ends an agent's terminal on the servers that hold it: a lead's own server and its
-    /// teammates' server whole, forgetting their clients, else its pane as an adopted teammate,
-    /// on the engine's server, or on a listening lead's server that holds it, which looks again
-    /// at a teammate whose teammates' server missed one look (SEC2-R2 F1). Takes the agent.
+    /// teammates' server whole, forgetting their clients, else its pane as an adopted teammate
+    /// on its lead's servers, looked at once more after one miss and nowhere else (SEC2-R2 F1),
+    /// on the engine's server, or on a listening lead's server that holds it. Takes the agent.
     /// Returns Ok once it ended, `terminal_agent_unknown` when none holds it, or the failure.
     fn kill_routed(&self, agent: &AgentId) -> Result<(), HostError> {
         let mates = self.mates(agent)?;
@@ -843,8 +843,14 @@ impl Servers {
         }
         match self.member(agent) {
             Ok(Some(server)) => return server.kill(agent),
-            Err(problem) if problem.0 != "terminal_agent_unknown" => return Err(problem),
-            _ => {}
+            Ok(None) => {}
+            Err(problem) if problem.0 == "terminal_agent_unknown" => {
+                return match self.member(agent)? {
+                    Some(server) => server.kill(agent),
+                    None => Err(failure("terminal_agent_unknown")),
+                };
+            }
+            Err(problem) => return Err(problem),
         }
         match self.engine.kill(agent) {
             Err(problem) if problem.0 == "terminal_agent_unknown" => {}
