@@ -4,7 +4,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The most reads in a row a busy or locked database may answer with no events before the
 /// reader refuses it with [`BUSY`].
@@ -32,13 +32,19 @@ pub const UNREADABLE: &str = "record_database_unreadable";
 pub const TOO_LARGE: &str = "record_database_too_large";
 /// The code of a SQLite library too old to refuse a link in a folder part of the path.
 pub const OLD_LIBRARY: &str = "record_sqlite_too_old";
-/// The longest one read may run SQLite's work, the schema load included.
+/// The longest one read may run SQLite's work, the schema load included; work past it stops
+/// the read as [`UNREADABLE`].
 pub const READ_TIME_MAX: Duration = Duration::from_secs(2);
+/// The first SQLite version whose `SQLITE_OPEN_NOFOLLOW` refuses a link in every part of a
+/// path, not only the last.
+const SQLITE_VERSION_MIN: i32 = 3_039_000;
+/// How many SQLite virtual machine steps pass between two looks at the read budget.
+const BUDGET_STEPS: i32 = 1000;
 
 /// Whether a SQLite library refuses a link in every part of a record path. Input: the
 /// library's version number. Output: whether this reader may use it.
-fn library_supported(_version: i32) -> bool {
-    true
+fn library_supported(version: i32) -> bool {
+    version >= SQLITE_VERSION_MIN
 }
 
 /// A read-only query set for one known harness database, written as engine code and never
@@ -56,9 +62,14 @@ pub struct Schema {
 /// of the rows past the last sequence read. Holds the database path, its query set, the last
 /// sequence read and how many reads in a row found it busy. SQLite refuses a link in any part
 /// of the path, so the caller passes the path by its real name; a path through a link is
-/// refused as [`UNSAFE`]. SQLite opens the database and its journal with no wait bound, and
-/// a file swapped for a FIFO after this reader's checks can hold a read, so the caller runs
-/// each read on a thread of its own with a deadline.
+/// refused as [`UNSAFE`], and a library too old to refuse it is refused as [`OLD_LIBRARY`].
+/// SQLite's work in one read, a schema load included, ends itself at [`READ_TIME_MAX`] as
+/// [`UNREADABLE`]. SQLite opens the database and its journal with no wait bound, though, and
+/// a file swapped for a FIFO after this reader's checks can hold an open that no budget ends.
+/// So the caller keeps at most one read in flight per reader, on a thread of its own with a
+/// deadline longer than [`READ_TIME_MAX`]. A read past that deadline ends record reading for
+/// the session, which reports [`UNREADABLE`] until that read returns. A refused read leaves
+/// the reader usable: the next read starts past the same sequence.
 pub struct SqlitePoll {
     path: PathBuf,
     schema: &'static Schema,
@@ -85,8 +96,12 @@ impl SqlitePoll {
     }
 
     /// Reads the facts of the rows written since the last read. Output: the facts, none while
-    /// the database does not exist yet or is busy, or a refusal code from this module.
+    /// the database does not exist yet or is busy, or a refusal code from this module,
+    /// [`OLD_LIBRARY`] before the path is looked at.
     pub fn read(&mut self) -> Result<Vec<TranscriptEvent>, LaunchError> {
+        if !library_supported(rusqlite::version_number()) {
+            return Err(failure(OLD_LIBRARY));
+        }
         let Some(mode) = mode(&self.path)? else {
             return Ok(Vec::new());
         };
@@ -257,9 +272,11 @@ fn plain(metadata: &std::fs::Metadata) -> bool {
 
 /// Opens the database for one read with every write and schema code path off: read-only,
 /// no link followed, defensive, no busy wait, query only, no schema functions trusted, cell
-/// sizes checked, no memory map and no value longer than [`VALUE_BYTES_MAX`]. The path goes
-/// into the URI byte for byte, so SQLite opens the name [`mode`] checked. Inputs: the path
-/// and the mode. Output: the connection.
+/// sizes checked, no memory map and no value longer than [`VALUE_BYTES_MAX`]. Before any
+/// statement runs, a progress handler stops the connection's work once [`READ_TIME_MAX`]
+/// has passed since the open, so a schema too large to load in time ends the read. The path
+/// goes into the URI byte for byte, so SQLite opens the name [`mode`] checked. Inputs: the
+/// path and the mode. Output: the connection.
 fn open(path: &Path, mode: Mode) -> Result<Connection, rusqlite::Error> {
     let mut uri = String::from("file:");
     for &byte in path.as_os_str().as_encoded_bytes() {
@@ -280,6 +297,8 @@ fn open(path: &Path, mode: Mode) -> Result<Connection, rusqlite::Error> {
             | OpenFlags::SQLITE_OPEN_NOFOLLOW
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+    let deadline = Instant::now() + READ_TIME_MAX;
+    connection.progress_handler(BUDGET_STEPS, Some(move || Instant::now() >= deadline))?;
     let length = i32::try_from(VALUE_BYTES_MAX).unwrap_or(i32::MAX);
     connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, length)?;
     assert!(connection.limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH)? <= length);
@@ -293,8 +312,9 @@ fn open(path: &Path, mode: Mode) -> Result<Connection, rusqlite::Error> {
 
 /// Sorts one SQLite failure: busy or locked, and under `immutable` a page a writer changed
 /// mid-read, is busy; a link in any part of the path is unsafe; a query the database's
-/// layout does not fit is an unknown version; the rest, a value past [`VALUE_BYTES_MAX`]
-/// included, is unreadable. Inputs: the failure and the mode. Output: the stop.
+/// layout does not fit is an unknown version; the rest, a value past [`VALUE_BYTES_MAX`] and
+/// work stopped at [`READ_TIME_MAX`] included, is unreadable. Inputs: the failure and the
+/// mode. Output: the stop.
 fn stop(error: &rusqlite::Error, immutable: bool) -> Stop {
     match error {
         rusqlite::Error::SqliteFailure(sqlite, _)
@@ -367,6 +387,9 @@ pub fn sentence(code: &str) -> Option<&'static str> {
         }
         UNREADABLE => "The harness's session database could not be read.",
         TOO_LARGE => "The harness's session database is too large for CrazyAgent to read.",
+        OLD_LIBRARY => {
+            "The SQLite library on this computer is older than 3.39, so CrazyAgent cannot read the harness's session database safely. Update SQLite to read it."
+        }
         _ => return None,
     })
 }
