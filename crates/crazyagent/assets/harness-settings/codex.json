@@ -529,8 +529,8 @@
       "apply": "codex_config",
       "scope": "app_and_project",
       "locked": {
-        "reason": "The engine decides which tools an agent has.",
-        "engine_value": false
+        "reason": "The engine sets it from the Native connectors setting.",
+        "engine_value": null
       }
     },
     {

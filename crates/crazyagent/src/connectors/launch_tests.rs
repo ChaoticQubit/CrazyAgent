@@ -263,15 +263,13 @@ fn native_connectors_off_adds_the_switch_for_claude_code_and_codex() {
     }
 
     let (_kept, base) = homes();
-    for (at, (native, off)) in [(Some(Off), true), (Some(On), false), (None, false)]
-        .into_iter()
-        .enumerate()
-    {
+    for (at, native) in [Some(Off), Some(On), None].into_iter().enumerate() {
         let context = AgentContext::for_tests(LaunchPlugins {
             native_connectors: native,
             ..LaunchPlugins::default()
         });
         for tools in [true, false] {
+            let off = native == Some(Off) || (native == Some(On) && !tools);
             let codex = home(&base, &format!("codex-{at}-{tools}"));
             let installed = context.install("codex", &codex, tools).unwrap();
             let config: toml::Table = fs::read_to_string(codex.join("config.toml"))

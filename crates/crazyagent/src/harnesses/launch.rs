@@ -61,7 +61,7 @@ pub(crate) const CODEX_TOOLS_OFF: [&str; 13] = [
     "features.view_image=false",
     "features.multi_agent=false",
     "features.code_mode=false",
-    "features.apps=false",
+    CODEX_APPS_OFF,
     "features.plugins=false",
     "features.goals=false",
     "web_search=\"disabled\"",
@@ -76,7 +76,7 @@ pub(crate) const CODEX_NO_USER_INPUT: &str = "tools.experimental_request_user_in
 const CODEX_TOOLS_ON: [&str; 8] = [
     "sandbox_mode=\"danger-full-access\"",
     "approval_policy=\"never\"",
-    "features.apps=false",
+    CODEX_APPS_OFF,
     "features.plugins=false",
     "features.goals=false",
     "features.multi_agent=false",
@@ -86,6 +86,10 @@ const CODEX_TOOLS_ON: [&str; 8] = [
 /// The tools-on Codex setting that keeps multi-agent v2 off; a native lead's launch leaves it
 /// out so the v2 table its `config.toml` holds turns Codex's own sub-agents on (PA-7).
 const CODEX_MULTI_AGENT_V2_OFF: &str = "features.multi_agent_v2=false";
+/// The Codex setting that keeps Codex's own apps (ChatGPT connectors) off; a tools-on launch
+/// whose context read the owner's Native setting as On leaves it out, so the `apps` key its
+/// `config.toml` holds decides (DEC-168 addendum 12).
+pub(crate) const CODEX_APPS_OFF: &str = "features.apps=false";
 
 type Invocation = (Vec<OsString>, Vec<(&'static str, OsString)>);
 
@@ -851,10 +855,19 @@ pub(super) fn codex_launch_settings(
 ) -> Vec<String> {
     let native = installed.is_some_and(Installed::native_threads);
     assert!(!native || request.tools);
+    let apps_on = installed.is_some_and(Installed::native_connectors_on);
+    assert!(!apps_on || request.tools);
     let mut settings = codex_configuration(request, installed.is_some(), key_file);
     if native {
         settings.retain(|setting| setting != CODEX_MULTI_AGENT_V2_OFF);
     }
+    if apps_on {
+        settings.retain(|setting| setting != CODEX_APPS_OFF);
+    }
+    assert_eq!(
+        settings.iter().any(|setting| setting == CODEX_APPS_OFF),
+        !apps_on
+    );
     assert_eq!(
         settings
             .iter()

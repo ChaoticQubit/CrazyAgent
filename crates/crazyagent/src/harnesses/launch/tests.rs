@@ -747,6 +747,59 @@ fn codex_arguments(request: &LaunchRequest) -> Vec<String> {
         .collect()
 }
 
+/// Native connectors (DEC-168 addendum 12 decision 4): a headless Codex project launch with
+/// tools on leaves out its fixed `features.apps=false` only when its context read the
+/// owner's setting as On, so its `config.toml` decides; Off, an unread setting and tools off
+/// keep the fixed switch.
+#[test]
+fn a_headless_codex_launch_turns_codex_apps_on_only_for_native_on_with_tools_on() {
+    use crate::connectors::settings::NativeConnectors::{Off, On};
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let folder = base.join("work");
+    std::fs::create_dir(&folder).unwrap();
+    for (at, (native, tools, on)) in [
+        (Some(On), true, true),
+        (Some(On), false, false),
+        (Some(Off), true, false),
+        (Some(Off), false, false),
+        (None, true, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let home = base.join(format!("home-{at}"));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&home)
+            .unwrap();
+        let installed =
+            crate::launch_context::AgentContext::for_tests(crate::plugins::LaunchPlugins {
+                native_connectors: native,
+                ..crate::plugins::LaunchPlugins::default()
+            })
+            .install("codex", &home, tools)
+            .unwrap();
+        let mut request = codex_request(crate::trust::Trust::Reviewed, folder.clone());
+        request.tools = tools;
+        let (arguments, _) = super::codex_invocation(&request, Some(&installed), None).unwrap();
+        let apps_off = arguments
+            .iter()
+            .any(|argument| argument == "features.apps=false");
+        assert_eq!(apps_off, !on, "{native:?} tools {tools}: {arguments:?}");
+        if tools {
+            let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+            assert_eq!(
+                config.contains("apps = false"),
+                native == Some(Off),
+                "{native:?}: {config}"
+            );
+        }
+        drop(installed);
+    }
+}
+
 #[test]
 fn an_untrusted_headless_codex_names_its_folder_untrusted_and_reads_no_project_docs() {
     let directory = tempfile::tempdir().unwrap();
