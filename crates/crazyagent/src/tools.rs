@@ -12,7 +12,7 @@ const PATH_BYTES_MAX: usize = 1024;
 const SCRIPT_HEAD_BYTES_MAX: usize = 256;
 const SHEBANG_WORDS_MAX: usize = 8;
 const ENV: &str = "/usr/bin/env";
-const NAME_LAUNCHERS: [&str; 20] = [
+const NAME_LAUNCHERS: [&str; 22] = [
     "env",
     "nice",
     "arch",
@@ -28,6 +28,8 @@ const NAME_LAUNCHERS: [&str; 20] = [
     "sudo",
     "doas",
     "busybox",
+    "coreutils",
+    "toybox",
     "genv",
     "gnice",
     "gnohup",
@@ -1088,7 +1090,8 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         },
         _ => needs(&interpreter_name),
     })?;
-    if launches_by_name(&interpreter.program) {
+    let real_name = interpreter.program.file_name().and_then(OsStr::to_str);
+    if real_name.is_some_and(launches_by_name) || launches_by_name(&interpreter_name) {
         return Err(refused(program.as_path(), Refusal::FirstLine));
     }
     Ok(Resolved {
@@ -1145,16 +1148,14 @@ fn named_interpreter(
     }
 }
 
-/// Whether an interpreter's real file is a launcher that starts the program it is given
-/// looked up by name in its own PATH, such as `env`, `nice`, `arch` or `nohup`, so a first
-/// line naming it starts a copy the resolver never judged (rv-sec2 B11 r2 F2). Matched on the
-/// file name, so a link or a multi-call `busybox` copy counts too. Input: the real file.
-/// Output: the answer.
-fn launches_by_name(program: &Path) -> bool {
-    program
-        .file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| NAME_LAUNCHERS.contains(&name))
+/// Whether a name is one of a launcher that starts the program it is given looked up by name
+/// in its own PATH, such as `env`, `nice`, `arch` or `nohup`, so a first line running it
+/// starts a copy the resolver never judged (rv-sec2 B11 r2 F2). [`entry_at`] asks it of the
+/// interpreter's real file name and of the name the line runs it as, its program word for
+/// `env` or the file name as written, since a multi-call binary such as coreutils or busybox
+/// picks its tool by that name (rv-code4 B18 F1). Input: the name. Output: the answer.
+fn launches_by_name(name: &str) -> bool {
+    NAME_LAUNCHERS.contains(&name)
 }
 
 /// A script's first line: the absolute interpreter, or the program name `env` looks up,
