@@ -598,10 +598,10 @@ fn run_listed(turn: ListedTurn, signals: Signals) -> ListedRun {
 
 impl OwnerRuntimeHandle {
     /// The entry of a listed harness, checked as a listed master turn checks its program:
-    /// found by the search set at engine start, refused in a folder agents can write, when it
-    /// does not resolve or is below the manifest's `version.minimum`. Input: the exact
-    /// registry id of a harness the engine does not drive itself. Output: the entry, or none
-    /// for any other name or a refusal.
+    /// found by the search set at engine start, refused where agents or other users can change
+    /// it ([`crate::harnesses::finding::out_of_reach`]), when it does not resolve or is below
+    /// the manifest's `version.minimum`. Input: the exact registry id of a harness the engine
+    /// does not drive itself. Output: the entry, or none for any other name or a refusal.
     pub(super) fn listed_entry(&self, id: &str) -> Option<PathBuf> {
         let engine_kind = crate::coord::settings::HarnessKind::ALL
             .into_iter()

@@ -417,6 +417,19 @@ pub fn check_file(
     if is_shim(home, path) {
         return Err(failure(PATH_SHIM));
     }
+    out_of_reach(path, space)?;
+    crate::engine::pinnable(&metadata)?;
+    assert!(path.is_absolute());
+    Ok(path.to_path_buf())
+}
+
+/// Refuses a harness file another hand could change, the one placement rule [`check_file`]
+/// and a listed harness's gate share (T19B-4-R2, T19B-SPACE-F1): the path, or any link or
+/// folder its resolution passes through, lies in a folder agents can write, or someone other
+/// than this user or root can change it. Inputs: the path and the agent space. Output: Ok,
+/// `harness_path_agent_space`, `harness_path_changeable`, or `harness_path_not_found` for a
+/// chain that does not resolve.
+pub(crate) fn out_of_reach(path: &Path, space: &AgentSpace) -> Result<(), EngineError> {
     let hops = link_hops(path).ok_or_else(|| failure(PATH_NOT_FOUND))?;
     if space.holds(path) || hops.iter().any(|hop| space.holds(hop)) {
         return Err(failure(PATH_AGENT_SPACE));
@@ -426,21 +439,6 @@ pub fn check_file(
         .any(|part| crate::service::changeable_by_others(part).is_some())
     {
         return Err(failure(PATH_CHANGEABLE));
-    }
-    crate::engine::pinnable(&metadata)?;
-    assert!(path.is_absolute());
-    Ok(path.to_path_buf())
-}
-
-/// Refuses a harness file another hand could change, the placement rule [`check_file`] and
-/// a listed harness's gate share (T19B-4-R2): the path, or any link or folder its resolution
-/// passes through, lies in a folder agents can write. Inputs: the path and the agent space.
-/// Output: Ok, `harness_path_agent_space`, or `harness_path_not_found` for a chain that does
-/// not resolve.
-pub(crate) fn out_of_reach(path: &Path, space: &AgentSpace) -> Result<(), EngineError> {
-    let hops = link_hops(path).ok_or_else(|| failure(PATH_NOT_FOUND))?;
-    if space.holds(path) || hops.iter().any(|hop| space.holds(hop)) {
-        return Err(failure(PATH_AGENT_SPACE));
     }
     Ok(())
 }
