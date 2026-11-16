@@ -104,7 +104,10 @@ fn finishing(flows: &[Flow], root: &Path, name: &str) -> bool {
 pub fn start(db: &Connection, root: &Path, name: &str) -> Result<url::Url, EngineError> {
     let (writes, challenge) = asked(db, name)?;
     let begin = |redirect: &url::Url| match challenge.as_deref() {
-        Some(challenge) => oauth::step_up(db, root, name, challenge, redirect, writes),
+        Some(challenge) => stepped(
+            oauth::step_up(db, root, name, challenge, redirect, writes),
+            || oauth::begin(db, root, name, redirect, writes),
+        ),
         None => oauth::begin(db, root, name, redirect, writes),
     };
     let owned = root.to_path_buf();
@@ -121,9 +124,12 @@ pub fn start(db: &Connection, root: &Path, name: &str) -> Result<url::Url, Engin
 /// step-up's answer and the plain sign-in. Output: the sign-in's start, or the refusal.
 fn stepped(
     step_up: Result<Pending, OAuthError>,
-    _plain: impl FnOnce() -> Result<Pending, OAuthError>,
+    plain: impl FnOnce() -> Result<Pending, OAuthError>,
 ) -> Result<Pending, OAuthError> {
-    step_up
+    match step_up {
+        Err(OAuthError("connector_oauth_scope_undeclared")) => plain(),
+        answered => answered,
+    }
 }
 
 /// How a sign-in of a connector begins now: whether the owner's setting allows writes, and
