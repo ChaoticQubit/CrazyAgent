@@ -11,10 +11,15 @@ function handClock(start) {
   return { waits, clock: { now: () => time, wait: async (ms) => { waits.push(ms); time += ms; } } };
 }
 
-/** The System Events key lines in an ide-window source that do not go through realKey. Input:
- * the source. Output: the offending matches, empty when every key goes through realKey. */
+/** The System Events key lines in an ide-window source that do not go through realKey: every
+ * `keystroke` or `key code`, in any case and any quote, that does not open a realKey call's first
+ * argument, with block comments left out. Input: the source. Output: the offending snippets,
+ * empty when every key goes through realKey. */
 function keysPastRealKey(source) {
-  return source.match(/onApp\(`(?:keystroke|key code)/g) ?? [];
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, "");
+  return [...code.matchAll(/\b(?:keystroke|key\s+code)\b/gi)]
+    .filter((key) => !/realKey\(\s*[`"']$/.test(code.slice(Math.max(0, key.index - 40), key.index)))
+    .map((key) => code.slice(Math.max(0, key.index - 40), key.index + 20));
 }
 
 test("a page plan ends at its latest step plus the settle time, whatever order its rows come in, so the next row waits out a plan its failed row left running", () => {
