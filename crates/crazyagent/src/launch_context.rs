@@ -1337,8 +1337,9 @@ impl AgentContext {
     /// manifest asks: the MCP servers and the instruction text into the files its `mcp` and
     /// `instructions` blocks name, and the environment its `home` block sets, on the guard.
     /// Inputs: the manifest, the private home ([`crate::harnesses::home::prepare`]) and the
-    /// tools switch; with tools off the MCP file holds no server, and a server with any tool
-    /// the owner switched off is left out whole, as the file cannot switch off one tool.
+    /// tools switch; with tools off the MCP file holds no server, a server with any tool the
+    /// owner switched off is left out whole, as the file cannot switch off one tool, and an
+    /// ACP harness's file leaves out the engine's own servers, which its session opens with.
     /// Output: the guard that deletes those files, `launch_manifest_invalid` for blocks that
     /// do not read, `launch_harness_unsupported` for a team agent's project files, or
     /// `launch_home_busy`.
@@ -1389,8 +1390,10 @@ impl AgentContext {
                 .collect(),
             _lock: lock,
         };
+        let acp = manifest.piped == Some(crate::harnesses::manifest::DriverKind::Acp);
         let servers = self.plugins.servers.iter().filter(|server| {
             tools
+                && !(acp && server.engine)
                 && !self
                     .off_tools
                     .iter()
