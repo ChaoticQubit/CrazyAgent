@@ -90,7 +90,7 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
   }, [projectId, noJob, lostSince]);
 
   useEffect(() => {
-    const step = lostStartStep(lostSince, answered, read, Date.now());
+    const step = lostStartStep(lostSince, answered, read, readFailed !== null, Date.now());
     if (step === "idle") return;
     if (step === "read") {
       const timer = setTimeout(() => setTick((value) => value + 1), DRAFT_POLL_MS);
@@ -99,7 +99,7 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
     forgetLostStart(projectId);
     setLostSince(null);
     if (step === "over") setProblem(PUBLISH_NOT_SEEN);
-  }, [lostSince, answered, read]);
+  }, [projectId, lostSince, answered, read, readFailed]);
 
   useEffect(() => {
     if (view.kind !== "drafting") return;
