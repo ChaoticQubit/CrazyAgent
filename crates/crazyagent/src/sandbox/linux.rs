@@ -665,22 +665,33 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     Ok(())
 }
 
-/// The bubblewrap options no caller names before the nest's `--`, beside stage 1's own
-/// descriptor flags: one reads more arguments from a descriptor, past every check here,
-/// and the others block on or write to a descriptor the caller holds (rv-code2 N5).
-const NEST_REFUSED: [&str; 4] = [
-    "--args",
-    "--userns-block-fd",
-    "--sync-fd",
-    "--json-status-fd",
-];
+/// Tells whether what follows [`NEST_ARGS`] is what the engine's own nests write: an
+/// optional `--unshare-net`, an optional `--chdir` with a clean absolute folder, then `--`
+/// and the command, so no caller adds a capability, filter, namespace, bind or descriptor
+/// option to the agent's bubblewrap (rv-sa241 SBX-2-R2 N2, rv-code2 N5). Input: the words
+/// after the fixed arguments. Output: true when they are.
+fn own_options(words: &[OsString]) -> bool {
+    let words = match words {
+        [unshare, rest @ ..] if unshare == bridge::UNSHARE_NET => rest,
+        _ => words,
+    };
+    let words = match words {
+        [chdir, folder, rest @ ..] if chdir == "--chdir" => {
+            if !clean_absolute(Path::new(folder)) {
+                return false;
+            }
+            rest
+        }
+        _ => words,
+    };
+    matches!(words, [end, _command, ..] if end == "--")
+}
 
 /// Reads what follows `--nest --`: bubblewrap at one of its fixed places, then exactly
-/// [`NEST_ARGS`], then at least the command bubblewrap starts, so the helper starts nothing
-/// else on a caller's word. No option before the nest's `--` is one of the descriptor
-/// flags stage 1 writes itself ([`egress::DESCRIPTOR_FLAGS`]) or [`NEST_REFUSED`]. Inputs:
-/// whether `--nest` was the only flag, and those arguments. Output: the request, or the
-/// reason they are refused.
+/// [`NEST_ARGS`], then only the options [`own_options`] allows and the command bubblewrap
+/// starts, so the helper starts nothing else on a caller's word and no caller names a
+/// descriptor flag stage 1 writes itself ([`egress::DESCRIPTOR_FLAGS`]). Inputs: whether
+/// `--nest` was the only flag, and those arguments. Output: the request, or the reason.
 fn nest_request(
     alone: bool,
     mut rest: impl Iterator<Item = OsString>,
@@ -704,16 +715,9 @@ fn nest_request(
             "{NEST} needs bubblewrap's fixed arguments and a command"
         ));
     }
-    let named = args[NEST_ARGS.len()..]
-        .iter()
-        .take_while(|arg| *arg != "--")
-        .any(|arg| {
-            let mut refused = egress::DESCRIPTOR_FLAGS.iter().chain(NEST_REFUSED.iter());
-            refused.any(|flag| arg == flag)
-        });
-    if named {
+    if !own_options(&args[NEST_ARGS.len()..]) {
         return Err(format!(
-            "{NEST} takes no descriptor flag; stage 1 writes its own"
+            "{NEST} takes only --unshare-net and an absolute --chdir before `--` and a command"
         ));
     }
     Ok(HelperRequest::Nest { bwrap, args })
@@ -1654,7 +1658,7 @@ impl LinuxSandbox {
             if let LinuxBackend::Nested { bwrap, helper } = &detected.backend
                 && let Some(routed) = detected.sandbox.routed()
             {
-                if route_held(bwrap, helper) {
+                if route_held(bwrap, helper, false) {
                     detected.routed = Some(routed);
                 } else {
                     eprintln!("linux_route_not_started: this agent keeps the shared network");
@@ -1904,20 +1908,22 @@ fn routes(bwrap: &Path, helper: &Path) -> bool {
         )
 }
 
-/// The route answer kept for this engine's life ([`kept_route`]): the bubblewrap and the
-/// helper it was asked for, and whether the probe passed.
+/// The route answer [`kept_route`] keeps: the bubblewrap and the helper it was asked for,
+/// and whether the probe passed.
 type KeptRoute = Mutex<Option<(PathBuf, PathBuf, bool)>>;
 
-/// Tells whether a nested agent gets a routed network of its own from one answer kept for
-/// the engine's life, so the Agent access page, the launch notice and the launch read the
-/// same fact (rv-code2 SX2-2, SX2B-1): false at once when `refused`, else the answer kept
-/// for this bubblewrap and helper, else the probe's, then kept, with no lock held while the
-/// probe runs. Inputs: the cell, bubblewrap, the helper, the refusal, the probe. Output: it.
+/// Tells whether a nested agent gets a routed network of its own from one kept answer that
+/// the Agent access page, the launch notice and the launch all read (rv-code2 SX2-2,
+/// SX2B-1): false when `refused`, a true kept for this bubblewrap and helper for the
+/// engine's life, a kept false until `again` asks it anew (rv-sa241 SBX-2-R2 N1), else the
+/// probe's, kept, with no lock held while it runs and a true kept meanwhile left in place.
+/// Inputs: the cell, bubblewrap, the helper, the refusal, `again`, the probe. Output: it.
 fn kept_route(
     kept: &KeptRoute,
     bwrap: &Path,
     helper: &Path,
     refused: bool,
+    again: bool,
     probe: impl FnOnce() -> bool,
 ) -> bool {
     if refused {
@@ -1927,12 +1933,21 @@ fn kept_route(
     if let Some((asked_bwrap, asked_helper, answer)) = held
         && asked_bwrap == bwrap
         && asked_helper == helper
+        && (answer || !again)
     {
         return answer;
     }
     let answer = probe();
-    let asked = (bwrap.to_path_buf(), helper.to_path_buf(), answer);
-    *kept.lock().unwrap_or_else(PoisonError::into_inner) = Some(asked);
+    let mut cell = kept.lock().unwrap_or_else(PoisonError::into_inner);
+    let found_meanwhile = cell
+        .as_ref()
+        .is_some_and(|(asked_bwrap, asked_helper, routed)| {
+            *routed && asked_bwrap == bwrap && asked_helper == helper
+        });
+    if found_meanwhile {
+        return true;
+    }
+    *cell = Some((bwrap.to_path_buf(), helper.to_path_buf(), answer));
     answer
 }
 
@@ -1941,10 +1956,11 @@ static ROUTE_READ: KeptRoute = Mutex::new(None);
 
 /// [`kept_route`] for this machine: refused as root (rv-sa241 NOTE-2), where slirp4netns
 /// would run with root's network before it joins the agent's. The tools check runs inside
-/// the probe, so a kept answer never changes for a key: a tool removed after a true answer
-/// gives a routed launch whose setup fails, which the go byte refuses. Inputs: bubblewrap
-/// and the helper. Output: true when the agent is routed.
-fn route_held(bwrap: &Path, helper: &Path) -> bool {
+/// the probe, so a kept true never changes for a key: a tool removed after it gives a routed
+/// launch whose setup fails, which the go byte refuses. Inputs: bubblewrap, the helper and
+/// `again`, which the host read sets to ask a kept false anew and a launch leaves unset, so
+/// a launch never waits on the probe for a kept answer. Output: true when it is routed.
+fn route_held(bwrap: &Path, helper: &Path, again: bool) -> bool {
     let root = rustix::process::geteuid().is_root();
     let probe = || {
         let tools = SLIRP_PATHS
@@ -1953,7 +1969,7 @@ fn route_held(bwrap: &Path, helper: &Path) -> bool {
             .all(|path| Path::new(path).is_file());
         tools && routes(bwrap, helper)
     };
-    kept_route(&ROUTE_READ, bwrap, helper, root, probe)
+    kept_route(&ROUTE_READ, bwrap, helper, root, again, probe)
 }
 
 /// The bubblewrap and the helper [`kept_nest`] found a nest for.
@@ -2027,7 +2043,7 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let root = rustix::process::geteuid().is_root();
     let nest = bwrap.filter(|_| nested);
     let supervised = held && data.is_some_and(|data| supervises(helper, nest, data, root));
-    let routed = held && nest.is_some_and(|bwrap| route_held(bwrap, helper));
+    let routed = held && nest.is_some_and(|bwrap| route_held(bwrap, helper, true));
     let setting = fs::read_to_string(APPARMOR_USERNS).ok();
     let armored = !nested && !root && restricts(setting.as_deref());
     assert!(!routed || nested);
@@ -4022,35 +4038,95 @@ mod tests {
         };
         let (bwrap, helper) = (Path::new(BWRAP_PATHS[0]), helper());
         assert!(
-            !kept_route(&kept, bwrap, &helper, true, probe(true)),
+            !kept_route(&kept, bwrap, &helper, true, false, probe(true)),
             "as root"
         );
         assert_eq!(probes.get(), 0, "a refusal starts no probe");
-        assert!(kept_route(&kept, bwrap, &helper, false, probe(true)));
+        assert!(kept_route(&kept, bwrap, &helper, false, false, probe(true)));
         assert!(
-            kept_route(&kept, bwrap, &helper, false, probe(false)),
+            kept_route(&kept, bwrap, &helper, false, false, probe(false)),
             "kept"
         );
         assert_eq!(probes.get(), 1, "page, notice and launch read one answer");
         assert!(
-            !kept_route(&kept, bwrap, &helper, true, probe(true)),
+            !kept_route(&kept, bwrap, &helper, true, false, probe(true)),
             "refused while kept"
         );
         assert!(
-            kept_route(&kept, bwrap, &helper, false, probe(false)),
+            kept_route(&kept, bwrap, &helper, false, false, probe(false)),
             "still kept"
         );
         assert_eq!(probes.get(), 1);
         let other = Path::new("/usr/local/bin/bwrap");
         assert!(
-            !kept_route(&kept, other, &helper, false, probe(false)),
+            !kept_route(&kept, other, &helper, false, false, probe(false)),
             "another bubblewrap"
         );
         assert!(
-            !kept_route(&kept, other, &helper, false, probe(true)),
+            !kept_route(&kept, other, &helper, false, false, probe(true)),
             "a failed answer too"
         );
         assert_eq!(probes.get(), 2);
+    }
+
+    /// rv-sa241 SBX-2-R2 N1: the host read asks a kept false route answer again, so one
+    /// failed probe (a timeout while the engine starts under load) leaves no launch unrouted
+    /// until a restart; a launch reads what is kept and never waits on the probe, a true
+    /// answer is never asked again, and a false probe never replaces a true another caller
+    /// kept meanwhile.
+    #[test]
+    fn a_false_route_answer_is_asked_again_by_the_host_read_and_a_true_one_is_kept() {
+        let kept: KeptRoute = Mutex::new(None);
+        let probes = &std::cell::Cell::new(0u32);
+        let probe = |answer: bool| {
+            move || {
+                probes.set(probes.get() + 1);
+                answer
+            }
+        };
+        let (bwrap, helper) = (Path::new(BWRAP_PATHS[0]), helper());
+        assert!(
+            !kept_route(&kept, bwrap, &helper, false, false, probe(false)),
+            "the first probe failed"
+        );
+        assert!(
+            !kept_route(&kept, bwrap, &helper, false, false, probe(true)),
+            "a launch reads the kept false"
+        );
+        assert_eq!(probes.get(), 1, "a launch never asks a kept answer again");
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, true, probe(true)),
+            "the host read asks a false answer again"
+        );
+        assert_eq!(probes.get(), 2);
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, false, probe(false)),
+            "a launch reads the new true"
+        );
+        assert!(
+            kept_route(&kept, bwrap, &helper, false, true, probe(false)),
+            "a true answer is never asked again"
+        );
+        assert_eq!(probes.get(), 2);
+        assert!(
+            !kept_route(&kept, bwrap, &helper, true, true, probe(true)),
+            "refused as root whatever is kept"
+        );
+        assert_eq!(probes.get(), 2);
+        let asked = (bwrap.to_path_buf(), helper.clone());
+        let racing: KeptRoute = Mutex::new(Some((asked.0.clone(), asked.1.clone(), false)));
+        let found_meanwhile = || {
+            *racing.lock().unwrap() = Some((asked.0.clone(), asked.1.clone(), true));
+            false
+        };
+        assert!(
+            kept_route(&racing, bwrap, &helper, false, true, found_meanwhile),
+            "a true another caller kept while this probe failed holds"
+        );
+        assert!(
+            kept_route(&racing, bwrap, &helper, false, false, probe(false)),
+            "and stays kept"
+        );
     }
 
     /// rv-sa241 SBX-2-R2 LOW-1: the nest answer the page and every launch read keeps a nest
@@ -4293,6 +4369,46 @@ mod tests {
         assert!(parse(&[NEST, PROBE]).is_err());
         assert!(parse(&[PROBE, NEST]).is_err());
         assert!(parse(&[NEST]).is_err());
+    }
+
+    /// rv-sa241 SBX-2-R2 N2: between the fixed nest arguments and the nest's `--` the helper
+    /// takes only `--unshare-net` and then `--chdir` with an absolute path, the options its
+    /// own builders write, and needs a command after that `--`, so no caller adds a
+    /// capability, a seccomp filter, a namespace or a bind to the agent's bubblewrap.
+    #[test]
+    fn a_nest_takes_only_its_network_and_working_folder_before_the_command() {
+        use bridge::UNSHARE_NET;
+        let nest = |options: &[&str]| {
+            let mut words = vec![NEST, "--", BWRAP_PATHS[0]];
+            words.extend(NEST_ARGS);
+            words.extend(options);
+            HelperRequest::parse(words.iter().map(OsString::from).collect())
+        };
+        let helper = "/opt/helper";
+        for kept in [
+            &["--", helper][..],
+            &[UNSHARE_NET, "--", helper],
+            &["--chdir", "/work", "--", helper],
+            &[UNSHARE_NET, "--chdir", "/work", "--", helper, NESTED],
+        ] {
+            assert!(nest(kept).is_ok(), "{kept:?}");
+        }
+        for refused in [
+            &[UNSHARE_NET, "--cap-add", "CAP_NET_ADMIN", "--", helper][..],
+            &["--seccomp", "5", "--", helper],
+            &["--userns", "5", "--", helper],
+            &["--bind", "/", "/", "--", helper],
+            &["--chdir", "work", "--", helper],
+            &["--chdir", "/work/../etc", "--", helper],
+            &["--chdir", "/work", UNSHARE_NET, "--", helper],
+            &[UNSHARE_NET, UNSHARE_NET, "--", helper],
+            &["--chdir", "/a", "--chdir", "/b", "--", helper],
+            &["--chdir", "--", helper],
+            &[helper],
+            &[UNSHARE_NET, "--"],
+        ] {
+            assert!(nest(refused).is_err(), "{refused:?}");
+        }
     }
 
     #[test]
