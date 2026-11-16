@@ -15,9 +15,14 @@ const STEP: Duration = Duration::from_millis(50);
 const QUIET: Duration = Duration::from_millis(400);
 const LONG_AGO: &str = "Thu Jan  1 00:00:00 1970";
 
-/// Copies of the system's sleep and bash in a folder of the row's own, so every stand-in
-/// runs an executable outside the system folders, as an owner's app does, and the freeze
-/// checks treat it as one.
+const STAND_IN: &str = "CRAZYAGENT_TEST_STAND_IN";
+const CHILDREN: &str = "CRAZYAGENT_TEST_STAND_IN_CHILDREN";
+const STAND_IN_ARGS: [&str; 4] = ["--exact", "stand_in", "--nocapture", "--test-threads=1"];
+const LINES_MAX: usize = 256;
+
+/// Copies of this test program in a folder of the row's own, so every stand-in runs an
+/// executable outside the system folders and outside this program's folder, as an owner's
+/// app does. macOS kills a copied system program, so a copy of `/bin/sleep` cannot stand in.
 struct Bin {
     _disk: tempfile::TempDir,
     folder: PathBuf,
@@ -29,8 +34,8 @@ impl Bin {
         let folder = disk.path().canonicalize().unwrap().join("apps");
         std::fs::create_dir(&folder).unwrap();
         assert!(!folder.to_string_lossy().contains(char::is_whitespace));
-        std::fs::copy("/bin/sleep", folder.join("app-sleep")).unwrap();
-        std::fs::copy("/bin/bash", folder.join("app-shell")).unwrap();
+        let this = std::env::current_exe().unwrap();
+        std::fs::copy(this, folder.join("app-sleep")).unwrap();
         Self {
             _disk: disk,
             folder,
@@ -41,54 +46,109 @@ impl Bin {
         self.folder.join("app-sleep")
     }
 
-    fn shell(&self) -> PathBuf {
-        self.folder.join("app-shell")
-    }
-
     fn named(&self, name: &str) -> PathBuf {
         let program = self.folder.join(name);
         std::fs::copy(self.sleep(), &program).unwrap();
         program
     }
+
+    /// The words that start one stand-in of the given copy.
+    fn argv(program: &Path) -> Vec<String> {
+        let mut argv = vec![program.display().to_string()];
+        argv.extend(STAND_IN_ARGS.map(str::to_owned));
+        argv
+    }
 }
 
-/// A real process that stands in for an app, an engine or an agent: a copied sleep, or a
-/// copied bash that starts children and prints their pids, one labelled line each. Every
-/// one is killed and reaped when the row ends, stopped or not.
+/// Not a check: the body of every stand-in process. Run by the test runner it returns at
+/// once. Run by a row from a copy of this program with `STAND_IN` set, it starts each
+/// child `CHILDREN` names (one per line: a label, then the program and its words, split by
+/// tabs) with `STAND_IN` set, prints one `stand-in <label> <pid>` line each and sleeps.
+#[test]
+fn stand_in() {
+    if std::env::var_os(STAND_IN).is_none() {
+        return;
+    }
+    let children = std::env::var(CHILDREN).unwrap_or_default();
+    let mut started = Vec::new();
+    for line in children.lines().filter(|line| !line.is_empty()).take(8) {
+        let mut words = line.split('\t');
+        let label = words.next().unwrap();
+        let program = words.next().unwrap();
+        let mut command = Command::new(program);
+        command
+            .args(words)
+            .env(STAND_IN, "on")
+            .env_remove(CHILDREN)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        let child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+        println!("stand-in {label} {}", child.id());
+        started.push(child);
+    }
+    std::thread::sleep(Duration::from_secs(600));
+    drop(started);
+}
+
+/// A real process that stands in for an app, an engine or an agent: a copy of this
+/// program that sleeps, with the children it was asked to start. Every one is killed and
+/// reaped when the row ends, stopped or not.
 struct StandIn {
     child: Child,
     helpers: Vec<(String, u32)>,
 }
 
 impl StandIn {
+    fn command(bin: &Bin, children: &[(&str, Vec<String>)]) -> Command {
+        let lines: Vec<String> = children
+            .iter()
+            .map(|(label, argv)| format!("{label}\t{}", argv.join("\t")))
+            .collect();
+        let mut command = Command::new(bin.sleep());
+        command
+            .args(STAND_IN_ARGS)
+            .env(STAND_IN, "on")
+            .env(CHILDREN, lines.join("\n"))
+            .stderr(Stdio::null());
+        command
+    }
+
     fn sleep(bin: &Bin) -> Self {
-        Self::start(Command::new(bin.sleep()).arg("600").stdout(Stdio::null()))
+        let mut command = Self::command(bin, &[]);
+        command.stdin(Stdio::null()).stdout(Stdio::null());
+        Self::start(&mut command)
     }
 
     fn with_helper(bin: &Bin) -> Self {
-        let script = format!("{} 600 & echo helper $!; wait", bin.sleep().display());
-        Self::shell(bin, &script, 1)
+        Self::with_children(bin, &[("helper", Bin::argv(&bin.sleep()))], 1)
     }
 
-    fn shell(bin: &Bin, script: &str, lines: usize) -> Self {
-        let mut command = Command::new(bin.shell());
-        command.args(["-c", script]).stdout(Stdio::piped());
+    fn with_children(bin: &Bin, children: &[(&str, Vec<String>)], lines: usize) -> Self {
+        let mut command = Self::command(bin, children);
+        command.stdin(Stdio::null()).stdout(Stdio::piped());
         let mut started = Self::start(&mut command);
         let out = started.child.stdout.take().unwrap();
         let mut reader = BufReader::new(out);
-        for _ in 0..lines {
+        for _ in 0..LINES_MAX {
+            if started.helpers.len() == lines {
+                break;
+            }
             let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let (label, pid) = line.trim().split_once(' ').unwrap();
+            assert!(reader.read_line(&mut line).unwrap() > 0, "the stand-in ended");
+            let Some(rest) = line.trim().strip_prefix("stand-in ") else {
+                continue;
+            };
+            let (label, pid) = rest.split_once(' ').unwrap();
             let pid: u32 = pid.parse().unwrap();
             assert!(pid > 1);
             started.helpers.push((label.to_owned(), pid));
         }
+        assert_eq!(started.helpers.len(), lines);
+        std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
         started
     }
 
     fn start(command: &mut Command) -> Self {
-        command.stdin(Stdio::null()).stderr(Stdio::null());
         let child = crazyagent::spawn_gate::spawn(command).unwrap();
         assert!(child.id() > 1);
         Self {
@@ -257,7 +317,7 @@ fn a_frozen_app_is_thawed_after_an_engine_crash_only_if_its_identity_matches() {
     let other = StandIn::sleep(&bin);
     let older = StandIn::sleep(&bin);
     let mut journal = freeze::journal(root.path()).unwrap();
-    let notes = listed("Notes", app.pid(), &bin.shell());
+    let notes = listed("Notes", app.pid(), &bin.sleep());
     let frozen = freeze::freeze(&mut journal, &notes, engine.pid(), &no_roots()).unwrap();
     let mut pids: Vec<u32> = frozen.procs.iter().map(|process| process.pid).collect();
     pids.sort_unstable();
@@ -319,8 +379,8 @@ fn an_engine_killed_while_an_app_is_frozen_leaves_the_guard_to_thaw_it() {
     let later = StandIn::sleep(&bin);
     let (reader, writer) = std::io::pipe().unwrap();
     let mut engine = {
-        let mut command = Command::new(bin.sleep());
-        command.arg("600").stdout(writer);
+        let mut command = StandIn::command(&bin, &[]);
+        command.stdin(writer).stdout(Stdio::null());
         StandIn::start(&mut command)
     };
     let mut guard = {
@@ -487,7 +547,7 @@ fn an_instance_below_an_agent_root_is_never_frozen() {
     let engine = StandIn::sleep(&bin);
     let server = StandIn::with_helper(&bin);
     let inside = listed("Notes", server.helper(), &bin.sleep());
-    let server_itself = listed("Server", server.pid(), &bin.shell());
+    let server_itself = listed("Server", server.pid(), &bin.sleep());
     let roots = BTreeSet::from([server.pid()]);
 
     let allowed = freeze::allowed(
@@ -518,16 +578,16 @@ fn never_freeze_descendants_keep_running_with_their_whole_subtree() {
     let bin = Bin::new();
     let root = tempfile::tempdir().unwrap();
     let engine = StandIn::sleep(&bin);
-    let sleep = bin.sleep().display().to_string();
-    let ours = bin.named("crazyagent-tool").display().to_string();
-    let script = format!(
-        "{sleep} 600 & echo plain $!\n\
-         /bin/sh -c '{sleep} 600 & echo inner $!; wait' & echo system $!\n\
-         {ours} 600 & echo ours $!\n\
-         wait"
+    let plain = Bin::argv(&bin.sleep());
+    let inner = format!(
+        "{STAND_IN}=on {} & echo stand-in inner $!; wait",
+        plain.join(" ")
     );
-    let app = StandIn::shell(&bin, &script, 4);
-    let notes = listed("Notes", app.pid(), &bin.shell());
+    let system = vec!["/bin/sh".to_owned(), "-c".to_owned(), inner];
+    let ours = Bin::argv(&bin.named("crazyagent-tool"));
+    let children = [("plain", plain), ("system", system), ("ours", ours)];
+    let app = StandIn::with_children(&bin, &children, 4);
+    let notes = listed("Notes", app.pid(), &bin.sleep());
     let mut journal = freeze::journal(root.path()).unwrap();
 
     let frozen = freeze::freeze(&mut journal, &notes, engine.pid(), &no_roots()).unwrap();
