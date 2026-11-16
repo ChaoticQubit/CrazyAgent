@@ -718,7 +718,7 @@ impl Catalogued {
         .unwrap();
         assert!(matches!(
             removed,
-            super::super::accounts::ResultValue::Removed(_)
+            super::super::accounts::ResultValue::Removed
         ));
     }
 
