@@ -2049,12 +2049,13 @@ oauth:
 
 /// A stand-in that is an MCP server and its own authorization server: it takes only the
 /// access token `taken` holds, answers any other with a 401 naming its resource metadata,
-/// and hands out `at-shelf-<n>` as its n-th token.
+/// hands out `at-shelf-<n>` as its n-th token, and has a read tool that echoes the token.
 fn shelf_vendor(taken: Arc<Mutex<String>>) -> Vendor {
     let given = Arc::new(AtomicUsize::new(0));
     Vendor::start(move |seen, _, stream| {
         let base = format!("http://{}", seen.header("host").unwrap_or_default());
-        let wanted = format!("Bearer {}", taken.lock().unwrap());
+        let token = taken.lock().unwrap().clone();
+        let wanted = format!("Bearer {token}");
         let reply = match (seen.verb.as_str(), seen.path.as_str()) {
             ("GET", "/.well-known/oauth-protected-resource/mcp") => json_reply(
                 "200 OK",
@@ -2087,7 +2088,13 @@ fn shelf_vendor(taken: Arc<Mutex<String>>) -> Vendor {
             }
             ("POST", "/mcp") if seen.header("authorization") == Some(wanted.as_str()) => {
                 legacy(seen, None, "2025-06-18").unwrap_or_else(|| match seen.rpc() {
-                    "tools/list" => result(seen, json!({"tools": [read_tool("list_items")]})),
+                    "tools/list" => result(
+                        seen,
+                        json!({"tools": [read_tool("list_items"), read_tool("echo_token")]}),
+                    ),
+                    "tools/call" if seen.tool() == "echo_token" => {
+                        result(seen, text_result(&format!("you sent {token}")))
+                    }
                     "tools/call" => result(seen, text_result("ran")),
                     other => panic!("{other}"),
                 })
@@ -2303,7 +2310,9 @@ fn an_oauth_connector_is_called_with_its_token_and_renews_once_when_refused() {
     grant(&bench, "shelf", true);
     let launch = launch(&bench);
 
-    assert_eq!(listed(&bench, &launch), ["shelf__list_items"]);
+    let mut names = listed(&bench, &launch);
+    names.sort();
+    assert_eq!(names, ["shelf__echo_token", "shelf__list_items"]);
     assert_eq!(
         renewals(&vendor),
         1,
@@ -2313,6 +2322,28 @@ fn an_oauth_connector_is_called_with_its_token_and_renews_once_when_refused() {
     let (text, error) = called(&bench, &launch, "shelf__list_items", json!({}));
     assert!(!error, "{text}");
     assert_eq!(renewals(&vendor), 1, "a held session needs no renewal");
+    let opened = |vendor: &Vendor| {
+        vendor
+            .calls()
+            .iter()
+            .filter(|rpc| *rpc == "initialize")
+            .count()
+    };
+    let sessions = opened(&vendor);
+    let (text, error) = called(&bench, &launch, "shelf__echo_token", json!({}));
+    assert!(
+        error && text.starts_with("connector_reply_withheld"),
+        "a reply that holds the access token never reaches the agent: {text}"
+    );
+    assert!(!text.contains("at-shelf-2"), "{text}");
+    let (text, error) = called(&bench, &launch, "shelf__list_items", json!({}));
+    assert!(!error, "{text}");
+    assert_eq!(
+        opened(&vendor),
+        sessions,
+        "a withheld reply keeps the session"
+    );
+    assert_eq!(renewals(&vendor), 1);
 
     *taken.lock().unwrap() = "scope-short".to_owned();
     for _ in 0..2 {
