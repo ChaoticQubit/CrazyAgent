@@ -18,40 +18,6 @@ pub const PREFIXES_MAX: usize = 4;
 /// only to the private home or a folder inside it.
 const XDG: &str = "XDG_";
 
-/// Names a `home.env` may never set and no declared prefix may cover: the engine sets them
-/// itself, or they decide which code a shell, git, a dynamic linker or a language runtime
-/// loads into every command an agent runs.
-const ENGINE_NAMES: [&str; 24] = [
-    "PATH",
-    "HOME",
-    "SHELL",
-    "TMPDIR",
-    "USER",
-    "LOGNAME",
-    "BASH_ENV",
-    "ENV",
-    "ZDOTDIR",
-    "PROMPT_COMMAND",
-    "NODE_OPTIONS",
-    "NODE_PATH",
-    "ELECTRON_RUN_AS_NODE",
-    "PYTHONPATH",
-    "PYTHONSTARTUP",
-    "PYTHONHOME",
-    "PYTHONUSERBASE",
-    "RUBYOPT",
-    "RUBYLIB",
-    "PERL5OPT",
-    "PERL5LIB",
-    "PERLLIB",
-    "JAVA_TOOL_OPTIONS",
-    "JDK_JAVA_OPTIONS",
-];
-
-/// Starts of names a `home.env` may never set and no declared prefix may cover, for the same
-/// reasons as [`ENGINE_NAMES`]; `GIT_` holds `GIT_SSH_COMMAND` and the `GIT_CONFIG_*` set.
-const ENGINE_PREFIXES: [&str; 4] = ["DYLD_", "LD_", "CRAZYAGENT_", "GIT_"];
-
 /// What a manifest's `home` block asks of the private home a harness runs in: the
 /// environment variables it sets, each named under one of its own `env_prefixes` or `XDG_`
 /// and valued plain text or a folder under `{home}`, and whether HOME itself is set to the
@@ -140,8 +106,8 @@ pub fn read(manifest: &Manifest) -> Result<Home, Refused> {
 
 /// Reads `home.env_prefixes`: at most [`PREFIXES_MAX`] starts of names the harness reads as
 /// its own, such as `OPENCODE_`, each capital letters, digits and `_`, starting with a letter
-/// and ending with `_`. A prefix that covers a name or start in [`ENGINE_NAMES`],
-/// [`ENGINE_PREFIXES`] or `XDG_` is refused, so a manifest cannot claim `GIT_` or `PYTHON_`.
+/// and ending with `_`. A prefix that covers a name the shared env-name rule owns, `XDG_`
+/// among them, is refused, so a manifest cannot claim `GIT_`, `NPM_` or `PYTHON_`.
 /// Input: the block's value. Output: the prefixes in file order, or the refusal.
 fn prefixes(value: &Value) -> Result<Vec<String>, Refused> {
     let Value::List(items) = value else {
@@ -164,20 +130,15 @@ fn prefixes(value: &Value) -> Result<Vec<String>, Refused> {
                 "home.env_prefixes: this must be a list of text in quotes.".into(),
             );
         };
-        let Some(stem) = prefix.strip_suffix('_').filter(|_| variable_name(prefix)) else {
+        if !variable_name(prefix) || !prefix.ends_with('_') {
             return refuse(
                 manifest::VALUE,
                 format!(
                     "home.env_prefixes.{prefix}: a prefix is capital letters, digits and _, starting with a letter and ending with _."
                 ),
             );
-        };
-        let covers = ENGINE_NAMES.iter().any(|name| name.starts_with(stem))
-            || ENGINE_PREFIXES
-                .iter()
-                .chain([&XDG])
-                .any(|start| start.starts_with(stem) || prefix.starts_with(start));
-        if covers {
+        }
+        if super::env_names::claims(prefix) {
             return refuse(
                 manifest::VALUE,
                 format!(
@@ -192,10 +153,11 @@ fn prefixes(value: &Value) -> Result<Vec<String>, Refused> {
 }
 
 /// Reads `home.env`: at most [`ENV_MAX`] names of capital letters, digits and `_`, none the
-/// engine owns, each starting with one of the manifest's own prefixes or with `XDG_`, with
-/// text in quotes that is plain or a folder under `{home}`; an XDG name's value must be the
-/// private home or a folder inside it. Inputs: the block's value and the declared prefixes.
-/// Output: the names and values in file order, or the refusal.
+/// shared env-name rule owns but the `XDG_` ones, each starting with one of the manifest's
+/// own prefixes or with `XDG_`, with text in quotes that is plain or a folder under `{home}`;
+/// an XDG name's value must be the private home or a folder inside it. Inputs: the block's
+/// value and the declared prefixes. Output: the names and values in file order, or the
+/// refusal.
 fn variables(value: &Value, own: &[String]) -> Result<Vec<(String, String)>, Refused> {
     let Value::Map(entries) = value else {
         return refuse(
@@ -218,13 +180,13 @@ fn variables(value: &Value, own: &[String]) -> Result<Vec<(String, String)>, Ref
                 format!("{path}: a name is capital letters, digits and _, starting with a letter."),
             );
         }
-        if engine_owned(name) {
+        let xdg = name.starts_with(XDG);
+        if !xdg && super::env_names::owned(name) {
             return refuse(
                 manifest::VALUE,
                 format!("{path}: CrazyAgent sets this itself, so a manifest cannot."),
             );
         }
-        let xdg = name.starts_with(XDG);
         if !xdg && !own.iter().any(|prefix| name.starts_with(prefix.as_str())) {
             return refuse(
                 manifest::VALUE,
@@ -281,10 +243,6 @@ fn variable_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
-fn engine_owned(name: &str) -> bool {
-    ENGINE_NAMES.contains(&name) || ENGINE_PREFIXES.iter().any(|start| name.starts_with(start))
 }
 
 /// Whether a value is the private home itself or a folder inside it: `{home}` at the start,
