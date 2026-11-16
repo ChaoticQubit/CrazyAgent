@@ -20,7 +20,8 @@ const LISTED: &str = concat!(
     "accounts:\n  openai-chat:\n    env:\n",
 );
 
-const COVERS: &str = "this prefix covers names CrazyAgent sets itself or that decide which code runs.";
+const COVERS: &str =
+    "this prefix covers names CrazyAgent sets itself or that decide which code runs.";
 
 const ENGINE_FAMILY_NAMES: &[&str] = &[
     "NPM_CONFIG_NODE_OPTIONS",
@@ -228,7 +229,12 @@ fn every_variable_the_engine_sets_on_a_launch_is_owned() {
             .iter()
             .map(|(name, _)| (*name).to_owned()),
     );
-    set.extend(identity.variables().iter().map(|(name, _)| (*name).to_owned()));
+    set.extend(
+        identity
+            .variables()
+            .iter()
+            .map(|(name, _)| (*name).to_owned()),
+    );
     set.push(LINEAGE_VARIABLE.to_owned());
     set.extend(
         [
@@ -249,7 +255,10 @@ fn every_variable_the_engine_sets_on_a_launch_is_owned() {
 
     let open: Vec<&String> = set.iter().filter(|name| !owned(name)).collect();
 
-    assert!(open.is_empty(), "the engine sets these and a manifest may: {open:?}");
+    assert!(
+        open.is_empty(),
+        "the engine sets these and a manifest may: {open:?}"
+    );
 }
 
 /// Env-name rule: each family that decides which code a shell, a linker, git, a package
@@ -260,7 +269,11 @@ fn every_family_that_decides_which_code_runs_or_which_server_is_trusted_is_owned
     for name in ENGINE_FAMILY_NAMES {
         assert!(owned(name), "{name}");
     }
-    for name in ["pnpm_config_store_dir", "https_proxy", "npm_config_userconfig"] {
+    for name in [
+        "pnpm_config_store_dir",
+        "https_proxy",
+        "npm_config_userconfig",
+    ] {
         assert!(owned(name), "{name}");
     }
 }
@@ -358,7 +371,8 @@ fn a_home_block_cannot_claim_an_engine_family_or_set_one_of_its_names() {
         );
     }
 
-    let xdg = "  env_prefixes:\n    - \"SAMPLE_\"\n  env:\n    XDG_CONFIG_HOME: \"{home}/config\"\n";
+    let xdg =
+        "  env_prefixes:\n    - \"SAMPLE_\"\n  env:\n    XDG_CONFIG_HOME: \"{home}/config\"\n";
 
     assert_eq!(home_refusal(xdg), None);
 }
@@ -397,7 +411,8 @@ fn the_package_index_module_proxy_and_openssl_families_are_owned_at_both_sites()
         );
     }
 
-    let inside_pi = "  env_prefixes:\n    - \"PI_\"\n  env:\n    PIP_INDEX_URL: \"https://mirror.example\"\n";
+    let inside_pi =
+        "  env_prefixes:\n    - \"PI_\"\n  env:\n    PIP_INDEX_URL: \"https://mirror.example\"\n";
 
     assert_eq!(
         home_refusal(inside_pi),

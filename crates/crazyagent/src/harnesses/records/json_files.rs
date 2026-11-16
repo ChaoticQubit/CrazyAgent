@@ -393,11 +393,15 @@ impl Pattern {
             _ => at,
         };
         let places: Vec<usize> = (0..self.parts.len()).map(place).collect();
-        let fitting = self.parts.iter().zip(&places).all(|(part, &at)| match part {
-            Part::Deep => true,
-            Part::Name(name) => name.as_str() == names[at],
-            Part::Glob(glob) => fits(glob, names[at]),
-        });
+        let fitting = self
+            .parts
+            .iter()
+            .zip(&places)
+            .all(|(part, &at)| match part {
+                Part::Deep => true,
+                Part::Name(name) => name.as_str() == names[at],
+                Part::Glob(glob) => fits(glob, names[at]),
+            });
         assert_eq!(places.len(), self.parts.len());
         fitting.then_some((names, places))
     }

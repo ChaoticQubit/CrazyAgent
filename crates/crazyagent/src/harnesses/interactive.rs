@@ -641,8 +641,7 @@ fn agent_env(
     let refused = |_: crate::sandbox::SandboxError| failure("launch_environment_refused");
     let built = match handover {
         Some(handover) => {
-            let handed = crate::sandbox::Handed::new(&names, handover.token())
-                .map_err(refused)?;
+            let handed = crate::sandbox::Handed::new(&names, handover.token()).map_err(refused)?;
             crate::sandbox::agent_env_handing(&base, harness, handed)
         }
         None => crate::sandbox::agent_env(&base, harness),

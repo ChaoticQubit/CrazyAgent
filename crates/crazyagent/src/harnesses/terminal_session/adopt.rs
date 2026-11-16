@@ -39,8 +39,12 @@ const POLL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RecordSource {
-    CodexRollouts { sessions: PathBuf },
-    ClaudeSession { file: PathBuf },
+    CodexRollouts {
+        sessions: PathBuf,
+    },
+    ClaudeSession {
+        file: PathBuf,
+    },
     Manifest {
         harness: String,
         home: PathBuf,

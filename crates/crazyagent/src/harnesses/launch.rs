@@ -1835,9 +1835,7 @@ impl Session {
     ) -> Result<Self, LaunchError> {
         assert!(context.is_none() || listed.is_empty());
         let native_threads = context.as_ref().is_some_and(Installed::native_threads);
-        let servers = context
-            .as_ref()
-            .map_or(listed, Installed::engine_servers);
+        let servers = context.as_ref().map_or(listed, Installed::engine_servers);
         let (driver, startup) = Driver::new(&request, native_threads, servers)?;
         let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
         command.env(LINEAGE_VARIABLE, token.as_str());
@@ -2307,8 +2305,7 @@ pub fn trim_unread_output(output: &Path, probe: &File) -> bool {
 fn never_waits(input: &File) -> Result<(), LaunchError> {
     let unavailable = |_: rustix::io::Errno| failure("launch_stdio_unavailable");
     let flags = rustix::fs::fcntl_getfl(input).map_err(unavailable)?;
-    rustix::fs::fcntl_setfl(input, flags | OFlags::NONBLOCK)
-        .map_err(unavailable)
+    rustix::fs::fcntl_setfl(input, flags | OFlags::NONBLOCK).map_err(unavailable)
 }
 
 /// Turns a child's stdin pipe into the file the session writes prompts to.

@@ -84,7 +84,11 @@ fn standin(kind: &'static str, first_screen: bool) -> Standin {
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let profile = base.join("agent.sb");
     std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
-    let text = if kind == "jsonl-append" { APPEND } else { REWRITE };
+    let text = if kind == "jsonl-append" {
+        APPEND
+    } else {
+        REWRITE
+    };
     let settings = TerminalSettings::read(&manifest::parse(text.as_bytes()).unwrap()).unwrap();
     let made = Standin {
         host,
