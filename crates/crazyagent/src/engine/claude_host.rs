@@ -325,20 +325,35 @@ fn carried_retry(command: &Command) -> crate::provider_retry::ProviderRetry {
     }
 }
 
-/// Renders the strict MCP configuration of a tools-on master: one stdio server, the engine
-/// executable serving `team-mcp` on the drop file and mailbox with the tools switched off.
-/// Input: the tools. Output: the JSON text, or `claude_host_invalid_launch` for a relative
-/// path, one with a control character or an unknown tool name.
+/// Renders the strict MCP configuration of a tools-on master: the engine executable serving
+/// `team-mcp` on the drop file and mailbox with the tools switched off and, with a connector
+/// launch folder, the same executable serving `connector-mcp` on that folder. Input: the
+/// tools. Output: the JSON text, or `claude_host_invalid_launch` for a relative path, one
+/// with a control character or an unknown tool name.
 fn delegate_config(tools: MasterTools<'_>) -> Result<String, EngineError> {
     let Some(engine) = plain_path(tools.engine) else {
         return Err(failure("claude_host_invalid_launch"));
     };
-    let config = serde_json::json!({"mcpServers": {crate::team::tool::SERVER_NAME: {
-        "type": "stdio",
-        "command": engine,
-        "args": tools.server_args()?,
-    }}});
-    Ok(config.to_string())
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        crate::team::tool::SERVER_NAME.into(),
+        serde_json::json!({"type": "stdio", "command": engine, "args": tools.server_args()?}),
+    );
+    if let Some(folder) = tools.connector {
+        let Some(folder) = plain_path(folder) else {
+            return Err(failure("claude_host_invalid_launch"));
+        };
+        servers.insert(
+            crate::connectors::launch::SERVER_NAME.into(),
+            serde_json::json!({
+                "type": "stdio",
+                "command": engine,
+                "args": [crate::connectors::shim::SERVER_COMMAND, folder],
+            }),
+        );
+    }
+    assert_eq!(servers.len(), 1 + usize::from(tools.connector.is_some()));
+    Ok(serde_json::json!({"mcpServers": servers}).to_string())
 }
 
 #[cfg(unix)]
@@ -851,16 +866,29 @@ fn failure(code: &'static str) -> EngineError {
     EngineError(code.into())
 }
 
-/// Reads the team server a tools-on master command names, so the command can be built
-/// again from it and compared. Input: the `--mcp-config` text. Output: the engine executable,
-/// drop file, mailbox and tools switched off before the trailing `wake` that `server_args`
-/// adds, or none when the text is not one engine server ending in it.
+/// Reads the team server and connector launch folder a tools-on master command names, so
+/// the command can be built again from them and compared. Input: the `--mcp-config` text.
+/// Output: the engine executable, drop file, mailbox, tools switched off before the trailing
+/// `wake` that `server_args` adds and the folder `connector-mcp` serves, if named, or none
+/// when the text is not one engine server ending in it or names a malformed connector server.
 #[cfg(unix)]
-fn named_tools(config: &str) -> Option<(PathBuf, PathBuf, PathBuf, Vec<String>)> {
+fn named_tools(config: &str) -> Option<NamedTools> {
     let config: serde_json::Value = serde_json::from_str(config).ok()?;
-    let server = config
-        .get("mcpServers")?
-        .get(crate::team::tool::SERVER_NAME)?;
+    let servers = config.get("mcpServers")?;
+    let connector = match servers.get(crate::connectors::launch::SERVER_NAME) {
+        None => None,
+        Some(entry) => {
+            let args = entry.get("args")?.as_array()?;
+            let [command, folder] = args.as_slice() else {
+                return None;
+            };
+            if command.as_str()? != crate::connectors::shim::SERVER_COMMAND {
+                return None;
+            }
+            Some(PathBuf::from(folder.as_str()?))
+        }
+    };
+    let server = servers.get(crate::team::tool::SERVER_NAME)?;
     let engine = server.get("command")?.as_str()?;
     let args = server
         .get("args")?
@@ -879,14 +907,20 @@ fn named_tools(config: &str) -> Option<(PathBuf, PathBuf, PathBuf, Vec<String>)>
         PathBuf::from(drop),
         PathBuf::from(mailbox),
         off.iter().map(|tool| (*tool).to_owned()).collect(),
+        connector,
     ))
 }
 
-/// Confirms a Claude Code master command names exactly the delegate server the engine gave
-/// its turn: with `tools`, one MCP configuration whose only server is that engine executable
-/// serving `team-mcp` on that drop file, and one deny list of exactly Claude Code's own
-/// sub-agent tools; without, an empty server list and no deny list. Input: the command and
-/// the expected tools. Output: Ok, or `master_delegate_unverified`.
+/// What a tools-on master command names for its servers: the engine executable, drop file,
+/// mailbox, tools switched off and connector launch folder, if any.
+#[cfg(unix)]
+type NamedTools = (PathBuf, PathBuf, PathBuf, Vec<String>, Option<PathBuf>);
+
+/// Confirms a Claude Code master command names exactly the delegate servers the engine gave
+/// its turn: with `tools`, one MCP configuration of exactly the servers `delegate_config`
+/// renders for them and one deny list of exactly Claude Code's own sub-agent tools; without,
+/// an empty server list and no deny list. Input: the command and the expected tools.
+/// Output: Ok, or `master_delegate_unverified`.
 pub(in crate::engine) fn require_delegate(
     command: &Command,
     tools: Option<MasterTools<'_>>,
@@ -1022,12 +1056,12 @@ fn validate_command(
         instructions,
         named
             .as_ref()
-            .map(|(engine, drop, mailbox, off)| MasterTools {
+            .map(|(engine, drop, mailbox, off, connector)| MasterTools {
                 engine,
                 drop,
                 mailbox,
                 off,
-                connector: None,
+                connector: connector.as_deref(),
             }),
         &settings,
     )
