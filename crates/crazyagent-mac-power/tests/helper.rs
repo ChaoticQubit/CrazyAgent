@@ -1305,3 +1305,97 @@ fn forget_with_low_power_set_finishes() {
     assert_eq!(stand_in.pin_text(), None);
     battery_source_only(&stand_in);
 }
+
+/// A configuration whose pmset fails `-b lowpowermode 1`, after writing it when `wrote`, so a
+/// row can see a set that failed before or after it took. A run that never wrote is not
+/// recorded in the stand-in's calls.
+fn failing_low_power_set(stand_in: &StandIn, wrote: bool) -> Config {
+    let program = stand_in.program().display().to_string();
+    let wrapper = stand_in.path("set-wrapper");
+    let first = if wrote {
+        format!("'{program}' \"$@\"\n")
+    } else {
+        String::new()
+    };
+    let text = format!(
+        "#!/bin/sh\nif [ \"$*\" = \"-b lowpowermode 1\" ]; then\n{first}exit 1\nfi\n\
+         exec '{program}' \"$@\"\n"
+    );
+    fs::write(&wrapper, text).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    Config {
+        pmset: wrapper,
+        ..stand_in.config()
+    }
+}
+
+#[test]
+fn an_owners_own_low_power_turned_off_mid_hold_stays_off() {
+    let stand_in = StandIn::new(0);
+    stand_in.set_low_power_by_owner(1, 0);
+    let mut helper = Helper::start(stand_in.config());
+    let me = holder(&stand_in, 10);
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS, OPEN), HELD);
+    helper.sense(NOW_MS, ON_BATTERY);
+    stand_in.set_low_power_by_owner(0, 0);
+    helper.sense(NOW_MS + 30_000, ON_BATTERY);
+    helper.sense(NOW_MS + 60_000, ON_BATTERY);
+    assert_eq!(stand_in.low_power().0, 0, "QUESTION 41a: the owner's own value too");
+    assert!(stand_in.low_power_writes().is_empty());
+    let released = helper.handle(me, Request::Release, NOW_MS + 61_000, OPEN);
+    assert_eq!(released, Reply::Released);
+    assert_eq!(helper.handle(me, LOW_POWER, NOW_MS + 62_000, OPEN), HELD);
+    helper.sense(NOW_MS + 90_000, ON_BATTERY);
+    assert_eq!(stand_in.low_power().0, 1, "a new ask after none asked sets it");
+    assert_eq!(stand_in.low_power_writes(), ["-b lowpowermode 1"]);
+}
+
+#[test]
+fn a_low_power_set_that_failed_never_leaves_it_on() {
+    for wrote in [false, true] {
+        let stand_in = StandIn::new(0);
+        let mut helper = Helper::start(failing_low_power_set(&stand_in, wrote));
+        let me = holder(&stand_in, 10);
+        assert_eq!(helper.handle(me, LOW_POWER, NOW_MS, OPEN), HELD);
+        helper.sense(NOW_MS, ON_BATTERY);
+        assert_eq!(stand_in.low_power().0, u8::from(wrote), "wrote {wrote}");
+        assert!(stand_in.journal_text().unwrap().contains("low_power"), "journaled first");
+        helper.sense(NOW_MS + 30_000, ON_BATTERY);
+        let journaled = stand_in.journal_text().unwrap().contains("low_power");
+        assert_eq!(journaled, wrote, "QUESTION 41b: a 0 after a failed set is the owner's");
+        let released = helper.handle(me, Request::Release, NOW_MS + 31_000, OPEN);
+        assert_eq!(released, Reply::Released);
+        helper.sense(NOW_MS + 60_000, ON_BATTERY);
+        assert_eq!(stand_in.low_power().0, 0, "wrote {wrote}: never left on");
+        assert_eq!(stand_in.journal_text().as_deref(), Some("[]"));
+        assert!(helper.idle());
+        battery_source_only(&stand_in);
+    }
+}
+
+#[test]
+fn a_battery_section_that_loses_the_key_drops_our_entry_unwritten() {
+    for asked in [true, false] {
+        let stand_in = StandIn::new(0);
+        let mut helper = Helper::start(stand_in.config());
+        let me = holder(&stand_in, 10);
+        assert_eq!(helper.handle(me, LOW_POWER, NOW_MS, OPEN), HELD);
+        helper.sense(NOW_MS, ON_BATTERY);
+        assert_eq!(stand_in.low_power().0, 1);
+        if !asked {
+            let released = helper.handle(me, Request::Release, NOW_MS + 1_000, OPEN);
+            assert_eq!(released, Reply::Released);
+        }
+        stand_in.drop_low_power_key();
+        helper.sense(NOW_MS + 30_000, ON_BATTERY);
+        assert_eq!(
+            stand_in.journal_text().as_deref(),
+            Some("[]"),
+            "QUESTION 41c, asked {asked}"
+        );
+        assert_eq!(stand_in.low_power_writes(), ["-b lowpowermode 1"]);
+        let forgotten = helper.handle(me, Request::Forget, NOW_MS + 31_000, OPEN);
+        assert_eq!(forgotten, Reply::Forgotten, "a vanished key never blocks Forget");
+        assert!(helper.idle());
+    }
+}
