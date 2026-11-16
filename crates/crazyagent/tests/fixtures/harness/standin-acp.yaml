@@ -10,6 +10,11 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+home:
+  env_prefixes:
+    - "STANDIN_ACP_"
+  env:
+    STANDIN_ACP_CONFIG: "{home}/config"
 roles:
   - "agent"
   - "master"
@@ -22,8 +27,3 @@ piped:
     - "{home}"
   tools_off:
     - "--no-tools"
-home:
-  env_prefixes:
-    - "STANDIN_ACP_"
-  env:
-    STANDIN_ACP_CONFIG: "{home}/config"
