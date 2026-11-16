@@ -75,8 +75,9 @@ const CONNECT_TIME: Duration = Duration::from_millis(500);
 const WATCH_POLL: Duration = Duration::from_secs(1);
 const STOP_POLL: Duration = Duration::from_millis(20);
 const KILL_WAIT: Duration = Duration::from_secs(2);
+/// The longest one `lsof` listing of a port's listeners may take before it is stopped.
 #[cfg(target_os = "macos")]
-const LISTENERS_BYTES_MAX: usize = 64 * 1024;
+const LISTENERS_TIME: Duration = Duration::from_secs(5);
 
 /// Where one project's running IDE is reached: the workbench URL on the engine proxy at
 /// 127.0.0.1, the proxy's port, which also serves the webview hosts, the server's own port
@@ -1543,7 +1544,7 @@ fn judged(
     if listeners.iter().any(|(_, address)| *address != loopback) {
         return Err(failure("ide_server_not_loopback"));
     }
-    assert!(listeners.iter().all(|(pid, _)| owns(*pid)));
+    assert!(!listeners.is_empty());
     Ok(())
 }
 
@@ -1559,28 +1560,26 @@ pub(super) async fn served_by(_port: u16, _served: &[i32]) -> Result<(), EngineE
     Err(failure("ide_platform_unqualified"))
 }
 
-/// Lists the processes listening on a TCP port and the address each binds, through `lsof`.
-/// Input: the port. Output: process ids with addresses, empty when none listens.
+/// Lists the processes listening on a TCP port and the address each binds, through `lsof`
+/// run within [`LISTENERS_TIME`], its process group stopped after, so a listing that hangs
+/// holds no open and no proxied request. Input: the port. Output: process ids with
+/// addresses, empty when none listens, or `ide_server_check_failed`.
 #[cfg(target_os = "macos")]
 pub(crate) fn listeners(port: u16) -> Result<Vec<(i32, String)>, EngineError> {
-    let output = crate::spawn_gate::output(
-        Command::new("/usr/sbin/lsof")
-            .env_clear()
-            .env("LC_ALL", "C")
-            .arg("-nP")
-            .arg(format!("-iTCP:{port}"))
-            .args(["-sTCP:LISTEN", "-Fpn"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null()),
-    )
-    .map_err(|_| failure("ide_server_check_failed"))?;
-    if output.stdout.len() > LISTENERS_BYTES_MAX {
+    let mut command = Command::new("/usr/sbin/lsof");
+    command
+        .env_clear()
+        .env("LC_ALL", "C")
+        .arg("-nP")
+        .arg(format!("-iTCP:{port}"))
+        .args(["-sTCP:LISTEN", "-Fpn"]);
+    let (succeeded, stdout) = crate::setup::process::run_command(command, LISTENERS_TIME)
+        .map_err(|_| failure("ide_server_check_failed"))?;
+    if stdout.len() >= crate::setup::process::OUTPUT_BYTES_MAX {
         return Err(failure("ide_server_check_failed"));
     }
-    let text =
-        std::str::from_utf8(&output.stdout).map_err(|_| failure("ide_server_check_failed"))?;
-    if !output.status.success() && !text.is_empty() {
+    let text = std::str::from_utf8(&stdout).map_err(|_| failure("ide_server_check_failed"))?;
+    if !succeeded && !text.is_empty() {
         return Err(failure("ide_server_check_failed"));
     }
     let mut pid = None;
