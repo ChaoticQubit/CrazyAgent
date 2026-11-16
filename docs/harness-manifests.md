@@ -4,7 +4,7 @@ A harness is a coding-agent program that CrazyAgent runs agents inside, such as 
 
 `crates/crazyagent/harness-manifests/<id>.yaml`
 
-The engine reads the bundled manifests once, builds its harness registry from them and serves the harness catalog from that registry. No list of harness names is kept in code.
+The engine reads the bundled manifests once, builds its harness registry from them and serves the harness catalog from that registry.
 
 This guide says what a manifest may hold and what the engine does with each part. Every YAML example is copied from a file in the repository: one of the 18 bundled manifests, or one of the stand-in manifests the tests use.
 
@@ -234,7 +234,7 @@ Workspace-routed, residency and FedRAMP accounts are not supported.
 
 ## What the catalog serves
 
-Each catalog row carries, from the manifest: `terminal` (it has a record reader, so a live terminal can be read back), `master` and `research` (from `roles`), `sub_agents` (`teams`, `threads` or `app`) and `account_protocols` as written. Both apps read these instead of a list of harness names.
+Each catalog row carries, from the manifest: `terminal` (it has a record reader, so a live terminal can be read back), `master` and `research` (from `roles`), `sub_agents` (`teams`, `threads` or `app`) and `account_protocols` as written. The apps read these fields from the catalog row.
 
 ## The home block
 
@@ -469,7 +469,7 @@ terminal:
 
 ## The import block
 
-Files in the owner's home that the owner may import from. Each is read only, never written, and only where its harness keeps its own files.
+Files a harness keeps in the owner's home that CrazyAgent's imports read from. Each is read only, never written, and only where its harness keeps its own files.
 
 | Key | Meaning |
 | --- | --- |
@@ -566,7 +566,7 @@ Every refusal has a stable code and one plain sentence that names the setting.
 
 The registry puts the file name in front: "two: schema: this app reads schema: 1 harness manifests only."
 
-A bundled manifest that is refused is a programming error: the registry stops the engine at first use. The row "every bundled manifest loads" guards it.
+A bundled manifest that is refused is a programming error: the registry stops the engine at first use. The row `every_bundled_manifest_loads_in_catalog_order_under_its_own_file_name` guards it.
 
 ## Adding a harness
 
