@@ -52,6 +52,7 @@ impl OwnerRuntimeHandle {
             instructions: None,
             model: prepared.model.clone(),
             model_provider: prepared.model_provider.clone(),
+            gateway: None,
         })
     }
 }

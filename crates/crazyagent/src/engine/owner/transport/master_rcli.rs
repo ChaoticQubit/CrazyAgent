@@ -5,6 +5,7 @@ mod tests;
 #[cfg(all(test, unix))]
 #[path = "master_rcli_capture_tests.rs"]
 mod capture_tests;
+use super::master_host_launch::{ConnectorTurn, MasterConnector};
 use super::master_runtime::{Capture, timed_out};
 use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
@@ -15,7 +16,7 @@ use crate::master_session::{
 };
 use crate::master_time_limit::minutes_of_cause;
 use crate::protocol::RequestId;
-use crate::rcli_host::RcliMasterStatus;
+use crate::rcli_host::{RcliGateway, RcliMasterStatus};
 use crate::storage::{MasterRuntimeObservation, PreparedMasterTurn};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -192,6 +193,29 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
 }
 
 impl OwnerRuntimeHandle {
+    /// Readies the connector launch of one RCLI master turn (Connectors Task 14): a project
+    /// with a connector granted to its master gets one launch, ended when the turn drops it,
+    /// and the gateway its host names as its one MCP server, run by the registered engine
+    /// executable. Input: the prepared turn. Output: the launch and its gateway, none
+    /// without a grant, or the refusal.
+    fn open_rcli_connector(
+        &self,
+        prepared: &PreparedMasterTurn,
+    ) -> Result<Option<(MasterConnector, RcliGateway)>, EngineError> {
+        let root = self.authority.root.engine_root()?;
+        let Some(connector) = MasterConnector::open(root, &prepared.session.project_id)? else {
+            return Ok(None);
+        };
+        let registered = self.registered_engine_executable()?;
+        let gateway = RcliGateway {
+            engine: registered.verified_path()?.to_path_buf(),
+            folder: connector.folder().to_path_buf(),
+        };
+        assert!(gateway.engine.is_absolute());
+        assert!(gateway.folder.starts_with(root));
+        Ok(Some((connector, gateway)))
+    }
+
     pub(super) async fn launch_rcli_master_turn(
         &self,
         prepared: &PreparedMasterTurn,
@@ -271,6 +295,8 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
+        let (_connector, gateway) = self.open_rcli_connector(prepared)?.unzip();
+        launch.gateway = gateway;
         let text = turn_instruction_text(&prepared.instructions, &prepared.agent_project)?;
         launch.command().map_err(|error| EngineError(error.0))?;
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
@@ -287,7 +313,10 @@ impl OwnerRuntimeHandle {
             &prepared.agent_policy,
             prepared.agent_project.trust,
             &prepared.hidden_paths,
-            None,
+            launch.gateway.as_ref().map(|gateway| ConnectorTurn {
+                engine: &gateway.engine,
+                folder: &gateway.folder,
+            }),
         )?;
         if !text.is_empty() {
             launch.instructions = Some(super::master_host_launch::write_master_instructions(

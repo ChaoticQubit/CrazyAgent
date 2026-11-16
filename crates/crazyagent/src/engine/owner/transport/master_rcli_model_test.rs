@@ -210,6 +210,7 @@ fn launched(test: &Test<'_>, mut custody: NativeProfileCustody) -> Result<RcliEn
         instructions: None,
         model: Some(test.model.to_owned()),
         model_provider: Some(test.provider.to_owned()),
+        gateway: None,
     };
     launch.command().map_err(|error| EngineError(error.0))?;
     let sandbox = super::super::master_host_launch::model_test_sandbox(
