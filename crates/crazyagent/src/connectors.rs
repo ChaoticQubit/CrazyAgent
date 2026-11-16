@@ -179,6 +179,63 @@ const PLAIN: &[(&str, &str)] = &[
         "connector_vendor_error",
         "the vendor answered with an error.",
     ),
+    (
+        "connector_oauth_client_invalid",
+        "the sign-in app's id or secret is not usable; save it again.",
+    ),
+    (
+        "connector_oauth_code_invalid",
+        "the sign-in answer held no usable code; sign in again.",
+    ),
+    (
+        "connector_oauth_issuer_mismatch",
+        "the sign-in answer came from another server than the one asked, so it was not used.",
+    ),
+    (
+        "connector_oauth_key_store_unavailable",
+        "the engine's key store could not be read or written.",
+    ),
+    (
+        "connector_oauth_metadata_invalid",
+        "the vendor's sign-in details could not be read.",
+    ),
+    (
+        "connector_oauth_needs_own_app",
+        "this service needs your own OAuth app; add its client id in the connector's settings.",
+    ),
+    (
+        "connector_oauth_not_offered",
+        "this connector does not offer a sign-in.",
+    ),
+    (
+        "connector_oauth_pkce_unsupported",
+        "the vendor's sign-in lacks the secure code check the engine requires (PKCE S256).",
+    ),
+    (
+        "connector_oauth_redirect_invalid",
+        "a sign-in can only come back to this computer.",
+    ),
+    ("connector_oauth_refused", "the vendor refused the sign-in."),
+    (
+        "connector_oauth_scope_undeclared",
+        "the vendor asked for access the connector's file does not declare, or for writes while they are off.",
+    ),
+    (
+        "connector_oauth_state_unknown",
+        "this sign-in has ended or was already answered; start it again.",
+    ),
+    (
+        "connector_oauth_step_up_limit",
+        "the vendor still wants more access after two sign-ins; check the connector's settings.",
+    ),
+    (
+        "connector_oauth_token_invalid",
+        "the vendor's sign-in answer held no usable token.",
+    ),
+    (
+        "connector_oauth_trust_changed",
+        "the connector's file changed since this sign-in began; start it again.",
+    ),
 ];
 
 /// The plain sentence for a code the Connectors page can show: this module's own, or an
