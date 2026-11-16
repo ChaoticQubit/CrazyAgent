@@ -1,5 +1,7 @@
 use super::master_launch::error;
+use crate::harnesses::leftovers::HoldBy;
 use crate::protocol::{FRAME_BYTES_MAX, ProtocolError};
+use crate::sandbox::LineageCheck;
 use crate::sandbox::warden::{self, Warden};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
@@ -31,7 +33,14 @@ pub(super) struct HostProcess {
 }
 
 impl HostProcess {
-    pub(super) fn spawn(mut command: Command) -> Result<Self, ProtocolError> {
+    /// Starts the rcli master host with its pipes open and not blocking. Inputs: the wrapped
+    /// command, what the stop checks of the processes it leaves outside its group and who to
+    /// hold those under. Output: the process, or a plain refusal.
+    pub(super) fn spawn(
+        mut command: Command,
+        _check: LineageCheck,
+        _by: HoldBy,
+    ) -> Result<Self, ProtocolError> {
         let (mut child, warden) =
             warden::spawn(&mut command).map_err(|_| error("rcli_master_spawn_failed"))?;
         let stdin = child.stdin.take().expect("configured host input pipe");
@@ -325,6 +334,56 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
+    /// Who a row's host leaves a hold under. Output: no project and a plain label.
+    fn test_by() -> HoldBy {
+        HoldBy {
+            project: None,
+            who: "an rcli master test host".to_owned(),
+        }
+    }
+
+    /// LINUX-KILL-GROUP r1 F1: an rcli master host whose boundary leaves a process in a
+    /// session of its own running, as the plain Linux Landlock helper's does, has its lineage
+    /// followed from its start, so the process it left outside its group is named as a
+    /// sandboxed run's leftover once the group is gone, and the stop ends with that code.
+    #[test]
+    fn a_followed_rcli_master_names_what_it_left_outside_its_group() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30")
+            .current_dir(folder.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut process = HostProcess::spawn(command, LineageCheck::Sandboxed, test_by()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let child = loop {
+            if let Some(child) = std::fs::read_to_string(folder.path().join("child.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break child;
+            }
+            assert!(Instant::now() < deadline, "the stand-in never started");
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        let cleaned = process.cleanup();
+        if let Some(pid) = Pid::from_raw(child) {
+            let _ = rustix::process::kill_process(pid, Signal::KILL);
+        }
+
+        assert_eq!(
+            cleaned.map_err(|failure| failure.0),
+            Err(crate::harnesses::leftovers::SANDBOX_LEFT.to_owned())
+        );
+        assert!(process.clean);
+        assert!(process.group_absent);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn cleanup_stops_what_a_sandboxed_rcli_master_detached() {
@@ -336,7 +395,7 @@ mod tests {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         assert!(process.warden.is_some());
         let processes = run.processes();
         process.cleanup().unwrap();
@@ -356,7 +415,7 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while rustix::process::test_kill_process_group(process.group())
             != Err(rustix::io::Errno::PERM)
@@ -388,7 +447,7 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         let stat = format!("/proc/{}/stat", process.child.id());
         let deadline = Instant::now() + Duration::from_secs(5);
         while !std::fs::read_to_string(&stat).is_ok_and(|stat| {
@@ -426,7 +485,7 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         process.exited_group().unwrap();
         assert!(process.status.is_none());
         assert!(!process.group_absent);
@@ -447,7 +506,7 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         let group = i32::try_from(process.child.id()).unwrap();
         let mut member = crate::spawn_gate::spawn(
             Command::new("/bin/sh")
@@ -501,7 +560,7 @@ read -r _
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(120);
         let mut frames = 0;
         let failure = loop {

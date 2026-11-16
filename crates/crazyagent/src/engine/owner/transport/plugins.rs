@@ -1631,7 +1631,7 @@ fn boundary_check(
         process.env(name, std::ffi::OsStr::from_bytes(value));
     }
     assert_eq!(process.get_program(), sandbox.launcher().as_os_str());
-    check::check_command(process, check::CHECK_TIME).map_err(String::from)
+    check::check_command(process, check::CHECK_TIME, sandbox.lineage_check()).map_err(String::from)
 }
 
 /// Refuses to check a command server where no process group can be stopped. Takes the

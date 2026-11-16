@@ -84,7 +84,11 @@ impl RcliMasterHost {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
-        let process = HostProcess::spawn(command)?;
+        let by = crate::harnesses::leftovers::HoldBy {
+            project: Some(launch.binding.project_id.as_str().to_owned()),
+            who: "the rcli master".to_owned(),
+        };
+        let process = HostProcess::spawn(command, sandbox.lineage_check(), by)?;
         let sequence = EventSequence::new(
             launch.binding.session_id.clone(),
             launch.binding.instance_id.clone(),
