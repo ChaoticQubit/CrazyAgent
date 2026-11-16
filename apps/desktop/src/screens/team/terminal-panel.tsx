@@ -479,11 +479,12 @@ export class KeptView implements Held {
   }
 
   /** Shows the view in a panel's screen: writes the output held while hidden in one write,
-   * then moves its element in. Nothing here waits or measures: no bridge call and no fit. The
-   * element's size watch fits after the frame only when the screen's size differs from the
-   * parked one, and sends the new size only when the columns or rows changed. A view whose
-   * terminal ended connects again once it is in, as a panel opened anew would. A live view
-   * takes the focus after the frame. Input: the screen element. Output: none. */
+   * then moves its element in. Nothing here waits or measures: no bridge call and no fit
+   * before the frame. The element's size watch fits after the frame only when the screen's
+   * size differs from the parked one. A view whose terminal ended connects again once it is
+   * in, as a panel opened anew would. After the frame a live view takes the focus and, once
+   * fitted, sends its size once, since another window may have resized the terminal while it
+   * was hidden. Input: the screen element. Output: none. */
   show(screen: HTMLElement): void {
     assert(!this.dropped, "a view let go is never shown");
     this.shown = true;
@@ -494,7 +495,9 @@ export class KeptView implements Held {
     if (this.state.view.kind === "ended") this.reopen();
     window.cancelAnimationFrame(this.focusFrame);
     this.focusFrame = window.requestAnimationFrame(() => {
-      if (this.shown && this.link?.live) this.terminal?.focus();
+      if (!this.shown || !this.link?.live) return;
+      this.terminal?.focus();
+      if (this.fitted) this.sendSize();
     });
   }
 
