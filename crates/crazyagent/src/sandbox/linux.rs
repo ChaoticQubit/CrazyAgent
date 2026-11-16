@@ -118,6 +118,12 @@ const RESOLVER_ROOT: &str = "/run/systemd/resolve";
 const HELPER_MISSING: &str = "this Linux cannot fully enforce Landlock file rules (Linux 6.2 \
      or newer), and CrazyAgent's sandbox helper, which keeps a bubblewrap agent off Unix \
      sockets, is missing; reinstall CrazyAgent";
+/// The launch refusal when this computer's nest check passed ([`nest_held`]) but the launch's
+/// own nest probe failed (rv-sa241 SBX-2-R2 LOW-1), so no agent runs on the shared network
+/// with Landlock rules alone while the Agent access page says it is nested.
+const LINUX_NEST_NOT_STARTED: &str = "bubblewrap did not start this agent's sandbox the way \
+     this computer's check found it does; try again, or restart CrazyAgent to check this \
+     computer again";
 /// The most ports one agent is kept off: the owner's fixed ports, the kept local model
 /// ports and every model proxy and model relay port.
 const KEEP_FREE_MAX: usize = OWNER_PORTS.len()
@@ -1541,12 +1547,13 @@ impl LinuxSandbox {
     }
 
     /// Picks the backend this machine holds: Landlock when the helper exists and its probe
-    /// passes for the policy's network needs, nested in bubblewrap when the same probe also
-    /// passes inside its namespaces ([`nests`]), otherwise bubblewrap from a fixed path with
-    /// the helper started inside it, so no bubblewrap agent starts without the helper. An
-    /// open network probes the TCP bind rules that keep ports free and never falls back to
+    /// passes for the policy's network needs, nested in bubblewrap where this machine nests
+    /// ([`nest_held`], the answer the Agent access page reads) and the same probe passes
+    /// inside its namespaces ([`nests`]), otherwise bubblewrap from a fixed path with the
+    /// helper started inside it, so no bubblewrap agent starts without the helper. An open
+    /// network probes the TCP bind rules that keep ports free and never falls back to
     /// bubblewrap. Input: the project policy and the helper executable. Output: the
-    /// sandbox, or `Unavailable` when no backend can hold it.
+    /// sandbox, or `Unavailable` when no backend can hold it or the nest does not start.
     pub fn detect(sandbox: ProjectSandbox, helper: &Path) -> Result<Self, SandboxError> {
         let bwraps: Vec<&Path> = BWRAP_PATHS.iter().map(Path::new).collect();
         Self::detect_among(sandbox, helper, &bwraps)
@@ -1580,7 +1587,15 @@ impl LinuxSandbox {
             let nest = bwraps
                 .iter()
                 .find(|bwrap| bwrap.is_file())
-                .filter(|bwrap| nests(bwrap, &helper, &flags));
+                .filter(|bwrap| nest_held(bwrap, &helper));
+            if let Some(bwrap) = nest
+                && !nests(bwrap, &helper, &flags)
+            {
+                eprintln!(
+                    "linux_nest_not_started: this agent is refused, not moved to Landlock alone"
+                );
+                return Err(SandboxError::Unavailable(LINUX_NEST_NOT_STARTED.into()));
+            }
             let backend = match nest {
                 Some(bwrap) => LinuxBackend::Nested {
                     bwrap: bwrap.to_path_buf(),
@@ -1886,6 +1901,47 @@ fn route_held(bwrap: &Path, helper: &Path) -> bool {
     kept_route(&ROUTE_READ, bwrap, helper, root, probe)
 }
 
+/// The bubblewrap and the helper [`kept_nest`] found a nest for.
+type KeptNest = Mutex<Option<(PathBuf, PathBuf)>>;
+
+/// Tells whether this machine nests the helper in bubblewrap from one answer the Agent access
+/// page and every launch read (rv-sa241 SBX-2-R2 LOW-1): a nest found for this bubblewrap and
+/// helper is kept for the engine's life, and one not found is asked again each time, so a
+/// machine that starts to nest is seen at its next read. No lock is held while the probe
+/// runs, and a failed probe reads the cell again, so a nest another caller found meanwhile
+/// holds. Inputs: the cell, bubblewrap, the helper, the probe. Output: true when it nests.
+fn kept_nest(kept: &KeptNest, bwrap: &Path, helper: &Path, probe: impl FnOnce() -> bool) -> bool {
+    let found = || {
+        kept.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|(asked_bwrap, asked_helper)| {
+                asked_bwrap == bwrap && asked_helper == helper
+            })
+    };
+    if found() {
+        return true;
+    }
+    if probe() {
+        let asked = (bwrap.to_path_buf(), helper.to_path_buf());
+        *kept.lock().unwrap_or_else(PoisonError::into_inner) = Some(asked);
+        return true;
+    }
+    found()
+}
+
+/// What [`nest_held`] found, read by the host facts and every launch alike.
+static NEST_READ: KeptNest = Mutex::new(None);
+
+/// [`kept_nest`] for this machine, asked with the probe alone ([`nests`]); a launch then
+/// runs its own flags' probe inside the nest and is refused when that fails. Inputs:
+/// bubblewrap and the helper. Output: true when the helper nests in it.
+fn nest_held(bwrap: &Path, helper: &Path) -> bool {
+    kept_nest(&NEST_READ, bwrap, helper, || {
+        nests(bwrap, helper, &[PROBE.into()])
+    })
+}
+
 /// Tells whether AppArmor keeps unprivileged programs out of user namespaces, from what
 /// [`APPARMOR_USERNS`] reads: only `1`, with or without its newline, does. Input: the text,
 /// none where the file cannot be read (no AppArmor, or an older one). Output: true when it
@@ -1896,7 +1952,8 @@ fn restricts(setting: Option<&str>) -> bool {
 
 /// Reads what this machine holds for an agent beyond its Landlock rules: whether the
 /// kernel scopes signals (the helper's `--scoped`), whether a launch gives the agent a
-/// process namespace ([`nests`], or the plain probe fails), whether the call supervisor
+/// process namespace ([`nest_held`], the answer every launch reads, or the plain probe
+/// fails), whether the call supervisor
 /// holds ([`supervises`]), whether a nested agent gets a routed network of its own
 /// ([`route_held`], the answer every launch reads), whether this runs as root and whether
 /// AppArmor's user namespace restriction, which never covers root, is why nothing nests
@@ -1910,7 +1967,7 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
         .iter()
         .map(Path::new)
         .find(|path| path.is_file());
-    let apart = |bwrap: &Path| !held || nests(bwrap, helper, &[PROBE.into()]);
+    let apart = |bwrap: &Path| !held || nest_held(bwrap, helper);
     let nested = usable && bwrap.is_some_and(apart);
     let root = rustix::process::geteuid().is_root();
     let nest = bwrap.filter(|_| nested);
@@ -3305,6 +3362,61 @@ mod tests {
         }
     }
 
+    /// rv-sa241 SBX-2-R2 LOW-1: where this computer's nest check passes, a launch whose own
+    /// nest probe fails is refused with words to try again or restart, instead of running on
+    /// the shared network with Landlock rules only while the Agent access page says it is
+    /// nested; where the nest check fails too, the launch is a Landlock one, as the page says.
+    #[test]
+    fn a_launch_whose_own_nest_probe_fails_where_this_computer_nests_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let place = temp.path().canonicalize().unwrap();
+        let bwrap = place.join("bwrap");
+        fs::write(&bwrap, b"").unwrap();
+        fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(trusted(&bwrap));
+        let fake = |name: &str, failing: &str| {
+            let helper = place.join(name);
+            let script = format!(
+                "#!/bin/sh\nnest=0\nfailing=0\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    \
+                 {NEST}) nest=1 ;;\n    {failing}) failing=1 ;;\n  esac\ndone\n\
+                 [ \"$nest\" = 1 ] && [ \"$failing\" = 1 ] && exit 1\nexit 0\n"
+            );
+            fs::write(&helper, script).unwrap();
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+            helper
+        };
+        let flagged = fake("flagged", KEEP_FREE);
+        let neither = fake("neither", PROBE);
+        assert!(
+            nests(&bwrap, &flagged, &[PROBE.into()]),
+            "this computer nests"
+        );
+        let (_project, sandbox) = project(SandboxNetwork::Open);
+        let answer = LinuxSandbox::detect_among(sandbox.clone(), &flagged, &[bwrap.as_path()]);
+        let shown = match &answer {
+            Ok(sandbox) => format!("{:?}", sandbox.backend()),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            matches!(
+                &answer,
+                Err(SandboxError::Unavailable(reason)) if reason.contains("restart CrazyAgent")
+            ),
+            "a launch that cannot nest where this computer nests is refused, never run on \
+             Landlock alone: {shown}"
+        );
+        assert!(
+            !nests(&bwrap, &neither, &[PROBE.into()]),
+            "this computer does not nest"
+        );
+        let landlock = LinuxSandbox::detect_among(sandbox, &neither, &[bwrap.as_path()]).unwrap();
+        assert!(
+            matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+            "where nothing nests the launch is a Landlock one, as the page says"
+        );
+    }
+
     #[test]
     fn an_agent_kept_on_this_network_by_a_low_port_names_the_lowest_one() {
         use SandboxRemote::{AnyHost, Loopback};
@@ -3574,6 +3686,55 @@ mod tests {
             "a failed answer too"
         );
         assert_eq!(probes.get(), 2);
+    }
+
+    /// rv-sa241 SBX-2-R2 LOW-1: the nest answer the page and every launch read keeps a nest
+    /// found for the same bubblewrap and helper without asking again, and asks again after a
+    /// nest was not found and for another bubblewrap, whose miss keeps the found one.
+    #[test]
+    fn a_found_nest_is_kept_and_a_missing_one_is_asked_again() {
+        let kept: KeptNest = Mutex::new(None);
+        let probes = &std::cell::Cell::new(0u32);
+        let probe = |answer: bool| {
+            move || {
+                probes.set(probes.get() + 1);
+                answer
+            }
+        };
+        let (bwrap, helper) = (Path::new(BWRAP_PATHS[0]), helper());
+        assert!(!kept_nest(&kept, bwrap, &helper, probe(false)));
+        assert!(
+            kept_nest(&kept, bwrap, &helper, probe(true)),
+            "a missing nest is asked again"
+        );
+        assert!(
+            kept_nest(&kept, bwrap, &helper, probe(false)),
+            "a found one is kept"
+        );
+        assert_eq!(
+            probes.get(),
+            2,
+            "page, notice and launch read one found nest"
+        );
+        let other = Path::new("/usr/local/bin/bwrap");
+        assert!(
+            !kept_nest(&kept, other, &helper, probe(false)),
+            "another bubblewrap is asked"
+        );
+        assert!(
+            kept_nest(&kept, bwrap, &helper, probe(false)),
+            "its miss keeps the found one"
+        );
+        assert_eq!(probes.get(), 3);
+        let racing: KeptNest = Mutex::new(None);
+        let found_meanwhile = || {
+            *racing.lock().unwrap() = Some((bwrap.to_path_buf(), helper.clone()));
+            false
+        };
+        assert!(
+            kept_nest(&racing, bwrap, &helper, found_meanwhile),
+            "a nest another caller found while this probe failed holds"
+        );
     }
 
     #[test]
