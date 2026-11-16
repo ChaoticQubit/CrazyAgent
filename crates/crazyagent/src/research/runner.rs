@@ -7693,6 +7693,60 @@ mod tests {
         );
     }
 
+    /// Every Claude Code research run, on a signed-in account, a local endpoint or a keyed
+    /// relay, with tools off or on, starts with its account's claude.ai connectors off and
+    /// hooks off, as no Native switch reaches a research run.
+    #[test]
+    fn every_claude_research_run_starts_with_the_accounts_claude_ai_connectors_off() {
+        let accounts = [
+            ResearchAccount::ManagedClaude {
+                connection: codex_connection(),
+                model: None,
+            },
+            ResearchAccount::AnthropicEndpoint {
+                base_url: "http://127.0.0.1:11434".into(),
+                model: "local-model".into(),
+                key: None,
+            },
+            ResearchAccount::AnthropicEndpoint {
+                base_url: "http://127.0.0.1:41234".into(),
+                model: "claude-test".into(),
+                key: Some(CredentialRef::new("openai-key-0123456789abcdef0123").unwrap()),
+            },
+        ];
+        for account in &accounts {
+            for tools in [false, true] {
+                let mut command = Command::new("/usr/bin/true");
+                claude_arguments(
+                    &mut command,
+                    Path::new("/agent/home"),
+                    Path::new("/agent/tmp"),
+                    tools,
+                    None,
+                    account,
+                    crate::provider_retry::ProviderRetry::HarnessDefault,
+                )
+                .unwrap();
+                let arguments: Vec<String> = command
+                    .get_args()
+                    .map(|argument| argument.to_str().unwrap().to_owned())
+                    .collect();
+                let settings: Vec<serde_json::Value> = arguments
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--settings")
+                    .map(|pair| serde_json::from_str(&pair[1]).unwrap())
+                    .collect();
+                assert_eq!(settings.len(), 1, "{arguments:?}");
+                assert_eq!(
+                    settings[0]["disableClaudeAiConnectors"], true,
+                    "{account:?} tools {tools}: {}",
+                    settings[0]
+                );
+                assert_eq!(settings[0]["disableAllHooks"], true, "{}", settings[0]);
+            }
+        }
+    }
+
     /// The answer of a streamed Claude Code run is the text of its last result line, and only
     /// when that result is a success the harness did not mark an error (DEC-150 MG-M1).
     #[test]

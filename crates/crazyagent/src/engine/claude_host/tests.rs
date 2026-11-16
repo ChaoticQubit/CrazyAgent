@@ -1074,7 +1074,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "--setting-sources",
             "",
             "--settings",
-            "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}",
+            "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"disableClaudeAiConnectors\":true,\"includeCoAuthoredBy\":false}",
             "--disable-slash-commands",
             "--no-session-persistence",
         ]
@@ -1118,7 +1118,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "--setting-sources",
             "",
             "--settings",
-            "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}",
+            "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"disableClaudeAiConnectors\":true,\"includeCoAuthoredBy\":false}",
             "--disable-slash-commands",
             "--no-session-persistence",
             "--max-turns",
@@ -1426,6 +1426,62 @@ fn every_key_a_claude_master_sets_is_locked_in_the_shipped_catalog() {
     }
 }
 
+/// A Claude Code master turn, tools off or on, starts with its account's claude.ai
+/// connectors off whatever the owner's Claude Code settings hold, as no Native switch
+/// reaches a master, and the host's read-back still finds exactly the owner's settings.
+#[test]
+fn a_claude_master_turn_starts_with_the_accounts_claude_ai_connectors_off() {
+    use crate::harness_settings::{Stored, apply::Applied, catalog, resolve};
+    let shipped = catalog::builtin("claude-code").unwrap().unwrap();
+    let version = shipped.qualified_versions.first().map(String::as_str);
+    let directories = Directories::new();
+    let engine = Path::new("/approved/crazyagent");
+    let drop = directories
+        .root
+        .join("tmp")
+        .join(crate::team::tool::DROP_FILE);
+    let memory: Stored = [("autoMemoryEnabled".to_owned(), serde_json::json!(true))].into();
+    for app in [Stored::new(), memory] {
+        let settings = Applied::new(&shipped, resolve(&shipped, version, &app, None));
+        let off = launch_command(
+            Path::new("/approved/claude"),
+            &directories.project,
+            &directories.home,
+            "native-default",
+            None,
+            &settings,
+        )
+        .unwrap();
+        let on = tools_launch_command(
+            Path::new("/approved/claude"),
+            &directories.project,
+            &directories.home,
+            "native-default",
+            None,
+            MasterTools {
+                engine,
+                drop: &drop,
+                mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+                off: &[],
+                connector: None,
+            },
+            &settings,
+        )
+        .unwrap();
+        for command in [off, on] {
+            let args = arguments(&command);
+            let at = args.iter().position(|arg| arg == "--settings").unwrap() + 1;
+            let document: serde_json::Value = serde_json::from_str(&args[at]).unwrap();
+            assert_eq!(
+                document["disableClaudeAiConnectors"],
+                serde_json::json!(true),
+                "{document}"
+            );
+            assert_eq!(master_settings_of(&args[at]), Some(settings.clone()));
+        }
+    }
+}
+
 #[test]
 fn a_claude_master_starts_with_auto_memory_off_unless_the_owner_turns_it_on() {
     use crate::harness_settings::{Source, Stored, apply::Applied, catalog, resolve};
@@ -1516,6 +1572,7 @@ fn the_host_runs_a_master_only_with_settings_the_shipped_catalog_allows() {
             "attribution": {"commit": "", "pr": ""},
             "cleanupPeriodDays": 60,
             "disableAllHooks": true,
+            "disableClaudeAiConnectors": true,
             "includeCoAuthoredBy": false,
         })
     );
@@ -1532,26 +1589,44 @@ fn the_host_runs_a_master_only_with_settings_the_shipped_catalog_allows() {
             Err(Fault::Host("claude_host_unapproved_command"))
         ));
     }
-    let mut hooked = args.clone();
-    hooked[at] = serde_json::json!({
-        "attribution": {"commit": "", "pr": ""},
-        "disableAllHooks": true,
-        "hooks": {"Stop": []},
-        "includeCoAuthoredBy": false,
-    })
-    .to_string();
-    let mut forged = std::process::Command::new(owned.get_program());
-    forged
-        .args(hooked)
-        .current_dir(owned.get_current_dir().unwrap())
-        .env_clear();
-    for (key, value) in owned.get_envs() {
-        forged.env(key, value.unwrap());
+    for settings in [
+        serde_json::json!({
+            "attribution": {"commit": "", "pr": ""},
+            "disableAllHooks": true,
+            "disableClaudeAiConnectors": true,
+            "hooks": {"Stop": []},
+            "includeCoAuthoredBy": false,
+        }),
+        serde_json::json!({
+            "attribution": {"commit": "", "pr": ""},
+            "disableAllHooks": true,
+            "includeCoAuthoredBy": false,
+        }),
+        serde_json::json!({
+            "attribution": {"commit": "", "pr": ""},
+            "disableAllHooks": true,
+            "disableClaudeAiConnectors": false,
+            "includeCoAuthoredBy": false,
+        }),
+    ] {
+        let mut changed = args.clone();
+        changed[at] = settings.to_string();
+        let mut forged = std::process::Command::new(owned.get_program());
+        forged
+            .args(changed)
+            .current_dir(owned.get_current_dir().unwrap())
+            .env_clear();
+        for (key, value) in owned.get_envs() {
+            forged.env(key, value.unwrap());
+        }
+        assert!(
+            matches!(
+                validate_command(&forged, &profile, &home),
+                Err(Fault::Host("claude_host_unapproved_command"))
+            ),
+            "{settings}"
+        );
     }
-    assert!(matches!(
-        validate_command(&forged, &profile, &home),
-        Err(Fault::Host("claude_host_unapproved_command"))
-    ));
 }
 
 /// Each master step limit the owner can pick ends the engine's tools-on command with
