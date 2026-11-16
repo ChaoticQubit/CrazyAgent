@@ -862,10 +862,10 @@ impl Keeper {
     /// tries, and clears them once it put everything back (rv-secreview and rv-code T17
     /// r1). It writes only when that changes, starting from nothing named, so the engine
     /// start's own rows stay until the lane names its kinds. A write that fails is logged
-    /// and tried again at the next step. Each freeze the lane refused whole since the last
-    /// step gets one "Apps not paused" notice with its reason (rv-code T17b r1 F1); that
-    /// write is logged when it fails and not tried again. Inputs: the engine database
-    /// outside any transaction and the time.
+    /// and tried again at the next step. A freeze the lane refused whole since the last
+    /// step gets one "Apps not paused" notice with the latest refusal's reason (rv-code
+    /// T17b r1 F1); that write is logged when it fails and not tried again. Inputs: the
+    /// engine database outside any transaction and the time.
     fn note_lane(&mut self, connection: &Connection, now_ms: i64) {
         #[cfg(unix)]
         {
