@@ -975,7 +975,7 @@ impl AgentContext {
         }
         self.plugins.servers.push(LaunchServer {
             name: name.into(),
-            engine: false,
+            engine: true,
             spec: ServerSpec::Stdio {
                 command,
                 args: std::iter::once(subcommand.to_owned())
@@ -1381,7 +1381,12 @@ impl AgentContext {
             freeze_record: self.freeze_record.clone(),
             terminal_display: self.terminal_display,
             environment: asked.environment(home),
-            engine_servers: Vec::new(),
+            engine_servers: self
+                .plugins
+                .servers
+                .iter()
+                .filter_map(engine_server)
+                .collect(),
             _lock: lock,
         };
         let servers = self.plugins.servers.iter().filter(|server| {
@@ -1394,6 +1399,22 @@ impl AgentContext {
         let written = crate::harnesses::render::write(&renders, home, servers, &self.instructions)?;
         assert_eq!(written.len(), count);
         Ok(installed)
+    }
+}
+
+/// The engine's own server as an ACP session takes it: one `AgentContext` marked as its
+/// own, run as a command and holding no secret. Input: one launch server. Output: its name,
+/// command and arguments, or none for any other server, whatever its name.
+fn engine_server(server: &LaunchServer) -> Option<EngineServer> {
+    match &server.spec {
+        ServerSpec::Stdio { command, args } if server.engine && server.secrets.is_empty() => {
+            Some(EngineServer {
+                name: server.name.clone(),
+                command: command.clone(),
+                args: args.clone(),
+            })
+        }
+        ServerSpec::Stdio { .. } | ServerSpec::Http { .. } => None,
     }
 }
 
@@ -1411,8 +1432,8 @@ impl Installed {
         &self.environment
     }
 
-    /// The engine's own MCP servers an ACP launch opens its session with, none for every
-    /// other launch. Output: the servers.
+    /// The engine's own MCP servers a listed launch carries for an ACP session to open with;
+    /// none for Codex and Claude Code, whose files name them. Output: the servers.
     pub fn engine_servers(&self) -> &[EngineServer] {
         &self.engine_servers
     }

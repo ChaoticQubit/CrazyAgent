@@ -649,19 +649,42 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     let (arguments, environment) = match drivers::piped(&request.harness)? {
         Piped::Codex => codex_invocation(request, installed, key_file.as_deref())?,
         Piped::Claude => claude_invocation(request, installed, key_file.as_deref()),
-        Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
+        Piped::Acp => acp_invocation(request)?,
+        Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
             return Err(failure("launch_harness_unsupported"));
         }
     };
     sandboxed(request, installed, &arguments, &environment)
 }
 
+/// The command line of an ACP agent: its manifest's arguments filled for this launch, and no
+/// variable of its own, since the installed context gives its home block's variables.
+/// Input: the request. Output: the arguments and variables, or the refusal
+/// [`drivers::acp::arguments`] gives.
+fn acp_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> {
+    let listed = super::registry::registry()
+        .get(&request.harness)
+        .ok_or_else(|| failure("launch_harness_unsupported"))?;
+    let arguments = drivers::acp::arguments(
+        listed.manifest(),
+        request.account.home(),
+        &request.working_dir,
+        request.model.as_deref(),
+        request.tools,
+    )?;
+    Ok((
+        arguments.into_iter().map(OsString::from).collect(),
+        Vec::new(),
+    ))
+}
+
 /// Wraps a harness command line in the launch's sandbox, with the agent's own environment:
 /// its home, temporary folder, tool path, plain locale, the model proxy and git identity of
-/// an installed context, and the harness's own variables. Inputs: the checked request, the
-/// installed context, if any, the harness arguments and variables. Output: the command with
-/// piped standard streams in the working folder, or `launch_sandbox_unavailable` off macOS
-/// and `launch_environment_refused` when the environment cannot be built.
+/// an installed context, the harness's own variables and those a listed harness's home block
+/// sets. Inputs: the checked request, the installed context, if any, the harness arguments
+/// and variables. Output: the command with piped standard streams in the working folder, or
+/// `launch_sandbox_unavailable` off macOS and `launch_environment_refused` when the
+/// environment cannot be built.
 fn sandboxed(
     request: &LaunchRequest,
     installed: Option<&Installed>,
@@ -711,9 +734,15 @@ fn sandboxed(
                 .map(|(name, value)| (name, OsStr::new(value))),
         );
     }
+    let listed = installed.map(Installed::environment).unwrap_or_default();
     let harness_env = environment
         .iter()
-        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())));
+        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())))
+        .chain(
+            listed
+                .iter()
+                .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str()))),
+        );
     let words = super::interactive::launch_words(&request.executable)?;
     let (program, script) = words
         .split_first()
