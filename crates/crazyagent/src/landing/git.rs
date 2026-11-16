@@ -732,8 +732,11 @@ impl Repo {
                 wrapped(&read, &[common.join("objects"), step.clone()]),
                 Vec::new(),
             ),
-            Writes::Index => (wrapped(&read, &[step.clone()]), Vec::new()),
-            Writes::WorkTree => (wrapped(&read, &[work]), wrapped(&read, &[step.clone()])),
+            Writes::Index => (wrapped(&read, std::slice::from_ref(&step)), Vec::new()),
+            Writes::WorkTree => (
+                wrapped(&read, &[work]),
+                wrapped(&read, std::slice::from_ref(&step)),
+            ),
         };
         Ok(Self {
             index: Some(step.join("index")),

@@ -61,7 +61,7 @@ fn an_agent_started_before_a_folder_was_hidden_is_listed_until_the_owner_restart
     worker.hidden = Some(Vec::new());
     team.workers.insert(before, worker);
     let (mut worker, _) = held_worker(&project, AgentRole::Sub);
-    worker.hidden = hid(&[secrets.clone()]);
+    worker.hidden = hid(std::slice::from_ref(&secrets));
     team.workers.insert(after, worker);
     let (mut worker, _) = held_worker(&project, AgentRole::Sub);
     worker.access = AgentAccess::Full;
@@ -138,12 +138,17 @@ fn a_pane_taken_over_after_a_folder_was_hidden_is_listed_by_what_its_record_hid(
         },
     )
     .unwrap();
-    crate::sandbox::hidden_paths::save(&fixture.connection, PROJECT, &[secrets.clone()]).unwrap();
+    crate::sandbox::hidden_paths::save(
+        &fixture.connection,
+        PROJECT,
+        std::slice::from_ref(&secrets),
+    )
+    .unwrap();
     let sees = |fixture: &Fixture, id: i64| listed(fixture).contains(&id);
 
     for (kept, seen) in [
         (Some(Vec::new()), true),
-        (hid(&[secrets.clone()]), false),
+        (hid(std::slice::from_ref(&secrets)), false),
         (None, true),
     ] {
         let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
