@@ -457,9 +457,9 @@ impl LidLine {
     }
 
     /// Brings the low power support up to date at the end of a step with the daemon enabled
-    /// (QUESTION 40a, 40d, 40e): from the view this step read, else what it was, with a hold
-    /// of it over once low power is no longer asked. Inputs: whether low power is asked, and
-    /// the time.
+    /// (QUESTION 40a, 40d, 40e): from the view this step read, else what it was while low
+    /// power is asked, else what is left once no ask runs (`unasked`). Inputs: whether low
+    /// power is asked, and the time.
     fn settle_low_power(&mut self, asked: bool, now_ms: i64) {
         if !asked {
             self.low_power_on_seen = false;
@@ -468,10 +468,7 @@ impl LidLine {
         self.low_power = match seen {
             Some((_, view)) => low_power_of(&view, asked, self.low_power_on_seen, &self.low_power),
             None if asked => self.low_power.clone(),
-            None => match &self.low_power {
-                LowPowerSupport::Held | LowPowerSupport::OwnerChanged => LowPowerSupport::Ready,
-                other => other.clone(),
-            },
+            None => unasked(&self.low_power),
         };
         self.low_power_on_seen |= asked && self.low_power == LowPowerSupport::Held;
         let ours = matches!(self.low_power, LowPowerSupport::Held | LowPowerSupport::OwnerChanged);
@@ -627,6 +624,29 @@ fn low_power_of(
         Some(false) if on_seen => LowPowerSupport::OwnerChanged,
         Some(false) => LowPowerSupport::Ready,
     }
+}
+
+/// The low power support a step with the daemon enabled leaves when no ask runs and it read
+/// no view (advisor 01:52): words about an ask that ended become ready, "Needs the lid
+/// helper" becomes unread since the helper now runs, and a Mac without the key stays so.
+/// Input: the support before. Output: the support.
+fn unasked(before: &LowPowerSupport) -> LowPowerSupport {
+    let after = match before {
+        LowPowerSupport::NotAvailable { reason } if reason == LOW_POWER_NEEDS_HELPER => {
+            LowPowerSupport::Unread
+        }
+        LowPowerSupport::NotAvailable { reason } if reason == LOW_POWER_NOT_ON_THIS_MAC => {
+            before.clone()
+        }
+        LowPowerSupport::Unread => LowPowerSupport::Unread,
+        LowPowerSupport::Ready
+        | LowPowerSupport::Held
+        | LowPowerSupport::OwnerChanged
+        | LowPowerSupport::NotAvailable { .. } => LowPowerSupport::Ready,
+    };
+    assert!(!matches!(after, LowPowerSupport::Held | LowPowerSupport::OwnerChanged));
+    assert!(*before != LowPowerSupport::Unread || after == LowPowerSupport::Unread);
+    after
 }
 
 /// A system error's words for the lid support: no control characters, at most
