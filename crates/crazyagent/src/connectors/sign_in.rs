@@ -74,13 +74,35 @@ fn unavailable() -> EngineError {
     EngineError("connector_oauth_callback_unavailable".into())
 }
 
+const FINISHING: &str = "connector_oauth_sign_in_finishing";
+
+/// Whether the owner's app may open an authorization address: https, or in rows only the
+/// loopback stand-in vendor's http address.
+fn openable(address: &url::Url) -> bool {
+    match (address.scheme(), address.host()) {
+        ("https", _) => true,
+        ("http", Some(url::Host::Ipv4(ip))) => cfg!(test) && ip == std::net::Ipv4Addr::LOCALHOST,
+        _ => false,
+    }
+}
+
+/// Whether a connector's sign-in has its browser answer claimed and still being redeemed.
+/// Inputs: the held sign-ins, the engine root and the connector.
+fn finishing(flows: &[Flow], root: &Path, name: &str) -> bool {
+    flows
+        .iter()
+        .filter(|flow| flow.root == root && flow.name == name)
+        .any(|flow| {
+            let held = locked(&flow.cell);
+            held.claimed && held.state == SignInState::Waiting
+        })
+}
+
 /// Starts a sign-in to a trusted connector through the owner's browser, asking for more
 /// scope when its server last refused a call for want of it. Inputs: the engine database,
 /// the engine root and the connector. Output: the address the owner's app opens.
 pub fn start(db: &Connection, root: &Path, name: &str) -> Result<url::Url, EngineError> {
-    let (saved, _) = settings::load(db)?;
-    let writes = saved.write != WritePolicy::ReadOnly;
-    let challenge = oauth::wanted(db, name)?;
+    let (writes, challenge) = asked(db, name)?;
     let begin = |redirect: &url::Url| match challenge.as_deref() {
         Some(challenge) => oauth::step_up(db, root, name, challenge, redirect, writes),
         None => oauth::begin(db, root, name, redirect, writes),
@@ -97,15 +119,15 @@ pub fn start(db: &Connection, root: &Path, name: &str) -> Result<url::Url, Engin
 /// How a sign-in of a connector begins now: whether the owner's setting allows writes, and
 /// the scope its server last asked for, when one did. Inputs: the engine database and the
 /// connector. Output: the two, or the refusal.
-fn asked(_db: &Connection, _name: &str) -> Result<(bool, Option<String>), EngineError> {
-    Err(EngineError("asked_not_built".into()))
+fn asked(db: &Connection, name: &str) -> Result<(bool, Option<String>), EngineError> {
+    let (saved, _) = settings::load(db)?;
+    Ok((saved.write != WritePolicy::ReadOnly, oauth::wanted(db, name)?))
 }
 
-/// Starts a sign-in with the given start and redeem steps: opens the callback, runs `begin`
-/// with its address, and waits on a thread of its own, which redeems the browser's answer
-/// with `finish` unless a cancel came first. The connector's earlier sign-in is cancelled
-/// once this one waits. Inputs: the engine root, the connector, how long to wait for the
-/// browser, and the two steps. Output: the address the owner's app opens, or the refusal.
+/// Starts a sign-in with the given steps: opens the callback, runs `begin` with its address
+/// and waits on a thread that redeems the answer with `finish` unless a cancel came first.
+/// It replaces the connector's earlier sign-in, or is refused while that one's answer is
+/// being redeemed. Inputs: root, connector, wait, steps. Output: the address, or the refusal.
 pub(crate) fn start_with<B, F>(
     root: &Path,
     name: &str,
@@ -118,13 +140,16 @@ where
     F: FnOnce(&str, &str, Option<&str>) -> Result<(), OAuthError> + Send + 'static,
 {
     assert!(!name.is_empty());
+    if finishing(&flows(), root, name) {
+        return Err(EngineError(FINISHING.into()));
+    }
     let callback = Callback::open().map_err(|_| unavailable())?;
     let begun = begin(callback.redirect());
     let Pending {
         authorize_url,
         state,
     } = begun.map_err(|refusal| EngineError(refusal.0.into()))?;
-    if authorize_url.scheme() != "https" {
+    if !openable(&authorize_url) {
         return Err(EngineError("connector_address_refused".into()));
     }
     assert!(!state.is_empty(), "a sign-in has a state");
@@ -147,7 +172,7 @@ where
         name: name.to_owned(),
         stop,
         cell,
-    });
+    })?;
     Ok(authorize_url)
 }
 
@@ -213,11 +238,16 @@ fn prune(flows: &mut Vec<Flow>) {
 }
 
 /// Holds a new sign-in: it replaces and cancels the connector's earlier one, and the oldest
-/// waiting one of its root is cancelled once `WAITING_MAX` already wait. Input: the
-/// sign-in.
-fn keep(flow: Flow) {
+/// waiting one of its root is cancelled once `WAITING_MAX` already wait. While the earlier
+/// one's answer is being redeemed, the new one is refused and its callback closes. Input:
+/// the sign-in. Output: Ok, or `connector_oauth_sign_in_finishing`.
+fn keep(flow: Flow) -> Result<(), EngineError> {
     let mut flows = flows();
     prune(&mut flows);
+    if finishing(&flows, &flow.root, &flow.name) {
+        flow.stop.store(true, Ordering::SeqCst);
+        return Err(EngineError(FINISHING.into()));
+    }
     let same = |kept: &Flow| kept.root == flow.root && kept.name == flow.name;
     if let Some(at) = flows.iter().position(same) {
         stopped(&flows.remove(at));
@@ -236,6 +266,7 @@ fn keep(flow: Flow) {
         .filter(|kept| kept.root == root && waits(kept))
         .count();
     assert!(count <= WAITING_MAX, "{count}");
+    Ok(())
 }
 
 /// Where a connector's sign-in stands. Inputs: the engine root and the connector. Output:
@@ -247,6 +278,24 @@ pub fn state_of(root: &Path, name: &str) -> SignInState {
         .iter()
         .find(|flow| flow.root == root && flow.name == name)
         .map_or(SignInState::Idle, |flow| locked(&flow.cell).state.clone())
+}
+
+/// Clears a connector's sign-in once its record or sign-in identity changed: a waiting one
+/// is cancelled and reads cancelled, one whose answer is being redeemed is left to finish,
+/// and one that already ended is forgotten, so it never reads signed in after. Inputs: the
+/// engine root and the connector.
+fn replaced(root: &Path, name: &str) {
+    let mut flows = flows();
+    prune(&mut flows);
+    let same = |flow: &Flow| flow.root == root && flow.name == name;
+    let Some(at) = flows.iter().position(same) else {
+        return;
+    };
+    if locked(&flows[at].cell).state == SignInState::Waiting {
+        stopped(&flows[at]);
+    } else {
+        flows.remove(at);
+    }
 }
 
 /// Cancels a connector's waiting sign-in and closes its callback, unless the browser's
@@ -267,8 +316,8 @@ fn refusal(error: OAuthError) -> EngineError {
 
 /// Saves the owner's own OAuth app for a connector that allows one, which then signs in
 /// with that app alone; a waiting sign-in is cancelled first, since it began with another
-/// client. Inputs: the engine database and root, the connector, the client id and the
-/// client secret of a confidential app. Output: Ok, or the refusal.
+/// client, and an ended one forgotten. Inputs: the engine database and root, the connector,
+/// the client id and the client secret of a confidential app. Output: Ok, or the refusal.
 pub fn save_own_app(
     db: &Connection,
     root: &Path,
@@ -280,24 +329,24 @@ pub fn save_own_app(
         .map(std::str::from_utf8)
         .transpose()
         .map_err(|_| EngineError("connector_oauth_client_invalid".into()))?;
-    cancel(root, name);
+    replaced(root, name);
     oauth::set_own_client(db, root, name, client_id, secret)
         .map_err(refusal)
 }
 
 /// Removes the owner's own OAuth app for a connector, which then signs in the automatic
-/// way; a waiting sign-in is cancelled first. Inputs: the engine database and root and the
-/// connector. Output: Ok, or the refusal.
+/// way; a waiting sign-in is cancelled first and an ended one forgotten. Inputs: the engine
+/// database and root and the connector. Output: Ok, or the refusal.
 pub fn clear_own_app(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
-    cancel(root, name);
+    replaced(root, name);
     oauth::clear_own_client(db, root, name).map_err(refusal)
 }
 
-/// Signs a connector out at the owner's ask: a waiting sign-in is cancelled first, then
-/// the sign-in ends with no "Sign in again" after. Inputs: the engine database and root and
-/// the connector. Output: Ok, or the refusal.
+/// Signs a connector out at the owner's ask: a waiting sign-in is cancelled first and an
+/// ended one forgotten, then the sign-in ends with no "Sign in again" after. Inputs: the
+/// engine database and root and the connector. Output: Ok, or the refusal.
 pub fn sign_out(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
-    cancel(root, name);
+    replaced(root, name);
     oauth::sign_out(db, root, name).map_err(refusal)
 }
 

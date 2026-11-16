@@ -54,6 +54,7 @@ pub const CONNECTORS_CODES: &[&str] = &[
     "connector_oauth_redirect_invalid",
     "connector_oauth_refused",
     "connector_oauth_scope_undeclared",
+    "connector_oauth_sign_in_finishing",
     "connector_oauth_state_unknown",
     "connector_oauth_step_up_limit",
     "connector_oauth_token_invalid",

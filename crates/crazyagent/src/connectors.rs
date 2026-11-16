@@ -258,6 +258,10 @@ const PLAIN: &[(&str, &str)] = &[
         "the vendor asked for access the connector's file does not declare, or for writes while they are off.",
     ),
     (
+        "connector_oauth_sign_in_finishing",
+        "this connector's last sign-in is still finishing; try again in a moment.",
+    ),
+    (
         "connector_oauth_state_unknown",
         "this sign-in has ended or was already answered; start it again.",
     ),

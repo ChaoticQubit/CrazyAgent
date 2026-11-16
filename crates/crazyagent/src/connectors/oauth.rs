@@ -43,7 +43,7 @@ pub(crate) use sign::step_up_with;
 
 /// Every sign-in refusal code this client adds beside the connector address codes of
 /// `mcp_client::MCP_CODES`, sorted.
-pub const OAUTH_CODES: [&str; 18] = [
+pub const OAUTH_CODES: [&str; 19] = [
     "connector_oauth_callback_expired",
     "connector_oauth_callback_flooded",
     "connector_oauth_callback_unavailable",
@@ -58,6 +58,7 @@ pub const OAUTH_CODES: [&str; 18] = [
     "connector_oauth_redirect_invalid",
     "connector_oauth_refused",
     "connector_oauth_scope_undeclared",
+    "connector_oauth_sign_in_finishing",
     "connector_oauth_state_unknown",
     "connector_oauth_step_up_limit",
     "connector_oauth_token_invalid",
@@ -126,6 +127,21 @@ fn own_issuer_ref(name: &str) -> Result<CredentialRef, OAuthError> {
     CredentialRef::new(format!("connector-issuer-{name}-own")).map_err(|_| key_store())
 }
 
+/// A connector's trusted file for a sign-in step, with a file waiting for the owner's review
+/// named so and any other refusal read as offering no sign-in. Inputs: database, engine
+/// root and connector. Output: the file, or `app_plugin_needs_review`, `_oauth_not_offered`.
+fn trusted(
+    db: &Connection,
+    root: &Path,
+    name: &str,
+) -> Result<crate::app_plugins::manifest::Manifest, OAuthError> {
+    let found = store::trusted_connector(db, root, name);
+    found.map_err(|problem| match problem.0.as_str() {
+        "app_plugin_needs_review" => OAuthError("app_plugin_needs_review"),
+        _ => not_offered(),
+    })
+}
+
 /// Saves the owner's own OAuth app for a trusted connector that lets the owner bring one:
 /// its client id and, for a confidential app, its secret, replacing what was saved before
 /// and freeing it from the issuer the old one was bound to. The connector's sign-in, by
@@ -140,7 +156,7 @@ pub fn set_own_client(
     id: &str,
     secret: Option<&str>,
 ) -> Result<(), OAuthError> {
-    let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
+    let manifest = trusted(db, root, name)?;
     let declared = manifest
         .connector()
         .and_then(|spec| spec.oauth.as_ref())
@@ -174,7 +190,7 @@ pub fn set_own_client(
 /// made with it ends and sign-ins begun with it are dropped. Inputs: database, engine root
 /// and connector. Output: Ok, or `connector_oauth_not_offered`, `_key_store_unavailable`.
 pub fn clear_own_client(db: &Connection, root: &Path, name: &str) -> Result<(), OAuthError> {
-    let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
+    let manifest = trusted(db, root, name)?;
     own_replaced(db, root, name, &manifest.title, now_ms(), || {
         for reference in [own_ref, own_secret_ref, own_issuer_ref] {
             let key = reference(name)?;
@@ -225,7 +241,7 @@ pub fn begin(
     redirect: &url::Url,
     writes: bool,
 ) -> Result<Pending, OAuthError> {
-    let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
+    let manifest = trusted(db, root, name)?;
     let spec = manifest.connector().ok_or_else(not_offered)?;
     let document = CLIENT_METADATA_URL
         .map(url::Url::parse)
@@ -257,7 +273,7 @@ pub fn step_up(
     redirect: &url::Url,
     writes: bool,
 ) -> Result<Pending, OAuthError> {
-    let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
+    let manifest = trusted(db, root, name)?;
     let spec = manifest.connector().ok_or_else(not_offered)?;
     let document = CLIENT_METADATA_URL
         .map(url::Url::parse)
