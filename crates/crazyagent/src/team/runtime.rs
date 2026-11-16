@@ -8184,6 +8184,9 @@ impl TeamRuntime {
     ) -> Result<Result<i64, String>, EngineError> {
         let launched = self.start_agent(stored, id, role, harness, tools, account, again, kept);
         let running = self.workers.contains_key(&id);
+        if !running {
+            self.end_connector_launch(id);
+        }
         spawn_ledger::settle(&self.connection, &self.root, id, running);
         launched
     }
@@ -9861,6 +9864,7 @@ impl TeamRuntime {
             );
             with_code(&sentence, Some(&e.0))
         })?;
+        self.open_connector_launch(&stored.project_id, id, role, tools)?;
         let context = self
             .launch_context(&stored.project_id, id, role, tools, layout, live)?
             .with_harness_settings(settings);
@@ -10165,6 +10169,16 @@ impl TeamRuntime {
             teammates = teammates
                 .map(|team| grant(team, runtime, &root, &policy, CacheShape::Teammate, &mates));
         }
+        if let Some(launch) = self
+            .connector_launches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+        {
+            sandbox = sandbox
+                .allow_connector_launch(&self.root, &launch.folder)
+                .map_err(sandboxed)?;
+        }
         if let Some(engine) = &self.delegation_tool {
             let changed = |e: EngineError| with_code("the delegate engine changed", Some(&e.0));
             let engine = engine.verified_path().map_err(changed)?;
@@ -10276,11 +10290,72 @@ impl TeamRuntime {
         self.agent_folder(id).join("tmp").join(tool::MAILBOX_FOLDER)
     }
 
+    /// Readies the connector launch of one agent run before its context is read: a tools-on
+    /// master or sub-agent of a project with a granted connector gets one, which its context
+    /// and profile then name; a launch an earlier run of the id left is ended first. Takes
+    /// the project, the agent id, its role and tools switch. Returns the owner line when the
+    /// project's connectors cannot be read.
+    fn open_connector_launch(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        role: AgentRole,
+        tools: bool,
+    ) -> Result<(), String> {
+        use crate::connectors::grants::Role;
+        self.end_connector_launch(id);
+        if !tools || role == AgentRole::Teammate || self.delegation_tool.is_none() {
+            return Ok(());
+        }
+        let (granted, name) = match role {
+            AgentRole::Master => (Role::Master, "Master".to_owned()),
+            AgentRole::Sub | AgentRole::Teammate => {
+                (Role::Agent { tools_on: true }, format!("Agent {id}"))
+            }
+        };
+        let made = crate::connectors::gateway::prepare(
+            &self.connection,
+            &self.root,
+            project.as_str(),
+            granted,
+            &name,
+        )
+        .map_err(|e| with_code("the project's connectors could not be readied", Some(&e.0)))?;
+        if let Some(launch) = made {
+            let earlier = self
+                .connector_launches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(id, launch);
+            assert!(earlier.is_none(), "an earlier run's launch was ended first");
+        }
+        Ok(())
+    }
+
     /// Ends the connector launch one agent's run holds, if any: its record and folder go,
     /// so a later call from that run is refused. Takes the agent id. A failure is logged
     /// and the record is left for the gateway's sweep of leftover launches.
     fn end_connector_launch(&self, id: i64) {
-        let _ = id;
+        let Some(launch) = self
+            .connector_launches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id)
+        else {
+            return;
+        };
+        let ended = launch
+            .folder
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| EngineError("connector_request_invalid".into()))
+            .and_then(|name| crate::connectors::gateway::end(&self.connection, &self.root, name));
+        if let Err(problem) = ended {
+            eprintln!(
+                "team_connector_launch_not_ended code={}",
+                crate::protocol::plain_code(&problem.0)
+            );
+        }
     }
 
     /// Tells whether an agent can run as a live master, its own app kept running in a pane
@@ -10431,7 +10506,25 @@ impl TeamRuntime {
             }
             None => context,
         };
-        Ok(context)
+        let launch = self
+            .connector_launches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+            .cloned();
+        match (&self.delegation_tool, launch) {
+            (Some(engine), Some(launch)) if tools => {
+                let engine = engine
+                    .verified_path()
+                    .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                let unwritten =
+                    |code: &str| with_code("the connector entry could not be written", Some(code));
+                let server = crate::connectors::launch::entry(engine, &launch)
+                    .map_err(|e| unwritten(&e.0))?;
+                context.with_connectors(server).map_err(|e| unwritten(&e.0))
+            }
+            _ => Ok(context),
+        }
     }
 
     /// Names the team role whose skill setting an agent's launch follows (DEC-111 R3): the
@@ -11007,6 +11100,14 @@ impl TeamRuntime {
                 let turn_open = worker.busy.is_some() || worker.turn_started.is_some();
                 self.waited_for.remove(&id);
                 self.access_restarts.remove(&id);
+                if worker.leave.load(Ordering::SeqCst) {
+                    self.connector_launches
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&id);
+                } else {
+                    self.end_connector_launch(id);
+                }
                 crate::coord::requeue_dead(&self.connection, id, now_ms())?;
                 if !worker.leave.load(Ordering::SeqCst) {
                     self.lead_ended(id)?;
