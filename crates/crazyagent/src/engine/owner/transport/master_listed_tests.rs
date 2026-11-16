@@ -160,9 +160,10 @@ mod launch {
         SecretString::new(SENTINEL.as_bytes().to_vec()).unwrap()
     }
 
-    /// One listed master turn's folder: a 0700 private home and worktree under the real
-    /// /tmp, an allow-all profile, the stand-in's program, and the engine, drop file and
-    /// mailbox its team server is named with.
+    /// One listed master turn's folder under the real /tmp: an agent home holding the 0700
+    /// private home T18 lays out, `<agent home>/standin-acp/row-account`, a worktree, an
+    /// allow-all profile, the stand-in's program, and the engine, drop file and mailbox its
+    /// team server is named with.
     struct Turn {
         folder: tempfile::TempDir,
         request: LaunchRequest,
@@ -179,14 +180,17 @@ mod launch {
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let base = folder.path().canonicalize().unwrap();
-        let (home, work) = (base.join("home"), base.join("work"));
-        for place in [&home, &work] {
+        let (bin, work) = (base.join("bin"), base.join("work"));
+        for place in [&bin, &work] {
             std::fs::create_dir(place).unwrap();
             std::fs::set_permissions(place, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
+        let account = crate::protocol::CredentialRef::new("row-account").unwrap();
+        let prepared = crate::harnesses::home::prepare(&base, "standin-acp", &account);
+        let home = prepared.unwrap();
         let profile = base.join("master.sb");
         std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
-        let program = base.join("standin-acp");
+        let program = bin.join("standin-acp");
         std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let request = LaunchRequest {
