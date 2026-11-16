@@ -3046,3 +3046,90 @@ async fn a_full_access_stop_names_a_process_that_left_its_group() {
     );
     assert_eq!(servers.left(&wide), None, "the names are handed out once");
 }
+
+/// RV-DS241-189: removing a recorded temp folder only moves it aside, one rename however
+/// much it holds, so no stop, shutdown or next start waits on what a session left there;
+/// the folder is removed on a thread of its own, and one no remove can finish no longer
+/// stays at its path.
+#[test]
+fn a_recorded_temp_folder_is_moved_aside_at_once_and_removed_off_the_stop_path() {
+    let (data, keys) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let folder = servers.prepare(&project("tmp-aside")).unwrap();
+    let left = crate::sandbox::toolchains::make_tmp(&keys.path().join("aside")).unwrap();
+    let shut = Path::new("deep").join("shut");
+    fs::create_dir_all(left.join(&shut).join("inner")).unwrap();
+    fs::set_permissions(left.join(&shut), fs::Permissions::from_mode(0o000)).unwrap();
+    record_server_tmp(&folder, &left);
+    remove_recorded_tmp(&folder);
+    let stayed = fs::symlink_metadata(&left).is_ok();
+    let recorded = folder.join("server-tmp").exists();
+    let prefix = format!("{}{TMP_GONE}", left.file_name().unwrap().to_str().unwrap());
+    let aside: Vec<PathBuf> = fs::read_dir(left.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect();
+    let named = aside.iter().all(|path| retired(path));
+    for path in aside.iter().chain(stayed.then_some(&left)) {
+        let _ = fs::set_permissions(path.join(&shut), fs::Permissions::from_mode(0o700));
+        let _ = fs::remove_dir_all(path);
+    }
+    assert!(!stayed, "the recorded temp folder stayed at its path");
+    assert!(!recorded, "the record stayed");
+    assert!(aside.len() <= 1, "moved aside more than once: {aside:?}");
+    assert!(named, "a moved folder is not one the start sweep removes");
+}
+
+/// RV-DS241-189: the engine-start sweep removes the temp folders an earlier engine moved
+/// aside and never finished removing, with what they hold, and leaves a folder named
+/// otherwise, one open to others, and a link in their place along with what it names.
+#[test]
+fn the_start_sweep_removes_only_temp_folders_an_earlier_engine_moved_aside() {
+    let (keys, outside) = (scratch(), scratch());
+    let gone_name = |tmp: &Path, suffix: &str| {
+        let short = tmp.file_name().unwrap().to_str().unwrap().to_owned();
+        tmp.with_file_name(format!("{short}{TMP_GONE}{suffix}"))
+    };
+    let aside = |key: &str, suffix: &str| {
+        let tmp = crate::sandbox::toolchains::make_tmp(&keys.path().join(key)).unwrap();
+        let gone = gone_name(&tmp, suffix);
+        fs::rename(&tmp, &gone).unwrap();
+        gone
+    };
+    let left = aside("left", "0123456789abcdef");
+    fs::create_dir_all(left.join("pip").join(".git")).unwrap();
+    let open = aside("open", "1123456789abcdef");
+    fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+    let named = aside("named", "not-hex-at-all!!");
+    let keep = outside.path().join("keep");
+    fs::write(&keep, "owner data\n").unwrap();
+    let link = gone_name(
+        &crate::sandbox::toolchains::tmp_path(&keys.path().join("link")),
+        "2123456789abcdef",
+    );
+    std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+    let swept = sweep_retired(usize::MAX)
+        .expect("the sweep starts")
+        .join()
+        .unwrap();
+    let removed = fs::symlink_metadata(&left).is_err();
+    let kept = [&open, &named, &link].map(|path| fs::symlink_metadata(path).is_ok());
+    let outside_kept = keep.is_file();
+    let _ = fs::remove_file(&link);
+    for path in [&left, &open, &named] {
+        let _ = fs::remove_dir_all(path);
+    }
+    assert!(
+        removed,
+        "the folder an earlier engine moved aside is still there"
+    );
+    assert!(swept >= 1, "the sweep counted no removal");
+    assert_eq!(kept, [true; 3], "open to others, named otherwise, link");
+    assert!(outside_kept, "a file behind the link was removed");
+}

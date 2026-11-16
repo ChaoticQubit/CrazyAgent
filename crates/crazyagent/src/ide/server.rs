@@ -1231,6 +1231,20 @@ fn remove_recorded_tmp(folder: &Path) {
     let _ = fs::remove_file(&record);
 }
 
+/// What a temp folder's name gains when [`remove_recorded_tmp`] moves it aside.
+const TMP_GONE: &str = "-gone-";
+
+/// Whether a path is a temp folder moved aside for removal (RV-DS241-189, red stub).
+fn retired(_path: &Path) -> bool {
+    false
+}
+
+/// Removes the temp folders an earlier engine moved aside (RV-DS241-189, red stub). Input:
+/// how many entries of the system temp folder it looks at. Output: the sweep's thread.
+fn sweep_retired(_limit: usize) -> Option<std::thread::JoinHandle<usize>> {
+    std::thread::Builder::new().spawn(|| 0).ok()
+}
+
 /// The temp folder a [`TMP_RECORD`] names, read only from a plain UTF-8 file of at most
 /// [`TMP_RECORD_BYTES_MAX`] bytes ending in a newline. Input: the record. Output: the path,
 /// or none.
