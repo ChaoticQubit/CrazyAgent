@@ -26,7 +26,7 @@ const TOKEN_FILE_BYTES_MAX: u64 = 256;
 const WEBVIEW_HOST_CHARS: usize = 52;
 const SPAN_MAX: f64 = 100_000.0;
 const LINK_GAP: Duration = Duration::from_secs(1);
-const OWN_WINDOW_TOUCH: Duration = Duration::from_secs(60);
+const TOUCH_EVERY: Duration = Duration::from_secs(60);
 const OWN_WINDOW_MIN_WIDTH: f64 = 640.0;
 const OWN_WINDOW_MIN_HEIGHT: f64 = 420.0;
 const OWN_WINDOW_TITLE_BAR: f64 = if cfg!(target_os = "macos") { 32.0 } else { 0.0 };
@@ -227,9 +227,49 @@ fn outside(url: &Url) {
     }
 }
 
+/// One project's loaded IDE webview: its label, the workbench URL it loaded, the panel it was
+/// last placed on, what the engine said the last IDE left running until a show hands it out,
+/// and the task telling the engine every minute that the IDE is still in use, so its server
+/// lives as long as the webview (DEC-187).
 struct Loaded {
     label: String,
     url: Url,
+    at: Bounds,
+    left: Option<String>,
+    beat: JoinHandle<()>,
+}
+
+impl Drop for Loaded {
+    fn drop(&mut self) {
+        self.beat.abort();
+    }
+}
+
+/// A kept IDE an open finds for its panel: the webview's label and whether the panel moved
+/// since that webview was last placed.
+#[derive(Debug)]
+struct Kept {
+    label: String,
+    resize: bool,
+}
+
+/// What a preload of a project's IDE may do: load it hidden, give way to the owner's newer open
+/// of the same project, whose server stays, or give way to another project's IDE, so the
+/// server the preload started stops.
+#[derive(Debug, PartialEq)]
+pub enum Preload {
+    Admitted,
+    Superseded,
+    Refused,
+}
+
+/// What a show of a kept IDE tells the tab: whether it was shown, and what the project's last
+/// Full access server left running, named once.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Shown {
+    pub shown: bool,
+    pub left: Option<String>,
 }
 
 #[derive(Default)]
@@ -243,18 +283,9 @@ struct Held {
     out: HashMap<String, Out>,
 }
 
-/// One project's IDE webview while it sits in a window of its own: the window's label, whether
-/// the project page closed meanwhile, and the task telling the engine the owner still uses it.
+/// One project's IDE webview while it sits in a window of its own: the window's label.
 struct Out {
     window: String,
-    page_closed: bool,
-    beat: JoinHandle<()>,
-}
-
-impl Drop for Out {
-    fn drop(&mut self) {
-        self.beat.abort();
-    }
 }
 
 /// What an open of a project finds of the project's own IDE window: none, one showing this
@@ -296,10 +327,9 @@ impl Held {
         self.opening.remove(project.as_str());
     }
 
-    /// Says what an open finds of the project's own window; an open that finds this launch's
-    /// window means the page is back, so a page close noted earlier no longer counts. Inputs:
-    /// the project and the URL the open loads. Output: what it found.
-    fn own_window(&mut self, project: &ProjectId, url: &Url) -> OwnWindow {
+    /// Says what an open finds of the project's own window. Inputs: the project and the URL
+    /// the open loads. Output: what it found.
+    fn own_window(&self, project: &ProjectId, url: &Url) -> OwnWindow {
         if !self.out.contains_key(project.as_str()) {
             return OwnWindow::Absent;
         }
@@ -307,13 +337,60 @@ impl Held {
             .loaded
             .get(project.as_str())
             .is_some_and(|loaded| loaded.url == *url);
-        if !current {
-            return OwnWindow::Stale;
+        if current {
+            OwnWindow::Stays
+        } else {
+            OwnWindow::Stale
         }
-        if let Some(out) = self.out.get_mut(project.as_str()) {
-            out.page_closed = false;
+    }
+
+    /// Finds a project's loaded IDE that can show over its panel at once, with no open. Inputs:
+    /// the project and its panel. Output: the webview's label and whether the panel moved, or
+    /// none when the IDE is not loaded or sits in its own window.
+    fn kept(&self, project: &ProjectId, panel: Bounds) -> Option<Kept> {
+        if self.out.contains_key(project.as_str()) {
+            return None;
         }
-        OwnWindow::Stays
+        self.loaded.get(project.as_str()).map(|loaded| Kept {
+            label: loaded.label.clone(),
+            resize: loaded.at != panel,
+        })
+    }
+
+    /// Lists the projects whose IDE an open of this project drops: every loaded one but this,
+    /// leaving an IDE in its own window, which is on screen (DEC-187). Input: the project.
+    /// Output: those projects.
+    fn others(&self, project: &ProjectId) -> Vec<ProjectId> {
+        self.loaded
+            .keys()
+            .filter(|name| name.as_str() != project.as_str() && !self.out.contains_key(*name))
+            .filter_map(|name| ProjectId::new(name.clone()).ok())
+            .collect()
+    }
+
+    /// Decides a preload's ticket: superseded when the project's newest open is not this one,
+    /// refused when any IDE is loaded, shown or opening, else admitted. A refused or admitted
+    /// preload's open is used up. Inputs: the project and the preload's ticket. Output: the
+    /// decision.
+    fn preload_admit(&mut self, project: &ProjectId, ticket: u64) -> Preload {
+        if self.opening.get(project.as_str()) != Some(&ticket) {
+            return Preload::Superseded;
+        }
+        self.opening.remove(project.as_str());
+        let busy = !self.loaded.is_empty() || self.shown.is_some() || !self.opening.is_empty();
+        if busy {
+            Preload::Refused
+        } else {
+            Preload::Admitted
+        }
+    }
+
+    /// Hands out what the project's last IDE left running, once. Input: the project. Output:
+    /// the note, or none.
+    fn take_left(&mut self, project: &ProjectId) -> Option<String> {
+        self.loaded
+            .get_mut(project.as_str())
+            .and_then(|loaded| loaded.left.take())
     }
 }
 
@@ -366,26 +443,10 @@ impl IdeViews {
         self.lock().out.contains_key(project.as_str())
     }
 
-    /// Whether a project's page closed while its IDE had its own window, so that page's server
-    /// stop is still owed. Input: the project. Output: true then.
-    pub fn page_left(&self, project: &ProjectId) -> bool {
-        self.lock()
-            .out
-            .get(project.as_str())
-            .is_some_and(|out| out.page_closed)
-    }
-
-    /// Keeps a project's IDE when its page closes while the IDE has its own window, noting the
-    /// close so that closing the window does the stop the page skipped. Input: the project.
-    /// Output: true when it was kept and the page's close must do nothing more.
-    pub fn keep_for_own_window(&self, project: &ProjectId) -> bool {
-        match self.lock().out.get_mut(project.as_str()) {
-            Some(out) => {
-                out.page_closed = true;
-                true
-            }
-            None => false,
-        }
+    /// The projects whose IDE an open of this project drops, so only the last used one stays
+    /// loaded (DEC-187). Input: the project. Output: those projects.
+    pub fn others(&self, project: &ProjectId) -> Vec<ProjectId> {
+        self.lock().others(project)
     }
 
     /// Notes a project page's close, before any await, when an open asked the engine for
@@ -439,7 +500,19 @@ fn failed(_: tauri::Error) -> BridgeError {
     refused("ide_webview_failed")
 }
 
-fn ide_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+/// The app menu while an IDE has the focus, built once and kept, so a show sets it with no build.
+struct IdeMenu<R: Runtime>(Menu<R>);
+
+fn ide_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    if let Some(kept) = app.try_state::<IdeMenu<R>>() {
+        return Ok(kept.0.clone());
+    }
+    let menu = build_ide_menu(app)?;
+    app.manage(IdeMenu(menu.clone()));
+    Ok(menu)
+}
+
+fn build_ide_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let name = app.package_info().name.clone();
     Menu::with_items(
         app,
@@ -487,10 +560,10 @@ fn restore_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(), BridgeError> {
     Ok(())
 }
 
-/// Shows a project's IDE over its panel: the loaded webview when its workbench is the same,
-/// else a new child webview with the input guard in every frame, a navigation lock that only
-/// refuses, and links opened as new windows sent to the browser. Any other project's IDE is
-/// hidden, and the app menu gives up Cmd+Z, W, N, P, F and comma before the IDE takes focus.
+/// Shows a project's IDE over its panel after the engine opened it: the loaded webview when its
+/// workbench is the same, else a new child webview from [`builder`] whose beat keeps the server
+/// alive while it is loaded. Any other project's IDE is hidden, and the app menu gives up Cmd+Z,
+/// W, N, P, F and comma before the IDE takes focus.
 /// Inputs: the app, the main window to add the child to, the views, the project, its
 /// workbench, the panel counted in the window and the open's ticket. Output: false once shown,
 /// true when the IDE stays in its own window, or `ide_open_cancelled` when a hide or close or a
@@ -538,6 +611,9 @@ pub fn show(
         Some(webview) => {
             webview.set_bounds(bounds.rect()).map_err(failed)?;
             webview.show().map_err(failed)?;
+            if let Some(loaded) = held.loaded.get_mut(project.as_str()) {
+                loaded.at = bounds;
+            }
             webview
         }
         None => {
@@ -550,18 +626,9 @@ pub fn show(
             }
             held.launches += 1;
             let label = format!("ide-{}-{}", hex_of(project), held.launches);
-            let server = workbench.server.clone();
-            let port = workbench.webview_port;
-            let builder = WebviewBuilder::new(&label, WebviewUrl::External(workbench.url.clone()))
-                .initialization_script_for_all_frames(GUARD)
-                .on_navigation(move |next| navigation_allowed(next, &server, port))
-                .on_new_window(|next, _| {
-                    outside(&next);
-                    NewWindowResponse::Deny
-                });
             let webview = window
                 .add_child(
-                    builder,
+                    builder(&label, &workbench),
                     LogicalPosition::new(bounds.x, bounds.y),
                     LogicalSize::new(bounds.width, bounds.height),
                 )
@@ -571,6 +638,9 @@ pub fn show(
                 Loaded {
                     label,
                     url: workbench.url,
+                    at: bounds,
+                    left: None,
+                    beat: beat(app.clone(), project.clone()),
                 },
             );
             webview
@@ -589,6 +659,122 @@ pub fn show(
     }
     webview.set_focus().map_err(failed)?;
     Ok(false)
+}
+
+/// The IDE child webview for a workbench: the input guard in every frame, a navigation lock that
+/// only refuses, and links opened as new windows sent to the browser. Inputs: the label and the
+/// workbench. Output: the builder.
+fn builder(label: &str, workbench: &Workbench) -> WebviewBuilder<tauri::Wry> {
+    let server = workbench.server.clone();
+    let port = workbench.webview_port;
+    WebviewBuilder::new(label, WebviewUrl::External(workbench.url.clone()))
+        .initialization_script_for_all_frames(GUARD)
+        .on_navigation(move |next| navigation_allowed(next, &server, port))
+        .on_new_window(|next, _| {
+            outside(&next);
+            NewWindowResponse::Deny
+        })
+}
+
+/// Shows a project's kept IDE webview over its panel with no engine call: the panel is placed
+/// only when it moved, the app menu set is the one built once, and the webview takes focus. Any
+/// other shown IDE is hidden first. Inputs: the app, the views, the project and the panel counted
+/// in the window. Output: whether it was shown, false when no IDE is kept for this project so
+/// the tab opens it, and what the last IDE left running if a preload kept that note.
+pub fn show_kept<R: Runtime>(
+    app: &AppHandle<R>,
+    views: &IdeViews,
+    project: &ProjectId,
+    InWindow(bounds): InWindow,
+) -> Result<Shown, BridgeError> {
+    let mut held = views.lock();
+    let not_kept = Shown {
+        shown: false,
+        left: None,
+    };
+    let Some(kept) = held.kept(project, bounds) else {
+        return Ok(not_kept);
+    };
+    let Some(webview) = app.get_webview(&kept.label) else {
+        held.loaded.remove(project.as_str());
+        return Ok(not_kept);
+    };
+    if let Some(other) = held.shown.take().filter(|other| other != project.as_str())
+        && let Some(hidden) = held
+            .loaded
+            .get(&other)
+            .and_then(|loaded| app.get_webview(&loaded.label))
+    {
+        hidden.hide().map_err(failed)?;
+    }
+    if kept.resize {
+        webview.set_bounds(bounds.rect()).map_err(failed)?;
+        if let Some(loaded) = held.loaded.get_mut(project.as_str()) {
+            loaded.at = bounds;
+        }
+    }
+    webview.show().map_err(failed)?;
+    held.shown = Some(project.as_str().to_owned());
+    if let Err(error) = ide_menu(app).and_then(|menu| app.set_menu(menu)) {
+        held.shown = None;
+        webview.hide().map_err(failed)?;
+        return Err(failed(error));
+    }
+    webview.set_focus().map_err(failed)?;
+    Ok(Shown {
+        shown: true,
+        left: held.take_left(project),
+    })
+}
+
+/// Loads the last used project's IDE at app start, hidden over its last panel, taking neither
+/// the focus nor the app menu, so the first show is instant (DEC-187). It gives way to any open
+/// that came meanwhile. Inputs: the app, the main window, the views, the project, its
+/// workbench, its last panel counted in the window, the preload's ticket and what the last IDE
+/// left running. Output: whether it loaded, or which open it gave way to.
+#[allow(clippy::too_many_arguments)]
+pub fn preload(
+    app: &AppHandle,
+    window: &Window,
+    views: &IdeViews,
+    project: &ProjectId,
+    workbench: Workbench,
+    InWindow(bounds): InWindow,
+    ticket: u64,
+    left: Option<String>,
+) -> Result<Preload, BridgeError> {
+    let mut held = views.lock();
+    let decision = held.preload_admit(project, ticket);
+    if decision != Preload::Admitted {
+        return Ok(decision);
+    }
+    held.launches += 1;
+    let label = format!("ide-{}-{}", hex_of(project), held.launches);
+    let webview = window
+        .add_child(
+            builder(&label, &workbench).focused(false),
+            LogicalPosition::new(bounds.x, bounds.y),
+            LogicalSize::new(bounds.width, bounds.height),
+        )
+        .map_err(failed)?;
+    let hidden = webview.hide();
+    held.loaded.insert(
+        project.as_str().to_owned(),
+        Loaded {
+            label,
+            url: workbench.url,
+            at: bounds,
+            left,
+            beat: beat(app.clone(), project.clone()),
+        },
+    );
+    hidden.map_err(failed)?;
+    #[cfg(feature = "native-webdriver")]
+    {
+        crate::ide_probe::ask_once(webview.clone());
+        crate::ide_probe::watch_windows(app.clone());
+    }
+    Ok(Preload::Admitted)
 }
 
 fn hex_of(project: &ProjectId) -> String {
@@ -651,14 +837,8 @@ pub fn move_out(
     if was_shown {
         held.shown = None;
     }
-    held.out.insert(
-        project.as_str().to_owned(),
-        Out {
-            window: label,
-            page_closed: false,
-            beat: beat(app.clone(), project.clone()),
-        },
-    );
+    held.out
+        .insert(project.as_str().to_owned(), Out { window: label });
     if let Err(error) = settle(app, &window, &webview, project) {
         held.out.remove(project.as_str());
         if was_shown {
@@ -710,17 +890,28 @@ fn watch_own_window(app: &AppHandle, window: &Window, webview: &Webview, project
     });
 }
 
+/// Tells the engine every minute that a loaded IDE is still in use, so its server lives as long
+/// as the webview, and drops the IDE once the engine says its server has gone. Inputs: the app
+/// and the project. Output: the task, aborted when the IDE is dropped.
 fn beat(app: AppHandle, project: ProjectId) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<crate::NativeState>();
         loop {
-            tokio::time::sleep(OWN_WINDOW_TOUCH).await;
+            tokio::time::sleep(TOUCH_EVERY).await;
             if matches!(touch(&state, &project).await, Ok(false)) {
-                tauri::async_runtime::spawn(window_closed(app.clone(), project.clone()));
+                tauri::async_runtime::spawn(server_gone(app.clone(), project.clone()));
                 return;
             }
         }
     })
+}
+
+/// Drops a project's IDE whose server has gone: its own window closes and its webview closes,
+/// so the next open loads the new server. Inputs: the app and the project. Output: none.
+async fn server_gone<R: Runtime>(app: AppHandle<R>, project: ProjectId) {
+    let views = app.state::<IdeViews>();
+    let _ = bring_home(&app, &views, &project);
+    let _ = close(&app, &views, &project);
 }
 
 async fn touch(state: &crate::NativeState, project: &ProjectId) -> Result<bool, BridgeError> {
@@ -777,26 +968,22 @@ pub fn main_focused(app: &AppHandle) {
     follow_focus(app.clone());
 }
 
-/// Handles the close of a project's own window: the webview goes back to the main window hidden,
-/// and when the project page closed meanwhile the IDE stops as that close would have stopped it.
-/// Inputs: the app and the project. Output: none; a window whose IDE already went home is left.
+/// Handles the close of a project's own window: the webview goes back to the main window hidden
+/// and stays loaded as the last used IDE (DEC-187). Inputs: the app and the project. Output:
+/// none; a window whose IDE already went home is left.
 async fn window_closed<R: Runtime>(app: AppHandle<R>, project: ProjectId) {
     let views = app.state::<IdeViews>();
-    let Ok(true) = bring_home(&app, &views, &project) else {
-        return;
-    };
-    let state = app.state::<crate::NativeState>();
-    let _ = crate::close_ide(&app, &state, &views, &project).await;
+    let _ = bring_home(&app, &views, &project);
 }
 
 fn bring_home<R: Runtime>(
     app: &AppHandle<R>,
     views: &IdeViews,
     project: &ProjectId,
-) -> Result<bool, BridgeError> {
+) -> Result<(), BridgeError> {
     let mut held = views.lock();
     let Some(out) = held.out.remove(project.as_str()) else {
-        return Ok(false);
+        return Ok(());
     };
     views.1.store(false, Ordering::SeqCst);
     let webview = held
@@ -819,20 +1006,15 @@ fn bring_home<R: Runtime>(
     if held.shown.is_none() {
         restore_menu(app)?;
     }
-    Ok(out.page_closed)
+    Ok(())
 }
 
 /// Closes IDE windows for good, with their webviews: one project's when it is removed, every one
-/// when the main window has gone. A named project whose page had already closed also gets the
-/// server stop that close skipped. It runs off the main thread, since it is called from there.
+/// when the main window has gone. It runs off the main thread, since it is called from there.
 /// Inputs: the app and the project, if any. Output: none.
 pub fn shut_own_windows<R: Runtime>(app: AppHandle<R>, project: Option<ProjectId>) {
     tauri::async_runtime::spawn(async move {
         let views = app.state::<IdeViews>();
-        if let Some(one) = project.as_ref().filter(|one| views.page_left(one)) {
-            window_closed(app.clone(), one.clone()).await;
-            return;
-        }
         let mut held = views.lock();
         let going: Vec<String> = held
             .out
@@ -872,23 +1054,27 @@ pub fn place<R: Runtime>(
     project: &ProjectId,
     InWindow(bounds): InWindow,
 ) -> Result<(), BridgeError> {
-    let held = views.lock();
+    let mut held = views.lock();
     if held.shown.as_deref() != Some(project.as_str()) {
         return Ok(());
     }
-    if let Some(webview) = held
-        .loaded
-        .get(project.as_str())
-        .and_then(|loaded| app.get_webview(&loaded.label))
-    {
+    let Some(loaded) = held.loaded.get_mut(project.as_str()) else {
+        return Ok(());
+    };
+    if loaded.at == bounds {
+        return Ok(());
+    }
+    if let Some(webview) = app.get_webview(&loaded.label) {
         webview.set_bounds(bounds.rect()).map_err(failed)?;
+        loaded.at = bounds;
     }
     Ok(())
 }
 
-/// Hides a project's IDE webview when its tab is left or an overlay covers it, keeping it
-/// loaded, stops an open of it still waiting for the engine, and gives the app its own menu
-/// back. Inputs: the app, the views and the project. Output: Ok.
+/// Hides a project's IDE webview when its tab or its page is left or an overlay covers it,
+/// keeping it loaded with its server (DEC-187), stops an open of it still waiting for the
+/// engine, and gives the app its own menu back. Inputs: the app, the views and the project.
+/// Output: Ok.
 pub fn hide<R: Runtime>(
     app: &AppHandle<R>,
     views: &IdeViews,
@@ -910,9 +1096,10 @@ pub fn hide<R: Runtime>(
     restore_menu(app)
 }
 
-/// Closes a project's IDE webview when the project page closes, stops an open of it still
-/// waiting for the engine, and gives the app its own menu back if that IDE was shown.
-/// Inputs: the app, the views and the project. Output: Ok.
+/// Closes a project's IDE webview when another project's IDE replaces it, its project is removed
+/// or its server has gone, stops an open of it still waiting for the engine, and gives the app
+/// its own menu back if that IDE was shown. Inputs: the app, the views and the project.
+/// Output: Ok.
 pub fn close<R: Runtime>(
     app: &AppHandle<R>,
     views: &IdeViews,

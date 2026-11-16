@@ -67,7 +67,7 @@ export function ideAnswers(bridge, opened) {
     },
     desktop_ide_place: none,
     desktop_ide_hide: none,
-    desktop_ide_close: none,
+    desktop_ide_show: async () => ({ value: { shown: false, left: null } }),
     desktop_ide_focus: none,
   };
 }
