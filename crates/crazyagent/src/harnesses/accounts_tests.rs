@@ -296,22 +296,23 @@ fn an_accounts_block_hands_over_only_the_relay_url_the_placeholder_and_the_model
 }
 
 /// Task 17: a team start whose pool has no account for a listed harness gets one plain
-/// sentence from the engine, naming the Add account providers whose accounts fit it, or
-/// saying that none does yet.
+/// sentence from the engine, naming each kind of account that fits it once, by provider and
+/// sign-in method (rv-code T17 r1 F2: never a whole provider whose sign-in does not fit),
+/// or saying that none does yet.
 #[test]
 fn a_listed_harness_names_the_kinds_of_account_that_fit_it_when_its_pool_has_none() {
     let line =
         |protocols: &[&str], accounts: &str| no_account_line(&built(protocols, accounts).all()[0]);
     assert_eq!(
         line(&["openai-chat"], OPENAI_ENV),
-        "No account in this project's pool can run Row Harness. Accounts that fit it: ChatGPT / Codex, OpenRouter, OpenAI API, Any OpenAI-compatible URL or Local models (Ollama)"
+        "No account in this project's pool can run Row Harness. Accounts that fit it: an OpenAI API key, an OpenRouter API key, an OpenAI-compatible URL or a local model (Ollama)"
     );
     assert_eq!(
         line(
             &["anthropic-messages"],
             "accounts:\n  anthropic-messages:\n    env:\n      ANTHROPIC_API_KEY: \"{token}\"\n"
         ),
-        "No account in this project's pool can run Row Harness. Accounts that fit it: Claude or Anthropic API"
+        "No account in this project's pool can run Row Harness. Accounts that fit it: an Anthropic API key"
     );
     assert_eq!(
         line(&[], ""),
