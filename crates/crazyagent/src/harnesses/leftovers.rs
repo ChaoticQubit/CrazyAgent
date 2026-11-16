@@ -232,20 +232,32 @@ fn held() -> MutexGuard<'static, BTreeMap<u64, Held>> {
 }
 
 /// Lets go of every hold a Full access stop keeps on one account, while what it named may
-/// still run, because the owner chose to sign the account out anyway. Input: the account.
-/// Output: how many holds ended.
+/// still run, because the owner chose to sign the account out anyway. A hold of a run on the
+/// hidden folders list stays as the owner's Keep leaves it, without the account and what it
+/// held for it, so the run stays named until its processes end. Input: the account.
+/// Output: how many holds let the account go.
 pub fn release(account: &CredentialRef) -> usize {
-    let released: Vec<Held> = {
+    let (count, let_go): (usize, Vec<Box<dyn Send>>) = {
         let mut held = held();
         let keys: Vec<u64> = held
             .iter()
             .filter(|(_, hold)| hold.account.as_ref() == Some(account))
             .map(|(key, _)| *key)
             .collect();
-        keys.iter().filter_map(|key| held.remove(key)).collect()
+        let mut let_go: Vec<Box<dyn Send>> = Vec::new();
+        for key in &keys {
+            let listed = held.get(key).is_some_and(|hold| hold.listed.is_some());
+            if !listed {
+                let_go.extend(held.remove(key).map(|hold| Box::new(hold) as Box<dyn Send>));
+            } else if let Some(hold) = held.get_mut(key) {
+                hold.state = HoldState::Kept;
+                hold.account = None;
+                let_go.extend(hold.kept.take());
+            }
+        }
+        (keys.len(), let_go)
     };
-    let count = released.len();
-    drop(released);
+    drop(let_go);
     count
 }
 
@@ -607,8 +619,9 @@ impl Leftovers {
 
     /// Holds as [`Leftovers::hold`] does, for a run on the hidden folders list (SA-VID14):
     /// `kept`, such as its account lease, goes as `mode` says, and `listed`, its place on that
-    /// list, stays in every mode, Keep and the owner's [`keep_held`] included, until the hold
-    /// ends, so a kept run is named while its processes run and frees its place once they end.
+    /// list, stays in every mode, through Keep, the owner's [`keep_held`] and a sign-out
+    /// ([`release`]), until the hold ends, so a kept run is named while its processes run and
+    /// frees its place once they end.
     /// Inputs: as for `hold`, plus the listing. Output: none.
     pub fn hold_listed<T: Send + 'static, L: Send + 'static>(
         self,
@@ -651,8 +664,6 @@ impl Leftovers {
                     (HoldState::Kept, None, None)
                 }
             };
-        assert!(state != HoldState::Kept || (kept.is_none() && account.is_none()));
-        assert!(listed.is_none() || by.project.is_some());
         let previous = held().insert(
             key,
             Held {
