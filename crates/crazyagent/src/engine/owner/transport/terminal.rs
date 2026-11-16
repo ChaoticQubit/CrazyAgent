@@ -639,13 +639,12 @@ async fn watch(
     stream: UnixStream,
     packet: &[u8; 37],
     admission: Admission,
-    mut viewer: TerminalStream,
+    viewer: TerminalStream,
     host: Arc<dyn Host>,
     member: Option<i64>,
     engine: &Engine,
     authority: &Authority,
 ) {
-    let agent = viewer.agent.clone();
     let database = engine_root(authority)
         .ok()
         .map(|root| root.join("engine.db"));
@@ -662,72 +661,19 @@ async fn watch(
         }
     });
     let replayed = replay(&mut writer, &viewer, engine, authority, packet, &admission).await;
-    let mut check = tokio::time::interval(GRANT_CHECK);
     let reason = match replayed {
         Err(reason) => reason,
-        Ok(()) => loop {
-            tokio::select! {
-                chunk = viewer.next() => match chunk {
-                    Some(Chunk::Output(bytes)) => {
-                        if write(&mut writer, &TerminalFrame::Output { bytes }).await.is_err() {
-                            break VIEWER_GONE;
-                        }
-                    }
-                    Some(Chunk::Behind) => match attach_again(host.clone(), agent.clone()).await {
-                        Ok(fresh) => {
-                            viewer = fresh;
-                            if redraw(&mut writer, &viewer).await.is_err() {
-                                break VIEWER_GONE;
-                            }
-                        }
-                        Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
-                        Err(_) => break "terminal_unavailable",
-                    },
-                    None => break "terminal_ended",
-                },
-                request = asked.recv() => match request {
-                    None | Some(TerminalRequest::Detach) => break "terminal_detached",
-                    Some(
-                        TerminalRequest::Attach { .. }
-                        | TerminalRequest::AttachPane { .. }
-                        | TerminalRequest::AttachSized { .. },
-                    ) => {
-                        break "terminal_request_invalid";
-                    }
-                    Some(_) if !still_granted(authority, packet, &admission) => {
-                        break GRANT_ENDED;
-                    }
-                    Some(request) => {
-                        if let (Some(keys), Some(member)) = (owner_keys(&request), member)
-                            && let Some(agents) = engine.agents_if_open()
-                        {
-                            agents.typing().record(member, keys, crate::team::now_ms());
-                        }
-                        match request {
-                            TerminalRequest::Prompt { text } => {
-                                let typed = prompt(&host, &agent, text.clone()).await;
-                                if typed.as_ref().is_err_and(|error| crate::terminal::ended_code(&error.0)) {
-                                    break "terminal_ended";
-                                }
-                                if let (Ok(true), Some(member), Some(database)) = (typed, member, &database) {
-                                    heard(database.clone(), member, text).await;
-                                }
-                            }
-                            request => {
-                                if act(&host, &agent, viewer.at.clone(), request).await.is_err_and(|error| crate::terminal::ended_code(&error.0)) {
-                                    break "terminal_ended";
-                                }
-                            }
-                        }
-                    }
-                },
-                _ = check.tick() => {
-                    if granted(engine, authority, packet).await.ok().as_ref() != Some(&admission) {
-                        break GRANT_ENDED;
-                    }
-                }
-            }
-        },
+        Ok(()) => {
+            let grant = Grant {
+                engine,
+                authority,
+                packet,
+                admission: &admission,
+                member,
+                database,
+            };
+            pump(&mut writer, viewer, &mut asked, host, &grant).await
+        }
     };
     listener.abort();
     if reason != VIEWER_GONE {
@@ -737,6 +683,138 @@ async fn watch(
         let _ = write(&mut writer, &closed).await;
     }
     let _ = writer.shutdown().await;
+}
+
+/// What a view's loop asks of the engine: whether the owner's grant still stands, read right
+/// before each send and on each grant check, and the owner's keys and prompts it records.
+/// The engine's answer is [`Grant`]; a row stands in for it to hold a send.
+#[cfg(unix)]
+trait Viewing {
+    fn allows(&self) -> bool;
+    fn holds(&self) -> impl Future<Output = bool> + Send;
+    fn typed(&self, request: &TerminalRequest);
+    fn heard(&self, text: String) -> impl Future<Output = ()> + Send;
+}
+
+/// One view's owner grant as the engine reads it, with the team agent its owner keys and
+/// prompts count for and the database that records a prompt heard.
+#[cfg(unix)]
+struct Grant<'a> {
+    engine: &'a Engine,
+    authority: &'a Authority,
+    packet: &'a [u8; 37],
+    admission: &'a Admission,
+    member: Option<i64>,
+    database: Option<PathBuf>,
+}
+
+#[cfg(unix)]
+impl Viewing for Grant<'_> {
+    fn allows(&self) -> bool {
+        still_granted(self.authority, self.packet, self.admission)
+    }
+
+    fn holds(&self) -> impl Future<Output = bool> + Send {
+        async move {
+            granted(self.engine, self.authority, self.packet)
+                .await
+                .ok()
+                .as_ref()
+                == Some(self.admission)
+        }
+    }
+
+    fn typed(&self, request: &TerminalRequest) {
+        if let (Some(keys), Some(member)) = (owner_keys(request), self.member)
+            && let Some(agents) = self.engine.agents_if_open()
+        {
+            agents.typing().record(member, keys, crate::team::now_ms());
+        }
+    }
+
+    fn heard(&self, text: String) -> impl Future<Output = ()> + Send {
+        let recorded = self.member.zip(self.database.clone());
+        async move {
+            if let Some((member, database)) = recorded {
+                heard(database, member, text).await;
+            }
+        }
+    }
+}
+
+/// Streams one attached view until it ends: the agent's output as it comes, a fresh viewer
+/// once it fell behind, and the owner's requests in order, each sent only while the grant
+/// allows it. Takes the writer, the viewer, the request queue, the host the viewer came from
+/// and the grant. Returns the reason the view ended.
+#[cfg(unix)]
+async fn pump(
+    writer: &mut (impl AsyncWrite + Unpin),
+    mut viewer: TerminalStream,
+    asked: &mut tokio::sync::mpsc::Receiver<TerminalRequest>,
+    host: Arc<dyn Host>,
+    viewing: &impl Viewing,
+) -> &'static str {
+    let agent = viewer.agent.clone();
+    let mut check = tokio::time::interval(GRANT_CHECK);
+    loop {
+        tokio::select! {
+            chunk = viewer.next() => match chunk {
+                Some(Chunk::Output(bytes)) => {
+                    if write(writer, &TerminalFrame::Output { bytes }).await.is_err() {
+                        break VIEWER_GONE;
+                    }
+                }
+                Some(Chunk::Behind) => match attach_again(host.clone(), agent.clone()).await {
+                    Ok(fresh) => {
+                        viewer = fresh;
+                        if redraw(writer, &viewer).await.is_err() {
+                            break VIEWER_GONE;
+                        }
+                    }
+                    Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
+                    Err(_) => break "terminal_unavailable",
+                },
+                None => break "terminal_ended",
+            },
+            request = asked.recv() => match request {
+                None | Some(TerminalRequest::Detach) => break "terminal_detached",
+                Some(
+                    TerminalRequest::Attach { .. }
+                    | TerminalRequest::AttachPane { .. }
+                    | TerminalRequest::AttachSized { .. },
+                ) => {
+                    break "terminal_request_invalid";
+                }
+                Some(_) if !viewing.allows() => {
+                    break GRANT_ENDED;
+                }
+                Some(request) => {
+                    viewing.typed(&request);
+                    match request {
+                        TerminalRequest::Prompt { text } => {
+                            let typed = prompt(&host, &agent, text.clone()).await;
+                            if typed.as_ref().is_err_and(|error| crate::terminal::ended_code(&error.0)) {
+                                break "terminal_ended";
+                            }
+                            if matches!(typed, Ok(true)) {
+                                viewing.heard(text).await;
+                            }
+                        }
+                        request => {
+                            if act(&host, &agent, viewer.at.clone(), request).await.is_err_and(|error| crate::terminal::ended_code(&error.0)) {
+                                break "terminal_ended";
+                            }
+                        }
+                    }
+                }
+            },
+            _ = check.tick() => {
+                if !viewing.holds().await {
+                    break GRANT_ENDED;
+                }
+            }
+        }
+    }
 }
 
 /// Serves one owner terminal connection: checks the owner and attaches within the attach

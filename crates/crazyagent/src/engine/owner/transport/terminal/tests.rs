@@ -300,3 +300,138 @@ fn wheel_keys_and_a_views_own_reports_never_count_as_owner_keys() {
         "a wheel request carrying other keys counts as the owner typing (OB10-L1)"
     );
 }
+
+/// How long a held send waits for its row before it answers anyway, so a failed row never
+/// leaves a blocking thread behind.
+const HELD: Duration = Duration::from_secs(5);
+
+/// A host whose every send of typed bytes reports them and then waits until the row lets it
+/// go, at most `HELD`, as a tmux server slow to answer `send-keys` does; every other call
+/// answers at once.
+struct Holding {
+    started: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Host for Holding {
+    fn spawn(
+        &self,
+        _: &AgentId,
+        _: &InteractiveCommand,
+    ) -> Result<crate::terminal::PaneRef, HostError> {
+        Err(HostError("terminal_unavailable".into()))
+    }
+
+    fn attach(&self, _: &AgentId) -> Result<TerminalStream, HostError> {
+        Err(HostError("terminal_agent_unknown".into()))
+    }
+
+    fn input(&self, _: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
+        let _ = self.started.send(bytes.to_vec());
+        let _ = self.release.lock().unwrap().recv_timeout(HELD);
+        Ok(())
+    }
+
+    fn resize(&self, _: &AgentId, _: u16, _: u16) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    fn kill(&self, _: &AgentId) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    fn alive(&self) -> Result<Vec<AgentId>, HostError> {
+        Ok(Vec::new())
+    }
+}
+
+/// A grant that always stands and records nothing, so a row drives a view's loop alone.
+struct Open;
+
+impl Viewing for Open {
+    fn allows(&self) -> bool {
+        true
+    }
+
+    fn holds(&self) -> impl Future<Output = bool> + Send {
+        async { true }
+    }
+
+    fn typed(&self, _: &TerminalRequest) {}
+
+    fn heard(&self, _: String) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+}
+
+/// v242 typing B (BRIEF-typing-path): a send waiting on the host never stops the view's
+/// output: what the agent prints while a typed key's send is held reaches the viewer before
+/// that send answers, and the next key waits for that answer, so keys stay in order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn output_reaches_the_view_while_a_typed_keys_send_is_held() {
+    let (started, mut sends) = tokio::sync::mpsc::unbounded_channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let host: Arc<dyn Host> = Arc::new(Holding {
+        started,
+        release: std::sync::Mutex::new(released),
+    });
+    let (feed, chunks) = crate::terminal::buffer::buffer();
+    let viewer = TerminalStream {
+        agent: AgentId::team(1).unwrap(),
+        cols: 80,
+        rows: 24,
+        history: Vec::new(),
+        screen: Vec::new(),
+        chunks,
+        at: None,
+    };
+    let (requests, mut asked) = tokio::sync::mpsc::channel(REQUESTS_QUEUED);
+    let (mut ours, mut theirs) = tokio::io::duplex(1 << 16);
+    let pumping =
+        tokio::spawn(async move { pump(&mut ours, viewer, &mut asked, host, &Open).await });
+    for key in [b"a", b"b"] {
+        let bytes = key.to_vec();
+        requests
+            .send(TerminalRequest::Input { bytes })
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        tokio::time::timeout(WAIT, sends.recv()).await,
+        Ok(Some(b"a".to_vec())),
+        "the first key's send started"
+    );
+
+    assert!(feed.push(b"printed-while-held"));
+    let frame = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut theirs))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|frame| serde_json::from_slice::<TerminalFrame>(&frame[4..]).ok());
+    assert_eq!(
+        frame,
+        Some(TerminalFrame::Output {
+            bytes: b"printed-while-held".to_vec()
+        }),
+        "output reached the view while a typed key's send was held"
+    );
+    assert!(
+        sends.try_recv().is_err(),
+        "the next key waits for the held send's answer"
+    );
+
+    release.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(WAIT, sends.recv()).await,
+        Ok(Some(b"b".to_vec())),
+        "keys are sent in the order typed"
+    );
+    release.send(()).unwrap();
+    drop(requests);
+    assert_eq!(
+        tokio::time::timeout(WAIT, pumping).await.map(Result::ok),
+        Ok(Some("terminal_detached")),
+        "the view ends as detached once its requests end"
+    );
+    drop(feed);
+}
