@@ -11,6 +11,13 @@ const CALL_MS = 15000;
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
 const PAGE = '<!doctype html><html lang="en"><head></head><body></body></html>';
 
+/** A page script that cancels every key press made with Cmd (Meta) held, before any page
+ * handler runs, which still sees the key. Chrome on macOS hands a key press its page left
+ * uncancelled to the Mac menu bar, so a Cmd key a test sent through DevTools opened About This
+ * Mac on the owner's screen (ABOUT-THIS-MAC); a cancelled one ends in the page. */
+export const MAC_MENU_GUARD = 'addEventListener("keydown", (event) => { if (event.metaKey) event.preventDefault(); }, true);';
+const GUARDED = '(() => { const press = new KeyboardEvent("keydown", { key: "c", metaKey: true, cancelable: true }); dispatchEvent(press); return press.defaultPrevented; })()';
+
 /** Bundles one test fixture and the production modules it imports into a script that defines
  * `Fixture` in the page. Input: the fixture path. Output: the script text. */
 export async function bundle(fixture) {
@@ -134,6 +141,9 @@ export async function withPage(check) {
         };
         await evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close();`);
         assert.equal(await evaluate("document.compatMode"), "CSS1Compat", "the page is in standards mode, as the app's page is");
+        await evaluate(MAC_MENU_GUARD);
+        await page.send("Page.addScriptToEvaluateOnNewDocument", { source: MAC_MENU_GUARD });
+        assert.equal(await evaluate(GUARDED), true, "a Cmd key press ends in the page, never in the Mac menu bar");
         await page.send("Emulation.setFocusEmulationEnabled", { enabled: true });
         assert.equal(await evaluate("document.hasFocus()"), true, "the page has focus, as the app window does");
         return await check({ evaluate, send: page.send, on: page.on, context: browserContextId });

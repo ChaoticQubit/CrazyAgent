@@ -43,7 +43,7 @@ test("each master input choice says whether keys reach the terminal and whether 
 const fixture = await bundle(new URL("./fixtures/live-master.mjs", import.meta.url).pathname);
 
 async function keyPress(send, modifiers) {
-  const event = { modifiers, key: "c", code: "KeyC", windowsVirtualKeyCode: 67, nativeVirtualKeyCode: 67 };
+  const event = { modifiers, key: "c", code: "KeyC", windowsVirtualKeyCode: 67, nativeVirtualKeyCode: 8 };
   await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...event });
   if (modifiers === 0) await send("Input.dispatchKeyEvent", { type: "char", text: "c", ...event });
   await send("Input.dispatchKeyEvent", { type: "keyUp", ...event });
