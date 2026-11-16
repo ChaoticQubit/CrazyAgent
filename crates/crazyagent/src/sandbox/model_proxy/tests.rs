@@ -634,7 +634,7 @@ fn a_tunnel_dials_no_address_on_this_machine_but_keeps_the_local_network() {
 /// Google, OCI, Akamai and Scaleway. Their neighbours stay dialable.
 #[test]
 fn a_tunnel_dials_no_cloud_metadata_service() {
-    for address in [
+    let listed = [
         "100.100.100.200",
         "168.63.129.16",
         "fd00:ec2::254",
@@ -643,9 +643,17 @@ fn a_tunnel_dials_no_cloud_metadata_service() {
         "fd00:c1::a9fe:a9fe",
         "fd00:a9fe:a9fe::1",
         "fd00:42::42",
-        "::ffff:100.100.100.200",
-        "::ffff:168.63.129.16",
-    ] {
+    ];
+    let parsed: Vec<IpAddr> = listed.iter().map(|text| text.parse().unwrap()).collect();
+    assert_eq!(
+        parsed,
+        super::super::CLOUD_METADATA,
+        "the list as its sources write it"
+    );
+    for address in listed
+        .into_iter()
+        .chain(["::ffff:100.100.100.200", "::ffff:168.63.129.16"])
+    {
         assert!(!dialable(address.parse().unwrap()), "{address}");
     }
     for address in ["100.100.100.100", "168.63.129.17", "fd00:ec2::255"] {

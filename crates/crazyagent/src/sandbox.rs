@@ -6,6 +6,7 @@ use std::fs::OpenOptions;
 use std::io;
 #[cfg(unix)]
 use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
@@ -993,6 +994,22 @@ pub const ADMIN_LINKS: [&str; 2] = ["commondir", "gitdir"];
 /// stands on and the config git reads for that worktree alone. Seatbelt denies each by name
 /// and the Linux call supervisor holds each (DEC-185 S2a).
 pub const ADMIN_WRITES: [&str; 2] = ["HEAD", "config.worktree"];
+
+/// The cloud metadata and credential services a VM reaches outside the link-local range,
+/// which no routed agent and no engine tunnel may reach (CLOUD-METADATA-ADDRS): Alibaba ECS
+/// and Azure's WireServer over IPv4; AWS IMDS, AWS EKS Pod Identity, Google, OCI, Akamai and
+/// Scaleway over IPv6. Only these addresses, so the rest of their ranges, such as Tailscale's
+/// 100.100.100.100, stays reachable.
+pub(crate) const CLOUD_METADATA: [IpAddr; 8] = [
+    IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200)),
+    IpAddr::V4(Ipv4Addr::new(168, 63, 129, 16)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0023)),
+    IpAddr::V6(Ipv6Addr::new(0xfd20, 0x00ce, 0, 0, 0, 0, 0, 0x0254)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0x00c1, 0, 0, 0, 0, 0xa9fe, 0xa9fe)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0xa9fe, 0xa9fe, 0, 0, 0, 0, 0x0001)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0x0042, 0, 0, 0, 0, 0, 0x0042)),
+];
 
 /// The lowest port a loopback bridge carries on Linux: inside a network namespace of its
 /// own an agent's helper has no capability to listen below it.
