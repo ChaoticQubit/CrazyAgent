@@ -15,10 +15,11 @@ const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
 const EXCLUDES_LOOKUP_TIME: Duration = Duration::from_secs(10);
 const CHECK_LINE_BYTES_MAX: usize = 80;
 
-/// The excludes setting a confined Linux step's git takes in place of the owner's ignore
-/// file, which that step may not read (SA vid 2): an empty file, so git applies no
-/// excludes file at all and never warns about one it cannot open.
-#[cfg(target_os = "linux")]
+/// The excludes setting a confined step's git takes in place of the owner's ignore file,
+/// which a step that writes an object or the work tree may not read (SA vid 2,
+/// [`Repo::step_excludes`]): an empty file, so git applies no excludes file at all and never
+/// warns about one it cannot open.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) const NO_EXCLUDES: &str = "core.excludesFile=/dev/null";
 
 #[cfg(test)]
@@ -387,7 +388,8 @@ pub(super) struct Repo {
 /// The Seatbelt profile of one engine git step on an agent's work tree (SECAUDIT
 /// unconfined-git-add-reads-through-raced-symlink, unconfined-read-tree-u): it reads only the
 /// system, its own toolchain, the work tree, the repository's git folder, the owner's ignore
-/// file and the index it works on with its lock, which git opens read-write, and writes only
+/// file for a reading step alone (/dev/null for any other, [`Repo::step_excludes`]) and the
+/// index it works on with its lock, which git opens read-write, and writes only
 /// what the step names and that index, the worktree's own or the engine's private one, never
 /// the repository's `hooks` or `config`, whatever an agent swaps a path for during the step.
 /// Paths reach it as parameters, so no path text is read as profile text.
@@ -399,8 +401,9 @@ const WORK_TREE_PROFILE: &str = "(version 1)\n\
 
 /// What one confined git step may write besides the index it works on: the object store,
 /// for a step that hashes the work tree, the work tree, for one that fills it, or nothing,
-/// for one that only reads it ([`Repo::reading`]). Only a step that writes no object may read
-/// the owner's ignore file on Linux, so a link swapped in can never hash it (SA vid 2).
+/// for one that only reads it ([`Repo::reading`]). Only a step that writes nothing but its
+/// index may read the owner's ignore file, on macOS and Linux alike, so a link swapped in can
+/// never hash it (SA vid 2, [`Repo::step_excludes`]).
 #[derive(Clone, Copy)]
 pub(super) enum Writes {
     Objects,
@@ -589,12 +592,12 @@ impl Repo {
             .filter(|root| root.parent().is_some())
             .ok_or_else(unsupported)?
             .to_path_buf();
-        let excludes = self
-            .excludes
-            .as_deref()
-            .and_then(|setting| setting.strip_prefix("core.excludesFile="))
+        let setting = self.step_excludes(writes);
+        let excludes = setting
+            .strip_prefix("core.excludesFile=")
             .and_then(|path| std::fs::canonicalize(path).ok())
             .unwrap_or_else(|| PathBuf::from("/dev/null"));
+        assert!(matches!(writes, Writes::Index) || excludes == Path::new("/dev/null"));
         let target = match writes {
             Writes::Objects => common.join("objects"),
             Writes::WorkTree => work.clone(),
@@ -625,8 +628,25 @@ impl Repo {
         ]);
         Ok(Self {
             confinement,
+            excludes: Some(setting),
             ..self.clone()
         })
+    }
+
+    /// The excludes setting one confined step's git takes, the one rule macOS and Linux share:
+    /// the owner's ignore file for a step that writes nothing but its index ([`Writes::Index`]),
+    /// else none ([`NO_EXCLUDES`]), so no step that writes an object or the work tree may read
+    /// that file, which a link swapped in during the step would hand to its git (SA vid 2). A
+    /// turn end's add applies that file's patterns as names instead (`flow::add_pathspecs`).
+    /// Input: what the step may write. Output: the `core.excludesFile=` setting.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn step_excludes(&self, writes: Writes) -> String {
+        let setting = match &self.excludes {
+            Some(owner) if matches!(writes, Writes::Index) => owner.clone(),
+            _ => NO_EXCLUDES.to_owned(),
+        };
+        assert!(setting.starts_with("core.excludesFile="));
+        setting
     }
 
     /// This repository with its git calls started by the Landlock helper under
@@ -638,8 +658,8 @@ impl Repo {
     /// file ([`NO_EXCLUDES`]), and a
     /// turn end applies that file's patterns as names instead (`flow::add_pathspecs`). So a
     /// `read-tree -u` counts an untracked file only that file names as the agent's and refuses
-    /// to write over it, failing closed where macOS writes over it (rv-sec3 F1). A step that
-    /// reads the work tree writes the object store and the engine's step folder in the
+    /// to write over it, failing closed, as on macOS (rv-sec3 F1, [`Self::step_excludes`]). A
+    /// step that reads the work tree writes the object store and the engine's step folder in the
     /// worktree's git folder, where it works on a copy of the index ([`Self::swapped`]). A
     /// step that may write the work tree writes only the work tree, and its index-only gits
     /// only that folder ([`Self::moved`]), so no git that writes a work-tree path, which a link
@@ -667,10 +687,7 @@ impl Repo {
             .filter(|helper| crate::sandbox::linux::holds_file_rules(helper))
             .ok_or_else(unsupported)?;
         let reads_ignore = matches!(writes, Writes::Index);
-        let excludes = match &self.excludes {
-            Some(owner) if reads_ignore => owner.clone(),
-            _ => NO_EXCLUDES.to_owned(),
-        };
+        let excludes = self.step_excludes(writes);
         let mut read = vec![work.clone(), common.clone(), git.clone()];
         read.extend(
             excludes
