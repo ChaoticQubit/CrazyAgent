@@ -2629,13 +2629,13 @@ impl Screen for AppSetup {
             hints.push(hint("p", "Fix"));
         }
         if !self.first_run {
-            hints.push(hint("h", "Change home"));
+            hints.push(hint("h", "Home"));
             if matches!(&self.github, Load::Ready(github) if github.signed_in) {
                 hints.push(hint("g", "Sign out of GitHub"));
             }
-            hints.push(hint("l", "Linux sockets"));
-            hints.push(hint("v", "Linux supervisor"));
-            hints.push(hint("f", "Finished agents"));
+            hints.push(hint("l", "Sockets"));
+            hints.push(hint("v", "Supervisor"));
+            hints.push(hint("f", "Finished"));
             hints.push(hint("q", "Quitting"));
             hints.push(hint("e", "Retry"));
             hints.push(hint("m", "Master steps"));
