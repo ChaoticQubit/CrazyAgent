@@ -8,6 +8,7 @@ use crazyagent::github::{
     CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan,
     GitHubRepoPage, GitHubStatus,
 };
+use crazyagent::github::{GitHubRepoRules, GitHubRule};
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::projects_home::icloud::Progress;
 use crazyagent::projects_home::job::{JobState, JobSubject, JobView};
@@ -15,6 +16,7 @@ use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome
 use crazyagent::protocol::{CredentialRef, ProjectId, RequestId};
 use crazyagent::setup::{Dependency, RefusedTool, SetupStatus};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -127,7 +129,7 @@ pub const INTAKE_CODES: [&str; 99] = [
     "delete_outside_home",
 ];
 
-const GITHUB_CODES: [&str; 35] = [
+const GITHUB_CODES: [&str; 41] = [
     "github_not_signed_in",
     "github_token_invalid",
     "github_token_refused",
@@ -163,6 +165,12 @@ const GITHUB_CODES: [&str; 35] = [
     "github_token_frame_invalid",
     "github_token_frame_mismatch",
     "not_connected",
+    "github_rules_not_published",
+    "github_rule_invalid",
+    "github_repo_unreadable",
+    "github_publish_project_unknown",
+    "github_publish_unavailable",
+    "github_store_unavailable",
 ];
 
 const SETUP_CODES: [&str; 48] = [
@@ -801,6 +809,67 @@ impl NativeBridge {
             bounded(
                 client
                     .github_publish_start(project, plan)
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Reads the rules a new repository starts with, as Settings > GitHub shows them.
+    /// Output: the rules on.
+    pub fn github_rule_defaults(&mut self) -> Result<Unlocked<BTreeSet<GitHubRule>>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_rule_defaults()
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Saves the rules a new repository starts with. Input: the rules on. Output: the rules
+    /// the engine read back.
+    pub fn github_rule_defaults_set(
+        &mut self,
+        rules: BTreeSet<GitHubRule>,
+    ) -> Result<Unlocked<BTreeSet<GitHubRule>>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_rule_defaults_set(rules)
+                    .await
+                    .map_err(github_failure)?,
+            )
+        }))
+    }
+
+    /// Reads the live rules of the repository CrazyAgent published a project to, with GET
+    /// calls only. Input: the project id. Output: the page.
+    pub fn github_rules(&mut self, id: &str) -> Result<Unlocked<GitHubRepoRules>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_rules(project).await.map_err(github_failure)?)
+        }))
+    }
+
+    /// Turns one rule on or off on that repository with the owner's sign-in. Inputs: the
+    /// project id, the rule and whether it is on. Output: the fresh page.
+    pub fn github_rule_set(
+        &mut self,
+        id: &str,
+        rule: GitHubRule,
+        on: bool,
+    ) -> Result<Unlocked<GitHubRepoRules>, BridgeError> {
+        let project = project(id)?;
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .github_rule_set(project, rule, on)
                     .await
                     .map_err(github_failure)?,
             )

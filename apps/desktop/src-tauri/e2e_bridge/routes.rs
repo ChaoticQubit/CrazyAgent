@@ -1893,6 +1893,48 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_start(&project, plan)?; call.await }.await;
             routed(result)
         }
+        "desktop_github_rule_defaults" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_rule_defaults()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_github_rule_defaults_set" => {
+            #[derive(serde::Deserialize)]
+            struct Args {
+                rules: std::collections::BTreeSet<crazyagent::github::GitHubRule>,
+            }
+            let Args { rules } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_rule_defaults_set(rules)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_github_rules" => {
+            #[derive(serde::Deserialize)]
+            struct Args {
+                project: String,
+            }
+            let Args { project } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_rules(&project)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_github_rule_set" => {
+            #[derive(serde::Deserialize)]
+            struct Args {
+                project: String,
+                rule: crazyagent::github::GitHubRule,
+                on: bool,
+            }
+            let Args { project, rule, on } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_rule_set(&project, rule, on)?; call.await }.await;
+            routed(result)
+        }
         "desktop_clone_repo" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

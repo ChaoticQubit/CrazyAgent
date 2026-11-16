@@ -1633,6 +1633,30 @@ export function githubPublishStart(project: string, plan: GitHubPublishPlan): Pr
   return invoke<GitHubPublishJob>("desktop_github_publish_start", { project, plan });
 }
 
+/** Reads the rules a new repository starts with, as Settings > GitHub shows them: DEC-182's
+ * standard setup while none are saved. Output: the rules on, by the engine's names. */
+export function githubRuleDefaults(): Promise<string[]> {
+  return invoke<string[]>("desktop_github_rule_defaults");
+}
+
+/** Saves the rules a new repository starts with. Input: the rules on. Output: the rules the
+ * engine read back after saving. */
+export function githubRuleDefaultsSet(rules: string[]): Promise<string[]> {
+  return invoke<string[]>("desktop_github_rule_defaults_set", { rules });
+}
+
+/** Reads the live rules of the repository CrazyAgent published a project to, with GET calls
+ * only. Input: the project id. Output: the repository, its CI check names and every rule. */
+export function githubRules(project: string): Promise<GitHubRepoRules> {
+  return invoke<GitHubRepoRules>("desktop_github_rules", { project });
+}
+
+/** Turns one rule on or off on that repository with the owner's sign-in, then reads it again.
+ * Inputs: the project id, the rule and whether it is on. Output: the fresh page. */
+export function githubRuleSet(project: string, rule: string, on: boolean): Promise<GitHubRepoRules> {
+  return invoke<GitHubRepoRules>("desktop_github_rule_set", { project, rule, on });
+}
+
 export type DependencyName = "tmux" | "uv" | "graphify" | "node";
 
 export type DependencyState =
