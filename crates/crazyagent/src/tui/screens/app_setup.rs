@@ -2625,7 +2625,8 @@ impl Screen for AppSetup {
             }
             _ => {}
         }
-        if self.fixable().is_some() && self.refused_tool() == Some(RefusedTool::FixButton) {
+        let fix = self.fixable().is_some() && self.refused_tool() == Some(RefusedTool::FixButton);
+        if fix && self.first_run {
             hints.push(hint("p", "Fix"));
         }
         if !self.first_run {
@@ -2642,6 +2643,9 @@ impl Screen for AppSetup {
             hints.push(hint("t", "Master time"));
             hints.push(hint("z", "Master frame"));
             hints.push(hint("u", "Unused"));
+            if fix {
+                hints.push(hint("p", "Fix"));
+            }
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
