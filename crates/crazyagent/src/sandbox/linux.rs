@@ -1951,7 +1951,7 @@ impl Grants {
         let carved = sandbox.carved_home.as_ref();
         assert!(read.iter().chain(&write).all(|grant| {
             secrets.iter().all(|secret| {
-                (carved == Some(grant) && grant.parent() == Some(secret.as_path()))
+                carved.is_some_and(|(home, folder)| home == grant && folder == secret)
                     || (!grant.starts_with(secret) && !secret.starts_with(grant))
             })
         }));
