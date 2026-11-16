@@ -130,7 +130,8 @@ test("a failed publish read keeps the last job shown with its problem and Try ag
   assert.deepEqual(publishJob.readKept(drafting, lines), { read: lines, failed: null });
   const card = read("src/screens/project/github-publish.tsx");
   assert.match(card, /readKept\(/);
-  assert.match(card, /\}, \[view\.kind, tick\]\);/, "the draft poll goes on after a failed read");
+  assert.match(card, /setAnswered\(\(count\) => count \+ 1\);/, "a failed read counts as an answer");
+  assert.match(card, /\}, \[view\.kind, answered\]\);/, "the draft poll goes on after a failed read");
   assert.match(card, /if \(result\.kind !== "ok"\) \{\n\s+failed\(result\);\n\s+setTick\(\(value\) => value \+ 1\);/, "a failed answer reads the job again");
   assert.match(card, /id="pj-github-reread"/, "a failed read offers Try again");
 });

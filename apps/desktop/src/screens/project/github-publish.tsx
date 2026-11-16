@@ -8,9 +8,7 @@ import { PublishFields, useGitHubPublish } from "../new-project/fields";
 import { createWait, emptyPublish, publishOutcome, startPublish } from "../new-project/publish";
 import { emptyDraft } from "../new-project/wizard";
 import type { ProjectDraft } from "../new-project/wizard";
-import { DRAFT_POLL_MS, PROMPT_LINE, PROMPT_NEVER, PROMPT_NOT_NOW, PROMPT_PUBLISH, discardable, leftLine, noticeShown, publishView } from "./publish-job";
-
-const ENGINE_STARTING = "CrazyAgent's engine is still starting. Try again in a moment.";
+import { DRAFT_POLL_MS, ENGINE_STARTING, PROMPT_LINE, PROMPT_NEVER, PROMPT_NOT_NOW, PROMPT_PUBLISH, discardable, leftLine, noticeShown, publishView, readKept } from "./publish-job";
 
 /** The New Project publish fields for a project made without them, opened by the Overview's
  * Publish: the visibility, account, repository name, description and docs switch, each name
@@ -45,7 +43,8 @@ function PublishForm({ projectId, name, about, onStarted, onCancel }: { projectI
 /** The Overview card for a project's GitHub publish (DEC-182): the draft while it runs, the
  * .gitignore lines to edit and approve, the secrets that block it with Leave this file out
  * and Check again, a stop with Try again, the finished repository, and Discard before the
- * push. With no publish it asks "This project is not on GitHub. Publish it?" when the engine
+ * push. A failed read keeps the last job with the problem and Try again, and a failed answer
+ * reads the job again. With no publish it asks "This project is not on GitHub. Publish it?" when the engine
  * says to, with Publish, Not now and Don't ask again. Inputs: the project's id, name and
  * about. Output: the card, or nothing. */
 export function GitHubPublishCard({ projectId, name, about }: { projectId: string; name: string; about: string }) {
@@ -59,6 +58,8 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
   const [prompt, setPrompt] = useState<Result<boolean> | null>(null);
   const [form, setForm] = useState(false);
   const [said, setSaid] = useState("");
+  const [readFailed, setReadFailed] = useState<string | null>(null);
+  const [answered, setAnswered] = useState(0);
   const job = read?.kind === "ok" ? read.value : null;
   const view = publishView(job);
   const noJob = read?.kind === "ok" && read.value === null;
@@ -66,7 +67,12 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
 
   useEffect(() => {
     let live = true;
-    void loadGitHubPublish(projectId).then((result) => { if (live) setRead(result); });
+    void loadGitHubPublish(projectId).then((result) => {
+      if (!live) return;
+      setReadFailed(readKept(null, result).failed);
+      setRead((kept) => readKept(kept, result).read);
+      setAnswered((count) => count + 1);
+    });
     return () => { live = false; };
   }, [projectId, tick]);
 
@@ -81,7 +87,7 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
     if (view.kind !== "drafting") return;
     const timer = setTimeout(() => setTick((value) => value + 1), DRAFT_POLL_MS);
     return () => clearTimeout(timer);
-  }, [view.kind, read]);
+  }, [view.kind, answered]);
 
   function failed(result: Exclude<Result<unknown>, { kind: "ok" }>) {
     setProblem(result.kind === "error" ? result.message : ENGINE_STARTING);
@@ -92,7 +98,11 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
     setProblem(null);
     const result = await run();
     setBusy(false);
-    if (result.kind !== "ok") return failed(result);
+    if (result.kind !== "ok") {
+      failed(result);
+      setTick((value) => value + 1);
+      return;
+    }
     setRead(result);
     setEdited(null);
   }
@@ -123,16 +133,22 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
     const result = await discardGitHubPublish(projectId);
     setBusy(false);
     setConfirming(false);
-    if (result.kind !== "ok") return failed(result);
+    if (result.kind !== "ok") {
+      failed(result);
+      setTick((value) => value + 1);
+      return;
+    }
     setLeft(leftLine(result.value));
     setRead({ kind: "ok", value: null });
     setEdited(null);
   }
 
-  if (view.kind === "none" && !left && !problem && !notice && !form) return null;
+  if (view.kind === "none" && !left && !problem && !notice && !form && !readFailed) return null;
   const lines = view.kind === "lines" ? edited ?? view.lines.join("\n") : "";
   return <section className="pj-stack-s" aria-labelledby="pj-github-publish">
     <h2 id="pj-github-publish">Publish on GitHub</h2>
+    {readFailed && <div className="pj-need"><span className="pj-error" role="alert">{displayText(readFailed)}</span>
+      <button type="button" className="btn" id="pj-github-reread" onClick={() => setTick((value) => value + 1)}>Try again</button></div>}
     {notice && !form && <div className="pj-need"><span>{PROMPT_LINE}</span>
       <button type="button" className="btn primary" disabled={busy} onClick={() => setForm(true)}>{PROMPT_PUBLISH}</button>
       <button type="button" className="btn" disabled={busy} onClick={() => void answer(() => answerGitHubPublishPrompt(projectId, "not_now"))}>{PROMPT_NOT_NOW}</button>

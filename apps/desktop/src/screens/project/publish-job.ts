@@ -124,5 +124,6 @@ export const ENGINE_STARTING = "CrazyAgent's engine is still starting. Try again
  * Inputs: the read kept so far, null before any answered, and the new read. Output: the read
  * to keep and the problem, null when the read answered. */
 export function readKept(kept: Result<GitHubPublishJob | null> | null, result: Result<GitHubPublishJob | null>): { read: Result<GitHubPublishJob | null> | null; failed: string | null } {
-  return { read: result.kind === "ok" ? result : kept, failed: null };
+  if (result.kind === "ok") return { read: result, failed: null };
+  return { read: kept, failed: result.kind === "error" ? result.message : ENGINE_STARTING };
 }
