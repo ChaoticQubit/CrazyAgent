@@ -366,7 +366,7 @@ impl SecretValue {
 
 impl Drop for SecretValue {
     fn drop(&mut self) {
-        self.0.fill(0);
+        crate::credentials::wipe(&mut self.0);
     }
 }
 

@@ -201,7 +201,7 @@ fn perform(
     let mut frame = Vec::with_capacity(secret.len() + 4);
     frame.extend_from_slice(&(secret.len() as u32).to_be_bytes());
     frame.extend_from_slice(&secret);
-    secret.fill(0);
+    crate::credentials::wipe(&mut secret);
     let deadline = WallInstant::now() + Duration::from_secs(5);
     let mut sent = 0;
     let mut stdout = Vec::new();
@@ -232,7 +232,7 @@ fn perform(
         }
         Ok(false)
     })();
-    frame.fill(0);
+    crate::credentials::wipe(&mut frame);
     drop(input);
     let okay = observed?;
     if !okay || stdout.len() < 5 {
@@ -320,7 +320,7 @@ fn drain_errors(
         4096usize.saturating_sub(*count),
     )?;
     *count += bytes.len();
-    bytes.fill(0);
+    crate::credentials::wipe(&mut bytes);
     Ok(())
 }
 

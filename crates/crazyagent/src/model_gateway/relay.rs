@@ -482,12 +482,12 @@ fn exchange(
     let input = child.stdin.take();
     let output = child.stdout.take();
     if let Err(mut child) = shared.attach(id, child) {
-        config.fill(0);
+        crate::credentials::wipe(&mut config);
         stop(&mut child);
         return Err(502);
     }
     let written = input.map(|mut input| input.write_all(&config));
-    config.fill(0);
+    crate::credentials::wipe(&mut config);
     let sent = match (written, body) {
         (Some(Ok(())), Some(mut body)) => body.write_all(&incoming.body).is_ok(),
         (Some(Ok(())), None) => true,
@@ -542,7 +542,7 @@ fn upstream_child(
     match spawned {
         Ok(child) => Ok((child, config, body)),
         Err(_) => {
-            config.fill(0);
+            crate::credentials::wipe(&mut config);
             Err(502)
         }
     }
