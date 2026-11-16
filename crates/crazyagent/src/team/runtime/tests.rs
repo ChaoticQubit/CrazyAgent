@@ -30208,6 +30208,7 @@ fn ended_native_lead_on<T>(
     let written = plan.working_dir.join("left.pid");
     let deadline = Instant::now() + WAIT;
     let pid = loop {
+        hand_warden_pid(&plan.working_dir);
         let read = [&written, &teammate_wrote].iter().find_map(|path| {
             std::fs::read_to_string(path)
                 .ok()
@@ -30261,17 +30262,70 @@ tmux -S "$s" kill-window -t crazyagent:_crazyagent || exit 1
 exec /bin/sleep 300
 "#;
 
+/// Answers a stand-in that asks for the warden of its own server (FBTMUX-P1-R1-L1 r1): once
+/// `warden.ask` in the lead's folder names the server's process, writes the one `perl` child
+/// of that process, found from outside the sandbox where `ps` runs, to `warden.pid`. The
+/// lead's profile runs no process lister, so the stand-in cannot find the warden itself; it
+/// still sends the kill from inside. Input: the lead's folder. Output: none.
+#[cfg(target_os = "macos")]
+fn hand_warden_pid(folder: &Path) {
+    let answer = folder.join("warden.pid");
+    if answer.exists() {
+        return;
+    }
+    let Some(server) = std::fs::read_to_string(folder.join("warden.ask"))
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
+    else {
+        return;
+    };
+    assert!(server > 1, "the stand-in named a server process");
+    let listed = crate::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-ax", "-o", "pid=,ppid=,comm="])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(listed.status.success(), "ps listed the processes");
+    let wardens: Vec<u32> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let parent = fields.next()?.parse::<u32>().ok()?;
+            let command = fields.next()?;
+            (parent == server && command.ends_with("perl")).then_some(pid)
+        })
+        .collect();
+    assert_eq!(
+        wardens.len(),
+        1,
+        "the lead's server {server} has one warden: {wardens:?}"
+    );
+    let staged = folder.join("warden.pid.part");
+    std::fs::write(&staged, format!("{}\n", wardens[0])).unwrap();
+    std::fs::rename(&staged, &answer).unwrap();
+}
+
 /// A stand-in Claude Code that, run as a native lead, kills the warden of its own server,
-/// which the keeper's shim forks inside the lead's sandbox as the server's child, and ends
-/// that server's holder window (FBTMUX-P1-R1-L1 r1), so neither the warden nor the holder
-/// ends the server; then it writes its own id to `left.pid` and waits. A refused kill or
-/// end fails the row.
+/// which the keeper's shim forks as the server's child inside the server's sandbox, the one
+/// the lead's pane runs nested in, and ends that server's holder window (FBTMUX-P1-R1-L1
+/// r1), so neither the warden nor the holder ends the server; then it writes its own id to
+/// `left.pid` and waits. Its profile runs no process lister, so it asks the row for the
+/// warden's id through `warden.ask` and [`hand_warden_pid`], and sends the kill itself. A
+/// refused kill or end, or no answer within 30 s, fails the row.
 #[cfg(target_os = "macos")]
 const WARDEN_ENDING_CLAUDE: &str = r#"#!/bin/sh
 t="${TMPDIR%/}"
 s="${t%/*}/tmux.sock"
 p=$(tmux -S "$s" display-message -p '#{pid}') && [ -n "$p" ] || exit 1
-/usr/bin/pkill -9 -P "$p" perl || exit 1
+echo "$p" > "$PWD/warden.ask.part" && mv "$PWD/warden.ask.part" "$PWD/warden.ask" || exit 1
+i=0
+until [ -s "$PWD/warden.pid" ]; do i=$((i+1)); [ "$i" -le 300 ] || exit 1; /bin/sleep 0.1; done
+kill -9 "$(cat "$PWD/warden.pid")" || exit 1
 tmux -S "$s" kill-window -t crazyagent:_crazyagent || exit 1
 exec /usr/bin/perl -e 'open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid"
 "#;
@@ -30374,8 +30428,9 @@ fn a_native_lead_that_ends_its_holder_window_still_ends_at_its_deadline() {
     );
 }
 
-/// FBTMUX-P1-R1-L1 r1: a native lead that kills its own server's warden, which runs inside
-/// its sandbox, and ends its holder window still has its own server, its teammates' server
+/// FBTMUX-P1-R1-L1 r1: a native lead that kills its own server's warden, which runs in the
+/// server's sandbox that the lead's pane is nested in, and ends its holder window still has
+/// its own server, its teammates' server
 /// and its own process end at the deadline the engine last renewed, since the keeper ends
 /// the server it started from outside the sandbox.
 #[cfg(target_os = "macos")]
