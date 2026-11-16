@@ -66,6 +66,7 @@ fn context() -> AgentContext {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     }
 }
 
@@ -630,4 +631,304 @@ fn install_finds_a_terminal_only_listed_harness_by_the_registry() {
     let installed = context().install("standin-screen", &home, true);
 
     assert!(installed.is_ok(), "{:?}", installed.as_ref().err());
+}
+
+const SAVED_KEY: &str = "sk-saved-key-never-in-the-agent-0123456789";
+
+const KEYLESS_URL: &str = "http://127.0.0.1:11434/v1";
+
+const KEYED_URL: &str = "https://api.example.org/v1";
+
+/// One pool account in the stand-in ACP harness's wire format, as the engine stores it.
+/// Inputs: its address and whether a key was saved with it. Output: the connection.
+fn openai_chat(url: &str, keyed: bool) -> crate::config::ModelConnection {
+    let auth = if keyed {
+        serde_json::json!({"method": "api_key", "credential_ref": "row-key"})
+    } else {
+        serde_json::json!({"method": "none"})
+    };
+    serde_json::from_value(serde_json::json!({
+        "id": "row-account",
+        "provider": "openai-compatible",
+        "harness": "rcli",
+        "protocol": "openai-chat",
+        "account_ref": "row-login",
+        "endpoint": {"kind": "http", "url": url},
+        "model": {"id": "qwen2.5:0.5b", "author": "openai-compatible"},
+        "auth": auth,
+    }))
+    .unwrap()
+}
+
+/// The stand-in ACP harness as the test registry lists it. Output: the harness.
+fn standin_acp() -> &'static crate::harnesses::registry::Harness {
+    crate::harnesses::registry::registry()
+        .get("standin-acp")
+        .unwrap()
+}
+
+/// A working folder and a project profile for one ACP launch row. Output: the guards,
+/// the canonical working folder and the profile path.
+fn work_and_profile() -> (tempfile::TempDir, tempfile::TempDir, PathBuf, PathBuf) {
+    let work = tempfile::tempdir().unwrap();
+    let working = work.path().canonicalize().unwrap();
+    let profiles = tempfile::tempdir().unwrap();
+    let profile = profiles.path().canonicalize().unwrap().join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    (work, profiles, working, profile)
+}
+
+/// The stand-in's ACP launch request on one account binding, inside a project profile, or
+/// at Full access when none is given. Inputs: the working folder, the profile and the
+/// binding. Output: the request.
+fn acp_request(
+    working: &Path,
+    profile: Option<PathBuf>,
+    account: crate::harnesses::launch::AccountBinding,
+) -> crate::harnesses::launch::LaunchRequest {
+    crate::harnesses::launch::LaunchRequest {
+        harness: "standin-acp".into(),
+        executable: PathBuf::from("/usr/bin/true"),
+        working_dir: working.to_path_buf(),
+        account,
+        model: Some("qwen2.5:0.5b".into()),
+        tools: true,
+        unconfined: profile.is_none(),
+        sandbox_profile: profile,
+        git_identity: None,
+        limits: crate::harnesses::launch::LaunchLimits::default(),
+    }
+}
+
+/// The variables a built command sets, by name. Input: the command. Output: the map.
+fn variables(command: &std::process::Command) -> std::collections::BTreeMap<String, String> {
+    command
+        .get_envs()
+        .filter_map(|(name, value)| {
+            Some((
+                name.to_string_lossy().into_owned(),
+                value?.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// T19b 19b-2: an ACP launch on a keyless account is handed its own address and the local
+/// placeholder in the variables its manifest's `accounts` entry names, and the engine's
+/// HOME still wins.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_acp_launch_on_a_keyless_account_is_handed_its_address_and_the_local_placeholder() {
+    let (_folder, home) = harness_home("standin-acp");
+    let (_work, _profiles, working, profile) = work_and_profile();
+    let handover =
+        crate::harnesses::accounts::handover(standin_acp(), &openai_chat(KEYLESS_URL, false), None)
+            .unwrap();
+    let context = context().with_handover(handover);
+    let request = acp_request(
+        &working,
+        Some(profile),
+        crate::harnesses::launch::AccountBinding::Url {
+            home: home.clone(),
+            base_url: KEYLESS_URL.into(),
+            key: None,
+        },
+    );
+
+    let built = crate::harnesses::launch::command_with_context(&request, &context);
+
+    assert!(built.is_ok(), "{:?}", built.as_ref().err());
+    let (command, _installed) = built.unwrap();
+    let set = variables(&command);
+    assert_eq!(
+        set.get("OPENAI_BASE_URL").map(String::as_str),
+        Some(KEYLESS_URL)
+    );
+    assert_eq!(
+        set.get("OPENAI_API_KEY").map(String::as_str),
+        Some(crate::model_gateway::relay::LOCAL_PLACEHOLDER)
+    );
+    assert_eq!(
+        set.get("STANDIN_MODEL").map(String::as_str),
+        Some("qwen2.5:0.5b")
+    );
+    assert_eq!(set.get("HOME").map(String::as_str), home.to_str());
+}
+
+/// T19b 19b-2: an ACP launch on a keyed account is handed the engine relay's loopback URL
+/// and its placeholder token, the token only under the name its manifest lists for it, and
+/// the saved key in no argument or variable.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_acp_launch_on_a_keyed_account_is_handed_its_relay_and_token_and_never_the_key() {
+    let (_folder, home) = harness_home("standin-acp");
+    let (_work, _profiles, working, profile) = work_and_profile();
+    let relay = crate::model_gateway::relay::Relay::start(
+        KEYED_URL,
+        crate::credentials::SecretString::new(SAVED_KEY.as_bytes().to_vec()).unwrap(),
+    )
+    .unwrap();
+    let handover = crate::harnesses::accounts::handover(
+        standin_acp(),
+        &openai_chat(KEYED_URL, true),
+        Some(&relay),
+    )
+    .unwrap();
+    let context = context().with_handover(handover);
+    let request = acp_request(
+        &working,
+        Some(profile),
+        crate::harnesses::launch::AccountBinding::Url {
+            home: home.clone(),
+            base_url: relay.base_url(),
+            key: Some(crate::harnesses::launch::Secret::new(relay.token().to_owned()).unwrap()),
+        },
+    );
+
+    let built = crate::harnesses::launch::command_with_context(&request, &context);
+
+    assert!(built.is_ok(), "{:?}", built.as_ref().err());
+    let (command, _installed) = built.unwrap();
+    let set = variables(&command);
+    assert_eq!(
+        set.get("OPENAI_BASE_URL").map(String::as_str),
+        Some(relay.base_url().as_str())
+    );
+    let holding: Vec<&str> = set
+        .iter()
+        .filter(|(_, value)| value.contains(relay.token()))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(holding, ["OPENAI_API_KEY"]);
+    let seen = command
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .chain(
+            set.iter()
+                .flat_map(|(name, value)| [name.clone(), value.clone()]),
+        );
+    for text in seen {
+        assert!(!text.contains(SAVED_KEY), "{text}");
+        assert!(!text.contains(KEYED_URL), "{text}");
+    }
+}
+
+/// T19b 19b-2: a hand-over made for another address than the launch's binding names is
+/// refused, so a launch never tells its harness one account while it is routed to another.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_acp_launch_refuses_a_hand_over_for_another_address_than_its_binding() {
+    let (_folder, home) = harness_home("standin-acp");
+    let (_work, _profiles, working, profile) = work_and_profile();
+    let handover =
+        crate::harnesses::accounts::handover(standin_acp(), &openai_chat(KEYLESS_URL, false), None)
+            .unwrap();
+    let context = context().with_handover(handover);
+    let request = acp_request(
+        &working,
+        Some(profile),
+        crate::harnesses::launch::AccountBinding::Url {
+            home,
+            base_url: "http://127.0.0.1:11435/v1".into(),
+            key: None,
+        },
+    );
+
+    let refused = crate::harnesses::launch::command_with_context(&request, &context);
+
+    assert_eq!(
+        refused.err().map(|problem| problem.0),
+        Some("launch_account_handover_mismatch".to_owned())
+    );
+}
+
+/// T19b 19b-2 (ruling t20-q1): the hand-over's one exception to the variable guard exists
+/// only under the agent profile, so an ACP launch given a hand-over at Full access is
+/// refused, as a listed master's is.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_acp_launch_given_a_hand_over_is_refused_at_full_access() {
+    let (_folder, home) = harness_home("standin-acp");
+    let (_work, _profiles, working, _profile) = work_and_profile();
+    let handover =
+        crate::harnesses::accounts::handover(standin_acp(), &openai_chat(KEYLESS_URL, false), None)
+            .unwrap();
+    let context = context().with_handover(handover);
+    let request = acp_request(
+        &working,
+        None,
+        crate::harnesses::launch::AccountBinding::Url {
+            home,
+            base_url: KEYLESS_URL.into(),
+            key: None,
+        },
+    );
+
+    let refused = crate::harnesses::launch::command_with_context(&request, &context);
+
+    assert_eq!(
+        refused.err().map(|problem| problem.0),
+        Some("launch_environment_refused".to_owned())
+    );
+}
+
+/// T19b 19b-2 guard row: Codex and Claude Code read no account hand-over, so an install of
+/// either given one is refused before it writes a file.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_install_given_a_hand_over_is_refused() {
+    let (_folder, home) = harness_home("standin-acp");
+    for native in ["codex", "claude-code"] {
+        let handover = crate::harnesses::accounts::handover(
+            standin_acp(),
+            &openai_chat(KEYLESS_URL, false),
+            None,
+        )
+        .unwrap();
+
+        let refused = context()
+            .with_handover(handover)
+            .install(native, &home, false);
+
+        assert_eq!(
+            refused.err().map(|problem| problem.0),
+            Some("launch_account_handover_mismatch".to_owned()),
+            "{native}"
+        );
+    }
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+}
+
+/// T19b 19b-2 guard row: a keyless hand-over given to a launch bound to a relay token at the
+/// same address is refused, so the placeholder the harness presents is always the binding's.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_acp_launch_refuses_a_keyless_hand_over_on_a_binding_with_a_relay_token() {
+    let (_folder, home) = harness_home("standin-acp");
+    let (_work, _profiles, working, profile) = work_and_profile();
+    let relay = crate::model_gateway::relay::Relay::start(
+        KEYED_URL,
+        crate::credentials::SecretString::new(SAVED_KEY.as_bytes().to_vec()).unwrap(),
+    )
+    .unwrap();
+    let handover =
+        crate::harnesses::accounts::handover(standin_acp(), &openai_chat(KEYLESS_URL, false), None)
+            .unwrap();
+    let context = context().with_handover(handover);
+    let request = acp_request(
+        &working,
+        Some(profile),
+        crate::harnesses::launch::AccountBinding::Url {
+            home,
+            base_url: KEYLESS_URL.into(),
+            key: Some(crate::harnesses::launch::Secret::new(relay.token().to_owned()).unwrap()),
+        },
+    );
+
+    let refused = crate::harnesses::launch::command_with_context(&request, &context);
+
+    assert_eq!(
+        refused.err().map(|problem| problem.0),
+        Some("launch_account_handover_mismatch".to_owned())
+    );
 }

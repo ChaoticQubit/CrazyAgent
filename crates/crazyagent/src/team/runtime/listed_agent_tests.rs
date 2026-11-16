@@ -71,3 +71,83 @@ fn a_team_agent_of_a_listed_harness_runs_in_its_private_home_inside_the_agent_ho
         .mode();
     assert_eq!(bits & 0o777, 0o700);
 }
+
+/// T19b 19b-2: a team agent of a listed harness on an endpoint account is handed that
+/// account by the stored connection's wire format: the context it starts with carries the
+/// hand-over its manifest's `accounts` entry fills, here the keyless address and the local
+/// placeholder.
+#[test]
+fn a_team_agent_of_a_listed_harness_starts_with_its_accounts_hand_over() {
+    let fixture = Fixture::new(1);
+    let runtime = listed_runtime(&fixture);
+    let account = keyless_endpoint();
+    assert_eq!(
+        fixture.agent(AgentRole::Sub, "standin-acp", AgentStatus::Starting),
+        1
+    );
+
+    let prepared = runtime.prepare(
+        &fixture.setup,
+        1,
+        AgentRole::Sub,
+        "standin-acp",
+        false,
+        &account,
+        false,
+        crate::agent_git::Layout::Linked,
+        false,
+    );
+
+    let (_, _, mode) = prepared.unwrap();
+    let Mode::Kept { context, .. } = &mode else {
+        panic!("an endpoint agent is kept between turns");
+    };
+    let handed = context.handover();
+    assert!(handed.is_some(), "a listed agent is handed its account");
+    let handed = handed.unwrap();
+    let local = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    assert_eq!(handed.base_url(), "http://127.0.0.1:11434/v1");
+    assert_eq!(handed.token(), local);
+    assert_eq!(
+        handed.env(),
+        [
+            (
+                "OPENAI_BASE_URL".to_owned(),
+                "http://127.0.0.1:11434/v1".to_owned()
+            ),
+            ("OPENAI_API_KEY".to_owned(), local.to_owned()),
+            ("STANDIN_MODEL".to_owned(), "qwen2.5:0.5b".to_owned()),
+        ]
+    );
+}
+
+/// T19b 19b-2 guard row: a listed agent's hand-over is read from the stored connection, so
+/// an agent whose account is no longer in the live access is refused in plain words.
+#[test]
+fn a_team_agent_of_a_listed_harness_whose_account_left_the_pool_is_refused() {
+    let fixture = Fixture::new(1);
+    let runtime = listed_runtime(&fixture);
+    let account = TeamAccount {
+        connection: reference("gone-account"),
+        ..keyless_endpoint()
+    };
+    assert_eq!(
+        fixture.agent(AgentRole::Sub, "standin-acp", AgentStatus::Starting),
+        1
+    );
+
+    let prepared = runtime.prepare(
+        &fixture.setup,
+        1,
+        AgentRole::Sub,
+        "standin-acp",
+        false,
+        &account,
+        false,
+        crate::agent_git::Layout::Linked,
+        false,
+    );
+
+    let refused = prepared.err().unwrap_or_default();
+    assert!(refused.contains("team_account_left_pool"), "{refused}");
+}

@@ -215,6 +215,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let installed = context.install("codex", &home, false).unwrap();
     let mut child = crate::spawn_gate::spawn(
@@ -342,6 +343,7 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
 
     let held = lock_only(&home, "codex").unwrap();
@@ -405,6 +407,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");
@@ -461,6 +464,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");
@@ -510,6 +514,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let context = fresh()
         .with_team_tool(engine, &record, &mailbox, &[])
@@ -638,6 +643,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     }
     .with_index(&plugins, &RoleSkills::default());
     let home = root.join("codex");
@@ -680,6 +686,7 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let first = context.install("codex", &home, true).unwrap();
     let planted = home.join("skills").join(".system").join("planted");
@@ -755,6 +762,7 @@ fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            handover: None,
         };
         let first = context.install("codex", &home, true).unwrap();
         drop(first);
@@ -817,6 +825,7 @@ fn a_parked_name_is_left_alone_and_a_home_denying_removals_still_loses_planted_s
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let first = context.install("codex", &home, true).unwrap();
     drop(first);
@@ -980,6 +989,7 @@ fn pinned_codex_system_skills_never_refuse_the_next_launches() {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            handover: None,
         };
         let system = home.join("skills").join(CODEX_SYSTEM_SKILLS);
         for launch in 1..=2 {
@@ -1079,6 +1089,7 @@ fn a_planted_skills_link_is_moved_away_and_what_it_names_is_left_as_it_was() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     agents.shell(&format!(
         "ln -s '{}' '{}'",
@@ -1153,6 +1164,7 @@ fn an_owner_file_linked_into_codex_skills_keeps_its_immutable_flag() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
 
     for launch in 1..=2 {
@@ -1207,6 +1219,7 @@ fn a_codex_install_moves_earlier_skills_out_of_a_home_that_denies_removals() {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            handover: None,
         };
 
         let launch = context.install("codex", &home, true);
@@ -1573,6 +1586,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
 
     agents.shell(&plant);
@@ -1738,6 +1752,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let start = "# Project context from CrazyAgent\n";
     assert!(!fresh(start.into()).instructions().contains(rule));
@@ -1934,6 +1949,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -2032,6 +2048,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            handover: None,
         };
         let claude = home(&format!("claude-{layout:?}"));
         let installed = context.install("claude-code", &claude, false).unwrap();
@@ -2120,6 +2137,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let request = || crate::harnesses::launch::LaunchRequest {
         harness: "codex".into(),
@@ -2248,6 +2266,7 @@ impl LeftPane {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            handover: None,
         };
         let request = crate::harnesses::launch::LaunchRequest {
             harness: "codex".into(),
@@ -2444,6 +2463,7 @@ fn the_restart_sentence_reaches_only_a_sub_agent_in_its_own_clone() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let restart = " After your change set is accepted, start your next work from main with git reset --keep crazyagent/main, unless you have newer commits.\n";
     let clone = fresh()
@@ -2494,6 +2514,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let off = vec![crate::team::tool::STOP_TOOL.to_owned()];
     for (context, subcommand) in [
@@ -2587,6 +2608,7 @@ fn context_with(
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     }
 }
 
@@ -3487,6 +3509,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -3707,6 +3730,7 @@ fn context_mode_context(plugins: LaunchPlugins) -> AgentContext {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     }
 }
 
@@ -4647,6 +4671,7 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
     };
     let base_url = format!("model_providers.stand.base_url=\"http://127.0.0.1:{port}/v1\"");
     let codex = |turn: &[&str]| -> String {

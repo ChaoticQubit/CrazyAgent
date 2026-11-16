@@ -18,6 +18,7 @@ const HANDED: [&str; 3] = ["relay_url", "token", "model"];
 /// What a listed harness is given to reach the model of one pool account: the address it
 /// sends model requests to, the placeholder it presents there, the model, and the
 /// environment its manifest's `accounts` entry asks for. It never holds a saved key.
+#[derive(Clone)]
 pub struct Handover {
     base_url: String,
     token: String,
@@ -264,6 +265,17 @@ pub fn check(manifest: &Manifest) -> Result<(), Refused> {
         );
     }
     Ok(())
+}
+
+/// Tells whether a listed harness is handed accounts of one wire format, through its
+/// manifest's `accounts` entry for that format (T19b 19b-2). Inputs: the harness and the
+/// wire format. Output: true when the entry is there.
+pub fn hands_over(harness: &Harness, format: &str) -> bool {
+    harness
+        .manifest()
+        .block("accounts")
+        .and_then(|accounts| accounts.get(format))
+        .is_some()
 }
 
 /// Hands one pool account to a listed harness (DEC-141 PA-4): a keyed account through the
