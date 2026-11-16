@@ -74,9 +74,11 @@ fn this_macs_own_pmset_and_thermal_text_is_understood() {
     let reading = read_power();
     assert_eq!(reading.source, source);
     assert_ne!(reading.heat, Heat::Unknown);
+    let lid = crazyagent_mac_power::lid::read();
     assert_eq!(
-        reading.lid_closed, None,
-        "the Mac's lid is read in a later slice"
+        reading.lid_closed,
+        lid.map(|lid| lid.closed),
+        "the lid is read in process with no helper (fix5 ASK-01:41, leader 01:42)"
     );
 }
 
