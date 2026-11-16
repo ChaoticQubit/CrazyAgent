@@ -1430,6 +1430,47 @@ fn a_native_codex_lead_keeps_codex_sub_agents_on_and_an_app_spawned_one_off() {
     drop(spawned);
 }
 
+/// Native connectors (DEC-168 addendum 12 decision 4): a Codex pane with tools on leaves out
+/// its fixed `features.apps=false` only when its context read the owner's setting as On, so
+/// the `config.toml` key decides and Codex's apps, on by default, stay on; Off, an unread
+/// setting and tools off keep the fixed switch.
+#[test]
+fn a_codex_pane_turns_codex_apps_on_only_for_native_on_with_tools_on() {
+    use crate::connectors::settings::NativeConnectors::{Off, On};
+    let case = Case::new();
+    for (native, tools, on) in [
+        (Some(On), true, true),
+        (Some(On), false, false),
+        (Some(Off), true, false),
+        (Some(Off), false, false),
+        (None, true, false),
+    ] {
+        let request = case.request("codex", case.subscription(), tools);
+        let installed =
+            crate::launch_context::AgentContext::for_tests(crate::plugins::LaunchPlugins {
+                native_connectors: native,
+                ..crate::plugins::LaunchPlugins::default()
+            })
+            .install("codex", &case.home(), tools)
+            .unwrap();
+        let built = command(&request, Some(&installed), &run(None)).unwrap();
+        let apps_off = built
+            .argv
+            .iter()
+            .any(|argument| argument == "features.apps=false");
+        assert_eq!(apps_off, !on, "{native:?} tools {tools}: {:?}", built.argv);
+        if tools {
+            let config = std::fs::read_to_string(case.home().join("config.toml")).unwrap();
+            assert_eq!(
+                config.contains("apps = false"),
+                native == Some(Off),
+                "{native:?}: {config}"
+            );
+        }
+        drop(installed);
+    }
+}
+
 /// PA-7, macOS only like every agent launch: the installed Codex (the pinned 0.164.0 in CI)
 /// reads a native lead's settings and `config.toml` with multi-agent v2 on, and an
 /// App-spawned lead's with it off.
