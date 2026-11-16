@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 const WAIT: Duration = Duration::from_secs(10);
 const STEP: Duration = Duration::from_millis(50);
 const QUIET: Duration = Duration::from_millis(400);
+/// How long the thaw guard waits for the journal lock in one try (`freeze::LOCK_WAIT`, five
+/// seconds), the bound on a thaw once the lock is let go.
+const GUARD_LOCK_WAIT: Duration = Duration::from_secs(5);
 const LONG_AGO: &str = "Thu Jan  1 00:00:00 1970";
 
 const STAND_IN: &str = "CRAZYAGENT_TEST_STAND_IN";
@@ -452,6 +455,57 @@ fn an_engine_killed_while_an_app_is_frozen_leaves_the_guard_to_thaw_it() {
         stays(|| stopped(later.pid())),
         "a reused pid is never signalled"
     );
+    let after = freeze::journal(root.path()).unwrap();
+    assert!(after.entries().is_empty(), "every entry settles");
+}
+
+/// Merge fb388b7a6, DEC-167 addendum 40: the thaw guard takes `journal.lock`, the one lock
+/// both journal files share. While another holds it, the guard of a killed engine thaws
+/// nothing; once it is let go, the guard thaws the app within the lock wait and settles.
+#[test]
+fn a_guard_whose_engine_is_gone_thaws_nothing_until_the_journal_lock_is_let_go() {
+    let bin = Bin::new();
+    let root = tempfile::tempdir().unwrap();
+    let app = StandIn::sleep(&bin);
+    let held = JournalLock::try_take(root.path()).unwrap().unwrap();
+    let (reader, writer) = std::io::pipe().unwrap();
+    let mut engine = {
+        let mut command = StandIn::command(&bin, &[]);
+        command.stdin(writer).stdout(Stdio::null());
+        StandIn::start(&mut command)
+    };
+    let mut guard = {
+        let program = Path::new(env!("CARGO_BIN_EXE_crazyagent"));
+        let mut command = freeze::guard_command(program, root.path());
+        command
+            .stdin(reader)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crazyagent::spawn_gate::spawn(&mut command).unwrap()
+    };
+    let mut journal = freeze::journal(root.path()).unwrap();
+    let notes = listed("Notes", app.pid(), &bin.sleep());
+    let frozen = freeze::freeze(&mut journal, &notes, engine.pid(), &no_roots()).unwrap();
+    assert_eq!(frozen.procs.len(), 1);
+    assert!(settles(|| stopped(app.pid())));
+    drop(journal);
+
+    engine.kill();
+
+    assert!(
+        stays(|| guard.try_wait().unwrap().is_none() && stopped(app.pid())),
+        "the guard thaws nothing while another holds journal.lock"
+    );
+    let let_go = Instant::now();
+    drop(held);
+    assert!(settles(|| !stopped(app.pid())));
+    assert!(
+        let_go.elapsed() < GUARD_LOCK_WAIT,
+        "thawed {:?} after the lock was let go",
+        let_go.elapsed()
+    );
+    let status = exited(&mut guard);
+    assert!(status.is_some_and(|status| status.success()), "{status:?}");
     let after = freeze::journal(root.path()).unwrap();
     assert!(after.entries().is_empty(), "every entry settles");
 }
