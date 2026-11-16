@@ -47,6 +47,13 @@ pub(super) enum Action {
     PublishContinue {
         project: ProjectId,
     },
+    PublishPrompt {
+        project: ProjectId,
+    },
+    PublishPromptSet {
+        project: ProjectId,
+        answer: crate::github::GitHubPromptAnswer,
+    },
     PublishStatus {
         project: ProjectId,
     },
@@ -83,6 +90,8 @@ enum Reply {
     Repos { page: GitHubRepoPage },
     Cloned { receipt: CloneReceipt },
     Owners { owners: GitHubOwners },
+    Prompt { ask: bool },
+    PromptKept,
     Publish { job: GitHubPublishJob },
     PublishStatus { job: Option<GitHubPublishJob> },
     Discarded { left: Option<GitHubPublishLeft> },
@@ -215,6 +224,35 @@ impl OwnerClient {
     ) -> Result<GitHubPublishJob, EngineError> {
         self.github_publish(Action::PublishContinue { project })
             .await
+    }
+
+    /// Tells whether a project's Overview asks to publish it on GitHub (DEC-182 S5b).
+    /// Input: the project. Output: true to ask, or `github_publish_project_unknown`.
+    pub async fn github_publish_prompt(&self, project: ProjectId) -> Result<bool, EngineError> {
+        match self
+            .github_exchange(Action::PublishPrompt { project }, None)
+            .await?
+        {
+            Reply::Prompt { ask } => Ok(ask),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Keeps the owner's answer to a project's publish prompt, Not now or Don't ask
+    /// again. Inputs: the project and the answer. Output: nothing, or
+    /// `github_publish_project_unknown`.
+    pub async fn github_publish_prompt_set(
+        &self,
+        project: ProjectId,
+        answer: crate::github::GitHubPromptAnswer,
+    ) -> Result<(), EngineError> {
+        match self
+            .github_exchange(Action::PublishPromptSet { project, answer }, None)
+            .await?
+        {
+            Reply::PromptKept => Ok(()),
+            _ => Err(unknown()),
+        }
     }
 
     /// Reads where a project's publish stands. Input: the project. Output: the job, or
@@ -479,6 +517,14 @@ async fn handle(
                     &crate::projects_home::owner_home()?,
                 )?,
             },
+            Action::PublishPrompt { project } => {
+                let _ = project;
+                Reply::Prompt { ask: false }
+            }
+            Action::PublishPromptSet { project, answer } => {
+                let _ = (project, answer);
+                Reply::PromptKept
+            }
             Action::PublishStatus { project } => Reply::PublishStatus {
                 job: account.publish_status(&project_folder(&root, &project)?)?,
             },
@@ -586,6 +632,7 @@ fn public_code(error: EngineError) -> String {
 /// Input: the request. Output: its name, None for a request that changes something.
 fn read_kind(action: &Action) -> Option<&'static str> {
     match action {
+        Action::PublishPrompt { .. } => Some("github.publish_prompt"),
         Action::Status => Some("github.status"),
         Action::Repos { .. } => Some("github.repos"),
         Action::Owners => Some("github.owners"),
