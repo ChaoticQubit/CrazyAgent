@@ -343,7 +343,7 @@ test("a failed run is recorded and counted, the schedule goes on, and the median
   assert.ok(progress.samples.base.every((sample) => sample.page_ms !== 3), "the failed run gives no sample");
   assert.equal(progress.runs.length, 2 * kept + 2);
   assert.deepEqual(progress.runs.filter((run) => Object.hasOwn(run, "failed")), [
-    { side: "base", warm: false, failed: "run.mjs speed failed (1): run 3 never showed Home" },
+    { side: "base", warm: false, failed: "run.mjs speed failed (1): run 3 never showed Home", quiet_after: true, reasons: [] },
   ]);
   const rows = judge(progress.samples.base, progress.samples.candidate, { page_ms: 0.05 });
   assert.deepEqual(rows.map((row) => [row.metric, row.status]), [["page_ms", "pass"]], "the good runs alone are judged");
@@ -382,6 +382,27 @@ test("a failed run's record keeps the tail of its error, bounded", async () => {
   const failed = progress.runs[0].failed;
   assert.equal(failed.length, FAILURE_TEXT_MAX);
   assert.ok(failed.endsWith(" the stderr tail"));
+});
+
+test("a failed run the Mac got busy through runs again and is not counted, its record keeps the Mac reading, and three in a row refuse", async () => {
+  const progress = progressOf();
+  const seen = launches((call) => call === 4);
+  const quietAfter = () => (seen.calls === 4 ? { quiet: false, reasons: ["load 4"] } : { quiet: true, reasons: [] });
+  assert.equal(await runSchedule(KEPT_MIN, { quietBefore: calm.quietBefore, launch: seen.launch, quietAfter }, progress), null);
+  assert.equal(seen.calls, 2 * KEPT_MIN + 3, "the failed run on a busy Mac ran again");
+  assert.deepEqual(progress.failed, { base: 0, candidate: 0 });
+  assert.equal(progress.samples.candidate.length, KEPT_MIN);
+  assert.deepEqual(progress.runs.filter((run) => Object.hasOwn(run, "failed")), [
+    { side: "candidate", warm: false, failed: "run.mjs speed failed (1): run 4 never showed Home", quiet_after: false, reasons: ["load 4"] },
+  ]);
+  assert.equal(compareExit([], [], progress.failed), 0, "a busy Mac fails no compare");
+  const always = progressOf();
+  const failing = launches(() => true);
+  const busy = () => ({ quiet: false, reasons: ["load 4"] });
+  const refused = await runSchedule(KEPT_MIN, { quietBefore: calm.quietBefore, launch: failing.launch, quietAfter: busy }, always);
+  assert.deepEqual(refused, ["3 runs in a row saw the Mac get busy"]);
+  assert.equal(failing.calls, 3);
+  assert.deepEqual(always.failed, { base: 0, candidate: 0 });
 });
 
 test("a run the Mac got busy through runs again, three in a row refuse, and a busy Mac before a run refuses at once", async () => {
