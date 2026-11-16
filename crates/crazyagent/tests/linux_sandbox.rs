@@ -3461,24 +3461,32 @@ fn a_supervised_agent_sets_no_time_on_a_held_entry_and_sets_its_own() {
     );
 }
 
-const PATH_ONLY: &str = "import os, sys
+const DESCRIPTORS: &str = "import os, sys
 own = sys.argv[1]
+ids = (os.getuid(), os.getgid())
 def said(name, work):
     try:
         work()
         print(name + '=0')
     except OSError as error:
         print(name + '=' + str(error.errno))
+def mode():
+    return oct(os.stat(own).st_mode & 0o777)
 path_only = os.open(own, os.O_PATH)
-said('mode', lambda: os.chmod(path_only, 0o600))
-said('owner', lambda: os.chown(path_only, -1, -1))
+said('path-mode', lambda: os.chmod(path_only, 0o600))
+said('path-owner', lambda: os.chown(path_only, *ids))
+print('kept=' + mode())
+plain = os.open(own, os.O_RDONLY)
+said('plain-mode', lambda: os.chmod(plain, 0o640))
+said('plain-owner', lambda: os.chown(plain, *ids))
+print('set=' + mode())
 ";
 
 /// `fchmod` and `fchown` on an `O_PATH` descriptor of the agent's own file answer 9 and
-/// leave its mode under the held guard, as the kernel answers them with no guard
-/// (SUPERVISOR-OPATH-EBADF).
+/// leave its mode, and on a plain descriptor of it change its mode and owner, under the
+/// held guard as with no guard, where the kernel answers them (SUPERVISOR-OPATH-EBADF).
 #[test]
-fn a_supervised_agent_changes_no_mode_or_owner_through_a_path_only_descriptor() {
+fn a_supervised_agent_changes_mode_and_owner_through_an_open_descriptor_not_a_path_only_one() {
     use std::os::unix::fs::PermissionsExt;
     let case = case();
     let admin = case.project.join(".git").join("worktrees").join("one");
@@ -3487,15 +3495,19 @@ fn a_supervised_agent_changes_no_mode_or_owner_through_a_path_only_descriptor() 
     fs::write(&held, "/elsewhere/one/.git\n").unwrap();
     let own = case.project.join("own.txt");
     fs::write(&own, "own\n").unwrap();
-    fs::set_permissions(&own, fs::Permissions::from_mode(0o644)).unwrap();
-    let script = ["-I", "-c", PATH_ONLY, own.to_str().unwrap()];
+    let script = ["-I", "-c", DESCRIPTORS, own.to_str().unwrap()];
     let held_guard = ["--guard-held", held.to_str().unwrap()];
     let guards: [&[&str]; 2] = [&held_guard, &[]];
     for guard in guards {
+        fs::set_permissions(&own, fs::Permissions::from_mode(0o644)).unwrap();
         let output = finished(supervised(&case, guard, "/usr/bin/python3", &script));
-        assert_eq!(told(&output), "mode=9\nowner=9\n", "{guard:?}");
+        assert_eq!(
+            told(&output),
+            "path-mode=9\npath-owner=9\nkept=0o644\nplain-mode=0\nplain-owner=0\nset=0o640\n",
+            "{guard:?}"
+        );
         let mode = fs::metadata(&own).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o644, "the mode stays {guard:?}");
+        assert_eq!(mode, 0o640, "the plain descriptor set the mode {guard:?}");
     }
 }
 
