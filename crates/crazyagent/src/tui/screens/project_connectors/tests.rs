@@ -347,5 +347,6 @@ fn a_failed_read_wraps_a_long_sentence() {
         &mut shell,
         ConnectorsEvent::Page(Err("app_plugin_folder_unsafe".into())),
     );
-    assert!(shows(&mut shell, "Make it yours alone and try again."));
+    assert!(shows(&mut shell, "Your plugins folder isn't private to you"));
+    assert!(shows(&mut shell, "yours alone and try again."), "the end is on the next line");
 }

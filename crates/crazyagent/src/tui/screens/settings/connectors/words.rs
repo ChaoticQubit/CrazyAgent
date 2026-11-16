@@ -86,7 +86,11 @@ pub(in crate::tui) const READY: &str = "Ready";
 /// The line under a refused connector file on its row and its page (WORDS r7).
 pub(in crate::tui) const REFUSED_FILE: &str = "Fix its file, or remove it on the App plugins page.";
 
-const REFUSALS: [(&str, &str); 16] = [
+/// The line a y on a trust screen not yet read to its end says (rv-ds241 T5 F1).
+pub(in crate::tui) const READ_TO_THE_END: &str =
+    "Read the trust screen to its end first, with Down or PgDn.";
+
+const REFUSALS: [(&str, &str); 17] = [
     (
         "app_plugin_bundled",
         "Built-in connectors can't be removed or replaced.",
@@ -96,8 +100,12 @@ const REFUSALS: [(&str, &str); 16] = [
         "The manifest changed after you checked it. Check it again before you trust it.",
     ),
     (
-        "app_plugin_connector_oauth_not_yet",
-        "This connector signs in with OAuth, which this build does not have.",
+        "app_plugin_file_not_text",
+        "That file isn't text. A manifest is a UTF-8 .yaml file.",
+    ),
+    (
+        "app_plugin_file_unreadable",
+        "CrazyAgent couldn't read that file. Pick a manifest file you can open.",
     ),
     (
         "app_plugin_folder_unavailable",

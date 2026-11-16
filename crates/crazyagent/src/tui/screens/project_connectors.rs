@@ -134,9 +134,10 @@ enum Row {
 }
 
 /// A project's Connectors page (DEC-168 addenda 18, 20 and 27): every ready connector and
-/// every one turned on for this project, with its On switch and, while On, who it reaches;
-/// the rest are named once. Space or Enter turns a switch on or off, Left and Right change
-/// who; each change goes to the engine at once. Opened with b on the project's Settings tab.
+/// every one turned on for this project, with its On switch and, while On and Ready, who
+/// it reaches; the rest are named once. Space or Enter turns a switch on or off, Left and
+/// Right change who; each change goes to the engine at once. Opened with b on the
+/// project's Settings tab.
 pub(in crate::tui) struct ProjectConnectorsPage {
     project: ProjectId,
     name: String,
@@ -196,7 +197,7 @@ impl ProjectConnectorsPage {
         let mut rows = Vec::new();
         for (at, switch) in switches.iter().enumerate() {
             rows.push(Row::Switch(at));
-            if switch.on() && switch.word != NOT_FOUND {
+            if switch.on() && switch.ready {
                 rows.push(Row::Who(at));
             }
         }
@@ -442,10 +443,15 @@ impl Screen for ProjectConnectorsPage {
                 }
                 lines.into_iter().skip(self.top).take(room).collect()
             }
-            Load::Failed(code) => vec![
-                styled(NOT_READ, Role::Warning, &ctx.theme),
-                styled(refusal(code), Role::Muted, &ctx.theme),
-            ],
+            Load::Failed(code) => {
+                let mut lines = vec![styled(NOT_READ, Role::Warning, &ctx.theme)];
+                lines.extend(
+                    wrap(&refusal(code), width)
+                        .into_iter()
+                        .map(|part| styled(part, Role::Muted, &ctx.theme)),
+                );
+                lines
+            }
             Load::Idle | Load::Loading | Load::NotReady => vec![styled(
                 format!("Reading connectors{}", ctx.glyphs.ellipsis),
                 Role::Muted,

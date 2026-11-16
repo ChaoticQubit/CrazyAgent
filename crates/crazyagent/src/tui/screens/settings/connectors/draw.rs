@@ -5,7 +5,7 @@ use super::words::{
     SIZE_LABEL, origin_line, reaches_line, refusal, secret_line, state, trust_lines,
 };
 use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, Row, TITLE, refused};
-use crate::app_plugins::RunsView;
+use crate::app_plugins::{RunsView, TrustView};
 use crate::connectors::launch::reach;
 use crate::connectors::{ConnectorView, ConnectorsView};
 use crate::coord::settings::HarnessKind;
@@ -43,6 +43,32 @@ pub(super) fn scrolled(top: usize, first: usize, last: usize, room: usize, total
         top = last + 1 - room;
     }
     top.min(total.saturating_sub(1))
+}
+
+/// The body rows a dialog box has, so it stays below the header and its rule and above
+/// the message line and the help bar (rv-ds241 T5 F1). Input: the context with the
+/// terminal size. Output: the rows, at least 3.
+pub(super) fn dialog_rows(ctx: &Ctx) -> usize {
+    let chrome = 5 + usize::from(ctx.hint_rows);
+    let rows = usize::from(ctx.height).saturating_sub(chrome).max(3);
+    assert!(rows >= 3);
+    rows
+}
+
+/// The part of a trust screen its box shows: the first line, how many lines show and how
+/// many are left below. A screen taller than the box keeps its last row for the line
+/// that says how many are below. Inputs: the first line asked for, the line count and the
+/// box rows. Output: the first line, the lines shown and the lines below.
+pub(super) fn window(top: usize, total: usize, rows: usize) -> (usize, usize, usize) {
+    assert!(rows >= 2, "a box shows a line and the line below it");
+    if total <= rows {
+        return (0, total, 0);
+    }
+    let shown = rows - 1;
+    let top = top.min(total - shown);
+    let below = total - top - shown;
+    assert_eq!(top + shown + below, total);
+    (top, shown, below)
 }
 
 fn muted(text: &str, room: usize, ctx: &Ctx) -> Vec<Line<'static>> {
@@ -303,19 +329,66 @@ impl ConnectorsPage {
         (lines, None, cursor)
     }
 
+    /// The trust screen's lines before any scroll: a failure first, then every trust line
+    /// wrapped to the box. Inputs: the trust view and the context. Output: the lines.
+    pub(super) fn trust_body(&self, trust: &TrustView, ctx: &Ctx) -> Vec<Line<'static>> {
+        let room = usize::from(MODAL_WIDTH) - 4;
+        let mut body = Vec::new();
+        self.failure_lines(&mut body, room, ctx);
+        let lines = trust_lines(trust);
+        body.extend(lines.iter().flat_map(|text| wrap(text, room)).map(Line::raw));
+        assert!(body.len() >= lines.len());
+        body
+    }
+
+    /// The trust screen in its box (rv-ds241 T5 F1): the lines that fit from the first one
+    /// scrolled to, a line saying how many are below, and y only once the end was on
+    /// screen. Inputs: whether a pasted manifest is added, the trust view and the context.
+    /// Output: the title, the body and the hints.
+    fn trust_dialog(
+        &self,
+        adding: bool,
+        trust: &TrustView,
+        ctx: &Ctx,
+    ) -> (String, Vec<Line<'static>>, Vec<Hint>) {
+        let body = self.trust_body(trust, ctx);
+        let rows = dialog_rows(ctx);
+        let (top, shown, below) = window(self.trust_top, body.len(), rows);
+        let mut lines: Vec<Line<'static>> = body.into_iter().skip(top).take(shown).collect();
+        if below > 0 {
+            let more = match below {
+                1 => "1 more line below".to_owned(),
+                _ => format!("{below} more lines below"),
+            };
+            lines.push(styled(more, Role::Muted, &ctx.theme));
+        }
+        let mut hints = Vec::new();
+        if top > 0 || below > 0 {
+            let keys = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
+            hints.push(hint(&keys, "Scroll"));
+        }
+        if self.trust_end || below == 0 {
+            hints.push(hint("y", "Confirm"));
+        }
+        hints.push(hint("Esc", "Cancel"));
+        let title = if adding {
+            format!("Trust {}?", safe(&trust.title))
+        } else {
+            format!("Review {}", safe(&trust.title))
+        };
+        assert!(!lines.is_empty() && lines.len() <= rows);
+        (title, lines, hints)
+    }
+
     pub(super) fn dialog(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
         let room = usize::from(MODAL_WIDTH) - 4;
         let mut body = Vec::new();
         self.failure_lines(&mut body, room, ctx);
         let (title, hints) = match &self.open {
             Open::Trust { yaml, trust } => {
-                let lines = trust_lines(trust);
-                body.extend(lines.iter().flat_map(|text| wrap(text, room)).map(Line::raw));
-                let title = match yaml {
-                    Some(_) => format!("Trust {}?", safe(&trust.title)),
-                    None => format!("Review {}", safe(&trust.title)),
-                };
-                (title, vec![hint("y", "Confirm"), hint("Esc", "Cancel")])
+                let (title, lines, hints) = self.trust_dialog(yaml.is_some(), trust, ctx);
+                body = lines;
+                (title, hints)
             }
             Open::Refused { yaml, problem } => {
                 body.extend(
@@ -343,6 +416,11 @@ impl ConnectorsPage {
             Open::None | Open::Add(_) | Open::Key(_) => return None,
         };
         assert!(!body.is_empty(), "a dialog says something");
+        let hints = if self.pending.is_some() {
+            Vec::new()
+        } else {
+            hints
+        };
         let modal = Modal {
             width: MODAL_WIDTH,
             title,

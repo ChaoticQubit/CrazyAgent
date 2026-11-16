@@ -101,8 +101,9 @@ enum Open {
 /// its state, the harnesses that reach connectors and the two connector settings beside the
 /// locked line. Enter opens a connector's page with its address and secrets, where `k` sets
 /// a key typed once, `u` clears it, Enter reviews a changed file and `x` removes the
-/// owner's own; `a` adds a manifest only after its trust screen is confirmed with `y`. A
-/// settings pick waits for Enter and saves with the version read. One request at a time.
+/// owner's own; `a` adds a manifest only after its trust screen, scrolled to its end, is
+/// confirmed with `y`. A settings pick waits for Enter and saves with the version read. One
+/// request at a time, and Esc waits for it.
 pub(in crate::tui) struct ConnectorsPage {
     stored: Load<ConnectorsView>,
     native: NativeConnectors,
@@ -112,6 +113,8 @@ pub(in crate::tui) struct ConnectorsPage {
     top: usize,
     detail: Option<String>,
     open: Open,
+    trust_top: usize,
+    trust_end: bool,
     pending: Option<Pending>,
     failure: Option<String>,
     sent: Option<String>,
@@ -131,6 +134,8 @@ impl ConnectorsPage {
             top: 0,
             detail: None,
             open: Open::None,
+            trust_top: 0,
+            trust_end: false,
             pending: None,
             failure: None,
             sent: None,
@@ -495,6 +500,8 @@ impl ConnectorsPage {
                     yaml,
                     trust: Box::new(trust.clone()),
                 };
+                self.trust_top = 0;
+                self.trust_end = false;
             }
             Ok(Preview::Refused { problem }) => {
                 self.open = Open::Refused {
@@ -533,10 +540,11 @@ impl ConnectorsPage {
             return Flow::Ignored;
         };
         match key {
-            Key::Esc => {
+            Key::Esc if self.pending.is_none() => {
                 self.open = Open::None;
                 self.failure = None;
             }
+            Key::Esc => {}
             Key::Tab | Key::BackTab => form.on_path = !form.on_path,
             Key::Enter if self.pending.is_none() => self.check(ctx),
             other => {
@@ -556,10 +564,11 @@ impl ConnectorsPage {
             return Flow::Ignored;
         };
         match key {
-            Key::Esc => {
+            Key::Esc if self.pending.is_none() => {
                 self.open = Open::None;
                 self.failure = None;
             }
+            Key::Esc => {}
             Key::Enter if self.pending.is_none() => self.save_key(ctx),
             Key::Enter => {}
             other => {
@@ -569,7 +578,37 @@ impl ConnectorsPage {
         Flow::Handled
     }
 
+    /// Moves the trust screen's first line for a scroll key and notes once its end was on
+    /// screen (rv-ds241 T5 F1). Inputs: the key, the trust screen's line count and the
+    /// context. Output: none.
+    fn scroll(&mut self, key: &Key, total: usize, ctx: &Ctx) {
+        let rows = draw::dialog_rows(ctx);
+        let page = rows.saturating_sub(1).max(1);
+        let top = self.trust_top;
+        let asked = match key {
+            Key::Up => top.saturating_sub(1),
+            Key::Down => top + 1,
+            Key::PageUp => top.saturating_sub(page),
+            Key::PageDown => top + page,
+            Key::Home => 0,
+            Key::End => total,
+            _ => top,
+        };
+        let (top, _, below) = draw::window(asked, total, rows);
+        self.trust_top = top;
+        self.trust_end |= below == 0;
+        assert!(self.trust_top <= total);
+    }
+
     fn dialog_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let total = match &self.open {
+            Open::Trust { trust, .. } => Some(self.trust_body(trust, ctx).len()),
+            _ => None,
+        };
+        if let Some(total) = total {
+            self.scroll(key, total, ctx);
+        }
+        let read = total.is_none() || self.trust_end;
         let confirms = matches!(self.open, Open::Trust { .. } | Open::Remove { .. });
         let edits = match &self.open {
             Open::Refused {
@@ -578,7 +617,10 @@ impl ConnectorsPage {
             _ => None,
         };
         match key {
-            Key::Char('y') if confirms && self.pending.is_none() => self.confirm(ctx),
+            Key::Char('y') if confirms && read && self.pending.is_none() => self.confirm(ctx),
+            Key::Char('y') if confirms && !read => {
+                ctx.say(Message::warning("Not yet.", words::READ_TO_THE_END));
+            }
             Key::Char('e') => {
                 if let Some(yaml) = edits {
                     let mut form = add_form();
@@ -586,7 +628,7 @@ impl ConnectorsPage {
                     self.open = Open::Add(Box::new(form));
                 }
             }
-            Key::Esc => {
+            Key::Esc if self.pending.is_none() => {
                 self.open = Open::None;
                 self.failure = None;
             }
@@ -727,6 +769,7 @@ impl Screen for ConnectorsPage {
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         match &self.open {
+            Open::Add(_) | Open::Key(_) if self.pending.is_some() => return Vec::new(),
             Open::Add(_) => {
                 return vec![
                     hint("Enter", CHECK),
