@@ -164,11 +164,13 @@ export interface ContextChunk {
 export type AgentAccess = "sandboxed" | "own_branch" | "full";
 
 /** One access level as the engine names it, with the reason it can't run agents on this
- * computer, null when it runs. */
+ * computer, null when it runs, and the lines for what this Linux can't hold at that level,
+ * absent from an older engine. */
 export interface AccessLevel {
   access: AgentAccess;
   label: string;
   unavailable: string | null;
+  gaps?: string[];
 }
 
 /** How far a project's tools-on agents and the plugin check may reach on the network: open is
@@ -186,6 +188,11 @@ export type Toolchain = "rust" | "node" | "python";
 /** Who shares the uv cache and pnpm store a project's sandboxed agents write (T8): shared is
  * one per access level and kind of folder, per_agent one per agent. */
 export type ToolCacheScope = "shared" | "per_agent";
+
+/** What a launch does with the .cache and npm cache an earlier run left in an agent home
+ * (DEC-173 add.1): keep them, clear them when the agent starts at a wider level than its last
+ * start, or clear them at every start. */
+export type HomeCaches = "keep" | "clear_when_raised" | "clear_every_launch";
 
 /** When a wider saved access reaches agents already running (F08): when_idle stops each at its
  * next idle point so its next start has it, the live master resuming its own conversation;
@@ -224,7 +231,8 @@ export interface SharedFolders {
 /** A project's saved agent policy: the level, the network choice, the toolchain switches
  * that differ from the project's own use, whether git in the IDE runs the project's own
  * hooks, what the IDE may change in agent folders, who shares the agents' tool cache,
- * shared when it is left out, when wider access reaches running agents and the allowed
+ * shared when it is left out, what a launch does with an agent home's caches, Clear
+ * when access is raised when it is left out, when wider access reaches running agents and the allowed
  * extras, the saved ones kept when left out, and the shared local folders, All and
  * Read-only when left out. */
 export interface AgentPolicy {
@@ -233,6 +241,7 @@ export interface AgentPolicy {
   toolchains: { toolchain: Toolchain; allowed: boolean }[];
   ide_git_hooks: boolean;
   tool_cache?: ToolCacheScope;
+  home_caches?: HomeCaches;
   ide_agent_files: IdeAgentFiles;
   apply_changes?: AccessApply;
   grants?: AccessGrant[];
@@ -242,16 +251,19 @@ export interface AgentPolicy {
 /** The engine's view of a project's agent policy: the level, the levels this computer offers
  * with the reason one can't run, the network choices, every detected toolchain, the IDE
  * hooks switch, the IDE agent folders choice, the tool cache choice with every choice, the
+ * agent home caches choice with every choice, the
  * shared local folders choice and the project folder's top-level folders to pick from. */
 export interface PolicyView {
   access: AgentAccess;
   network: AgentNetwork;
   levels: AccessLevel[];
-  networks: { network: AgentNetwork; label: string }[];
+  networks: { network: AgentNetwork; label: string; gap?: string | null }[];
   toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
   ide_git_hooks: boolean;
   tool_cache: ToolCacheScope;
   tool_caches: { scope: ToolCacheScope; label: string }[];
+  home_caches?: HomeCaches;
+  home_cache_choices?: { choice: HomeCaches; label: string }[];
   ide_agent_files: IdeAgentFiles;
   apply_changes?: AccessApply;
   apply_choices?: { apply: AccessApply; label: string }[];

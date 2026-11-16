@@ -123,9 +123,10 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
 /// Builds an engine-hosted terminal's command: the shell under the project's agent sandbox
 /// with the network its level allows, the engine runtime guarded (its IDE folder with each capability and
 /// server token lies outside every allowed root), the project's toolchains and extra
-/// folders readable, its own home and temp folders, and only the
-/// [`TERMINAL_VARIABLES`] given. The engine runs it outside every sandbox, since macOS
-/// refuses a second Seatbelt profile inside a sandboxed process such as the IDE server.
+/// folders readable, its own home and temp folders, the home cleared of every shell startup
+/// file first (SA vid 12), and only the [`TERMINAL_VARIABLES`] given. The engine runs it
+/// outside every sandbox, since macOS refuses a second Seatbelt profile inside a sandboxed
+/// process such as the IDE server.
 /// Its listeners stay off the owner's local model ports, and it keeps to the project's IDE
 /// agent folders choice (DEC-124).
 /// Input: the launch. Output: the command, or a refusal for an unlisted shell, a start
@@ -162,6 +163,8 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     for folder in [&home, &tmp] {
         private_folder(folder)?;
     }
+    crate::agent_home::remove_shell_startup(&home, &root)
+        .map_err(|_| invalid("the terminal home keeps a shell startup file"))?;
     let homes = ToolHomes::owner()?;
     let scratch = toolchains::make_tmp(&home)?;
     toolchains::prepare_cargo_home(&home, &homes)?;

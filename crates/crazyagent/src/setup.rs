@@ -424,10 +424,12 @@ pub fn tool_lock(package: &str, version: &str) -> Option<ToolLock<'static>> {
 }
 
 /// The two uv commands that install a locked tool into a fresh virtual environment: the
-/// first creates it with the pinned Python, the second installs exactly the lock's
-/// wheels and refuses any file whose SHA-256 the lock lacks and any source build. Both
-/// ignore uv configuration files. Inputs: the Python version, the environment folder,
-/// its Python and the lock file. Output: each command's arguments.
+/// first creates it with the pinned Python, only one uv manages itself and never one it
+/// would find on the PATH, which another account may have planted (RV-DS241-200); the
+/// second installs exactly the lock's wheels and refuses any file whose SHA-256 the lock
+/// lacks and any source build. Both ignore uv configuration files. Inputs: the Python
+/// version, the environment folder, its Python and the lock file. Output: each command's
+/// arguments.
 pub fn locked_tool_args(
     python: &str,
     venv: &std::path::Path,
@@ -439,6 +441,7 @@ pub fn locked_tool_args(
             "venv".into(),
             "--no-project".into(),
             "--no-config".into(),
+            "--managed-python".into(),
             "--python".into(),
             python.into(),
             venv.into(),
@@ -980,6 +983,9 @@ mod tests {
         assert_eq!(tool_lock("headroom-ai", "0.41.1"), None);
     }
 
+    /// A locked tool installs with required hashes and no source builds, into a virtual
+    /// environment on a Python uv manages itself, never one a lookup finds on the PATH, where
+    /// another account may have planted one (RV-DS241-200).
     #[test]
     fn a_locked_tool_installs_with_required_hashes_and_no_source_builds() {
         let [venv, install] = locked_tool_args(
@@ -992,6 +998,7 @@ mod tests {
             "venv",
             "--no-project",
             "--no-config",
+            "--managed-python",
             "--python",
             "3.12",
             "/e/venv"

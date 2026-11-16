@@ -33,6 +33,12 @@ const view = {
     { scope: "shared", label: "Shared by agents with the same access" },
     { scope: "per_agent", label: "One per agent" },
   ],
+  home_caches: "clear_when_raised",
+  home_cache_choices: [
+    { choice: "keep", label: "Keep" },
+    { choice: "clear_when_raised", label: "Clear when access is raised" },
+    { choice: "clear_every_launch", label: "Clear every launch" },
+  ],
   ide_agent_files: "allow_all",
   shared_folders: { scope: "all", access: "read_only", chosen: [], secrets: [] },
   local_folders: ["build", "program"],
@@ -40,13 +46,14 @@ const view = {
 const SHARED = { scope: "all", access: "read_only", chosen: [], secrets: [] };
 
 test("Save sends the level, the network choice and only the toolchain switches that differ from the project's own use", () => {
-  assert.deepEqual(access.policyOf(view, "own_branch", "open", [true, false], false, "allow_all"), { access: "own_branch", network: "open", toolchains: [], ide_git_hooks: false, tool_cache: "shared", ide_agent_files: "allow_all", apply_changes: "when_idle", grants: [], shared_folders: SHARED });
+  assert.deepEqual(access.policyOf(view, "own_branch", "open", [true, false], false, "allow_all"), { access: "own_branch", network: "open", toolchains: [], ide_git_hooks: false, tool_cache: "shared", home_caches: "clear_when_raised", ide_agent_files: "allow_all", apply_changes: "when_idle", grants: [], shared_folders: SHARED });
   assert.deepEqual(access.policyOf(view, "sandboxed", "https", [false, true], false, "allow_all"), {
     access: "sandboxed",
     network: "https",
     toolchains: [{ toolchain: "rust", allowed: false }, { toolchain: "node", allowed: true }],
     ide_git_hooks: false,
     tool_cache: "shared",
+    home_caches: "clear_when_raised",
     ide_agent_files: "allow_all",
     apply_changes: "when_idle",
     grants: [],
@@ -164,7 +171,7 @@ test("agent access saves at the version the page read, and a stale save reads th
 });
 
 test("the IDE hooks switch is saved with the policy and reads the same in both UIs, Off for a new project", () => {
-  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], true, "allow_all"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: true, tool_cache: "shared", ide_agent_files: "allow_all", apply_changes: "when_idle", grants: [], shared_folders: SHARED });
+  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], true, "allow_all"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: true, tool_cache: "shared", home_caches: "clear_when_raised", ide_agent_files: "allow_all", apply_changes: "when_idle", grants: [], shared_folders: SHARED });
   assert.equal(access.IDE_GIT_HOOKS, "IDE git runs the project's hooks");
   assert.match(access.IDE_GIT_HOOKS_LINE, /never signed/);
   assert.doesNotMatch(access.IDE_GIT_HOOKS_LINE, /Sandboxed terminal/);
@@ -173,7 +180,7 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
   assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS}"`));
   assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS_LINE}"`));
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
-  assert.ok(page.includes("policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants)"));
+  assert.ok(page.includes("policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants, homeCaches)"));
   assert.ok(page.includes("ideGitHooks !== view.ide_git_hooks"));
   assert.ok(page.includes("setIdeGitHooks(next.ide_git_hooks)"));
   assert.match(page, /<IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} \/>/);
@@ -184,7 +191,7 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
 });
 
 test("the tool cache choice is saved with the policy, the saved one unless the owner picks another, with the engine's labels and what each means", () => {
-  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], false, "allow_all", "per_agent"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: false, tool_cache: "per_agent", ide_agent_files: "allow_all", apply_changes: "when_idle", grants: [], shared_folders: SHARED });
+  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], false, "allow_all", "per_agent"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: false, tool_cache: "per_agent", home_caches: "clear_when_raised", ide_agent_files: "allow_all", apply_changes: "when_idle", grants: [], shared_folders: SHARED });
   assert.equal(access.policyOf({ ...view, tool_cache: "per_agent" }, "sandboxed", "open", [true, false], false, "allow_all").tool_cache, "per_agent", "a save that shows no choice keeps the saved one");
   assert.deepEqual(access.TOOL_CACHE_CHOICES.map((choice) => [choice.scope, choice.label]), view.tool_caches.map((row) => [row.scope, row.label]));
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
@@ -198,6 +205,30 @@ test("the tool cache choice is saved with the policy, the saved one unless the o
   assert.match(page, /<ToolCacheChoices name="ps-tool-cache" value={toolCache} access={access} onChange={setToolCache} \/>/);
   const rows = readFileSync(new URL("../src/screens/team/setup-rows.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(rows, /tool_cache|toolCache/, "Agent settings' level row keeps the saved choice through policyOf");
+});
+
+test("the Tool caches in agent homes choice is saved with the policy, the saved one unless the owner picks another, with the engine's words and the same help in both UIs", () => {
+  for (const choice of ["keep", "clear_when_raised", "clear_every_launch"]) {
+    assert.equal(access.policyOf(view, "sandboxed", "open", [true, false], false, "allow_all", "shared", undefined, undefined, undefined, choice).home_caches, choice);
+    assert.equal(access.policyOf({ ...view, home_caches: choice }, "sandboxed", "open", [true, false], false, "allow_all").home_caches, choice, "a save that shows no choice keeps the saved one");
+  }
+  assert.equal(access.policyOf({ ...view, home_caches: undefined }, "sandboxed", "open", [true, false], false, "allow_all").home_caches, "clear_when_raised", "a view from before the setting reads the default");
+  assert.equal(access.HOME_CACHES, "Tool caches in agent homes");
+  assert.deepEqual(access.HOME_CACHES_CHOICES.map((choice) => [choice.choice, choice.label]), view.home_cache_choices.map((row) => [row.choice, row.label]));
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  for (const choice of access.HOME_CACHES_CHOICES) assert.ok(engine.includes(`=> "${choice.choice}"`) && engine.includes(`=> "${choice.label}"`), `${choice.label} is the engine's word`);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
+  assert.ok(tui.includes(`"${access.HOME_CACHES}"`));
+  for (const choice of access.HOME_CACHES_CHOICES) assert.ok(tui.includes(`"${choice.help}"`), `${choice.label} reads the same in the TUI`);
+  const markup = renderToStaticMarkup(createElement(access.HomeCachesChoices, { name: "t", value: "keep", onChange: () => {} }));
+  for (const choice of access.HOME_CACHES_CHOICES) assert.ok(markup.includes(choice.label) && markup.includes(choice.help), choice.label);
+  assert.match(markup, /value="keep" checked=""/);
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.ok(page.includes(`setHomeCaches(next.home_caches ?? "clear_when_raised")`));
+  assert.ok(page.includes(`homeCaches !== (view.home_caches ?? "clear_when_raised")`));
+  assert.match(page, /<HomeCachesChoices name="ps-home-caches" value={homeCaches} onChange={setHomeCaches} \/>/);
+  const rows = readFileSync(new URL("../src/screens/team/setup-rows.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(rows, /home_caches|homeCaches/, "Agent settings' level row keeps the saved choice through policyOf");
 });
 
 test("the IDE agent folders choice is saved with the policy, restarts the IDE and reads the same in both UIs, Allow all changes by default", () => {
@@ -310,7 +341,7 @@ test("F08: an extra the owner types is a full plain socket path or a port below 
 
 test("F08: Agent access shows the extras with what each means, the apply choice and the extras log, and every grant refusal has the engine's sentence", () => {
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
-  assert.match(page, /<GrantsEditor prefix="ps" view={view} grants={grants} access={access} onChange={setGrants} \/>/);
+  assert.match(page, /<GrantsEditor prefix="ps" view={view} grants={grants} access={access} network={network} onChange={setGrants} \/>/);
   assert.match(page, /<ApplyChoices name="ps-apply-changes" value={applyChanges} onChange={setApplyChanges} \/>/);
   assert.match(page, /<GrantLog rows={view\.grant_log \?\? \[\]} \/>/);
   assert.ok(page.includes("setGrants(savedGrants(next))"));
@@ -419,21 +450,47 @@ test("every shared folders refusal has its own sentence in both UIs", () => {
   }
 });
 
-test("only on Linux do the network and access choices say ports hold no host and nested git is not blocked (RV-DS241-83, -85)", () => {
+test("only on Linux does the network choice say ports hold no host, and the access level names nested git once, only as the engine sends it (RV-DS241-83, -85, DEC-179 T4c)", () => {
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
   assert.ok(engine.includes(`pub const LINUX_PORTS_ANY_HOST_LINE: &str = "${access.LINUX_PORTS_ANY_HOST}";`), "the port gap reads as the engine states it");
-  assert.ok(engine.includes(`pub const LINUX_NESTED_GIT_LINE: &str = "${access.LINUX_NESTED_GIT}";`), "the nested git gap reads as the engine states it");
+  assert.ok(!("LINUX_NESTED_GIT" in access), "the engine's level lines carry the nested git line");
+  const nested = engine.match(/pub const LINUX_NESTED_GIT_LINE: &str = "([^"]+)";/)[1];
   const none = () => {};
-  const shown = (platform, chosen) => renderToStaticMarkup(createElement(access.NetworkChoices, { name: "n", value: "none", access: chosen, onChange: none, platform }))
-    + renderToStaticMarkup(createElement(access.AccessLevels, { name: "a", value: chosen, unavailable: () => null, onChange: none, platform }));
   const escaped = (text) => text.replaceAll("'", "&#x27;");
-  const linux = shown("linux", "sandboxed");
-  assert.ok(linux.includes(escaped(access.LINUX_PORTS_ANY_HOST)), linux);
-  assert.ok(linux.includes(escaped(access.LINUX_NESTED_GIT)), linux);
-  for (const page of [shown("macos", "sandboxed"), shown("windows", "sandboxed"), shown("linux", "full")]) {
+  const network = (platform, chosen) => renderToStaticMarkup(createElement(access.NetworkChoices, { name: "n", value: "none", access: chosen, onChange: none, platform }));
+  const levels = (platform, gaps) => renderToStaticMarkup(createElement(access.AccessLevels, { name: "a", value: "sandboxed", unavailable: () => null, gaps: () => gaps, onChange: none, platform }));
+  assert.ok(network("linux", "sandboxed").includes(escaped(access.LINUX_PORTS_ANY_HOST)));
+  for (const page of [network("macos", "sandboxed"), network("windows", "sandboxed"), network("linux", "full")]) {
     assert.ok(!page.includes(escaped(access.LINUX_PORTS_ANY_HOST)), page);
-    assert.ok(!page.includes(escaped(access.LINUX_NESTED_GIT)), page);
   }
+  for (const platform of ["linux", "macos"]) {
+    const quiet = levels(platform, []);
+    assert.ok(!quiet.includes(escaped(nested)), quiet);
+    const named = levels(platform, [nested]);
+    assert.equal(named.split(escaped(nested)).length - 1, 1, named);
+  }
+});
+
+test("the network choice shows the ports line the engine sends for it, and this desktop's own only for an engine that sends none (DEC-179 T3b)", () => {
+  const told = "a line the engine sends for this choice";
+  const line = access.LINUX_PORTS_ANY_HOST.replaceAll("'", "&#x27;");
+  const sent = (platform, chosen, gap) => renderToStaticMarkup(createElement(access.NetworkChoices, { name: "n", value: "none", access: chosen, onChange: () => {}, platform, gap }));
+  for (const platform of ["linux", "macos"]) {
+    const page = sent(platform, "sandboxed", told);
+    assert.ok(page.includes(told), page);
+    assert.ok(!page.includes(line), page);
+    assert.ok(!sent(platform, "full", told).includes(told), "Full access has no network limit to speak of");
+  }
+  assert.ok(!sent("linux", "sandboxed", null).includes(line), "the engine says this choice holds here");
+  assert.ok(sent("linux", "sandboxed", undefined).includes(line), "an engine that sends no line");
+  const networks = [{ network: "open", label: "Open", gap: "open line" }, { network: "none", label: "None", gap: null }, { network: "https", label: "Port 443 only" }];
+  assert.equal(access.networkGap({ networks }, "open", "macos"), "open line");
+  assert.equal(access.networkGap({ networks }, "none", "linux"), null);
+  assert.equal(access.networkGap({ networks }, "https", "linux"), access.LINUX_PORTS_ANY_HOST);
+  assert.equal(access.networkGap({ networks }, "https", "macos"), null);
+  assert.equal(access.networkGap(null, "none", "linux"), access.LINUX_PORTS_ANY_HOST);
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<NetworkChoices[^>]*gap=\{networkGap\(view, network\)\}/);
 });
 
 test("only on Linux below Full access do the allowed extras say a port is open on every host (RV-DS241-83)", () => {
@@ -442,5 +499,26 @@ test("only on Linux below Full access do the allowed extras say a port is open o
   assert.ok(shown("linux", "sandboxed").includes(line), shown("linux", "sandboxed"));
   for (const page of [shown("macos", "sandboxed"), shown("windows", "own_branch"), shown("linux", "full")]) {
     assert.ok(!page.includes(line), page);
+  }
+  const told = "a line the engine sends for None";
+  const saved = (gap) => ({ ...view, network: "none", networks: view.networks.map((choice) => choice.network === "none" ? { ...choice, gap } : choice) });
+  const sent = (platform, gap, network) => renderToStaticMarkup(createElement(access.GrantsEditor, { prefix: "g", view: saved(gap), grants: [], access: "sandboxed", network, onChange: () => {}, platform }));
+  assert.ok(sent("macos", told).includes(told), "the engine's line for the saved choice");
+  assert.ok(!sent("linux", null).includes(line), "the engine says None holds here");
+  assert.ok(sent("linux", null, "open").includes(line), "the choice being edited, not the saved one");
+});
+
+test("the access choice shows what the engine says this Linux can't hold for the chosen level (SA vid 4)", () => {
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const line = /pub const LINUX_SIGNALS_LINE: &str = "([^"]+)";/.exec(engine)?.[1];
+  assert.ok(line, "the engine states the signal gap");
+  const told = (level) => level === "sandboxed" ? [line] : [];
+  const shown = (chosen, gaps) => renderToStaticMarkup(createElement(access.AccessLevels, { name: "a", value: chosen, unavailable: () => null, gaps, onChange: () => {}, platform: "linux" }));
+  const escaped = line.replaceAll("'", "&#x27;");
+  assert.ok(shown("sandboxed", told).includes(escaped), shown("sandboxed", told));
+  assert.ok(!shown("own_branch", told).includes(escaped));
+  assert.ok(!shown("sandboxed", undefined).includes(escaped), "an older engine sends no gap line");
+  for (const page of ["../src/screens/project/settings.tsx", "../src/screens/new-project/index.tsx"]) {
+    assert.match(readFileSync(new URL(page, import.meta.url), "utf8"), /<AccessLevels [^\n]* gaps=\{/, page);
   }
 });

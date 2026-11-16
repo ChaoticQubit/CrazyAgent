@@ -142,6 +142,7 @@ impl Hooked {
                     toolchains: Vec::new(),
                     ide_git_hooks: on,
                     tool_cache: Default::default(),
+                    home_caches: Default::default(),
                     ide_agent_files: Default::default(),
                     shared_folders: Default::default(),
                     network: crazyagent::sandbox::policy::AgentNetwork::default(),

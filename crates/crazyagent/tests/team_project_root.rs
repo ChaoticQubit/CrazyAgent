@@ -153,6 +153,7 @@ async fn wire(chosen: Option<AgentAccess>) -> Wired {
             network: AgentNetwork::Open,
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()

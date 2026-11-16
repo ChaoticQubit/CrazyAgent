@@ -474,9 +474,13 @@ export function saveProfile(profile: OwnerProfile): Promise<Result<void>> {
 /** How a limited-network agent's sockets are held on Linux, the engine's `LinuxSockets`. */
 export type LinuxSockets = "tcp_only" | "refuse" | "tcp_ports";
 
+/** Whether the call supervisor guards agents on Linux, the engine's `LinuxSupervisor`. */
+export type LinuxSupervisor = "on" | "off";
+
 /** The owner's app-wide sandbox settings, the engine's `SandboxSettings`. */
 export interface SandboxSettings {
   linux_sockets: LinuxSockets;
+  linux_supervisor: LinuxSupervisor;
 }
 
 /** Reads the owner's sandbox settings. Output: the stored settings, or the defaults before the first save. */

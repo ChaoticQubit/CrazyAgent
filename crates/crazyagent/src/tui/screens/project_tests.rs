@@ -2674,6 +2674,7 @@ fn access_view(access: AgentAccess, version: u64) -> PolicyView {
                 access: level,
                 label: level.label().to_owned(),
                 unavailable: None,
+                gaps: Vec::new(),
             })
             .collect(),
         networks: crate::sandbox::policy::AgentNetwork::ALL
@@ -2681,12 +2682,15 @@ fn access_view(access: AgentAccess, version: u64) -> PolicyView {
             .map(|network| crate::sandbox::policy::NetworkView {
                 network,
                 label: network.label().to_owned(),
+                gap: None,
             })
             .collect(),
         toolchains: Vec::new(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         tool_caches: Vec::new(),
+        home_cache_choices: Vec::new(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         local_folders: Vec::new(),
@@ -2736,6 +2740,7 @@ fn a_stale_access_save_keeps_the_level_and_enter_saves_it_over_the_re_read() {
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),

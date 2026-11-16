@@ -3,11 +3,11 @@ import type { Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type ReadPaths } from "../../api-projects";
-import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
+import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
 import type { IntakeJob, IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
 import { loadIntakeJob } from "../../api-intake";
 import { refusalLine } from "../intake/intake";
-import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
+import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, HomeCachesChoices, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, networkGap, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
 import { Button, ConfirmDialog, Dialog, Segmented, Select, navigate } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -600,6 +600,7 @@ function AccessSection({ data }: { data: ProjectData }) {
   const [access, setAccess] = useState<AgentAccess>("sandboxed");
   const [network, setNetwork] = useState<AgentNetwork>("open");
   const [toolCache, setToolCache] = useState<ToolCacheScope>("shared");
+  const [homeCaches, setHomeCaches] = useState<HomeCaches>("clear_when_raised");
   const [allowed, setAllowed] = useState<boolean[]>([]);
   const [ideGitHooks, setIdeGitHooks] = useState(false);
   const [ideAgentFiles, setIdeAgentFiles] = useState<IdeAgentFiles>("allow_all");
@@ -616,6 +617,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     setAccess(next.access);
     setNetwork(next.network);
     setToolCache(next.tool_cache);
+    setHomeCaches(next.home_caches ?? "clear_when_raised");
     setAllowed(next.toolchains.map((row) => row.allowed));
     setIdeGitHooks(next.ide_git_hooks);
     setIdeAgentFiles(next.ide_agent_files);
@@ -638,7 +640,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     if (!view) return;
     setConfirming(false);
     setBusy(true);
-    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants));
+    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants, homeCaches));
     setBusy(false);
     if (saved.fresh) seed(saved.fresh);
     setNote(saved.note);
@@ -648,22 +650,23 @@ function AccessSection({ data }: { data: ProjectData }) {
   const sharedFolders: SharedFolders = { ...shared, secrets: sharedSecretsOf(secretsText) };
   const sharedValid = sharedFolders.secrets.length <= SHARED_SECRETS_MAX;
   const grantsChanged = view !== null && grants.map(grantLabel).join("\n") !== savedGrants(view).map(grantLabel).join("\n");
-  const changed = view !== null && (access !== view.access || network !== view.network || toolCache !== view.tool_cache || ideGitHooks !== view.ide_git_hooks || ideAgentFiles !== view.ide_agent_files || !sameShared(sharedFolders, view.shared_folders) || applyChanges !== (view.apply_changes ?? "when_idle") || grantsChanged || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
+  const changed = view !== null && (access !== view.access || network !== view.network || toolCache !== view.tool_cache || homeCaches !== (view.home_caches ?? "clear_when_raised") || ideGitHooks !== view.ide_git_hooks || ideAgentFiles !== view.ide_agent_files || !sameShared(sharedFolders, view.shared_folders) || applyChanges !== (view.apply_changes ?? "when_idle") || grantsChanged || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
   return <div className="pj-stack">
     <h2>Agent access</h2>
     <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.</p>
     {view === null && !note && <p className="pj-muted" role="status">Loading...</p>}
-    {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} onChange={setAccess} />}
+    {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} gaps={(level) => view.levels.find((item) => item.access === level)?.gaps ?? []} onChange={setAccess} />}
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
     {view && <p className="pj-help">{POLICY_RESTARTS_IDE}</p>}
-    {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} />}
+    {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} gap={networkGap(view, network)} />}
     {view && <ToolCacheChoices name="ps-tool-cache" value={toolCache} access={access} onChange={setToolCache} />}
+    {view && <HomeCachesChoices name="ps-home-caches" value={homeCaches} onChange={setHomeCaches} />}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
     {view && <p className="pj-help">{TOOLCHAIN_OFF_STOPS_AGENTS}</p>}
     {view && <IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} />}
     {view && <IdeAgentFilesChoices name="ps-agent-files" value={ideAgentFiles} access={access} onChange={setIdeAgentFiles} />}
     {view && <SharedFoldersChoices prefix="ps" value={shared} secretsText={secretsText} local={view.local_folders} access={access} onChange={setShared} onSecretsText={setSecretsText} />}
-    {view && <GrantsEditor prefix="ps" view={view} grants={grants} access={access} onChange={setGrants} />}
+    {view && <GrantsEditor prefix="ps" view={view} grants={grants} access={access} network={network} onChange={setGrants} />}
     {view && <ApplyChoices name="ps-apply-changes" value={applyChanges} onChange={setApplyChanges} />}
     {view && <GrantLog rows={view.grant_log ?? []} />}
     {note && <p className="pj-note warn" role="status">{note}</p>}

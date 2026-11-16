@@ -225,8 +225,8 @@ fn read_only_folder_lists_are_bounded_before_the_engine_checks_them() {
 #[test]
 fn catalog_names_every_access_level_with_why_it_cannot_run_here() {
     use crate::sandbox::policy::{AgentAccess, LevelView};
-    let catalog = catalog(&config(), None, &[], &BTreeSet::new()).unwrap();
-    assert_eq!(catalog.agent_access, LevelView::all());
+    let catalog = catalog(&config(), None, &[], &BTreeSet::new(), None).unwrap();
+    assert_eq!(catalog.agent_access, LevelView::all(None));
     let runs: Vec<(AgentAccess, bool)> = catalog
         .agent_access
         .iter()
@@ -268,6 +268,7 @@ fn catalog_serves_plain_labels_and_default_team_prefers_signed_in_codex() {
         Some(&mixed),
         &[ResearchKind::MarketResearch, ResearchKind::DesignResearch],
         &signed(&["c-codex", "b-claude"]),
+        None,
     )
     .unwrap();
     assert!(
@@ -374,9 +375,15 @@ fn research_toggles_leave_the_default_team_open_and_the_master_follows_the_best_
         ResearchKind::CompetitorResearch,
         ResearchKind::DesignResearch,
     ];
-    let claude = catalog(&config, Some(&managed), &toggles, &signed(&["m-claude"]))
-        .unwrap()
-        .default_team;
+    let claude = catalog(
+        &config,
+        Some(&managed),
+        &toggles,
+        &signed(&["m-claude"]),
+        None,
+    )
+    .unwrap()
+    .default_team;
     assert_eq!(claude.master, "claude");
     assert!(claude.master_tools);
     assert!(
@@ -405,7 +412,7 @@ fn research_toggles_leave_the_default_team_open_and_the_master_follows_the_best_
         "an RCLI account never leads the default team"
     );
     assert_eq!(
-        catalog(&config, Some(&managed), &toggles, &signed(&[]))
+        catalog(&config, Some(&managed), &toggles, &signed(&[]), None)
             .unwrap()
             .default_team_status
             .as_deref(),
@@ -418,12 +425,13 @@ fn research_toggles_leave_the_default_team_open_and_the_master_follows_the_best_
 }
 
 fn catalog_ok_without_pool(config: &EffectiveConfig) -> bool {
-    catalog(config, None, &ResearchKind::ALL, &BTreeSet::new()).is_ok()
+    catalog(config, None, &ResearchKind::ALL, &BTreeSet::new(), None).is_ok()
         && catalog(
             config,
             Some(&CredentialRef::new("pool-absent").unwrap()),
             &[],
             &BTreeSet::new(),
+            None,
         )
         .is_err()
 }

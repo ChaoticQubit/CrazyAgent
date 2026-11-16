@@ -205,7 +205,7 @@ pub struct HeldView {
 /// One hold of a Full access stop: the account it keeps, if any, the report naming what
 /// still runs, what the stop holds, such as the agent's account lease, until the
 /// hold ends or the owner keeps the processes running, who left it, the names it shows, where
-/// it stands and when it began.
+/// it stands, when it began and whether a sandboxed run left it ([`confined_left_by`]).
 struct Held {
     account: Option<CredentialRef>,
     report: String,
@@ -215,6 +215,7 @@ struct Held {
     names: String,
     state: HoldState,
     since_ms: i64,
+    sandboxed: bool,
 }
 
 /// Every account a Full access stop keeps now, by the order they were kept in, so a refused
@@ -270,6 +271,22 @@ pub fn held_in(project: &str) -> Vec<HeldView> {
             holds_account: hold.account.is_some(),
         })
         .collect()
+}
+
+/// Whether a hold still lists commands a sandboxed run of `by` left that go on running: ones
+/// the owner keeps, or has yet to end or keep. Such a command writes where the agent does,
+/// so a next run in the same home would run what it leaves there (SA vid 12). A hold that
+/// is ending its commands does not count, nor does one a Full access run left, whose
+/// commands hold the owner's rights already. Input: who would start. Output: the answer.
+pub fn confined_left_by(by: &HoldBy) -> bool {
+    assert!(!by.who.is_empty());
+    let who: String = by.who.chars().take(WHO_CHARS_MAX).collect();
+    held().values().any(|hold| {
+        hold.sandboxed
+            && matches!(hold.state, HoldState::Held | HoldState::Kept)
+            && hold.by.project == by.project
+            && hold.by.who == who
+    })
 }
 
 /// Has one hold of a project end its processes, the owner's End: SIGTERM, then SIGKILL after
@@ -581,6 +598,7 @@ impl Leftovers {
         mode: LeftoverMode,
     ) {
         let key = NEXT_HELD.fetch_add(1, Ordering::Relaxed);
+        let sandboxed = self.0.sandboxed;
         let report = self.plain();
         let names = self.names();
         let by = HoldBy {
@@ -606,6 +624,7 @@ impl Leftovers {
                 names,
                 state,
                 since_ms: now_ms(),
+                sandboxed,
             },
         );
         assert!(previous.is_none());
@@ -2582,6 +2601,16 @@ pub(crate) mod tests {
         }
     }
 
+    /// Leaves a hold as a sandboxed run's stop does, for another module's row: a process in
+    /// a session of its own, listed under `by` with the owner's setting `mode`. Inputs: who
+    /// left it and the setting. Output: the process, which the row ends.
+    pub(crate) fn held_sandboxed(by: HoldBy, mode: LeftoverMode) -> std::process::Child {
+        let left = session_sleeper(false);
+        let lineage = Lineage::of_sandboxed(left.id(), None).unwrap();
+        Leftovers(Box::new(lineage)).hold(None, (), by, mode);
+        left
+    }
+
     /// Starts a perl process in a session of its own that ignores SIGTERM, or not, and waits
     /// until it left its session. Input: whether it ignores SIGTERM. Output: the child.
     fn session_sleeper(ignores_term: bool) -> std::process::Child {
@@ -2734,6 +2763,61 @@ pub(crate) mod tests {
         );
         assert!(still_runs, "Keep ended the process");
         assert!(cleared, "a kept process that ended stayed listed");
+    }
+
+    /// Commands a sandboxed run left count against its agent's next start while the owner
+    /// keeps them or has not chosen, in that agent's project only, and no longer once the
+    /// hold ends them or they are gone; a Full access run's never count.
+    #[test]
+    fn commands_a_sandboxed_run_left_count_until_their_hold_ends_them() {
+        let mut asked = session_sleeper(false);
+        let mut full = session_sleeper(false);
+        let mut kept = session_sleeper(false);
+        let hold = |lineage: Lineage, project: &str, mode: LeftoverMode| {
+            Leftovers(Box::new(lineage)).hold(None, (), by_in(project), mode);
+        };
+        hold(
+            Lineage::of_sandboxed(asked.id(), None).unwrap(),
+            "left-asked",
+            LeftoverMode::Ask,
+        );
+        hold(
+            Lineage::of(full.id(), None).unwrap(),
+            "left-full",
+            LeftoverMode::Ask,
+        );
+        hold(
+            Lineage::of_sandboxed(kept.id(), None).unwrap(),
+            "left-kept",
+            LeftoverMode::Keep,
+        );
+        let another = HoldBy {
+            project: Some("left-asked".into()),
+            who: "team agent 8".into(),
+        };
+
+        let waiting = confined_left_by(&by_in("left-asked"));
+        let elsewhere = confined_left_by(&by_in("left-other"));
+        let for_another = confined_left_by(&another);
+        let unconfined = confined_left_by(&by_in("left-full"));
+        let keeping = confined_left_by(&by_in("left-kept"));
+        let key = held_in("left-asked")[0].key;
+        let ending = end_held(key, "left-asked");
+        let while_ending = confined_left_by(&by_in("left-asked"));
+        for child in [&mut asked, &mut full, &mut kept] {
+            end_pid(i32::try_from(child.id()).unwrap());
+            let _ = child.wait();
+        }
+        let cleared = within(LEFTOVER_GRACE, || !confined_left_by(&by_in("left-kept")));
+
+        assert!(waiting, "a hold the owner has not chosen on did not count");
+        assert!(!elsewhere, "a hold counted in another project");
+        assert!(!for_another, "a hold counted for another agent");
+        assert!(!unconfined, "a Full access run's commands counted");
+        assert!(keeping, "commands the owner keeps did not count");
+        assert!(ending);
+        assert!(!while_ending, "a hold that is ending its commands counted");
+        assert!(cleared, "kept commands that ended still counted");
     }
 
     #[test]

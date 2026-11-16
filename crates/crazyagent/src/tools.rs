@@ -13,6 +13,7 @@ const NAME_BYTES_MAX: usize = 64;
 const PATH_BYTES_MAX: usize = 1024;
 const SCRIPT_HEAD_BYTES_MAX: usize = 256;
 const SHEBANG_WORDS_MAX: usize = 8;
+const ENV: &str = "/usr/bin/env";
 pub(crate) const INTERPRETER_DEPTH_MAX: usize = 2;
 const VERSION_ENTRIES_MAX: usize = 64;
 const VERSIONS_PER_MANAGER_MAX: usize = 4;
@@ -66,6 +67,14 @@ pub fn record_engine_root(root: &Path) {
     assert!(root.is_absolute());
     let kept = ENGINE_ROOT.get_or_init(|| root.to_path_buf());
     assert_eq!(kept, root, "one engine root per process");
+}
+
+/// The data root this process's engine recorded at its start ([`record_engine_root`]),
+/// none in a process that runs no engine. No input. Output: the absolute root.
+pub(crate) fn engine_root() -> Option<&'static Path> {
+    let root = ENGINE_ROOT.get().map(PathBuf::as_path);
+    assert!(root.is_none_or(Path::is_absolute));
+    root
 }
 
 /// The owner line when tmux is found nowhere the resolver looks, with how to install it.
@@ -758,13 +767,15 @@ impl Reason {
 /// named so the owner knows what to fix, a file agents can write, a version-manager shim
 /// with no real install found behind it, or a file in a temp folder the engine's places
 /// refuse or reached through a link into one, which agents with the owner's temp folder
-/// grant or other users write.
+/// grant or other users write, or a script whose first line the resolver cannot read the
+/// way the system and `/usr/bin/env` run it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     OthersCanChange(PathBuf),
     AgentsCanWrite,
     Shim,
     InTemp,
+    FirstLine,
 }
 
 /// A file the resolver found and passed over, and why.
@@ -1004,12 +1015,16 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         return Err(refused(program.as_path(), Refusal::InTemp));
     }
     assert!(program.is_absolute());
-    let Some(shebang) = shebang(&program) else {
-        return Ok(Resolved {
-            entry: entry.to_path_buf(),
-            program,
-            kind: Kind::Native,
-        });
+    let shebang = match shebang(&program) {
+        Ok(Some(shebang)) => shebang,
+        Ok(None) => {
+            return Ok(Resolved {
+                entry: entry.to_path_buf(),
+                program,
+                kind: Kind::Native,
+            });
+        }
+        Err(Unreadable) => return Err(refused(program.as_path(), Refusal::FirstLine)),
     };
     let needs = |name: &str| Missing {
         tool: tool.clone(),
@@ -1031,7 +1046,11 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
             .is_ok_and(|real| leads_into_temp(entry, &real, &places.temps));
     let interpreter = match &shebang.by_name {
         Some(name) => named_interpreter(name, &program, places, depth + 1),
-        None if through_shim => resolve_at(&interpreter_name, places, depth + 1),
+        None if through_shim => match check_place(places, &shebang.interpreter) {
+            Some(Ok(())) => resolve_at(&interpreter_name, places, depth + 1),
+            Some(Err(why)) => Err(refused(shebang.interpreter.as_path(), why)),
+            None => Err(not_there()),
+        },
         None if into_temp => Err(Missing {
             reason: Reason::Refused,
             refused: Some(Box::new(Refused {
@@ -1049,6 +1068,9 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         },
         _ => needs(&interpreter_name),
     })?;
+    if interpreter.program == Path::new(ENV) {
+        return Err(refused(program.as_path(), Refusal::FirstLine));
+    }
     Ok(Resolved {
         entry: entry.to_path_buf(),
         program,
@@ -1125,51 +1147,93 @@ impl Shebang {
     }
 }
 
-/// Reads the `#!` line of a file, at most [`SCRIPT_HEAD_BYTES_MAX`] bytes: an absolute
-/// interpreter with its words, or `env` with the program it names (its flags and
-/// assignments skipped). Input: the real file. Output: the line, or none for a program
-/// that is not a script or a line that names no usable interpreter.
-fn shebang(file: &Path) -> Option<Shebang> {
+/// A first line the resolver cannot read the way the system and `/usr/bin/env` run it, so
+/// what it starts is not known.
+struct Unreadable;
+
+/// Reads the `#!` line of a file the way the system runs it, at most
+/// [`SCRIPT_HEAD_BYTES_MAX`] bytes, ended by a newline or a NUL, its words split on spaces
+/// and tabs: an absolute interpreter with its words, or `/usr/bin/env`, after one `-S` at
+/// most, with the program it names. An interpreter that is `env` anywhere else is refused
+/// here, and one whose real file is `/usr/bin/env` by the resolver ([`entry_at`]).
+/// Input: the real file. Output: the line, none for a file that is not a script, or
+/// [`Unreadable`] for any other first line.
+fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     use std::io::Read;
     let mut head = Vec::with_capacity(SCRIPT_HEAD_BYTES_MAX);
-    std::fs::File::open(file)
-        .ok()?
+    let Ok(opened) = std::fs::File::open(file) else {
+        return Ok(None);
+    };
+    if opened
         .take(SCRIPT_HEAD_BYTES_MAX as u64)
         .read_to_end(&mut head)
-        .ok()?;
-    let line = head.strip_prefix(b"#!")?;
-    let line = &line[..line.iter().position(|b| *b == b'\n').unwrap_or(line.len())];
-    let line = std::str::from_utf8(line).ok()?.trim();
-    let words: Vec<&str> = line.split_whitespace().take(SHEBANG_WORDS_MAX).collect();
-    let interpreter = PathBuf::from(words.first()?);
-    if !usable(&interpreter) {
-        return None;
+        .is_err()
+    {
+        return Ok(None);
     }
-    let rest = &words[1..];
+    assert!(head.len() <= SCRIPT_HEAD_BYTES_MAX);
+    let Some(line) = head.strip_prefix(b"#!") else {
+        return Ok(None);
+    };
+    let end = line.iter().position(|byte| *byte == b'\n' || *byte == 0);
+    if end.is_none() && head.len() == SCRIPT_HEAD_BYTES_MAX {
+        return Err(Unreadable);
+    }
+    let line = std::str::from_utf8(&line[..end.unwrap_or(line.len())]).map_err(|_| Unreadable)?;
+    if line.chars().any(|c| c.is_control() && c != '\t') {
+        return Err(Unreadable);
+    }
+    let words: Vec<&str> = line
+        .split([' ', '\t'])
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words.len() > SHEBANG_WORDS_MAX {
+        return Err(Unreadable);
+    }
+    let (first, rest) = words.split_first().ok_or(Unreadable)?;
+    let interpreter = PathBuf::from(first);
+    if !usable(&interpreter) {
+        return Err(Unreadable);
+    }
     if interpreter.file_name() != Some(OsStr::new("env")) {
-        return Some(Shebang {
+        return Ok(Some(Shebang {
             interpreter,
             by_name: None,
             arguments: rest.iter().map(|word| (*word).to_owned()).collect(),
-        });
+        }));
     }
-    let start = rest
-        .iter()
-        .position(|word| !word.starts_with('-') && !word.contains('='))?;
-    let program = rest[start];
-    let arguments: Vec<String> = rest[start + 1..].iter().map(|w| (*w).to_owned()).collect();
+    if interpreter != Path::new(ENV) {
+        return Err(Unreadable);
+    }
+    let split = rest.first() == Some(&"-S");
+    let rest = if split { &rest[1..] } else { rest };
+    let (program, arguments) = rest.split_first().ok_or(Unreadable)?;
+    let plain = !program.starts_with('-')
+        && !program.contains('=')
+        && !(split && program.contains(['$', '\\', '"', '\'', '#']));
+    if !plain {
+        return Err(Unreadable);
+    }
+    let arguments: Vec<String> = arguments.iter().map(|word| (*word).to_owned()).collect();
     if program.starts_with('/') {
-        return Some(Shebang {
-            interpreter: PathBuf::from(program),
+        let interpreter = PathBuf::from(program);
+        if !usable(&interpreter) {
+            return Err(Unreadable);
+        }
+        return Ok(Some(Shebang {
+            interpreter,
             by_name: None,
             arguments,
-        });
+        }));
     }
-    valid_name(program).then(|| Shebang {
+    if !valid_name(program) {
+        return Err(Unreadable);
+    }
+    Ok(Some(Shebang {
         interpreter,
-        by_name: Some(program.to_owned()),
+        by_name: Some((*program).to_owned()),
         arguments,
-    })
+    }))
 }
 
 /// Homebrew's program folders on Apple silicon and Intel. Only a build with the
@@ -1289,6 +1353,9 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
         Refusal::InTemp => format!(
             "{tool} can't start: {file} is not used because it is in a temp folder or links to one, which agents or other users can change. Install it outside temp folders, then try again."
         ),
+        Refusal::FirstLine => format!(
+            "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, or a line that is too long or unreadable). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
+        ),
     }
 }
 
@@ -1307,19 +1374,29 @@ fn install_hint(tool: &str) -> &'static str {
 }
 
 /// Checks a found file: none when it is not an executable file whose links resolve, else
-/// passed, or passed over as a version-manager shim, as agents' to write, as changeable by
-/// another user or group past a sticky store, or as leading into a temp folder: the file as
-/// found and real first, then each link and `..` folder on its way, as it runs by its path
-/// ([`Places::hop_refusal`], B1). Inputs: the places and the file. Output: the check.
+/// passed, or passed over as a version-manager shim, or as [`check_place`] refuses it.
+/// Inputs: the places and the file. Output: the check.
 fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
+    let place = check_place(places, candidate)?;
+    Some(if crate::harnesses::is_shim(places.home(), candidate) {
+        Err(Refusal::Shim)
+    } else {
+        place
+    })
+}
+
+/// Checks where a file sits, shim or not: none when it is not an executable file whose links
+/// resolve, else passed, or passed over as agents' to write, as changeable by another user
+/// or group past a sticky store, or as leading into a temp folder: the file as found and
+/// real first, then each link and `..` folder on its way, as it runs by its path
+/// ([`Places::hop_refusal`], B1). Inputs: the places and the file. Output: the check.
+fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
     if !executable_file(candidate) {
         return None;
     }
     let real = candidate.canonicalize().ok()?;
     let hops = crate::harnesses::finding::link_hops(candidate)?;
-    Some(if crate::harnesses::is_shim(places.home(), candidate) {
-        Err(Refusal::Shim)
-    } else if places.agent_writable(candidate) {
+    Some(if places.agent_writable(candidate) {
         Err(Refusal::AgentsCanWrite)
     } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
         Err(Refusal::OthersCanChange(part))

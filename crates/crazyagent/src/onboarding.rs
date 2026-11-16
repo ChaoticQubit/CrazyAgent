@@ -462,8 +462,9 @@ fn real_dir(path: &Path) -> bool {
 /// (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, CLAUDE.local.md) are copied into its
 /// project instructions and moved into `.crazyagent/imported/` last, after the project
 /// instructions the folder arrived with are labelled Imported (SA vid 7), a label that
-/// cannot be saved refusing the start as `onboarding_instructions_unwritable`, both recorded
-/// as the engine's own text (SA vid 7 residual), and the moved
+/// cannot be saved refusing the start as `onboarding_instructions_unwritable` and a file that
+/// cannot be read as `onboarding_instructions_unreadable` (RV-DS241-202), both recorded
+/// as the engine's own text, the label as it was saved (SA vid 7 residual), and the moved
 /// files are kept for the onboarding view; a file or import the engine refuses
 /// stays in place for the owner's later import. Takes the transaction,
 /// configuration, engine database path and action. Returns Applied or a plain
@@ -542,13 +543,14 @@ pub(crate) fn execute(
     {
         return Ok(rejected("onboarding_layout_incomplete"));
     }
-    if crate::instruction_files::label_arrived(&repo).is_err() {
-        return Ok(rejected("onboarding_instructions_unwritable"));
-    }
-    let data = database.parent().filter(|root| root.is_absolute());
-    if let Some(data) = data
-        && let Ok(labelled) = crate::agent_home::read_project(&repo)
-    {
+    let labelled = match crate::instruction_files::label_arrived(&repo) {
+        Ok(labelled) => labelled,
+        Err(problem) if problem.0 == "onboarding_instructions_unreadable" => {
+            return Ok(rejected("onboarding_instructions_unreadable"));
+        }
+        Err(_) => return Ok(rejected("onboarding_instructions_unwritable")),
+    };
+    if let Some(data) = database.parent().filter(|root| root.is_absolute()) {
         let _ = crate::agent_home::mark_written(data, &repo, &labelled);
     }
     let mut drafted = engine_draft(tx, repo_text, &layout)?
@@ -593,6 +595,7 @@ pub(crate) fn execute(
         network: crate::sandbox::policy::AgentNetwork::default(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()

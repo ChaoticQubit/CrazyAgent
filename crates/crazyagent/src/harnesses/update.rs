@@ -818,40 +818,64 @@ fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'stati
     Ok(fixed)
 }
 
-/// Passes a command only when the tool resolver would run its program and every copy of an
-/// interpreter the program asks `env` for by name that the command's own search folders
-/// hold, since the child's PATH looks there first and would find that copy ahead of the one
-/// the resolver vetted. Inputs: the command and the resolver's places. Output: the real file
-/// the resolver resolved the program to and checked, or `TOOL_UNSAFE`.
+/// Passes a command only when the tool resolver would run its program and, at each level
+/// whose script asks `env` for an interpreter by name, the copy `env` takes: the first one
+/// the command's own search folders hold, since the child's PATH looks there first. That
+/// copy must resolve, a link whose target is not there yet included, and the walk goes on
+/// from it; a copy behind it never runs. Each of those folders that exists must be one a
+/// lookup would trust ([`crate::tools::Places::kept_for_children`]), so no copy can appear
+/// there before the run (RV-DS241-203). Inputs: the command and the resolver's places.
+/// Output: the real file the resolver resolved the program to and checked, or `TOOL_UNSAFE`.
 fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'static str> {
+    let kept = fixed.search.iter().all(|folder| {
+        std::fs::symlink_metadata(folder).is_err() || places.kept_for_children(folder)
+    });
+    if !kept {
+        return Err(TOOL_UNSAFE);
+    }
     let resolved = crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
-    let mut at = &resolved;
+    let program = resolved.program.clone();
+    let mut at = resolved;
     for _ in 0..=crate::tools::INTERPRETER_DEPTH_MAX {
         let crate::tools::Kind::Script {
             interpreter,
             by_name,
             ..
-        } = &at.kind
+        } = at.kind
         else {
-            return Ok(resolved.program.clone());
+            return Ok(program);
         };
-        if *by_name {
-            let name = interpreter.entry.file_name().ok_or(TOOL_UNSAFE)?;
-            let refused = fixed
-                .search
-                .iter()
-                .map(|folder| folder.join(name))
-                .any(|copy| {
-                    std::fs::metadata(&copy).is_ok()
-                        && crate::tools::resolve_entry(&copy, places).is_err()
-                });
-            if refused {
-                return Err(TOOL_UNSAFE);
-            }
-        }
-        at = &**interpreter;
+        at = if by_name {
+            taken_copy(fixed, &interpreter.entry, places)?.unwrap_or(*interpreter)
+        } else {
+            *interpreter
+        };
     }
     Err(TOOL_UNSAFE)
+}
+
+/// The copy of an interpreter named by name that `env` takes in a command's run: the first
+/// entry of that name in the command's search folders, a dangling link included, since an
+/// agent could fill its target before the run. Inputs: the command, the interpreter the
+/// resolver found and the places. Output: that copy resolved, none when no search folder
+/// holds the name, or `TOOL_UNSAFE` when the first copy does not resolve.
+fn taken_copy(
+    fixed: &Fixed,
+    found: &Path,
+    places: &crate::tools::Places,
+) -> Result<Option<crate::tools::Resolved>, &'static str> {
+    let name = found.file_name().ok_or(TOOL_UNSAFE)?;
+    let Some(copy) = fixed
+        .search
+        .iter()
+        .map(|folder| folder.join(name))
+        .find(|copy| std::fs::symlink_metadata(copy).is_ok())
+    else {
+        return Ok(None);
+    };
+    let taken = crate::tools::resolve_entry(&copy, places).map_err(|_| TOOL_UNSAFE)?;
+    assert_eq!(taken.entry.file_name(), Some(name));
+    Ok(Some(taken))
 }
 
 /// Builds the one update command of an installed harness: its own updater, or the Homebrew

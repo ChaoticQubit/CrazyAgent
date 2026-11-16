@@ -11,7 +11,7 @@ use crazyagent::master_session::{MasterBackend, MasterOwnerAction};
 use crazyagent::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
 use crazyagent::project_setup::{ProjectSetup, TeamPlan};
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
-use crazyagent::sandbox::LinuxSockets;
+use crazyagent::sandbox::{LinuxSockets, LinuxSupervisor};
 use crazyagent::sandbox_settings::SandboxSettings;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -254,7 +254,10 @@ async fn each_linux_sockets_option_is_saved_in_the_engine_and_survives_a_restart
         (3, LinuxSockets::TcpOnly),
         (4, LinuxSockets::TcpPorts),
     ] {
-        let settings = SandboxSettings { linux_sockets };
+        let settings = SandboxSettings {
+            linux_sockets,
+            ..SandboxSettings::default()
+        };
         assert_eq!(
             applied(
                 controller
@@ -273,6 +276,37 @@ async fn each_linux_sockets_option_is_saved_in_the_engine_and_survives_a_restart
         controller.sandbox_settings().await.unwrap().linux_sockets,
         LinuxSockets::TcpPorts
     );
+    drop(controller);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn each_linux_call_supervisor_option_is_saved_in_the_engine_and_survives_a_restart() {
+    let mut case = Case::new().await;
+    let mut controller = case.controller().await;
+    assert_eq!(
+        controller.sandbox_settings().await.unwrap().linux_supervisor,
+        LinuxSupervisor::On
+    );
+    for (generation, linux_supervisor) in [(1, LinuxSupervisor::Off), (2, LinuxSupervisor::On)] {
+        let settings = SandboxSettings {
+            linux_sockets: LinuxSockets::Refuse,
+            linux_supervisor,
+        };
+        let set = controller.set_sandbox_settings(settings, generation).await;
+        assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
+        assert_eq!(controller.sandbox_settings().await.unwrap(), settings);
+    }
+    let off = SandboxSettings {
+        linux_sockets: LinuxSockets::TcpOnly,
+        linux_supervisor: LinuxSupervisor::Off,
+    };
+    let set = controller.set_sandbox_settings(off, 3).await;
+    assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
+    drop(controller);
+    case.restart().await;
+    let mut controller = case.controller().await;
+    assert_eq!(controller.sandbox_settings().await.unwrap(), off);
     drop(controller);
     case.close().await;
 }
