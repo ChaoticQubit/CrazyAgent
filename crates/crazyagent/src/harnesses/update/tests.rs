@@ -2280,9 +2280,10 @@ fn a_version_read_runs_the_file_it_checked_when_a_middle_link_moves_before_the_r
 
 /// security-audit vid 1 r2 (rv-secreview, leader 03:29): an update command is checked when
 /// it is built and run later, so the check must bind what runs. A standalone Codex whose
-/// owner entry leads through a link in a project agents can write, which the resolver now
-/// refuses too (B1), has that link moved to a planted file after the self-update command's
-/// checks, if a command is built at all: the planted file never runs.
+/// owner entry leads through a link in a project agents can write gets no command at all:
+/// a self-update runs the entry as written and binds nothing at run, so the build refuses
+/// the movable link (rv-sa241 B1 N2), and once that link is moved to a planted file the
+/// planted file never runs.
 #[test]
 fn a_self_update_never_runs_a_file_a_middle_link_moved_to_after_its_check() {
     let machine = Machine::new();
@@ -2303,11 +2304,14 @@ fn a_self_update_never_runs_a_file_a_middle_link_moved_to_after_its_check() {
     std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&middle, &entry).unwrap();
     assert_eq!(method("codex", &real, &roots), Method::SelfUpdate);
-    if let Ok(fixed) = update_command("codex", &entry, &real, &roots) {
-        std::fs::remove_file(&middle).unwrap();
-        std::os::unix::fs::symlink(&planted, &middle).unwrap();
-        let _ = run(&fixed, &roots.home, CHECK_TIME);
-    }
+    let built = update_command("codex", &entry, &real, &roots).map(|_| ());
+    std::fs::remove_file(&middle).unwrap();
+    std::os::unix::fs::symlink(&planted, &middle).unwrap();
+    assert_eq!(
+        built,
+        Err(TOOL_UNSAFE),
+        "no command is built for a link agents can move"
+    );
     assert!(
         !planted_ran.exists(),
         "a link moved after the check never reaches the update run"
