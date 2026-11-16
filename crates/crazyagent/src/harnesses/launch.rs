@@ -34,6 +34,14 @@ const LINE_BYTES_MAX: usize = crate::adapters::LINE_BYTES_MAX;
 /// The longest prompt a launch sends: half of one outbound Codex frame, which leaves room
 /// for the JSON-RPC envelope around it.
 pub(crate) const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
+/// The most input bytes a session keeps for a harness that has not taken them yet: room for
+/// the largest prompt frame with every byte escaped to six, its envelope and an interrupt, so
+/// only a harness that stopped reading reaches it (T20 sec r1 F1).
+const INPUT_PENDING_MAX: usize = 8 * PROMPT_BYTES_MAX;
+const _: () = assert!(6 * PROMPT_BYTES_MAX + 8192 <= INPUT_PENDING_MAX);
+/// How long `next_event` waits on output between tries to hand a harness the input it has
+/// not taken yet.
+const INPUT_RETRY: Duration = Duration::from_millis(20);
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -1675,6 +1683,7 @@ pub struct Session {
     uncertain: bool,
     follower: Option<Follower>,
     stdin: Option<File>,
+    pending: Vec<u8>,
     lines: Receiver<Line>,
     driver: Driver,
     queue: VecDeque<LaunchEvent>,
@@ -1834,6 +1843,7 @@ impl Session {
             uncertain: false,
             follower,
             stdin,
+            pending: Vec::new(),
             lines,
             driver,
             queue: VecDeque::new(),
@@ -1852,6 +1862,10 @@ impl Session {
             let lifeline = crate::research::runner::Lifeline::watch(session.child.id())
                 .map_err(|_| failure("launch_spawn_failed"))?;
             session.lifeline = Some(lifeline);
+        }
+        #[cfg(unix)]
+        if let Some(input) = &session.stdin {
+            never_waits(input)?;
         }
         for bytes in startup {
             session.write(&bytes)?;
@@ -1911,7 +1925,14 @@ impl Session {
             if now >= until {
                 return Ok(None);
             }
-            match self.lines.recv_timeout(until.min(self.deadline) - now) {
+            self.flush_input()?;
+            let wait = until.min(self.deadline) - now;
+            let wait = if self.pending.is_empty() {
+                wait
+            } else {
+                wait.min(INPUT_RETRY)
+            };
+            match self.lines.recv_timeout(wait) {
                 Ok(Line::Bytes(line)) => {
                     let (events, writes) = match self.driver.receive(&line) {
                         Ok(result) => result,
@@ -1965,15 +1986,42 @@ impl Session {
         Ok(())
     }
 
+    /// Hands bytes to the harness's input without ever waiting on it: what its pipe has room
+    /// for goes now and the rest is kept, in order, for the next write and each pass of
+    /// `next_event`, so a harness that stops reading never holds the engine past a stop or the
+    /// run clock (T20 sec r1 F1). Input: the bytes. Output: Ok, `launch_input_closed`, or
+    /// `launch_input_full` once more than `INPUT_PENDING_MAX` bytes would wait.
     fn write(&mut self, bytes: &[u8]) -> Result<(), LaunchError> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| failure("launch_input_closed"))?;
-        stdin
-            .write_all(bytes)
-            .and_then(|()| stdin.flush())
-            .map_err(|_| failure("launch_input_closed"))
+        if self.stdin.is_none() {
+            return Err(failure("launch_input_closed"));
+        }
+        if self.pending.len() + bytes.len() > INPUT_PENDING_MAX {
+            return Err(failure("launch_input_full"));
+        }
+        self.pending.extend_from_slice(bytes);
+        self.flush_input()
+    }
+
+    /// Writes as much of the input the harness has not taken yet as its pipe has room for
+    /// now, never waiting. Output: Ok, also with bytes still kept or with the input a stop
+    /// closed, or `launch_input_closed` once the harness's end of the pipe is gone.
+    fn flush_input(&mut self) -> Result<(), LaunchError> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Ok(());
+        };
+        while !self.pending.is_empty() {
+            match stdin.write(&self.pending) {
+                Ok(0) => return Err(failure("launch_input_closed")),
+                Ok(taken) => {
+                    assert!(taken <= self.pending.len());
+                    self.pending.drain(..taken);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+                Err(_) => return Err(failure("launch_input_closed")),
+            }
+        }
+        Ok(())
     }
 
     fn reap(&mut self, wait: Duration) -> Option<i32> {
@@ -2187,6 +2235,18 @@ pub fn trim_unread_output(output: &Path, probe: &File) -> bool {
         opened.is_file() && (opened.dev(), opened.ino()) == (probed.dev(), probed.ino())
     });
     same && log.set_len(0).is_ok()
+}
+
+/// Makes the engine's own open of a harness's input never wait on the harness: a write takes
+/// what the pipe has room for now and reports would-block for the rest. The harness's end of
+/// the pipe is an open of its own and stays as it was. Input: the file. Output: Ok, or
+/// `launch_stdio_unavailable`.
+#[cfg(unix)]
+fn never_waits(input: &File) -> Result<(), LaunchError> {
+    let unavailable = |_: rustix::io::Errno| failure("launch_stdio_unavailable");
+    let flags = rustix::fs::fcntl_getfl(input).map_err(unavailable)?;
+    rustix::fs::fcntl_setfl(input, flags | OFlags::NONBLOCK)
+        .map_err(unavailable)
 }
 
 /// Turns a child's stdin pipe into the file the session writes prompts to.

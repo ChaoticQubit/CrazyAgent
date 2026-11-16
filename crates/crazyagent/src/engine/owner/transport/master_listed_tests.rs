@@ -144,6 +144,7 @@ fn a_listed_master_stops_for_the_reasons_every_master_stops_for() {
         ("launch_spawn_failed", MasterReason::RuntimeUnavailable),
         ("launch_closed", MasterReason::RuntimeUnavailable),
         ("launch_input_closed", MasterReason::RuntimeUnavailable),
+        ("launch_input_full", MasterReason::RuntimeUnavailable),
         ("launch_protocol_failed", MasterReason::ProtocolFault),
         ("launch_request_failed", MasterReason::ProtocolFault),
         (
