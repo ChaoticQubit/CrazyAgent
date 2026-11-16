@@ -8,7 +8,7 @@ import {
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
-  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob,
+  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan, GitHubRepoPage, GitHubRepoRules, GitHubStatus, IcloudProgress, IntakeJob,
   IntentReceipt, OnboardingView,
   DependencyName, ProjectsHome, RefusedTool, SetupStatus,
 } from "./engine-client";
@@ -391,6 +391,37 @@ export function loadGitHubOwners(): Promise<Result<GitHubOwners>> {
  * Inputs: the project id and the plan. Output: the job at its .gitignore lines. */
 export function startGitHubPublish(project: string, plan: GitHubPublishPlan): Promise<Result<GitHubPublishJob>> {
   return wrap(() => githubPublishStart(project, plan));
+}
+
+export const DEFAULTS_UNREADABLE = "";
+
+/** Gives the defaults read its own sentence when the saved file cannot be read safely.
+ * Input: the read. Output: the read, with the defaults sentence on such a failure. */
+export function defaultsRead(read: Result<string[]>): Result<string[]> {
+  return read;
+}
+
+/** Reads the rules a new repository starts with. Output: the rules on. */
+export function loadGitHubRuleDefaults(): Promise<Result<string[]>> {
+  return Promise.resolve({ kind: "not_ready" });
+}
+
+/** Saves the rules a new repository starts with. Input: the rules on. Output: the rules the
+ * engine read back. */
+export function saveGitHubRuleDefaults(_rules: string[]): Promise<Result<string[]>> {
+  return Promise.resolve({ kind: "not_ready" });
+}
+
+/** Reads the live rules of the repository a project was published to. Input: the project id.
+ * Output: the page. */
+export function loadGitHubRules(_project: string): Promise<Result<GitHubRepoRules>> {
+  return Promise.resolve({ kind: "not_ready" });
+}
+
+/** Turns one rule on or off on the repository a project was published to. Inputs: the
+ * project id, the rule and whether it is on. Output: the fresh page. */
+export function setGitHubRule(_project: string, _rule: string, _on: boolean): Promise<Result<GitHubRepoRules>> {
+  return Promise.resolve({ kind: "not_ready" });
 }
 
 /** Reads one page of the signed-in account's repositories.

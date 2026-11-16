@@ -28,6 +28,19 @@ export function GitHubAccountView({ status, busy, problem, onSignOut }: {
   </SettingSection>;
 }
 
+/** Settings, GitHub, New repositories as a view of its read: one switch per rule, each
+ * marked when it differs from the standard setup, and Use the standard setup. Inputs: the
+ * read, the last save's problem and the handlers. Output: the section. */
+export function GitHubDefaultsView(_props: {
+  read: Loaded<string[]>;
+  problem: string;
+  onRule: (rule: string, on: boolean) => void;
+  onStandard: () => void;
+  onRetry: () => void;
+}) {
+  return null;
+}
+
 /** Settings, GitHub as a view of its reads: the account and Sign out while signed in, otherwise
  * the sign-in choices. Inputs: the status read, the sign-in panel, the account panel and retry. */
 export function GitHubSettingsView({ status, signIn, account, onRetry }: {

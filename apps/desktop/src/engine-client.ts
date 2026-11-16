@@ -1576,6 +1576,14 @@ export interface GitHubPublishJob {
   step: GitHubPublishStep;
   stopped: string | null;
   made: string | null;
+  rules?: string[];
+}
+
+export interface GitHubRepoRules {
+  full_name: string;
+  private: boolean;
+  checks: string[];
+  rules: GitHubRuleOutcome[];
 }
 
 /** Starts "Sign in with GitHub". Output: the code to type at the GitHub page and its
