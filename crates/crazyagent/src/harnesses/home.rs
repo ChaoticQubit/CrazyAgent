@@ -106,9 +106,9 @@ pub fn read(manifest: &Manifest) -> Result<Home, Refused> {
 
 /// Reads `home.env_prefixes`: at most [`PREFIXES_MAX`] starts of names the harness reads as
 /// its own, such as `OPENCODE_`, each capital letters, digits and `_`, starting with a letter
-/// and ending with `_`. A prefix that covers a name the shared env-name rule owns, `XDG_`
-/// among them, is refused, so a manifest cannot claim `GIT_`, `NPM_` or `PYTHON_`.
-/// Input: the block's value. Output: the prefixes in file order, or the refusal.
+/// and ending with `_`. A prefix covering a name the shared env-name rule owns (`XDG_` too) or
+/// an owner's toolchain name is refused: no `GIT_`, `NPM_`, `PYTHON_` or `CFLAGS_`. Input:
+/// the block's value. Output: the prefixes in file order, or the refusal.
 fn prefixes(value: &Value) -> Result<Vec<String>, Refused> {
     let Value::List(items) = value else {
         return refuse(
@@ -146,6 +146,11 @@ fn prefixes(value: &Value) -> Result<Vec<String>, Refused> {
                 ),
             );
         }
+        if super::env_names::claims_owner_toolchain(prefix) {
+            let covers = super::env_names::COVERS_TOOLCHAIN;
+            let words = format!("home.env_prefixes.{prefix}: {covers}");
+            return refuse(manifest::VALUE, words);
+        }
         prefixes.push(prefix.clone());
     }
     assert!(prefixes.len() <= PREFIXES_MAX);
@@ -153,11 +158,10 @@ fn prefixes(value: &Value) -> Result<Vec<String>, Refused> {
 }
 
 /// Reads `home.env`: at most [`ENV_MAX`] names of capital letters, digits and `_`, none the
-/// shared env-name rule owns but the `XDG_` ones, each starting with one of the manifest's
-/// own prefixes or with `XDG_`, with text in quotes that is plain or a folder under `{home}`;
-/// an XDG name's value must be the private home or a folder inside it. Inputs: the block's
-/// value and the declared prefixes. Output: the names and values in file order, or the
-/// refusal.
+/// shared env-name rule owns but the `XDG_` ones and none of the owner's toolchain names,
+/// each under one of the manifest's own prefixes or `XDG_`, its text plain or a folder under
+/// `{home}`, an XDG folder the private home or inside it. Inputs: the block's value and the
+/// declared prefixes. Output: the names and values in file order, or the refusal.
 fn variables(value: &Value, own: &[String]) -> Result<Vec<(String, String)>, Refused> {
     let Value::Map(entries) = value else {
         return refuse(
@@ -186,6 +190,10 @@ fn variables(value: &Value, own: &[String]) -> Result<Vec<(String, String)>, Ref
                 manifest::VALUE,
                 format!("{path}: CrazyAgent sets this itself, so a manifest cannot."),
             );
+        }
+        if super::env_names::owner_toolchain(name) {
+            let picks = super::env_names::PICKS;
+            return refuse(manifest::VALUE, format!("{path}: this {picks}"));
         }
         if !xdg && !own.iter().any(|prefix| name.starts_with(prefix.as_str())) {
             return refuse(
@@ -393,6 +401,25 @@ pub(crate) fn listed_folder(
         rustix::fs::open(base, FOLDER, rustix::fs::Mode::empty()).map_err(|_| unsafe_home())?;
     let home = walk(opened, &[harness, account], fixed)?;
     walk(home, below, step)
+}
+
+/// Opens one file of a listed private home to read: the folder it sits in reached by the
+/// no-follow walk of [`listed_folder`], the file opened in that folder without following a
+/// link or waiting on a FIFO, so a link planted at the harness or account folder is
+/// refused, never read through (T18 LEAD-1). Inputs: the home, the plain folders below it
+/// and the file's plain name. Output: the open folder and file, or none.
+#[cfg(unix)]
+pub(crate) fn open_listed(
+    home: &Path,
+    folders: &[&str],
+    name: &str,
+) -> Option<(std::os::fd::OwnedFd, std::fs::File)> {
+    use rustix::fs::{Mode, OFlags};
+    assert!(!name.is_empty() && name != "." && name != ".." && !name.contains('/'));
+    let folder = listed_folder(home, None, folders, Walk::Open).ok()?;
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let file = rustix::fs::openat(&folder, name, flags, Mode::empty()).ok()?;
+    Some((folder, std::fs::File::from(file)))
 }
 
 /// Refuses a private home where its Unix owner and 0700 mode cannot be checked. Inputs:

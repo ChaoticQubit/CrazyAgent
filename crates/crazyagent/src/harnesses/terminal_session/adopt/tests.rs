@@ -1099,3 +1099,46 @@ fn an_adoption_reads_a_manifest_record_on_past_a_read_that_finds_no_object() {
     assert_eq!(replay(&mut reader, until), Ok(Replayed::Open));
     assert_eq!(reader.read(), Ok(Vec::new()));
 }
+
+/// T18 LEAD-1 residual (leader 01:49): an engine adopting a keyed listed pane reads its key
+/// file through the no-follow walk from the agent home, so a link planted at the harness
+/// folder after the adopt's walk gives no guard, and the folder the link names keeps its
+/// own key file when the guard would end.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_adopted_listed_pane_never_reads_its_key_through_a_link_at_its_harness_folder() {
+    let (agents, victim) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let base = agents.path().canonicalize().unwrap();
+    let target = victim.path().canonicalize().unwrap();
+    let kept = target.join("account-1");
+    std::fs::create_dir(&kept).unwrap();
+    for folder in [&base, &target, &kept] {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let name = interactive::KEY_FILE;
+    std::fs::write(kept.join(name), "kept").unwrap();
+    let account = crate::protocol::CredentialRef::new("account-1").unwrap();
+    let home = crate::harnesses::home::prepare(&base, "standin-acp", &account).unwrap();
+    let key = home.join(name);
+    std::fs::write(&key, "own").unwrap();
+    let transcript = Transcript::ClaudeSession {
+        file: home.join("record.jsonl"),
+    };
+    let since = SystemTime::now();
+    let mut record = PaneRecord::new(&transcript, &base, since, 1, Some(&key)).unwrap();
+    record.context = Some(InstalledFiles {
+        home: home.clone(),
+        codex: false,
+        rendered: Vec::new(),
+        listed: true,
+    });
+    std::fs::rename(base.join("standin-acp"), base.join("moved")).unwrap();
+    std::os::unix::fs::symlink(&target, base.join("standin-acp")).unwrap();
+
+    let guard = record.key_file();
+
+    assert!(guard.is_none());
+    drop(guard);
+    let left = std::fs::read_to_string(kept.join(name)).ok();
+    assert_eq!(left.as_deref(), Some("kept"));
+}

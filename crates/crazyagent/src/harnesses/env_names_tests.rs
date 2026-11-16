@@ -20,6 +20,75 @@ const LISTED: &str = concat!(
     "accounts:\n  openai-chat:\n    env:\n",
 );
 
+const OWNER_TOOLCHAIN: &[&str] = &[
+    "DEVELOPER_DIR",
+    "CC",
+    "CXX",
+    "CFLAGS",
+    "LDFLAGS",
+    "CPATH",
+    "LIBRARY_PATH",
+    "PKG_CONFIG_PATH",
+    "CXXFLAGS",
+    "CPPFLAGS",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "OBJC_INCLUDE_PATH",
+    "TOOLCHAINS",
+    "PKG_CONFIG_LIBDIR",
+    "PKG_CONFIG_SYSROOT_DIR",
+    "HOST_CC",
+    "HOST_CXX",
+    "HOST_CFLAGS",
+    "TARGET_CC",
+    "TARGET_CXX",
+    "TARGET_CFLAGS",
+    "AR",
+    "LD",
+    "AS",
+    "CPP",
+    "RANLIB",
+    "CONFIG_SHELL",
+    "CCACHE_PREFIX",
+    "LDLIBS",
+    "MAKEFLAGS",
+    "CGO_CFLAGS",
+    "CGO_LDFLAGS",
+    "CMAKE_TOOLCHAIN_FILE",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "GOROOT",
+];
+
+const OWNER_TOOLCHAIN_PREFIXES: &[&str] = &[
+    "DEVELOPER_",
+    "CC_",
+    "CXX_",
+    "CFLAGS_",
+    "LDFLAGS_",
+    "CPATH_",
+    "LIBRARY_",
+    "PKG_",
+    "CXXFLAGS_",
+    "CPP_",
+    "CPLUS_",
+    "OBJC_",
+    "HOST_",
+    "TARGET_",
+    "HOST_CC_",
+    "TOOLCHAINS_",
+    "AR_",
+    "RANLIB_",
+    "CONFIG_",
+    "LDLIBS_",
+    "MAKE_",
+    "MACOSX_",
+    "GOROOT_",
+    "CCACHE_",
+    "CGO_",
+    "CMAKE_",
+    "CMAKE_PREFIX_",
+];
+
 const COVERS: &str =
     "this prefix covers names CrazyAgent sets itself or that decide which code runs.";
 
@@ -98,6 +167,34 @@ const ENGINE_FAMILY_NAMES: &[&str] = &[
     "GOPRIVATE",
     "GONOPROXY",
     "GOTOOLCHAIN",
+    "GCONV_PATH",
+    "PHPRC",
+    "PHP_INI_SCAN_DIR",
+    "DOTNET_STARTUP_HOOKS",
+    "CORECLR_PROFILER_PATH",
+    "GTK_MODULES",
+    "QT_PLUGIN_PATH",
+    "GST_PLUGIN_PATH",
+    "GST_PLUGIN_SYSTEM_PATH",
+    "GIO_EXTRA_MODULES",
+    "TCLLIBPATH",
+    "R_PROFILE",
+    "R_PROFILE_USER",
+    "ERL_AFLAGS",
+    "ERL_ZFLAGS",
+    "ERL_LIBS",
+    "JULIA_LOAD_PATH",
+    "LUA_INIT",
+    "LUA_INIT_5_4",
+    "FPATH",
+    "PAGER",
+    "MANPAGER",
+    "LESSOPEN",
+    "LESSCLOSE",
+    "EDITOR",
+    "VISUAL",
+    "BROWSER",
+    "SSLKEYLOGFILE",
 ];
 
 const ENGINE_FAMILY_PREFIXES: &[&str] = &[
@@ -148,6 +245,28 @@ const ENGINE_FAMILY_PREFIXES: &[&str] = &[
     "BUN_",
     "OPENSSL_",
     "GEM_",
+    "GCONV_",
+    "PHP_",
+    "DOTNET_",
+    "CORECLR_",
+    "GTK_",
+    "QT_",
+    "GST_",
+    "GIO_",
+    "TCL_",
+    "R_",
+    "ERL_",
+    "JULIA_",
+    "LUA_",
+    "LUA_INIT_",
+    "FPATH_",
+    "PAGER_",
+    "MANPAGER_",
+    "LESS_",
+    "EDITOR_",
+    "VISUAL_",
+    "BROWSER_",
+    "SSLKEYLOG_",
 ];
 
 const HARNESS_NAMES: &[&str] = &[
@@ -244,6 +363,7 @@ fn every_variable_the_engine_sets_on_a_launch_is_owned() {
             "PATH",
             "SHELL",
             "SSL_CERT_FILE",
+            "SDKROOT",
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
             "CLAUDE_SECURESTORAGE_CONFIG_DIR",
@@ -262,8 +382,10 @@ fn every_variable_the_engine_sets_on_a_launch_is_owned() {
 }
 
 /// Env-name rule: each family that decides which code a shell, a linker, git, a package
-/// manager or a language runtime loads, or which server is trusted, is owned by every name
-/// in it, and the engine's lower-case names count as their upper-case twins.
+/// manager or a language runtime and its plugins load, which command a tool starts or which
+/// server is trusted is owned by every name in it (rv-sa241 N1: the runtimes' loaders, the
+/// pagers and editors and `SSLKEYLOGFILE`), and the engine's lower-case names count as
+/// their upper-case twins.
 #[test]
 fn every_family_that_decides_which_code_runs_or_which_server_is_trusted_is_owned() {
     for name in ENGINE_FAMILY_NAMES {
@@ -425,4 +547,67 @@ fn the_package_index_module_proxy_and_openssl_families_are_owned_at_both_sites()
         home_refusal("  env_prefixes:\n    - \"PI_\"\n  env:\n    PI_HOME: \"{home}\"\n"),
         None
     );
+}
+
+/// Env-name rule, the pinned SDK (fix8 re-check at 4f66cf20e): `toolchains::agent_env` sets
+/// `SDKROOT` on every launch and a harness variable of the same name replaces it, so an
+/// account entry cannot set it and no home prefix can cover it, as for every name the engine
+/// sets.
+#[test]
+fn the_macos_sdk_the_engine_pins_is_owned_at_both_sites() {
+    let place = "rowharness: accounts.openai-chat.env";
+    let sentence = "SDKROOT is not a variable an account entry may set.";
+
+    let refused = account_refusal("      SDKROOT: \"/tmp/sdk\"\n");
+
+    assert_eq!(refused, Some((VALUE, format!("{place}: {sentence}"))));
+    assert!(owned("sdkroot"));
+    assert!(claims("SDK_"));
+}
+
+/// The owner's toolchain names (leader 01:34 residual call, widened at 02:00 with their
+/// same-role names, rv-code4 F1 and rv-sa241 LOW-1): the compilers, linker and build tools,
+/// their flags, header and library paths, the host and target forms and the toolchain picks.
+/// No manifest may set them, in an account entry or a home block, or claim them with a home
+/// prefix, the CPLUS_, OBJC_, HOST_, TARGET_, CCACHE_, CGO_ and CMAKE_ families whole.
+#[test]
+fn no_manifest_sets_or_claims_the_owner_s_toolchain_names() {
+    let place = "rowharness: accounts.openai-chat.env";
+    let picks = "picks the owner's compiler or build tools, so only the owner sets it.";
+    let covers = "this prefix covers names that pick the owner's compiler or build tools.";
+    for name in OWNER_TOOLCHAIN {
+        let block = format!("  env_prefixes:\n    - \"SAMPLE_\"\n  env:\n    {name}: \"x\"\n");
+
+        let account = account_refusal(&format!("      {name}: \"/opt/tools\"\n"));
+        let home = home_refusal(&block);
+
+        let to_account = format!("{place}: {name} {picks}");
+        let to_home = format!("home.env.{name}: this {picks}");
+        assert_eq!(account, Some((VALUE, to_account)), "{name}");
+        assert_eq!(home, Some((VALUE, to_home)), "{name}");
+    }
+    for prefix in OWNER_TOOLCHAIN_PREFIXES {
+        let block = format!("  env_prefixes:\n    - \"{prefix}\"\n");
+
+        let refused = home_refusal(&block);
+
+        let words = format!("home.env_prefixes.{prefix}: {covers}");
+        assert_eq!(refused, Some((VALUE, words)), "{prefix}");
+    }
+}
+
+/// The owner's toolchain names stay the owner's (leader 01:34): the engine does not own
+/// them and the launch's variable guard lets them through, so a value the owner chose for
+/// an account still reaches the agent; only a manifest is refused them.
+#[test]
+fn the_owner_s_toolchain_names_stay_open_to_the_owner() {
+    use std::ffi::OsStr;
+    for name in OWNER_TOOLCHAIN {
+        let value = OsStr::new("/opt/owner/tools");
+
+        let allowed = crate::sandbox::agent_variable_allowed(OsStr::new(name), value);
+
+        assert!(!owned(name), "{name}");
+        assert!(allowed, "{name}");
+    }
 }

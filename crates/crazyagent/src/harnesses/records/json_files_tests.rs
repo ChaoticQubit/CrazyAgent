@@ -296,3 +296,28 @@ fn a_typed_prompt_past_the_value_bound_of_one_object_is_not_found() {
     many.swap(0, TYPED_VALUES_MAX);
     assert_eq!(typed_at(&[json!(many)], "fix the parser"), Some(0));
 }
+
+/// T18 LEAD-1 residual (leader 01:49): a listed pane's record opens through the no-follow
+/// walk from the agent home, so once a link is planted at the harness folder the record
+/// path reads nothing, never the record in the folder the link names.
+#[test]
+fn a_listed_home_s_record_is_never_read_through_a_link_at_its_harness_folder() {
+    let (agents, victim) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let base = agents.path().canonicalize().unwrap();
+    let target = victim.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let standin = manifest::parse(STANDIN.as_bytes()).unwrap();
+    let account = crate::protocol::CredentialRef::new("account-1").unwrap();
+    let home = crate::harnesses::home::prepare(&base, &standin.id, &account).unwrap();
+    let elsewhere = target.join("account-1").join("standin").join("records");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let line = json!({"type": "started", "prompt": "elsewhere"}).to_string();
+    std::fs::write(elsewhere.join(format!("{SESSION_ID}.jsonl")), line).unwrap();
+    let pattern = Pattern::read(&standin, &home, SESSION_ID).unwrap();
+    std::fs::rename(base.join(&standin.id), base.join("moved")).unwrap();
+    symlink(&target, base.join(&standin.id)).unwrap();
+
+    let found = pattern.newest(&[]);
+
+    assert!(found.is_none());
+}

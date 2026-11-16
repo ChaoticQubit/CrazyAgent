@@ -156,6 +156,7 @@ struct FirstScreen {
 pub(super) struct KeyFile {
     path: PathBuf,
     digest: [u8; 32],
+    listed: bool,
 }
 
 impl KeyFile {
@@ -166,21 +167,62 @@ impl KeyFile {
         Self {
             path,
             digest: Sha256::digest(content).into(),
+            listed: false,
         }
+    }
+
+    /// Guards the key file of a listed harness's private home at `path` that holds
+    /// `content`, read and removed only through the no-follow walk from the agent home
+    /// ([`remove_listed`], T18 LEAD-1). Inputs: the path and the bytes. Output: the guard,
+    /// which removes the file on drop only while it still holds them.
+    pub(super) fn listed(path: PathBuf, content: &[u8]) -> Self {
+        let mut guard = Self::new(path, content);
+        guard.listed = true;
+        guard
     }
 }
 
 impl Drop for KeyFile {
     /// Removes the key file only while it is still a regular file holding this guard's
     /// bytes, read through one open that follows no link and waits on no FIFO, since the
-    /// path sits in the agent-writable account home. Input: the guard. Output: none.
+    /// path sits in the agent-writable account home; a listed home's file only through
+    /// [`remove_listed`]. Input: the guard. Output: none.
     fn drop(&mut self) {
-        if crate::platform::read_plain_file(&self.path, KEY_FILE_BYTES_MAX)
+        if self.listed {
+            remove_listed(&self.path, &self.digest);
+        } else if crate::platform::read_plain_file(&self.path, KEY_FILE_BYTES_MAX)
             .is_some_and(|current| <[u8; 32]>::from(Sha256::digest(current)) == self.digest)
         {
             let _ = std::fs::remove_file(&self.path);
         }
     }
+}
+
+/// Removes a listed home's key file only while it still holds the guarded bytes: read in
+/// the folder [`super::home::open_listed`] reaches by no-follow steps from the agent home,
+/// then unlinked from that same open folder, so a folder on the way swapped to a link
+/// removes nothing it names (rv-sa241 N2). Inputs: the file's path and its bytes' digest.
+#[cfg(unix)]
+fn remove_listed(path: &Path, digest: &[u8; 32]) {
+    let name = path.file_name().and_then(|name| name.to_str());
+    let (Some(home), Some(name)) = (path.parent(), name) else {
+        return;
+    };
+    let Some((folder, file)) = super::home::open_listed(home, &[], name) else {
+        return;
+    };
+    let held = crate::platform::read_plain(file, KEY_FILE_BYTES_MAX);
+    if held.is_some_and(|current| <[u8; 32]>::from(Sha256::digest(current)) == *digest) {
+        let _ = rustix::fs::unlinkat(&folder, name, rustix::fs::AtFlags::empty());
+    }
+}
+
+/// Leaves a listed key file alone where none is ever written, as
+/// [`super::render::put_key`] refuses every listed key file there. Inputs: the path and
+/// the digest, both unused.
+#[cfg(not(unix))]
+fn remove_listed(path: &Path, digest: &[u8; 32]) {
+    let _ = (path, digest);
 }
 
 /// A harness conversation an agent continues: the id the harness resumes it by and the
@@ -193,16 +235,22 @@ pub struct Resume {
 
 /// Writes a routed launch's relay token to the 0600 key file in its account home, the only
 /// place its harness reads it from, so the token is in no argument or variable of any agent
-/// process. Input: the request after [`route`]. Output: the file's guard, none for a
-/// keyless launch, or a plain refusal code.
+/// process; a listed harness's private home only through the no-follow walk from the agent
+/// home ([`super::render::put_key`], T18 LEAD-1). Input: the request after [`route`].
+/// Output: the file's guard, none for a keyless launch, or a plain refusal code.
 pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>, LaunchError> {
     request
         .account
         .key()
         .map(|key| {
             assert!(is_placeholder(key.reveal()));
-            interactive::write_key(request.account.home(), key)
-                .map(|path| KeyFile::new(path, key.reveal().as_bytes()))
+            let home = request.account.home();
+            let bytes = key.reveal().as_bytes();
+            if crate::launch_context::listed_home(&request.harness) {
+                super::render::put_key(home, bytes).map(|path| KeyFile::listed(path, bytes))
+            } else {
+                interactive::write_key(home, key).map(|path| KeyFile::new(path, bytes))
+            }
         })
         .transpose()
 }

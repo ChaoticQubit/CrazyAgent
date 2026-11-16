@@ -41,6 +41,7 @@ pub struct Pattern {
     home: PathBuf,
     parts: Vec<Part>,
     learn: Option<Learn>,
+    listed: bool,
 }
 
 /// Where `{session}` stood in a record path for a harness that picks its own session id:
@@ -160,7 +161,12 @@ impl Pattern {
         assert!(!parts.is_empty());
         assert!(session.is_none() || learn.is_none());
         let home = home.to_path_buf();
-        Ok(Self { home, parts, learn })
+        Ok(Self {
+            home,
+            parts,
+            learn,
+            listed: true,
+        })
     }
 
     /// Reads where a harness keeps its past conversation records below the owner's home,
@@ -202,6 +208,7 @@ impl Pattern {
             home,
             parts,
             learn: None,
+            listed: false,
         })
     }
 
@@ -427,13 +434,42 @@ impl Pattern {
     }
 
     /// Opens one file below the home as itself: no link followed on the way, no FIFO
-    /// waited on. Input: the file's place below the home. Output: the file and its
-    /// identity, or none for anything but a regular file.
+    /// waited on, and a filled record path's private home itself reached by the no-follow
+    /// walk from the agent home (T18 LEAD-1). Input: the file's place below the home.
+    /// Output: the file and its identity, or none for anything but a regular file.
     pub(super) fn open(&self, below: &Path) -> Option<(File, FileKey)> {
-        let file = crate::platform::open_plain_beneath(&self.home, below).ok()?;
+        let file = self.open_below(below)?;
         let metadata = file.metadata().ok()?;
         let key = file_key(&metadata, &self.home.join(below));
         metadata.is_file().then_some((file, key))
+    }
+
+    /// Opens one place below the home without following a link: a filled record path's
+    /// through [`crate::harnesses::home::open_listed`], so a link planted at the harness or
+    /// account folder is refused, an owned one's beneath the owner's home. Input: the place,
+    /// plain names only. Output: the open file, or none.
+    #[cfg(unix)]
+    fn open_below(&self, below: &Path) -> Option<File> {
+        if !self.listed {
+            return crate::platform::open_plain_beneath(&self.home, below).ok();
+        }
+        let mut parts = Vec::new();
+        for part in below.components() {
+            let Component::Normal(part) = part else {
+                return None;
+            };
+            parts.push(part.to_str()?);
+        }
+        let (name, folders) = parts.split_last()?;
+        let (_, file) = super::super::home::open_listed(&self.home, folders, name)?;
+        Some(file)
+    }
+
+    /// Opens one place beneath the home without following a link, where no listed home's
+    /// walk exists. Input: the place, plain names only. Output: the open file, or none.
+    #[cfg(not(unix))]
+    fn open_below(&self, below: &Path) -> Option<File> {
+        crate::platform::open_plain_beneath(&self.home, below).ok()
     }
 
     /// Tells which file is at one place below the home now, without opening it or

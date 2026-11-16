@@ -243,32 +243,68 @@ pub fn write<'a>(
 /// file's path, or the refusal.
 #[cfg(unix)]
 fn put(home: &Path, path: &str, text: String) -> Result<PathBuf, LaunchError> {
-    use rustix::fs::{AtFlags, Mode, OFlags};
-    use std::io::Write;
     assert!(plain(path));
     let (folders, name) = match path.rsplit_once('/') {
         Some((folders, name)) => (folders.split('/').collect::<Vec<_>>(), name),
         None => (Vec::new(), path),
     };
     let mut bytes = text.into_bytes();
-    let walked = super::home::listed_folder(home, None, &folders, super::home::Walk::Make);
-    let written = walked.and_then(|folder| {
-        match rustix::fs::unlinkat(&folder, name, AtFlags::empty()) {
-            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-            Err(_) => return Err(failure("launch_account_home_unsafe")),
-        }
-        let flags =
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let file = rustix::fs::openat(&folder, name, flags, Mode::RUSR | Mode::WUSR)
-            .map_err(|_| failure("launch_account_home_unsafe"))?;
-        let mut file = std::fs::File::from(file);
-        file.write_all(&bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|_| failure("launch_context_unwritable"))
-    });
+    let written = put_in(home, &folders, name, &bytes);
     bytes.fill(0);
     written?;
     Ok(home.join(path))
+}
+
+/// Writes one file in a folder of the private home reached through
+/// [`super::home::listed_folder`] from the agent home: any entry at its name removed, then
+/// the file made new, 0600, never through a link. Inputs: the home, the folders below it,
+/// the file's name and its bytes. Output: done, or the refusal.
+#[cfg(unix)]
+fn put_in(home: &Path, folders: &[&str], name: &str, bytes: &[u8]) -> Result<(), LaunchError> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
+    let folder = super::home::listed_folder(home, None, folders, super::home::Walk::Make)?;
+    match rustix::fs::unlinkat(&folder, name, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+        Err(_) => return Err(failure("launch_account_home_unsafe")),
+    }
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let file = rustix::fs::openat(&folder, name, flags, Mode::RUSR | Mode::WUSR)
+        .map_err(|_| failure("launch_account_home_unsafe"))?;
+    let mut file = std::fs::File::from(file);
+    let unwritable = |_| failure("launch_context_unwritable");
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(unwritable)?;
+    let metadata = file.metadata().map_err(unwritable)?;
+    if metadata.mode() & 0o077 != 0 {
+        return Err(failure("launch_account_home_unsafe"));
+    }
+    assert_eq!(metadata.len(), bytes.len() as u64);
+    Ok(())
+}
+
+/// Writes a keyed listed launch's key file, `.crazyagent-key`, into its private home as a
+/// rendered file is written: through no-follow steps from the agent home, any entry at the
+/// name removed, the file made new, 0600, so a link planted at the harness or account folder
+/// after the install's walk is refused, never written through (T18 LEAD-1). Inputs: the
+/// private home and the key. Output: the file's path, or `launch_account_home_unsafe`.
+#[cfg(unix)]
+pub(crate) fn put_key(home: &Path, key: &[u8]) -> Result<PathBuf, LaunchError> {
+    let name = super::interactive::KEY_FILE;
+    put_in(home, &[], name, key)?;
+    let path = home.join(name);
+    assert_eq!(path.parent(), Some(home));
+    Ok(path)
+}
+
+/// Refuses a key file where owner-only no-follow creation does not exist. Inputs: the
+/// private home and the key, both unused. Output: `launch_key_file_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn put_key(home: &Path, key: &[u8]) -> Result<PathBuf, LaunchError> {
+    let _ = (home, key);
+    Err(failure("launch_key_file_unavailable"))
 }
 
 /// Deletes one file a render wrote, by its path inside the private home, through no-follow

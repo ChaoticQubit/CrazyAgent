@@ -278,7 +278,13 @@ pub fn project_file(folder: &Path, relative: &str) -> Result<PathBuf, &'static s
 /// swapped in after an earlier check is read. Takes the path and the byte limit. Returns
 /// the text, or none for a link, any other non-regular file, more bytes or invalid UTF-8.
 pub fn read_plain_file(path: &Path, limit: u64) -> Option<String> {
-    let file = open_plain(path).ok()?;
+    read_plain(open_plain(path).ok()?, limit)
+}
+
+/// Reads a small UTF-8 file already open, checking the opened file itself, so the open that
+/// made it decides which file is read. Takes the file and the byte limit. Returns the text,
+/// or none for a file that is not regular, more bytes or invalid UTF-8.
+pub(crate) fn read_plain(file: std::fs::File, limit: u64) -> Option<String> {
     let opened = file.metadata().ok()?;
     if !opened.is_file() || opened.len() > limit {
         return None;
