@@ -58,7 +58,7 @@ pub fn piped(harness: &str) -> Result<Piped, LaunchError> {
 /// inside a filled value; a `{` that opens no known placeholder stays as written. Inputs:
 /// the argument and the value of each placeholder it names. Output: the filled argument,
 /// or the first refusal `value` gives.
-fn fill<'a>(
+pub(crate) fn fill<'a>(
     argument: &str,
     value: impl Fn(&str) -> Result<&'a str, LaunchError>,
 ) -> Result<String, LaunchError> {
@@ -91,7 +91,11 @@ fn fill<'a>(
 /// never read as an option. Inputs: the `piped.argv`, `piped.resume` and `piped.tools_off`
 /// of one manifest. Output: that index, or a refusal for a `{prompt}` that begins an argument
 /// before it, or for `{prompt}` in `piped.resume` or `piped.tools_off`.
-fn positional(argv: &[String], resume: &[String], tools_off: &[String]) -> Result<usize, Refused> {
+pub(crate) fn positional(
+    argv: &[String],
+    resume: &[String],
+    tools_off: &[String],
+) -> Result<usize, Refused> {
     let positional = argv
         .iter()
         .position(|argument| argument == "--")
@@ -127,7 +131,7 @@ fn positional(argv: &[String], resume: &[String], tools_off: &[String]) -> Resul
 /// entry on, so a prompt after that entry can neither end nor add an option. Inputs:
 /// `piped.argv`, the index [`positional`] gave for it and this turn's added arguments.
 /// Output: the arguments.
-fn ordered<'a>(
+pub(crate) fn ordered<'a>(
     argv: &'a [String],
     positional: usize,
     resume: &'a [String],

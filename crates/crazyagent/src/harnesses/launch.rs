@@ -668,6 +668,41 @@ fn sandboxed(
     arguments: &[OsString],
     environment: &[(&'static str, OsString)],
 ) -> Result<Command, LaunchError> {
+    let harness_env = environment
+        .iter()
+        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())));
+    confined(request, installed, arguments, harness_env, None)
+}
+
+/// Builds the command one listed master turn spawns (DEC-180 Task 20): the request's sandbox
+/// and base variables as [`command`] gives them, the manifest's arguments, and the harness
+/// variables with the launch's exception to the variable guard. Inputs: the request, the
+/// arguments, the variables and the exception. Output: the command, or the refusals of
+/// [`command`].
+pub fn listed_command(
+    request: &LaunchRequest,
+    arguments: &[OsString],
+    environment: &[(OsString, OsString)],
+    handed: crate::sandbox::Handed<'_>,
+) -> Result<Command, LaunchError> {
+    validate(request)?;
+    let harness_env = environment
+        .iter()
+        .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str())));
+    confined(request, None, arguments, harness_env, Some(handed))
+}
+
+/// Wraps a harness command line as [`sandboxed`] says, with the launch's exception to the
+/// variable guard, if any, which only a confined launch may carry. Inputs: the checked
+/// request, the installed context, the harness arguments and variables and the exception.
+/// Output: the command, or the refusals of [`sandboxed`].
+fn confined<'a>(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    arguments: &[OsString],
+    harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    handed: Option<crate::sandbox::Handed<'_>>,
+) -> Result<Command, LaunchError> {
     let home = request.account.home();
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
@@ -711,17 +746,23 @@ fn sandboxed(
                 .map(|(name, value)| (name, OsStr::new(value))),
         );
     }
-    let harness_env = environment
-        .iter()
-        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())));
     let words = super::interactive::launch_words(&request.executable)?;
     let (program, script) = words
         .split_first()
         .ok_or_else(|| failure("launch_environment_refused"))?;
     let program = Path::new(program);
-    let mut command = match &request.sandbox_profile {
-        Some(profile) => crate::sandbox::agent_command(profile, program, &base, harness_env),
-        None => crate::sandbox::unconfined_command(program, &base, harness_env),
+    let mut command = match (&request.sandbox_profile, handed) {
+        #[cfg(unix)]
+        (Some(profile), Some(handed)) => {
+            crate::sandbox::agent_command_handing(profile, program, &base, harness_env, handed)
+        }
+        #[cfg(not(unix))]
+        (Some(_), Some(_)) => return Err(failure("launch_sandbox_unavailable")),
+        (Some(profile), None) => {
+            crate::sandbox::agent_command(profile, program, &base, harness_env)
+        }
+        (None, None) => crate::sandbox::unconfined_command(program, &base, harness_env),
+        (None, Some(_)) => return Err(failure("launch_environment_refused")),
     }
     .map_err(|_| failure("launch_environment_refused"))?;
     command
@@ -1507,6 +1548,18 @@ impl Session {
         let key = write_key_file(&request)?;
         let command = command(&request)?;
         Self::spawn(request, command, None, None, (relay, key))
+    }
+
+    /// Spawns one listed master turn's harness from the command [`listed_command`] built,
+    /// holding the relay of a keyed account for as long as the session lives (DEC-180 Task
+    /// 20). Inputs: the checked request, the command and the relay, if any. Output: a running
+    /// session, or a plain refusal code.
+    pub fn start_listed(
+        request: LaunchRequest,
+        command: Command,
+        relay: Option<Relay>,
+    ) -> Result<Self, LaunchError> {
+        Self::spawn(request, command, None, None, (relay, None))
     }
 
     /// Spawns the harness for an agent of one project with the project's approved skills,

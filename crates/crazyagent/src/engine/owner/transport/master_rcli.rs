@@ -81,7 +81,7 @@ fn failed_turn_code(failure: Option<crate::rcli_host::RcliProviderFailure>) -> &
 
 /// What an rcli master's instruction file holds. Inputs: the master's startup instruction
 /// and the owner's app and project instructions. Output: the file text.
-fn instruction_file_text(instructions: &str, given: crate::agent_home::Given) -> String {
+pub(super) fn instruction_file_text(instructions: &str, given: crate::agent_home::Given) -> String {
     let fitted = super::master_host_launch::fit_process(
         instructions,
         given,

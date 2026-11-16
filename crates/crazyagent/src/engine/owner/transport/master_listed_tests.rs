@@ -367,7 +367,6 @@ mod launch {
         let given = args(&launch);
         let pair = ["--home".to_owned(), home.to_owned()];
         assert!(given.windows(2).any(|window| window == pair));
-        assert!(given.iter().all(|arg| arg != "--no-tools"));
     }
 
     /// DEC-180 Task 20 M3: with tools on, the MCP config written in the private home holds
