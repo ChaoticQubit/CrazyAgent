@@ -2173,6 +2173,45 @@ fn a_connector_with_a_key_and_a_sign_in_calls_the_way_the_owner_chose() {
     assert_eq!(bearers(&vendor).last().map(String::as_str), Some(keyed));
 }
 
+/// rv-sec3 01:23: with Browser chosen, a key saved and no sign-in, a call answers that the
+/// connector needs a sign-in and the vendor never sees the key, so Browser never falls back
+/// to the key; once Key is chosen again the saved key is sent.
+#[test]
+fn a_connector_set_to_browser_with_no_sign_in_never_falls_back_to_its_key() {
+    let taken = Arc::new(Mutex::new("at-shelf-1".to_owned()));
+    let vendor = shelf_vendor(taken);
+    let bench = bench();
+    add(&bench.case, SHELF_BOTH, false);
+    save_keys(&bench.case, "shelf", &[("api_key", "sk-shelf-key-0002")]);
+    bench.gateway.stand_in("shelf", vendor.endpoint());
+    grant(&bench, "shelf", true);
+    let choose = |way: crate::connectors::SignInWith| {
+        crate::connectors::sign_in::choose(&bench.case.db, &bench.case.root, "shelf", way)
+    };
+    choose(crate::connectors::SignInWith::Browser).unwrap();
+    let launch = launch(&bench);
+    for _ in 0..2 {
+        let (text, error) = called(&bench, &launch, "shelf__echo_token", json!({}));
+        assert!(
+            error && text.starts_with("connector_sign_in_needed"),
+            "{text}"
+        );
+    }
+    let keyed = vendor
+        .seen()
+        .iter()
+        .filter_map(|seen| seen.header("authorization").map(str::to_owned))
+        .any(|sent| sent.contains("sk-shelf-key-0002"));
+    assert!(!keyed, "the vendor never sees the key while Browser is chosen");
+    assert!(bearers(&vendor).is_empty(), "nothing reaches the vendor's MCP address");
+    choose(crate::connectors::SignInWith::Key).unwrap();
+    called(&bench, &launch, "shelf__echo_token", json!({}));
+    assert_eq!(
+        bearers(&vendor).last().map(String::as_str),
+        Some("Bearer sk-shelf-key-0002")
+    );
+}
+
 /// The sha256 of the `shelf` file the bench trusted.
 fn shelf_sha(bench: &Bench) -> String {
     store::trusted_connector(&bench.case.db, &bench.case.root, "shelf")
