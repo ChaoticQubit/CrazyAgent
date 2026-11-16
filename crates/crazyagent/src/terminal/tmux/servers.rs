@@ -75,6 +75,29 @@ fn refused(socket: &Path) -> bool {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many of this thread's next looks at a lead's teammates' socket miss, as a connect
+    /// that fails once does, so a row can tell how often a call looked ([`missed_look`]).
+    static MATES_MISSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether a row armed this look at a lead's teammates' socket to miss, using up one armed
+/// miss ([`MATES_MISSES`]). Takes nothing. Returns the answer.
+#[cfg(test)]
+fn missed_look() -> bool {
+    let armed = MATES_MISSES.get();
+    MATES_MISSES.set(armed.saturating_sub(1));
+    armed > 0
+}
+
+/// Whether a row armed this look to miss, which only a test build arms. Takes nothing.
+/// Returns false.
+#[cfg(not(test))]
+fn missed_look() -> bool {
+    false
+}
+
 /// Whether a lead's teammates' socket names no file now, as once its project was deleted with
 /// the record of that name: [`Servers::mates`] then reads no server by the file alone, so a
 /// keeper held for it decides nothing. Takes the engine root and the lead. Returns the
@@ -618,7 +641,7 @@ impl Servers {
         let Ok(socket) = teammates_socket(&self.root, lead) else {
             return Ok(None);
         };
-        if !listening(&socket) || self.mates_gone(lead, &socket) {
+        if missed_look() || !listening(&socket) || self.mates_gone(lead, &socket) {
             if let Ok(mut mates) = self.mates.lock() {
                 mates.remove(lead);
             }

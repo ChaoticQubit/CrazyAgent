@@ -770,6 +770,67 @@ async fn a_runner_folder_an_earlier_engine_left_never_costs_a_runner_slot() {
     .await;
 }
 
+/// G5 sec F1: a runner folder an earlier runner left holding an entry it made immutable, a
+/// folder it made read-only and a folder whose ACL denies deleting in it never costs a
+/// runner slot: the first registration clears all of it and takes slot 0 in a fresh folder.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_runner_folder_an_earlier_runner_pinned_never_costs_a_runner_slot() {
+    run_case(|context| async move {
+        let (attempt, _client) = context.reserve().await;
+        let stale = context.root.join("r00");
+        let read_only = stale.join("read-only");
+        let denied = stale.join("denied");
+        for folder in [&read_only, &denied] {
+            std::fs::create_dir_all(folder).unwrap();
+            std::fs::write(folder.join("held"), "").unwrap();
+        }
+        std::fs::write(stale.join("pinned"), "").unwrap();
+        assert!(file_tool(
+            "/usr/bin/chflags",
+            &["uchg"],
+            &stale.join("pinned")
+        ));
+        assert!(file_tool(
+            "/bin/chmod",
+            &["+a", "everyone deny delete_child"],
+            &denied
+        ));
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let prepared = context.service.lock().await.prepare_runner(&attempt).await;
+        let left = stale.join("pinned").exists() || read_only.exists() || denied.exists();
+        if left {
+            file_tool("/usr/bin/chflags", &["-R", "nouchg"], &stale);
+            file_tool("/bin/chmod", &["-R", "-N"], &stale);
+            file_tool("/bin/chmod", &["-R", "u+rwx"], &stale);
+        }
+
+        assert!(
+            matches!(prepared, Ok(ref runner) if runner.slot() == 0),
+            "{prepared:?}"
+        );
+        assert!(!left, "what the earlier runner pinned stayed");
+    })
+    .await;
+}
+
+/// Runs one macOS file tool on a path, as a runner's own `chflags` or `chmod` would. Takes
+/// the program, its arguments and the path. Returns whether it exited successfully.
+#[cfg(target_os = "macos")]
+fn file_tool(program: &str, args: &[&str], path: &Path) -> bool {
+    crazyagent::spawn_gate::status(
+        ProcessCommand::new(program)
+            .args(args)
+            .arg(path)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .is_ok_and(|status| status.success())
+}
+
 /// RV-DS241-77: a runner registration that fails gives its slot back, so failures never
 /// use up `RUNNERS_MAX`: after a refusal the same attempt registers in slot 0.
 #[tokio::test]
