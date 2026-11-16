@@ -41,6 +41,30 @@ const STAMP_SETTLE: Duration = Duration::from_secs(4);
 const DEADLINE_EVERY: u64 = 1024;
 const GITDIR_FILE_BYTES_MAX: u64 = 4096;
 
+/// The slot of one step an intake test runs once inside a walk; None runs nothing.
+#[cfg(all(test, unix))]
+type TestStep = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// A step an intake test runs once, just before the walk that makes a tree writable first
+    /// touches a folder below the tree's root, standing in for a process that swaps that
+    /// folder for a link meanwhile.
+    static BEFORE_WRITABLE_FOLDER: TestStep = const { std::cell::RefCell::new(None) };
+    /// A step an intake test runs once, just before a refill first opens a folder of its
+    /// target below the root, standing in for a process that swaps that folder for a link
+    /// meanwhile.
+    static BEFORE_REFILL_FOLDER: TestStep = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the test step `step` holds, once. Input: the step's slot.
+#[cfg(all(test, unix))]
+fn run_step(step: &'static std::thread::LocalKey<TestStep>) {
+    if let Some(run) = step.with(|slot| slot.borrow_mut().take()) {
+        run();
+    }
+}
+
 /// What one add, project move, delete or New Project reports while it works and the stop it
 /// obeys: whether a project move or a delete still waits for its agents to stop and how many
 /// are left, the entries copied and checked so far, whether the checked copy is in place and
@@ -642,6 +666,10 @@ fn fill_tree(copy: &Path, target: &Path) -> Result<(), EngineError> {
     let mut stack = vec![(copy.to_path_buf(), target.to_path_buf(), 0usize, root)];
     let mut entries = 0u64;
     while let Some((from, to, depth, seen)) = stack.pop() {
+        #[cfg(all(test, unix))]
+        if depth > 0 {
+            run_step(&BEFORE_REFILL_FOLDER);
+        }
         let below = from
             .strip_prefix(copy)
             .map_err(|_| refused("home_copy_failed"))?;
@@ -830,6 +858,10 @@ pub fn add_left(source: &Path, destination: &Path, moving: bool) -> &'static str
 fn make_writable(root: &Path) -> std::io::Result<()> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(folder) = stack.pop() {
+        #[cfg(all(test, unix))]
+        if folder != root {
+            run_step(&BEFORE_WRITABLE_FOLDER);
+        }
         writable_folder(&folder)?;
         for entry in fs::read_dir(&folder)? {
             let entry = entry?;
