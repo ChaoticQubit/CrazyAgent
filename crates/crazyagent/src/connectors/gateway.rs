@@ -80,6 +80,7 @@ const STALE: Duration = Duration::from_secs(10 * 60);
 const HELD_STALE: Duration = Duration::from_secs(shim::HELD_WAIT.as_secs() + STALE.as_secs());
 const PARKED_MAX: usize = 2 * approvals::WAITING_MAX;
 const SETTLING: &str = "approvals";
+const SETTLE_EVERY: Duration = Duration::from_secs(1);
 const SEPARATOR: &str = "__";
 
 const _: () = assert!(LIST_CONNECTOR_BYTES_MAX <= LIST_BYTES_MAX);
@@ -1455,10 +1456,10 @@ fn take_busy(busy: &Arc<Mutex<BTreeSet<String>>>, id: &str) -> Option<Busy> {
 }
 
 /// Runs the gateway until told to stop on one engine database connection, never creating
-/// it. Its first good read ends every waiting approval and held mark, as it holds no write;
-/// then every `TICK` it answers waiting calls, one thread per launch, and settles held
-/// writes in one more, at most `WORKERS_MAX` at once; with no launch it waits for the next.
-/// A failed read closes nothing. Inputs: the engine root and the stop flag.
+/// it. It answers nothing until it ends every waiting approval and held mark, as it holds no
+/// write; then every `TICK` it answers waiting calls, one thread per launch, and every
+/// `SETTLE_EVERY` settles held writes in one more, at most `WORKERS_MAX` at once; with no
+/// launch it waits for the next. Inputs: the engine root and the stop flag.
 pub fn serve(root: &Path, stop: &AtomicBool) {
     serve_with(root, stop, &crate::storage::versioned::open);
 }
@@ -1502,6 +1503,7 @@ fn serve_with(
     let busy: Arc<Mutex<BTreeSet<String>>> = Arc::default();
     let mut held: Option<Connection> = None;
     let mut fresh = true;
+    let mut settled: Option<Instant> = None;
     loop {
         let seen = launched();
         if stop.load(Ordering::SeqCst) {
@@ -1522,15 +1524,21 @@ fn serve_with(
             continue;
         };
         gateway.forget_ended(&found);
-        if fresh && approvals::expire_waiting(db, crate::semantic::now_ms()).is_ok() {
+        if fresh {
+            if approvals::expire_waiting(db, crate::semantic::now_ms()).is_err() {
+                std::thread::sleep(TICK);
+                continue;
+            }
             fresh = false;
             for launch in &found {
                 drop_held(root, &launch.id);
             }
         }
         if !locked(&gateway.parked).is_empty()
+            && settled.is_none_or(|at| at.elapsed() >= SETTLE_EVERY)
             && let Some(guard) = take_busy(&busy, SETTLING)
         {
+            settled = Some(Instant::now());
             let worker = gateway.clone();
             let _ = std::thread::Builder::new()
                 .name("connector-approvals".into())
