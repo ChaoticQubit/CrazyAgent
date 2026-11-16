@@ -381,6 +381,30 @@ pub(crate) fn holds(connection: &Connection, folder: &Path) -> rusqlite::Result<
     }))
 }
 
+/// Tells whether a pending project move lands in `folder`: the folder is the move's
+/// destination in the home or inside it, as given or as it resolves now. Nothing is
+/// registered there until the move is finished or forgotten, since the move's record
+/// rewrites every stored path under its old folder to the same place under the
+/// destination and replaces a row already there. Inputs: an engine connection and the
+/// folder. Output: the answer, or any SQLite failure.
+pub(crate) fn lands(connection: &Connection, folder: &Path) -> rusqlite::Result<bool> {
+    if !present(connection, "projects_home_project_move")? {
+        return Ok(false);
+    }
+    let target: Option<String> = connection
+        .query_row(
+            "SELECT target FROM projects_home_project_move WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(target.is_some_and(|target| {
+        let target = Path::new(&target);
+        folder.starts_with(target)
+            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(target))
+    }))
+}
+
 /// Forgets a pending project move whose disk work never ran. Inputs: the transaction and
 /// the transport exchange that planned it. Output: Ok; a move of another exchange stays.
 pub(crate) fn forget(tx: &Transaction<'_>, exchange: i64) -> Result<(), EngineError> {
@@ -652,7 +676,10 @@ pub(crate) enum Finished {
 /// after this record. Without that report a Move counts only when the old folder is gone
 /// (a rename), since a copy cut short looks the same on disk; a Copy counts only when
 /// verified. A finished move re-points the project's agent copies and rewrites every
-/// stored path of the folder in the caller's write. Inputs: the transaction, which pending
+/// stored path of the folder in the caller's write; a verified Move whose old folder is
+/// still there went by copy, so the same write marks that folder as still to clear under
+/// the move's request (`projects_home_project_move_left`, B17 -66), replacing an older
+/// mark, until the clear forgets it. Inputs: the transaction, which pending
 /// move to finish and whether its disk work reported success. Output: None when no such
 /// move is pending, else what was found.
 pub(crate) fn finish(
@@ -683,6 +710,17 @@ pub(crate) fn finish(
     }
     let repointed = repoint(tx, &pending.origin, &pending.target)?;
     rewrite(tx, &pending.project, &pending.origin, &pending.target)?;
+    if verified && left && matches!(pending.mode, AddMode::Move) {
+        tx.execute(
+            "INSERT OR REPLACE INTO projects_home_project_move_left VALUES (1,?1,?2,?3)",
+            params![
+                pending.request,
+                pending.project.as_str(),
+                text(&pending.origin)?
+            ],
+        )
+        .map_err(sql)?;
+    }
     Ok(Some(Finished::Moved { repointed }))
 }
 

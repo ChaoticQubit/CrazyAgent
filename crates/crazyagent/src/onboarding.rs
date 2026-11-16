@@ -466,7 +466,9 @@ fn real_dir(path: &Path) -> bool {
 /// cannot be read as `onboarding_instructions_unreadable` (RV-DS241-202), both recorded
 /// as the engine's own text, the label as it was saved (SA vid 7 residual), and the moved
 /// files are kept for the onboarding view; a file or import the engine refuses
-/// stays in place for the owner's later import. Takes the transaction,
+/// stays in place for the owner's later import. A folder a pending project move lands in,
+/// its destination or a folder inside it, is refused as `move_project_in_progress` until
+/// the move is finished or forgotten (B17 -44). Takes the transaction,
 /// configuration, engine database path and action. Returns Applied or a plain
 /// rejection.
 pub(crate) fn execute(
@@ -477,6 +479,9 @@ pub(crate) fn execute(
 ) -> Result<Outcome, EngineError> {
     action.validate()?;
     let OnboardingAction::Start { path, pool } = action;
+    if crate::projects_home::project_move_lands(tx, Path::new(path)).map_err(error)? {
+        return Ok(rejected("move_project_in_progress"));
+    }
     if !crate::project_setup::pool_exists(config, pool) {
         return Ok(rejected("pool_missing"));
     }

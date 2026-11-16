@@ -886,3 +886,93 @@ fn an_engine_start_forgets_the_admissions_of_projects_that_are_gone() {
         .unwrap();
     assert_eq!(left, ["kept"]);
 }
+
+/// B17 (-66): a project move whose record marked its old folder as still to clear is told as
+/// left under its own request while that folder is there, and its mark is forgotten once the
+/// folder is cleared or the owner dismisses it. An engine start keeps it as the ended job with
+/// the old-folder code while the folder is there and no other end is kept, and forgets a mark
+/// whose folder is gone.
+#[test]
+fn a_move_whose_old_folder_is_left_is_told_until_it_is_cleared_or_dismissed() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let origin = base.join("first").join("reading-list");
+    std::fs::create_dir_all(&origin).unwrap();
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let mark = |connection: &Connection, request: &str| {
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO projects_home_project_move_left VALUES (1, ?1, 'reading', ?2)",
+                params![request, origin.to_str().unwrap()],
+            )
+            .unwrap();
+    };
+    let marks = |connection: &Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT count(*) FROM projects_home_project_move_left",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let move_1 = RequestId::new("move-1").unwrap();
+    let move_2 = RequestId::new("move-2").unwrap();
+    mark(&connection, "move-1");
+    assert!(projects_home::move_left(&connection, &move_1).unwrap());
+    assert!(!projects_home::move_left(&connection, &move_2).unwrap());
+    projects_home::move_left_clear(&connection, &move_2).unwrap();
+    assert_eq!(
+        marks(&connection),
+        1,
+        "another request's clear keeps the mark"
+    );
+    projects_home::move_left_clear(&connection, &move_1).unwrap();
+    assert_eq!(marks(&connection), 0);
+    assert!(!projects_home::move_left(&connection, &move_1).unwrap());
+
+    mark(&connection, "move-1");
+    projects_home::project_move_settle(&mut connection, None, false).unwrap();
+    let ended = projects_home::move_ended(&connection)
+        .unwrap()
+        .map(|ended| {
+            (
+                ended.request,
+                ended.project,
+                ended.source,
+                ended.mode,
+                ended.ended,
+            )
+        });
+    assert_eq!(
+        ended,
+        Some((
+            move_1.clone(),
+            ProjectId::new("reading").unwrap(),
+            origin.to_str().unwrap().to_owned(),
+            crate::projects_home::AddMode::Move,
+            "move_project_old_folder_left".to_owned()
+        ))
+    );
+    projects_home::job_forget(&connection, &move_1).unwrap();
+    assert_eq!(projects_home::move_ended(&connection).unwrap(), None);
+    assert_eq!(
+        marks(&connection),
+        0,
+        "a dismissed warning is not kept again"
+    );
+    projects_home::project_move_settle(&mut connection, None, false).unwrap();
+    assert_eq!(projects_home::move_ended(&connection).unwrap(), None);
+
+    mark(&connection, "move-2");
+    std::fs::remove_dir_all(&origin).unwrap();
+    assert!(!projects_home::move_left(&connection, &move_2).unwrap());
+    projects_home::project_move_settle(&mut connection, None, false).unwrap();
+    assert_eq!(projects_home::move_ended(&connection).unwrap(), None);
+    assert_eq!(
+        marks(&connection),
+        0,
+        "a start forgets a mark whose folder is gone"
+    );
+}
