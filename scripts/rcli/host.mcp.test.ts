@@ -85,6 +85,18 @@ function crowdedServer(folder: string, calls: string): string {
   return stubServer(folder, calls).replace(/const tools = \[[\s\S]*?\n\];/, `const tools = ${tools};`);
 }
 
+/**
+ * Writes a stand-in gateway that finishes the handshake like `stubServer` and then never
+ * answers its tool list, as a cold vendor list past the connect bound does. Inputs: the
+ * folder and the call log. Output: the script text.
+ */
+function slowListServer(folder: string, calls: string): string {
+  const script = stubServer(folder, calls);
+  const slow = script.replace(/else if \(request\.method === "tools\/list"\) send\([^\n]*\);/, `else if (request.method === "tools/list") continue;`);
+  assert(slow !== script, "the stand-in names its tool list answer");
+  return slow;
+}
+
 /** A model stand-in that plays two scripted streams: the first turn, then the continuation after tool results. */
 class ScriptedClient {
   readonly capabilities = { assistants: false, threads: true, memory: false };
@@ -242,6 +254,24 @@ test("a gateway that does not start says so once in the turn, and a turn cancell
       await cancelled.close();
     }
   }, () => "process.exit(1);\n");
+}, 20_000);
+
+test("a gateway that shakes hands but does not list its tools within the connect bound says so once in the turn", async () => {
+  await withFixture(async ({ cwd, gateway }) => {
+    const registry = new ToolRegistry();
+    const tools = new GatewayTools(gateway, cwd, registry, new EventBus());
+    try {
+      const started = Date.now();
+      await tools.sync(AbortSignal.timeout(GATEWAY_TIMEOUT_MS));
+      expect(Date.now() - started).toBeGreaterThanOrEqual(GATEWAY_CONNECT_MS - 1000);
+      expect(registry.list()).toEqual([]);
+      expect(tools.names).toEqual([]);
+      expect(tools.takeNotice()).toBe(GATEWAY_OFF_LINE);
+      expect(tools.takeNotice()).toBeNull();
+    } finally {
+      await tools.close();
+    }
+  }, slowListServer);
 }, 20_000);
 
 test("a gateway that lists more tools than the host takes leaves the turn without them and says why", async () => {
