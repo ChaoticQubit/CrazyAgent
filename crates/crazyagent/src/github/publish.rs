@@ -176,6 +176,33 @@ fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
 }
 
+/// A step a row runs once inside a publish commit.
+#[cfg(test)]
+pub(super) type CommitStep = Box<dyn FnOnce() + Send>;
+
+/// The steps rows set for publish commits, each for one project and one point of it.
+#[cfg(test)]
+pub(super) static COMMIT_STEPS: Mutex<Vec<(PathBuf, &'static str, CommitStep)>> =
+    Mutex::new(Vec::new());
+
+/// Runs the step a row set for this project at this point of a publish commit: `add` once
+/// the project was checked and before anything is added, `ref` just before the branch moves
+/// to the new commit, so a row can write a file or move HEAD in that gap. Inputs: the
+/// project and the point.
+#[cfg(test)]
+fn commit_step(project: &Path, at: &str) {
+    let step = {
+        let mut steps = COMMIT_STEPS.lock().unwrap_or_else(PoisonError::into_inner);
+        steps
+            .iter()
+            .position(|(path, point, _)| path == project && *point == at)
+            .map(|found| steps.remove(found).2)
+    };
+    if let Some(step) = step {
+        step();
+    }
+}
+
 /// A private empty folder under the engine root that git uses as its home for one call,
 /// so no owner configuration applies; it is deleted when dropped.
 pub(super) struct GitHome(PathBuf);
@@ -1472,6 +1499,10 @@ fn commit_within(
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty() && !taken(*entry))
         .count();
+    #[cfg(test)]
+    commit_step(project, "add");
+    #[cfg(test)]
+    commit_step(project, "ref");
     let succeeded = |command: &mut Command| -> Result<(), EngineError> {
         let output = work(command)?;
         if output.status.success() {

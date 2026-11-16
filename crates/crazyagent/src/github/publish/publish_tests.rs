@@ -1110,3 +1110,96 @@ fn the_file_rules_turned_off_leave_the_security_policy_and_dependabot_unwritten(
         )
     );
 }
+
+/// Sets a step a publish commit of this project runs at one point. Inputs: the project, the
+/// point and the step.
+fn at_commit(project: &Path, at: &'static str, step: impl FnOnce() + Send + 'static) {
+    COMMIT_STEPS
+        .lock()
+        .unwrap()
+        .push((project.to_path_buf(), at, Box::new(step)));
+}
+
+/// rv-sec2 s2c N3: a file written after the check, while the commit runs, is in the tree
+/// the commit takes, so that tree is checked again: a secret there makes no commit, the
+/// branch stays unborn and the project's index stays as the owner left it.
+#[test]
+fn a_secret_written_after_the_check_is_never_committed_with_no_history() {
+    let fresh = fixture();
+    let project = fresh.path();
+    git(&["init", "-q", "-b", "main"], &project);
+    fresh.write("a.txt", "a\n");
+    fresh.write("staged.txt", "staged\n");
+    git(&["add", "staged.txt"], &project);
+    let local = fresh.inspect().unwrap();
+    let written = fresh.prepare(&local, true, false, &[]).unwrap();
+    let written: Vec<&str> = written.iter().map(String::as_str).collect();
+    assert!(fresh.findings(GitHubHistory::Empty).unwrap().is_empty());
+    let note = project.join("notes.txt");
+    at_commit(&project, "add", move || {
+        std::fs::write(note, format!("token {TOKEN}\n")).unwrap();
+    });
+    let refused = fresh.commit(&written);
+    assert_eq!(refused.unwrap_err().0, "github_publish_secret_found");
+    assert!(
+        !project.join(".git/refs/heads/main").exists(),
+        "the branch stays unborn"
+    );
+    assert_eq!(fresh.lines(&["ls-files", "--cached"]), ["staged.txt"]);
+}
+
+/// rv-sec2 s2c N3: on a project with owner history the commit's tree is checked again
+/// too, so a secret put into a file publish wrote after the check makes no commit, and
+/// HEAD and what the owner staged stay as they were.
+#[test]
+fn a_secret_put_into_a_written_file_after_the_check_is_never_committed() {
+    let owned = fixture();
+    let project = owned.path();
+    git(&["init", "-q", "-b", "trunk"], &project);
+    owned.write("a.txt", "a\n");
+    git(&["add", "-A"], &project);
+    git(&["commit", "-q", "-m", "first"], &project);
+    owned.write("staged.txt", "staged\n");
+    git(&["add", "staged.txt"], &project);
+    let head = owned.lines(&["rev-parse", "HEAD"]);
+    let local = owned.inspect().unwrap();
+    let written = owned.prepare(&local, true, false, &[]).unwrap();
+    let written: Vec<&str> = written.iter().map(String::as_str).collect();
+    assert_eq!(written, [".gitignore"]);
+    let ignore = project.join(".gitignore");
+    at_commit(&project, "add", move || {
+        let mut text = std::fs::read_to_string(&ignore).unwrap();
+        text.push_str(&format!("# {TOKEN}\n"));
+        std::fs::write(&ignore, text).unwrap();
+    });
+    let refused = owned.commit(&written);
+    assert_eq!(refused.unwrap_err().0, "github_publish_secret_found");
+    assert_eq!(owned.lines(&["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        owned.lines(&["diff", "--cached", "--name-only"]),
+        ["staged.txt"]
+    );
+}
+
+/// rv-sec2 s2c N3 (fix10's own find): the branch moves to the publish commit only from the
+/// HEAD the commit was built on, so an owner commit made while it runs is never undone: the
+/// publish answers that HEAD moved, and the owner's commit stays the branch tip.
+#[test]
+fn a_head_that_moves_while_the_commit_runs_is_never_undone() {
+    let owned = fixture();
+    let project = owned.path();
+    git(&["init", "-q", "-b", "trunk"], &project);
+    owned.write("a.txt", "a\n");
+    git(&["add", "-A"], &project);
+    git(&["commit", "-q", "-m", "first"], &project);
+    let local = owned.inspect().unwrap();
+    let written = owned.prepare(&local, true, false, &[]).unwrap();
+    let written: Vec<&str> = written.iter().map(String::as_str).collect();
+    let moving = project.clone();
+    at_commit(&project, "ref", move || {
+        git(&["commit", "-q", "--allow-empty", "-m", "owner"], &moving);
+    });
+    let refused = owned.commit(&written);
+    assert_eq!(refused.unwrap_err().0, "github_publish_head_moved");
+    assert_eq!(owned.lines(&["log", "--format=%s"]), ["owner", "first"]);
+}
