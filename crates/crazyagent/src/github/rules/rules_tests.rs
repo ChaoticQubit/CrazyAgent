@@ -121,6 +121,7 @@ fn state_of(outcomes: &[GitHubRuleOutcome], rule: GitHubRule) -> GitHubRuleState
 fn recorded(rules: &[(GitHubRule, u64)]) -> RepoRecord {
     RepoRecord {
         rulesets: rules.iter().copied().collect(),
+        on: None,
     }
 }
 
@@ -950,4 +951,594 @@ fn required_checks_go_when_ci_is_removed_and_stay_while_waiting_for_new_names() 
     let none = required(&after, GitHubCi::None, &mut made);
     assert_eq!(none.state, gone.state);
     assert!(after.seen().is_empty());
+}
+
+#[test]
+fn a_pass_remembers_the_rules_the_owner_wants_on() {
+    let server = github(stand(json!([])));
+    let mut made = RepoRecord::default();
+    let mut on = GitHubRule::defaults();
+    on.remove(&GitHubRule::WikiOff);
+    applied_on(&server, &on, &private(), &mut made);
+    assert_eq!(made.on.as_ref(), Some(&on));
+    on.insert(GitHubRule::SignedCommits);
+    set(
+        &Endpoints::loopback(server.port),
+        &token(),
+        "octo-cat/tool",
+        GitHubRule::SignedCommits,
+        &on,
+        &private(),
+        &mut made,
+    )
+    .unwrap();
+    assert_eq!(made.on.as_ref(), Some(&on));
+    let older: RepoRecord = serde_json::from_str(r#"{"rulesets":{}}"#).unwrap();
+    assert_eq!(older.on, None);
+    assert_eq!(
+        serde_json::to_string(&RepoRecord::default()).unwrap(),
+        r#"{"rulesets":{}}"#
+    );
+}
+
+const FILE: &str = "a file in the project, written when it is published";
+const OURS: [(GitHubRule, u64, &str); 7] = [
+    (GitHubRule::PullRequest, 11, "CrazyAgent pull requests"),
+    (GitHubRule::NoForcePush, 12, "CrazyAgent no force push"),
+    (GitHubRule::NoDeletion, 13, "CrazyAgent no branch deletion"),
+    (GitHubRule::LinearHistory, 14, "CrazyAgent linear history"),
+    (GitHubRule::RequiredChecks, 15, "CrazyAgent required checks"),
+    (GitHubRule::SignedCommits, 16, "CrazyAgent signed commits"),
+    (GitHubRule::TagProtection, 17, "CrazyAgent release tags"),
+];
+
+type Reads = Vec<(String, u16, Option<Value>)>;
+type Shown = Vec<(GitHubRule, bool, GitHubRuleState)>;
+
+fn reads(answers: Reads) -> Server {
+    Server::start(move |seen, _| {
+        if seen.method != "GET" {
+            return Answer::json(500, json!({ "message": "a page read sent a write" }));
+        }
+        match answers.iter().find(|(path, _, _)| *path == seen.path) {
+            Some((_, status, Some(body))) => Answer::json(*status, body.clone()),
+            Some((_, status, None)) => Answer::bytes(*status, Vec::new()),
+            None => Answer::json(404, json!({ "message": "Not Found" })),
+        }
+    })
+}
+
+fn listed(enforcement: &[(u64, &str)]) -> Value {
+    Value::Array(
+        OURS.iter()
+            .map(|(_, id, name)| {
+                let state = enforcement
+                    .iter()
+                    .find(|(listed, _)| listed == id)
+                    .map_or("active", |(_, state)| *state);
+                json!({
+                    "id": id,
+                    "name": name,
+                    "source_type": "Repository",
+                    "enforcement": state,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn ours() -> RepoRecord {
+    recorded(&OURS.map(|(rule, id, _)| (rule, id)))
+}
+
+fn secure(private: bool) -> Reads {
+    let r = REPO;
+    vec![
+        (
+            r.to_owned(),
+            200,
+            Some(json!({
+                "full_name": "octo-cat/tool",
+                "private": private,
+                "default_branch": "main",
+                "allow_squash_merge": true,
+                "allow_merge_commit": false,
+                "allow_rebase_merge": false,
+                "delete_branch_on_merge": true,
+                "has_issues": true,
+                "has_wiki": false,
+                "has_projects": false,
+                "allow_auto_merge": false,
+                "security_and_analysis": {
+                    "secret_scanning": { "status": "enabled" },
+                    "secret_scanning_push_protection": { "status": "enabled" },
+                },
+            })),
+        ),
+        (format!("{r}/rulesets"), 200, Some(listed(&[]))),
+        (
+            format!("{r}/rulesets/11"),
+            200,
+            Some(json!({
+                "id": 11,
+                "name": "CrazyAgent pull requests",
+                "enforcement": "active",
+                "rules": [{
+                    "type": "pull_request",
+                    "parameters": {
+                        "required_approving_review_count": 0,
+                        "required_review_thread_resolution": true,
+                    },
+                }],
+            })),
+        ),
+        (format!("{r}/vulnerability-alerts"), 204, None),
+        (
+            format!("{r}/automated-security-fixes"),
+            200,
+            Some(json!({ "enabled": true, "paused": false })),
+        ),
+        (
+            format!("{r}/private-vulnerability-reporting"),
+            200,
+            Some(json!({ "enabled": true })),
+        ),
+        (
+            format!("{r}/actions/permissions"),
+            200,
+            Some(json!({ "enabled": true, "allowed_actions": "selected" })),
+        ),
+        (
+            format!("{r}/actions/permissions/selected-actions"),
+            200,
+            Some(json!({
+                "github_owned_allowed": true,
+                "verified_allowed": true,
+                "patterns_allowed": [],
+            })),
+        ),
+        (
+            format!("{r}/actions/permissions/workflow"),
+            200,
+            Some(json!({
+                "default_workflow_permissions": "read",
+                "can_approve_pull_request_reviews": false,
+            })),
+        ),
+        (
+            format!("{r}/actions/permissions/fork-pr-contributor-approval"),
+            200,
+            Some(json!({ "approval_policy": "all_external_contributors" })),
+        ),
+        (
+            format!("{r}/code-scanning/default-setup"),
+            200,
+            Some(json!({ "state": "configured", "languages": ["rust"] })),
+        ),
+        (
+            format!("{r}/actions/workflows"),
+            200,
+            Some(json!({ "total_count": 1, "workflows": [] })),
+        ),
+        (
+            format!("{r}/commits/main/check-runs"),
+            200,
+            Some(json!({
+                "total_count": 3,
+                "check_runs": [{ "name": "test" }, { "name": "build" }, { "name": "test" }],
+            })),
+        ),
+    ]
+}
+
+fn answer(answers: &mut Reads, tail: &str, status: u16, body: Option<Value>) {
+    let path = if tail.is_empty() {
+        REPO.to_owned()
+    } else {
+        format!("{REPO}/{tail}")
+    };
+    let at = answers
+        .iter_mut()
+        .find(|(listed, _, _)| *listed == path)
+        .expect("a read the stand answers");
+    at.1 = status;
+    at.2 = body;
+}
+
+fn page_of(server: &Server, made: &RepoRecord) -> (GitHubRepoRules, GitHubRepoFacts) {
+    read(
+        &Endpoints::loopback(server.port),
+        &token(),
+        "octo-cat/tool",
+        made,
+    )
+    .unwrap()
+}
+
+fn shown(page: &GitHubRepoRules) -> Shown {
+    page.rules
+        .iter()
+        .map(|outcome| (outcome.rule, outcome.on, outcome.state.clone()))
+        .collect()
+}
+
+fn each(state: impl Fn(GitHubRule) -> (bool, GitHubRuleState)) -> Shown {
+    GitHubRule::ALL
+        .into_iter()
+        .map(|rule| {
+            let (on, state) = state(rule);
+            (rule, on, state)
+        })
+        .collect()
+}
+
+fn sorted(server: &Server) -> Vec<String> {
+    let mut seen = calls(server);
+    seen.sort();
+    seen
+}
+
+fn every_get(tails: &[&str]) -> Vec<String> {
+    let mut expected: Vec<String> = tails
+        .iter()
+        .map(|tail| {
+            if tail.is_empty() {
+                format!("GET {REPO}")
+            } else {
+                format!("GET {REPO}/{tail}")
+            }
+        })
+        .collect();
+    expected.sort();
+    expected
+}
+
+#[test]
+fn the_settings_page_reads_each_rule_from_its_own_get_and_sends_no_write() {
+    let server = reads(secure(false));
+    let (page, facts) = page_of(&server, &ours());
+    assert_eq!(
+        shown(&page),
+        each(|rule| if rule.on_github() {
+            (true, GitHubRuleState::Applied)
+        } else {
+            (false, not_applicable(FILE))
+        })
+    );
+    assert_eq!(page.full_name, "octo-cat/tool");
+    assert!(!page.private);
+    assert_eq!(page.checks, ["build", "test"]);
+    assert_eq!(
+        facts,
+        GitHubRepoFacts {
+            private: false,
+            ci: GitHubCi::Checks(vec!["build".into(), "test".into()]),
+        }
+    );
+    assert_eq!(
+        sorted(&server),
+        every_get(&[
+            "",
+            "rulesets",
+            "rulesets/11",
+            "vulnerability-alerts",
+            "automated-security-fixes",
+            "private-vulnerability-reporting",
+            "actions/permissions",
+            "actions/permissions/selected-actions",
+            "actions/permissions/workflow",
+            "actions/permissions/fork-pr-contributor-approval",
+            "code-scanning/default-setup",
+            "actions/workflows",
+            "commits/main/check-runs",
+        ])
+    );
+    let seen = server.seen();
+    let rulesets = seen
+        .iter()
+        .find(|seen| seen.path == format!("{REPO}/rulesets"))
+        .unwrap();
+    assert_eq!(
+        rulesets
+            .query_pairs()
+            .get("includes_parents")
+            .map(String::as_str),
+        Some("false")
+    );
+}
+
+#[test]
+fn a_repository_on_githubs_own_defaults_reads_every_switch_off() {
+    let mut answers = secure(false);
+    answer(
+        &mut answers,
+        "",
+        200,
+        Some(json!({
+            "full_name": "octo-cat/tool",
+            "private": false,
+            "default_branch": "main",
+            "allow_squash_merge": true,
+            "allow_merge_commit": true,
+            "allow_rebase_merge": true,
+            "delete_branch_on_merge": false,
+            "has_issues": false,
+            "has_wiki": true,
+            "has_projects": true,
+            "allow_auto_merge": true,
+            "security_and_analysis": {
+                "secret_scanning": { "status": "disabled" },
+                "secret_scanning_push_protection": { "status": "disabled" },
+            },
+        })),
+    );
+    answer(&mut answers, "rulesets", 200, Some(json!([])));
+    answer(
+        &mut answers,
+        "vulnerability-alerts",
+        404,
+        Some(json!({ "message": "Not Found" })),
+    );
+    answer(
+        &mut answers,
+        "automated-security-fixes",
+        404,
+        Some(json!({ "message": "Not Found" })),
+    );
+    answer(
+        &mut answers,
+        "private-vulnerability-reporting",
+        200,
+        Some(json!({ "enabled": false })),
+    );
+    answer(
+        &mut answers,
+        "actions/permissions",
+        200,
+        Some(json!({ "enabled": true, "allowed_actions": "all" })),
+    );
+    answer(
+        &mut answers,
+        "actions/permissions/workflow",
+        200,
+        Some(json!({
+            "default_workflow_permissions": "write",
+            "can_approve_pull_request_reviews": false,
+        })),
+    );
+    answer(
+        &mut answers,
+        "actions/permissions/fork-pr-contributor-approval",
+        200,
+        Some(json!({ "approval_policy": "first_time_contributors" })),
+    );
+    answer(
+        &mut answers,
+        "code-scanning/default-setup",
+        200,
+        Some(json!({ "state": "not-configured" })),
+    );
+    answer(
+        &mut answers,
+        "actions/workflows",
+        200,
+        Some(json!({ "total_count": 0, "workflows": [] })),
+    );
+    let server = reads(answers);
+    let (page, facts) = page_of(&server, &RepoRecord::default());
+    assert_eq!(
+        shown(&page),
+        each(|rule| match rule {
+            GitHubRule::ConversationResolution => (false, not_applicable("needs pull requests")),
+            GitHubRule::RequiredChecks => (false, not_applicable(NO_CI)),
+            GitHubRule::DependabotVersionUpdates | GitHubRule::SecurityPolicy => {
+                (false, not_applicable(FILE))
+            }
+            _ => (false, GitHubRuleState::Applied),
+        })
+    );
+    assert_eq!(
+        facts,
+        GitHubRepoFacts {
+            private: false,
+            ci: GitHubCi::None,
+        }
+    );
+    assert!(page.checks.is_empty());
+    let asked = calls(&server);
+    for tail in [
+        "rulesets/11",
+        "actions/permissions/selected-actions",
+        "commits/main/check-runs",
+    ] {
+        assert!(!asked.contains(&format!("GET {REPO}/{tail}")), "{asked:?}");
+    }
+}
+
+#[test]
+fn required_checks_wait_for_the_first_ci_run_then_show_its_names_and_a_read_makes_nothing() {
+    let mut answers = secure(false);
+    let mut listing = listed(&[]);
+    listing
+        .as_array_mut()
+        .unwrap()
+        .retain(|listed| listed["id"] != 15);
+    answer(&mut answers, "rulesets", 200, Some(listing));
+    answer(
+        &mut answers,
+        "commits/main/check-runs",
+        200,
+        Some(json!({ "total_count": 0, "check_runs": [] })),
+    );
+    let mut record = ours();
+    record.rulesets.remove(&GitHubRule::RequiredChecks);
+    record.on = Some(GitHubRule::defaults());
+    let state_of_checks = |page: &GitHubRepoRules| {
+        shown(page)
+            .into_iter()
+            .find(|(rule, _, _)| *rule == GitHubRule::RequiredChecks)
+            .map(|(_, on, state)| (on, state))
+    };
+    let waiting = reads(answers.clone());
+    let (page, facts) = page_of(&waiting, &record);
+    assert_eq!(
+        state_of_checks(&page),
+        Some((
+            false,
+            GitHubRuleState::Waiting {
+                reason: WAITING.into(),
+            }
+        ))
+    );
+    assert_eq!(facts.ci, GitHubCi::Waiting);
+    assert!(page.checks.is_empty());
+    answer(
+        &mut answers,
+        "commits/main/check-runs",
+        200,
+        Some(json!({
+            "total_count": 2,
+            "check_runs": [{ "name": "lint" }, { "name": "build" }],
+        })),
+    );
+    let named = reads(answers);
+    let (page, facts) = page_of(&named, &record);
+    assert_eq!(
+        state_of_checks(&page),
+        Some((false, GitHubRuleState::Applied))
+    );
+    assert_eq!(page.checks, ["build", "lint"]);
+    assert_eq!(
+        facts.ci,
+        GitHubCi::Checks(vec!["build".into(), "lint".into()])
+    );
+    for server in [&waiting, &named] {
+        assert!(
+            calls(server).iter().all(|call| call.starts_with("GET ")),
+            "{:?}",
+            calls(server)
+        );
+    }
+}
+
+#[test]
+fn a_read_github_refuses_shows_its_reason_and_the_other_rules_still_read() {
+    let mut answers = secure(true);
+    answer(
+        &mut answers,
+        "code-scanning/default-setup",
+        403,
+        Some(json!({ "message": PLAN })),
+    );
+    answer(
+        &mut answers,
+        "rulesets",
+        403,
+        Some(json!({ "message": PLAN })),
+    );
+    let server = reads(answers);
+    let (page, facts) = page_of(&server, &ours());
+    let plan = GitHubRuleState::Refused {
+        status: 403,
+        message: PLAN.into(),
+    };
+    assert_eq!(
+        shown(&page),
+        each(|rule| match rule {
+            GitHubRule::PullRequest
+            | GitHubRule::ConversationResolution
+            | GitHubRule::NoForcePush
+            | GitHubRule::NoDeletion
+            | GitHubRule::LinearHistory
+            | GitHubRule::RequiredChecks
+            | GitHubRule::SignedCommits
+            | GitHubRule::TagProtection
+            | GitHubRule::CodeqlDefaultSetup => (false, plan.clone()),
+            GitHubRule::PrivateVulnerabilityReporting => {
+                (false, not_applicable("public repositories only"))
+            }
+            GitHubRule::ActionsOutsidePrApproval => (
+                false,
+                not_applicable("a private repository runs no outside pull request workflows"),
+            ),
+            GitHubRule::DependabotVersionUpdates | GitHubRule::SecurityPolicy => {
+                (false, not_applicable(FILE))
+            }
+            _ => (true, GitHubRuleState::Applied),
+        })
+    );
+    assert!(page.private && facts.private);
+    let asked = calls(&server);
+    for tail in [
+        "rulesets/11",
+        "private-vulnerability-reporting",
+        "actions/permissions/fork-pr-contributor-approval",
+    ] {
+        assert!(!asked.contains(&format!("GET {REPO}/{tail}")), "{asked:?}");
+    }
+}
+
+#[test]
+fn a_ruleset_turned_off_on_github_or_made_by_someone_else_reads_off() {
+    let mut answers = secure(false);
+    let mut listing = listed(&[(11, "disabled")]);
+    for listed in listing.as_array_mut().unwrap() {
+        if listed["id"] == 12 {
+            listed["id"] = json!(99);
+        }
+    }
+    answer(&mut answers, "rulesets", 200, Some(listing));
+    let server = reads(answers);
+    let (page, _) = page_of(&server, &ours());
+    assert_eq!(
+        shown(&page),
+        each(|rule| match rule {
+            GitHubRule::PullRequest => (false, GitHubRuleState::Applied),
+            GitHubRule::ConversationResolution => (false, not_applicable("needs pull requests")),
+            GitHubRule::NoForcePush => (false, not_sent(FOREIGN)),
+            GitHubRule::DependabotVersionUpdates | GitHubRule::SecurityPolicy => {
+                (false, not_applicable(FILE))
+            }
+            _ => (true, GitHubRuleState::Applied),
+        })
+    );
+    assert!(!calls(&server).contains(&format!("GET {REPO}/rulesets/11")));
+}
+
+#[test]
+fn a_repository_github_will_not_show_stops_the_page_before_any_other_read() {
+    let mut answers = secure(false);
+    answer(
+        &mut answers,
+        "",
+        404,
+        Some(json!({ "message": "Not Found" })),
+    );
+    let server = reads(answers);
+    let endpoints = Endpoints::loopback(server.port);
+    assert_eq!(
+        read(&endpoints, &token(), "octo-cat/tool", &ours())
+            .map(|_| ())
+            .map_err(|error| error.0),
+        Err("github_repo_unreadable".to_owned())
+    );
+    assert_eq!(calls(&server), [format!("GET {REPO}")]);
+    let refused = Server::start(|_, _| Answer::json(401, json!({ "message": "Bad credentials" })));
+    assert_eq!(
+        read(
+            &Endpoints::loopback(refused.port),
+            &token(),
+            "octo-cat/tool",
+            &ours()
+        )
+        .map(|_| ())
+        .map_err(|error| error.0),
+        Err("github_token_refused".to_owned())
+    );
+    assert_eq!(
+        read(&endpoints, &token(), "octo-cat/../x", &ours())
+            .map(|_| ())
+            .map_err(|error| error.0),
+        Err("github_repo_name_invalid".to_owned())
+    );
 }

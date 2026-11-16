@@ -323,6 +323,21 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "github_store_unavailable" => {
             "CrazyAgent's GitHub records can't be read or written right now. Try again."
         }
+        "github_rules_not_published" => super::project_github::RULES_NOT_PUBLISHED,
+        "github_rule_invalid" => {
+            "This rule is a file in the project, so it can't be switched on GitHub."
+        }
+        "github_rules_repo_mismatch" => {
+            "This project is now published to another GitHub repository, so nothing was changed. Check its rules again."
+        }
+        "github_repo_unreadable" => {
+            "GitHub didn't show this repository. Check that it still exists and that your GitHub sign-in can see it."
+        }
+        "github_request_bounds" => "That request was too large for the engine. Try again.",
+        "github_reply_bounds" => "GitHub's reply was too large to show. Try again.",
+        "github_request_invalid" => "The engine couldn't read that request. Reload and try again.",
+        "github_rule_busy" => "Another GitHub rule is still changing. Try again when it's done.",
+        "github_rule_unstarted" => "CrazyAgent couldn't start the change. Try again.",
         "trusted_connection_unavailable" | "trusted_connection_lost" => {
             "The engine connection dropped. CrazyAgent reconnects on its own."
         }

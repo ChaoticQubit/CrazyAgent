@@ -36,6 +36,7 @@ use crazyagent::github::{
     CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
     GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
 };
+use crazyagent::github::{GitHubRepoRules, GitHubRule};
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
@@ -71,6 +72,7 @@ use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::money::MoneyChoice;
 use crazyagent::usage::report::UsageReport;
 use crazyagent::usage::spend::SpendChoice;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
@@ -2642,6 +2644,52 @@ async fn desktop_github_publish_start(
 ) -> Result<GitHubPublishJob, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.github_publish_start(&project, plan)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rule_defaults(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<BTreeSet<GitHubRule>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_rule_defaults()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rule_defaults_set(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    rules: BTreeSet<GitHubRule>,
+) -> Result<BTreeSet<GitHubRule>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_rule_defaults_set(rules)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rules(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<GitHubRepoRules, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_rules(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rule_set(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    repo: String,
+    rule: GitHubRule,
+    on: bool,
+) -> Result<GitHubRepoRules, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_rule_set(&project, repo, rule, on)?;
     call.await
 }
 
@@ -5266,6 +5314,10 @@ native_commands! {
     desktop_github_publish_prompt_set,
     desktop_github_publish_discard,
     desktop_github_publish_start,
+    desktop_github_rule_defaults,
+    desktop_github_rule_defaults_set,
+    desktop_github_rules,
+    desktop_github_rule_set,
     desktop_clone_repo,
     desktop_icloud_download,
     desktop_icloud_progress,

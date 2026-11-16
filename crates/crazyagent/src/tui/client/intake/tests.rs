@@ -227,3 +227,156 @@ async fn the_tui_starts_an_intake_job_reads_it_to_done_and_dismisses_it() {
 
     service.shutdown().await.unwrap();
 }
+
+async fn owner_event(connection: &mut Connection) -> OwnerEvent {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Some(event) = connection.poll_owner().unwrap() {
+            return event;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "owner event timed out"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+fn rule_set() -> IntakeQuery {
+    IntakeQuery::GitHubRuleSet {
+        project: ProjectId::new("alpha").unwrap(),
+        repo: "octo-cat/tool".into(),
+        rule: GitHubRule::WikiOff,
+        on: true,
+    }
+}
+
+/// A GitHub rule switch runs on a lane of its own (rv-ds241 gh-s6c N1): the worker answers
+/// it at once as changing and takes the next request, and the switch's own result comes
+/// after as an event of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rule_switch_is_answered_at_once_and_its_result_comes_after() {
+    let root = private_root("ca-tlane-");
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let mut connection = Connection::connect_paired(
+        Client::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    while !matches!(
+        owner_event(&mut connection).await,
+        OwnerEvent::Access { ready: true, .. }
+    ) {}
+    let set = rule_set();
+    connection.intake(IntakeJob::Query(set.clone())).unwrap();
+    let OwnerEvent::Intake(first) = owner_event(&mut connection).await else {
+        panic!("the switch is answered first");
+    };
+    assert_eq!(
+        *first,
+        IntakeEvent {
+            query: set.clone(),
+            result: Ok(IntakeView::RuleChanging),
+        }
+    );
+    assert!(!connection.busy(), "the worker takes the next request");
+    connection
+        .intake(IntakeJob::Query(IntakeQuery::Home))
+        .unwrap();
+    let (mut home, mut result) = (None, None);
+    while home.is_none() || result.is_none() {
+        let OwnerEvent::Intake(event) = owner_event(&mut connection).await else {
+            continue;
+        };
+        if event.query == IntakeQuery::Home {
+            home = Some(event.result);
+        } else if event.query == set {
+            result = Some(event.result);
+        }
+    }
+    assert!(matches!(home, Some(Ok(IntakeView::Home(_)))), "{home:?}");
+    let result = result.unwrap();
+    assert!(result.is_err(), "alpha is no project: {result:?}");
+    drop(connection);
+    service.shutdown().await.unwrap();
+}
+
+/// One rule switch at a time: while one runs, the next is refused at once with
+/// `github_rule_busy` as the worker's answer and sends nothing more; once it ends, the next
+/// is answered as changing before it starts, and its result comes after as an unfinished
+/// event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_rule_switch_while_one_runs_is_refused_at_once() {
+    let root = private_root("ca-tlane2-");
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let mut native = NativeOwner::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    );
+    let (_, access) = native.attach().await;
+    assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+    let (replies, receiver) = std::sync::mpsc::sync_channel(1);
+    let next = || {
+        let reply = tokio::task::block_in_place(|| {
+            receiver.recv_timeout(std::time::Duration::from_secs(20))
+        })
+        .unwrap();
+        let OwnerEvent::Intake(event) = reply.event else {
+            panic!("a rule switch answers with intake events");
+        };
+        (reply.finished, *event)
+    };
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    native.rule_lane = Some(std::thread::spawn(move || {
+        let _ = held.recv();
+    }));
+    let set = rule_set();
+    assert!(native.rule_lane(IntakeJob::Query(set.clone()), &replies));
+    assert_eq!(
+        next(),
+        (
+            true,
+            IntakeEvent {
+                query: set.clone(),
+                result: Err("github_rule_busy".into()),
+            }
+        )
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "a refused switch sends nothing more"
+    );
+    release.send(()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !native.rule_lane.as_ref().unwrap().is_finished() {
+        assert!(std::time::Instant::now() < deadline, "the held lane ends");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(native.rule_lane(IntakeJob::Query(set.clone()), &replies));
+    assert_eq!(
+        next(),
+        (
+            true,
+            IntakeEvent {
+                query: set.clone(),
+                result: Ok(IntakeView::RuleChanging),
+            }
+        )
+    );
+    let (finished, event) = next();
+    assert!(!finished, "the result is not the worker's answer");
+    assert_eq!(event.query, set);
+    assert!(event.result.is_err(), "{:?}", event.result);
+    service.shutdown().await.unwrap();
+}

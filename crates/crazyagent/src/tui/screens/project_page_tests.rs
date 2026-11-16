@@ -7675,6 +7675,7 @@ fn publish_job(step: GitHubPublishStep) -> GitHubPublishJob {
         step,
         stopped: None,
         made: None,
+        rules: crate::github::GitHubRule::defaults(),
     }
 }
 

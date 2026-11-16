@@ -28,6 +28,7 @@ fn job(step: GitHubPublishStep, stopped: Option<&str>) -> GitHubPublishJob {
         step,
         stopped: stopped.map(str::to_owned),
         made: None,
+        rules: GitHubRule::defaults(),
     }
 }
 

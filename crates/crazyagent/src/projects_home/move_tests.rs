@@ -761,6 +761,7 @@ fn publish_job(folder: &Path) -> crate::github::GitHubPublishJob {
         step: crate::github::GitHubPublishStep::Drafting,
         stopped: None,
         made: None,
+        rules: crate::github::GitHubRule::defaults(),
     }
 }
 

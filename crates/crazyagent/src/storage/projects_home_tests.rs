@@ -105,6 +105,7 @@ fn a_home_move_carries_each_moved_projects_github_publish_job() {
         step: crate::github::GitHubPublishStep::Drafting,
         stopped: None,
         made: None,
+        rules: crate::github::GitHubRule::defaults(),
     };
     crate::github::keep_job(&engine, &job);
     std::fs::rename(&origin, &target).unwrap();
@@ -213,6 +214,7 @@ fn delete_everything_forgets_the_github_publish_job_and_remove_from_dashboard_ke
         step: crate::github::GitHubPublishStep::Drafting,
         stopped: None,
         made: None,
+        rules: crate::github::GitHubRule::defaults(),
     };
     for id in ["kept", "gone"] {
         let folder = home.join(id);

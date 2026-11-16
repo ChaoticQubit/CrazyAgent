@@ -104,8 +104,9 @@ pub enum GitHubPublishStep {
 
 /// One project's publish as the engine records it: the plan, the lines the owner
 /// approved, the paths publish wrote, the step reached, the code of the failure that
-/// stopped it there, if one did, and the `owner/name` of the repository it made, kept
-/// once made so a check and commit again never create a second one.
+/// stopped it there, if one did, the `owner/name` of the repository it made, kept
+/// once made so a check and commit again never create a second one, and the rules it
+/// sets, copied from the global defaults at Start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubPublishJob {
@@ -117,6 +118,8 @@ pub struct GitHubPublishJob {
     pub stopped: Option<String>,
     #[serde(default)]
     pub made: Option<String>,
+    #[serde(default = "GitHubRule::defaults")]
+    pub rules: BTreeSet<GitHubRule>,
 }
 
 /// Holds one project's publish for the engine, so a second run of it is refused while
@@ -276,6 +279,7 @@ impl GitHub {
         api::check_new(&new_repo(plan))?;
         let held = publishing(&self.root, project)?;
         self.saved()?;
+        let rules = state::load_defaults(&self.root)?;
         let written = match state::load_job(&self.root, project)? {
             Some(job)
                 if match &job.step {
@@ -301,6 +305,7 @@ impl GitHub {
             step: GitHubPublishStep::Drafting,
             stopped: None,
             made: None,
+            rules,
         };
         state::save_job(&self.root, &job)?;
         Ok(GitHubDraft {
@@ -539,6 +544,7 @@ impl GitHub {
             private: job.plan.private,
             docs: job.plan.docs,
             approved: job.lines.clone(),
+            rules: job.rules.clone(),
         };
         for path in self.publish_prepare(&job.project, &local, &choices)? {
             if !job.written.contains(&path) {
@@ -635,7 +641,7 @@ impl GitHub {
                             GitHubCi::None
                         },
                     };
-                    let outcomes = self.apply_rules(full_name, &GitHubRule::defaults(), &facts)?;
+                    let outcomes = self.apply_rules(full_name, &job.rules, &facts)?;
                     GitHubPublishStep::Done {
                         full_name: full_name.clone(),
                         outcomes,

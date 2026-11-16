@@ -661,6 +661,7 @@ pub(in crate::tui) enum ProjectReply {
     RefreshOverview,
     MoveHome(crate::projects_home::AddMode),
     DeleteEverything(String),
+    GitHubRules,
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -2663,6 +2664,7 @@ impl ProjectScreen {
                 ProjectReply::Handled
             }
             KeyCode::Char('i') => ProjectReply::Process,
+            KeyCode::Char('G') => ProjectReply::GitHubRules,
             KeyCode::Char('u') => match &self.schedule {
                 Some(schedule) => ProjectReply::AccountOrder(
                     crate::tui::screens::settings::account_choice::cycle(

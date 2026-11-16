@@ -4,11 +4,13 @@ use crate::github::{
     CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
     GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
 };
+use crate::github::{GitHubRepoRules, GitHubRule};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::icloud::{DOWNLOAD_TIME_MAX, Progress};
 use crate::projects_home::job::{JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const ICLOUD_PROGRESS_EVERY: Duration = Duration::from_secs(1);
@@ -331,5 +333,44 @@ impl OwnerController {
             }
         }
         Err(EngineError("icloud_outcome_unknown".into()))
+    }
+
+    /// Reads the rules a new GitHub repository starts with. Takes nothing.
+    /// Returns the rules on, DEC-182's standard setup while the owner saved none.
+    pub async fn github_rule_defaults(&mut self) -> Result<BTreeSet<GitHubRule>, EngineError> {
+        self.owner_client()?.github_rule_defaults().await
+    }
+
+    /// Saves the rules a new GitHub repository starts with. Takes the rules on.
+    /// Returns the rules the engine read back.
+    pub async fn github_rule_defaults_set(
+        &mut self,
+        rules: BTreeSet<GitHubRule>,
+    ) -> Result<BTreeSet<GitHubRule>, EngineError> {
+        self.owner_client()?.github_rule_defaults_set(rules).await
+    }
+
+    /// Reads the live rules of the repository a project was published to; sends nothing
+    /// that changes it. Takes the project. Returns the page.
+    pub async fn github_rules(
+        &mut self,
+        project: ProjectId,
+    ) -> Result<GitHubRepoRules, EngineError> {
+        self.owner_client()?.github_rules(project).await
+    }
+
+    /// Turns one rule on or off on the repository a project was published to, with the
+    /// owner's sign-in. Takes the project, the `owner/name` the page showed, the rule and
+    /// whether it is on. Returns the page read again after the change.
+    pub async fn github_rule_set(
+        &mut self,
+        project: ProjectId,
+        repo: String,
+        rule: GitHubRule,
+        on: bool,
+    ) -> Result<GitHubRepoRules, EngineError> {
+        self.owner_client()?
+            .github_rule_set(project, repo, rule, on)
+            .await
     }
 }

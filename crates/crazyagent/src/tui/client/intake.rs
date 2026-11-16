@@ -5,10 +5,12 @@ use crate::github::{
     CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
     GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
 };
+use crate::github::{GitHubRepoRules, GitHubRule};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::job::{JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, RequestId};
+use std::collections::BTreeSet;
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -90,6 +92,19 @@ pub(in crate::tui) enum IntakeQuery {
     JobDismiss {
         id: RequestId,
     },
+    GitHubRuleDefaults,
+    GitHubRuleDefaultsSet {
+        rules: BTreeSet<GitHubRule>,
+    },
+    GitHubRules {
+        project: ProjectId,
+    },
+    GitHubRuleSet {
+        project: ProjectId,
+        repo: String,
+        rule: GitHubRule,
+        on: bool,
+    },
 }
 
 /// A fresh id for one start of the engine's intake job, which the job that start makes
@@ -133,6 +148,9 @@ pub(in crate::tui) enum IntakeView {
     Job(Option<JobView>),
     JobStopped(bool),
     JobDismissed(bool),
+    RuleChanging,
+    RuleDefaults(BTreeSet<GitHubRule>),
+    Rules(Box<GitHubRepoRules>),
 }
 
 /// One intake reply for the screens.
@@ -196,6 +214,88 @@ impl NativeOwner {
             self.detach();
         }
         IntakeEvent { query, result }
+    }
+
+    /// Starts one GitHub rule switch on a lane thread of its own, so the worker takes other
+    /// requests while GitHub answers, which can take minutes. It first sends the worker's
+    /// finished answer, `RuleChanging` or the refusal, `github_rule_busy` while a switch
+    /// still runs; the switch's result comes after as an unfinished owner event. Takes the
+    /// switch job and the reply sender. Returns false once nobody reads the replies.
+    pub(super) fn rule_lane(&mut self, job: IntakeJob, replies: &SyncSender<OwnerReply>) -> bool {
+        let query = job.query();
+        let IntakeJob::Query(IntakeQuery::GitHubRuleSet {
+            project,
+            repo,
+            rule,
+            on,
+        }) = job
+        else {
+            unreachable!("the rule lane runs only a rule switch");
+        };
+        let reply = |finished, result| OwnerReply {
+            finished,
+            event: OwnerEvent::Intake(Box::new(IntakeEvent {
+                query: query.clone(),
+                result,
+            })),
+        };
+        if self
+            .rule_lane
+            .as_ref()
+            .is_some_and(|lane| !lane.is_finished())
+        {
+            return replies
+                .send(reply(true, Err("github_rule_busy".into())))
+                .is_ok();
+        }
+        let shared = self
+            .controller
+            .as_ref()
+            .filter(|_| self.ready)
+            .and_then(|controller| controller.shared_client().ok());
+        let Some(client) = shared else {
+            return replies
+                .send(reply(true, Err("trusted_connection_unavailable".into())))
+                .is_ok();
+        };
+        if replies
+            .send(reply(true, Ok(IntakeView::RuleChanging)))
+            .is_err()
+        {
+            return false;
+        }
+        let lane_replies = replies.clone();
+        let asked = query.clone();
+        let spawned = std::thread::Builder::new()
+            .name("tui-github".into())
+            .spawn(move || {
+                let result = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime
+                        .block_on(client.github_rule_set(project, repo, rule, on))
+                        .map(|page| IntakeView::Rules(Box::new(page)))
+                        .map_err(|error| bounded_problem(&error.0)),
+                    Err(_) => Err("github_rule_unstarted".to_owned()),
+                };
+                let _ = lane_replies.send(OwnerReply {
+                    finished: false,
+                    event: OwnerEvent::Intake(Box::new(IntakeEvent {
+                        query: asked,
+                        result,
+                    })),
+                });
+            });
+        match spawned {
+            Ok(lane) => {
+                self.rule_lane = Some(lane);
+                true
+            }
+            Err(_) => replies
+                .send(reply(false, Err("github_rule_unstarted".into())))
+                .is_ok(),
+        }
     }
 
     async fn intake_view(&mut self, job: IntakeJob, lost: &mut bool) -> Result<IntakeView, String> {
@@ -352,6 +452,29 @@ impl NativeOwner {
             IntakeQuery::JobDismiss { id } => {
                 IntakeView::JobDismissed(controller.job_dismiss(id).await.map_err(problem)?)
             }
+            IntakeQuery::GitHubRuleDefaults => {
+                IntakeView::RuleDefaults(controller.github_rule_defaults().await.map_err(problem)?)
+            }
+            IntakeQuery::GitHubRuleDefaultsSet { rules } => IntakeView::RuleDefaults(
+                controller
+                    .github_rule_defaults_set(rules)
+                    .await
+                    .map_err(problem)?,
+            ),
+            IntakeQuery::GitHubRules { project } => IntakeView::Rules(Box::new(
+                controller.github_rules(project).await.map_err(problem)?,
+            )),
+            IntakeQuery::GitHubRuleSet {
+                project,
+                repo,
+                rule,
+                on,
+            } => IntakeView::Rules(Box::new(
+                controller
+                    .github_rule_set(project, repo, rule, on)
+                    .await
+                    .map_err(problem)?,
+            )),
         })
     }
 }

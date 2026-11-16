@@ -2598,7 +2598,8 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         entry(
             "Process",
             Row::of("Instructions for this project's agents", look.fg)
-                .push("   i Edit", look.muted),
+                .push("   i Edit", look.muted)
+                .push("   G GitHub rules", look.muted),
         ),
         entry(
             "Roadmap",
