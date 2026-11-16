@@ -462,6 +462,16 @@ impl Fault {
             Self::Exit(None) => failure("claude_host_native_exit_signal"),
         }
     }
+
+    /// Whether this is the Linux call supervisor's held stop: the run's own end, which a
+    /// clean cleanup does not turn into a close failure and a cleanup fault outranks.
+    /// Takes the fault. Returns true only for the held-stop exit on this system.
+    fn held(self) -> bool {
+        let Self::Exit(Some(code)) = self else {
+            return false;
+        };
+        crate::sandbox::held_stop(std::env::consts::OS, code).is_some()
+    }
 }
 
 /// Names a Claude protocol fault as a plain lowercase code that engine logs can show.
@@ -729,7 +739,10 @@ impl ClaudeHost {
         loop {
             let current = *self.status.borrow();
             if current.phase == Phase::Retired {
-                return current.fault.map_or(Ok(()), |error| Err(error.error()));
+                return current
+                    .fault
+                    .filter(|fault| !fault.held())
+                    .map_or(Ok(()), |error| Err(error.error()));
             }
             tokio::time::timeout_at(deadline, self.status.changed())
                 .await
