@@ -598,9 +598,10 @@ fn run_listed(turn: ListedTurn, signals: Signals) -> ListedRun {
 
 impl OwnerRuntimeHandle {
     /// The entry of a listed harness, checked as a listed master turn checks its program:
-    /// found by the search set at engine start, refused when it does not resolve or is below
-    /// the manifest's `version.minimum`. Input: the exact registry id of a harness the engine
-    /// does not drive itself. Output: the entry, or none for any other name or a refusal.
+    /// found by the search set at engine start, refused in a folder agents can write, when it
+    /// does not resolve or is below the manifest's `version.minimum`. Input: the exact
+    /// registry id of a harness the engine does not drive itself. Output: the entry, or none
+    /// for any other name or a refusal.
     pub(super) fn listed_entry(&self, id: &str) -> Option<PathBuf> {
         let engine_kind = crate::coord::settings::HarnessKind::ALL
             .into_iter()
@@ -612,12 +613,14 @@ impl OwnerRuntimeHandle {
         let root = super::changes::engine_root(&self.authority).ok()?;
         let updates = self.engine.harness_updates.clone();
         let work = move || {
+            use crate::harnesses::finding;
             let entry = crate::harnesses::entry(harness, &search);
+            let found = entry.executable.clone()?;
+            let db = crate::landing::open(&root).ok()?;
+            let space = finding::AgentSpace::read(&root, &db).ok()?;
+            finding::outside_agent_space(&found, &space).ok()?;
             let roots = crate::harnesses::update::Roots::engine(&root);
-            let installed = crate::landing::open(&root)
-                .ok()
-                .and_then(|db| updates.versions(&db, &entry, &roots, false).installed);
-            let found = entry.executable?;
+            let installed = updates.versions(&db, &entry, &roots, false).installed;
             listed_program(harness, Some(found.as_path()), installed.as_deref()).ok()?;
             Some(found)
         };

@@ -432,6 +432,18 @@ pub fn check_file(
     Ok(path.to_path_buf())
 }
 
+/// Refuses a listed harness's file by the agent-space rule of [`check_file`]: the path, or
+/// any link or folder its resolution passes through, lies in a folder agents can write
+/// (T19B-4-R2). Inputs: the path and the agent space. Output: Ok, `harness_path_agent_space`,
+/// or `harness_path_not_found` for a chain that does not resolve.
+pub(crate) fn outside_agent_space(path: &Path, space: &AgentSpace) -> Result<(), EngineError> {
+    let hops = link_hops(path).ok_or_else(|| failure(PATH_NOT_FOUND))?;
+    if space.holds(path) || hops.iter().any(|hop| space.holds(hop)) {
+        return Err(failure(PATH_AGENT_SPACE));
+    }
+    Ok(())
+}
+
 /// Every link a path's resolution passes through, file and folder links alike, and every
 /// real folder a `..` in it leaves, each named where it really sits, in the order the
 /// resolution meets them, so a chain is judged by every place an agent could move it from,

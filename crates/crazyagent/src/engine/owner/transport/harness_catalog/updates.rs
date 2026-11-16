@@ -309,9 +309,10 @@ pub(crate) async fn sign_in_version(
 }
 
 /// The catalog entry a listed master turn runs and its installed version, as Settings,
-/// Harnesses shows them, with the same search the catalog list uses (DEC-180 Task 20).
+/// Harnesses shows them, with the same search the catalog list uses (DEC-180 Task 20). An
+/// entry in a folder agents can write is refused before its version is read (T19B-4-R2).
 /// Inputs: the engine, the engine root, the catalog search and the catalog id. Output: the
-/// entry's file and its installed version, each none when not found or unknown.
+/// entry's file and its installed version, none for a missing or refused entry.
 pub(crate) async fn listed_install(
     engine: &Arc<Engine>,
     root: PathBuf,
@@ -325,16 +326,22 @@ pub(crate) async fn listed_install(
         return (None, None);
     };
     let updates = engine.harness_updates.clone();
-    let installed = tokio::task::spawn_blocking(move || {
+    let checked = tokio::task::spawn_blocking(move || {
         let db = open(&root).ok()?;
-        updates
+        let space = finding::AgentSpace::read(&root, &db).ok()?;
+        finding::outside_agent_space(&executable, &space).ok()?;
+        let installed = updates
             .versions(&db, &entry, &Roots::engine(&root), false)
-            .installed
+            .installed;
+        Some((executable, installed))
     })
     .await
     .ok()
     .flatten();
-    (Some(executable), installed)
+    match checked {
+        Some((executable, installed)) => (Some(executable), installed),
+        None => (None, None),
+    }
 }
 
 /// Runs one blocking piece of harness update work off the request path.
