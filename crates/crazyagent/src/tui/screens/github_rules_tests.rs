@@ -492,6 +492,9 @@ fn the_tui_github_rules_words_match_the_desktop_word_for_word() {
         "github_rule_invalid",
         "github_rules_repo_mismatch",
         "github_repo_unreadable",
+        "github_request_bounds",
+        "github_reply_bounds",
+        "github_request_invalid",
     ] {
         let sentence = known(code).unwrap_or_default();
         assert!(!sentence.is_empty(), "{code}");
