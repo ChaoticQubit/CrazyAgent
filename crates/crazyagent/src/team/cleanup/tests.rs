@@ -1585,7 +1585,7 @@ fn an_entry_swapped_for_a_link_to_an_owner_file_before_its_acl_clear_leaves_the_
     write(&left, b"left by a terminal\n");
     let aside = home.join("aside");
     let _cleared = [AclCleared(owner.clone()), AclCleared(aside.clone())];
-    add_acl("everyone deny delete", &[owner.clone(), left.clone()]);
+    add_acl("everyone deny delete", std::slice::from_ref(&owner));
     let parent = walk_handle(&home);
     let found = rustix::fs::statat(&parent, c"f", AtFlags::SYMLINK_NOFOLLOW).unwrap();
     let (moved, held, linked) = (left.clone(), aside.clone(), owner.clone());
