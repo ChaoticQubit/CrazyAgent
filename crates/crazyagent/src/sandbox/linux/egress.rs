@@ -1220,6 +1220,8 @@ mod tests {
             &[ROUTE_FD, "8", BRIDGE, "18080", PROBE],
             &[ROUTE_FD, "8", "--", "/bin/true"],
             &[ROUTE_FD, "8", SCOPED],
+            &[ROUTE, "443", ROUTE_FD, "8", PROBE],
+            &[ROUTE, "443", ROUTE_FD, "8", "--nested", "--", "/bin/true"],
         ] {
             assert!(asked(words(refused)).is_err(), "{refused:?}");
         }
