@@ -535,3 +535,88 @@ fn a_started_acp_agent_opens_its_session_with_the_engines_team_server_and_no_own
     );
     session.stop().unwrap();
 }
+
+/// A team context as `for_project` makes it, with no file read from a project folder: the
+/// app-wide instructions saved in its own engine data folder, the owner's text for the one
+/// agent and the hooks given. Inputs: the app text, the agent text and the hooks. Output:
+/// the data folder's guard and the context.
+fn team_context(
+    app: &str,
+    agent: &str,
+    hooks: Vec<EffectiveHook>,
+) -> (tempfile::TempDir, AgentContext) {
+    let data = tempfile::tempdir().unwrap();
+    let project = crate::agent_home::AgentProject {
+        data: data.path().canonicalize().unwrap(),
+        id: ProjectId::new("listed-team").unwrap(),
+        folder: None,
+        mode: crate::instruction_files::Mode::Both,
+        repeated: crate::agent_home::Repeated::LeaveOut,
+    };
+    crate::agent_home::save_app(&project.data, app).unwrap();
+    let mut context = context();
+    context.process = Some(Box::new(Process {
+        project,
+        hooks,
+        agent: agent.into(),
+    }));
+    (data, context)
+}
+
+/// T19b prerequisite (fix8 Q12 A): a team agent of a listed harness is given its project's
+/// context. The instruction file its manifest names holds the startup instruction first,
+/// then the owner's app text and the owner's text for this agent.
+#[test]
+fn a_team_context_gives_a_listed_harness_the_owners_app_and_agent_text_in_its_instruction_file() {
+    let (_folder, home) = private_home();
+    let (_data, context) = team_context("OWNER-APP-5c1\n", "AGENT-TEXT-5c2", Vec::new());
+
+    let installed = context.install_listed(&manifest(BLOCKS), &home, true);
+
+    assert!(installed.is_ok(), "{:?}", installed.as_ref().err());
+    let written = fs::read_to_string(home.join("agent").join("AGENTS.md")).unwrap();
+    assert!(written.starts_with(INSTRUCTIONS), "{written}");
+    let app = written.find("OWNER-APP-5c1");
+    let agent = written.find("AGENT-TEXT-5c2");
+    assert!(app.is_some() && agent.is_some(), "{written}");
+    assert!(app < agent, "{written}");
+    drop(installed);
+}
+
+/// T19b prerequisite (fix8 Q12 A): a listed harness has no way to run the owner's hooks, so
+/// a tools-on team agent whose project turned hooks on is refused in plain words, never
+/// started with its hooks dropped; with tools off no hook applies and it starts.
+#[test]
+fn a_tools_on_team_agent_of_a_listed_harness_is_refused_when_its_project_turned_hooks_on() {
+    let (_folder, home) = private_home();
+    let hook = EffectiveHook {
+        plugin: "guard".into(),
+        event: "PreToolUse".into(),
+        matcher: None,
+        command: "/usr/bin/true".into(),
+        timeout: None,
+        folder: PathBuf::from("/missing-hook-folder"),
+    };
+    let (_data, context) = team_context("OWNER-APP-5c3\n", "", vec![hook]);
+
+    let refused = context.install_listed(&manifest(BLOCKS), &home, true);
+
+    assert_eq!(
+        refused.err().map(|error| error.0),
+        Some("launch_listed_hooks_unsupported".to_owned())
+    );
+    let tools_off = context.install_listed(&manifest(BLOCKS), &home, false);
+    assert!(tools_off.is_ok(), "{:?}", tools_off.as_ref().err());
+}
+
+/// T19b prerequisite (fix8 Q12 A): `install` finds a listed harness by the registry, not by
+/// a piped driver, so a harness that runs only in a terminal is installed too.
+#[test]
+fn install_finds_a_terminal_only_listed_harness_by_the_registry() {
+    let (_folder, home) = harness_home("standin-screen");
+    assert!(crate::harnesses::drivers::piped("standin-screen").is_err());
+
+    let installed = context().install("standin-screen", &home, true);
+
+    assert!(installed.is_ok(), "{:?}", installed.as_ref().err());
+}
