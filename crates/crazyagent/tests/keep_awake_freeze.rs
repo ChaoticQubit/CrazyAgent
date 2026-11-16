@@ -17,6 +17,7 @@ const LONG_AGO: &str = "Thu Jan  1 00:00:00 1970";
 
 const STAND_IN: &str = "CRAZYAGENT_TEST_STAND_IN";
 const CHILDREN: &str = "CRAZYAGENT_TEST_STAND_IN_CHILDREN";
+const LISTEN: &str = "CRAZYAGENT_TEST_STAND_IN_LISTEN";
 const STAND_IN_ARGS: [&str; 4] = ["--exact", "stand_in", "--nocapture", "--test-threads=1"];
 const LINES_MAX: usize = 256;
 
@@ -61,14 +62,21 @@ impl Bin {
 }
 
 /// Not a check: the body of every stand-in process. Run by the test runner it returns at
-/// once. Run by a row from a copy of this program with `STAND_IN` set, it starts each
-/// child `CHILDREN` names (one per line: a label, then the program and its words, split by
-/// tabs) with `STAND_IN` set, prints one `stand-in <label> <pid>` line each and sleeps.
+/// once. Run by a row from a copy of this program with `STAND_IN` set, it first listens at
+/// the socket `LISTEN` names, if any, as a tmux server does, and prints
+/// `stand-in listening <pid>`; then it starts each child `CHILDREN` names (one per line: a
+/// label, then the program and its words, split by tabs) with `STAND_IN` set, prints one
+/// `stand-in <label> <pid>` line each and sleeps.
 #[test]
 fn stand_in() {
     if std::env::var_os(STAND_IN).is_none() {
         return;
     }
+    let listener = std::env::var_os(LISTEN).map(|socket| {
+        let listener = crazyagent::spawn_gate::bind_unix_std(&socket).unwrap();
+        println!("stand-in listening {}", std::process::id());
+        listener
+    });
     let children = std::env::var(CHILDREN).unwrap_or_default();
     let mut started = Vec::new();
     for line in children.lines().filter(|line| !line.is_empty()).take(8) {
@@ -80,6 +88,7 @@ fn stand_in() {
             .args(words)
             .env(STAND_IN, "on")
             .env_remove(CHILDREN)
+            .env_remove(LISTEN)
             .stdin(Stdio::null())
             .stderr(Stdio::null());
         let child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
@@ -88,6 +97,7 @@ fn stand_in() {
     }
     std::thread::sleep(Duration::from_secs(600));
     drop(started);
+    drop(listener);
 }
 
 /// A real process that stands in for an app, an engine or an agent: a copy of this
@@ -100,11 +110,15 @@ struct StandIn {
 
 impl StandIn {
     fn command(bin: &Bin, children: &[(&str, Vec<String>)]) -> Command {
+        Self::command_of(&bin.sleep(), children)
+    }
+
+    fn command_of(program: &Path, children: &[(&str, Vec<String>)]) -> Command {
         let lines: Vec<String> = children
             .iter()
             .map(|(label, argv)| format!("{label}\t{}", argv.join("\t")))
             .collect();
-        let mut command = Command::new(bin.sleep());
+        let mut command = Command::new(program);
         command
             .args(STAND_IN_ARGS)
             .env(STAND_IN, "on")
@@ -125,8 +139,22 @@ impl StandIn {
 
     fn with_children(bin: &Bin, children: &[(&str, Vec<String>)], lines: usize) -> Self {
         let mut command = Self::command(bin, children);
+        Self::reading(&mut command, lines)
+    }
+
+    /// A stand-in for a tmux server: a copy of this program under the given name that
+    /// listens at the socket, with the children it was asked to start.
+    fn listening(bin: &Bin, name: &str, socket: &Path, children: &[(&str, Vec<String>)]) -> Self {
+        let mut command = Self::command_of(&bin.named(name), children);
+        command.env(LISTEN, socket);
+        let started = Self::reading(&mut command, children.len() + 1);
+        assert_eq!(started.labelled("listening"), started.pid());
+        started
+    }
+
+    fn reading(command: &mut Command, lines: usize) -> Self {
         command.stdin(Stdio::null()).stdout(Stdio::piped());
-        let mut started = Self::start(&mut command);
+        let mut started = Self::start(command);
         let out = started.child.stdout.take().unwrap();
         let mut reader = BufReader::new(out);
         for _ in 0..LINES_MAX {
@@ -571,6 +599,142 @@ fn an_instance_below_an_agent_root_is_never_frozen() {
         vec![inside],
         "the root is what refuses it"
     );
+}
+
+/// A folder outside the row's temp folder, such as an agent's short temp folder, removed
+/// with everything in it when the row ends.
+struct Made(PathBuf);
+
+impl Made {
+    fn new(path: PathBuf) -> Self {
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for Made {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// An engine root with its terminal folder and one agent whose short temp folder exists.
+/// Output: the root's disk, the root, the terminal folder and the agent's temp folder.
+fn engine_root() -> (tempfile::TempDir, PathBuf, PathBuf, Made) {
+    use std::os::unix::fs::PermissionsExt;
+    let disk = tempfile::tempdir().unwrap();
+    let root = disk.path().canonicalize().unwrap();
+    let terminal = root.join(crazyagent::terminal::FOLDER);
+    std::fs::create_dir(&terminal).unwrap();
+    std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let home = root
+        .join("team")
+        .join("agents")
+        .join("agent-1")
+        .join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let tmp = Made::new(crazyagent::sandbox::toolchains::tmp_path(&home));
+    (disk, root, terminal, tmp)
+}
+
+/// T17b, rv-code T17 r2 F1: the agent roots are the listeners at this engine's own tmux
+/// sockets, named by the system from the socket and never by a program name, since the
+/// shipped app runs its bundled `crazyagent-tmux`. The engine's server, a lead's own
+/// server and a lead's teammates' server all count; a socket nothing listens at does not;
+/// an app inside one of them is never frozen.
+#[test]
+fn every_tmux_server_on_a_socket_of_this_engine_is_an_agent_root_whatever_its_name() {
+    let bin = Bin::new();
+    let (_disk, root, terminal, tmp) = engine_root();
+    let app = ("app", Bin::argv(&bin.sleep()));
+    let engine_socket = terminal.join(crazyagent::terminal::tmux::SOCKET);
+    let engine_server = StandIn::listening(&bin, "crazyagent-tmux", &engine_socket, &[app]);
+    let lead_socket = tmp.0.join(crazyagent::terminal::HARNESS_SOCKET);
+    let lead = StandIn::listening(&bin, "tmux", &lead_socket, &[]);
+    let mates_socket = tmp.0.join("teammates-0123456789abcdef.sock");
+    let mates = StandIn::listening(&bin, "crazyagent-tmux", &mates_socket, &[]);
+    drop(crazyagent::spawn_gate::bind_unix_std(tmp.0.join("ended.sock")).unwrap());
+    let engine = StandIn::sleep(&bin);
+
+    let roots = freeze::servers(&root).unwrap();
+
+    assert_eq!(
+        roots,
+        BTreeSet::from([engine_server.pid(), lead.pid(), mates.pid()])
+    );
+    let inside = listed("Notes", engine_server.labelled("app"), &bin.sleep());
+    assert!(
+        freeze::allowed(&[inside], engine.pid(), &roots)
+            .unwrap()
+            .is_empty(),
+        "an app inside the engine's own server is an agent's"
+    );
+}
+
+/// T17b: a socket folder of this engine that cannot be read hides which servers run there,
+/// so every freeze is refused rather than guessed.
+#[test]
+fn a_socket_folder_that_cannot_be_read_refuses_every_freeze() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::getuid().is_root() {
+        eprintln!("skipped: root reads every folder");
+        return;
+    }
+    let (_disk, root, _terminal, tmp) = engine_root();
+    std::fs::set_permissions(&tmp.0, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    assert!(freeze::servers(&root).is_err());
+}
+
+/// rv-code T17 r2 F2: on Linux a journaled pid that another user's process now holds is
+/// not the frozen process, since only the owner's are journaled: it reads as gone, and
+/// the rest of the app is still thawed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_journaled_pid_another_user_now_holds_is_gone_and_the_rest_still_thaws() {
+    use std::os::unix::fs::MetadataExt;
+    let own = rustix::process::getuid().as_raw();
+    let theirs = std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| *pid > 1)
+        .filter(|pid| {
+            std::fs::metadata(format!("/proc/{pid}")).is_ok_and(|found| found.uid() != own)
+        })
+        .find(|pid| {
+            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|line| !line.is_empty())
+        });
+    let Some(theirs) = theirs else {
+        eprintln!("skipped: no process of another user runs here");
+        return;
+    };
+    let gone = freeze::identity(theirs).unwrap_err();
+    assert!(gone.0.starts_with("keep_awake_freeze_gone"), "{gone:?}");
+    let bin = Bin::new();
+    let root = tempfile::tempdir().unwrap();
+    let engine = StandIn::sleep(&bin);
+    let app = StandIn::with_helper(&bin);
+    let mut journal = freeze::journal(root.path()).unwrap();
+    let notes = listed("Notes", app.pid(), &bin.sleep());
+    let mut frozen = freeze::freeze(&mut journal, &notes, engine.pid(), &no_roots()).unwrap();
+    assert!(settles(|| stopped(app.pid()) && stopped(app.helper())));
+    let helper = frozen
+        .procs
+        .iter_mut()
+        .find(|process| process.pid == app.helper())
+        .unwrap();
+    helper.pid = theirs;
+
+    freeze::thaw(&frozen.entry()).unwrap();
+
+    assert!(
+        settles(|| !stopped(app.pid())),
+        "the app's own process is thawed"
+    );
+    signal("-CONT", app.helper());
 }
 
 /// rv-secreview T17 r1 F4, leader 01:57 (2): a descendant that may never be frozen (a
