@@ -227,9 +227,28 @@ fn hand_over(db: &Connection, id: &ChangeSetId, asker: Asker) -> Result<(), Engi
     let agent = team_agent(&set)?;
     let prompt = fitted(&landing::resolve_task_prompt(db, id)?);
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
+    if !takes_resolve(&tx, id, &project, agent)? {
+        return Err(refused("changes_stale"));
+    }
     admit(&tx, &project, agent, &prompt, asker)?.map_err(refused)?;
     tx.commit().map_err(storage)?;
     landing::resolve_handed_over(db, id)
+}
+
+/// Whether a team agent's set still takes its resolve work, read in the transaction that
+/// would admit it: an updating set waiting for its agent does, one not waiting only while
+/// no resolve task of its agent is under way, so two asks that both read none before either
+/// admitted one give the agent one task (LAND-UPDATING-RACE). Inputs: the transaction, the
+/// set, the project and the agent. Output: the answer.
+fn takes_resolve(
+    tx: &Transaction<'_>,
+    id: &ChangeSetId,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<bool, EngineError> {
+    let set = view(tx, id)?.ok_or_else(|| refused("changes_not_found"))?;
+    Ok(set.state == ChangeState::Updating
+        && (set.waiting || !crate::team::resolve_pending(tx, project, agent)?))
 }
 
 /// Admits a team agent's resolve task in the caller's transaction. For the engine, an
