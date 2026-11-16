@@ -316,13 +316,11 @@ fn one_launchs_flood_of_calls_that_never_reached_a_vendor_leaves_every_sent_call
     list.sent = false;
     record(&case.db, &list, KeepLog::Days90).unwrap();
 
-    for at in 0..QUIET_ROWS_PER_LAUNCH_MAX as i64 + 50 {
+    let quiet = QUIET_ROWS_PER_LAUNCH_MAX as i64;
+    for at in 0..quiet + 50 {
         record(&case.db, &refused("a", now + at), KeepLog::Days90).unwrap();
     }
-    assert_eq!(
-        count(&case.db, "launch='a' AND sent=0"),
-        QUIET_ROWS_PER_LAUNCH_MAX as i64
-    );
+    assert_eq!(count(&case.db, "launch='a' AND sent=0"), quiet + 1);
     assert_eq!(count(&case.db, "launch='a' AND sent=1"), 1);
     assert_eq!(
         count(&case.db, "launch='b'"),
@@ -331,12 +329,31 @@ fn one_launchs_flood_of_calls_that_never_reached_a_vendor_leaves_every_sent_call
     );
     assert_eq!(
         count(&case.db, "launch='a' AND kind='list'"),
-        0,
-        "the oldest calls that never reached a vendor go first"
+        1,
+        "a launch's first calls that never reached a vendor stay"
+    );
+    assert_eq!(
+        count(&case.db, "launch='a' AND outcome='connector_tool_unknown'"),
+        quiet - 1
+    );
+    assert_eq!(
+        count(
+            &case.db,
+            &format!(
+                "launch='a' AND outcome='{QUIET_CAP_REACHED}' AND started_ms={}",
+                now + quiet - 1
+            )
+        ),
+        1,
+        "one row says where the launch passed its cap, and later calls are not listed"
     );
     let sent = view(&case.db, None, None).unwrap();
     assert_eq!(sent.calls.len(), VIEW_CALLS_MAX);
     assert!(sent.more);
+    assert_eq!(sent.calls[0].outcome, QUIET_CAP_REACHED);
+    let plain = crate::connectors::plain_problem(QUIET_CAP_REACHED)
+        .expect("the page says it in plain words");
+    assert!(sent.calls[0].outcome_text.ends_with(&plain[1..]));
     let board = recent(&case.db, READ_MAX).unwrap();
     assert!(
         board

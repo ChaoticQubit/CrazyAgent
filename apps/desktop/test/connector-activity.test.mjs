@@ -116,7 +116,7 @@ test("Connector activity: a refusal reads as the engine's own sentence", () => {
   assert.ok(Object.keys(api.CONNECTOR_REFUSALS).includes("connector_request_invalid"));
 });
 
-test("Settings lists Connector activity under App after App plugins and opens its own screen through its two commands", () => {
+test("Settings lists Connector activity under App after App plugins and opens its own screen through its two commands, built and granted to the main window", () => {
   const index = source("../src/screens/settings/index.tsx");
   assert.match(index, /\{ id: "app-plugins", label: "App plugins" \}, \{ id: "connector-activity", label: "Connector activity" \}/u);
   assert.match(index, /tab === "connector-activity" \? <ConnectorActivity \/>/u);
@@ -125,8 +125,12 @@ test("Settings lists Connector activity under App after App plugins and opens it
   assert.match(apiSource, /[cC]all<ActivityView>\("desktop_connector_activity", \{ connector, project \}\)/u);
   assert.match(apiSource, /[cC]all<ConnectorSettingsSave>\("desktop_connector_settings_set", \{ settings, version \}\)/u);
   const lib = source("../src-tauri/src/lib.rs");
+  const built = source("../src-tauri/build.rs");
+  const granted = JSON.parse(source("../src-tauri/capabilities/main-window.json")).permissions;
   for (const command of ["desktop_connector_activity", "desktop_connector_settings_set"]) {
     assert.match(lib, new RegExp(`async fn ${command}\\(`, "u"), command);
     assert.ok(lib.split(command).length >= 3, `${command} is registered with the window`);
+    assert.ok(built.includes(`"${command}",`), `${command} is in the app's built commands`);
+    assert.ok(granted.includes(`allow-${command.replaceAll("_", "-")}`), `${command} is granted to the main window`);
   }
 });

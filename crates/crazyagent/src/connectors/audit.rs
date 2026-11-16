@@ -13,8 +13,11 @@ pub const ROWS_MAX: i64 = 100_000;
 /// The most rows one read returns.
 pub const READ_MAX: usize = 500;
 /// The most rows one launch keeps of lists and calls that sent nothing of an agent's to a
-/// vendor; its oldest go first, so a flood of them never pushes a sent call out.
+/// vendor. Its first ones stay; past them one `QUIET_CAP_REACHED` row says the rest are not
+/// listed, so a flood never erases an earlier refusal nor pushes a sent call out.
 pub const QUIET_ROWS_PER_LAUNCH_MAX: usize = 1_000;
+/// The outcome of the one row that says a launch passed `QUIET_ROWS_PER_LAUNCH_MAX`.
+pub const QUIET_CAP_REACHED: &str = "connector_quiet_cap_reached";
 /// The most rows the log keeps of lists and calls that sent nothing to a vendor, across
 /// every launch; they are capped apart from the calls that reached a vendor, so no number
 /// of them pushes one of those out.

@@ -5,8 +5,8 @@ use crate::app_plugins::store;
 use crate::connectors::audit::{self, CallKind, CallRow};
 use crate::connectors::grants::{self, Who};
 use crate::connectors::mcp_client::tests::{
-    BOARD, DESK, KEY, Seen, USER, Vendor, empty, json_reply, legacy, no_lookup, result, rpc_error,
-    send, text_result, tool,
+    BOARD, DESK, KEY, Seen, USER, Vendor, empty, json_reply, legacy, modern, no_lookup, result,
+    rpc_error, send, text_result, tool,
 };
 use crate::connectors::settings::KeepLog;
 use crate::connectors::shim::{self, Ask};
@@ -1538,15 +1538,155 @@ fn one_launchs_flood_of_refused_calls_leaves_every_call_that_reached_a_vendor_in
             )
             .unwrap()
     };
-    assert_eq!(count("launch='a' AND sent=0"), quiet);
+    assert_eq!(count("launch='a' AND sent=0"), quiet + 1);
     assert_eq!(count("launch='a' AND sent=1"), 1);
     assert_eq!(count("launch='b'"), 2, "another launch keeps every row");
     assert_eq!(
         count(&format!(
-            "launch='a' AND sent=0 AND started_ms < {}",
-            now + 50
+            "launch='a' AND outcome='connector_tool_unknown' AND started_ms < {}",
+            now + quiet
         )),
-        0,
-        "the oldest refused calls go first"
+        quiet,
+        "the first refused calls stay"
+    );
+    assert_eq!(
+        count(&format!(
+            "launch='a' AND outcome='{}' AND started_ms = {}",
+            audit::QUIET_CAP_REACHED,
+            now + quiet
+        )),
+        1,
+        "one row says where the launch passed its cap, and later calls are not listed"
+    );
+}
+
+#[test]
+fn a_flood_of_refused_calls_never_erases_an_earlier_refused_write() {
+    let vendor = serving(vec![read_tool("list_issues"), write_tool("create_issue")]);
+    let (bench, launch) = board_bench(&vendor);
+    let (text, error) = called(
+        &bench,
+        &launch,
+        "board__create_issue",
+        json!({"title": "x"}),
+    );
+    assert!(error);
+    assert!(text.starts_with("connector_writes_not_yet"), "{text}");
+    let id: String = bench
+        .case
+        .db
+        .query_row(
+            "SELECT launch FROM connector_calls WHERE kind='write'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let quiet = audit::QUIET_ROWS_PER_LAUNCH_MAX as i64;
+    bench
+        .case
+        .db
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+             INSERT INTO connector_calls
+                 (launch, connector, tool, kind, sent, project, agent, started_ms, ms,
+                  bytes_in, bytes_out, outcome)
+             SELECT ?2, '', '', 'unknown', 0, 'alpha', 'Agent 1', ?3, 0, 2, 0,
+                    'connector_tool_unknown'
+             FROM n",
+            rusqlite::params![quiet - 1, id, crate::semantic::now_ms()],
+        )
+        .unwrap();
+    let flood: Vec<Value> = (1..=11)
+        .map(|at| {
+            request(
+                at,
+                "tools/call",
+                json!({"name": "nothing", "arguments": {}}),
+            )
+        })
+        .collect();
+    let replies = talk(&bench, &launch, &flood);
+    assert_eq!(replies.len(), 11);
+    for reply in &replies {
+        let (text, error) = shown(reply);
+        assert!(
+            error && text.starts_with("connector_tool_unknown"),
+            "{text}"
+        );
+    }
+    assert!(vendor_calls(&vendor).is_empty());
+    let rows = |filter: &str| {
+        count(
+            &bench,
+            &format!("SELECT COUNT(*) FROM connector_calls WHERE launch='{id}' AND {filter}"),
+        )
+    };
+    assert_eq!(
+        rows("kind='write' AND outcome='connector_writes_not_yet' AND sent=0"),
+        1,
+        "the refused write is still listed"
+    );
+    assert_eq!(rows("sent=0"), quiet + 1);
+    assert_eq!(rows(&format!("outcome='{}'", audit::QUIET_CAP_REACHED)), 1);
+    assert_eq!(rows("outcome='connector_tool_unknown'"), quiet - 1);
+}
+
+#[test]
+fn a_call_the_client_refuses_before_sending_is_logged_as_never_reaching_the_vendor() {
+    let vendor = Vendor::start(|seen, _, stream| {
+        let reply = modern(seen).unwrap_or_else(|| match seen.rpc() {
+            "tools/list" => result(
+                seen,
+                json!({
+                    "resultType": "complete",
+                    "tools": [{
+                        "name": "list_issues",
+                        "description": "Lists issues.",
+                        "inputSchema": {"type": "object", "properties": {
+                            "team": {"type": "string", "x-mcp-header": "Team"},
+                        }},
+                        "annotations": {"readOnlyHint": true},
+                    }],
+                }),
+            ),
+            "tools/call" => result(seen, text_result("ran list_issues")),
+            other => panic!("{other}"),
+        });
+        send(stream, &reply);
+    });
+    let (bench, launch) = board_bench(&vendor);
+    let (text, error) = called(
+        &bench,
+        &launch,
+        "board__list_issues",
+        json!({"team": ["core", "web"]}),
+    );
+    assert!(error);
+    assert!(text.starts_with("connector_arguments_invalid"), "{text}");
+    assert!(vendor_calls(&vendor).is_empty());
+    let (text, error) = called(
+        &bench,
+        &launch,
+        "board__list_issues",
+        json!({"team": "core"}),
+    );
+    assert!(!error, "{text}");
+    assert_eq!(vendor_calls(&vendor).len(), 1);
+    assert_eq!(
+        count(
+            &bench,
+            "SELECT COUNT(*) FROM connector_calls
+             WHERE kind='read' AND sent=0 AND outcome='connector_arguments_invalid'"
+        ),
+        1,
+        "a call the client refused before sending sent nothing to the vendor"
+    );
+    assert_eq!(
+        count(
+            &bench,
+            "SELECT COUNT(*) FROM connector_calls WHERE kind='read' AND sent=1"
+        ),
+        1,
+        "the call that reached the vendor reads as sent"
     );
 }
