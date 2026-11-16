@@ -170,6 +170,7 @@ struct Sign {
     case: Case,
     vendor: Vendor,
     spec: ConnectorSpec,
+    sha256: String,
 }
 
 impl Sign {
@@ -238,7 +239,12 @@ fn prepared(
         }),
         read_tools: Vec::new(),
     };
-    Sign { case, vendor, spec }
+    Sign {
+        case,
+        vendor,
+        spec,
+        sha256: SHA.to_owned(),
+    }
 }
 
 fn redirect() -> url::Url {
@@ -253,7 +259,7 @@ fn start_with(sign: &Sign, writes: bool, cimd: Option<&url::Url>) -> Result<Pend
     begin_with(
         &sign.case.root,
         "board",
-        SHA,
+        &sign.sha256,
         &sign.spec,
         &redirect(),
         writes,
@@ -771,6 +777,7 @@ fn fresh_for(sign: &Sign, spec: &ConnectorSpec, now_ms: i64) -> Result<Credentia
         &sign.case.root,
         "board",
         "Board",
+        &sign.sha256,
         spec,
         now_ms,
         &no_lookup(),
@@ -841,6 +848,127 @@ fn an_oauth_token_never_goes_to_a_read_only_address_outside_its_resource() {
         &no_lookup(),
     );
     assert!(allowed.is_ok(), "{allowed:?}");
+}
+
+/// A sign-in made under one file of a connector is never used under another: the next
+/// credential read ends it with nothing sent, also when the new file moved its read-only
+/// address outside the resource, and one Action item asks the owner to sign in again.
+#[test]
+fn a_sign_in_is_ended_once_its_connector_file_changed() {
+    let mut sign = signing(shape(), &["127.0.0.1"]);
+    let pending = begun(&sign, false);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    let now = fresh_at(&sign, clock());
+    assert!(matches!(now, Ok(Credential::OAuth { .. })), "{now:?}");
+    let seen = sign.vendor.seen().len();
+    let moved = read_only_at(&sign, &format!("{}/ro", sign.issuer()));
+    sign.sha256 = "sha256-of-a-changed-board-file".to_owned();
+    assert_eq!(
+        fresh_for(&sign, &moved, clock()),
+        Err(OAuthError("connector_sign_in_needed")),
+        "a sign-in is never handed out under another file"
+    );
+    assert_eq!(
+        sign.vendor.seen().len(),
+        seen,
+        "nothing is sent for a changed file"
+    );
+    for prefix in [
+        "connector-token-board-",
+        "connector-refresh-board-",
+        "connector-signin-board",
+    ] {
+        assert!(saved(&sign.case, prefix).is_empty(), "{prefix} is removed");
+    }
+    assert_eq!(
+        notices(&mut sign.case),
+        vec![(
+            NoticeKind::ConnectorSignIn,
+            NoticeClass::Action,
+            "Board needs you to sign in again.".to_owned(),
+            json!({"page": "connectors"}),
+        )]
+    );
+    sign.sha256 = SHA.to_owned();
+    assert_eq!(
+        fresh_at(&sign, clock()),
+        Err(OAuthError("connector_sign_in_needed")),
+        "the ended sign-in is gone under the first file too"
+    );
+}
+
+/// Removing a connector drops every key its sign-ins saved: tokens, the record, the client
+/// registered at its issuer, and the owner's own app with its binding; a sign-in still
+/// waiting is never redeemed, and another connector's keys stay.
+#[test]
+fn removing_a_connector_drops_every_key_its_sign_ins_saved() {
+    let sign = prepared(
+        Shape {
+            register: Some("{base}/register"),
+            ..shape()
+        },
+        &["127.0.0.1"],
+        &[Registration::Own, Registration::Dcr],
+        None,
+    );
+    let pending = begun(&sign, false);
+    assert_eq!(query(&pending.authorize_url)["client_id"], DCR_CLIENT);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    assert_eq!(
+        set_own_client(
+            &sign.case.db,
+            &sign.case.root,
+            "board",
+            CLIENT,
+            Some(SECRET)
+        ),
+        Ok(())
+    );
+    let pending = begun(&sign, false);
+    assert_eq!(query(&pending.authorize_url)["client_id"], CLIENT);
+    assert_eq!(
+        finished(&sign, &pending.state, Some(&sign.issuer())),
+        Ok(())
+    );
+    let waiting = begun(&sign, false);
+    for prefix in [
+        "connector-token-board-",
+        "connector-refresh-board-",
+        "connector-signin-board",
+        "connector-client-board-",
+        "connector-secret-board-own",
+        "connector-issuer-board-own",
+    ] {
+        assert!(!saved(&sign.case, prefix).is_empty(), "{prefix} is saved");
+    }
+    let another = CredentialRef::new("connector-token-board-two-0123456789abcdef").unwrap();
+    crate::storage::accounts::replace_key_in(
+        &sign.case.root,
+        PLUGIN_KEYS,
+        &another,
+        b"kept".to_vec(),
+    )
+    .unwrap();
+    let sent = token_calls(&sign.vendor).len();
+
+    crate::app_plugins::store::remove(&sign.case.db, &sign.case.root, "board").unwrap();
+    assert_eq!(
+        saved(&sign.case, "connector-"),
+        vec!["kept".to_owned()],
+        "only another connector's key is left"
+    );
+    assert_eq!(
+        finished(&sign, &waiting.state, Some(&sign.issuer())),
+        Err(OAuthError("connector_oauth_state_unknown")),
+        "a sign-in begun before the removal is never redeemed"
+    );
+    assert_eq!(token_calls(&sign.vendor).len(), sent);
 }
 
 /// The Authorization values the stand-in's MCP address was sent.
@@ -1198,6 +1326,7 @@ fn a_failed_refresh_raises_one_sign_in_notice() {
         crate::app_plugins::store::trusted_connector(&sign.case.db, &sign.case.root, "board")
             .unwrap()
             .sha256;
+    sign.sha256 = trusted.clone();
     let signed_in = |sign: &Sign| {
         let begun = begin_with(
             &sign.case.root,

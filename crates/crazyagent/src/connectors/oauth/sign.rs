@@ -1126,34 +1126,38 @@ fn renew(
 /// The credential a call sends now for one connector as declared, its access token
 /// renewed first at the token endpoint of its sign-in when it ends within a minute. A
 /// sign-in for another resource than the one declared is not used. Blocking when it
-/// renews. Inputs: database, root, connector, its title, its declaration, the clock (Unix
-/// ms) and the lookup. Output: the credential, or `connector_sign_in_needed` and a
-/// renewal's refusals.
+/// renews. Inputs: database, root, connector, its title, the trusted file's sha256, its
+/// declaration, the clock (Unix ms) and the lookup. Output: the credential, or
+/// `connector_sign_in_needed` and a renewal's refusals.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fresh_with(
     db: &Connection,
     root: &Path,
     name: &str,
     title: &str,
+    sha256: &str,
     spec: &ConnectorSpec,
     now_ms: i64,
     reach: &ProviderReach,
 ) -> Result<Credential, OAuthError> {
-    current(db, root, name, title, spec, now_ms, false, reach)
+    current(db, root, name, title, sha256, spec, now_ms, false, reach)
 }
 
 /// [`fresh_with`] with the access token renewed whatever its end, for a server that
 /// refused it; a renewal or sign-in another call made since the record was read is used
 /// instead of a second one. Inputs and outputs as there.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn renew_with(
     db: &Connection,
     root: &Path,
     name: &str,
     title: &str,
+    sha256: &str,
     spec: &ConnectorSpec,
     now_ms: i64,
     reach: &ProviderReach,
 ) -> Result<Credential, OAuthError> {
-    current(db, root, name, title, spec, now_ms, true, reach)
+    current(db, root, name, title, sha256, spec, now_ms, true, reach)
 }
 
 /// Ends a sign-in whose server refused the token just renewed for it, and raises its
@@ -1192,11 +1196,13 @@ fn current(
     root: &Path,
     name: &str,
     title: &str,
+    sha256: &str,
     spec: &ConnectorSpec,
     now_ms: i64,
     force: bool,
     reach: &ProviderReach,
 ) -> Result<Credential, OAuthError> {
+    let _ = sha256;
     let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
     let usable = |record: Option<Record>| {
         record

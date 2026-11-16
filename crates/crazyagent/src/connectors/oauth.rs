@@ -240,6 +240,7 @@ pub fn fresh(db: &Connection, root: &Path, name: &str) -> Result<Credential, OAu
         root,
         name,
         &manifest.title,
+        &manifest.sha256,
         spec,
         now_ms(),
         &ProviderReach::system(),
@@ -370,11 +371,13 @@ pub(crate) fn refused_with(
 /// No renewal where curl's private request cannot be made. Output:
 /// `connector_unavailable_here`.
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn renew_with(
     _db: &Connection,
     _root: &Path,
     _name: &str,
     _title: &str,
+    _sha256: &str,
     _spec: &crate::app_plugins::connector::ConnectorSpec,
     _now_ms: i64,
     _reach: &ProviderReach,
@@ -403,11 +406,13 @@ pub(crate) fn step_up_with(
 /// No renewal where curl's private request cannot be made. Output:
 /// `connector_unavailable_here`.
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fresh_with(
     _db: &Connection,
     _root: &Path,
     _name: &str,
     _title: &str,
+    _sha256: &str,
     _spec: &crate::app_plugins::connector::ConnectorSpec,
     _now_ms: i64,
     _reach: &ProviderReach,

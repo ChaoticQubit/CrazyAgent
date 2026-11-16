@@ -2114,9 +2114,16 @@ fn shelf_vendor(taken: Arc<Mutex<String>>) -> Vendor {
     })
 }
 
-/// Signs `shelf` in at the stand-in with the owner's own client, as the file whose sha256
-/// is given. Inputs: the bench, the stand-in and the trusted file's sha256.
-fn shelf_signed_in(bench: &Bench, vendor: &Vendor, sha256: &str) {
+/// The sha256 of the `shelf` file the bench trusted.
+fn shelf_sha(bench: &Bench) -> String {
+    store::trusted_connector(&bench.case.db, &bench.case.root, "shelf")
+        .unwrap()
+        .sha256
+}
+
+/// Signs `shelf` in at the stand-in with the owner's own client, under the trusted file.
+/// Inputs: the bench and the stand-in. Output: the connector as declared at the stand-in.
+fn shelf_signed_in(bench: &Bench, vendor: &Vendor) -> ConnectorSpec {
     assert_eq!(
         crate::connectors::oauth::set_own_client(
             &bench.case.db,
@@ -2142,7 +2149,7 @@ fn shelf_signed_in(bench: &Bench, vendor: &Vendor, sha256: &str) {
     let pending = crate::connectors::oauth::begin_with(
         &bench.case.root,
         "shelf",
-        sha256,
+        &shelf_sha(bench),
         &spec,
         &redirect,
         false,
@@ -2160,6 +2167,7 @@ fn shelf_signed_in(bench: &Bench, vendor: &Vendor, sha256: &str) {
         ),
         Ok(())
     );
+    spec
 }
 
 /// An OAuth connector whose read-only address is outside the resource it signed in for
@@ -2172,7 +2180,24 @@ fn an_oauth_connector_never_sends_its_token_to_a_read_only_address_outside_its_s
     let other = shelf_vendor(taken);
     let bench = bench();
     add(&bench.case, SHELF, false);
-    shelf_signed_in(&bench, &vendor, "sha256-of-shelf");
+    let spec = shelf_signed_in(&bench, &vendor);
+    let own = crate::connectors::oauth::fresh_with(
+        &bench.case.db,
+        &bench.case.root,
+        "shelf",
+        "Shelf",
+        &shelf_sha(&bench),
+        &spec,
+        crate::semantic::now_ms(),
+        &no_lookup(),
+    );
+    assert!(
+        matches!(
+            own,
+            Ok(crate::connectors::mcp_client::Credential::OAuth { .. })
+        ),
+        "the sign-in itself is good for its own address: {own:?}"
+    );
     bench.gateway.stand_in(
         "shelf",
         crate::app_plugins::connector::McpEndpoint {
@@ -2255,7 +2280,7 @@ fn an_oauth_connector_is_called_with_its_token_and_renews_once_when_refused() {
     let pending = crate::connectors::oauth::begin_with(
         &bench.case.root,
         "shelf",
-        "sha256-of-shelf",
+        &shelf_sha(&bench),
         &spec,
         &redirect,
         false,
