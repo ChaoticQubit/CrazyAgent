@@ -51,9 +51,10 @@ pub enum RecordSource {
 /// under (CS-2) and the owner's narrow grants its profile holds (F08). For DEC-158 it also
 /// keeps whether the pane's keeper was given the engine's freeze record, when the pane was
 /// last frozen, how long it was frozen before, and for a native lead the keepers of its
-/// servers. A record from an engine that did not keep the level, the files, the
-/// toolchains, the port, the network, the grants or the freeze facts has none; no grants
-/// means none were held.
+/// servers, and the digests of the folders its sandbox hid, as
+/// [`crate::sandbox::hidden_paths::digest`] writes them. A record from an engine that did
+/// not keep the level, the files, the toolchains, the port, the network, the grants, the
+/// freeze facts or the hidden folders has none; no grants means none were held.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -87,6 +88,8 @@ pub struct PaneRecord {
     pub frozen_for_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepers: Option<Vec<KeeperPin>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<Vec<String>>,
 }
 
 /// One server keeper of a native lead that a quitting engine froze (DEC-158): its process
@@ -139,6 +142,7 @@ impl PaneRecord {
             frozen_ms: None,
             frozen_for_ms: None,
             keepers: None,
+            hidden: None,
         })
     }
 

@@ -4,7 +4,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type ReadPaths } from "../../api-projects";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
-import type { IntakeJob, IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
+import type { IntakeJob, IntentReceipt, MessageSettings, SwitchApply, TeamAgent, TeamStatus } from "../../engine-client";
 import { loadIntakeJob } from "../../api-intake";
 import { refusalLine } from "../intake/intake";
 import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, HomeCachesChoices, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, networkGap, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
@@ -500,6 +500,21 @@ function SandboxSection({ data }: { data: ProjectData }) {
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy} onClick={() => void save()}>Save folders</Button></div>
   </div>;
+}
+
+/** The running agents a team status lists as able to open a folder hidden after they
+ * started (SA-VID14-A). Input: the team status, or null before it is read. Output: those
+ * agents in the status order. */
+export function hiddenSeers(status: TeamStatus | null): TeamAgent[] {
+  void status;
+  return [];
+}
+
+/** What the hidden folders section says about the agents that can still open a hidden
+ * folder. Input: the agents, at least one. Output: the line naming them. */
+export function seersLine(agents: TeamAgent[]): string {
+  void agents;
+  return "";
 }
 
 function HiddenSection({ data }: { data: ProjectData }) {

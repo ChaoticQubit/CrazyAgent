@@ -1,9 +1,14 @@
 use super::canonical;
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// The most folders one project may keep its agents out of.
 pub const HIDDEN_PATHS_MAX: usize = 8;
+
+/// The length of one hidden folder's digest as an agent's launch records it, in hex.
+pub const DIGEST_HEX_LEN: usize = 32;
 
 const PATH_TEXT_MAX: usize = 1024;
 
@@ -13,6 +18,81 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS project_hidden_paths (
     path TEXT NOT NULL,
     PRIMARY KEY (project, position)
 )";
+
+const SEERS: &str = "team_hidden_seers";
+
+const SEERS_TABLE: &str = "CREATE TABLE IF NOT EXISTS team_hidden_seers (
+    agent INTEGER PRIMARY KEY,
+    project TEXT NOT NULL,
+    restart INTEGER NOT NULL DEFAULT 0 CHECK(restart IN (0, 1))
+)";
+
+/// Names one hidden folder as an agent's launch records it: the first 16 bytes of the
+/// SHA-256 of its canonical path in lowercase hex, so a pane record stays small.
+/// Input: the canonical folder. Output: the digest of `DIGEST_HEX_LEN` characters.
+pub fn digest(folder: &Path) -> String {
+    let bytes = Sha256::digest(folder.as_os_str().as_encoded_bytes());
+    let text: String = bytes[..DIGEST_HEX_LEN / 2]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(text.len(), DIGEST_HEX_LEN);
+    text
+}
+
+/// Tells whether a recorded digest has the shape [`digest`] writes: `DIGEST_HEX_LEN`
+/// lowercase hex characters. Input: the text. Output: the answer.
+pub fn digest_plain(text: &str) -> bool {
+    text.len() == DIGEST_HEX_LEN
+        && text
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Tells whether an agent's sandbox keeps it out of every folder saved hidden now: each
+/// saved folder, or a folder above it, was hidden when the agent started. A launch that
+/// recorded no hidden folders, as a pane from before the engine kept them, hides none.
+/// Inputs: the digests its launch recorded and the saved folders. Output: the answer.
+pub fn covers(built: Option<&[String]>, saved: &[PathBuf]) -> bool {
+    let _ = (built, saved);
+    true
+}
+
+/// Replaces the running agents of one project that can still open a folder hidden after
+/// they started, writing only when the set changed; an agent kept on the list keeps the
+/// owner's restart ask. Inputs: the engine connection, the project id and the agents.
+/// Output: done, or the database error.
+pub fn set_seers(
+    connection: &Connection,
+    project: &str,
+    agents: &BTreeSet<i64>,
+) -> rusqlite::Result<()> {
+    let _ = (connection, project, agents, SEERS, SEERS_TABLE);
+    Ok(())
+}
+
+/// Reads the agents of one project listed as able to open a folder hidden after they
+/// started; a database without the list has none. Inputs: the connection and the project
+/// id. Output: their ids.
+pub fn seers(connection: &Connection, project: &str) -> rusqlite::Result<BTreeSet<i64>> {
+    let _ = (connection, project);
+    Ok(BTreeSet::new())
+}
+
+/// Asks every listed agent of one project to restart, as the owner's Restart them does.
+/// Inputs: the open transaction and the project id. Output: how many listed agents were
+/// asked, none for a project with none listed, or the database error.
+pub fn ask_restart(connection: &Connection, project: &str) -> rusqlite::Result<usize> {
+    let _ = (connection, project);
+    Ok(0)
+}
+
+/// Reads the listed agents of one project the owner asked to restart. Inputs: the
+/// connection and the project id. Output: their ids.
+pub fn restarts(connection: &Connection, project: &str) -> rusqlite::Result<BTreeSet<i64>> {
+    let _ = (connection, project);
+    Ok(BTreeSet::new())
+}
 
 /// Checks one folder the owner wants this project's agents kept out of: an absolute existing
 /// folder, taken in its canonical form, that sits strictly inside the project root. A folder
@@ -438,5 +518,58 @@ mod tests {
         assert_eq!(load(&connection, "app").unwrap(), paths);
         save(&connection, "app", &[]).unwrap();
         assert!(load(&connection, "app").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_agent_sees_a_hidden_folder_unless_it_or_a_folder_above_was_hidden_at_its_start() {
+        let secrets = PathBuf::from("/tmp/app/secrets");
+        let inner = secrets.join("keys");
+        let vendor = PathBuf::from("/tmp/app/vendor");
+        let built = vec![digest(&secrets)];
+        assert!(digest_plain(&built[0]), "{}", built[0]);
+        assert_ne!(digest(&secrets), digest(&vendor));
+        assert!(covers(Some(&built), &[secrets.clone()]));
+        assert!(
+            covers(Some(&built), &[inner.clone()]),
+            "a folder above it was hidden"
+        );
+        assert!(!covers(Some(&built), &[secrets.clone(), vendor.clone()]));
+        assert!(
+            !covers(Some(&[]), &[secrets.clone()]),
+            "started before the hide"
+        );
+        assert!(
+            !covers(None, &[inner]),
+            "a launch that kept no list hides none"
+        );
+        assert!(covers(None, &[]), "nothing hidden, nothing to see");
+        assert!(
+            !digest_plain("ABCDEF"),
+            "upper case or short is not a digest"
+        );
+    }
+
+    #[test]
+    fn listed_agents_keep_their_restart_ask_until_they_leave_the_list() {
+        let connection = Connection::open_in_memory().unwrap();
+        assert!(seers(&connection, "app").unwrap().is_empty());
+        assert_eq!(ask_restart(&connection, "app").unwrap(), 0, "none listed");
+        let both = BTreeSet::from([3, 4]);
+        set_seers(&connection, "app", &both).unwrap();
+        set_seers(&connection, "web", &BTreeSet::from([9])).unwrap();
+        assert_eq!(seers(&connection, "app").unwrap(), both);
+        assert!(restarts(&connection, "app").unwrap().is_empty());
+        assert_eq!(ask_restart(&connection, "app").unwrap(), 2);
+        assert_eq!(restarts(&connection, "app").unwrap(), both);
+        assert!(
+            restarts(&connection, "web").unwrap().is_empty(),
+            "one project only"
+        );
+        set_seers(&connection, "app", &BTreeSet::from([4, 5])).unwrap();
+        assert_eq!(seers(&connection, "app").unwrap(), BTreeSet::from([4, 5]));
+        assert_eq!(restarts(&connection, "app").unwrap(), BTreeSet::from([4]));
+        set_seers(&connection, "app", &BTreeSet::new()).unwrap();
+        assert!(seers(&connection, "app").unwrap().is_empty());
+        assert_eq!(seers(&connection, "web").unwrap(), BTreeSet::from([9]));
     }
 }

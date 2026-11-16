@@ -1953,6 +1953,17 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::TeamChange(action) => {
+                let generation = ctx.next_generation();
+                self.send(
+                    SetupQuery::TeamChange {
+                        action: *action,
+                        generation,
+                    },
+                    ctx,
+                );
+                Flow::Handled
+            }
             ProjectReply::Usage => Flow::Open(Place::Usage),
             ProjectReply::AccountOrder(strategy) => {
                 self.set_order(strategy, ctx);

@@ -778,6 +778,7 @@ export interface TeamAgent {
   pane?: string | null;
   hookless?: boolean;
   message_note?: string | null;
+  sees_hidden?: boolean;
 }
 
 /** One teammate a harness split off in its own pane of the harness's terminal: its pane id,

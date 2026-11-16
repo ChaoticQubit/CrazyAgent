@@ -662,6 +662,7 @@ pub(in crate::tui) enum ProjectReply {
     MoveHome(crate::projects_home::AddMode),
     DeleteEverything(String),
     GitHubRules,
+    TeamChange(Box<crate::team::TeamAction>),
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.

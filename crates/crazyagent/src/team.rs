@@ -836,6 +836,9 @@ pub enum TeamAction {
         project_id: ProjectId,
         agent: i64,
     },
+    RestartHiddenSeers {
+        project_id: ProjectId,
+    },
     MessageSettings {
         project_id: ProjectId,
         settings: agent_messages::MessageSettings,
@@ -1125,7 +1128,8 @@ impl TeamAction {
             | Self::LiveMaster { .. }
             | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
-            | Self::Resume { .. } => Ok(()),
+            | Self::Resume { .. }
+            | Self::RestartHiddenSeers { .. } => Ok(()),
         }
     }
 
@@ -1175,6 +1179,7 @@ impl TeamAction {
             },
             Self::Rename { project_id, .. }
             | Self::WakeAgent { project_id, .. }
+            | Self::RestartHiddenSeers { project_id }
             | Self::StopAgent { project_id, .. }
             | Self::StopTeammate { project_id, .. }
             | Self::MessageAgent { project_id, .. }
@@ -3014,6 +3019,7 @@ fn perform(
             Ok(()) => Outcome::Applied,
             Err(code) => rejected(code),
         }),
+        TeamAction::RestartHiddenSeers { .. } => Ok(rejected("team_no_hidden_seers")),
         TeamAction::AnswerQuestion { message, text, .. } => {
             questions::answer(tx, project, *message, text, now)
         }
@@ -3437,6 +3443,8 @@ pub struct TeamAgent {
     pub instructions_changed: bool,
     #[serde(default)]
     pub message_note: Option<String>,
+    #[serde(default)]
+    pub sees_hidden: bool,
 }
 
 /// One teammate a harness split off in its own pane of the harness's terminal, such as a
@@ -3752,6 +3760,7 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         hookless: row.get(18)?,
         instructions_changed: false,
         message_note: None,
+        sees_hidden: false,
     })
 }
 

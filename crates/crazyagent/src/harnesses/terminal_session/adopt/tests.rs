@@ -424,6 +424,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         frozen_ms: None,
         frozen_for_ms: None,
         keepers: None,
+        hidden: None,
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
@@ -470,6 +471,37 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let networked = narrowed.encode().unwrap();
     assert!(networked.contains("\"network\":\"none\""), "{networked}");
     assert_eq!(PaneRecord::decode(&networked), Some(narrowed));
+    assert!(!text.contains("hidden"), "{text}");
+    let secrets =
+        crate::sandbox::hidden_paths::digest(std::path::Path::new("/private/tmp/project/secrets"));
+    let hid = PaneRecord {
+        hidden: Some(vec![secrets.clone()]),
+        ..record.clone()
+    };
+    let kept = hid.encode().unwrap();
+    assert!(
+        kept.contains(&format!("\"hidden\":[\"{secrets}\"]")),
+        "{kept}"
+    );
+    assert_eq!(PaneRecord::decode(&kept), Some(hid));
+    let shout = kept.replace(&secrets, &secrets.to_uppercase());
+    assert_eq!(
+        PaneRecord::decode(&shout),
+        None,
+        "not a digest the engine writes"
+    );
+    let nine = PaneRecord {
+        hidden: Some(vec![
+            secrets.clone();
+            crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX + 1
+        ]),
+        ..record.clone()
+    };
+    assert_eq!(
+        PaneRecord::decode(&nine.encode().unwrap()),
+        None,
+        "more than a project may hide"
+    );
     let mut relative = record.clone();
     relative.cwd = PathBuf::from("worktrees/agent-3");
     assert_eq!(PaneRecord::decode(&relative.encode().unwrap()), None);
@@ -682,6 +714,7 @@ fn keyed(key: &std::path::Path) -> PaneRecord {
         frozen_ms: None,
         frozen_for_ms: None,
         keepers: None,
+        hidden: None,
     }
 }
 

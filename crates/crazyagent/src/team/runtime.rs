@@ -263,7 +263,8 @@ struct Grant {
 /// (F08); `terminal_display` is the project's terminal display, read when the
 /// agent is prepared (N-D9, DEC-141);
 /// `task_start` is a sub-agent's or master's Task-start reminder from its launch context
-/// (T3-15, DEC-116).
+/// (T3-15, DEC-116); `hidden` the digests of the project folders its sandbox hides, read
+/// once with the profile (SA-VID14-A).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -294,6 +295,7 @@ struct Plan {
     relay: Option<Arc<Relay>>,
     terminal_display: crate::coord::settings::TerminalDisplay,
     task_start: Option<String>,
+    hidden: Vec<String>,
 }
 
 /// Why a pane an earlier engine left running on a keyed endpoint is not taken over: its key
@@ -770,6 +772,7 @@ struct Worker {
     reasked: Option<i64>,
     starts: crate::coord::relay::TaskStarts,
     after_done: AfterDone,
+    hidden: Option<Vec<String>>,
 }
 
 /// The lstat size and modification time of an agent worktree's HEAD file and of its own
@@ -3410,6 +3413,8 @@ impl TeamRuntime {
         self.retire_rejected(project, access);
         self.retire_narrowed(&stored);
         self.restart_widened(&stored)?;
+        self.restart_seers(&stored)?;
+        self.mark_seers(&stored)?;
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
         self.resume_interrupted(&stored, access, &paused)?;
@@ -4243,6 +4248,22 @@ impl TeamRuntime {
                 self.note(project, ACCESS_MASTER_RESTARTED)?;
             }
         }
+        Ok(())
+    }
+
+    /// Lists the project's running agents that can still open a folder the owner hid after
+    /// they started, for the team status and the owner's Restart them (SA-VID14-A). Takes
+    /// the project's stored setup. Returns any SQLite failure.
+    fn mark_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
+        let _ = stored;
+        Ok(())
+    }
+
+    /// Restarts the listed agents of the project the owner asked to restart, so each starts
+    /// again kept out of every hidden folder (SA-VID14-A). Takes the project's stored setup.
+    /// Returns any SQLite failure.
+    fn restart_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
+        let _ = stored;
         Ok(())
     }
 
@@ -7986,18 +8007,20 @@ impl TeamRuntime {
         assert!(!(kept_session && live));
         let fresh = matches!(&launch, Launch::Fresh(plan, _) if plan.resume.is_none()).then(now_ms);
         let resumed = matches!(&launch, Launch::Fresh(plan, _) if plan.resume.is_some());
-        let (access, toolchains, network, access_grants) = match &launch {
+        let (access, toolchains, network, access_grants, hidden) = match &launch {
             Launch::Fresh(plan, _) => (
                 plan.access,
                 Some(plan.toolchains.clone()),
                 plan.network,
                 plan.grants.clone(),
+                Some(plan.hidden.clone()),
             ),
             Launch::Adopt(adoption) => (
                 adoption.access,
                 adoption.toolchains.clone(),
                 adoption.network,
                 adoption.grants.clone(),
+                adoption.record.hidden.clone(),
             ),
         };
         let starts = crate::coord::relay::TaskStarts {
@@ -8084,6 +8107,7 @@ impl TeamRuntime {
                 reasked: None,
                 starts,
                 after_done,
+                hidden,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -9695,6 +9719,10 @@ impl TeamRuntime {
             relay,
             terminal_display,
             task_start,
+            hidden: hidden
+                .iter()
+                .map(|folder| crate::sandbox::hidden_paths::digest(folder))
+                .collect(),
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -10098,12 +10126,14 @@ impl TeamRuntime {
                 let (access, toolchains) = (Some(worker.access), worker.toolchains.clone());
                 let network = Some(worker.network);
                 let grants = Some(worker.access_grants.clone());
+                let hidden = worker.hidden.clone();
                 let per_turn = worker.managed && !worker.live && !worker.kept_session;
                 let pane = pane.map(|record| PaneRecord {
                     access,
                     toolchains,
                     network,
                     grants,
+                    hidden,
                     ..*record
                 });
                 if let Some(record) = pane

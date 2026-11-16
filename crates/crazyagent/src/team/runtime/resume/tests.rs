@@ -1288,6 +1288,7 @@ mod live {
             relay: plan.relay.clone(),
             terminal_display: plan.terminal_display,
             task_start: plan.task_start.clone(),
+            hidden: plan.hidden.clone(),
         }
     }
 
