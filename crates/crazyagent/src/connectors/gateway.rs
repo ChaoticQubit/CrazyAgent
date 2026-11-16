@@ -22,7 +22,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
 pub mod pins;
@@ -71,6 +71,7 @@ const TITLE_BYTES_MAX: usize = 64;
 const SECRET_FORM_BYTES_MIN: usize = 8;
 const WORKERS_MAX: usize = 8;
 const TICK: Duration = Duration::from_millis(50);
+const IDLE: Duration = Duration::from_secs(30);
 const STALE: Duration = Duration::from_secs(10 * 60);
 const SEPARATOR: &str = "__";
 
@@ -258,6 +259,7 @@ pub fn prepare(
     }
     assert!(folder.starts_with(&launches));
     end_leftovers(db, root);
+    wake();
     Ok(Some(GatewayLaunch {
         folder,
         snapshot: GrantSnapshot {
@@ -311,11 +313,17 @@ fn end_leftovers(db: &Connection, root: &Path) {
     }
 }
 
+/// Makes the launch table when it is missing, then reads its records as [`recorded`] does.
+/// Input: the engine database. Output: the launches, or `connectors_unavailable`.
+fn launches(db: &Connection) -> Result<Vec<Launch>, EngineError> {
+    db.execute_batch(SCHEMA).map_err(sqlite)?;
+    recorded(db)
+}
+
 /// Reads the newest `LAUNCHES_MAX` launch records, so a pile of old ones can never hide
 /// a new launch. Input: the engine database. Output: the launches, a record that does not
 /// read left out, or `connectors_unavailable`.
-fn launches(db: &Connection) -> Result<Vec<Launch>, EngineError> {
-    db.execute_batch(SCHEMA).map_err(sqlite)?;
+fn recorded(db: &Connection) -> Result<Vec<Launch>, EngineError> {
     let rows: Vec<(String, String, String, String, String)> = db
         .prepare(
             "SELECT id, project, role, agent, connectors FROM connector_launches
@@ -1101,20 +1109,45 @@ impl Drop for Busy {
     }
 }
 
-/// Runs the gateway until told to stop: every `TICK` it looks for launches with waiting
-/// calls and answers each in a thread of its own, at most `WORKERS_MAX` at once and one
-/// per launch. A call waits at most `CONNECTOR_WAIT` for its connector and sessions close
-/// on their own thread, so a slow vendor holds up only its own calls. A round whose launch
-/// read fails is skipped and closes nothing. Inputs: the engine root and the stop flag.
+/// Runs the gateway until told to stop on one engine database connection, never creating
+/// the database: while launches are recorded it looks for waiting calls every `TICK` and
+/// answers each in a thread of its own, at most `WORKERS_MAX` at once and one per launch;
+/// with none it waits for the next launch. A slow vendor holds up only its own calls, and
+/// a failed read closes nothing. Inputs: the engine root and the stop flag.
 pub fn serve(root: &Path, stop: &AtomicBool) {
-    serve_with(root, stop, &crate::questions::open);
+    serve_with(root, stop, &crate::storage::versioned::open);
 }
 
-/// Wakes a gateway loop that waits with no launch. Takes nothing.
-fn wake() {}
+/// Counts the launches this engine recorded, so a gateway loop with none waits for the
+/// next instead of reading the engine database every tick.
+static LAUNCHED: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
 
-/// [`serve`] with the way it opens the engine database given. Inputs: the engine root, the
-/// stop flag and the open.
+/// Wakes every gateway loop that waits with no launch: a launch was recorded or a loop was
+/// told to stop. Takes nothing.
+fn wake() {
+    let mut count = locked(&LAUNCHED.0);
+    *count = count.wrapping_add(1);
+    LAUNCHED.1.notify_all();
+}
+
+/// The launch count a loop reads before its round, so a launch recorded during the round
+/// still wakes the wait after it. Output: the count.
+fn launched() -> u64 {
+    *locked(&LAUNCHED.0)
+}
+
+/// Waits until the launch count moves past `seen` or `IDLE` passes. Input: the count read
+/// before the round.
+fn idle(seen: u64) {
+    let count = locked(&LAUNCHED.0);
+    let _ = LAUNCHED
+        .1
+        .wait_timeout_while(count, IDLE, |count| *count == seen);
+}
+
+/// [`serve`] with the way it opens the engine database given: one connection, opened again
+/// only after a read on it failed, with the launch table made once per connection. Inputs:
+/// the engine root, the stop flag and the open.
 fn serve_with(
     root: &Path,
     stop: &AtomicBool,
@@ -1122,13 +1155,28 @@ fn serve_with(
 ) {
     let gateway = Arc::new(Gateway::new(root));
     let busy: Arc<Mutex<BTreeSet<String>>> = Arc::default();
+    let mut held: Option<Connection> = None;
     while !stop.load(Ordering::SeqCst) {
-        let found = open(root).ok().and_then(|db| launches(&db).ok());
-        let Some(found) = found else {
+        let seen = launched();
+        if held.is_none() {
+            held = open(root)
+                .ok()
+                .filter(|db| db.execute_batch(SCHEMA).is_ok());
+        }
+        let Some(db) = held.as_ref() else {
+            idle(seen);
+            continue;
+        };
+        let Ok(found) = recorded(db) else {
+            held = None;
             std::thread::sleep(TICK);
             continue;
         };
         gateway.forget_ended(&found);
+        if found.is_empty() {
+            idle(seen);
+            continue;
+        }
         for launch in found {
             if !waiting(root, &launch.id) {
                 continue;
@@ -1181,6 +1229,7 @@ impl Running {
     /// on their own threads. Input: the running gateway.
     pub fn stop(self) {
         self.stop.store(true, Ordering::SeqCst);
+        wake();
         let _ = self.thread.join();
     }
 }
