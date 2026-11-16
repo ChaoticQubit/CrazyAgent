@@ -37,7 +37,7 @@ impl<'a> Endpoint<'a> {
 }
 
 /// The installed helper: launchd's socket under `/private/var/run`, root, and 12 s for a call
-/// whose helper may run `pmset -g` and a `pmset` write, 5 s each at most.
+/// whose reply waits on at most `helper::REPLY_PMSET_RUNS_MAX` (2) `pmset` runs, 5 s each.
 pub const PRODUCTION: Endpoint<'static> = Endpoint {
     socket: "/private/var/run/dev.crazyagent.power.sock",
     peer_uid: 0,

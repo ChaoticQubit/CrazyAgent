@@ -155,3 +155,14 @@ fn the_production_endpoint_is_launchds_socket_run_as_root() {
     assert_eq!(PRODUCTION.peer_uid, 0);
     assert_eq!(PRODUCTION.wait, Duration::from_secs(12));
 }
+
+#[test]
+fn the_production_wait_covers_every_pmset_run_a_reply_waits_on() {
+    let runs = u32::try_from(crate::helper::REPLY_PMSET_RUNS_MAX).unwrap();
+    assert!(runs > 0);
+    assert!(PRODUCTION.wait >= crate::pmset::WAIT * runs);
+    assert!(
+        PRODUCTION.wait < crate::pmset::WAIT * (runs + 1),
+        "one more run in a reply would outlast the wait"
+    );
+}

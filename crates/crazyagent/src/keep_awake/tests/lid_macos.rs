@@ -1,6 +1,6 @@
 use super::sensing::{step_until, steps};
 use super::{IDLE, IDLE_AND_LID, NOW_MS, SECOND_MS, agent, engine};
-use crate::keep_awake::{Heat, Keeper, LidSupport, PowerSource};
+use crate::keep_awake::{Heat, Keeper, LidSupport, LowPowerSupport, PowerSource};
 use crate::keep_awake::hold_macos::{
     ENDED_TO_PROTECT, HELPER_UNANSWERED, HelperLine, LEASE_S, LID_UNREAD, LID_WITHHELD_MACOS,
     LidLine, LidPlatform, PIN_FILE_KEPT, PIN_NONE, PIN_OTHER, READ_EVERY_MS, REMOVE_NOT_PUT_BACK,
@@ -22,16 +22,19 @@ const OFF: LidAsk = LidAsk {
     rule_on: false,
     wanted: false,
     sleep_display: false,
+    low_power: false,
 };
 const RESTING: LidAsk = LidAsk {
     rule_on: true,
     wanted: false,
     sleep_display: false,
+    low_power: false,
 };
 const WANTED: LidAsk = LidAsk {
     rule_on: true,
     wanted: true,
     sleep_display: true,
+    low_power: false,
 };
 const READING_MS: i64 = 30 * SECOND_MS;
 
@@ -579,6 +582,7 @@ fn the_keeper_keeps_the_lid_through_failed_renewals_while_the_lease_runs() {
         heat: Heat::Nominal,
         lid_closed: Some(false),
         lid_support: LidSupport::HelperMissing,
+        low_power: LowPowerSupport::Unread,
     });
     let mut keeper = Keeper::default().with_sensors(reader, Some(lid));
     let mut now_ms = NOW_MS;

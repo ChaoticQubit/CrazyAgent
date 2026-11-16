@@ -1,4 +1,4 @@
-use super::state::{Heat, LidSupport, PowerSource, Sensors};
+use super::state::{Heat, LidSupport, LowPowerSupport, PowerSource, Sensors};
 use crate::paths::Platform;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -25,8 +25,9 @@ const THREAD_NAME: &str = "keep-awake-sensors";
 type Ask = (LidAsk, Option<LidCommand>, i64);
 
 /// One reading of the platform: where the power comes from, the battery charge, the heat,
-/// whether the lid is closed, and whether this platform can hold with the lid closed, each
-/// unknown or none where the platform does not say.
+/// whether the lid is closed, whether this platform can hold with the lid closed, and
+/// whether it can turn on low power mode, each unknown or none where the platform does not
+/// say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PowerReading {
     pub source: PowerSource,
@@ -34,19 +35,27 @@ pub struct PowerReading {
     pub heat: Heat,
     pub lid_closed: Option<bool>,
     pub lid_support: LidSupport,
+    pub low_power: LowPowerSupport,
 }
 
 impl PowerReading {
-    /// A reading that knows nothing, with the lid reason this platform starts with.
+    /// A reading that knows nothing, with the lid and low power reasons this platform starts
+    /// with.
     pub fn unknown() -> Self {
-        let lid_support = Sensors::unread().lid_support;
+        let Sensors {
+            lid_support,
+            low_power,
+            ..
+        } = Sensors::unread();
         assert_ne!(lid_support, LidSupport::Held);
+        assert_ne!(low_power, LowPowerSupport::Held);
         Self {
             source: PowerSource::Unknown,
             battery_pct: None,
             heat: Heat::Unknown,
             lid_closed: None,
             lid_support,
+            low_power,
         }
     }
 }
@@ -56,13 +65,15 @@ impl PowerReading {
 pub type Reader = Box<dyn FnMut() -> PowerReading + Send>;
 
 /// What the keeper tells the lid line with each ask: whether the lid rule is on, whether
-/// the decision holds the closed lid, which only a rule that is on allows, and whether the
-/// display sleeps once per close while it does, which only a wanted ask carries (Task 12).
+/// the decision holds the closed lid, which only a rule that is on allows, whether the
+/// display sleeps once per close while it does, which only a wanted ask carries (Task 12),
+/// and whether the running hold asks for low power mode, with or without the lid (Task 16).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LidAsk {
     pub rule_on: bool,
     pub wanted: bool,
     pub sleep_display: bool,
+    pub low_power: bool,
 }
 
 /// An owner command for the lid line: Turn on lid-closed hold or Remove lid helper on
@@ -103,6 +114,23 @@ pub fn platform_lid(root: &Path) -> Option<LidReader> {
     #[cfg(not(any(target_os = "macos", windows)))]
     let lid = None;
     lid
+}
+
+/// The power line on the sensor thread (Task 16, QUESTION 39g): handed whether the running
+/// hold asks for low power mode and the engine time with each reading, it holds or lets go
+/// of the platform's power saver and returns the low power support, which stands in for
+/// the reader's.
+pub type PowerLine = Box<dyn FnMut(bool, i64) -> LowPowerSupport + Send>;
+
+/// Builds this platform's power line: power-profiles-daemon on Linux, and none elsewhere,
+/// where low power mode rides the lid line (macOS) or is not available (Windows). Output:
+/// the power line, if this platform has one.
+pub fn platform_power() -> Option<PowerLine> {
+    #[cfg(target_os = "linux")]
+    let power = Some(super::low_power_linux::power_line());
+    #[cfg(not(target_os = "linux"))]
+    let power = None;
+    power
 }
 
 /// Builds this platform's reader: system tools on macOS, files below `/sys`, `/proc` and
@@ -171,19 +199,21 @@ pub fn sensors(reading: &PowerReading, battery_unread_twice: bool, lid_refused: 
         heat: reading.heat,
         lid_closed: reading.lid_closed,
         lid_support,
+        low_power: reading.low_power.clone(),
     }
 }
 
 /// The keeper's line to the sensor thread. The keeper asks for a reading and takes the
 /// answer on a later step, so a slow system tool, bus or lid helper never holds up the
 /// engine's team step. Each ask carries the keeper's lid ask, and an owner command when
-/// one waits, for the lid line, if the thread runs one. The thread ends when this value
-/// is dropped.
+/// one waits, for the lid line, and the low power ask for the power line, if the thread
+/// runs them. The thread ends when this value is dropped, and a power line's hold with it.
 #[derive(Debug)]
 pub(super) struct Sensing {
     ask: SyncSender<Ask>,
     answers: Receiver<PowerReading>,
     lid: bool,
+    power: bool,
     pending: Option<LidCommand>,
     asked_ms: Option<i64>,
     asked_with: Option<LidAsk>,
@@ -197,10 +227,22 @@ impl Sensing {
     /// whose lid support stands in for the reader's in every reading. Inputs: the reader
     /// and the lid line, which the thread owns from here on. Output: the line to the
     /// thread, or the error of starting it.
-    pub(super) fn start(mut reader: Reader, mut lid: Option<LidReader>) -> std::io::Result<Self> {
+    pub(super) fn start(reader: Reader, lid: Option<LidReader>) -> std::io::Result<Self> {
+        Self::start_lines(reader, lid, None)
+    }
+
+    /// Starts the sensor thread around a reader, the lid line and the power line, where
+    /// the platform has them; each line's support stands in for the reader's in every
+    /// reading. Inputs: the reader and both lines, which the thread owns from here on.
+    /// Output: the line to the thread, or the error of starting it.
+    pub(super) fn start_lines(
+        mut reader: Reader,
+        mut lid: Option<LidReader>,
+        mut power: Option<PowerLine>,
+    ) -> std::io::Result<Self> {
         let (ask, asked) = sync_channel::<Ask>(1);
         let (answer, answers) = sync_channel::<PowerReading>(1);
-        let has_lid = lid.is_some();
+        let (has_lid, has_power) = (lid.is_some(), power.is_some());
         std::thread::Builder::new()
             .name(THREAD_NAME.into())
             .spawn(move || {
@@ -208,6 +250,9 @@ impl Sensing {
                     let mut reading = reader();
                     if let Some(lid) = lid.as_mut() {
                         reading.lid_support = lid(lid_ask, command, now_ms);
+                    }
+                    if let Some(power) = power.as_mut() {
+                        reading.low_power = power(lid_ask.low_power, now_ms);
                     }
                     assert_ne!(reading.lid_support, LidSupport::Off);
                     if answer.send(reading).is_err() {
@@ -219,6 +264,7 @@ impl Sensing {
             ask,
             answers,
             lid: has_lid,
+            power: has_power,
             pending: None,
             asked_ms: None,
             asked_with: None,
@@ -240,15 +286,18 @@ impl Sensing {
         assert!(self.pending.is_some());
     }
 
-    /// Sends a last ask and waits for its answer, at most `wait` in all, so a lid lease
-    /// is released before the engine stops. A reading under way is waited for first; the
-    /// last ask goes only when the ask sent before it wanted the lid. It does nothing
-    /// without a lid line or before any ask. Inputs: the last ask and the longest wait.
+    /// Sends a last ask and waits for its answer, at most `wait` in all, so a lid or low
+    /// power lease is released before the engine stops. A reading under way is waited for
+    /// first; the last ask goes only when the ask sent before it wanted the lid or low power.
+    /// It does nothing without a lid or power line, or before any ask. Inputs: the last ask
+    /// and the longest wait.
     pub(super) fn finish(&mut self, last: LidAsk, wait: Duration) {
         assert!(!last.wanted);
         assert!(!last.sleep_display);
+        assert!(!last.low_power);
         assert!(!wait.is_zero());
-        let Some(asked_ms) = self.asked_ms.filter(|_| self.lid && !self.stopped) else {
+        let lines = self.lid || self.power;
+        let Some(asked_ms) = self.asked_ms.filter(|_| lines && !self.stopped) else {
             return;
         };
         let until = Instant::now() + wait;
@@ -257,7 +306,7 @@ impl Sensing {
             return;
         }
         self.waiting = false;
-        if !self.asked_with.is_some_and(|asked| asked.wanted) {
+        if !self.asked_with.is_some_and(|asked| asked.wanted || asked.low_power) {
             return;
         }
         if self.ask.try_send((last, None, asked_ms)).is_err() {
@@ -285,7 +334,8 @@ impl Sensing {
 
     /// Takes one step: hands over a reading that came back, and asks for the next one
     /// when `READ_MS` passed since the last ask, or at once when the thread runs a lid
-    /// line and the lid ask changed, while none is under way. A reading that takes longer
+    /// line and the lid ask changed, or a power line and the low power ask changed, while
+    /// none is under way. A reading that takes longer
     /// than two periods is logged once. Inputs: the engine time and the lid ask. Output:
     /// the reading that came back since the last step, if any.
     pub(super) fn step(&mut self, now_ms: i64, lid_ask: LidAsk) -> Option<PowerReading> {
@@ -305,7 +355,10 @@ impl Sensing {
             return answer;
         }
         let since = self.asked_ms.map(|asked| now_ms - asked);
-        let changed = self.lid && self.asked_with != Some(lid_ask);
+        let lid_changed = self.lid && self.asked_with != Some(lid_ask);
+        let low_power_asked = self.asked_with.map(|asked| asked.low_power);
+        let power_changed = self.power && low_power_asked != Some(lid_ask.low_power);
+        let changed = lid_changed || power_changed;
         let ordered = self.pending.is_some();
         let due = changed || ordered || since.is_none_or(|since| !(0..READ_MS).contains(&since));
         if due && !self.waiting {

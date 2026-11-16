@@ -1,4 +1,7 @@
-use super::settings::{DisplayAwake, HeatEnd, HeatNotice, KeepAwakeSettings, LidRule, Mode};
+use super::settings::{
+    DisplayAwake, HeatEnd, HeatNotice, KeepAwakeSettings, LidRule, LowPower, Mode,
+};
+use crate::paths::Platform;
 use serde::{Deserialize, Serialize};
 
 /// Where the computer's power comes from, as the platform reader last saw it.
@@ -44,8 +47,42 @@ pub enum LidSupport {
     NotAvailable { reason: String },
 }
 
+/// The words the low power row shows on Windows, where no public call holds battery saver
+/// (QUESTION 39f).
+pub const LOW_POWER_WINDOWS: &str = "Not available on Windows";
+
+/// Whether a hold can turn on the platform's low power mode (Task 16): not read yet, ready,
+/// on now for the running hold, left as the owner set it during this hold, or not available
+/// with the plain reason.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LowPowerSupport {
+    #[default]
+    Unread,
+    Ready,
+    Held,
+    OwnerChanged,
+    NotAvailable { reason: String },
+}
+
+impl LowPowerSupport {
+    /// What a platform says before its low power line ran: not available on Windows, not
+    /// read yet elsewhere. Input: the platform. Output: the support.
+    pub fn at_start(platform: Platform) -> Self {
+        let start = match platform {
+            Platform::Windows => Self::NotAvailable {
+                reason: LOW_POWER_WINDOWS.into(),
+            },
+            Platform::MacOs | Platform::Linux => Self::Unread,
+        };
+        assert!(matches!(platform, Platform::Windows) || start == Self::Unread);
+        assert_ne!(start, Self::Held);
+        start
+    }
+}
+
 /// What the platform readers last saw: power source, battery percent, whether the battery
-/// could not be read twice in a row, heat, lid position and lid support.
+/// could not be read twice in a row, heat, lid position, lid support and low power support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sensors {
@@ -55,6 +92,8 @@ pub struct Sensors {
     pub heat: Heat,
     pub lid_closed: Option<bool>,
     pub lid_support: LidSupport,
+    #[serde(default)]
+    pub low_power: LowPowerSupport,
 }
 
 impl Sensors {
@@ -75,6 +114,7 @@ impl Sensors {
             heat: Heat::Unknown,
             lid_closed: None,
             lid_support,
+            low_power: LowPowerSupport::at_start(Platform::CURRENT),
         }
     }
 }
@@ -272,6 +312,33 @@ pub fn lid_status(settings: &KeepAwakeSettings, sensors: &Sensors) -> LidSupport
         return LidSupport::IdleOnlyOnBattery;
     }
     LidSupport::Held
+}
+
+/// Tells whether a hold asks for the platform's low power mode (QUESTION 39e): only while a
+/// hold runs on battery. Below 40 % needs a read charge under 40, and once asked under that
+/// option it stays asked while on battery, so a charge read at 39, then 40, does not turn it
+/// on and off. Inputs: the settings, the readings, whether a hold runs, and the option the
+/// last ask of this hold was made under, none when it did not ask. Output: whether to ask.
+pub fn low_power_wanted(
+    settings: &KeepAwakeSettings,
+    sensors: &Sensors,
+    holding: bool,
+    asked_under: Option<LowPower>,
+) -> bool {
+    assert!(sensors.battery_pct.is_none_or(|pct| pct <= 100));
+    if !holding || sensors.power != PowerSource::Battery {
+        return false;
+    }
+    let kept = asked_under == Some(settings.low_power);
+    let wanted = match settings.low_power {
+        LowPower::Off => false,
+        LowPower::OnBattery => true,
+        LowPower::BatteryBelow40 => {
+            kept || sensors.battery_pct.is_some_and(|pct| pct < LowPower::BELOW_PCT)
+        }
+    };
+    assert!(settings.low_power != LowPower::Off || !wanted);
+    wanted
 }
 
 /// Tells whether the heat notice is due: the setting is on and the heat is serious or

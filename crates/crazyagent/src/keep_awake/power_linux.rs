@@ -194,6 +194,7 @@ pub fn read_under(root: &Path) -> PowerReading {
         } else {
             unknown.lid_support
         },
+        low_power: unknown.low_power,
     }
 }
 

@@ -17,6 +17,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const FOLDER: &str = "/Library/Application Support/dev.crazyagent.power";
 
+/// The most `pmset` runs a served reply may wait on: the engine's call wait covers this many
+/// runs of `pmset::WAIT` each and no more (rv-code ka12 F1).
+pub const REPLY_PMSET_RUNS_MAX: usize = 2;
+
 /// Where the helper keeps its state and what it runs: its folder and the uid that must own it
 /// (root in production), the `pmset` program, and the console whose owner it pins.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,8 +104,10 @@ impl Helper {
         helper
     }
 
-    /// Answers one verified request. Inputs: the caller, the request, the monotonic time and
-    /// the lid. Output: the reply.
+    /// Answers one verified request. It keeps the display's count but never sleeps it: that
+    /// waits for the next reading, so the reply waits on at most `REPLY_PMSET_RUNS_MAX` pmset
+    /// runs (rv-code ka12 F1). Inputs: the caller, the request, the monotonic time and the lid.
+    /// Output: the reply.
     pub fn handle(
         &mut self,
         holder: Holder,
@@ -118,7 +124,8 @@ impl Helper {
             Request::Read => Reply::State(self.view(holder, now_ms, lid)),
             Request::Forget => self.forget(holder, lid),
         };
-        self.sleep_display(lid);
+        let display_due = self.display_due(lid);
+        assert!(!display_due || self.leases.asks_display_sleep());
         assert!(self.leases.len() <= HOLDERS_MAX);
         assert!(self.floor.is_none() || self.leases.is_empty());
         assert!(!self.sleep_owed || self.pending());
@@ -177,14 +184,21 @@ impl Helper {
         }
     }
 
-    /// Puts every journaled value back before the helper exits on SIGTERM.
+    /// Puts every journaled value back before the helper exits on SIGTERM, and first serves a
+    /// sleep the start still owes, so a SIGTERM before the first reading does not skip it
+    /// (rv-secreview ka12 N2). Input: the lid.
     pub fn terminate(&mut self, lid: Option<Lid>) {
+        if std::mem::take(&mut self.owed_at_start) {
+            self.sleep_owed_at_start(lid);
+        }
         let was_holding = !self.leases.is_empty();
         self.leases.clear();
         self.put_back(lid, was_holding);
-        self.sleep_display(lid);
+        let display_due = self.display_due(lid);
+        assert!(!display_due, "no lease lives, so the display is never due");
         assert!(self.leases.is_empty());
         assert!(!self.display_slept);
+        assert!(!self.owed_at_start);
     }
 
     /// Whether readings are due: a lease lives, the floor holds, a value waits to be put
@@ -210,25 +224,34 @@ impl Helper {
         }
     }
 
-    /// Runs `pmset displaysleepnow` once per close while a live lease asks for it and the
-    /// lid reads closed with no external display (QUESTION 38c, 38d). The count starts again
-    /// when the lid reads open or at a desk, and when no lease lives; an unread lid changes
-    /// nothing. A failed run is logged and waits for the next close. Input: the lid.
-    fn sleep_display(&mut self, lid: Option<Lid>) {
+    /// Keeps the once-per-close count (QUESTION 38c, 38d) and runs nothing: the count starts
+    /// again when no lease lives and when the lid reads open or at a desk; an unread lid
+    /// changes nothing. Input: the lid. Output: whether the display is due to sleep, which
+    /// needs a live lease that asks for it, the lid closed alone and no run since.
+    fn display_due(&mut self, lid: Option<Lid>) -> bool {
         if self.leases.is_empty() {
             self.display_slept = false;
-            return;
+            return false;
         }
         let Some(lid) = lid else {
-            return;
+            return false;
         };
         if !lid.sleeps_now() {
             self.display_slept = false;
+            return false;
+        }
+        !self.display_slept && self.leases.asks_display_sleep()
+    }
+
+    /// Runs `pmset displaysleepnow` when the display is due, after a reading or an expiry,
+    /// never inside a reply (rv-code ka12 F1). A failed run is logged and waits for the next
+    /// close. Input: the lid.
+    fn sleep_display(&mut self, lid: Option<Lid>) {
+        if !self.display_due(lid) {
             return;
         }
-        if self.display_slept || !self.leases.asks_display_sleep() {
-            return;
-        }
+        assert!(!self.leases.is_empty());
+        assert!(self.leases.asks_display_sleep());
         self.display_slept = true;
         if let Err(error) = self.pmset.display_sleep_now() {
             ffi::log(&format!("displaysleepnow failed: {error:?}"));

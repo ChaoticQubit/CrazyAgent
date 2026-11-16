@@ -99,6 +99,7 @@ fn sensors(power: PowerSource, battery_pct: Option<u8>) -> Sensors {
         heat: Heat::Nominal,
         lid_closed: Some(false),
         lid_support: LidSupport::Held,
+        low_power: LowPowerSupport::Unread,
     }
 }
 
@@ -722,7 +723,92 @@ fn every_settings_value() -> Vec<KeepAwakeSettings> {
         display_awake,
         ..base
     }));
+    all.extend(LowPower::ALL.map(|low_power| KeepAwakeSettings { low_power, ..base }));
     all
+}
+
+#[test]
+fn a_settings_row_saved_before_low_power_loads_with_its_default() {
+    let (_folder, connection) = engine();
+    let mut text = serde_json::to_value(KeepAwakeSettings::DEFAULT).unwrap();
+    let removed = text.as_object_mut().unwrap().remove("low_power");
+    assert_eq!(removed, Some(serde_json::json!("battery_below40")));
+    let saved = connection
+        .execute(
+            "INSERT INTO configured_keep_awake(singleton,settings) VALUES(1,?1)",
+            params![text.to_string()],
+        )
+        .unwrap();
+    assert_eq!(saved, 1);
+    assert_eq!(
+        settings::load(&connection).ok(),
+        Some(KeepAwakeSettings::DEFAULT),
+        "a row from an earlier V3 dev build loads, with the owner's default (addendum 26)"
+    );
+    assert_eq!(LowPower::default(), KeepAwakeSettings::DEFAULT.low_power);
+}
+
+#[test]
+fn low_power_is_asked_only_while_a_hold_runs_on_battery_as_the_setting_says() {
+    let below = KeepAwakeSettings::DEFAULT;
+    assert_eq!(below.low_power, LowPower::BatteryBelow40, "owner question 4 A");
+    let on_battery = KeepAwakeSettings {
+        low_power: LowPower::OnBattery,
+        ..below
+    };
+    let off = KeepAwakeSettings {
+        low_power: LowPower::Off,
+        ..below
+    };
+    let battery = |pct| sensors(PowerSource::Battery, pct);
+    let ac = sensors(PowerSource::Ac, Some(30));
+    let unknown = sensors(PowerSource::Unknown, Some(30));
+
+    assert!(low_power_wanted(&on_battery, &battery(Some(90)), true, None));
+    assert!(!low_power_wanted(&on_battery, &battery(Some(90)), false, None), "no hold");
+    assert!(!low_power_wanted(&on_battery, &ac, true, None), "on AC power");
+    assert!(!low_power_wanted(&on_battery, &unknown, true, None), "a source not read");
+    assert!(!low_power_wanted(&off, &battery(Some(5)), true, None));
+    assert!(low_power_wanted(&below, &battery(Some(39)), true, None));
+    assert!(!low_power_wanted(&below, &battery(Some(40)), true, None));
+    assert!(!low_power_wanted(&below, &battery(None), true, None), "a charge not read");
+
+    let asked = Some(LowPower::BatteryBelow40);
+    assert!(
+        low_power_wanted(&below, &battery(Some(41)), true, asked),
+        "once asked in a hold it stays asked on battery (QUESTION 39e)"
+    );
+    assert!(low_power_wanted(&below, &battery(None), true, asked));
+    assert!(!low_power_wanted(&below, &ac, true, asked), "AC power ends it");
+    assert!(!low_power_wanted(&below, &battery(Some(41)), false, asked), "so does the end");
+    assert!(
+        !low_power_wanted(&below, &battery(Some(80)), true, Some(LowPower::OnBattery)),
+        "an ask made under another option does not keep it"
+    );
+}
+
+#[test]
+fn low_power_starts_not_available_on_windows_and_unread_elsewhere() {
+    use crate::paths::Platform;
+    assert_eq!(
+        LowPowerSupport::at_start(Platform::Windows),
+        LowPowerSupport::NotAvailable {
+            reason: state::LOW_POWER_WINDOWS.into()
+        }
+    );
+    assert_eq!(
+        LowPowerSupport::at_start(Platform::MacOs),
+        LowPowerSupport::Unread
+    );
+    assert_eq!(
+        LowPowerSupport::at_start(Platform::Linux),
+        LowPowerSupport::Unread
+    );
+    assert_eq!(
+        Sensors::unread().low_power,
+        LowPowerSupport::at_start(Platform::CURRENT),
+        "the readings this platform starts with"
+    );
 }
 
 #[test]
@@ -740,10 +826,11 @@ fn every_setting_option_round_trips_through_the_owner_protocol() {
             heat_notice: HeatNotice::Serious,
             lid_display: LidDisplay::Sleep,
             display_awake: DisplayAwake::Off,
+            low_power: LowPower::BatteryBelow40,
         }
     );
     let all = every_settings_value();
-    assert_eq!(all.len(), 1 + 3 + 4 + 4 + 3 + 4 + 3 + 2 + 2 + 2);
+    assert_eq!(all.len(), 1 + 3 + 4 + 4 + 3 + 4 + 3 + 2 + 2 + 2 + 3);
     for settings in all {
         let mutation = OwnerMutation::KeepAwake {
             action: KeepAwakeAction::Set { settings },
@@ -987,6 +1074,7 @@ fn a_failed_step_drops_the_platform_hold_and_the_next_good_step_takes_it_again()
 mod lid_macos;
 mod lid_windows;
 mod notices;
+mod power_saver;
 mod sensing;
 
 #[cfg(target_os = "linux")]

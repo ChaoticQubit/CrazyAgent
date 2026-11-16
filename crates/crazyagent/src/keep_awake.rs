@@ -10,9 +10,13 @@ mod hold_windows;
 pub mod journal;
 #[cfg(any(windows, test))]
 pub(crate) mod lid_windows;
+#[cfg(target_os = "linux")]
+mod low_power_linux;
 pub mod power;
 pub mod power_linux;
 pub mod power_macos;
+#[cfg(any(test, target_os = "linux"))]
+mod power_saver;
 #[cfg(windows)]
 mod power_windows;
 pub mod settings;
@@ -25,11 +29,11 @@ mod tests;
 pub use hold::{Held, Hold, HoldError, REASON, platform_hold};
 pub use settings::{
     BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeSettings, LidDisplay,
-    LidRule, Mode,
+    LidRule, LowPower, Mode,
 };
 pub use state::{
-    Decision, EndReason, Heat, Inputs, LidSupport, PowerSource, Reason, Sensors, Want, decide,
-    heat_notice, lid_status,
+    Decision, EndReason, Heat, Inputs, LidSupport, LowPowerSupport, PowerSource, Reason,
+    Sensors, Want, decide, heat_notice, lid_status, low_power_wanted,
 };
 
 use crate::engine::EngineError;
@@ -610,7 +614,8 @@ fn noted(
 /// one, in step with the decision. With a reader it asks a sensor thread for a reading
 /// every `power::READ_MS`; with a lid line there too, it hands the line what the lid
 /// wants with each ask, and at once when that changes, each owner lid command once, and
-/// notes a lid helper journal the line cannot read for the notification center.
+/// notes a lid helper journal the line cannot read for the notification center. With a
+/// power line, it hands the line the low power ask the same way (Task 16).
 #[derive(Debug, Default)]
 pub struct Keeper {
     looked_ms: Option<i64>,
@@ -620,7 +625,9 @@ pub struct Keeper {
     lost: bool,
     sensing: Option<power::Sensing>,
     lid_line: bool,
+    power_line: bool,
     lid_ask: power::LidAsk,
+    low_power_under: Option<LowPower>,
     lid_order_sent: u32,
     lid_journal: Option<bool>,
     reading: Option<power::PowerReading>,
@@ -653,18 +660,35 @@ impl Keeper {
     /// it, so a platform hold that takes only idle sleep is no refused lid. Inputs: the
     /// reader and the lid line. Output: the keeper; when the thread cannot start that is
     /// logged and the keeper reads nothing and holds no lid.
-    pub fn with_sensors(mut self, reader: power::Reader, lid: Option<power::LidReader>) -> Self {
+    pub fn with_sensors(self, reader: power::Reader, lid: Option<power::LidReader>) -> Self {
+        self.with_lines(reader, lid, None)
+    }
+
+    /// Gives the keeper platform readings, the lid line and the power line, where the
+    /// platform has them, all run on the sensor thread. The power line holds the platform's
+    /// power saver while the keeper asks for low power mode (Task 16). Inputs: the reader
+    /// and both lines. Output: the keeper; when the thread cannot start that is logged and
+    /// the keeper reads nothing and holds neither line.
+    pub fn with_lines(
+        mut self,
+        reader: power::Reader,
+        lid: Option<power::LidReader>,
+        saver: Option<power::PowerLine>,
+    ) -> Self {
         assert!(self.sensing.is_none());
         assert!(!self.lid_line);
-        let has_lid = lid.is_some();
-        match power::Sensing::start(reader, lid) {
+        assert!(!self.power_line);
+        let (has_lid, has_saver) = (lid.is_some(), saver.is_some());
+        match power::Sensing::start_lines(reader, lid, saver) {
             Ok(sensing) => {
                 self.sensing = Some(sensing);
                 self.lid_line = has_lid;
+                self.power_line = has_saver;
             }
             Err(problem) => eprintln!("keep awake: no sensor thread: {problem}"),
         }
         assert!(self.sensing.is_some() || !self.lid_line);
+        assert!(self.sensing.is_some() || !self.power_line);
         self
     }
 
@@ -725,15 +749,18 @@ impl Keeper {
         self.lost = false;
         self.lid_ask.wanted = false;
         self.lid_ask.sleep_display = false;
+        self.lid_ask.low_power = false;
+        self.low_power_under = None;
     }
 
     /// Drops every hold as the engine stops (QUESTION 36d): the platform hold at once, and
-    /// the lid lease through one last ask the sensor thread answers within `STOP_WAIT`, or
-    /// the lease runs out by itself.
+    /// the lid lease or the power saver hold through one last ask the sensor thread answers
+    /// within `STOP_WAIT`, or the lease runs out and the bus connection closes by itself.
     pub fn stop(&mut self) {
         self.release();
         assert!(!self.lid_ask.wanted);
-        if !self.lid_line {
+        assert!(!self.lid_ask.low_power);
+        if !self.lid_line && !self.power_line {
             return;
         }
         if let Some(sensing) = self.sensing.as_mut() {
@@ -881,13 +908,21 @@ impl Keeper {
         self.work = Some(view.work);
         self.hand_lid_order(lid_order);
         let wanted = matches!(view.state.want, Want::IdleAndLid { .. });
+        let holding = view.state.want != Want::Nothing;
+        let low_power = self.sensors().is_some_and(|sensors| {
+            low_power_wanted(&view.settings, &sensors, holding, self.low_power_under)
+        });
+        self.low_power_under = low_power.then_some(view.settings.low_power);
         self.lid_ask = power::LidAsk {
             rule_on: view.settings.lid != LidRule::Off,
             wanted,
             sleep_display: wanted && view.settings.lid_display == LidDisplay::Sleep,
+            low_power,
         };
         assert!(self.lid_ask.rule_on || !self.lid_ask.wanted);
         assert!(self.lid_ask.wanted || !self.lid_ask.sleep_display);
+        assert!(holding || !self.lid_ask.low_power);
+        assert_eq!(self.low_power_under.is_some(), self.lid_ask.low_power);
         assert!(view.work <= work::WORK_MAX);
         Ok(Some(view))
     }

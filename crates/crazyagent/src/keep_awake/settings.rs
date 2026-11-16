@@ -177,9 +177,29 @@ impl DisplayAwake {
     pub const ALL: [Self; 2] = [Self::Off, Self::WhileHolding];
 }
 
+/// When a hold turns on the platform's low power mode (DEC-167 addendum 2 item 4, QUESTION
+/// 39e): on battery below `BELOW_PCT`, whenever on battery, or never.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LowPower {
+    #[default]
+    BatteryBelow40,
+    OnBattery,
+    Off,
+}
+
+impl LowPower {
+    /// Every choice, in the order the settings show them.
+    pub const ALL: [Self; 3] = [Self::BatteryBelow40, Self::OnBattery, Self::Off];
+
+    /// The charge, in percent, that `BatteryBelow40` asks below.
+    pub const BELOW_PCT: u8 = 40;
+}
+
 /// The owner's Keep awake choices for this computer (DEC-167). Before the first save they
 /// are `DEFAULT`: Auto, 10 minutes of grace, a 24 hour cap, lid hold on AC power only, end
-/// at 10 % battery and at critical heat, a notice at serious heat.
+/// at 10 % battery and at critical heat, a notice at serious heat, low power mode on battery
+/// below 40 %.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeepAwakeSettings {
@@ -192,6 +212,8 @@ pub struct KeepAwakeSettings {
     pub heat_notice: HeatNotice,
     pub lid_display: LidDisplay,
     pub display_awake: DisplayAwake,
+    #[serde(default)]
+    pub low_power: LowPower,
 }
 
 impl KeepAwakeSettings {
@@ -206,6 +228,7 @@ impl KeepAwakeSettings {
         heat_notice: HeatNotice::Serious,
         lid_display: LidDisplay::Sleep,
         display_awake: DisplayAwake::Off,
+        low_power: LowPower::BatteryBelow40,
     };
 }
 
