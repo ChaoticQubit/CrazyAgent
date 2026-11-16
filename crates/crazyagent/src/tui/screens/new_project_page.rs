@@ -59,9 +59,9 @@ pub(in crate::tui) fn carry_background(arrival: &Arrival, ctx: &mut Ctx) {
         }
     }
     let (settled, waiting): (Vec<_>, Vec<_>) = running.into_iter().partition(|page| {
-        page.creation
-            .as_ref()
-            .is_none_or(|creation| creation.stage == Stage::Finished)
+        page.creation.as_ref().is_none_or(|creation| {
+            creation.stage == Stage::Finished && creation.publishing.is_none()
+        })
     });
     RUNNING.with_borrow_mut(|running| running.extend(waiting));
     drop(settled);
@@ -223,6 +223,7 @@ pub(in crate::tui) struct NewProjectPage {
 
 /// One New Project this page started as the engine's job (DEC-177 step 3b): the start's
 /// id, the project it makes, its name, the pool and agent access to set once it is made,
+/// the GitHub publish to start then (DEC-182), the publish Start a carried page waits on,
 /// and where it stands.
 struct Creation {
     id: RequestId,
@@ -231,6 +232,7 @@ struct Creation {
     pool: Option<CredentialRef>,
     access: AgentAccess,
     publish: Option<GitHubPublishPlan>,
+    publishing: Option<IntakeQuery>,
     stage: Stage,
 }
 
@@ -456,6 +458,7 @@ impl NewProjectPage {
             pool,
             access: self.wizard.access,
             publish,
+            publishing: None,
             stage: Stage::Starting,
         });
     }
@@ -587,13 +590,12 @@ impl NewProjectPage {
         creation.stage = Stage::Finished;
         if self.carried {
             if let Some(plan) = publish {
-                intake::ask(
-                    ctx,
-                    IntakeQuery::GitHubPublishStart {
-                        project: creation.project_id.clone(),
-                        plan,
-                    },
-                );
+                let start = IntakeQuery::GitHubPublishStart {
+                    project: creation.project_id.clone(),
+                    plan,
+                };
+                creation.publishing = Some(start.clone());
+                intake::ask(ctx, start);
             }
             if saves_access {
                 creation.stage = Stage::ReadingAccess;
@@ -662,13 +664,22 @@ impl NewProjectPage {
 
     /// Carries one arrival for a page the shell closed. Takes the arrival and the context.
     /// Returns true only when the arrival was this page's alone: the reply to its own start,
-    /// the pool edit its assignment waits for, or a reply its access save waits for. A job
-    /// read is every page's, so it returns false for one.
+    /// the pool edit its assignment waits for, a reply its access save waits for, or the
+    /// reply to its GitHub publish Start, which is said. A job read is every page's, so it
+    /// returns false for one.
     fn carry(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> bool {
-        let Some(creation) = &self.creation else {
+        let Some(creation) = self.creation.as_mut() else {
             return false;
         };
         if let Some(event) = intake::event(arrival) {
+            if creation.publishing.as_ref() == Some(&event.query) {
+                creation.publishing = None;
+                ctx.say(ProjectPage::publish_start_said(
+                    &creation.name,
+                    &event.result,
+                ));
+                return true;
+            }
             let own = creation.started_by(event);
             self.intake_arrived(event, ctx);
             if self.creation.is_none() {

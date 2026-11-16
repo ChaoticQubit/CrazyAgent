@@ -588,6 +588,25 @@ impl ProjectPage {
         }
     }
 
+    /// The line a made project's GitHub publish Start reply gives: the project is ready and
+    /// publishing started, or why publishing did not start. Takes the project's name and the
+    /// reply. Returns the message.
+    pub(in crate::tui) fn publish_start_said(
+        name: &str,
+        result: &Result<IntakeView, String>,
+    ) -> Message {
+        match result {
+            Ok(IntakeView::Publish(_)) => {
+                Message::success(&format!("{name} is ready."), PUBLISH_STARTED)
+            }
+            Ok(_) => Message::warning(
+                PUBLISH_NOT_STARTED,
+                &super::intake::copy("github_outcome_unknown"),
+            ),
+            Err(code) => Message::warning(PUBLISH_NOT_STARTED, &super::intake::copy(code)),
+        }
+    }
+
     /// Says a made project's picked agent access was not saved, so its agents stay
     /// Sandboxed. Inputs: the reason and the context. Output: none.
     pub(in crate::tui) fn stays_sandboxed(why: &str, ctx: &mut Ctx) {
@@ -1239,16 +1258,7 @@ impl ProjectPage {
                 self.publish_pane = Some(PublishPane::new((**job).clone()));
                 self.publish_read_ms = Some(now_ms());
             }
-            ctx.say(match &event.result {
-                Ok(IntakeView::Publish(_)) => {
-                    Message::success(&format!("{} is ready.", self.screen.name), PUBLISH_STARTED)
-                }
-                Ok(_) => Message::warning(
-                    PUBLISH_NOT_STARTED,
-                    &super::intake::copy("github_outcome_unknown"),
-                ),
-                Err(code) => Message::warning(PUBLISH_NOT_STARTED, &super::intake::copy(code)),
-            });
+            ctx.say(Self::publish_start_said(&self.screen.name, &event.result));
             return true;
         }
         self.poll_publish(ctx);
