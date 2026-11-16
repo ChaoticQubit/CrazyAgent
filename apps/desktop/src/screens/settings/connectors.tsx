@@ -246,8 +246,9 @@ export function ConnectorsSettingsView({ view, reach, open, dialog, write, wait,
   const dialogs = <ConnectorDialogs dialog={dialog} busy={busy} failure={failure} keyRef={keyRef} actions={actions} />;
   if (open !== null) {
     const connector = page.connectors.find((listed) => listed.name === open) ?? null;
+    const elsewhere = signing === null || signing === open ? null : page.connectors.find((listed) => listed.name === signing)?.title ?? signing;
     return <>
-      <ConnectorDetailView name={open} connector={connector} busy={busy} waiting={signing === open} failure={dialog.kind === "none" ? failure : ""} actions={actions} />
+      <ConnectorDetailView name={open} connector={connector} busy={busy} waiting={signing === open} elsewhere={elsewhere} failure={dialog.kind === "none" ? failure : ""} actions={actions} />
       {dialogs}
     </>;
   }

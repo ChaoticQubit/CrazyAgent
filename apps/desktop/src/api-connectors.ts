@@ -292,6 +292,12 @@ export function signedInLine(title: string): string {
   return `${title} is signed in.`;
 }
 
+/** The line on another connector's page while one sign-in waits, the same in the TUI
+ * (rv-code CONN-T10-PAGES-A F1). Input: the waiting connector's title. Output: the line. */
+export function signInFirstLine(title: string): string {
+  return `Finish or cancel the ${title} sign-in first.`;
+}
+
 /** The line a sign-out confirms with, the same in the TUI. Input: the connector's title.
  * Output: "<title> is signed out.". */
 export function signedOutLine(title: string): string {

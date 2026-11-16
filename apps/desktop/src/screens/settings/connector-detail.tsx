@@ -1,4 +1,4 @@
-import { CONNECTORS_PAGE, SIGN_IN_WITH_CHOICES, browserNow, chosenWay, connectorState, originLine, reachesLine, secretsShown, signedIn, type ConnectorView } from "../../api-connectors";
+import { CONNECTORS_PAGE, SIGN_IN_WITH_CHOICES, browserNow, chosenWay, connectorState, originLine, reachesLine, secretsShown, signInFirstLine, signedIn, type ConnectorView } from "../../api-connectors";
 import { Button, Notice, StatusBadge, formatRoute } from "../../ui";
 import { secretLine } from "./app-plugins";
 import type { ConnectorActions } from "./connectors";
@@ -8,12 +8,14 @@ const BACK = formatRoute({ name: "settings", tab: "connectors" });
 /** A connector's own page: the way back, title, origin, state, hosts, Sign in with, Sign in,
  * Waiting for the browser with Cancel, or Sign out, its keys, Review and Remove; a refused
  * file shows only its reason. Inputs: the name, the connector when listed, a busy flag,
- * whether its sign-in waits for the browser, the last failure and the actions. Output: the page. */
-export function ConnectorDetailView({ name, connector, busy, waiting, failure, actions }: {
+ * whether its sign-in waits, the title of another connector whose sign-in waits, the last
+ * failure and the actions. Output: the page. */
+export function ConnectorDetailView({ name, connector, busy, waiting, elsewhere = null, failure, actions }: {
   name: string;
   connector: ConnectorView | null;
   busy: boolean;
   waiting: boolean;
+  elsewhere?: string | null;
   failure: string;
   actions: ConnectorActions;
 }) {
@@ -56,8 +58,9 @@ export function ConnectorDetailView({ name, connector, busy, waiting, failure, a
         <Button size="small" aria-label={`Cancel the sign-in to ${connector.title}`} onClick={() => actions.onCancelSignIn(connector)}>Cancel</Button>
       </div>}
       {offered && <div className="pj-row" data-sign-in="offered">
-        <Button size="small" variant="primary" aria-label={`Sign in to ${connector.title}`} disabled={busy} onClick={() => actions.onSignIn(connector)}>{CONNECTORS_PAGE.signIn}</Button>
+        <Button size="small" variant="primary" aria-label={`Sign in to ${connector.title}`} disabled={busy || elsewhere !== null} onClick={() => actions.onSignIn(connector)}>{CONNECTORS_PAGE.signIn}</Button>
       </div>}
+      {offered && elsewhere !== null && <p className="small muted">{signInFirstLine(elsewhere)}</p>}
       {secrets.length > 0 && <ul className="pj-rows" aria-label={`Secrets of ${connector.title}`}>{secrets.map((secret) => <li key={secret.name} className="pj-row between">
         <span>{secretLine(secret)}</span>
         {secret.binding.kind === "none"

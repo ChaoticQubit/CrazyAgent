@@ -4,8 +4,8 @@ use super::words::{
     OPEN_ADDRESS, PURPOSE, REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS,
     SIGN_IN_WITH, SIGN_IN_WITH_HELP, SIGN_OUT_HELP, SIZE_CHOICES, SIZE_HELP, SIZE_LABEL,
     WAIT_CHOICES, WAIT_HELP, WAIT_LABEL, WAITING, WRITE_CHOICES, WRITE_HELP, WRITE_LABEL,
-    chosen_way, origin_line, reaches_line, refusal, secret_line, secrets_shown, signed_in, state,
-    trust_lines, way_word,
+    browser_now, chosen_way, origin_line, reaches_line, refusal, secret_line, secrets_shown,
+    sign_in_first, signed_in, state, trust_lines, way_word,
 };
 use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, Row, TITLE, refused};
 use crate::app_plugins::{RunsView, TrustView};
@@ -377,6 +377,8 @@ impl ConnectorsPage {
             lines.extend(wrap(&waiting, width).into_iter().map(Line::raw));
             lines.extend(muted(OPEN_ADDRESS, width, ctx));
             lines.extend(wrap(&signing.url, width).into_iter().map(Line::raw));
+        } else if let Some(other) = signing.filter(|_| browser_now(connector)) {
+            lines.extend(muted(&sign_in_first(&other.title), width, ctx));
         }
         lines
     }

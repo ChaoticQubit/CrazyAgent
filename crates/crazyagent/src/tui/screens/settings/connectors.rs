@@ -27,7 +27,7 @@ use words::{
     ADD_FIELD, BACK, BROWSER_NO_KEY, CHECK, CHECKING, KEY_EMPTY, KEY_FIELD, NOT_CONNECTOR,
     NOT_OPENED, NOT_READ_SIGN_IN, OAUTH_NOT_YET, SAVE, SAVED, SIGN_IN, SIGN_IN_CANCELLED, SIGN_OUT,
     STALE, browser_now, chosen_way, hosts, keys_shown, other_way, refusal, secrets_shown,
-    signed_in, signed_in_line, signed_out_line, signs_in_with, way_word,
+    sign_in_first, signed_in, signed_in_line, signed_out_line, signs_in_with, way_word,
 };
 
 mod draw;
@@ -416,6 +416,11 @@ impl ConnectorsPage {
             return;
         }
         if !browser_now(connector) || self.waiting_on(&name) {
+            return;
+        }
+        if let Some(other) = &self.signing {
+            let first = sign_in_first(&other.title);
+            ctx.say(Message::warning("Not yet.", &first));
             return;
         }
         self.ask(ConnectorsJob::SignIn { name }, Pending::SignIn, ctx);
@@ -944,7 +949,7 @@ impl ConnectorsPage {
                 if !signing.cancelled {
                     hints.push(hint("c", "Cancel"));
                 }
-            } else if browser_now(connector) && !refused(connector) {
+            } else if browser_now(connector) && !refused(connector) && self.signing.is_none() {
                 hints.push(hint("s", SIGN_IN));
             }
             let secret = listed.get(self.secret);

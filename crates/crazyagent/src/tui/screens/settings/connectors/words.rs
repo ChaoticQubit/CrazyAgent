@@ -370,6 +370,12 @@ pub(in crate::tui) fn signed_in_line(title: &str) -> String {
     format!("{} is signed in.", safe(title))
 }
 
+/// The line on another connector's page while one sign-in waits, the desktop's words
+/// (rv-code CONN-T10-PAGES-A F1). Input: the waiting connector's title. Output: the line.
+pub(in crate::tui) fn sign_in_first(title: &str) -> String {
+    format!("Finish or cancel the {} sign-in first.", safe(title))
+}
+
 /// The line a sign-out confirms with, the desktop's words. Input: the connector's title.
 /// Output: "<title> is signed out.".
 pub(in crate::tui) fn signed_out_line(title: &str) -> String {
