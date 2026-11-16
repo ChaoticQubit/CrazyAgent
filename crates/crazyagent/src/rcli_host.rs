@@ -57,7 +57,7 @@ pub(crate) use master_launch::INSTRUCTIONS_BYTES_MAX;
 pub(crate) use master_launch::checked_configured_profile;
 #[cfg(unix)]
 pub(crate) use master_launch::configured_sdk_connection;
-pub use master_launch::{RcliMasterBinding, RcliMasterLaunch};
+pub use master_launch::{RcliGateway, RcliMasterBinding, RcliMasterLaunch};
 
 #[cfg(all(test, unix))]
 #[path = "rcli_host/master_tests.rs"]
