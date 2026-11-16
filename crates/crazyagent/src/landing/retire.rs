@@ -318,7 +318,9 @@ pub(super) fn unlanded_teammates(
 /// clone's git folder: the owner repository's git, with the clone as its work tree and a
 /// private index in the owner's git folder filled from the tip the engine fetched, runs
 /// the same checks as for a linked worktree (`holds_only`) once `sizes_match` found no
-/// file of another size, so the clone's config, hooks and index are never read. The
+/// file of another size, so the clone's config, hooks and index are never read. Each of
+/// those gits runs as the confined reading step on that private index ([`Repo::reading`]),
+/// so neither the clone nor a link swapped in reaches the owner's own index. The
 /// teammates' worktree folder is left out of its untracked files, since `teammates_landed`
 /// checks it, and so is the code graph's copy unless the tip tracks it (`graph_excludes`).
 /// Inputs: the owner checkout root, the clone and the tip. Output: true when it holds
@@ -334,7 +336,7 @@ fn clone_holds_only(repository: &Path, worktree: &Path, tip: &str) -> Result<boo
         if !sizes_match(&repo, worktree, tip)? {
             return Ok(false);
         }
-        let repo = repo.private_index(&folder.join("index"));
+        let repo = repo.private_index(&folder.join("index")).reading()?;
         repo.run(&["read-tree", tip])?;
         let teammates = format!("/{}/", agent_git::TEAMMATES_FOLDER);
         let mut excluded = vec![teammates.as_str()];
