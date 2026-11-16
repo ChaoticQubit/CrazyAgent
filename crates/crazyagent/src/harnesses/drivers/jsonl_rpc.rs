@@ -215,7 +215,8 @@ impl JsonlRpc {
     }
 
     /// Whether the running turn used a tool with tools off, so its caller must make sure the
-    /// process stops it. Output: true from the breach until the turn ends.
+    /// process stops it. Output: true from the breach until the turn ends, when the
+    /// conversation fails for good.
     pub fn breached(&self) -> bool {
         self.turn.breached
     }
@@ -270,11 +271,13 @@ impl JsonlRpc {
     }
 
     /// Reads one line the process wrote. A line over `LINE_BYTES_MAX`, a line that is not
-    /// one JSON object and a line no rule matches give nothing; a line outside a turn gives
-    /// nothing but may carry the session id. With tools off, a tool the harness reports
-    /// using is a breach: one `ApprovalDenied` instead of the tool use and the interrupt
-    /// frame to write, unless an interrupt was already asked; after it only a line that ends
-    /// the turn is read. A finished fact, a turn error or an interrupted fact ends the turn
+    /// one JSON object and a line no rule matches give nothing; any other line outside a
+    /// turn gives nothing but may carry the session id. With tools off, a tool the harness
+    /// reports using is a breach, between turns too: one `ApprovalDenied` instead of the
+    /// tool use and the interrupt frame to write, unless an interrupt was already asked. A
+    /// breach fails the conversation for good, between turns at once and in a turn at its
+    /// end, before which only a line that ends the turn is read, so a process that breached
+    /// takes no further turn. A finished fact, a turn error or an interrupted fact ends the turn
     /// with exactly one `TurnFinished`: after an interrupt, `Interrupted` and an unsuccessful
     /// end; after a breach or a turn error, an unsuccessful end; else the success the rule
     /// read, true when none did. Input: the line, with or without its newline. Output: the
@@ -313,6 +316,12 @@ impl JsonlRpc {
             found.fact,
             Fact::TurnFinished | Fact::TurnError | Fact::Interrupted
         );
+        if found.fact == Fact::ToolUse && !self.tools && self.phase == Phase::Idle {
+            let writes = vec![self.interrupt_frame()];
+            self.phase = Phase::Failed;
+            self.assert_consistent();
+            return Ok((vec![LaunchEvent::ApprovalDenied], writes));
+        }
         if self.phase != Phase::Running || (self.turn.breached && !ending) {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -365,7 +374,11 @@ impl JsonlRpc {
                 success: self.turn.success.unwrap_or(true),
             }]
         };
-        self.phase = Phase::Idle;
+        self.phase = if self.turn.breached {
+            Phase::Failed
+        } else {
+            Phase::Idle
+        };
         self.turn = Turn::default();
         events
     }
