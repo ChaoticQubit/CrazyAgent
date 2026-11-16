@@ -3027,6 +3027,55 @@ fn a_codex_launch_pins_only_its_own_hooks_and_never_bypasses_hook_trust() {
     drop(installed);
 }
 
+/// SECRET-PARSE-COPIES R2: the engine reads back a Codex launch's pinned hook keys from the
+/// launch's own key list, never by parsing `config.toml`, whose MCP env and header tables
+/// hold secrets that a parse tree would copy into memory no wipe reaches. An edited or
+/// missing `config.toml` changes nothing, and a home with no key list is unreadable even
+/// when its `config.toml` pins keys.
+#[test]
+fn a_codex_launch_s_pinned_keys_come_from_its_own_key_list_never_from_its_config_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let engine = root.join("bin").join("crazyagent");
+    let codex = private_home(&root, "codex");
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .with_relay(&engine, &root.join("mailbox-codex"))
+        .install("codex", &codex, true)
+        .unwrap();
+    let key = format!(
+        "{}:pre_tool_use:0:0",
+        codex.canonicalize().unwrap().join("config.toml").display()
+    );
+    assert_eq!(codex_pinned_keys(&codex), Some(vec![key.clone()]));
+    let planted = r#"[hooks.state."planted:pre_tool_use:0:0"]
+trusted_hash = "sha256:00"
+
+[mcp_servers.tools.env]
+TOKEN = "secret-value"
+"#;
+    let config = codex.join("config.toml");
+    fs::write(&config, planted).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&codex),
+        Some(vec![key.clone()]),
+        "an edited config.toml is never parsed for the keys"
+    );
+    fs::remove_file(&config).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&codex),
+        Some(vec![key]),
+        "the keys need no config.toml at all"
+    );
+    let bare = private_home(&root, "bare");
+    fs::write(bare.join("config.toml"), planted).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&bare),
+        None,
+        "a home with no key list is unreadable, never read from its config.toml"
+    );
+    drop(installed);
+}
+
 #[test]
 fn a_native_lead_gives_its_teammates_its_instructions_and_the_lead_graph() {
     let directory = tempfile::tempdir().unwrap();
