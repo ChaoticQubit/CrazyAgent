@@ -1548,12 +1548,18 @@ fn find(root: &Path) -> Vec<Found> {
         .collect()
 }
 
-/// Reads a file at a path with no link in it as owner text: a regular file the owner owns,
-/// at most `agent_home::TEXT_BYTES_MAX` bytes of UTF-8 with no NUL, opened without
+/// Reads a file at a path with no link in it as owner text ([`text_of`]), opened without
 /// following a link or waiting on a FIFO. Input: the canonical path. Output: the text, or
 /// a plain code.
 fn owned_text(target: &Path) -> Result<String, &'static str> {
     let file = crate::platform::open_plain(target).map_err(|_| "process_import_unreadable")?;
+    text_of(file)
+}
+
+/// Reads an open file as owner text: a regular file the owner owns, at most
+/// `agent_home::TEXT_BYTES_MAX` bytes of UTF-8 with no NUL. Input: the open file. Output:
+/// the text, or a plain code.
+fn text_of(file: fs::File) -> Result<String, &'static str> {
     let held = file.metadata().map_err(|_| "process_import_unreadable")?;
     if !held.is_file() || !owned(&held) {
         return Err("process_import_unsafe");
