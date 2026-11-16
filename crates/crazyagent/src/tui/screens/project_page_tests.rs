@@ -1091,6 +1091,7 @@ async fn home_shell(connection: &mut Connection) -> Shell {
 /// card. Once its checks land, Home moves the focus to Get set up, since setup is never done
 /// here (see `home_shell`), and its key bar then starts with that panel's Enter; Tab moves it
 /// back. No reply arrives before the next key, so the focus holds. Input: the shell on Home.
+#[cfg(target_os = "macos")]
 fn list_focus(shell: &mut Shell) {
     let setup_keys = |shell: &mut Shell| {
         render(shell, 120, 30)
