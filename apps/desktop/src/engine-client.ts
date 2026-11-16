@@ -1,4 +1,4 @@
-import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api/core";
+import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
 import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 import { isWindows } from "./ui/keys";
@@ -2119,39 +2119,6 @@ export interface IdeFocus {
  * window when there is one. Output: the project and reveal, or null when none is waiting. */
 export function ideFocus(): Promise<IdeFocus | null> {
   return invoke<IdeFocus | null>("desktop_ide_focus");
-}
-
-/** Opens a live view of one agent's terminal. The channel gets the attach frame, the screen
- * and then live output until the terminal closes or the view detaches. Inputs: the terminal
- * name and the channel. Output: the view's serial once the engine accepted the attach. */
-export function terminalAttach(agent: string, output: Channel<TerminalMessage>, pane: string | null = null): Promise<number> {
-  return invoke<number>("desktop_terminal_attach", { agent, pane, output });
-}
-
-/** Types bytes into an attached agent terminal exactly as given. Inputs: the terminal name
- * and 1 to 4096 bytes. Output: resolves once the bridge queued them in order. */
-export function terminalInput(agent: string, bytes: number[]): Promise<void> {
-  return invoke<void>("desktop_terminal_input", { agent, bytes });
-}
-
-/** Sends the owner's explicit prompt to an attached agent terminal as one submission; a
- * sub-agent's master hears a note of it. Inputs: the terminal name and up to 4096 bytes of
- * text. Output: resolves once the bridge queued it in order. */
-export function terminalPrompt(agent: string, text: string): Promise<void> {
-  return invoke<void>("desktop_terminal_prompt", { agent, text });
-}
-
-/** Sets an attached agent terminal's size for its app and every viewer. Inputs: the terminal
- * name, columns and rows, each from 2 to 1000. Output: resolves once queued. */
-export function terminalResize(agent: string, cols: number, rows: number): Promise<void> {
-  return invoke<void>("desktop_terminal_resize", { agent, cols, rows });
-}
-
-/** Closes this window's view of an agent terminal; the agent keeps running and a newer view
- * of it stays open. Inputs: the terminal name and the serial its attach returned. Output:
- * resolves once the view is gone. */
-export function terminalDetach(agent: string, serial: number): Promise<void> {
-  return invoke<void>("desktop_terminal_detach", { agent, serial });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {
