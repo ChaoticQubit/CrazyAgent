@@ -222,7 +222,18 @@ pub struct Installed {
     freeze_record: Option<PathBuf>,
     terminal_display: TerminalDisplay,
     environment: Vec<(OsString, OsString)>,
+    engine_servers: Vec<EngineServer>,
     _lock: File,
+}
+
+/// The engine's own MCP server as an ACP launch hands it to its agent in `session/new`:
+/// its name, absolute command and arguments. It has no secret field, so no account key,
+/// connector key or owner secret can ride along.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineServer {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
 }
 
 /// What a native-team lead's launch gives its teammates (DEC-104 K5a): the tmux program
@@ -964,6 +975,7 @@ impl AgentContext {
         }
         self.plugins.servers.push(LaunchServer {
             name: name.into(),
+            engine: false,
             spec: ServerSpec::Stdio {
                 command,
                 args: std::iter::once(subcommand.to_owned())
@@ -1097,6 +1109,7 @@ impl AgentContext {
             freeze_record: self.freeze_record.clone(),
             terminal_display: self.terminal_display,
             environment: Vec::new(),
+            engine_servers: Vec::new(),
             _lock: lock,
         };
         remove(&state);
@@ -1368,6 +1381,7 @@ impl AgentContext {
             freeze_record: self.freeze_record.clone(),
             terminal_display: self.terminal_display,
             environment: asked.environment(home),
+            engine_servers: Vec::new(),
             _lock: lock,
         };
         let servers = self.plugins.servers.iter().filter(|server| {
@@ -1395,6 +1409,12 @@ impl Installed {
     /// private home filled in; empty for Codex and Claude Code. Output: the names and values.
     pub fn environment(&self) -> &[(OsString, OsString)] {
         &self.environment
+    }
+
+    /// The engine's own MCP servers an ACP launch opens its session with, none for every
+    /// other launch. Output: the servers.
+    pub fn engine_servers(&self) -> &[EngineServer] {
+        &self.engine_servers
     }
 
     /// Tells whether a headless Claude run of this launch keeps its transcript, as the
@@ -1476,6 +1496,7 @@ impl Installed {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             environment: Vec::new(),
+            engine_servers: Vec::new(),
             _lock: lock,
         })
     }
@@ -2418,6 +2439,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         environment: Vec::new(),
+        engine_servers: Vec::new(),
         _lock: lock,
     })
 }

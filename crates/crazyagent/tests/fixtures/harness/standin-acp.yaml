@@ -22,3 +22,8 @@ piped:
     - "{home}"
   tools_off:
     - "--no-tools"
+home:
+  env_prefixes:
+    - "STANDIN_ACP_"
+  env:
+    STANDIN_ACP_CONFIG: "{home}/config"

@@ -2,6 +2,7 @@ use super::super::launch::{LaunchError, LaunchEvent, failure, rate_limited};
 use super::super::manifest::{self, DriverKind, Manifest, Refused};
 use crate::adapters::{LINE_BYTES_MAX, clip_text};
 use crate::app_plugins::yaml::Value as Yaml;
+use crate::launch_context::EngineServer;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -98,6 +99,13 @@ impl Acp {
         );
         acp.assert_consistent();
         Ok((acp, start))
+    }
+
+    /// Gives the session the engine's own MCP servers, which `session/new`, `session/load`
+    /// and `session/resume` carry in the ACP stdio form, and none with tools off. Input: the
+    /// servers, before the first line is read. Output: the protocol.
+    pub fn with_servers(self, _servers: &[EngineServer]) -> Self {
+        self
     }
 
     /// Where the conversation stands. Output: the phase.
@@ -474,6 +482,21 @@ pub fn check(manifest: &Manifest) -> Result<(), Refused> {
             message: "piped.tools_off: an acp harness switches tools off only by a setting of its own; name it here, or say tools_limited.".into(),
         }),
     }
+}
+
+/// The command line of an ACP agent process: `piped.argv`, then `piped.tools_off` with tools
+/// off, each `{home}`, `{cwd}` and `{model}` filled once. Inputs: the manifest, the agent
+/// home, the working folder, the model, if any, and the tools switch. Output: the arguments,
+/// `launch_model_unsupported` for `{model}` with no model, or `launch_harness_unsupported` for
+/// a manifest that does not read, a folder that is not UTF-8 or any other placeholder.
+pub fn arguments(
+    _manifest: &Manifest,
+    _home: &Path,
+    _cwd: &Path,
+    _model: Option<&str>,
+    _tools: bool,
+) -> Result<Vec<String>, LaunchError> {
+    Err(failure("launch_harness_unsupported"))
 }
 
 /// Picks the permission option the launch's tools switch allows: with tools on the

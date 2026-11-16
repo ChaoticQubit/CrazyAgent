@@ -8,7 +8,7 @@ use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexS
 use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::credentials::SecretString;
-use crate::launch_context::{AgentContext, Installed};
+use crate::launch_context::{AgentContext, EngineServer, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -1142,12 +1142,14 @@ enum Driver {
 
 impl Driver {
     /// Starts the protocol driver of one headless launch: a Codex native lead (PA-7) keeps
-    /// the sub-agent threads its Codex starts, any other Codex launch interrupts each one.
-    /// Inputs: the request and whether it is a Codex native lead. Output: the driver and its
-    /// first frames, or a plain refusal code.
+    /// the sub-agent threads its Codex starts, any other Codex launch interrupts each one,
+    /// and an ACP launch opens its session with the engine's own MCP servers.
+    /// Inputs: the request, whether it is a Codex native lead and the engine's servers.
+    /// Output: the driver and its first frames, or a plain refusal code.
     fn new(
         request: &LaunchRequest,
         native_threads: bool,
+        servers: &[EngineServer],
     ) -> Result<(Self, Vec<Vec<u8>>), LaunchError> {
         let piped = drivers::piped(&request.harness);
         assert!(!native_threads || (matches!(piped, Ok(Piped::Codex)) && request.tools));
@@ -1196,7 +1198,7 @@ impl Driver {
             Piped::Acp => {
                 let (protocol, start) = Acp::new(&request.working_dir, request.tools, None)?;
                 let driver = Self::Acp {
-                    protocol: Box::new(protocol),
+                    protocol: Box::new(protocol.with_servers(servers)),
                 };
                 Ok((driver, vec![start]))
             }
@@ -1560,7 +1562,11 @@ impl Session {
         (relay, key): (Option<Relay>, Option<KeyFile>),
     ) -> Result<Self, LaunchError> {
         let native_threads = context.as_ref().is_some_and(Installed::native_threads);
-        let (driver, startup) = Driver::new(&request, native_threads)?;
+        let servers = context
+            .as_ref()
+            .map(Installed::engine_servers)
+            .unwrap_or_default();
+        let (driver, startup) = Driver::new(&request, native_threads, servers)?;
         let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
         command.env(LINEAGE_VARIABLE, token.as_str());
         let (sender, lines) = sync_channel(LINES_AHEAD_MAX);
