@@ -198,13 +198,20 @@ impl LidLine {
         }
     }
 
-    /// Runs one owner command behind the same gate as every step, so a Mac that cannot
-    /// hold the lid never reaches SMAppService (QUESTION 35i, 35j, 36a). The next step
-    /// reads the helper again, and what the command could not do stands until the daemon
-    /// status changes or another command runs. Inputs: the command and the engine time.
+    /// Runs one owner command. Turn on runs behind the same gate as every step, so a Mac
+    /// that cannot hold the lid never registers the helper (QUESTION 35i, 35j, 36a). Remove
+    /// needs only the helper in the bundle: a helper registered before its macOS version
+    /// was withheld, or while the version cannot be read, still starts as root, so Remove
+    /// always works there (rv-sec2 22:38 F1). The next step reads the helper again, and
+    /// what the command could not do stands until the daemon status changes or another
+    /// command runs. Inputs: the command and the engine time.
     pub(super) fn run(&mut self, command: LidCommand, now_ms: i64) {
         assert!(now_ms > 0);
-        if self.platform.refusal().is_some() {
+        let gated = match command {
+            LidCommand::TurnOn => self.platform.refusal().is_some(),
+            LidCommand::Remove => !self.platform.bundled,
+        };
+        if gated {
             eprintln!("keep awake: this Mac cannot hold the lid, {command:?} is dropped");
             return;
         }
@@ -301,28 +308,40 @@ impl LidLine {
         Some(LidSupport::RemoveHelper { reason })
     }
 
-    /// Takes one step at a reading. Inputs: the keeper's lid ask and the engine time.
-    /// Output: the lid support, which is never Off or idle only on battery.
+    /// Takes one step at a reading. On a withheld or unread macOS version with the helper
+    /// in the bundle it reads only the daemon status, never the helper: a daemon that is
+    /// enabled or waits for approval was registered before, so the support offers Remove
+    /// lid helper with the reason the lid is not held (rv-sec2 22:38 F1). Inputs: the
+    /// keeper's lid ask and the engine time. Output: the lid support, which is never Off
+    /// or idle only on battery.
     pub(super) fn step(&mut self, ask: LidAsk, now_ms: i64) -> LidSupport {
         assert!(now_ms > 0);
         assert!(ask.rule_on || !ask.wanted);
-        if let Some(refused) = self.platform.refusal() {
-            assert!(self.lease_until_ms.is_none());
-            return refused;
-        }
+        let held_back = match self.platform.refusal() {
+            Some(LidSupport::NotAvailable { reason }) if self.platform.bundled => Some(reason),
+            Some(refused) => {
+                assert!(self.lease_until_ms.is_none());
+                return refused;
+            }
+            None => None,
+        };
         let status = self.service.status();
-        let enabled = status == Some(Status::Enabled);
+        let enabled = held_back.is_none() && status == Some(Status::Enabled);
         if !enabled {
             self.lease_until_ms = None;
             self.read_ms = None;
             self.last = None;
         }
-        let support = match status {
-            None => not_available(STATUS_UNREAD),
-            Some(Status::NotFound) => LidSupport::HelperMissing,
-            Some(Status::NotRegistered) => LidSupport::NotTurnedOn,
-            Some(Status::RequiresApproval) => LidSupport::NeedsApproval,
-            Some(Status::Enabled) => self.enabled(ask, now_ms),
+        let support = match (held_back, status) {
+            (Some(reason), Some(Status::Enabled | Status::RequiresApproval)) => {
+                LidSupport::RemoveHelper { reason }
+            }
+            (Some(reason), _) => LidSupport::NotAvailable { reason },
+            (None, None) => not_available(STATUS_UNREAD),
+            (None, Some(Status::NotFound)) => LidSupport::HelperMissing,
+            (None, Some(Status::NotRegistered)) => LidSupport::NotTurnedOn,
+            (None, Some(Status::RequiresApproval)) => LidSupport::NeedsApproval,
+            (None, Some(Status::Enabled)) => self.enabled(ask, now_ms),
         };
         if self.trouble.as_ref().is_some_and(|(after, _)| *after != status) {
             self.trouble = None;
@@ -473,12 +492,13 @@ fn not_available(reason: &str) -> LidSupport {
 
 impl LidLine {
     /// Uninstall's lid step (QUESTION 37b): Remove lid helper behind the same gate as every
-    /// command, then one reading of what stayed. A Mac that cannot hold the lid reaches no
-    /// SMAppService. Input: the time. Output: what could not be removed, in words; none
-    /// when it was removed, nothing was there, or this Mac cannot hold the lid.
+    /// command, then one reading of what stayed. A bundle with no helper reaches no
+    /// SMAppService; a withheld or unread macOS version still removes a helper registered
+    /// before (rv-sec2 22:38 F1). Input: the time. Output: what could not be removed, in
+    /// words; none when it was removed, nothing was there, or the bundle has no helper.
     pub(super) fn uninstall(&mut self, now_ms: i64) -> Option<String> {
         assert!(now_ms > 0);
-        if self.platform.refusal().is_some() {
+        if !self.platform.bundled {
             return None;
         }
         self.run(LidCommand::Remove, now_ms);
@@ -486,7 +506,12 @@ impl LidLine {
             rule_on: true,
             wanted: false,
         };
-        let kept = match self.step(ask, now_ms) {
+        let refused = self.platform.refusal();
+        let support = self.step(ask, now_ms);
+        if refused.as_ref() == Some(&support) {
+            return None;
+        }
+        let kept = match support {
             LidSupport::NotTurnedOn | LidSupport::HelperMissing => return None,
             LidSupport::RemoveHelper { reason } | LidSupport::NotAvailable { reason } => reason,
             LidSupport::SleepNotRestored => UNINSTALL_SLEEP_KEPT.into(),
