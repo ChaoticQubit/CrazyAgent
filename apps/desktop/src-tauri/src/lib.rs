@@ -64,7 +64,7 @@ use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::quit_settings::QuitSettings;
 use crazyagent::roadmap_status::{Refresh, RoadmapStatus};
-use crazyagent::sandbox_settings::SandboxSettings;
+use crazyagent::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::cleanup::FinishedAgent;
@@ -3270,7 +3270,7 @@ fn desktop_set_theme<R: Runtime>(
 async fn desktop_sandbox_settings(
     webview: Webview,
     state: State<'_, NativeState>,
-) -> Result<SandboxSettings, BridgeError> {
+) -> Result<StoredSandboxSettings, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.sandbox_settings().await
 }
@@ -3280,12 +3280,13 @@ async fn desktop_set_sandbox_settings(
     webview: Webview,
     state: State<'_, NativeState>,
     settings: SandboxSettings,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state)
         .await?
-        .set_sandbox_settings(settings, generation)
+        .set_sandbox_settings(settings, version, generation)
         .await
 }
 

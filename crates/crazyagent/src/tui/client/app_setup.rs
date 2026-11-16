@@ -8,7 +8,7 @@ use crate::master_time_limit::MasterTimeSettings;
 use crate::projects_home::ProjectsHome;
 use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::QuitSettings;
-use crate::sandbox_settings::SandboxSettings;
+use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crate::setup::SetupStatus;
 
 /// One request from the setup page: setup status and runs, one tool installed alone, a refused
@@ -46,6 +46,7 @@ pub(in crate::tui) enum AppSetupJob {
     Sandbox,
     SetSandbox {
         settings: SandboxSettings,
+        version: u64,
         generation: u64,
     },
     Cleanup,
@@ -109,7 +110,7 @@ pub(in crate::tui) enum AppSetupEvent {
     FolderSize(String, Result<u64, String>),
     GitHub(Result<GitHubStatus, String>),
     GitHubSignedOut(Result<GitHubStatus, String>),
-    Sandbox(Result<SandboxSettings, String>),
+    Sandbox(Result<StoredSandboxSettings, String>),
     SandboxSet(Result<(), String>),
     Cleanup(Result<CleanupSettings, String>),
     CleanupSet(Result<(), String>),
@@ -277,9 +278,12 @@ impl NativeOwner {
             ),
             AppSetupJob::SetSandbox {
                 settings,
+                version,
                 generation,
             } => AppSetupEvent::SandboxSet(applied(
-                controller.set_sandbox_settings(settings, generation).await,
+                controller
+                    .set_sandbox_settings(settings, version, generation)
+                    .await,
                 "sandbox_outcome_unknown",
                 lost,
             )),
@@ -519,7 +523,11 @@ mod tests {
         else {
             panic!("sandbox settings required")
         };
-        assert_eq!(sandbox.linux_sockets, crate::sandbox::LinuxSockets::TcpOnly);
+        assert_eq!(
+            sandbox.settings.linux_sockets,
+            crate::sandbox::LinuxSockets::TcpOnly
+        );
+        let mut version = sandbox.version;
         for (generation, linux_sockets) in [
             (3, crate::sandbox::LinuxSockets::TcpPorts),
             (4, crate::sandbox::LinuxSockets::Refuse),
@@ -533,6 +541,7 @@ mod tests {
                 &mut native,
                 AppSetupJob::SetSandbox {
                     settings,
+                    version,
                     generation,
                 },
             )
@@ -542,7 +551,9 @@ mod tests {
             else {
                 panic!("sandbox settings required")
             };
-            assert_eq!(read, settings);
+            assert_eq!(read.settings, settings);
+            assert_eq!(read.version, version + 1, "each save moves the version on");
+            version = read.version;
         }
 
         let AppSetupEvent::Quit(Ok(quit)) = ask(&mut native, AppSetupJob::Quit).await else {

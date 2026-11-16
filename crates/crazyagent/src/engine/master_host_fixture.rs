@@ -4,7 +4,7 @@ use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUse, NativePro
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::sandbox::{
-    InstalledSandbox, LinuxSupervisor, ProjectSandbox, SandboxNetwork, SandboxRemote,
+    InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork, SandboxRemote,
 };
 use rustix::process::Pid;
 use std::fs;
@@ -225,7 +225,7 @@ impl MasterFixture {
         .allow_read(readable)
         .unwrap();
         let profile = self.root.path().join("master.sb");
-        InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On).unwrap()
+        InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off).unwrap()
     }
 }
 
