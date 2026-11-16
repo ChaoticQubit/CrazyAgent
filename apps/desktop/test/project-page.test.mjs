@@ -991,7 +991,7 @@ test("team tasks waiting for a pool ask the owner for one, with the engine's rea
   assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool"), teamTask(2, "needs_pool", { problem: "No account in this project's pool can run codex." })]),
     "2 team tasks wait: No account in this project's pool can run codex.");
   assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool")]), "A team task waits for an account in this project's pool.");
-  const gemini = "No account in this project's pool can run Row Harness. Accounts that fit it: Gemini API";
+  const gemini = "No account in this project's pool can run Row Harness. Accounts that fit it: a Gemini API key";
   assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool", { problem: gemini })]), `A team task waits: ${gemini}.`,
     "Task 21: the engine's sentence naming the accounts that fit reads word for word");
   assert.equal(research.teamWaitingLine([]), null);

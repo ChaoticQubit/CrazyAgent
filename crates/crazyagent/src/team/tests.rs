@@ -7704,7 +7704,7 @@ fn a_waiting_task_says_why_it_waits_in_one_text_for_every_client() {
         Some("Waits: codex is not installed")
     );
     let gemini = "Waits: No account in this project's pool can run Row Harness. \
-                  Accounts that fit it: Gemini API";
+                  Accounts that fit it: a Gemini API key";
     assert_eq!(
         wait_line(TaskStatus::Queued, Some(gemini)).as_deref(),
         Some(gemini),
