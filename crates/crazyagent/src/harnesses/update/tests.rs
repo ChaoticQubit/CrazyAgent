@@ -2458,14 +2458,14 @@ fn the_interpreter_walk_follows_the_copy_env_takes_and_judges_its_own_interprete
     assert!(checked(fixed(), &roots.places).is_ok());
 }
 
-/// rv-sec2 B11 r2 F1: `env` passes over a copy the owner cannot execute and runs the one
-/// behind it, so the walk does too. A first `node` of mode 611, which the resolver counts as
-/// executable, ahead of a `node` link into a project, is refused; with an owner `node` behind
-/// it instead, the command passes. A first copy the owner cannot execute that leads into a
-/// project is taken as it stands and refused, since an agent could make it executable
-/// before the run.
+/// rv-sec2 B11 r2 F1, rv-sec3 B18 F1: the resolver counts a file as runnable only when the
+/// run's user can execute it, as the system does, so a copy `env` passes over is never one the
+/// walk takes and passes. A first `node` of mode 611 is refused, with a `node` link into a
+/// project behind it or an owner `node`; so is a first `node` script whose absolute
+/// interpreter is mode 611, which `env` passes over too; and so is a first copy that is a link
+/// to a 611 file in a project. Each fails closed rather than judging the copy behind it.
 #[test]
-fn an_interpreter_copy_the_owner_cannot_execute_is_passed_over_as_env_does() {
+fn an_interpreter_copy_the_owner_cannot_execute_or_start_is_refused() {
     let machine = Machine::new();
     let roots = machine.roots();
     let at = machine.root.path();
@@ -2485,20 +2485,77 @@ fn an_interpreter_copy_the_owner_cannot_execute_is_passed_over_as_env_does() {
         search: vec![first.clone(), second.clone()],
         prefix: None,
     };
-    assert_eq!(
-        checked(fixed(), &roots.places).map(|_| ()),
-        Err(TOOL_UNSAFE)
-    );
+    let refused = |shape: &str| {
+        assert_eq!(
+            checked(fixed(), &roots.places).map(|_| ()),
+            Err(TOOL_UNSAFE),
+            "{shape}"
+        );
+    };
+    refused("611 first, project link behind");
     std::fs::remove_file(second.join("node")).unwrap();
     machine.program("home/second/node", 0o755);
-    assert!(checked(fixed(), &roots.places).is_ok());
+    refused("611 first, owner node behind");
+    let interpreter = machine.program("interp/sh", 0o611);
+    std::fs::remove_file(first.join("node")).unwrap();
+    executable(
+        &first.join("node"),
+        &format!("#!{}\n", interpreter.display()),
+    );
+    refused("755 script first whose interpreter is 611");
     let locked = machine.program("proj/tools/locked", 0o611);
     std::fs::remove_file(first.join("node")).unwrap();
     std::os::unix::fs::symlink(&locked, first.join("node")).unwrap();
-    assert_eq!(
-        checked(fixed(), &roots.places).map(|_| ()),
-        Err(TOOL_UNSAFE)
-    );
+    refused("first a link to a 611 file in a project");
+}
+
+/// rv-sec3 B18 F2: an update command's script runs only under an interpreter that runs the
+/// script it is given, judged by its real file: a shell with no word but `-e`, `-u` and `-x`
+/// flags, or Node with only flags that change no code it runs. A launcher such as lockf,
+/// ssh-agent, taskpolicy or xargs, perl at all (so `perl -S`), a shell given `-c` and Node
+/// given `-e` are refused; `#!/bin/sh -eu` and Node with `--no-warnings` pass.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_update_script_runs_only_under_a_shell_or_node_that_runs_it() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    let at = machine.root.path();
+    machine.program("brew/bin/node", 0o755);
+    let checked_line = |name: &str, line: &str| {
+        let script = at.join("home/tool").join(name);
+        executable(&script, line);
+        checked(
+            Fixed {
+                program: script,
+                args: vec!["--version"],
+                search: Vec::new(),
+                prefix: None,
+            },
+            &roots.places,
+        )
+        .map(|_| ())
+    };
+    let refused = [
+        ("lockf", "#!/usr/bin/lockf lock node\n"),
+        ("ssh-agent", "#!/usr/bin/ssh-agent node\n"),
+        ("taskpolicy", "#!/usr/sbin/taskpolicy node\n"),
+        ("xargs", "#!/usr/bin/xargs node\n"),
+        ("perl", "#!/usr/bin/perl -S node\n"),
+        ("sh-c", "#!/bin/sh -c node\n"),
+        ("sh-ec", "#!/bin/sh -ec node\n"),
+        ("sh-file", "#!/bin/sh other\n"),
+        ("node-e", "#!/usr/bin/env -S node -e 1\n"),
+    ];
+    for (name, line) in refused {
+        assert_eq!(checked_line(name, line), Err(TOOL_UNSAFE), "{name}");
+    }
+    let passed = [
+        ("sh-eu", "#!/bin/sh -eu\n"),
+        ("node-quiet", "#!/usr/bin/env -S node --no-warnings\n"),
+    ];
+    for (name, line) in passed {
+        assert_eq!(checked_line(name, line), Ok(()), "{name}");
+    }
 }
 
 /// rv-sec2 F3 (RV-DS241-203's own chain): an `env` copy in the search folder whose middle
