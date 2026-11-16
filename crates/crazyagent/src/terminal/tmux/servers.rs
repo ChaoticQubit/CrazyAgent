@@ -5,7 +5,7 @@ use super::super::{
 use super::super::{keep_servers_deadline, teammates_socket};
 use super::{ServerPin, Tmux, harness_socket, renew_socket, user};
 use crate::harnesses::interactive::InteractiveCommand;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -82,9 +82,28 @@ fn keeper_ended(kept: &Mutex<BTreeMap<AgentId, Child>>, lead: &AgentId) -> Optio
     let Ok(mut keepers) = kept.lock() else {
         return Some(false);
     };
-    keepers
-        .get_mut(lead)
-        .map(|keeper| matches!(keeper.try_wait(), Ok(Some(status)) if status.success()))
+    keepers.get_mut(lead).map(ended_cleanly)
+}
+
+/// The leads whose keeper an engine holds for one kind of their servers and has not seen
+/// exit cleanly, or none when the keepers cannot be read. Takes those keepers. Returns the
+/// leads.
+fn unproven_keepers(kept: &Mutex<BTreeMap<AgentId, Child>>) -> Option<BTreeSet<AgentId>> {
+    let mut keepers = kept.lock().ok()?;
+    Some(
+        keepers
+            .iter_mut()
+            .filter(|(_, keeper)| !ended_cleanly(keeper))
+            .map(|(lead, _)| lead.clone())
+            .collect(),
+    )
+}
+
+/// Whether a keeper exited cleanly, the exit `end_keeper` reads as its server's end
+/// confirmed. Takes the keeper. Returns false while it runs, after any other exit, or when
+/// its state cannot be read.
+fn ended_cleanly(keeper: &mut Child) -> bool {
+    matches!(keeper.try_wait(), Ok(Some(status)) if status.success())
 }
 
 /// The installed Seatbelt profile of a team agent, which its own server and every engine
@@ -418,18 +437,33 @@ impl Servers {
         self.server(agent, &socket).map(Some)
     }
 
-    /// The client host for one lead's own server, opened once and kept while it listens.
-    /// Takes the lead and its socket. Returns the host, or a refusal when the lead has no
-    /// installed profile or too many lead servers are kept.
+    /// The client host for one lead's own server, opened once and kept while it listens or
+    /// while this engine holds that server's keeper and has not seen it exit cleanly, so
+    /// [`Self::own`] still reads a socket unlinked under it as no proof of an end. The keepers
+    /// are read before the hosts are locked, so a lead's start, which holds the keepers, never
+    /// holds up another agent waiting on the hosts; when they cannot be read every kept host
+    /// stays. Takes the lead and its socket. Returns the host, or a refusal when the lead has
+    /// no installed profile or too many lead servers are kept.
     fn server(&self, lead: &AgentId, socket: &Path) -> Result<Arc<Tmux>, HostError> {
-        let mut leads = self
-            .leads
-            .lock()
-            .map_err(|_| failure("terminal_unavailable"))?;
+        let kept = || {
+            self.leads
+                .lock()
+                .map_err(|_| failure("terminal_unavailable"))
+        };
+        if let Some(found) = kept()?.get(lead) {
+            return Ok(found.clone());
+        }
+        let unproven = unproven_keepers(&self.keepers);
+        let mut leads = kept()?;
         if let Some(found) = leads.get(lead) {
             return Ok(found.clone());
         }
-        leads.retain(|_, server| listening(&server.socket()));
+        leads.retain(|known, server| {
+            listening(&server.socket())
+                || unproven
+                    .as_ref()
+                    .is_none_or(|unproven| unproven.contains(known))
+        });
         if leads.len() >= LEADS_KEPT_MAX {
             return Err(failure("terminal_unavailable"));
         }
