@@ -289,12 +289,16 @@ fn a_withheld_or_unreadable_macos_version_turns_the_lid_hold_off() {
         withheld: &[15],
         ..mac(15)
     };
+    let words = "Lid-closed hold is not available on macOS 15";
     let mut fifteen = Rig::new(withheld, Some(Status::Enabled));
     assert_eq!(
         fifteen.line.step(WANTED, NOW_MS),
-        not_available("Lid-closed hold is not available on macOS 15")
+        remove_helper(words),
+        "a helper registered before the withhold is offered for removal (rv-sec2 22:38 F1)"
     );
-    assert!(fifteen.calls().is_empty());
+    assert!(fifteen.calls().is_empty(), "no hold and no read where the lid is withheld");
+    let mut never = Rig::new(withheld, Some(Status::NotRegistered));
+    assert_eq!(never.line.step(WANTED, NOW_MS), not_available(words));
 
     let others = LidPlatform {
         withheld: &[15],
@@ -310,8 +314,8 @@ fn a_withheld_or_unreadable_macos_version_turns_the_lid_hold_off() {
     let mut unknown = Rig::new(unread, Some(Status::Enabled));
     assert_eq!(
         unknown.line.step(WANTED, NOW_MS),
-        not_available(VERSION_UNREAD),
-        "a version that cannot be read fails closed"
+        remove_helper(VERSION_UNREAD),
+        "a version that cannot be read fails closed for the hold and stays open for Remove"
     );
     assert!(unknown.calls().is_empty());
 }
@@ -798,22 +802,61 @@ fn a_failed_turn_on_says_why_until_the_status_changes() {
     assert_eq!(rig.line.step(RESTING, later_ms), LidSupport::NeedsApproval);
 }
 
+/// The platforms where the lid is never held although the helper is in the bundle: a
+/// withheld macOS version and one that cannot be read.
+fn held_back() -> [(LidPlatform, &'static str); 2] {
+    let withheld = LidPlatform {
+        withheld: &[15],
+        ..mac(15)
+    };
+    let unread = LidPlatform {
+        macos: None,
+        ..mac(15)
+    };
+    [
+        (withheld, "Lid-closed hold is not available on macOS 15"),
+        (unread, VERSION_UNREAD),
+    ]
+}
+
 #[test]
-fn a_lid_command_runs_only_behind_the_platform_gate() {
-    for platform in [mac(12), LidPlatform { macos: None, ..mac(15) }] {
-        let mut rig = Rig::new(platform, Some(Status::NotRegistered));
-        rig.line.run(LidCommand::TurnOn, NOW_MS);
-        rig.line.run(LidCommand::Remove, NOW_MS + SECOND_MS);
-        assert!(rig.seen().is_empty(), "{platform:?}");
-        assert_eq!(*rig.status_reads.lock().unwrap(), 0, "{platform:?}");
-    }
+fn turn_on_runs_only_behind_the_platform_gate_and_remove_needs_only_the_bundle() {
     let unbundled = LidPlatform {
         bundled: false,
         ..mac(15)
     };
-    let mut rig = Rig::new(unbundled, Some(Status::NotRegistered));
-    rig.line.run(LidCommand::TurnOn, NOW_MS);
-    assert!(rig.seen().is_empty(), "no helper in the bundle, nothing to register");
+    let [(withheld, _), (unread, _)] = held_back();
+    for platform in [mac(12), unread, withheld, unbundled] {
+        let mut rig = Rig::new(platform, Some(Status::NotRegistered));
+        rig.line.run(LidCommand::TurnOn, NOW_MS);
+        assert!(rig.seen().is_empty(), "nothing is registered: {platform:?}");
+        assert_eq!(*rig.status_reads.lock().unwrap(), 0, "{platform:?}");
+    }
+    let mut rig = Rig::new(unbundled, Some(Status::Enabled));
+    rig.line.run(LidCommand::Remove, NOW_MS);
+    assert!(rig.seen().is_empty(), "no helper in the bundle, nothing to remove");
+    assert_eq!(*rig.status_reads.lock().unwrap(), 0);
+}
+
+#[test]
+fn remove_lid_helper_on_a_withheld_or_unread_version_sends_forget_then_unregister() {
+    for (platform, words) in held_back() {
+        let mut rig = Rig::new(platform, Some(Status::Enabled));
+        assert_eq!(rig.line.step(RESTING, NOW_MS), remove_helper(words), "{platform:?}");
+        rig.line.run(LidCommand::Remove, NOW_MS + SECOND_MS);
+        assert_eq!(
+            rig.seen(),
+            [Seen::Helper(Request::Forget), Seen::Unregister],
+            "Remove always works (rv-sec2 22:38 F1): {platform:?}"
+        );
+        let removed_ms = NOW_MS + 2 * SECOND_MS;
+        assert_eq!(rig.line.step(RESTING, removed_ms), not_available(words));
+
+        let mut waiting = Rig::new(platform, Some(Status::RequiresApproval));
+        assert_eq!(waiting.line.step(RESTING, NOW_MS), remove_helper(words));
+        waiting.line.run(LidCommand::Remove, NOW_MS + SECOND_MS);
+        assert_eq!(waiting.seen(), [Seen::Unregister], "{platform:?}");
+    }
 }
 
 #[test]
@@ -838,16 +881,31 @@ fn a_command_is_followed_by_one_read_of_the_helper() {
 }
 
 #[test]
-fn uninstall_on_a_mac_that_cannot_hold_the_lid_reaches_no_smappservice() {
+fn uninstall_from_a_bundle_with_no_helper_reaches_no_smappservice() {
     let unbundled = LidPlatform {
         bundled: false,
         ..mac(15)
     };
-    for platform in [unbundled, mac(12), LidPlatform { macos: None, ..mac(15) }] {
+    let mut rig = Rig::new(unbundled, Some(Status::Enabled));
+    assert_eq!(rig.line.uninstall(NOW_MS), None);
+    assert_eq!(*rig.status_reads.lock().unwrap(), 0);
+    assert!(rig.seen().is_empty());
+}
+
+#[test]
+fn uninstall_on_a_withheld_or_unread_version_still_removes_the_helper() {
+    for (platform, _) in held_back() {
         let mut rig = Rig::new(platform, Some(Status::Enabled));
         assert_eq!(rig.line.uninstall(NOW_MS), None, "{platform:?}");
-        assert_eq!(*rig.status_reads.lock().unwrap(), 0, "{platform:?}");
-        assert!(rig.seen().is_empty(), "{platform:?}");
+        assert_eq!(
+            rig.seen(),
+            [Seen::Helper(Request::Forget), Seen::Unregister],
+            "{platform:?}"
+        );
+        let mut unfinished = Rig::new(platform, Some(Status::Enabled));
+        unfinished.refuse("Operation not permitted");
+        let words = format!("{REMOVE_UNFINISHED}Operation not permitted");
+        assert_eq!(unfinished.line.uninstall(NOW_MS), Some(words), "{platform:?}");
     }
 }
 
