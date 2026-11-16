@@ -14,6 +14,28 @@ const PATH_BYTES_MAX: usize = 1024;
 const SCRIPT_HEAD_BYTES_MAX: usize = 256;
 const SHEBANG_WORDS_MAX: usize = 8;
 const ENV: &str = "/usr/bin/env";
+const NAME_LAUNCHERS: [&str; 20] = [
+    "env",
+    "nice",
+    "arch",
+    "nohup",
+    "time",
+    "caffeinate",
+    "xcrun",
+    "script",
+    "sandbox-exec",
+    "timeout",
+    "stdbuf",
+    "setsid",
+    "sudo",
+    "doas",
+    "busybox",
+    "genv",
+    "gnice",
+    "gnohup",
+    "gtimeout",
+    "gstdbuf",
+];
 pub(crate) const INTERPRETER_DEPTH_MAX: usize = 2;
 const VERSION_ENTRIES_MAX: usize = 64;
 const VERSIONS_PER_MANAGER_MAX: usize = 4;
@@ -413,6 +435,28 @@ impl Places {
             && crate::service::changeable_past_sticky(folder).is_none()
             && !(self.temp_refused && in_temp_of(folder, &self.temps))
             && self.link_hops_kept(folder)
+    }
+
+    /// Whether a search for a program by name, as `env` makes with `execvp`, passes over this
+    /// entry for good: a file the run's user cannot execute, which `execvp` skips on EACCES,
+    /// in a place no agent or other user can change before the run ([`check_place`]), so its
+    /// mode stays as read (rv-sec2 B11 r2 F1). A dangling or looping link, a folder, a file
+    /// with no execute bit at all, or one a changeable place leads to is not, so the caller
+    /// takes it as it stands. Input: the entry. Output: the answer.
+    #[cfg(unix)]
+    pub(crate) fn passed_over_by_env(&self, entry: &Path) -> bool {
+        assert!(entry.is_absolute());
+        std::fs::metadata(entry).is_ok_and(|metadata| metadata.is_file())
+            && rustix::fs::access(entry, rustix::fs::Access::EXEC_OK)
+                == Err(rustix::io::Errno::ACCESS)
+            && check_place(self, entry) == Some(Ok(()))
+    }
+
+    /// Passes over no entry where the platform runs no `#!` search. Input unused.
+    /// Output: false.
+    #[cfg(not(unix))]
+    pub(crate) fn passed_over_by_env(&self, _entry: &Path) -> bool {
+        false
     }
 
     /// Whether a path run as written meets only links no one else can move: every link and
@@ -1068,7 +1112,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         },
         _ => needs(&interpreter_name),
     })?;
-    if interpreter.program == Path::new(ENV) {
+    if launches_by_name(&interpreter.program) {
         return Err(refused(program.as_path(), Refusal::FirstLine));
     }
     Ok(Resolved {
@@ -1125,6 +1169,18 @@ fn named_interpreter(
     }
 }
 
+/// Whether an interpreter's real file is a launcher that starts the program it is given
+/// looked up by name in its own PATH, such as `env`, `nice`, `arch` or `nohup`, so a first
+/// line naming it starts a copy the resolver never judged (rv-sec2 B11 r2 F2). Matched on the
+/// file name, so a link or a multi-call `busybox` copy counts too. Input: the real file.
+/// Output: the answer.
+fn launches_by_name(program: &Path) -> bool {
+    program
+        .file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| NAME_LAUNCHERS.contains(&name))
+}
+
 /// A script's first line: the absolute interpreter, or the program name `env` looks up,
 /// and the arguments before the script.
 struct Shebang {
@@ -1155,21 +1211,20 @@ struct Unreadable;
 /// [`SCRIPT_HEAD_BYTES_MAX`] bytes, ended by a newline or a NUL, its words split on spaces
 /// and tabs: an absolute interpreter with its words, or `/usr/bin/env`, after one `-S` at
 /// most, with the program it names. An interpreter that is `env` anywhere else is refused
-/// here, and one whose real file is `/usr/bin/env` by the resolver ([`entry_at`]).
-/// Input: the real file. Output: the line, none for a file that is not a script, or
-/// [`Unreadable`] for any other first line.
+/// here, and one whose real file launches by name by the resolver ([`entry_at`]). A file
+/// it cannot read, which the system still runs, and a line holding `#`, where the system
+/// ends it, are [`Unreadable`] (rv-sec2 B11 r2 F3, F4). Input: the real file. Output: the
+/// line, none for a file that is not a script, or [`Unreadable`] for any other first line.
 fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     use std::io::Read;
     let mut head = Vec::with_capacity(SCRIPT_HEAD_BYTES_MAX);
-    let Ok(opened) = std::fs::File::open(file) else {
-        return Ok(None);
-    };
+    let opened = std::fs::File::open(file).map_err(|_| Unreadable)?;
     if opened
         .take(SCRIPT_HEAD_BYTES_MAX as u64)
         .read_to_end(&mut head)
         .is_err()
     {
-        return Ok(None);
+        return Err(Unreadable);
     }
     assert!(head.len() <= SCRIPT_HEAD_BYTES_MAX);
     let Some(line) = head.strip_prefix(b"#!") else {
@@ -1180,7 +1235,10 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
         return Err(Unreadable);
     }
     let line = std::str::from_utf8(&line[..end.unwrap_or(line.len())]).map_err(|_| Unreadable)?;
-    if line.chars().any(|c| c.is_control() && c != '\t') {
+    if line
+        .chars()
+        .any(|c| (c.is_control() && c != '\t') || c == '#')
+    {
         return Err(Unreadable);
     }
     let words: Vec<&str> = line
@@ -1210,7 +1268,7 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     let (program, arguments) = rest.split_first().ok_or(Unreadable)?;
     let plain = !program.starts_with('-')
         && !program.contains('=')
-        && !(split && program.contains(['$', '\\', '"', '\'', '#']));
+        && !(split && program.contains(['$', '\\', '"', '\'']));
     if !plain {
         return Err(Unreadable);
     }
@@ -1354,7 +1412,7 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
             "{tool} can't start: {file} is not used because it is in a temp folder or links to one, which agents or other users can change. Install it outside temp folders, then try again."
         ),
         Refusal::FirstLine => format!(
-            "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, or a line that is too long or unreadable). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
+            "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, a launcher such as nice or nohup that looks a program up by name, a # in the line, a line that is too long, or a file CrazyAgent can't read). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
         ),
     }
 }

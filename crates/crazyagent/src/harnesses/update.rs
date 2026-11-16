@@ -820,7 +820,8 @@ fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'stati
 
 /// Passes a command only when the tool resolver would run its program and, at each level
 /// whose script asks `env` for an interpreter by name, the copy `env` takes: the first one
-/// the command's own search folders hold, since the child's PATH looks there first. That
+/// the command's own search folders hold past a kept file the run's user cannot execute
+/// ([`taken_copy`]), since the child's PATH looks there first. That
 /// copy must resolve, a link whose target is not there yet included, and the walk goes on
 /// from it; a copy behind it never runs. Each of those folders that exists must be one a
 /// lookup would trust ([`crate::tools::Places::kept_for_children`]), so no copy can appear
@@ -856,9 +857,11 @@ fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'sta
 
 /// The copy of an interpreter named by name that `env` takes in a command's run: the first
 /// entry of that name in the command's search folders, a dangling link included, since an
-/// agent could fill its target before the run. Inputs: the command, the interpreter the
-/// resolver found and the places. Output: that copy resolved, none when no search folder
-/// holds the name, or `TOOL_UNSAFE` when the first copy does not resolve.
+/// agent could fill its target before the run, past only a kept file the run's user cannot
+/// execute, which `env` passes over too ([`crate::tools::Places::passed_over_by_env`]).
+/// Inputs: the command, the interpreter the resolver found and the places. Output: that
+/// copy resolved, none when no search folder holds the name, or `TOOL_UNSAFE` when the
+/// copy taken does not resolve.
 fn taken_copy(
     fixed: &Fixed,
     found: &Path,
@@ -869,7 +872,7 @@ fn taken_copy(
         .search
         .iter()
         .map(|folder| folder.join(name))
-        .find(|copy| std::fs::symlink_metadata(copy).is_ok())
+        .find(|copy| std::fs::symlink_metadata(copy).is_ok() && !places.passed_over_by_env(copy))
     else {
         return Ok(None);
     };
