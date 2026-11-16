@@ -203,12 +203,23 @@ fn run_server(bench: &Bench, launch: &GatewayLaunch, requests: &[Value]) -> (Vec
     command
         .arg(shim::SERVER_COMMAND)
         .arg(&launch.folder)
-        .env_clear()
+        .env_clear();
+    assert_eq!(command.get_args().count(), 2);
+    assert_eq!(command.get_envs().count(), 0);
+    run_command(bench, command, requests)
+}
+
+/// Starts `command` as a connector server, feeds it the requests and answers as the engine
+/// until it ends. Output: the replies and the exact bytes it wrote.
+fn run_command(
+    bench: &Bench,
+    mut command: std::process::Command,
+    requests: &[Value],
+) -> (Vec<Value>, Vec<u8>) {
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    assert_eq!(command.get_args().count(), 2);
-    assert_eq!(command.get_envs().count(), 0);
     let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
     let mut input = child.stdin.take().unwrap();
     input.write_all(&lines(requests)).unwrap();
@@ -227,6 +238,25 @@ fn run_server(bench: &Bench, launch: &GatewayLaunch, requests: &[Value]) -> (Vec
     }
     let bytes = reader.join().unwrap();
     (parsed(&bytes), bytes)
+}
+
+/// An agent sandbox whose project, home and temp folders sit beside the engine root, with
+/// the engine root's secrets guarded, as a team launch builds it before its grants.
+fn agent_sandbox(bench: &Bench) -> crate::sandbox::ProjectSandbox {
+    let agent = bench.case.base.join("agent");
+    let (project, home, tmp) = (agent.join("project"), agent.join("home"), agent.join("tmp"));
+    for folder in [&project, &home, &tmp] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    crate::sandbox::ProjectSandbox::new(
+        &project,
+        &home,
+        &tmp,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .guard_engine(&bench.case.root)
+    .unwrap()
 }
 
 fn tools_of(bench: &Bench, launch: &GatewayLaunch) -> Vec<Value> {
@@ -1368,6 +1398,154 @@ fn the_engines_gateway_thread_answers_a_launchs_call_and_stops_when_told() {
         clock.elapsed() < 10 * TICK + Duration::from_secs(1),
         "the loop ends within a round of being told"
     );
+}
+
+#[test]
+fn an_agent_home_has_no_connector_key_after_launch_and_the_call_still_reaches_the_vendor() {
+    use crate::connectors::launch::{SERVER_NAME, entry};
+    use std::os::unix::fs::DirBuilderExt;
+    let vendor = serving(vec![read_tool("list_issues")]);
+    let (bench, launch) = board_bench(&vendor);
+    let context =
+        crate::launch_context::AgentContext::for_tests(crate::plugins::LaunchPlugins::default())
+            .with_connectors(entry(&engine_binary(), &launch).unwrap())
+            .unwrap();
+    let home = bench.case.base.join("codex-home");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&home)
+        .unwrap();
+    let installed = context.install("codex", &home, true).unwrap();
+    let config: toml::Table = std::fs::read_to_string(home.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let server = config["mcp_servers"][SERVER_NAME].as_table().unwrap();
+    let mut command = std::process::Command::new(server["command"].as_str().unwrap());
+    command
+        .args(
+            server["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|argument| argument.as_str().unwrap()),
+        )
+        .env_clear();
+    let (replies, _) = run_command(
+        &bench,
+        command,
+        &[request(
+            1,
+            "tools/call",
+            json!({"name": "board__list_issues", "arguments": {}}),
+        )],
+    );
+    let (text, error) = shown(&replies[0]);
+    assert!(!error, "{text}");
+    assert!(text.ends_with("ran list_issues"), "{text}");
+    let bearer = format!("Bearer {KEY}");
+    let calls = vendor_calls(&vendor);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].header("authorization"), Some(bearer.as_str()));
+    let mut files = Vec::new();
+    files_under(&home, &mut files);
+    assert!(!files.is_empty());
+    for file in &files {
+        let text = String::from_utf8_lossy(&std::fs::read(file).unwrap()).into_owned();
+        assert!(!text.contains(KEY), "{} holds the key", file.display());
+    }
+    drop(installed);
+}
+
+#[test]
+fn an_agent_sandbox_grants_its_own_launch_folder_and_never_the_launches_folder() {
+    let vendor = serving(vec![read_tool("list_issues")]);
+    let (bench, launch) = board_bench(&vendor);
+    let other = prepare(
+        &bench.case.db,
+        &bench.case.root,
+        PROJECT,
+        Role::Agent { tools_on: true },
+        "Agent 2",
+    )
+    .unwrap()
+    .unwrap();
+    let root = &bench.case.root;
+    let launches = root.join(LAUNCHES_FOLDER);
+    let granted = agent_sandbox(&bench)
+        .allow_connector_launch(root, &launch.folder)
+        .unwrap();
+    assert!(
+        granted.writable_roots().any(|held| *held == launch.folder),
+        "the agent reaches its own launch folder"
+    );
+    assert!(
+        granted
+            .writable_roots()
+            .all(|held| !launches.starts_with(held) && !other.folder.starts_with(held)),
+        "no root holds the launches folder or another launch"
+    );
+    assert!(
+        granted.allow_connector_launch(root, &other.folder).is_err(),
+        "one launch folder per sandbox"
+    );
+    let elsewhere = bench.case.base.join("x").join(LAUNCHES_FOLDER).join("id");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    for refused in [launches.clone(), root.clone(), elsewhere] {
+        assert!(
+            agent_sandbox(&bench)
+                .allow_connector_launch(root, &refused)
+                .is_err(),
+            "{}",
+            refused.display()
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_shim_runs_inside_the_agent_sandbox_and_reaches_only_its_own_launch() {
+    let vendor = serving(vec![read_tool("list_issues")]);
+    let (bench, launch) = board_bench(&vendor);
+    let other = prepare(
+        &bench.case.db,
+        &bench.case.root,
+        PROJECT,
+        Role::Agent { tools_on: true },
+        "Agent 2",
+    )
+    .unwrap()
+    .unwrap();
+    let engine = engine_binary();
+    let sandbox = agent_sandbox(&bench)
+        .allow_engine(&engine)
+        .unwrap()
+        .allow_connector_launch(&bench.case.root, &launch.folder)
+        .unwrap();
+    let profile = bench.case.base.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    let call = [request(
+        1,
+        "tools/call",
+        json!({"name": "board__list_issues", "arguments": {}}),
+    )];
+    let mut command = sandbox.command(&profile, &engine);
+    command.arg(shim::SERVER_COMMAND).arg(&launch.folder);
+    let (replies, _) = run_command(&bench, command, &call);
+    assert_eq!(replies.len(), 1);
+    let (text, error) = shown(&replies[0]);
+    assert!(!error, "{text}");
+    assert!(text.ends_with("ran list_issues"), "{text}");
+    let mut command = sandbox.command(&profile, &engine);
+    command.arg(shim::SERVER_COMMAND).arg(&other.folder);
+    let (replies, _) = run_command(&bench, command, &call);
+    assert!(
+        replies
+            .iter()
+            .all(|reply| reply["result"]["isError"].as_bool() != Some(false)),
+        "another launch's folder is closed to the agent: {replies:?}"
+    );
+    assert_eq!(vendor_calls(&vendor).len(), 1);
 }
 
 #[test]

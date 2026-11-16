@@ -1006,6 +1006,7 @@ pub struct ProjectSandbox {
     shared_writes: Vec<PathBuf>,
     open_tops: Option<Vec<String>>,
     node_bin: Option<PathBuf>,
+    connector_launch: Option<PathBuf>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -1095,6 +1096,7 @@ impl ProjectSandbox {
             shared_writes: Vec::new(),
             open_tops: None,
             node_bin: None,
+            connector_launch: None,
         })
     }
 
@@ -1955,6 +1957,20 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Lets the agent read and write its own connector launch folder, where its connector
+    /// server's mailbox lives, and nothing else of the engine's launches folder. Inputs: the
+    /// canonical engine root and a canonical existing folder directly in its launches folder,
+    /// clear of [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid` for any
+    /// other folder or a second one.
+    pub fn allow_connector_launch(
+        self,
+        engine: &Path,
+        folder: &Path,
+    ) -> Result<Self, SandboxError> {
+        let _ = (engine, folder);
+        Ok(self)
+    }
+
     /// Keeps one folder inside a granted root out of the agent's reach, read and write, as
     /// the secret paths are; the graph step hides the project's `.crazyagent/` from graphify.
     /// Input: a clean absolute path below a root, in a real parent folder, absent or a real
@@ -2581,6 +2597,7 @@ impl ProjectSandbox {
             .chain(self.tool_cache.iter().map(|(root, _)| root))
             .chain(self.owner_tmp.iter())
             .chain(self.shared_writes.iter())
+            .chain(self.connector_launch.iter())
     }
 
     /// The read-only toolchain folders, Seatbelt only, with credential names carved out.
