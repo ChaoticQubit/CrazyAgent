@@ -833,13 +833,14 @@ pub(crate) fn backend_member(backend: MasterBackend, connection: &ModelConnectio
     }
 }
 
-/// Tells whether a listed master harness runs a master on a connection: an account the
-/// harness fits. Inputs: the harness and the connection. Output: the answer.
+/// Tells whether a listed master harness runs a master on a connection: an endpoint account
+/// the harness fits, never a sign-in, even a ChatGPT one it takes as an agent (T22), since a
+/// master's hand-over takes none. Inputs: the harness and the connection. Output: the answer.
 fn listed_member(
     harness: &crate::harnesses::registry::Harness,
     connection: &ModelConnection,
 ) -> bool {
-    harness.account_fits(connection)
+    matches!(connection.endpoint, ModelEndpoint::Http { .. }) && harness.account_fits(connection)
 }
 
 #[cfg(test)]
