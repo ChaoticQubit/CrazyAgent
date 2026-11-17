@@ -204,6 +204,7 @@ jobs:
           Invoke-AsUser 'update' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD @('harnesses::update::', '--test-threads', '2')
           Invoke-AsUser 'setup' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD @('setup::windows::', 'setup::launch::', '--test-threads', '2')
           Invoke-AsUser 'plugins' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD @('plugins::windows_tests', '--test-threads', '2')
+          Invoke-AsUser 'check' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD @('engine::owner::transport::plugins::tests::a_windows_command_server_check', '--test-threads', '1')
           Invoke-AsUser 'context' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD @('context_mode::windows_tests', '--test-threads', '1')
           $rows = $script:codes.GetEnumerator() | ForEach-Object { "| $($_.Key) | $($_.Value) |" }
           @('| run as a standard local user | exit |', '| --- | --- |') + $rows | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
