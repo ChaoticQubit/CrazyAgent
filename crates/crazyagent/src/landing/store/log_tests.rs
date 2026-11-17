@@ -1,8 +1,8 @@
 use super::*;
 use crate::landing_log::{
     AGENT_BRANCH_FORGOTTEN, AGENT_BRANCH_SET, BASE_SET, CHANGE_SET_NUMBERED, OWNER_EDIT_KEPT,
-    OWNER_EDITS_DROPPED, OWNER_EDITS_FORGOTTEN, OWNER_EDITS_SETTLED,
-    WORKTREE_OWNER_EDITS_FORGOTTEN, rebuild, seed,
+    OWNER_EDITS_DROPPED, OWNER_EDITS_FORGOTTEN, OWNER_EDITS_SETTLED, PUBLISH_PROMPT_NEVER,
+    PUBLISH_PROMPT_SNOOZED, WORKTREE_OWNER_EDITS_FORGOTTEN, rebuild, seed,
 };
 use crate::state_log::replay::rows;
 use serde_json::json;
@@ -244,4 +244,30 @@ fn a_numbering_pass_logs_one_event_per_set_at_one_revision_and_rebuilds() {
     assert_eq!(live.len(), 2);
     rebuild(&db).unwrap();
     assert_eq!(rows(&db, "landing_change_set_numbers").unwrap(), live);
+}
+
+/// V250-L9: each answer to a project's publish prompt appends one event with a closed body
+/// (Not now with the time it asks again, Don't ask again), and the prompt table rebuilt from
+/// the log equals the live row.
+#[cfg(unix)]
+#[test]
+fn publish_prompt_answers_are_logged_and_rebuild_to_the_live_row() {
+    use crate::github::{GitHubPromptAnswer, SNOOZE_MS, keep_prompt_answer};
+    let (root, db) = store();
+    let project = ProjectId::new("project-1").unwrap();
+    keep_prompt_answer(root.path(), &project, GitHubPromptAnswer::NotNow);
+    keep_prompt_answer(root.path(), &project, GitHubPromptAnswer::Never);
+    let snoozed = json!({"project": "project-1", "until_ms": SNOOZE_MS});
+    let expected = vec![
+        (PUBLISH_PROMPT_SNOOZED.to_owned(), snoozed),
+        (
+            PUBLISH_PROMPT_NEVER.to_owned(),
+            json!({"project": "project-1"}),
+        ),
+    ];
+    assert_eq!(events(&db), expected);
+    let live = rows(&db, "github_publish_prompt").unwrap();
+    assert_eq!(live.len(), 1, "one row per project");
+    rebuild(&db).unwrap();
+    assert_eq!(rows(&db, "github_publish_prompt").unwrap(), live);
 }
