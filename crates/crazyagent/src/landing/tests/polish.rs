@@ -490,3 +490,71 @@ fn an_untracked_owner_file_where_the_set_adds_one_is_never_committed() {
         panic!("the accept conflicted");
     };
 }
+
+/// Shapes what engine git on this thread reports as its version for the rest of a row.
+/// Input: the line `git version` prints, or None for the real git's own.
+fn shape_git(printed: Option<&str>) {
+    git::VERSION_PRINTED.with(|shaped| *shaped.borrow_mut() = printed.map(str::to_owned));
+}
+
+/// W-GIT-FLOOR: on the git 2.39 of Xcode 16 and its Command Line Tools, a turn still records
+/// its change set and the list and diff still read it, while Accept, which needs
+/// `merge-tree --merge-base` and `check-attr --source`, refuses with `changes_git_old` and
+/// leaves the checkout as it was. The merge check reads the version kept at open, running
+/// no git (#260 F1). A git older than 2.39 refuses at the first step, a version git does
+/// not name stays `changes_git_unsupported`, and 2.40 lands.
+#[test]
+fn on_git_2_39_a_turn_records_and_the_list_and_diff_read_it_while_accept_refuses_as_too_old() {
+    let case = Case::new();
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case
+        .turn(TurnOutcome::Succeeded)
+        .expect("a turn on git 2.39 records its change set");
+    let view = case.view(&id);
+    assert_eq!((view.files, view.added), (1, 1));
+    let page = diff(&case.db, &id, &view.head, 0).unwrap();
+    assert!(page.text.contains("+four\n"), "{}", page.text);
+    let before = case.checkout();
+    assert_eq!(refused(case.accept(&id)), "changes_git_old");
+    assert_eq!(
+        case.checkout(),
+        before,
+        "a refused Accept changed the checkout"
+    );
+    let owner = git::Repo::open(&case.repo, &case.repo.join(".git"), None).unwrap();
+    assert!(owner.old_git());
+    shape_git(Some("git version 2.40.0"));
+    let runs = git::GIT_RUNS.with(std::cell::Cell::get);
+    assert_eq!(refused(owner.check_merge_version()), "changes_git_old");
+    assert_eq!(git::GIT_RUNS.with(std::cell::Cell::get), runs);
+
+    shape_git(Some("git version 2.38.1"));
+    case.edit("README", "one\ntwo\nthree\nfour\nfive\n");
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-2".into(),
+        prompt_line: "Add the fifth line".into(),
+    };
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &turn)),
+        "changes_git_old"
+    );
+    shape_git(Some("git version unknown"));
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &turn)),
+        "changes_git_unsupported"
+    );
+
+    shape_git(Some("git version 2.40.0"));
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\n"
+    );
+    shape_git(None);
+}
