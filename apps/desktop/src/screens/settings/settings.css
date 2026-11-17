@@ -1,7 +1,7 @@
 .settings-split { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 24px; }
 .settings-nav { position: sticky; top: 20px; flex: 0 0 200px; width: 200px; display: flex; flex-direction: column; gap: 1px; }
 .settings-nav [role="group"] { display: flex; flex-direction: column; gap: 1px; }
-.settings-nav-title { margin: 0; padding: 10px 10px 4px; font-family: var(--mono); font-size: var(--font-secondary); line-height: var(--leading-secondary); color: var(--text-3); }
+.settings-nav-title { margin: 0; padding: 10px 10px 4px; font-family: var(--mono); font-size: var(--font-secondary); line-height: var(--leading-secondary); font-weight: var(--weight-prose); color: var(--text-3); }
 .settings-nav [role="group"]:first-child .settings-nav-title { padding-top: 0; }
 .settings-nav-item { display: flex; align-items: center; min-height: 30px; padding: 0 10px; border-radius: var(--radius-control); color: var(--text-2); font-size: var(--font-body); font-weight: var(--weight-ui); text-decoration: none; }
 .settings-nav-item:hover { background: var(--surface-2); color: var(--text); }
@@ -26,7 +26,7 @@
 .set-row.wide > .set-line-ctl > .field { width: auto; }
 .set-line-ctl > fieldset { margin: 0; padding: 0; border: 0; }
 .set-body .tg-terminal-note { padding: 0; }
-#process-app { font-family: var(--mono); font-size: var(--font-body); line-height: var(--leading-body); }
+#process-app { font-family: var(--mono); font-size: var(--font-body); line-height: var(--leading-body); font-weight: var(--weight-prose); }
 .pool-screen { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 16px; align-items: start; }
 .pool-screen > * { min-width: 0; }
 @media (max-width: 1180px) { .pool-screen { grid-template-columns: minmax(0, 1fr); } }
@@ -63,15 +63,15 @@
 .pool-why a { color: var(--text); font-weight: var(--weight-ui); }
 .pool-hold { font-size: var(--font-secondary); line-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
 .pool-limits { display: flex; flex-direction: column; gap: 2px; }
-.pool-limit { display: grid; grid-template-columns: 44px 72px minmax(0, 1fr); gap: 6px; align-items: center; font-family: var(--mono); font-size: var(--font-meta); line-height: var(--leading-meta); color: var(--text-2); }
+.pool-limit { display: grid; grid-template-columns: 44px 72px minmax(0, 1fr); gap: 6px; align-items: center; font-family: var(--mono); font-size: var(--font-meta); line-height: var(--leading-meta); font-weight: var(--weight-prose); color: var(--text-2); }
 .pool-bar { display: block; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
 .pool-bar i { display: block; height: 100%; background: var(--ok); }
 .pool-limit.near { color: var(--warn); font-weight: var(--weight-ui); }
 .pool-limit.near .pool-bar i { background: var(--warn); }
 .pool-limit.full { color: var(--danger); font-weight: var(--weight-ui); }
 .pool-limit.full .pool-bar i { background: var(--danger); }
-.pool-limit-none { font-family: var(--mono); font-size: var(--font-meta); line-height: var(--leading-meta); color: var(--text-3); text-align: right; }
-.pool-extras { margin-top: 2px; font-family: var(--mono); font-size: var(--font-meta); line-height: var(--leading-meta); color: var(--text-2); text-align: right; overflow-wrap: anywhere; }
+.pool-limit-none { font-family: var(--mono); font-size: var(--font-meta); line-height: var(--leading-meta); font-weight: var(--weight-prose); color: var(--text-3); text-align: right; }
+.pool-extras { margin-top: 2px; font-family: var(--mono); font-size: var(--font-meta); line-height: var(--leading-meta); font-weight: var(--weight-prose); color: var(--text-2); text-align: right; overflow-wrap: anywhere; }
 @container (max-width: 560px) { .pool-row { grid-template-columns: 24px minmax(0, 1fr); } .pool-right { grid-column: 2; margin-top: 6px; } .pool-limit-none, .pool-extras { text-align: left; } }
 .pool-left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .pool-app-order { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
