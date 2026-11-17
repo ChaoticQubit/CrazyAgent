@@ -127,6 +127,73 @@ fn a_send_keys_run_never_cuts_a_paste_end_marker_inside_the_input() {
     }
 }
 
+/// #359 r2, rv-code2 r2 F1: the desktop joins whole events into one input, and no
+/// `send-keys` run ends inside one of them, so an app never reads half an escape sequence
+/// and takes its lone ESC for the Escape key.
+#[test]
+fn a_send_keys_run_never_cuts_an_escape_sequence_of_a_batched_input() {
+    let text = |times: usize| vec![&b"x"[..]; times];
+    let cases: Vec<(&str, Vec<&[u8]>)> = vec![
+        ("wheel reports", vec![&b"\x1b[<65;40;12M"[..]; 341]),
+        ("held arrow keys", vec![&b"\x1b[A"[..]; 300]),
+        ("held application arrow keys", vec![&b"\x1bOA"[..]; 300]),
+        ("alt keys", [text(1), vec![&b"\x1bx"[..]; 300]].concat()),
+        ("x10 mouse reports", vec![&b"\x1b[M`!!"[..]; 100]),
+        (
+            "osc replies",
+            vec![&b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07"[..]; 20],
+        ),
+        ("dcs replies", vec![&b"\x1bP1$r0;1m\x1b\\"[..]; 40]),
+        (
+            "a paste, then Enter and a key",
+            [
+                vec![&b"\x1b[200~"[..]],
+                text(245),
+                vec![PASTE_CLOSE, &b"\r"[..], &b"\x1b[B"[..]],
+            ]
+            .concat(),
+        ),
+    ];
+    for (case, events) in cases {
+        let bytes = events.concat();
+        let bounds: Vec<usize> = events
+            .iter()
+            .scan(0, |end, event| {
+                *end += event.len();
+                Some(*end)
+            })
+            .collect();
+        let runs = typed_runs(&send_keys_lines("%7", &bytes));
+        assert_eq!(runs.concat(), bytes, "{case}");
+        assert!(
+            runs.iter().all(|run| run.len() <= SEND_KEYS_BYTES_MAX),
+            "{case}"
+        );
+        let mut end = 0;
+        for run in &runs {
+            end += run.len();
+            assert!(
+                bounds.contains(&end),
+                "{case}: a run ends inside an event at {end}"
+            );
+        }
+    }
+}
+
+/// #359 r2: a run moves its end back at most `RUN_CUT_BACK_BYTES_MAX` bytes to keep an escape
+/// sequence whole. A window title that starts further back than that is the one sequence a
+/// run cuts, at the run size.
+#[test]
+fn a_send_keys_run_cuts_only_a_sequence_that_starts_past_its_back_off() {
+    let title = [&b"\x1b]0;"[..], &[b't'; 200][..], &b"\x07"[..]].concat();
+    for (before, first) in [(200, 200), (150, SEND_KEYS_BYTES_MAX)] {
+        let bytes = [&vec![b'x'; before][..], &title, &b"\x1b[A"[..]].concat();
+        let runs = typed_runs(&send_keys_lines("%7", &bytes));
+        assert_eq!(runs.concat(), bytes, "a title after {before} bytes");
+        assert_eq!(runs[0].len(), first, "a title after {before} bytes");
+    }
+}
+
 /// Reads typed bytes back out of `send-keys -H` commands for `%7`. Input: the commands.
 /// Output: each command's bytes, in order.
 fn typed_runs(lines: &[String]) -> Vec<Vec<u8>> {
