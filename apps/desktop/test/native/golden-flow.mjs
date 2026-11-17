@@ -17,15 +17,18 @@ const GIT = "/usr/bin/git";
 const WAIT_MAX_MS = 300000;
 const STEPS_MAX = 64;
 export const POOL = "local-pool";
+export const LIMITED = "limited-connection";
+export const READY = "local-connection";
 
-/** Starts one golden flow as a first run leaves the app: a real engine on a private root with a
- * scratch HOME and one pool, the bridge, a saved profile and projects folder and the built app,
- * as the flow's first step. It fills the caller's empty run, so `stopGolden` ends what a failed
- * start left. Inputs: that run, the flow's name (lowercase words joined by "-") and, for a team
- * flow, the Codex stand-in's absolute path, pinned with a silent provider. Output: none. */
-export async function startGolden(run, flow, { codex = null } = {}) {
+/** Starts one golden flow as a first run leaves the app: a real engine on a private root, a
+ * scratch HOME, one pool, the bridge, a saved profile and projects folder and the built app, as
+ * the flow's first step; a failed start is left for `stopGolden`. Inputs: the empty run, the
+ * flow's name, and for a team flow the Codex stand-in's absolute path with a silent provider
+ * and whether the pool lists LIMITED first, on that provider at /limited/v1. Output: none. */
+export async function startGolden(run, flow, { codex = null, limitedFirst = false } = {}) {
   assert.match(flow, /^[a-z]+(-[a-z]+)*$/);
   assert.ok(codex === null || (isAbsolute(codex) && existsSync(codex)), `the Codex stand-in: ${codex}`);
+  assert.ok(typeof limitedFirst === "boolean" && (!limitedFirst || codex !== null), "a limited member needs the stand-in");
   assert.ok(flow.length <= 64);
   assert.deepEqual(Object.keys(run), [], "a golden run starts empty");
   Object.assign(run, { flow, steps: [], started: Date.now(), finished: false });
@@ -44,16 +47,19 @@ export async function startGolden(run, flow, { codex = null } = {}) {
   rmSync(recordPath(run), { force: true });
   run.provider = codex === null ? null : await silentProvider();
   const provider = run.provider === null ? await closedPort() : run.provider.port;
+  const limitedAccount = limitedFirst ? `"limited-account", ` : "";
+  const limitedConnection = limitedFirst ? `  { id = "${LIMITED}", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "limited-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider}/limited/v1" }, model = { id = "golden-model", author = "openai-compatible" }, auth = { method = "none" } },\n` : "";
+  const limitedMember = limitedFirst ? `"${LIMITED}", ` : "";
   writeFileSync(join(runtime, "global.toml"), `version = 1
 timeout_ms = 2000
 allowed_destinations = []
 
 [model_access]
-accounts = ["local-account"]
+accounts = [${limitedAccount}"local-account"]
 connections = [
-  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider}/v1" }, model = { id = "golden-model", author = "openai-compatible" }, auth = { method = "none" } },
+${limitedConnection}  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider}/v1" }, model = { id = "golden-model", author = "openai-compatible" }, auth = { method = "none" } },
 ]
-pools = [{ id = "${POOL}", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
+pools = [{ id = "${POOL}", members = [${limitedMember}"local-connection"], projects = [], roles = [], fallback_allowed = false }]
 `, { mode: 0o600 });
   const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
   run.log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
