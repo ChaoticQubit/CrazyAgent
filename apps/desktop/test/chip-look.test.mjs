@@ -40,6 +40,11 @@ for (const theme of ["light", "dark"]) {
     }
   });
 
+  test(`${theme}: a working badge's dot pulses and a steady info badge's dot stays still`, async () => {
+    const seen = await looks(theme);
+    assert.deepEqual(seen.motion, { working: "badge-pulse", steady: "none" });
+  });
+
   test(`${theme}: a team graph dot takes its state color, the info dot --running`, async () => {
     const seen = await looks(theme);
     assert.deepEqual(seen.dots, { info: seen.tokens.running, ok: seen.tokens.ok, warn: seen.tokens.warn, danger: seen.tokens.danger });
@@ -54,9 +59,9 @@ test("the badge, tone, console state and graph dot rules name no accent token, n
   assert.match(rules, /\.tg-dot\.tone-info \{\s*background: var\(--running\);\s*\}/);
 });
 
-test("the working badge's dot pulses only when motion is allowed, and no other badge rule animates", () => {
+test("only a working badge's dot pulses, and only when motion is allowed", () => {
   const style = sheet("../src/style.css");
-  assert.ok(style.includes("@media (prefers-reduced-motion: no-preference) { .badge.tone-info::before { animation: badge-pulse 1.2s ease-in-out infinite; } }"), "the pulse sits behind the motion preference");
+  assert.ok(style.includes("@media (prefers-reduced-motion: no-preference) { .badge[data-working]::before { animation: badge-pulse 1.2s ease-in-out infinite; } }"), "the pulse sits behind the motion preference");
   assert.ok(style.includes("@keyframes badge-pulse { 50% { opacity: 0.4; } }"), "the dot dims to 40 percent at mid-pulse");
   assert.deepEqual(style.split("\n").filter((line) => /^\.(?:badge|tone-)/.test(line) && /animation/.test(line)), []);
 });

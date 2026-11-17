@@ -5,7 +5,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { StatusBadge, statusTone, statusIcon } = await import("../src/ui/feedback.tsx");
+const { StatusBadge, statusTone, statusIcon, statusWorking } = await import("../src/ui/feedback.tsx");
 const { ICON_NAMES } = await import("../src/ui/icon.tsx");
 
 const TABLE = [
@@ -40,7 +40,7 @@ test("a status badge is its word alone in markup, toned when the word has an ent
   const signedIn = renderToStaticMarkup(createElement(StatusBadge, { word: "Key saved" }));
   assert.equal(signedIn, '<span class="badge tone-ok">Key saved</span>');
   const live = renderToStaticMarkup(createElement(StatusBadge, { word: "Signing in..." }));
-  assert.equal(live, '<span class="badge tone-info">Signing in...</span>');
+  assert.equal(live, '<span class="badge tone-info" data-working="true">Signing in...</span>');
   assert.doesNotMatch(renderToStaticMarkup(createElement(StatusBadge, { word: "Queued" })), /<svg/);
 });
 
@@ -74,5 +74,16 @@ test("projects folder, onboarding, setup, pack and team words carry their icons"
   assert.equal(statusIcon("Found 3.4"), undefined);
   assert.equal(statusIcon("Online"), undefined);
   for (const name of ["folder-input", "git-branch", "wrench", "blocks"]) assert.ok(ICON_NAMES.includes(name), `${name} is vendored`);
-  assert.equal(renderToStaticMarkup(createElement(StatusBadge, { word: "Installing" })), '<span class="badge tone-info">Installing</span>');
+  assert.equal(renderToStaticMarkup(createElement(StatusBadge, { word: "Installing" })), '<span class="badge tone-info" data-working="true">Installing</span>');
+});
+
+test("only a word for work in progress marks its badge as working, so steady info states keep a still dot", () => {
+  const working = ["Running", "Signing in...", "Starting", "Thinking...", "Writing", "Working", "Installing", "Reading", "Downloading", "Adding",
+    "Checking", "Finishing", "Deleting", "Agent is updating", "Agent is fixing conflicts with main"];
+  for (const word of working) assert.equal(statusWorking(word), true, word);
+  for (const word of ["Ready to review", "Found", "New", "Recommended", "Waiting", "Setting up", "Signed in", "Queued", "Running late", "2 results waiting"]) {
+    assert.equal(statusWorking(word), false, word);
+  }
+  assert.equal(renderToStaticMarkup(createElement(StatusBadge, { word: "Ready to review", tone: "info" })), '<span class="badge tone-info">Ready to review</span>');
+  assert.equal(renderToStaticMarkup(createElement(StatusBadge, { word: "Agent is updating", tone: "info" })), '<span class="badge tone-info" data-working="true">Agent is updating</span>');
 });
