@@ -1,6 +1,9 @@
 use super::{Fixed, OUTPUT_BYTES_MAX, POINTER_BYTES_MAX, Pointer};
+use std::io::Read;
 use std::path::Path;
-use std::time::Duration;
+use std::process::{Child, ExitStatus};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::time::{Duration, Instant};
 
 pub const SHOWN_BYTES_MAX: usize = 4 * 1024;
 pub const VERSION_TIME: Duration = Duration::from_secs(10);
@@ -29,7 +32,6 @@ pub struct Ran {
 
 /// How one tool run ended, for the engine's own parsing: the exit and the unmasked last
 /// `STREAM_BYTES_MAX` bytes of each stream. Never shown and never sent to a client.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) struct Raw {
     pub(super) success: bool,
     pub(super) stdout: Vec<u8>,
@@ -75,109 +77,136 @@ pub(super) fn run_raw(_fixed: &Fixed, _home: &Path, _limit: Duration) -> Result<
     Err(super::UNSUPPORTED_HERE)
 }
 
+/// Runs a harness's version command exactly as [`run_raw`] does. Inputs: the command, the
+/// home folder and the limit. Output: the exit and both stream tails, or a refusal code.
+#[cfg(unix)]
+pub(super) fn version_raw(
+    fixed: &Fixed,
+    home: &Path,
+    limit: Duration,
+) -> Result<Raw, &'static str> {
+    run_raw(fixed, home, limit)
+}
+
+/// Runs a harness's version command where [`run_raw`] refuses every tool: started suspended
+/// with no window in a kill-on-close job of its own, so everything it starts ends with the
+/// job once it exits or passes its limit. Only version reads run this way; updates and tool
+/// checks stay refused. Inputs: the command, the home folder and the limit. Output: the exit
+/// and both stream tails, or a refusal code.
+#[cfg(windows)]
+pub(super) fn version_raw(
+    fixed: &Fixed,
+    home: &Path,
+    limit: Duration,
+) -> Result<Raw, &'static str> {
+    windows::version_raw(fixed, home, limit)
+}
+
+const POLL: Duration = Duration::from_millis(50);
+const DRAIN_TIME: Duration = Duration::from_secs(2);
+const CHUNK_BYTES: usize = 8192;
+const SEARCH_MAX: usize = 4;
+
+const _: () = assert!(CHUNK_BYTES <= STREAM_BYTES_MAX);
+
+/// The last bytes of one output pipe, read on its own thread so a chatty tool never
+/// blocks on a full pipe. `done` answers when the pipe reached its end.
+struct Tail {
+    kept: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<()>,
+}
+
+impl Tail {
+    /// Starts reading a pipe to its end, keeping its last `STREAM_BYTES_MAX` bytes.
+    /// Input: the pipe, present for a piped stream. Output: the handle to what is kept.
+    fn start(pipe: Option<impl Read + Send + 'static>) -> Self {
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let (sender, done) = mpsc::channel();
+        if let Some(pipe) = pipe {
+            let into = kept.clone();
+            let reader = std::thread::Builder::new().name("harness-update-output".into());
+            let _ = reader.spawn(move || {
+                follow(pipe, &into);
+                let _ = sender.send(());
+            });
+        }
+        Self { kept, done }
+    }
+
+    /// Waits a short time for the pipe's end, then takes what was kept so far, so a
+    /// descendant that still holds the pipe cannot hold the run. Output: the last bytes.
+    fn taken(self) -> Vec<u8> {
+        let _ = self.done.recv_timeout(DRAIN_TIME);
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut bytes = std::mem::take(&mut *kept);
+        if bytes.len() > STREAM_BYTES_MAX {
+            bytes.drain(..bytes.len() - STREAM_BYTES_MAX);
+        }
+        assert!(bytes.len() <= STREAM_BYTES_MAX);
+        bytes
+    }
+}
+
+/// Reads a pipe to its end into a shared buffer that never holds more than twice the
+/// kept size. Inputs: the pipe and the buffer. Output: none.
+fn follow(mut pipe: impl Read, into: &Mutex<Vec<u8>>) {
+    let mut chunk = [0_u8; CHUNK_BYTES];
+    loop {
+        let read = match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let mut kept = into.lock().unwrap_or_else(PoisonError::into_inner);
+        kept.extend_from_slice(&chunk[..read]);
+        if kept.len() > STREAM_BYTES_MAX * 2 {
+            let extra = kept.len() - STREAM_BYTES_MAX;
+            kept.drain(..extra);
+        }
+        assert!(kept.len() <= STREAM_BYTES_MAX * 2);
+    }
+}
+
+/// Waits for a child to end, polling, for at most a time limit.
+/// Inputs: the child and the limit. Output: its exit, None when it still runs or cannot
+/// be asked.
+fn waited(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return None;
+                }
+                std::thread::sleep(POLL.min(left));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 #[cfg(unix)]
 mod unix {
-    use super::{AS_ROOT, Raw, START_FAILED, STREAM_BYTES_MAX, TIMEOUT, refused_user};
+    use super::{
+        AS_ROOT, Raw, SEARCH_MAX, START_FAILED, STREAM_BYTES_MAX, TIMEOUT, Tail, refused_user,
+        waited,
+    };
     use crate::harnesses::update::{ARGS_MAX, Fixed, TOOL_UNSAFE};
     use rustix::process::{Pid, Signal};
     use std::ffi::OsString;
-    use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::path::Path;
-    use std::process::{Child, Command, ExitStatus, Stdio};
-    use std::sync::{Arc, Mutex, PoisonError, mpsc};
-    use std::time::{Duration, Instant};
+    use std::process::{Child, Command, Stdio};
+    use std::time::Duration;
 
-    const POLL: Duration = Duration::from_millis(50);
     const STOP_GRACE: Duration = Duration::from_secs(2);
-    const DRAIN_TIME: Duration = Duration::from_secs(2);
-    const CHUNK_BYTES: usize = 8192;
-    const SEARCH_MAX: usize = 4;
     /// The environment name npm reads its global prefix from, ahead of every npmrc file.
     const NPM_PREFIX: &str = "npm_config_prefix";
     const SYSTEM_PATH: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
     const LANGUAGE: &str = "C.UTF-8";
-
-    const _: () = assert!(CHUNK_BYTES <= STREAM_BYTES_MAX);
-
-    /// The last bytes of one output pipe, read on its own thread so a chatty tool never
-    /// blocks on a full pipe. `done` answers when the pipe reached its end.
-    struct Tail {
-        kept: Arc<Mutex<Vec<u8>>>,
-        done: mpsc::Receiver<()>,
-    }
-
-    impl Tail {
-        /// Starts reading a pipe to its end, keeping its last `STREAM_BYTES_MAX` bytes.
-        /// Input: the pipe, present for a piped stream. Output: the handle to what is kept.
-        fn start(pipe: Option<impl Read + Send + 'static>) -> Self {
-            let kept = Arc::new(Mutex::new(Vec::new()));
-            let (sender, done) = mpsc::channel();
-            if let Some(pipe) = pipe {
-                let into = kept.clone();
-                let reader = std::thread::Builder::new().name("harness-update-output".into());
-                let _ = reader.spawn(move || {
-                    follow(pipe, &into);
-                    let _ = sender.send(());
-                });
-            }
-            Self { kept, done }
-        }
-
-        /// Waits a short time for the pipe's end, then takes what was kept so far, so a
-        /// descendant that still holds the pipe cannot hold the run. Output: the last bytes.
-        fn taken(self) -> Vec<u8> {
-            let _ = self.done.recv_timeout(DRAIN_TIME);
-            let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
-            let mut bytes = std::mem::take(&mut *kept);
-            if bytes.len() > STREAM_BYTES_MAX {
-                bytes.drain(..bytes.len() - STREAM_BYTES_MAX);
-            }
-            assert!(bytes.len() <= STREAM_BYTES_MAX);
-            bytes
-        }
-    }
-
-    /// Reads a pipe to its end into a shared buffer that never holds more than twice the
-    /// kept size. Inputs: the pipe and the buffer. Output: none.
-    fn follow(mut pipe: impl Read, into: &Mutex<Vec<u8>>) {
-        let mut chunk = [0_u8; CHUNK_BYTES];
-        loop {
-            let read = match pipe.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(read) => read,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            };
-            let mut kept = into.lock().unwrap_or_else(PoisonError::into_inner);
-            kept.extend_from_slice(&chunk[..read]);
-            if kept.len() > STREAM_BYTES_MAX * 2 {
-                let extra = kept.len() - STREAM_BYTES_MAX;
-                kept.drain(..extra);
-            }
-            assert!(kept.len() <= STREAM_BYTES_MAX * 2);
-        }
-    }
-
-    /// Waits for a child to end, polling, for at most a time limit.
-    /// Inputs: the child and the limit. Output: its exit, None when it still runs or cannot
-    /// be asked.
-    fn waited(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
-        let deadline = Instant::now() + limit;
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => return Some(status),
-                Ok(None) => {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        return None;
-                    }
-                    std::thread::sleep(POLL.min(left));
-                }
-                Err(_) => return None,
-            }
-        }
-    }
 
     /// Waits for the tool to its limit; past it, asks its whole process group to stop, waits
     /// a short grace, then kills the group and reaps the tool. A group that is already gone
@@ -264,6 +293,90 @@ mod unix {
         let (stdout, stderr) = (stdout.taken(), stderr.taken());
         assert!(stdout.len() <= STREAM_BYTES_MAX && stderr.len() <= STREAM_BYTES_MAX);
         let success = success.ok_or(TIMEOUT)?;
+        Ok(Raw {
+            success,
+            stdout,
+            stderr,
+        })
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::{Raw, SEARCH_MAX, START_FAILED, STREAM_BYTES_MAX, TIMEOUT, Tail, waited};
+    use crate::harnesses::update::{ARGS_MAX, Fixed, TOOL_UNSAFE};
+    use std::os::windows::process::CommandExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    const CREATE_SUSPENDED: u32 = 0x0000_0004;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const SYSTEM_ROOT_DEFAULT: &str = r"C:\Windows";
+
+    /// The child's whole search path: the command's own folders, then the Windows system
+    /// folders. Input: the command. Output: the value, None when a folder cannot be on it.
+    fn search_path(fixed: &Fixed) -> Option<std::ffi::OsString> {
+        let root = std::env::var_os("SystemRoot")
+            .map_or_else(|| PathBuf::from(SYSTEM_ROOT_DEFAULT), PathBuf::from);
+        let system = [root.join("System32"), root];
+        std::env::join_paths(fixed.search.iter().cloned().chain(system)).ok()
+    }
+
+    /// Builds the child: no shell, the fixed arguments only, the environment a plugin
+    /// server check keeps ([`crate::plugins::check::ENV_KEPT`]) with the home as
+    /// USERPROFILE and the search path as PATH, no input, no window, started suspended.
+    /// Inputs: the command, the home folder and the search path. Output: the command.
+    fn command(fixed: &Fixed, home: &Path, path: std::ffi::OsString) -> Command {
+        let mut command = Command::new(&fixed.program);
+        command.args(&fixed.args).env_clear();
+        for name in crate::plugins::check::ENV_KEPT {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        command
+            .env("USERPROFILE", home)
+            .env("PATH", path)
+            .current_dir(home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+        command
+    }
+
+    pub(super) fn version_raw(
+        fixed: &Fixed,
+        home: &Path,
+        limit: Duration,
+    ) -> Result<Raw, &'static str> {
+        assert!(fixed.program.is_absolute());
+        assert!(fixed.args.len() <= ARGS_MAX);
+        assert!(fixed.search.len() <= SEARCH_MAX);
+        assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
+        assert!(fixed.prefix.is_none());
+        let path = search_path(fixed).ok_or(TOOL_UNSAFE)?;
+        let mut child =
+            crate::spawn_gate::spawn(&mut command(fixed, home, path)).map_err(|_| START_FAILED)?;
+        let tree = match crazyagent_win_sandbox::ProcessTree::hold(&child) {
+            Ok(tree) => tree,
+            Err(error) => {
+                eprintln!("harness_version_tree_refused cause={error}");
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(START_FAILED);
+            }
+        };
+        let stdout = Tail::start(child.stdout.take());
+        let stderr = Tail::start(child.stderr.take());
+        let status = waited(&mut child, limit);
+        drop(tree);
+        let _ = child.kill();
+        let _ = child.wait();
+        let (stdout, stderr) = (stdout.taken(), stderr.taken());
+        assert!(stdout.len() <= STREAM_BYTES_MAX && stderr.len() <= STREAM_BYTES_MAX);
+        let success = status.ok_or(TIMEOUT)?.success();
         Ok(Raw {
             success,
             stdout,
@@ -410,4 +523,54 @@ pub(super) fn read_pointer(
     crate::update::download(url, &mut body, bytes_max, limit).map_err(|_| LOOKUP_FAILED)?;
     assert!(body.len() as u64 <= bytes_max);
     Ok(body)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const GRANDCHILD: &str = "$p = Start-Process -FilePath ping.exe -ArgumentList \
+        '-n','120','127.0.0.1' -NoNewWindow -PassThru; Set-Content -LiteralPath grandchild.pid \
+        -Value $p.Id; Start-Sleep -Seconds 120";
+
+    /// Whether a process id still runs, as `tasklist` lists it. Input: the id. Output: the
+    /// answer.
+    fn running(pid: u32) -> bool {
+        let mut tasklist = std::process::Command::new("tasklist");
+        tasklist.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
+        let listed = crate::spawn_gate::collected(&mut tasklist).unwrap();
+        String::from_utf8_lossy(&listed.stdout).contains(&format!("\"{pid}\""))
+    }
+
+    /// V243-W1-VERSION-READ: a version run that passes its limit ends as timed out, and the
+    /// process it started ends with its job, so no child of a harness outlives a version read.
+    #[test]
+    fn a_version_run_past_its_limit_ends_with_every_process_it_started() {
+        let folder = tempfile::tempdir().unwrap();
+        let home = crate::sandbox::canonical(folder.path()).unwrap();
+        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0");
+        let fixed = Fixed {
+            program: shell.join("powershell.exe"),
+            args: vec!["-NoProfile", "-NonInteractive", "-Command", GRANDCHILD],
+            search: vec![shell],
+            prefix: None,
+        };
+        let ran = version_raw(&fixed, &home, Duration::from_secs(20));
+        assert_eq!(ran.err(), Some(TIMEOUT));
+        let pid: u32 = std::fs::read_to_string(home.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(pid > 4);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!running(pid), "the version run's child {pid} outlived it");
+    }
 }

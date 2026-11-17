@@ -791,16 +791,14 @@ fn numbers(text: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
-/// Asks an installed harness for its version under the engine's own HOME, as the updates
-/// check does, and only where the tool resolver would run it and every interpreter its
-/// first line names (`version_if_runs`), so the usage User-Agent read never starts a file or
-/// an interpreter copy agents or other users can change. Input: the harness executable.
-/// Output: the version, None when the harness is refused or cannot be asked, prints no plain
-/// version, or HOME is unset or relative.
+/// Asks an installed harness for its version under the engine's own home
+/// ([`state::home_folder`]), as the updates check does, and only where the tool resolver
+/// would run it and every interpreter its first line names (`version_if_runs`), so the usage
+/// User-Agent read never starts a file or an interpreter copy agents or other users can
+/// change. Input: the harness executable. Output: the version, None when the harness is
+/// refused or cannot be asked, prints no plain version, or the home is unknown.
 pub(crate) fn version_under_home(executable: &Path) -> Option<String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|home| home.is_absolute())?;
+    let home = state::home_folder()?;
     state::version_if_runs(
         executable,
         &home,
@@ -1021,5 +1019,29 @@ mod windows_tests {
                 "{refused}"
             );
         }
+    }
+    /// V243-W1-VERSION-READ: with the engine's home now the profile folder on Windows, a
+    /// harness that installed itself under it is named as self-updating, and its update
+    /// stays refused as unsupported here.
+    #[test]
+    fn a_windows_self_updating_install_is_named_and_its_update_stays_refused() {
+        let folder = tempfile::tempdir().unwrap();
+        let home = crate::sandbox::canonical(folder.path()).unwrap();
+        let installed = home.join(".codex").join("packages").join("standalone");
+        std::fs::create_dir_all(&installed).unwrap();
+        let entry = installed.join("codex.exe");
+        std::fs::write(&entry, "").unwrap();
+        let roots = Roots {
+            home,
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: None,
+            places: crate::tools::Places::new(Vec::new(), None),
+        };
+        assert_eq!(method("codex", &entry, &roots), Method::SelfUpdate);
+        assert_eq!(
+            update_command("codex", &entry, &entry, &roots),
+            Err(UNSUPPORTED_HERE)
+        );
     }
 }
