@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { harnessCatalog, type HarnessAccountKind, type HarnessEntry, type Result } from "../../api";
 import { openLink } from "../../api-projects";
 import {
-  harnessVersions, installedWith, installHarness, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, setHarnessUpdateSettings, updateCopy, updateHarness, versionLine,
+  harnessVersions, installedWith, installHarness, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, runningLine, setHarnessUpdateSettings, updateCopy, updateHarness, versionLine,
   UPDATE_POLL_MS, UPDATE_POLLS_MAX, UPDATE_SETTINGS_DEFAULT, type CheckWhen, type HarnessJob, type HarnessVersions, type InstallFromApp, type OnlineLookup, type UpdateMode, type UpdateSettings,
 } from "../../api-harness-updates";
 import { installDependency, loadSetupStatus } from "../../api-intake";
@@ -149,10 +149,11 @@ export function refusalLine(versions: HarnessVersions): string | null {
 /** One harness line: what it is, its version, and Check for updates and Update when the settings
  * and the install allow them, Install for one that is not on this Mac, or Can't run with the
  * resolver's line and Try again for a found one it can't run, from the versions read or, until
- * it arrives, the catalog's. Inputs: the catalog entry, its versions (null until read), the
- * update mode, a failure to show, whether a read runs, and the actions. Output: the row. */
-export function HarnessRowView({ entry, versions, mode, problem, checking = false, onCheck, onUpdate, onInstall, onGuide, onRetry }: {
-  entry: HarnessEntry; versions: HarnessVersions | null; mode: UpdateMode; problem?: string; checking?: boolean;
+ * it arrives, the catalog's. A running job held behind another harness's job names that
+ * harness. Inputs: the catalog entry, its versions (null until read), the update mode, a
+ * failure to show, whether a read runs, the catalog's names and the actions. Output: the row. */
+export function HarnessRowView({ entry, versions, mode, problem, checking = false, nameOf = (id) => id, onCheck, onUpdate, onInstall, onGuide, onRetry }: {
+  entry: HarnessEntry; versions: HarnessVersions | null; mode: UpdateMode; problem?: string; checking?: boolean; nameOf?: (id: string) => string;
   onCheck: () => void; onUpdate: () => void; onInstall: () => void; onGuide: (url: string) => void; onRetry?: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -183,7 +184,7 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
         {shown !== null && shown.method.kind !== "with_app" && <span>{versionLine(shown)}</span>}
         {versions?.sign_in_min && <span>{`Sign-in needs ${versions.sign_in_min} or newer.`}</span>}
         {refusal !== null && <span>{refusal}</span>}
-        {running && <span role="status">{missing ? "Installing..." : "Updating..."}</span>}
+        {running && read !== null && <span role="status">{runningLine(read, missing, nameOf)}</span>}
         {last !== null && <span role="status">{last}</span>}
         {problem && <span className="pj-error" role="alert">{problem}</span>}
         {guide !== null && <span><a href={guide} onClick={(event) => { event.preventDefault(); onGuide(guide); }}>{missing ? "How to install it yourself" : "How to update it yourself"}</a></span>}
@@ -343,8 +344,8 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function HarnessRow({ entry, settings, again, onCatalog, onRead, onNodeAgain }: {
-  entry: HarnessEntry; settings: UpdateSettings | null; again: number; onCatalog: () => void; onRead: (id: string, versions: HarnessVersions | null) => void;
+function HarnessRow({ entry, settings, again, nameOf, onCatalog, onRead, onNodeAgain }: {
+  entry: HarnessEntry; settings: UpdateSettings | null; again: number; nameOf: (id: string) => string; onCatalog: () => void; onRead: (id: string, versions: HarnessVersions | null) => void;
   onNodeAgain: () => void;
 }) {
   const [versions, setVersions] = useState<HarnessVersions | null>(null);
@@ -423,7 +424,7 @@ function HarnessRow({ entry, settings, again, onCatalog, onRead, onNodeAgain }: 
     await follow();
   };
   return <>
-    <HarnessRowView entry={entry} versions={versions} mode={mode} problem={problem} checking={checking}
+    <HarnessRowView entry={entry} versions={versions} mode={mode} problem={problem} checking={checking} nameOf={nameOf}
       onCheck={() => void check()} onUpdate={() => void ask("update")} onInstall={() => void ask("install")} onGuide={(url) => void openLink(url)} onRetry={() => void retry()} />
     {chooser !== null && <div className="set-body"><HarnessFile id={chooser} name={entry.name} onFound={onCatalog} /></div>}
     {versions?.command && <UpdateConfirm versions={versions} name={entry.name} open={asking} pending={pending}
@@ -472,7 +473,8 @@ export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, on
       : catalog.kind === "not_ready" ? <NotReady what="The harness list" />
       : catalog.kind === "error" ? <LoadError message="Couldn't check harnesses." onRetry={onCheck} />
       : harnessGroups(catalog.value).map((group) => <SettingSection key={group.title} title={`${group.title} (${group.entries.length})`}>
-        {group.entries.map((entry) => <HarnessRow key={entry.id} entry={entry} settings={settings} again={again} onCatalog={onCheck} onRead={onRead ?? ignoreRead} onNodeAgain={onNodeAgain ?? ignoreAgain} />)}
+        {group.entries.map((entry) => <HarnessRow key={entry.id} entry={entry} settings={settings} again={again} nameOf={(id) => catalog.value.find((other) => other.id === id)?.name ?? id}
+          onCatalog={onCheck} onRead={onRead ?? ignoreRead} onNodeAgain={onNodeAgain ?? ignoreAgain} />)}
       </SettingSection>)}
   </div>;
 }

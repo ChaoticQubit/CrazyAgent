@@ -236,8 +236,40 @@ test("an update whose old version could not be read is not called an install", (
   assert.match(stopped, /<summary[^>]*>What the installer said<\/summary>/);
 });
 
-test("a second job says another update or install is running, not this harness", () => {
-  assert.equal(api.updateCopy("harness_update_busy"), "Another harness update or install is running.");
+test("a second job on the same harness says it is already updating or installing", () => {
+  assert.equal(api.updateCopy("harness_update_busy"), "This harness is already updating or installing.");
+});
+
+test("a job held behind another harness's job says which one it waits for, with no error and its buttons off", () => {
+  const goose = { ...aider, id: "goose", install: "/opt/homebrew/bin/brew install --formula block-goose-cli", running: true, waiting: "aider" };
+  const names = (id) => id === "aider" ? "Aider" : id;
+  const html = row({ entry: missing("goose", "Goose"), versions: goose, mode: "check_and_update", nameOf: names });
+  assert.match(html, /Waiting for Aider to finish\.\.\./);
+  assert.doesNotMatch(html, /Installing\.\.\./);
+  assert.doesNotMatch(html, /role="alert"/);
+  assert.match(html, /<button[^>]*disabled=""[^>]*>Install<\/button>/);
+  const running = row({ entry: missing("goose", "Goose"), versions: { ...goose, waiting: null }, mode: "check_and_update", nameOf: names });
+  assert.match(running, /Installing\.\.\./);
+  assert.doesNotMatch(running, /Waiting for/);
+});
+
+test("a row is read through its wait behind other jobs and its own run, one budget per job it waited for", async () => {
+  let reads = 0;
+  const waited = api.UPDATE_POLLS_MAX;
+  const done = await api.pollWhileRunning("goose", (id) => {
+    reads += 1;
+    const waiting = reads <= waited ? "aider" : null;
+    return Promise.resolve({ kind: "ok", value: { ...aider, id, running: reads < waited + 4, waiting } });
+  }, () => Promise.resolve());
+  assert.equal(reads, waited + 4);
+  assert.equal(done.value.running, false);
+  let held = 0;
+  const cut = await api.pollWhileRunning("goose", (id) => {
+    held += 1;
+    return Promise.resolve({ kind: "ok", value: { ...aider, id, running: true, waiting: "aider" } });
+  }, () => Promise.resolve());
+  assert.equal(cut.value.running, true);
+  assert.equal(held, api.UPDATE_POLLS_MAX * 2, "a wait behind one job is bounded too");
 });
 
 test("the confirm opens on a fresh read, so it shows the line the engine has now", async () => {
