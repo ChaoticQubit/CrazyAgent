@@ -271,3 +271,53 @@ fn publish_prompt_answers_are_logged_and_rebuild_to_the_live_row() {
     rebuild(&db).unwrap();
     assert_eq!(rows(&db, "github_publish_prompt").unwrap(), live);
 }
+
+/// V250-L9: a project Delete in the log drops the project's prompt answer at its place, so
+/// the prompt table rebuilt from the log equals the live one; a Remove from dashboard keeps
+/// the answer (DEC-178 add.1, L6 Q10).
+#[cfg(unix)]
+#[test]
+fn a_logged_project_delete_drops_its_prompt_answer_on_rebuild_and_a_remove_keeps_it() {
+    use crate::github::{GitHubPromptAnswer, keep_prompt_answer};
+    let (root, db) = store();
+    let kept = ProjectId::new("kept").unwrap();
+    let deleted = ProjectId::new("deleted").unwrap();
+    keep_prompt_answer(root.path(), &kept, GitHubPromptAnswer::Never);
+    keep_prompt_answer(root.path(), &deleted, GitHubPromptAnswer::Never);
+    removal(&db, &kept, true);
+    removal(&db, &deleted, false);
+    crate::github::forget_prompt(&db, &deleted).unwrap();
+    let live = rows(&db, "github_publish_prompt").unwrap();
+    assert_eq!(
+        live.len(),
+        1,
+        "the Remove keeps its answer, the Delete forgets it"
+    );
+    rebuild(&db).unwrap();
+    assert_eq!(rows(&db, "github_publish_prompt").unwrap(), live);
+}
+
+/// Appends a project removal to the log as an owner request does, behind the test host,
+/// without its projection. Inputs: the store, the project and whether its notes are kept.
+fn removal(db: &Connection, project: &ProjectId, kept: bool) {
+    use crate::project_setup::removed::event::{KIND, ProjectRemoved};
+    use crate::state_log::{Aggregate, Appender, Draft};
+    let behavior = rusqlite::TransactionBehavior::Immediate;
+    let tx = rusqlite::Transaction::new_unchecked(db, behavior).unwrap();
+    let fence = crate::worktrees::log::store_fence(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence).unwrap();
+    let removed = ProjectRemoved {
+        project: project.clone(),
+        kept,
+    };
+    let body = removed.body().unwrap();
+    let draft = Draft {
+        aggregate: Aggregate::Projects,
+        kind: KIND,
+        schema: 1,
+        at_ms: 1,
+        body: &body,
+    };
+    assert!(log.append(&draft).unwrap() > 0);
+    tx.commit().unwrap();
+}
