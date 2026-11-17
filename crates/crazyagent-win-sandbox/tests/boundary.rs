@@ -237,6 +237,13 @@ fn call(case: &Case, step: &[&str]) -> Output {
     output(command, &CHILD)
 }
 
+/// Whether Windows refused a [`call`]: the child ran and its call failed with access denied
+/// (error 5), so a path left in place is the boundary's doing, not a child that never started.
+fn denied(output: &Output) -> bool {
+    output.status.code() == Some(1)
+        && String::from_utf8_lossy(&output.stdout).contains("(os error 5)")
+}
+
 /// The child [`call`] starts: makes the one call named in its environment and exits 1 when
 /// Windows refuses it; without that variable, as in a normal test run, it does nothing.
 /// Calls: `delete`, `rename` (replacing the target), `rmdir`, `rmtree` and `mkdir`.
@@ -303,6 +310,7 @@ fn an_agent_writes_in_its_roots_but_not_outside_them_or_into_protected_paths() {
     run(&case, &["/C", "echo", "escape>", &plain(&escape)]);
     let changed = run(&case, &["/C", "echo", "changed>", &plain(&brief)]);
     let deleted = call(&case, &["delete", &plain(&brief)]);
+    assert!(denied(&deleted), "delete: {}", ran(&deleted));
     assert!(fs::read_to_string(&inside).unwrap().starts_with("inside"));
     assert!(fs::read_to_string(&home).unwrap().starts_with("home"));
     assert!(!escape.exists());
@@ -394,6 +402,16 @@ fn a_narrower_profile_takes_back_what_the_one_before_granted() {
         "the wide profile lets the agent write there"
     );
     assert_ne!(entries(&case.outside), before);
+    let packages = "*S-1-15-2-1";
+    let readable = Command::new(system("icacls.exe"))
+        .args([
+            plain(&case.outside).as_str(),
+            "/grant",
+            &format!("{packages}:(OI)(CI)(RX)"),
+        ])
+        .output()
+        .unwrap();
+    assert!(readable.status.success(), "{}", ran(&readable));
 
     let mut narrowed = case.base.clone();
     narrowed.read_roots.push(plain(&case.outside));
@@ -407,12 +425,21 @@ fn a_narrower_profile_takes_back_what_the_one_before_granted() {
     assert!(String::from_utf8_lossy(&read.stdout).contains("first"));
     let second = case.outside.join("second.txt");
     run(&case, &["/C", "echo", "second>", &plain(&second)]);
-    call(&case, &["delete", &plain(&first)]);
+    let deleted = call(&case, &["delete", &plain(&first)]);
     assert!(
         !second.exists(),
-        "modify narrowed to read and run takes back writes"
+        "modify narrowed to read and run takes back writes, on a root every package reads too"
     );
-    assert!(first.is_file(), "and deletes");
+    assert!(
+        first.is_file() && denied(&deleted),
+        "and deletes: {}",
+        ran(&deleted)
+    );
+    let shared = Command::new(system("icacls.exe"))
+        .args([plain(&case.outside).as_str(), "/remove:g", packages])
+        .output()
+        .unwrap();
+    assert!(shared.status.success(), "{}", ran(&shared));
 
     install(&case, &case.base);
     let hidden = run(&case, &["/C", "type", &plain(&first)]);
@@ -598,25 +625,33 @@ fn read_only_paths_refuse_every_change_while_the_project_stays_writable() {
     }
     let sample = path(r".git\hooks\pre-commit.sample");
     let deleted = call(&case, &["delete", &plain(&sample)]);
-    checks.expect(sample.is_file(), "a hook is not deleted", &deleted);
+    checks.expect(
+        sample.is_file() && denied(&deleted),
+        "a hook is not deleted",
+        &deleted,
+    );
     let config = path(r".git\config");
     let lock = path(r".git\config.lock");
     let made = run(&case, &["/C", "echo", "planted>", &plain(&lock)]);
     checks.expect(starts(&lock, "planted"), "config.lock is made", &made);
     let replaced = call(&case, &["rename", &plain(&lock), &plain(&config)]);
     checks.expect(
-        reads(&config, "[core]\n\tbare = false\n"),
+        reads(&config, "[core]\n\tbare = false\n") && denied(&replaced),
         "config.lock is not renamed over config",
         &replaced,
     );
     let removed = call(&case, &["delete", &plain(&config)]);
-    checks.expect(config.is_file(), "config is not deleted", &removed);
+    checks.expect(
+        config.is_file() && denied(&removed),
+        "config is not deleted",
+        &removed,
+    );
     for relative in [r".git\hooks", "context", r".crazyagent\context"] {
         let folder = path(relative);
         let moved = plain(&folder.with_file_name("moved"));
         let output = call(&case, &["rename", &plain(&folder), &moved]);
         checks.expect(
-            folder.is_dir() && !folder.with_file_name("moved").exists(),
+            folder.is_dir() && !folder.with_file_name("moved").exists() && denied(&output),
             &format!("{relative} is not renamed"),
             &output,
         );
@@ -651,7 +686,7 @@ fn anchored_folders_stay_in_place_while_git_writes_its_own_files() {
         checks.expect(starts(&lock, mark), &format!("{name}.lock is made"), &made);
         let moved = call(&case, &["rename", &plain(&lock), &plain(&target)]);
         checks.expect(
-            starts(&target, mark) && !lock.exists(),
+            starts(&target, mark) && !lock.exists() && moved.status.success(),
             &format!("{name}.lock is renamed over {name}"),
             &moved,
         );
@@ -676,17 +711,29 @@ fn anchored_folders_stay_in_place_while_git_writes_its_own_files() {
     let stepped = run(&case, &["/C", "echo", "step>", &plain(&step)]);
     checks.expect(starts(&step, "step"), "a rebase step is written", &stepped);
     let done = call(&case, &["delete", &plain(&step)]);
-    checks.expect(!step.exists(), "a rebase step is deleted", &done);
+    checks.expect(
+        !step.exists() && done.status.success(),
+        "a rebase step is deleted",
+        &done,
+    );
     let removed = call(&case, &["rmdir", &plain(&rebase)]);
-    checks.expect(!rebase.exists(), "the rebase folder is removed", &removed);
+    checks.expect(
+        !rebase.exists() && removed.status.success(),
+        "the rebase folder is removed",
+        &removed,
+    );
     let hooks = path(r".git\hooks");
     let moved = call(&case, &["rename", &plain(&hooks), &plain(&path("hooks"))]);
-    checks.expect(hooks.is_dir(), "the hooks folder is not moved out", &moved);
+    checks.expect(
+        hooks.is_dir() && denied(&moved),
+        "the hooks folder is not moved out",
+        &moved,
+    );
     for (relative, name) in [(".git", "git-moved"), (".crazyagent", "crazyagent-moved")] {
         let folder = path(relative);
         let output = call(&case, &["rename", &plain(&folder), &plain(&path(name))]);
         checks.expect(
-            folder.is_dir() && !path(name).exists(),
+            folder.is_dir() && !path(name).exists() && denied(&output),
             &format!("{relative} is not renamed"),
             &output,
         );
@@ -739,7 +786,11 @@ fn a_missing_protected_path_cannot_be_made() {
     );
     let objects = path(r".git\objects\ab");
     let folder = call(&case, &["mkdir", &plain(&objects)]);
-    checks.expect(objects.is_dir(), "work below .git goes on", &folder);
+    checks.expect(
+        objects.is_dir() && folder.status.success(),
+        "work below .git goes on",
+        &folder,
+    );
     let watched = [path(".git"), path(".crazyagent")];
     checks.done(&watched.each_ref().map(PathBuf::as_path));
 }
@@ -934,7 +985,7 @@ fn an_agent_works_normally_in_its_project_and_home() {
         ],
     );
     checks.expect(
-        path(r"build\out-moved\deep\o.txt").is_file(),
+        path(r"build\out-moved\deep\o.txt").is_file() && renamed.status.success(),
         "a build folder is renamed",
         &renamed,
     );
@@ -943,14 +994,22 @@ fn an_agent_works_normally_in_its_project_and_home() {
     run(&case, &["/C", "echo", "new>", &plain(&new)]);
     let replaced = call(&case, &["rename", &plain(&new), &plain(&old)]);
     checks.expect(
-        starts(&old, "new") && !new.exists(),
+        starts(&old, "new") && !new.exists() && replaced.status.success(),
         "a file is renamed over another",
         &replaced,
     );
     let deleted = call(&case, &["delete", &plain(&old)]);
-    checks.expect(!old.exists(), "a file is deleted", &deleted);
+    checks.expect(
+        !old.exists() && deleted.status.success(),
+        "a file is deleted",
+        &deleted,
+    );
     let removed = call(&case, &["rmtree", &plain(&path("build"))]);
-    checks.expect(!path("build").exists(), "a build tree is removed", &removed);
+    checks.expect(
+        !path("build").exists() && removed.status.success(),
+        "a build tree is removed",
+        &removed,
+    );
     let home = case.home.join("notes.txt");
     let noted = run(&case, &["/C", "echo", "home>", &plain(&home)]);
     checks.expect(starts(&home, "home"), "the agent home is written", &noted);

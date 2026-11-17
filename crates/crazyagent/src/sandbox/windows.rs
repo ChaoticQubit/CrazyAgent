@@ -778,7 +778,7 @@ mod tests {
         quiet(installed, &command)
     }
 
-    fn call(installed: &WindowsSandbox, folders: &Folders, step: &[&Path]) -> bool {
+    fn call(installed: &WindowsSandbox, folders: &Folders, step: &[&Path]) -> std::process::Output {
         assert!(!step.is_empty() && step.len() <= 2);
         let probe = folders.home.join("file-call.exe");
         if !probe.is_file() {
@@ -800,7 +800,13 @@ mod tests {
             ])
             .env(CALL, line(verb))
             .current_dir(&folders.project);
-        quiet(installed, &command)
+        let mut wrapped = Sandbox::wrap(installed, &command).unwrap();
+        crate::spawn_gate::collected(&mut wrapped).unwrap()
+    }
+
+    fn denied(output: &std::process::Output) -> bool {
+        output.status.code() == Some(1)
+            && String::from_utf8_lossy(&output.stdout).contains("(os error 5)")
     }
 
     #[test]
@@ -912,17 +918,15 @@ mod tests {
         let installed =
             WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
         let run = |line: &str| shell(&installed, &folders, line);
-        assert!(!call(
-            &installed,
-            &folders,
-            &[&git, &project.join(".git-moved")]
-        ));
+        let moved = call(&installed, &folders, &[&git, &project.join(".git-moved")]);
+        assert!(denied(&moved), "{moved:?}");
         assert!(git.join("config").is_file() && !project.join(".git-moved").exists());
         assert!(!run(r"mkdir .crazyagent\context"));
         assert!(!project.join(".crazyagent").exists());
         assert!(run(r"echo planted>.git\config.lock"));
         let lock = git.join("config.lock");
-        assert!(!call(&installed, &folders, &[&lock, &git.join("config")]));
+        let replaced = call(&installed, &folders, &[&lock, &git.join("config")]);
+        assert!(denied(&replaced), "{replaced:?}");
         assert_eq!(
             fs::read_to_string(git.join("config")).unwrap(),
             "[core]\r\n"
@@ -930,13 +934,18 @@ mod tests {
         assert!(!run(r"mkdir .git\hooks\planted"));
         assert!(!git.join("hooks").join("planted").exists());
         let context = project.join("context");
-        assert!(!call(
-            &installed,
-            &folders,
-            &[&context, &project.join("moved")]
-        ));
+        let vacated = call(&installed, &folders, &[&context, &project.join("moved")]);
+        assert!(denied(&vacated), "{vacated:?}");
         assert!(context.join("brief.md").is_file());
         assert!(run(r"echo changed>src\work.txt"));
+        let src = project.join("src");
+        let renamed = call(
+            &installed,
+            &folders,
+            &[&src.join("work.txt"), &src.join("done.txt")],
+        );
+        assert!(renamed.status.success(), "{renamed:?}");
+        assert!(src.join("done.txt").is_file() && !src.join("work.txt").exists());
         assert!(run("echo changed>README.md"));
         assert_eq!(
             fs::read_to_string(project.join("README.md")).unwrap(),
@@ -962,7 +971,8 @@ mod tests {
         let run = |line: &str| shell(&installed, &folders, line);
         assert!(run(r"echo lock>.git\index.lock"));
         let lock = git.join("index.lock");
-        assert!(call(&installed, &folders, &[&lock, &git.join("index")]));
+        let staged = call(&installed, &folders, &[&lock, &git.join("index")]);
+        assert!(staged.status.success(), "{staged:?}");
         assert!(git.join("index").is_file() && !lock.exists());
         assert!(run("echo new>notes.txt"));
         assert!(run("mkdir docs"));
@@ -970,12 +980,10 @@ mod tests {
         assert!(!run(r"echo planted>.git\hooks\pre-commit"));
         assert!(!git.join("hooks").join("pre-commit").exists());
         assert!(!run(r"echo planted>.crazyagent\context\brief.md"));
-        assert!(!call(
-            &installed,
-            &folders,
-            &[&git, &project.join(".git-moved")]
-        ));
-        assert!(!call(&installed, &folders, &[&state]));
+        let moved = call(&installed, &folders, &[&git, &project.join(".git-moved")]);
+        assert!(denied(&moved), "{moved:?}");
+        let removed = call(&installed, &folders, &[&state]);
+        assert!(denied(&removed), "{removed:?}");
         assert_eq!(
             fs::read_to_string(state.join("brief.md")).unwrap(),
             "brief\r\n"

@@ -62,10 +62,10 @@ pub(super) struct Withdrawal {
 /// container's own entries become the role's, and a guarded path or anchored folder is cut
 /// and every other package narrowed. A granted root must exist and must not be a link or
 /// junction; a guarded path or anchored folder that is missing, a link or a junction gets
-/// nothing, since the plan keeps the entries of the present folder above it. A read root the
-/// owner may not change is accepted only when every container can already read it, as with
-/// `C:\Program Files`. Inputs: the container SID, the role and the path's saved snapshot.
-/// Output: the step, or the refusal or failed step.
+/// nothing, since the plan keeps the entries of the present folder above it. A read root every
+/// container can already read, as with `C:\Program Files`, is left as it is unless it still
+/// holds an entry of the container's own. Inputs: the container SID, the role and the path's
+/// saved snapshot. Output: the step, or the refusal or failed step.
 pub(super) fn role(
     container: &Words,
     ace: &Ace,
@@ -79,10 +79,15 @@ pub(super) fn role(
         return Ok(none());
     };
     let current = read(&ace.path)?;
-    if ace.access == Access::ReadExecute && reads(&current.list, &ALL_APPLICATION_PACKAGES) {
+    let sid = container.bytes();
+    if ace.access == Access::ReadExecute
+        && reads(&current.list, &ALL_APPLICATION_PACKAGES)
+        && without(&current.list, &sid)
+            .map_err(BoundaryError::Refused)?
+            .is_none()
+    {
         return Ok(none());
     }
-    let sid = container.bytes();
     let target =
         converge(&current.list, &sid, ace.access, folder).map_err(BoundaryError::Refused)?;
     let cut = ace.access.cuts();
