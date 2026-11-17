@@ -2,7 +2,7 @@ use super::{Routed, Shared, parse, read, routed};
 use crazyagent::protocol::Topic;
 use crazyagent_desktop::bridge::BridgeError;
 use crazyagent_desktop::bridge::watch::Changed;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -45,10 +45,11 @@ impl Watched {
         true
     }
 
-    /// Waits for topics and takes them all. A newer long-poll ends this one with none, so a
-    /// reloaded page's poll never loses topics to the page it replaced. Input: the longest
-    /// wait. Output: the topics, none when the wait ran out or a newer poll came.
-    pub async fn next(&self, wait: Duration) -> Vec<Topic> {
+    /// Waits for topics and takes them all. A newer long-poll ends this one, so a reloaded
+    /// page's poll never loses topics to the page it replaced, as the app's channel goes to
+    /// the newest page only. Input: the longest wait. Output: the topics, empty when the wait
+    /// ran out, or None once a newer poll came.
+    pub async fn next(&self, wait: Duration) -> Option<Vec<Topic>> {
         let me = self.waiter.fetch_add(1, Ordering::AcqRel) + 1;
         self.changed.notify_waiters();
         let deadline = tokio::time::Instant::now() + wait;
@@ -57,15 +58,15 @@ impl Watched {
             tokio::pin!(notified);
             notified.as_mut().enable();
             if self.waiter.load(Ordering::Acquire) != me {
-                return Vec::new();
+                return None;
             }
             let taken =
                 std::mem::take(&mut *self.topics.lock().unwrap_or_else(PoisonError::into_inner));
             if !taken.is_empty() {
-                return taken.into_iter().collect();
+                return Some(taken.into_iter().collect());
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return Vec::new();
+                return Some(Vec::new());
             }
         }
     }
@@ -102,10 +103,16 @@ pub fn watch(state: &Shared, watched: &Arc<Watched>, args: Value) -> Routed {
 }
 
 /// Answers `e2e_watch_next`: the topics the feed handed on since the last one, waiting up to
-/// `NEXT_WAIT` for any. Input: the watch. Output: `{ topics }`, empty when none came.
+/// `NEXT_WAIT` for any. Input: the watch. Output: `{ topics }`, empty when none came, or the
+/// failure `watch_superseded` once a newer page polls, which ends the older page's loop.
 pub async fn next(watched: &Watched) -> Routed {
-    let topics = watched.next(NEXT_WAIT).await;
-    routed(Ok::<_, BridgeError>(Changed { topics }))
+    match watched.next(NEXT_WAIT).await {
+        Some(topics) => routed(Ok::<_, BridgeError>(Changed { topics })),
+        None => Routed::Failure(json!({
+            "code": "watch_superseded",
+            "message": "a newer page follows the engine watch",
+        })),
+    }
 }
 
 #[cfg(test)]
@@ -113,13 +120,13 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn a_poll_takes_every_topic_kept_and_a_newer_poll_ends_an_older_one_with_none() {
+    async fn a_poll_takes_every_topic_kept_and_a_newer_poll_ends_an_older_one() {
         let watched = Arc::new(Watched::default());
         assert!(watched.add(&[Topic::Team]));
         assert!(watched.add(&[Topic::Projects, Topic::Team]));
         assert_eq!(
             watched.next(Duration::from_secs(5)).await,
-            vec![Topic::Projects, Topic::Team]
+            Some(vec![Topic::Projects, Topic::Team])
         );
         let older = tokio::spawn({
             let watched = Arc::clone(&watched);
@@ -137,13 +144,14 @@ mod tests {
             async move { watched.next(Duration::from_secs(30)).await }
         });
         let ended = tokio::time::timeout(Duration::from_secs(5), older).await;
-        assert_eq!(ended.unwrap().unwrap(), Vec::<Topic>::new());
+        assert_eq!(ended.unwrap().unwrap(), None, "a newer poll ends the older");
         assert!(watched.add(&[Topic::Ide]));
         let woken = tokio::time::timeout(Duration::from_secs(5), newer).await;
-        assert_eq!(woken.unwrap().unwrap(), vec![Topic::Ide]);
+        assert_eq!(woken.unwrap().unwrap(), Some(vec![Topic::Ide]));
         assert_eq!(
             watched.next(Duration::from_millis(50)).await,
-            Vec::<Topic>::new()
+            Some(Vec::new()),
+            "a wait that runs out answers no topics"
         );
     }
 }

@@ -115,8 +115,8 @@ export function countFindings(base, candidate) {
       const now = candidate[scenario][cmd];
       const was = base[scenario][cmd] ?? 0;
       assert.ok(Number.isInteger(now) && now >= 0 && Number.isInteger(was) && was >= 0);
-      const allowed = was === 0 && Object.hasOwn(WATCH_CALLS_MAX, cmd) ? WATCH_CALLS_MAX[cmd] : 0;
-      if ((was === 0 && now > allowed) || now > was + COUNT_SLACK) findings.push({ scenario, cmd, base: was, candidate: now });
+      const limit = was > 0 ? was + COUNT_SLACK : Object.hasOwn(WATCH_CALLS_MAX, cmd) ? WATCH_CALLS_MAX[cmd] : 0;
+      if (now > limit) findings.push({ scenario, cmd, base: was, candidate: now });
     }
   }
   return findings;

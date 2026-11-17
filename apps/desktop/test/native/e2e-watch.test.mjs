@@ -31,13 +31,13 @@ test("v2.5 S3c: e2e_watch_next lives in the e2e bridge only and never builds int
   assert.match(readFileSync(join(DESKTOP, "src-tauri/e2e_bridge/main.rs"), "utf8"), /^mod watch;$/m);
 });
 
-test("v2.5 S3c: the harness page hands each e2e_watch_next change to the watch's channel in order, skips empty waits and stops with the bridge", async () => {
+test("v2.5 S3c: the harness page hands each e2e_watch_next change to the watch's channel in order, skips empty waits and stops once a newer page polls", async () => {
   const answers = [
     { value: null },
     { value: { topics: ["team"] } },
     { value: { topics: [] } },
     { value: { topics: ["ide", "unknown"] } },
-    { dropped: "the bridge closed" },
+    { failure: { code: "watch_superseded", message: "a newer page follows the engine watch" } },
   ];
   const asked = [];
   let ended;
