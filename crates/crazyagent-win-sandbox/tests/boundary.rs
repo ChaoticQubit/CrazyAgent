@@ -244,6 +244,26 @@ fn denied(output: &Output) -> bool {
         && String::from_utf8_lossy(&output.stdout).contains("(os error 5)")
 }
 
+/// The rows read an access list as the SDDL `icacls /save` writes for that path alone, from
+/// its `D:` on, and never through PowerShell, whose start costs about 3 s on windows-11-arm
+/// and timed rows out under load. A Users read entry granted here must show in the text.
+#[test]
+fn an_access_list_read_is_the_saved_sddl_of_that_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let folder = temp.path().join("read");
+    fs::create_dir(&folder).unwrap();
+    let granted = Command::new(system("icacls.exe"))
+        .arg(&folder)
+        .args(["/grant", "*S-1-5-32-545:(R)"])
+        .output()
+        .unwrap();
+    assert!(granted.status.success(), "{}", ran(&granted));
+    let text = read_sddl(&folder);
+    assert!(text.starts_with("D:"), "{text}");
+    assert!(text.contains(";;;BU)"), "{text}");
+    assert!(!text.contains('\n'), "{text}");
+}
+
 /// The child [`call`] starts: makes the one call named in its environment and exits 1 when
 /// Windows refuses it; without that variable, as in a normal test run, it does nothing.
 /// Calls: `delete`, `rename` (replacing the target), `rmdir`, `rmtree` and `mkdir`.
