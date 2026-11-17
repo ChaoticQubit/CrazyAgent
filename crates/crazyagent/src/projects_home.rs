@@ -353,17 +353,19 @@ fn overlaps(left: &Path, right: &Path) -> bool {
 
 /// True when a real folder overlaps a folder the project uses: its own folder
 /// or a repository it declares, each compared as recorded and, when it
-/// resolves, at its canonical path, so one declared through a link counts.
-/// Input: a canonical folder and the project. Output: whether it is in use.
+/// resolves, at its canonical path in one spelling, so one declared through a link or
+/// recorded under the other macOS name counts. Input: a canonical folder in either
+/// spelling and the project. Output: whether it is in use.
 pub(crate) fn in_use(real: &Path, project: &Registered) -> bool {
     assert!(real.is_absolute());
+    let short = one_spelling(real.to_path_buf());
     std::iter::once(&project.folder)
         .chain(&project.repositories)
         .filter(|used| used.is_absolute())
         .any(|used| {
             overlaps(real, used)
                 || std::fs::canonicalize(used)
-                    .is_ok_and(|canonical| overlaps(real, &one_spelling(canonical)))
+                    .is_ok_and(|canonical| overlaps(&short, &one_spelling(canonical)))
         })
 }
 
