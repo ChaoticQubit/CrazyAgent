@@ -477,7 +477,7 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 8] = [
+const KINDS: [&str; 9] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -486,11 +486,13 @@ const KINDS: [&str; 8] = [
     crate::worktrees::log::KIND_ADMITTED,
     crate::worktrees::log::KIND_RESERVED,
     crate::worktrees::log::KIND_SAVED,
+    crate::memory::log::KIND,
 ];
 
 /// The source files outside tests that name the log's appender, as paths under `src` in
 /// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
-const WRITERS: [(&str, &[&str]); 4] = [
+const WRITERS: [(&str, &[&str]); 5] = [
+    ("memory/log.rs", &["KIND,"]),
     ("project_setup/removed/event.rs", &["KIND,"]),
     ("state_log.rs", &["SNAPSHOT_CHUNK,", "SNAPSHOT_DONE,"]),
     (
@@ -506,10 +508,31 @@ const WRITERS: [(&str, &[&str]); 4] = [
 /// The writers outside this module that take a snapshot, each with the only tables its runs
 /// may carry. A run copies those tables' stored columns as they stand, rows the typed events
 /// wrote; the run does not check them again.
-const SNAPSHOTS: [(&str, &[&str]); 1] = [(
-    "worktrees/log.rs",
-    &["repository_admissions", "worktree_leases"],
-)];
+const SNAPSHOTS: [(&str, &[&str]); 2] = [
+    (
+        "worktrees/log.rs",
+        &["repository_admissions", "worktree_leases"],
+    ),
+    (
+        "memory/log.rs",
+        &[
+            "knowledge_principals",
+            "knowledge_sources",
+            "knowledge_activity",
+            "knowledge_nominations",
+            "knowledge_entries",
+            "knowledge_heads",
+            "knowledge_globals",
+            "knowledge_jobs",
+            "knowledge_watermarks",
+            "memory_library",
+            "memory_settings",
+            "memory_agent_scope",
+            "asset_sources",
+            "asset_snapshots",
+        ],
+    ),
+];
 
 /// A lease record as the worktrees events carry it, of task t1 in /repo under the engine's
 /// branch. Output: the record as JSON.
@@ -543,6 +566,38 @@ fn worktrees_runs_carry_only_their_named_tables() {
     let tx = db.transaction().unwrap();
     let mut log = Appender::own(&tx, fence::engine()).unwrap();
     crate::worktrees::log::snapshot(&mut log, 9).unwrap();
+    drop(log);
+    let mut statement = tx
+        .prepare("SELECT body FROM state_log WHERE kind=?1")
+        .unwrap();
+    let tables: Vec<String> = statement
+        .query_map([SNAPSHOT_CHUNK], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|body| {
+            let chunk: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            chunk["table"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(tables.len(), named.len(), "one chunk per empty table");
+    assert!(
+        tables.iter().all(|table| named.contains(&table.as_str())),
+        "{tables:?}"
+    );
+}
+
+/// Checks that a memory snapshot run carries only the tables [`SNAPSHOTS`] names for
+/// memory/log.rs, on a store holding the 14 memory tables, one chunk for each empty table.
+/// Output: none.
+#[cfg(unix)]
+fn memory_runs_carry_only_their_named_tables() {
+    let (writer, named) = SNAPSHOTS[1];
+    assert_eq!(writer, "memory/log.rs");
+    let mut db = db();
+    crate::memory::initialize(&db).unwrap();
+    crate::assets::initialize(&db).unwrap();
+    let tx = db.transaction().unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    crate::memory::log::snapshot(&mut log, 9).unwrap();
     drop(log);
     let mut statement = tx
         .prepare("SELECT body FROM state_log WHERE kind=?1")
@@ -655,6 +710,8 @@ fn only_named_writers_take_a_snapshot(writers: &[(String, String)]) {
         );
     }
     worktrees_runs_carry_only_their_named_tables();
+    #[cfg(unix)]
+    memory_runs_carry_only_their_named_tables();
 }
 
 /// Checks that a snapshot's closing body holds only its aggregate, its chunk count and its
@@ -765,6 +822,15 @@ fn no_event_body_can_carry_a_secret() {
             crate::worktrees::log::KIND_ADMITTED
             | crate::worktrees::log::KIND_RESERVED
             | crate::worktrees::log::KIND_SAVED => worktrees_body_is_closed(kind),
+            crate::memory::log::KIND => closed_body(
+                crate::memory::log::closed,
+                json!({
+                    "action": "knowledge",
+                    "deleted": [{"table": "knowledge_jobs", "key": [{"id": "j1"}]}],
+                    "put": [{"table": "memory_settings", "cells": [{"int": 1}, {"id": "ask"}]}]
+                }),
+                &["action", "deleted", "put"],
+            ),
             other => panic!("the kind {other} has no body rule"),
         }
     }
