@@ -1950,6 +1950,7 @@ fn an_empty_file_a_failed_run_and_an_unusable_reply_change_nothing() {
         (Err(cleanup::FAILED), "instructions_cleanup_failed"),
         (Err(cleanup::TIMED_OUT), "instructions_cleanup_timed_out"),
         (Err(cleanup::BUSY), "instructions_cleanup_busy"),
+        (Err(cleanup::FULL), "instructions_cleanup_full"),
         (Err(cleanup::NO_ACCOUNT), "instructions_cleanup_no_account"),
         (Err(cleanup::PAUSED), "instructions_cleanup_paused"),
         (

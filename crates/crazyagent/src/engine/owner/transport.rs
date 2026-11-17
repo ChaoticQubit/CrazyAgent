@@ -92,6 +92,7 @@ const SOCKET: &str = "owner.sock";
 const REPLY_LOG: &str = "owner-reply.log";
 const CLIENTS_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const DEFERRED_MAX: usize = 4;
+const _: () = assert!(2 * crate::instruction_cleanup::CLEANUPS_MAX <= DEFERRED_MAX);
 const HANDSHAKES_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const REFUSALS_MAX: usize = 4;
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
