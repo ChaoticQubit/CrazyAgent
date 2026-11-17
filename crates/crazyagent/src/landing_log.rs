@@ -13,8 +13,28 @@ pub const AGENT_BRANCH_SET: &str = "AgentBranchSet";
 pub const AGENT_BRANCH_FORGOTTEN: &str = "AgentBranchForgotten";
 /// The commit a worktree's next change set opens above stored (`landing_bases`).
 pub const BASE_SET: &str = "BaseSet";
+/// An owner edit kept waiting in an agent worktree for its next turn end
+/// (`landing_owner_edits`).
+pub const OWNER_EDIT_KEPT: &str = "OwnerEditKept";
+/// A worktree's waiting owner edits settled on the change set its turn end recorded.
+pub const OWNER_EDITS_SETTLED: &str = "OwnerEditsSettled";
+/// A worktree's waiting owner edits dropped by a turn end that left no change set open.
+pub const OWNER_EDITS_DROPPED: &str = "OwnerEditsDropped";
+/// The owner edits settled on a change set forgotten once no review can show them.
+pub const OWNER_EDITS_FORGOTTEN: &str = "OwnerEditsForgotten";
+/// Every owner edit of a removed worktree forgotten.
+pub const WORKTREE_OWNER_EDITS_FORGOTTEN: &str = "WorktreeOwnerEditsForgotten";
 /// Every landing event kind.
-pub const KINDS: [&str; 3] = [AGENT_BRANCH_SET, AGENT_BRANCH_FORGOTTEN, BASE_SET];
+pub const KINDS: [&str; 8] = [
+    AGENT_BRANCH_SET,
+    AGENT_BRANCH_FORGOTTEN,
+    BASE_SET,
+    OWNER_EDIT_KEPT,
+    OWNER_EDITS_SETTLED,
+    OWNER_EDITS_DROPPED,
+    OWNER_EDITS_FORGOTTEN,
+    WORKTREE_OWNER_EDITS_FORGOTTEN,
+];
 
 /// Whether a body path is absolute: `/`, then names `owner_edit::check_path` accepts, so
 /// no free text rides in it (v2.5 L6 Q11). Input: the path. Output: the answer.

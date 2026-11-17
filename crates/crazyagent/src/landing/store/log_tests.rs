@@ -1,5 +1,8 @@
 use super::*;
-use crate::landing_log::{AGENT_BRANCH_FORGOTTEN, AGENT_BRANCH_SET, BASE_SET, rebuild, seed};
+use crate::landing_log::{
+    AGENT_BRANCH_FORGOTTEN, AGENT_BRANCH_SET, BASE_SET, OWNER_EDIT_KEPT, OWNER_EDITS_DROPPED,
+    OWNER_EDITS_FORGOTTEN, OWNER_EDITS_SETTLED, WORKTREE_OWNER_EDITS_FORGOTTEN, rebuild, seed,
+};
 use crate::state_log::replay::rows;
 use serde_json::json;
 
@@ -112,4 +115,70 @@ fn a_base_set_again_is_logged_and_rebuilds_to_the_last_base() {
     assert_eq!(live.len(), 1);
     rebuild(&db).unwrap();
     assert_eq!(rows(&db, "landing_bases").unwrap(), live);
+}
+
+/// V250-L9: each owner-edit write appends one event with a closed body (kept, settled on a
+/// change set, dropped, forgotten by change set or by worktree), and the table rebuilt from
+/// the log equals the live rows after every step.
+#[cfg(unix)]
+#[test]
+fn owner_edits_kept_settled_and_forgotten_are_logged_and_rebuild_to_the_live_rows() {
+    use crate::landing::owner_edit;
+    let (root, db) = store();
+    let (one, two) = (
+        root.path().join("repo/.wt/one"),
+        root.path().join("repo/.wt/two"),
+    );
+    let id = crate::landing::ChangeSetId::new("c".repeat(32)).unwrap();
+    owner_edit::record(&db, &one, "README", 1000).unwrap();
+    owner_edit::record(&db, &one, "src/a.rs", 1001).unwrap();
+    owner_edit::record(&db, &two, "x", 1002).unwrap();
+    owner_edit::settle(&db, &one, Some(&id)).unwrap();
+    owner_edit::record(&db, &one, "late", 1003).unwrap();
+    owner_edit::settle(&db, &two, None).unwrap();
+    let logged = events(&db);
+    let kinds: Vec<&str> = logged.iter().map(|(kind, _)| kind.as_str()).collect();
+    let kept = OWNER_EDIT_KEPT;
+    let expected = [
+        kept,
+        kept,
+        kept,
+        OWNER_EDITS_SETTLED,
+        kept,
+        OWNER_EDITS_DROPPED,
+    ];
+    assert_eq!(kinds, expected);
+    assert_eq!(
+        logged[0].1,
+        json!({"worktree": one, "path": "README", "at_ms": 1000})
+    );
+    assert_eq!(
+        logged[3].1,
+        json!({"worktree": one, "change_set": id.as_str()})
+    );
+    assert_eq!(logged[5].1, json!({"worktree": two}));
+    let live = rows(&db, "landing_owner_edits").unwrap();
+    assert_eq!(
+        live.len(),
+        3,
+        "two settled on the set and one waiting, the dropped one gone"
+    );
+    rebuild(&db).unwrap();
+    assert_eq!(rows(&db, "landing_owner_edits").unwrap(), live);
+    owner_edit::forget(&db, &id).unwrap();
+    owner_edit::forget_worktree(&db, &one).unwrap();
+    let logged = events(&db);
+    assert_eq!(logged.len(), 8, "one event per forget");
+    assert_eq!(
+        logged[6],
+        (
+            OWNER_EDITS_FORGOTTEN.to_owned(),
+            json!({"change_set": id.as_str()})
+        )
+    );
+    let gone = json!({"worktree": one});
+    assert_eq!(logged[7], (WORKTREE_OWNER_EDITS_FORGOTTEN.to_owned(), gone));
+    assert!(rows(&db, "landing_owner_edits").unwrap().is_empty());
+    rebuild(&db).unwrap();
+    assert!(rows(&db, "landing_owner_edits").unwrap().is_empty());
 }
