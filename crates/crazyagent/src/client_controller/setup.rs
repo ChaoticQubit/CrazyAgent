@@ -113,6 +113,17 @@ impl OwnerController {
         self.send_pending().await
     }
 
+    /// Asks the engine to stop and bring back the pinned 2.4 backup, keeping a dated copy of
+    /// the 2.5 data it replaces (L5). Takes the client generation. Returns the actual owner
+    /// response; a rejection carries a plain code, `storage_restore_unavailable` after the
+    /// 30 days and `storage_restore_agents_running` while an agent runs. The engine stops
+    /// right after it applies, so the reply may never come.
+    pub async fn restore_pinned(&mut self, generation: u64) -> Result<OwnerResponse, EngineError> {
+        self.setup_status().await?;
+        self.begin_mutation(OwnerMutation::RestorePinned, generation)?;
+        self.send_pending().await
+    }
+
     /// Turns one installed default-pack entry on or off for every project.
     /// Takes the entry id, on or off, the pack version the screen showed and the client
     /// generation. Returns the actual owner response; a rejection carries a plain code,

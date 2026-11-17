@@ -37,7 +37,7 @@ const TABLES_MAX: usize = 4_096;
 type CopyCheck = fn(&Connection, &Path) -> Result<(), EngineError>;
 
 /// The database file name inside a backup folder.
-const DATABASE: &str = "engine.db";
+pub(crate) const DATABASE: &str = "engine.db";
 
 /// One forward engine.db schema step. `to` is the version the database reaches when
 /// the upgrade commits; `run` makes the change inside the upgrade transaction and
@@ -372,6 +372,7 @@ pub(crate) fn upgrade(
     settings: Option<&SettingsSources>,
     steps: &[Step],
 ) -> Result<(), EngineError> {
+    forget_restore(path);
     upgrade_at(db, path, settings, steps, SystemTime::now(), check_copy)
 }
 
@@ -665,7 +666,7 @@ fn alone(path: &Path) -> Result<Connection, EngineError> {
 /// Whether a team agent or a research run still runs, as engine.db records it: a team_agents
 /// row, masters included, that is not stopped or failed, or a research_jobs row running. A
 /// table that does not exist holds none. Input: the connection. Output: the answer.
-fn agents_running(db: &Connection) -> Result<bool, EngineError> {
+pub(crate) fn agents_running(db: &Connection) -> Result<bool, EngineError> {
     let checks = [
         (
             "team_agents",
@@ -991,6 +992,76 @@ pub fn backup_failure(root: &Path) -> Option<&'static str> {
     [BACKUP_UNSAFE, BACKUP_FAILED]
         .into_iter()
         .find(|code| text == *code)
+}
+
+/// The private file beside engine.db that says how the owner's last restore stands, so a
+/// client can say so while no engine answers: `pending`, `restored <copy>` or
+/// `failed <code>`.
+pub(crate) const RESTORE_RECORD_FILE: &str = "restore-record";
+/// The record of a restore the engine stops for.
+pub(crate) const RECORD_PENDING: &str = "pending";
+/// The first word of the record of a restore that brought the 2.4 data back.
+pub(crate) const RECORD_RESTORED: &str = "restored";
+/// The first word of the record of a restore that changed nothing.
+pub(crate) const RECORD_FAILED: &str = "failed";
+/// The most a restore record holds.
+const RESTORE_RECORD_BYTES_MAX: usize = 512;
+
+/// Replaces the restore record of the engine at `root` with one line, written private and
+/// synced. Inputs: the root and the line. Output: Ok once it is on disk.
+pub(crate) fn write_restore_record(root: &Path, line: &str) -> Result<(), EngineError> {
+    assert!(!line.is_empty());
+    assert!(line.len() <= RESTORE_RECORD_BYTES_MAX);
+    let record = root.join(RESTORE_RECORD_FILE);
+    match std::fs::remove_file(&record) {
+        Ok(()) => {}
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+        Err(cause) => return Err(restore_failed(cause)),
+    }
+    private_file(&record, line.as_bytes()).map_err(|cause| restore_failed(cause.0))
+}
+
+/// Reads the restore record of the engine at `root`, without an engine and without following
+/// a link: only a private regular file of this user counts. Input: the root. Output: its line,
+/// or none.
+pub(crate) fn read_restore_record(root: &Path) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(root.join(RESTORE_RECORD_FILE))
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+    {
+        return None;
+    }
+    let mut text = String::new();
+    let limit = u64::try_from(RESTORE_RECORD_BYTES_MAX).ok()?;
+    file.take(limit).read_to_string(&mut text).ok()?;
+    assert!(text.len() <= RESTORE_RECORD_BYTES_MAX);
+    Some(text)
+}
+
+/// Removes a pending or restored record as the engine starts, so a stale one never keeps a
+/// client from starting the engine after a crash or a return to 2.5; a failed one stays for
+/// the restore screen until the next request. Input: the database path. Output: none; a
+/// record that cannot be removed is logged.
+fn forget_restore(path: &Path) {
+    let Some(root) = path.parent() else {
+        return;
+    };
+    let Some(line) = read_restore_record(root) else {
+        return;
+    };
+    if line.split(' ').next() == Some(RECORD_FAILED) {
+        return;
+    }
+    if std::fs::remove_file(root.join(RESTORE_RECORD_FILE)).is_err() {
+        eprintln!("storage_restore_record_kept");
+    }
 }
 
 /// Writes the database and settings copies into a new backup folder.

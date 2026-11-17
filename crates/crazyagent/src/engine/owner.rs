@@ -223,6 +223,7 @@ pub enum OwnerMutation {
     SetRefusedTool {
         choice: crate::setup::RefusedTool,
     },
+    RestorePinned,
     SetProjectsHome {
         path: String,
     },
@@ -510,6 +511,9 @@ impl OwnerMutation {
             },
             Self::SetRefusedTool { choice } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::SetRefusedTool { choice: *choice },
+            },
+            Self::RestorePinned => Command::OwnerSetup {
+                action: crate::setup::SetupAction::RestorePinned,
             },
             Self::RemovePackEntry { id, version } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Remove {
