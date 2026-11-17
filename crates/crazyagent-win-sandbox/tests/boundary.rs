@@ -34,6 +34,14 @@ fn system(program: &str) -> String {
 }
 
 fn case(container: &str) -> Case {
+    case_in(container, true)
+}
+
+/// The case tree under a root whose access list is auto-inherited, or, when `auto_inherited`
+/// is false, holds the same entries as explicit copies with no AI flag: the state of a root
+/// made under a parent whose list has none, which every folder made in it then shares.
+/// Inputs: the container name and the root's state. Output: the case.
+fn case_in(container: &str, auto_inherited: bool) -> Case {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().to_path_buf();
     let reset = Command::new(system("icacls.exe"))
@@ -44,6 +52,15 @@ fn case(container: &str) -> Case {
     assert!(reset.status.success(), "{}", ran(&reset));
     let reset_sddl = read_sddl(&root);
     assert!(reset_sddl.starts_with("D:AI("), "{reset_sddl}");
+    if !auto_inherited {
+        let copies = access(&reset_sddl);
+        assert!(
+            copies.starts_with("D:(") && !copies.contains("ID;"),
+            "{copies}"
+        );
+        write_raw(&root, &copies);
+        assert_eq!(read_sddl(&root), copies);
+    }
     let project = root.join("project");
     let home = root.join("agent").join("home");
     let tmp = root.join("agent").join("tmp");
@@ -97,6 +114,79 @@ fn case(container: &str) -> Case {
         profile: profile_path,
         base: profile,
     }
+}
+
+/// An SDDL line without the flags that record where its entries came from, AI on the list
+/// and ID on each entry, so two lines compare equal when they grant the same access with the
+/// same protection. Input: a D: line. Output: the line without those flags.
+fn access(sddl: &str) -> String {
+    let start = sddl.find('(').unwrap_or(sddl.len());
+    let list = &sddl[..start];
+    assert!(list.starts_with("D:"), "{sddl}");
+    format!(
+        "{}{}",
+        list.replace("AI", ""),
+        rewrite_flags(&sddl[start..], |flags| flags.replace("ID", ""))
+    )
+}
+
+/// The SDDL line Windows gives a list of explicit copies once it applies inheritance to it:
+/// the AI flag on the list and the inherited flag on every entry. Input: a D: line with no
+/// list flags. Output: the line.
+fn inherited(sddl: &str) -> String {
+    let aces = sddl.strip_prefix("D:").expect(sddl);
+    assert!(aces.starts_with('('), "{sddl}");
+    format!("D:AI{}", rewrite_flags(aces, |flags| format!("{flags}ID")))
+}
+
+/// The entries of an SDDL line, each with its flags field rewritten. Inputs: the entries,
+/// from the first `(` on, and the rewrite. Output: the entries.
+fn rewrite_flags(aces: &str, rewrite: impl Fn(&str) -> String) -> String {
+    assert!(
+        aces.is_empty() || (aces.starts_with('(') && aces.ends_with(')')),
+        "{aces}"
+    );
+    aces.split_inclusive(')')
+        .map(|ace| {
+            let mut fields: Vec<String> = ace.split(';').map(str::to_owned).collect();
+            assert!(fields.len() >= 6, "{aces}");
+            fields[1] = rewrite(&fields[1]);
+            fields.join(";")
+        })
+        .collect()
+}
+
+/// Writes `sddl` as the access list of `path` through SetFileSecurityW, which applies no
+/// inheritance, so the list holds exactly the line: its entries' flags and no AI flag the
+/// line does not carry. Relies on `sddl` being a D: line; the descriptor the conversion
+/// allocates is freed after the write. Inputs: the path and the line. Output: none.
+fn write_raw(path: &Path, sddl: &str) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+    };
+    let line: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
+    let target: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            line.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(converted, 0, "{sddl}: {}", std::io::Error::last_os_error());
+    assert!(!descriptor.is_null());
+    let written =
+        unsafe { SetFileSecurityW(target.as_ptr(), DACL_SECURITY_INFORMATION, descriptor) };
+    let error = std::io::Error::last_os_error();
+    unsafe { LocalFree(descriptor) };
+    assert_ne!(written, 0, "{}: {error}", path.display());
 }
 
 fn install(case: &Case, profile: &BoundaryProfile) {
@@ -1187,5 +1277,85 @@ fn releasing_keeps_an_access_list_the_owner_changed_and_drops_only_the_agents_en
         entries(&config),
         config_before,
         "a guarded path the owner left alone is restored"
+    );
+}
+
+#[test]
+fn releasing_under_a_parent_without_auto_inheritance_keeps_the_access_with_inherited_entries() {
+    let case = case_in("crazyagent.test.explicit", false);
+    let context = case.project.join("context");
+    let written = [
+        case.project.clone(),
+        case.project.join("readme.txt"),
+        context.clone(),
+        context.join("brief.md"),
+        case.home.clone(),
+    ];
+    let untouched = [
+        case.secret.parent().unwrap().to_path_buf(),
+        case.secret.clone(),
+    ];
+    let watched: Vec<&PathBuf> = written.iter().chain(&untouched).collect();
+    let read = || {
+        watched
+            .iter()
+            .map(|path| read_sddl(path))
+            .collect::<Vec<_>>()
+    };
+    let before = read();
+    for line in &before {
+        assert!(
+            line.starts_with("D:(") && !line.contains("ID;"),
+            "a path made under the root holds explicit copies: {line}"
+        );
+    }
+    let readme = run(
+        &case,
+        &["/C", "type", &plain(&case.project.join("readme.txt"))],
+    );
+    assert!(readme.status.success(), "{}", ran(&readme));
+    let sid = container_sid(&case);
+    let granted = read();
+    assert_ne!(granted, before);
+    crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.explicit").unwrap();
+    let after = read();
+    let shown = |lines: &[String]| {
+        watched
+            .iter()
+            .zip(lines)
+            .map(|(path, line)| format!("{} => {line}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let report = format!(
+        "before:\n{}\ngranted:\n{}\nafter:\n{}",
+        shown(&before),
+        shown(&granted),
+        shown(&after)
+    );
+    assert!(
+        after.iter().all(|line| !line.contains(&sid)),
+        "no entry of the container is left\n{report}"
+    );
+    assert_eq!(
+        after.iter().map(|line| access(line)).collect::<Vec<_>>(),
+        before.iter().map(|line| access(line)).collect::<Vec<_>>(),
+        "each path grants the access it did before\n{report}"
+    );
+    let expected: Vec<String> = before
+        .iter()
+        .enumerate()
+        .map(|(at, line)| {
+            if at < written.len() {
+                inherited(line)
+            } else {
+                line.clone()
+            }
+        })
+        .collect();
+    assert_eq!(
+        after, expected,
+        "a path the grant wrote holds its entries as inherited ones under the AI flag, as Windows \
+         leaves it at the next change above it; a path it never wrote stays exact\n{report}"
     );
 }
