@@ -8,8 +8,8 @@ use crazyagent::protocol::{
     ExecutionContext, PROTOCOL_VERSION, ProjectId, RequestId, SnapshotId, TaskId, WireRequest,
 };
 use crazyagent::verification::{
-    BaselineDraft, BaselineOrigin, CandidateSnapshot, CheckKind, CheckSpec, OwnerVerification,
-    Risk, RiskRule, VerificationReceipt, VerifyRequest, verify,
+    BaselineDraft, BaselineOrigin, CheckKind, CheckSpec, Risk, RiskRule, VerificationReceipt,
+    VerifyRequest, verify,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -36,10 +36,7 @@ pub(super) fn scenarios() -> Vec<Scenario> {
         capture,
     };
     vec![
-        check(
-            "verify-refused-until-qualified",
-            verify_refused_until_qualified,
-        ),
+        check("verify-path-without-register", verify_path_without_register),
         check("verify-unknown-candidate", verify_unknown_candidate),
         check(
             "baseline-without-integrity-floor",
@@ -115,18 +112,6 @@ fn draft() -> Result<BaselineDraft, String> {
     })
 }
 
-/// The candidate source every verification scenario registers. Output: the snapshot.
-fn snapshot() -> CandidateSnapshot {
-    CandidateSnapshot {
-        files: BTreeMap::from([(
-            "src/main.rs".into(),
-            b"fn sum(a: i32, b: i32) -> i32 { a + b }".to_vec(),
-        )]),
-        head_digest: "a".repeat(64),
-        target_digest: "b".repeat(64),
-    }
-}
-
 /// A host client on the engine's request socket that keeps the revision the engine last
 /// answered, as a hosted agent's client does.
 struct Wire {
@@ -147,7 +132,8 @@ impl Wire {
     }
 
     /// Sends one command and records its outcome whole. Input: the command.
-    /// Output: the outcome as JSON, or `{"refused": code}` when the engine refused it.
+    /// Output: the outcome as JSON; a failed exchange on the socket is an error, never a
+    /// capture.
     async fn call(&mut self, command: Command) -> Result<Value, String> {
         self.sent += 1;
         let request = WireRequest {
@@ -157,13 +143,24 @@ impl Wire {
             expected_revision: Cursor::new(self.revision),
             command,
         };
-        match self.client.request(request).await {
-            Ok(answer) => {
-                self.revision = answer.revision.value();
-                serde_json::to_value(&answer.outcome).map_err(|error| error.to_string())
-            }
-            Err(error) => Ok(json!({ "refused": error.0 })),
-        }
+        let answer = self
+            .client
+            .request(request)
+            .await
+            .map_err(|error| format!("the engine socket failed: {}", error.0))?;
+        self.revision = answer.revision.value();
+        serde_json::to_value(&answer.outcome).map_err(|error| error.to_string())
+    }
+}
+
+/// Reads one owner read the way the desktop does. Inputs: the owner and the read.
+/// Output: `{"data": ..}`, or `{"refused": code}` with the engine's plain code.
+async fn owner_read(owner: &mut Owner, read: OwnerRead) -> Result<Value, String> {
+    match owner.controller.read(read).await {
+        Ok(reply) => serde_json::to_value(&reply.data)
+            .map(|data| json!({ "data": data }))
+            .map_err(|error| error.to_string()),
+        Err(error) => Ok(json!({ "refused": error.0 })),
     }
 }
 
@@ -190,12 +187,12 @@ async fn config_id(owner: &mut Owner) -> Result<ConfigId, String> {
     read.map(|answer| answer.config_id).map_err(|error| error.0)
 }
 
-/// The whole verification path on a project at 2.4.2: a baseline proposed and approved, a
-/// task pinned, a candidate registered, then Verify from the host and from the owner, both
-/// refused as unavailable until the runtime is qualified, the candidate's state, Accept
-/// refused, and whether the outcomes name the draft's identity and the registered digests,
-/// which the runner masks. Input: the scratch folder. Output: each step's outcome by name.
-fn verify_refused_until_qualified(scratch: &Path) -> Result<Value, String> {
+/// The 2.4.2 verification path: the owner proposes and approves a baseline, a host client
+/// pins a task, then the owner's Verify, Inspect and Accept on a candidate id, and whether
+/// the outcomes name the draft's identity, which the runner masks. Verify of a registered
+/// candidate is not covered: 2.4.2 has no owner or wire route that registers one.
+/// Input: the scratch folder. Output: each step's outcome by name.
+fn verify_path_without_register(scratch: &Path) -> Result<Value, String> {
     let engine = engine(scratch)?;
     let socket = engine.socket();
     let scratch = scratch.to_path_buf();
@@ -205,88 +202,55 @@ fn verify_refused_until_qualified(scratch: &Path) -> Result<Value, String> {
     })
 }
 
-/// The steps of [`verify_refused_until_qualified`]. Inputs: the owner, the scratch folder and
+/// The steps of [`verify_path_without_register`]. Inputs: the owner, the scratch folder and
 /// the engine socket. Output: each step's outcome by name.
 async fn verify_steps(owner: &mut Owner, scratch: &Path, socket: &Path) -> Result<Value, String> {
     let project = seeded(owner, scratch).await?;
-    let config_id = config_id(owner).await?;
     let draft = draft()?;
     let baseline_id: BaselineId = draft.identity().map_err(|error| error.0)?;
     let identity = baseline_id.as_str().to_owned();
-    let candidate = typed("candidate", RequestId::new)?;
-    let task_id = typed("task", TaskId::new)?;
+    let mut steps = Map::new();
+    let propose = OwnerMutation::ProposeBaseline { draft };
+    steps.insert("1-propose".into(), owner_change(owner, propose).await?);
+    let approve = OwnerMutation::ApproveBaseline {
+        baseline_id: baseline_id.clone(),
+    };
+    steps.insert("2-approve".into(), owner_change(owner, approve).await?);
+    let context = ExecutionContext {
+        project_id: project,
+        task_id: typed("task", TaskId::new)?,
+        config_id: config_id(owner).await?,
+        snapshot_id: typed("initial", SnapshotId::new)?,
+        baseline_id,
+        allowed_destinations: vec![],
+        budget_ref: typed("local", CredentialRef::new)?,
+    };
     let mut wire = Wire::new(socket)?;
     wire.call(Command::Snapshot).await?;
-    let mut steps = Map::new();
-    let host = |action| Command::OwnerVerification { action };
-    let sent = [
-        ("1-propose", Command::ProposeBaseline { draft }),
-        (
-            "2-approve",
-            host(OwnerVerification::Approve {
-                baseline_id: baseline_id.clone(),
-            }),
-        ),
-        (
-            "3-pin",
-            Command::PinTask {
-                context: ExecutionContext {
-                    project_id: project,
-                    task_id: task_id.clone(),
-                    config_id,
-                    snapshot_id: typed("initial", SnapshotId::new)?,
-                    baseline_id,
-                    allowed_destinations: vec![],
-                    budget_ref: typed("local", CredentialRef::new)?,
-                },
-            },
-        ),
-        (
-            "4-register",
-            host(OwnerVerification::Register {
-                id: candidate.clone(),
-                task_id,
-                snapshot: snapshot(),
-                environment_id: typed("controlled-fixture", EnvironmentId::new)?,
-            }),
-        ),
-        (
-            "5-verify-host",
-            host(OwnerVerification::Verify {
-                candidate_id: candidate.clone(),
-                attempt_id: typed("attempt", RequestId::new)?,
-            }),
-        ),
-    ];
-    for (name, command) in sent {
-        steps.insert(name.into(), wire.call(command).await?);
-    }
-    let owner_verify = OwnerMutation::Verify {
-        candidate_id: candidate.clone(),
-        attempt_id: typed("owner-attempt", RequestId::new)?,
-    };
     steps.insert(
-        "6-verify-owner".into(),
-        owner_change(owner, owner_verify).await?,
+        "3-pin".into(),
+        wire.call(Command::PinTask { context }).await?,
     );
-    let inspect = host(OwnerVerification::Inspect {
+    let candidate = typed("candidate", RequestId::new)?;
+    let attempt = typed("attempt", RequestId::new)?;
+    let verify = OwnerMutation::Verify {
         candidate_id: candidate.clone(),
-    });
-    steps.insert("7-inspect".into(), wire.call(inspect).await?);
-    let accept = host(OwnerVerification::Accept {
+        attempt_id: attempt.clone(),
+    };
+    steps.insert("4-verify".into(), owner_change(owner, verify).await?);
+    let inspect = OwnerRead::Inspect {
+        candidate_id: candidate.clone(),
+    };
+    steps.insert("5-inspect".into(), owner_read(owner, inspect).await?);
+    let accept = OwnerRead::Accept {
         candidate_id: candidate,
-        attempt_id: typed("attempt", RequestId::new)?,
-    });
-    steps.insert("8-accept".into(), wire.call(accept).await?);
+        attempt_id: attempt,
+    };
+    steps.insert("6-accept".into(), owner_read(owner, accept).await?);
     let text = Value::Object(steps.clone()).to_string();
-    let registered = snapshot();
     steps.insert(
-        "9-facts".into(),
-        json!({
-            "names_draft_identity": text.contains(&identity),
-            "names_registered_head": text.contains(&registered.head_digest),
-            "names_registered_target": text.contains(&registered.target_digest),
-        }),
+        "7-facts".into(),
+        json!({ "names_draft_identity": text.contains(&identity) }),
     );
     Ok(Value::Object(steps))
 }
@@ -411,10 +375,9 @@ fn qualification(scratch: &Path, arguments: &[&str]) -> Result<Value, String> {
     }))
 }
 
-/// The report the engine writes without native or provider runs, and whether it names the
-/// source revision given, which the runner masks. Input: the scratch folder.
-/// Output: the command's result.
-fn qualification_report(scratch: &Path) -> Result<Value, String> {
+/// Runs the engine's report command without native or provider runs.
+/// Input: the scratch folder. Output: the command's result with its stdout as written.
+fn report_ran(scratch: &Path) -> Result<Value, String> {
     let arguments = [
         "report",
         "--source-revision",
@@ -422,18 +385,32 @@ fn qualification_report(scratch: &Path) -> Result<Value, String> {
         "--profile-id",
         PROFILE,
     ];
-    let mut ran = qualification(scratch, &arguments)?;
-    let names_source = ran["stdout"]
-        .as_str()
-        .is_some_and(|text| text.contains(SOURCE));
+    qualification(scratch, &arguments)
+}
+
+/// The engine's report read as JSON, with its own version taken out for a stable fact, and
+/// whether it names the source revision given, which the runner masks.
+/// Input: the scratch folder. Output: the command's result.
+fn qualification_report(scratch: &Path) -> Result<Value, String> {
+    let mut ran = report_ran(scratch)?;
+    let stdout = ran["stdout"].as_str().ok_or("report has no stdout")?;
+    let names_source = stdout.contains(SOURCE);
+    let mut report: Value = serde_json::from_str(stdout).map_err(|error| error.to_string())?;
+    let version = report
+        .get_mut("versions")
+        .and_then(Value::as_object_mut)
+        .and_then(|versions| versions.remove("crazyagent"));
+    let names_version = version.as_ref().and_then(Value::as_str) == Some(env!("CARGO_PKG_VERSION"));
+    ran["stdout"] = report;
     ran["names_source"] = json!(names_source);
+    ran["names_version"] = json!(names_version);
     Ok(ran)
 }
 
 /// Writes the engine's own report and an empty evidence folder for the admit scenarios.
 /// Input: the scratch folder. Output: the report and evidence paths as text.
 fn report_files(scratch: &Path) -> Result<(String, String), String> {
-    let written = qualification_report(scratch)?;
+    let written = report_ran(scratch)?;
     let text = written["stdout"].as_str().ok_or("report has no stdout")?;
     let report = scratch.join("report.json");
     std::fs::write(&report, text).map_err(|error| error.to_string())?;
