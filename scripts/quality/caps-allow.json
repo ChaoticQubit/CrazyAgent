@@ -15,7 +15,7 @@
   "apps/desktop/src/screens/process.tsx": 946,
   "apps/desktop/src/screens/project/overview-tabs.tsx": 844,
   "apps/desktop/src/screens/project/research.ts": 874,
-  "apps/desktop/src/screens/project/settings.tsx": 948,
+  "apps/desktop/src/screens/project/settings.tsx": 908,
   "apps/desktop/src/screens/settings/plugins.tsx": 883,
   "apps/desktop/src/screens/settings/pools.tsx": 724,
   "apps/desktop/src/screens/team/controls.tsx": 874,
