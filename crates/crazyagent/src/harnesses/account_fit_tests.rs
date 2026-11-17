@@ -1,4 +1,7 @@
-use super::{AccountKind, account_fits, endpoint_base_url, spec};
+use super::{
+    AccountKind, KEY_RELAYED, account_fits, account_kinds_here, endpoint_base_url, keyed_runs_here,
+    spec,
+};
 use crate::accounts::{AccountDraft, Field, Provider, SignInMethod, catalog};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::coord::settings::HarnessKind;
@@ -63,13 +66,12 @@ fn every_harness_kind_runs_on_the_same_accounts_its_catalog_entry_names() {
     let accounts = every_account();
     for harness in HarnessKind::ALL {
         let id = harness.as_str();
-        let listed = spec(id)
-            .expect("every harness kind is in the catalog")
-            .account_kinds;
+        let listed = account_kinds_here(spec(id).expect("every harness kind is in the catalog"));
         for (provider, method, _, connection) in &accounts {
+            let keyed = matches!(connection.auth, ModelAuthentication::ApiKey { .. });
             assert_eq!(
                 account_fits(id, connection),
-                runs_on(harness, *provider, *method),
+                runs_on(harness, *provider, *method) && (!keyed || keyed_runs_here(id)),
                 "{id} on {provider:?} {method:?} {:?}",
                 connection.auth
             );
@@ -168,4 +170,42 @@ fn a_sign_in_fits_only_its_own_harness_and_unknown_harnesses_fit_nothing() {
                 .all(|h| !account_fits(h.as_str(), &oauth))
         );
     }
+}
+
+#[test]
+fn a_relayed_harness_is_offered_keyed_accounts_only_where_the_key_relay_starts() {
+    let here = crate::model_gateway::relay::available();
+    assert_eq!(here, cfg!(unix));
+    let keyed: Vec<_> = every_account()
+        .into_iter()
+        .filter(|(.., connection)| matches!(connection.auth, ModelAuthentication::ApiKey { .. }))
+        .collect();
+    assert!(!keyed.is_empty());
+    let listed = super::catalog(&super::Search::new(Vec::new(), None, Vec::new()));
+    for id in KEY_RELAYED {
+        let harness = spec(id).unwrap();
+        assert!(harness.account_kinds.contains(&AccountKind::ApiKey));
+        assert_eq!(keyed_runs_here(id), here);
+        assert_eq!(
+            account_kinds_here(harness).contains(&AccountKind::ApiKey),
+            here
+        );
+        let entry = listed.iter().find(|entry| entry.id == id).unwrap();
+        assert_eq!(entry.account_kinds, account_kinds_here(harness));
+        if !here {
+            assert!(
+                keyed
+                    .iter()
+                    .all(|(.., connection)| !account_fits(id, connection))
+            );
+        }
+    }
+    let rcli = spec("rcli").unwrap();
+    assert!(keyed_runs_here("rcli"));
+    assert_eq!(account_kinds_here(rcli), rcli.account_kinds);
+    assert!(
+        keyed
+            .iter()
+            .all(|(.., connection)| account_fits("rcli", connection))
+    );
 }

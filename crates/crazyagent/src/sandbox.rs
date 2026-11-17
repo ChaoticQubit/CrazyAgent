@@ -43,6 +43,20 @@ const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+/// Whether `program` is the boundary program [`agent_command`] starts a confined agent from
+/// on this system: [`SANDBOX_EXEC`] on Unix, the boundary helper beside the engine's
+/// executable on Windows. Input: a command's program. Output: true for that program.
+pub fn starts_at_boundary(program: &OsStr) -> bool {
+    #[cfg(unix)]
+    {
+        program == SANDBOX_EXEC
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::helper_beside_engine().is_ok_and(|helper| program == helper.as_os_str())
+    }
+}
+
 /// The fixed ports the owner's tools listen on, which no tools-on agent may bind or listen
 /// on at any address: the Codex sign-in callback and Ollama's local model server. Seatbelt
 /// matches a local address by port only (`localhost` there matches every local address), so
@@ -339,6 +353,9 @@ const ENGINE_SECRET_FOLDERS: &[&str] = &[
     crate::ide::FOLDER,
     crate::engine::bootstrap::NATIVE_PROFILES_FOLDER,
     crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER,
+    "plugin-keys",
+    #[cfg(unix)]
+    crate::storage::migrations::BACKUPS,
 ];
 
 const RUNTIME_ENTRIES_MAX: usize = 1024;
@@ -1674,12 +1691,10 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Names the engine runtime folder whose secrets this agent must never read or write:
-    /// the engine database, the owner socket, the GitHub sign-in and settings files, the
-    /// saved account keys, the native sign-in profiles, the configured SDK homes with their
-    /// keys, the terminal and IDE server folders and every engine socket and socket folder
-    /// found in it now. The agent's own home and
-    /// temp dirs may sit inside it, but no granted root may hold or sit inside a secret.
+    /// Names the engine runtime folder whose secrets no granted root may hold or sit inside:
+    /// engine.db, the owner socket, the GitHub files, the account and plugin keys, the upgrade
+    /// backups, the native profiles, the configured SDK homes, the terminal and IDE folders and
+    /// every engine socket and socket folder in it now; the agent's home and temp may sit in it.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
         let runtime = canonical(runtime)?;
@@ -3528,9 +3543,10 @@ impl ProjectSandbox {
     /// The Seatbelt rule that keeps an agent from planting a nested git repository inside a
     /// writable working tree, which the owner's own unsandboxed git (its terminal or the
     /// V2 IDE) would later enter as a submodule and run under the agent's own config (SM1).
-    /// No entry named `.git`, in any letter case, as a folder, file or link, may be created
-    /// below a writable working tree, except that tree's own top-level `.git` and, only in a
-    /// profile built by [`Self::adding_worktrees`], the engine's worktree links, which any
+    /// No entry named `.git`, in every spelling a case-insensitive volume finds ([`any_case`]),
+    /// as a folder, file or link, may be created below a writable working tree, except that
+    /// tree's own top-level `.git` and, only in a profile built by [`Self::adding_worktrees`],
+    /// the engine's worktree links, given back by their exact name in either case, which any
     /// other process could point at git data of its own (SECAUDIT-WORKTREE-ADMIN-PLANT).
     /// The project's own `.git` and each worktree's own `.git` sit
     /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
@@ -3543,7 +3559,8 @@ impl ProjectSandbox {
     /// make, remove or point elsewhere, and which, moved with their bucket into a tree, git
     /// never enters or stages. Input: the policy. Output: the rule text.
     fn nested_git_denies(&self) -> String {
-        let dot_git = "\\.[gG][iI][tT]";
+        let dot_git = any_case(".git");
+        let own_git = "\\.[gG][iI][tT]";
         let (working, other) = self.git_deny_roots();
         let mut nested = String::new();
         for root in &working {
@@ -3560,19 +3577,19 @@ impl ProjectSandbox {
         let mut exempt = String::new();
         if self.adds_worktrees {
             exempt.push_str(&format!(
-                "\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))"
+                "\n    (require-not (regex #\"^{checkouts}/{own_git}$\"))"
             ));
         }
         if let Some(clone) = &self.clone {
             exempt.push_str(&format!(
-                "\n    (require-not (regex #\"^{}/{}/[^/]+/{dot_git}$\"))",
+                "\n    (require-not (regex #\"^{}/{}/[^/]+/{own_git}$\"))",
                 seatbelt_pattern(clone),
                 regex_escape(crate::agent_git::TEAMMATES_FOLDER)
             ));
         }
         if let Some(setup) = &self.setup {
             exempt.push_str(&format!(
-                "\n    (require-not (regex #\"^{}/[^/]+/{dot_git}$\"))",
+                "\n    (require-not (regex #\"^{}/[^/]+/{own_git}$\"))",
                 seatbelt_pattern(&setup.folder)
             ));
         }
@@ -3802,7 +3819,7 @@ impl ProjectSandbox {
         let base = self.base_env(true);
         let mut command = agent_command(profile, program, &borrowed(&base), harness.get_envs())?;
         command.args(harness.get_args()).current_dir(cwd);
-        assert_eq!(command.get_program(), SANDBOX_EXEC);
+        assert!(starts_at_boundary(command.get_program()));
         Ok(command)
     }
 
@@ -3926,9 +3943,7 @@ impl InstalledSandbox {
         }
         #[cfg(target_os = "windows")]
         {
-            let helper = windows::existing_helper(
-                &std::env::current_exe()?.with_file_name(windows::HELPER_NAME),
-            )?;
+            let helper = windows::existing_helper(&windows::helper_beside_engine()?)?;
             let grants = windows::grants_folder()?;
             let windows =
                 windows::WindowsSandbox::install(sandbox.clone(), &helper, profile, &grants)?;
@@ -5006,13 +5021,14 @@ fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
-/// The Seatbelt filter for a `.git` at any depth below `root`, top level included, in any
-/// letter case: the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
+/// The Seatbelt filter for a `.git` at any depth below `root`, top level included, in every
+/// spelling a case-insensitive volume finds ([`any_case`]): the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
 /// working tree (SM1-R). Input: the root. Output: the regex filter.
 fn any_depth_git(root: &Path) -> String {
     format!(
-        "(regex #\"^{}/(.+/)?\\.[gG][iI][tT](/.*)?$\")",
-        seatbelt_pattern(root)
+        "(regex #\"^{}/(.+/)?{}(/.*)?$\")",
+        seatbelt_pattern(root),
+        any_case(".git")
     )
 }
 
@@ -5263,7 +5279,7 @@ mod windows_path_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod linux_sockets_tests {
     use super::*;
     use crate::sandbox::elf::tests::executable;

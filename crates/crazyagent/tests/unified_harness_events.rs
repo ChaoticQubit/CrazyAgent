@@ -1,3 +1,5 @@
+mod path_support;
+
 use crazyagent::adapters::claude::ClaudeProtocol;
 use crazyagent::adapters::codex::{CodexProtocol, Event, ProtocolError, State, WireId};
 use crazyagent::adapters::codex_events::{BridgeError, CodexEventBridge, OUTPUT_BYTES_MAX};
@@ -6,6 +8,7 @@ use crazyagent::adapters::events::{
 };
 use crazyagent::adapters::{FIELD_BYTES_MAX, NativeAction, NativeHarness};
 use crazyagent::protocol::{CredentialRef, RequestId, SessionId};
+use path_support::unit_path;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -42,7 +45,7 @@ fn reply(protocol: &mut CodexProtocol, id: i64, result: Value) -> Vec<Event> {
 fn thread() -> Value {
     json!({
         "id":"native-thread", "cliVersion":"0.163.0", "createdAt":1, "updatedAt":1,
-        "cwd":"/worktree", "ephemeral":false, "modelProvider":"protocol-test-data",
+        "cwd":unit_path("/worktree"), "ephemeral":false, "modelProvider":"protocol-test-data",
         "preview":"", "projectId":null, "sessionId":"unprojected-session",
         "source":"appServer", "status":{"type":"idle"}, "turns":[]
     })
@@ -56,7 +59,7 @@ fn ready() -> (CodexProtocol, CodexEventBridge) {
         &mut protocol,
         1,
         json!({
-            "userAgent":"protocol-test-data", "codexHome":"/protocol-test-data",
+            "userAgent":"protocol-test-data", "codexHome":unit_path("/protocol-test-data"),
             "platformFamily":"unix", "platformOs":"macos"
         }),
     );
@@ -64,12 +67,14 @@ fn ready() -> (CodexProtocol, CodexEventBridge) {
         bridge.translate(event, None).unwrap();
     }
     protocol.initialized().unwrap();
-    protocol.start_thread(Path::new("/worktree")).unwrap();
+    protocol
+        .start_thread(Path::new(&unit_path("/worktree")))
+        .unwrap();
     let events = reply(
         &mut protocol,
         2,
         json!({
-            "thread":thread(), "cwd":"/worktree", "model":"protocol-test-data",
+            "thread":thread(), "cwd":unit_path("/worktree"), "model":"protocol-test-data",
             "modelProvider":"protocol-test-data", "approvalPolicy":"on-request",
             "approvalsReviewer":"user", "sandbox":{"type":"readOnly","networkAccess":false}
         }),
@@ -115,7 +120,7 @@ fn initialization_preserves_local_provenance_and_leaves_unreported_native_fields
         &mut protocol,
         1,
         json!({
-            "userAgent":"protocol-test-data", "codexHome":"/protocol-test-data",
+            "userAgent":"protocol-test-data", "codexHome":unit_path("/protocol-test-data"),
             "platformFamily":"unix", "platformOs":"macos"
         }),
     );
@@ -512,7 +517,7 @@ fn a_codex_approval_past_a_field_is_summarized_instead_of_failing_the_turn() {
     );
     let params = json!({
         "threadId":"native-thread", "turnId":"native-turn", "itemId":"item", "startedAtMs":1,
-        "command":command, "cwd":"/worktree", "reason":"write the note"
+        "command":command, "cwd":unit_path("/worktree"), "reason":"write the note"
     });
     let size = serde_json::to_vec(&params).unwrap().len();
     let events = protocol

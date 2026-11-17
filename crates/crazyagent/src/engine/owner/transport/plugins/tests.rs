@@ -327,3 +327,334 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
         "the check lists the context-mode tools: {tools:?}"
     );
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
+    const ID: &str = "mcp-0123456789abcdef01234567";
+    let directory = tempfile::tempdir().unwrap();
+    let root = crate::sandbox::canonical(directory.path())
+        .unwrap()
+        .join("engine");
+    std::fs::create_dir_all(&root).unwrap();
+    let check = |command: &Path| {
+        boundary_check(
+            &root,
+            ID,
+            command.to_str().unwrap(),
+            &["--list".to_owned()],
+            &[],
+            &[],
+            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap_err()
+    };
+    assert_eq!(
+        check(&root.join("missing-server.exe")),
+        "server_command_not_found"
+    );
+    let server = std::env::current_exe().unwrap();
+    let helper = server.with_file_name(crate::sandbox::windows::HELPER_NAME);
+    let checked = check(&server);
+    if helper.is_file() {
+        assert_eq!(checked, "server_exited");
+    } else {
+        assert_eq!(
+            checked,
+            crate::plugins::check_refused(crate::sandbox::windows::APPCONTAINER_MISSING)
+        );
+    }
+    for name in ["project", "home", "tmp"] {
+        assert!(root.join(CHECK_FOLDER).join(ID).join(name).is_dir());
+    }
+}
+
+/// The read entry a server's check was granted on its program's folder is taken back when the
+/// server is removed, and its container is deleted with the folder Windows gave it, so nothing
+/// of the dead container stays; without the boundary helper beside the engine nothing is
+/// granted and the check says why.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_removed_servers_check_grants_and_container_are_taken_back() {
+    const ID: &str = "mcp-0123456789abcdef01234568";
+    let directory = tempfile::tempdir().unwrap();
+    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let root = base.join("engine");
+    let folder = base.join("server");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    let server = folder.join("server.exe");
+    std::fs::copy(std::env::current_exe().unwrap(), &server).unwrap();
+    let entries = || {
+        let listed =
+            crate::spawn_gate::output(std::process::Command::new("icacls").arg(&folder)).unwrap();
+        assert!(listed.status.success(), "{listed:?}");
+        String::from_utf8_lossy(&listed.stdout).into_owned()
+    };
+    let before = entries();
+    let checked = boundary_check(
+        &root,
+        ID,
+        server.to_str().unwrap(),
+        &["--list".to_owned()],
+        &[],
+        &[],
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap_err();
+    let helper = std::env::current_exe()
+        .unwrap()
+        .with_file_name(crate::sandbox::windows::HELPER_NAME);
+    if !helper.is_file() {
+        assert_eq!(
+            checked,
+            crate::plugins::check_refused(crate::sandbox::windows::APPCONTAINER_MISSING)
+        );
+        return;
+    }
+    assert_eq!(checked, "server_exited");
+    assert_ne!(entries(), before);
+    let checks = root.join(CHECK_FOLDER);
+    let profile = check_profile(&checks, ID);
+    let name = crazyagent_win_sandbox::profile::BoundaryProfile::load(&profile)
+        .unwrap()
+        .container;
+    let container = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+        .join("Packages")
+        .join(name);
+    assert!(container.is_dir());
+    let cleared = check_folders::remove_check_folder(&checks, ID);
+    assert!(!checks.join(ID).exists());
+    cleared.await.unwrap();
+    assert_eq!(entries(), before);
+    assert!(!profile.exists());
+    assert!(!container.exists());
+}
+
+/// A check container a crash left behind is released when the engine starts if no server of
+/// its id is stored: the read entry on its program's folder is taken back and its container,
+/// profile and check folder are deleted, while a stored server's check container stays as it
+/// was until that server is gone too; without the boundary helper nothing is granted.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
+    const DEAD: &str = "mcp-0123456789abcdef0123456b";
+    const LIVE: &str = "mcp-0123456789abcdef0123456c";
+    let directory = tempfile::tempdir().unwrap();
+    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let root = base.join("engine");
+    std::fs::create_dir_all(&root).unwrap();
+    let entries = |folder: &std::path::Path| {
+        let listed =
+            crate::spawn_gate::output(std::process::Command::new("icacls").arg(folder)).unwrap();
+        assert!(listed.status.success(), "{listed:?}");
+        String::from_utf8_lossy(&listed.stdout).into_owned()
+    };
+    let helper = std::env::current_exe()
+        .unwrap()
+        .with_file_name(crate::sandbox::windows::HELPER_NAME);
+    let mut programs = Vec::with_capacity(2);
+    for id in [DEAD, LIVE] {
+        let folder = base.join(format!("server-{id}"));
+        std::fs::create_dir_all(&folder).unwrap();
+        let server = folder.join("server.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &server).unwrap();
+        let before = entries(&folder);
+        let checked = boundary_check(
+            &root,
+            id,
+            server.to_str().unwrap(),
+            &["--list".to_owned()],
+            &[],
+            &[],
+            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap_err();
+        if !helper.is_file() {
+            assert_eq!(
+                checked,
+                crate::plugins::check_refused(crate::sandbox::windows::APPCONTAINER_MISSING)
+            );
+            return;
+        }
+        assert_eq!(checked, "server_exited");
+        let granted = entries(&folder);
+        assert_ne!(granted, before);
+        programs.push((folder, before, granted));
+    }
+    let checks = root.join(CHECK_FOLDER);
+    let container = |id: &str| {
+        let name =
+            crazyagent_win_sandbox::profile::BoundaryProfile::load(&check_profile(&checks, id))
+                .unwrap()
+                .container;
+        PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+            .join("Packages")
+            .join(name)
+    };
+    let (dead, live) = (container(DEAD), container(LIVE));
+    assert_ne!(dead, live);
+    assert!(dead.is_dir());
+    assert!(live.is_dir());
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::storage::plugins::initialize(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO plugin_items(id,kind,scope,name,body) VALUES (?1,'server','global','live','{}')",
+            [LIVE],
+        )
+        .unwrap();
+
+    crate::storage::trash::sweep_at_start(&connection, None).unwrap();
+
+    let (dead_folder, dead_before, _) = &programs[0];
+    let (live_folder, live_before, live_granted) = &programs[1];
+    assert_eq!(&entries(dead_folder), dead_before);
+    assert!(!check_profile(&checks, DEAD).exists());
+    assert!(!dead.exists());
+    assert!(!checks.join(DEAD).exists());
+    assert_eq!(&entries(live_folder), live_granted);
+    assert!(check_profile(&checks, LIVE).is_file());
+    assert!(live.is_dir());
+    assert!(checks.join(LIVE).is_dir());
+
+    connection
+        .execute("DELETE FROM plugin_items WHERE id=?1", [LIVE])
+        .unwrap();
+    crate::storage::trash::sweep_at_start(&connection, None).unwrap();
+    assert_eq!(&entries(live_folder), live_before);
+    assert!(!check_profile(&checks, LIVE).exists());
+    assert!(!live.exists());
+    assert!(!checks.join(LIVE).exists());
+}
+
+/// At engine start a check profile the boundary cannot release stays for the next start while
+/// the check folder of its server, no longer stored, is deleted with no copy moved aside left;
+/// a stored server's profile and folder and a file that is no profile stay untouched. No
+/// boundary helper is needed.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_check_profile_that_cannot_be_released_stays_for_the_next_start() {
+    const DEAD: &str = "mcp-0123456789abcdef0123456d";
+    const LIVE: &str = "mcp-0123456789abcdef0123456e";
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("engine");
+    let checks = root.join(CHECK_FOLDER);
+    for id in [DEAD, LIVE] {
+        std::fs::create_dir_all(checks.join(id).join("home")).unwrap();
+        let profile = check_profile(&checks, id);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "(version 1)\n").unwrap();
+    }
+    let other = checks.join(CHECK_PROFILES).join("notes.txt");
+    std::fs::write(&other, "kept").unwrap();
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::storage::plugins::initialize(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO plugin_items(id,kind,scope,name,body) VALUES (?1,'server','global','live','{}')",
+            [LIVE],
+        )
+        .unwrap();
+
+    crate::storage::trash::sweep_at_start(&connection, None).unwrap();
+
+    assert!(!checks.join(DEAD).exists());
+    assert!(check_profile(&checks, DEAD).is_file());
+    assert!(checks.join(LIVE).join("home").is_dir());
+    assert!(check_profile(&checks, LIVE).is_file());
+    assert!(other.is_file());
+    let left: Vec<String> = std::fs::read_dir(&checks)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !left.iter().any(|name| name.starts_with(".removed-")),
+        "{left:?}"
+    );
+}
+
+/// A check profile is released only when it names the container the engine derives for its
+/// server from the check folders: one forged to name another container is kept with nothing
+/// of it touched, not even a lock in its grants folder, while the bound one beside it goes.
+/// No boundary helper is needed (V243-WIN-CHECK-PROFILE-BIND, rv-sec2 #311 N1).
+#[cfg(target_os = "windows")]
+#[test]
+fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_released() {
+    const BOUND: &str = "mcp-0123456789abcdef0123456f";
+    const FORGED: &str = "mcp-0123456789abcdef01234570";
+    let directory = tempfile::tempdir().unwrap();
+    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let checks = base.join("engine").join(CHECK_FOLDER);
+    let grants = base.join("grants");
+    std::fs::create_dir_all(checks.join(CHECK_PROFILES)).unwrap();
+    std::fs::create_dir_all(&grants).unwrap();
+    let foreign = format!("crazyagent.{}", "0".repeat(32));
+    let mut bound = String::new();
+    for id in [BOUND, FORGED] {
+        let folders = crate::storage::plugins::check_sandbox_folders(&checks, id).unwrap();
+        for folder in &folders {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let sandbox = crate::sandbox::ProjectSandbox::new(
+            &folders[0],
+            &folders[1],
+            &folders[2],
+            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
+        let mut profile = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
+        if id == FORGED {
+            profile.container = foreign.clone();
+        } else {
+            bound = profile.container.clone();
+        }
+        std::fs::write(check_profile(&checks, id), profile.encode().unwrap()).unwrap();
+    }
+    assert!(bound.starts_with("crazyagent.") && bound != foreign);
+    let lock = |name: &str| grants.join(format!("container-{name}.lock"));
+
+    for id in [BOUND, FORGED] {
+        crate::storage::plugins::withdraw_check_profile(&checks, id);
+    }
+
+    assert!(
+        !check_profile(&checks, BOUND).exists(),
+        "the bound one goes"
+    );
+    assert!(lock(&bound).is_file(), "the bound one is released");
+    assert!(
+        check_profile(&checks, FORGED).is_file(),
+        "the forged one stays"
+    );
+    assert!(
+        !lock(&foreign).exists(),
+        "nothing of the forged one is released"
+    );
+}
+
+/// A server removed while one of its checks runs keeps its check folder until that check
+/// ends, so the check cannot put back what the removal cleared; a server with no check
+/// running is cleared at once.
+#[tokio::test]
+async fn a_removed_servers_check_folder_is_cleared_when_its_running_check_ends() {
+    const ID: &str = "mcp-0123456789abcdef01234569";
+    const IDLE: &str = "mcp-0123456789abcdef0123456a";
+    let directory = tempfile::tempdir().unwrap();
+    let checks = directory.path().join(CHECK_FOLDER);
+    for id in [ID, IDLE] {
+        std::fs::create_dir_all(checks.join(id).join("home")).unwrap();
+    }
+    let slot = CheckSlot::take().unwrap();
+    let counted = CheckOf::take(ID, checks.clone(), &slot);
+    removed_server_checks(&checks, IDLE);
+    assert!(!checks.join(IDLE).exists());
+    removed_server_checks(&checks, ID);
+    assert!(checks.join(ID).is_dir());
+    assert!(check_folders::checking().removed.contains(&ID.to_owned()));
+    drop(counted);
+    assert!(!checks.join(ID).exists());
+    assert!(!check_folders::checking().removed.contains(&ID.to_owned()));
+    assert!(!check_folders::checking().running.contains(&ID.to_owned()));
+    drop(slot);
+}

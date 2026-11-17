@@ -9,9 +9,9 @@ struct Machine {
 
 impl Machine {
     fn new() -> Self {
+        let root = crate::harnesses::finding::private_root();
         Self {
-            root: tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
-                .unwrap(),
+            root: tempfile::tempdir_in(root).unwrap(),
         }
     }
     fn roots(&self) -> Roots {
@@ -1985,7 +1985,9 @@ fn an_npm_codex_with_no_node_the_resolver_finds_reads_needs_node_until_node_is_i
 /// find, a versions read never asks the harness for its version, so the Settings and first-run
 /// reads that wait on Node start nothing however often they come; the first read after the
 /// resolver finds Node asks once, through the `node` beside the entry that `env` takes, which
-/// vid 1's vetted runs because it is Node (update.rs:874).
+/// vid 1's vetted runs because it is Node (update.rs:874). That `node` is planted only then:
+/// the resolver takes the one in a script's own npm prefix first (d69c2d0a6), so one there
+/// from the start would end the need on the first read.
 #[test]
 fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_resolver_finds_it() {
     let machine = Machine::new();
@@ -1998,13 +2000,6 @@ fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_res
     let codex = machine.root.path().join("node/bin/codex");
     std::os::unix::fs::symlink(&real, &codex).unwrap();
     let asked = machine.root.path().join("asked");
-    executable(
-        &machine.root.path().join("node/bin/node"),
-        &format!(
-            "#!/bin/sh\necho asked >> {}\necho 'codex-cli 0.167.1'\n",
-            asked.display()
-        ),
-    );
     assert!(matches!(
         method("codex", &real, &machine.roots()),
         Method::Npm { .. }
@@ -2026,7 +2021,13 @@ fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_res
         !asked.exists(),
         "a harness that still needs its program is never run for its version"
     );
-    case.machine.program("setup/bin/node", 0o755);
+    executable(
+        &case.machine.root.path().join("node/bin/node"),
+        &format!(
+            "#!/bin/sh\necho asked >> {}\necho 'codex-cli 0.167.1'\n",
+            asked.display()
+        ),
+    );
     let versions = case.versions(false);
     assert_eq!(versions.needs, None);
     assert_eq!(versions.installed.as_deref(), Some("0.167.1"));
@@ -2222,44 +2223,6 @@ fn a_harness_file_trusted_refuses_is_never_asked_its_version_on_macos() {
     );
 }
 
-/// A folder for a row's owner entry outside every temp folder and every folder agents can
-/// write: in `~/Library/Caches`, since this user's `getconf` cache folder lies in
-/// `/private/var/folders`, a temp folder, and the checkout and its build sit below a project
-/// folder. A HOME without `Library/Caches`, as the gate's own HOME is, gets it private, as
-/// macOS makes it for every user. A HOME inside a project, below a `.crazyagent` folder,
-/// leaves no such folder, so the rows stop here naming it rather than on a refusal they did
-/// not test. Input: the folder name's prefix. Output: the folder, removed when dropped.
-#[cfg(target_os = "macos")]
-fn outside_temp(prefix: &str) -> tempfile::TempDir {
-    use std::os::unix::fs::DirBuilderExt;
-    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
-    let caches = home.join("Library").join("Caches");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&caches)
-        .unwrap();
-    let caches = caches.canonicalize().unwrap();
-    let folder = tempfile::Builder::new()
-        .prefix(prefix)
-        .tempdir_in(caches)
-        .unwrap();
-    let place = folder.path().canonicalize().unwrap();
-    assert!(
-        !crate::tools::temp_roots()
-            .iter()
-            .any(|temp| place.starts_with(temp)),
-        "HOME lies in a temp folder: {}",
-        place.display()
-    );
-    assert!(
-        !crate::tools::Places::from_environment(None).agent_writable(&place),
-        "HOME lies where agents can write, such as below a project's .crazyagent folder: {}",
-        place.display()
-    );
-    folder
-}
-
 /// security-audit vid 1 (NEXT-02:50 step 1), on macOS: an owner entry outside every temp
 /// folder that leads to a harness file in the temp folder is refused on the engine's places
 /// as one in a temp folder, is never run for its version, and what it needs names that
@@ -2280,7 +2243,7 @@ fn a_harness_entry_that_leads_into_temp_is_never_asked_its_version_on_macos() {
             ran.display()
         ),
     );
-    let outside = outside_temp("vid1-temp-");
+    let outside = crate::harnesses::finding::outside_temp("vid1-temp-");
     let link = outside.path().join("bin/codex");
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&real, &link).unwrap();
@@ -2736,7 +2699,7 @@ fn a_command_is_refused_when_a_search_folder_others_or_agents_can_write_exists()
 fn a_command_whose_link_chain_passes_through_the_temp_folder_is_refused_on_macos() {
     let machine = Machine::new();
     let at = machine.root.path();
-    let outside = outside_temp("vid1-hop-");
+    let outside = crate::harnesses::finding::outside_temp("vid1-hop-");
     let real = outside.path().join("real/codex");
     executable(&real, "#!/bin/sh\n");
     let middle = at.join("tools/codex");

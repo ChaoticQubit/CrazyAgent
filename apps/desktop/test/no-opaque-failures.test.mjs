@@ -10,6 +10,7 @@ const client = await import("../src/engine-client.ts");
 const research = await import("../src/screens/project/research.ts");
 const { updateMessage } = await import("../src/screens/settings/updates-state.ts");
 const { signInFailure } = await import("../src/screens/settings/sign-in.tsx");
+const { isMac, thisComputer } = await import("../src/ui/keys.ts");
 
 const ENGINE = new URL("../../../crates/crazyagent/src/", import.meta.url).pathname;
 const FALLBACK = "Something went wrong. Try again.";
@@ -228,20 +229,46 @@ test("each sign-in sentence is true on every path that records its code, and an 
     ["native_auth_claude_credential_expiring", "Claude Code couldn't renew this account's sign-in before it expires. Try again."],
     ["native_profile_identity_changed", "This account's sign-in folder no longer matches what CrazyAgent recorded, so CrazyAgent stopped. Delete the account, then add it again."],
   ];
-  for (const [code, text] of sentences) assert.deepEqual(signInFailure(code, "claude"), { text, hint: "retry" }, code);
-  assert.deepEqual(signInFailure("native_auth_host_executable_unsafe", "chatgpt"),
+  for (const [code, text] of sentences) assert.deepEqual(signInFailure(code, "claude", undefined, undefined, "this Mac"), { text, hint: "retry" }, code);
+  assert.deepEqual(signInFailure("native_auth_host_executable_unsafe", "chatgpt", undefined, undefined, "this Mac"),
     { text: "Codex on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall Codex, then try again.", hint: "retry" });
-  assert.deepEqual(signInFailure("native_auth_host_executable_changed", "claude"),
+  assert.deepEqual(signInFailure("native_auth_host_executable_changed", "claude", undefined, undefined, "this Mac"),
     { text: "Claude Code changed on this Mac after CrazyAgent checked it, perhaps from an update. Try again.", hint: "retry" });
+  assert.equal(signInFailure("native_auth_host_unavailable", "chatgpt", undefined, undefined, "this computer").text,
+    "CrazyAgent didn't find a Codex it can run on this computer, so ChatGPT sign-in isn't available. Install Codex, then choose Check again, or choose its file.");
   for (const code of ["__proto__", "constructor", "toString", "valueOf"]) {
     assert.deepEqual(signInFailure(code, "claude"), { text: client.withCode("Sign-in didn't finish. Try again.", code), hint: "retry" }, code);
   }
 });
 
-const TUI_SIGN_IN = "tui/screens/settings_add_account.rs";
-const TUI_OWN = new Set(["native_auth_recovery_required"]);
+test("the app names the computer as the TUI does: this Mac on macOS, this computer on Windows and Linux", () => {
+  assert.equal(thisComputer(isMac("MacIntel")), "this Mac");
+  assert.equal(thisComputer(isMac("Linux x86_64")), "this computer");
+  assert.equal(thisComputer(isMac("Win32")), "this computer");
+  assert.equal(signInFailure("native_auth_host_executable_changed", "claude").text,
+    `Claude Code changed on ${thisComputer()} after CrazyAgent checked it, perhaps from an update. Try again.`);
+});
 
-test("the TUI gives every sign-in failure the engine records the app's sentence", () => {
+const TUI_SIGN_IN = "tui/screens/settings_add_account.rs";
+const TUI_SCREENS = "tui/screens/mod.rs";
+const TUI_OWN = new Set(["native_auth_recovery_required"]);
+const TUI_COMPUTER = [
+  [true, /#\[cfg\(target_os = "macos"\)\]\s*const THIS_COMPUTER: &str = "([^"]*)";/],
+  [false, /#\[cfg\(not\(target_os = "macos"\)\)\]\s*const THIS_COMPUTER: &str = "([^"]*)";/],
+];
+
+/** Reads the TUI's word for the computer on each system from its screens and checks it against
+ * the app's word for the same system. Output: the words, macOS first. */
+function tuiComputers() {
+  const screens = readFileSync(join(ENGINE, TUI_SCREENS), "utf8");
+  return TUI_COMPUTER.map(([mac, pattern]) => {
+    const word = screens.match(pattern)?.[1];
+    assert.equal(word, thisComputer(mac), `${TUI_SCREENS} names the computer as the app does on ${mac ? "macOS" : "Windows and Linux"}`);
+    return word;
+  });
+}
+
+test("the TUI gives every sign-in failure the engine records the app's sentence, on every system", () => {
   const source = readFileSync(join(ENGINE, TUI_SIGN_IN), "utf8");
   const start = source.indexOf("const SIGN_IN_SENTENCES");
   assert.ok(start >= 0, `${TUI_SIGN_IN} keeps its sign-in sentences in SIGN_IN_SENTENCES`);
@@ -249,12 +276,14 @@ test("the TUI gives every sign-in failure the engine records the app's sentence"
   const rows = [...table.matchAll(/\(\s*"([a-z][a-z0-9_]*)",\s*"((?:[^"\\]|\\.)*)",?\s*\)/g)].map((match) => [match[1], match[2]]);
   const sentences = new Map(rows);
   assert.equal(sentences.size, rows.length, "each code is listed once");
-  for (const code of new Set([...recordedSignInCodes(), ...sentences.keys()])) {
-    assert.ok(sentences.has(code), `${code} has no TUI sentence`);
-    for (const [provider, harness, name] of [["chatgpt", "Codex", "ChatGPT"], ["claude", "Claude Code", "Claude"]]) {
-      const line = sentences.get(code).replaceAll("{harness}", harness).replaceAll("{name}", name);
-      if (TUI_OWN.has(code)) assert.doesNotMatch(line, / \([a-z0-9_]+\)$|_|[{}]/, `${code}: ${line}`);
-      else assert.equal(line, signInFailure(code, provider).text, `${code} for ${provider}`);
+  for (const computer of tuiComputers()) {
+    for (const code of new Set([...recordedSignInCodes(), ...sentences.keys()])) {
+      assert.ok(sentences.has(code), `${code} has no TUI sentence`);
+      for (const [provider, harness, name] of [["chatgpt", "Codex", "ChatGPT"], ["claude", "Claude Code", "Claude"]]) {
+        const line = sentences.get(code).replaceAll("{harness}", harness).replaceAll("{name}", name).replaceAll("{computer}", computer);
+        if (TUI_OWN.has(code)) assert.doesNotMatch(line, / \([a-z0-9_]+\)$|_|[{}]/, `${code}: ${line}`);
+        else assert.equal(line, signInFailure(code, provider, undefined, undefined, computer).text, `${code} for ${provider} on ${computer}`);
+      }
     }
   }
 });

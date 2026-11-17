@@ -46,6 +46,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        sudo chmod go-w /usr/local/bin
+        test -z "$(find /usr/local/bin -maxdepth 0 -perm /022)"
         work="$RUNNER_TEMP/tmux"
         prefix="$RUNNER_TEMP/tmux-$TMUX_VERSION"
         mkdir -p "$work"

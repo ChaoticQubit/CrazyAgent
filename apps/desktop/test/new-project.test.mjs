@@ -325,6 +325,21 @@ test("pools are summarised by provider and the biggest pool is preselected", () 
   assert.equal(wizard.poolFits(harness("opencode", "OpenCode", ready, undefined, ["api_key"]), [member("a", "codex", managed)]), false);
 });
 
+test("an account holding a key fits Codex and Claude Code only where the engine lists API keys for them", () => {
+  const keyed = (id, stored, url) => ({ id, provider: "p", harness: stored, protocol: "openai-chat", account_ref: id, endpoint: { kind: "http", url },
+    model: { id: "m", author: "a" }, auth: { method: "api_key", credential_ref: id } });
+  const pool = [keyed("k1", "rcli", "https://api.openai.com/v1"), keyed("k2", "codex", "https://gateway.example.invalid/v1")];
+  const local = [{ ...keyed("l1", "rcli", "http://127.0.0.1:11434/v1"), auth: { method: "none" } }];
+  const codexHere = harness("codex", "Codex", ready, undefined, ["subscription", "api_key", "open_ai_compatible_url", "local"]);
+  const codexWindows = harness("codex", "Codex", ready, undefined, ["subscription", "open_ai_compatible_url", "local"]);
+  const claudeWindows = harness("claude-code", "Claude Code", ready, undefined, ["subscription"], available, ["claude"]);
+  assert.equal(wizard.poolFits(codexHere, pool), true);
+  assert.equal(wizard.poolFits(codexWindows, pool), false);
+  assert.equal(wizard.poolFits(claudeWindows, pool), false);
+  assert.equal(wizard.poolFits(codexWindows, local), true);
+  assert.equal(wizard.poolFits(harness("rcli", "RCLI", ready, undefined, ["api_key", "open_ai_compatible_url", "local"]), pool), true);
+});
+
 test("Claude subscriptions fit Claude Code under the catalog id and aliases the engine serves", () => {
   const claudeCode = harness("claude-code", "Claude Code", ready, undefined, ["subscription", "api_key", "local"], available, ["claude"]);
   const managed = { method: "native_managed", profile_ref: "profile-claude" };
