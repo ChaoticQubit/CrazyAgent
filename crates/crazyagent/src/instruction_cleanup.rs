@@ -462,7 +462,11 @@ mod run {
             {
                 return Err(BUSY);
             }
-            if running.iter().filter(|held| held.root == root).count() >= super::CLEANUPS_MAX {
+            let seated = running
+                .iter()
+                .filter(|held| held.root == root && held.holds_seat)
+                .count();
+            if holds_seat && seated >= super::CLEANUPS_MAX {
                 return Err(FULL);
             }
             let held = Held {
