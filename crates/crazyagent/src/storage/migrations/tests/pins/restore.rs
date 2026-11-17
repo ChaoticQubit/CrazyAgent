@@ -426,11 +426,12 @@ fn private_secret(file: &Path) {
     std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-/// V250-L5-N5B: a restore deletes the generated SDK home holding the key of an API key account
-/// only the replaced 2.5 data holds, and the sign-in files of a native account only it holds,
-/// keeping the rest of that slot, while the home of an account the 2.4 copy holds stays.
+/// V250-L5-N5B: a restore moves the generated SDK home holding the key of an API key account
+/// only the replaced 2.5 data holds, and the whole profile slot of a native account only it
+/// holds, sign-in files included, into the same folders of its dated copy (DEC-192), private
+/// as they were, while the home of an account the 2.4 copy holds stays where it is.
 #[test]
-fn a_restore_deletes_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds() {
+fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_copy() {
     use crate::config::ModelAuthentication;
     let reference = |value: &str| crate::protocol::CredentialRef::new(value).unwrap();
     let start = SystemTime::now();
@@ -483,13 +484,29 @@ fn a_restore_deletes_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds() {
         private_secret(file);
     }
 
-    restored(&root, start + HOUR).unwrap();
+    let copy = restored(&root, start + HOUR).unwrap();
 
     assert_eq!(version(&root.connection()).unwrap(), V24_VERSION_MAX);
     assert!(kept_home.join(".backboard/keys.json").exists());
     assert!(!new_home.exists());
-    for file in &sign_ins {
-        assert!(!file.exists(), "{}", file.display());
+    assert!(!slot.exists());
+    let copied_homes = copy.join("configured-sdk-homes");
+    let copied_slot = copy
+        .join("native-profiles")
+        .join(slot_name("restore-new-profile"));
+    assert_eq!(mode(&copied_homes), 0o700);
+    assert_eq!(mode(&copy.join("native-profiles")), 0o700);
+    assert!(!copied_homes.join(slot_name("restore-old-key")).exists());
+    let moved_home = copied_homes.join(slot_name("restore-new-key"));
+    let moved = sign_ins
+        .iter()
+        .chain([&identity])
+        .map(|file| copied_slot.join(file.strip_prefix(&slot).unwrap()))
+        .chain(
+            [".backboard/config.json", ".backboard/keys.json"].map(|file| moved_home.join(file)),
+        );
+    for file in moved {
+        assert_eq!(mode(&file), 0o600, "{}", file.display());
+        assert_eq!(std::fs::read(&file).unwrap(), b"secret-dummy");
     }
-    assert!(identity.exists());
 }
