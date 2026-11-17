@@ -326,7 +326,8 @@ impl Record {
         folder.join(format!("{}-{}.json", self.flow, self.client))
     }
 
-    /// Writes the record: the flow, the client, the outcome, the whole time and each step's.
+    /// Writes the record: the flow, the client, the outcome, the whole time, each step's, and
+    /// the measures when the flow kept any.
     /// Input: `passed` or `failed`.
     /// Output: the write's error, if any.
     fn write(&self, outcome: &str) -> std::io::Result<()> {
@@ -336,13 +337,18 @@ impl Record {
             .iter()
             .map(|(step, ms)| json!({ "step": step, "ms": ms }))
             .collect();
-        let record = json!({
+        let mut record = json!({
             "flow": self.flow,
             "client": self.client,
             "outcome": outcome,
             "total_ms": millis(self.started.elapsed()),
             "steps": steps,
         });
+        if !self.measures.is_empty() {
+            let measures = self.measures.iter();
+            let measures = measures.map(|(name, value)| ((*name).to_owned(), json!(value)));
+            record["measures"] = Value::Object(measures.collect());
+        }
         let path = self.path();
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(path, serde_json::to_vec_pretty(&record)?)

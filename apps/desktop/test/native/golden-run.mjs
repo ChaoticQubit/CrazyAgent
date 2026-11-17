@@ -75,11 +75,12 @@ export function recordPath(run) {
   return join(run.evidence, `${run.flow}-desktop.json`);
 }
 
-/** Writes the run record: the flow, its outcome, its whole time and each step's time, with
- * no path and no name.
+/** Writes the run record: the flow, its outcome, its whole time, each step's time and the
+ * measures when the flow kept any, with no path and no name.
  * Inputs: the run and "passed" or "failed". Output: none. */
 export function writeRecord(run, outcome) {
   assert.ok(outcome === "passed" || outcome === "failed");
   const record = { flow: run.flow, client: "desktop", outcome, total_ms: Date.now() - run.started, steps: run.steps };
+  if (run.measures && Object.keys(run.measures).length > 0) record.measures = run.measures;
   writeFileSync(recordPath(run), JSON.stringify(record, null, 1), { mode: 0o600 });
 }
