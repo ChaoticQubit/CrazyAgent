@@ -913,6 +913,17 @@ impl Drop for Ending {
 /// Input: the authority and the job. Output: Ok once every file is on this Mac, else the
 /// download's code, `icloud_download_busy` while a client's own download runs.
 async fn fetch(authority: &Arc<Authority>, job: &Arc<IntakeJob>) -> Result<(), EngineError> {
+    fetch_with(authority, job, icloud::download).await
+}
+
+/// Runs the job's download as `fetch` does, with `pull` in place of the iCloud download, so a
+/// test can watch when downloads run. Inputs: the authority, the job and the download to run.
+/// Output: Ok once `pull` brought every file within the job's bounds, else its code.
+pub(super) async fn fetch_with(
+    authority: &Arc<Authority>,
+    job: &Arc<IntakeJob>,
+    pull: fn(&str, &icloud::Download, crate::projects_home::CopyBounds) -> Result<u64, EngineError>,
+) -> Result<(), EngineError> {
     let turn = authority.intake.downloads.lock();
     tokio::pin!(turn);
     let _turn = loop {
@@ -929,7 +940,7 @@ async fn fetch(authority: &Arc<Authority>, job: &Arc<IntakeJob>) -> Result<(), E
     let download = claim.download();
     let path = job.source().to_owned();
     let bounds = crate::projects_home::add_bounds(job.overrides());
-    let fetched = tokio::task::spawn_blocking(move || icloud::download(&path, &download, bounds))
+    let fetched = tokio::task::spawn_blocking(move || pull(&path, &download, bounds))
         .await
         .map_err(|_| failure("home_icloud_not_downloaded"));
     drop(claim);
