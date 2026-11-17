@@ -1284,14 +1284,17 @@ mod tests {
         assert_eq!(shown(asked("not-a-commit")), "changes_stale");
     }
 
-    /// Reads the plain codes a source file refuses with, before its tests.
-    /// Input: the file text. Output: each `changes_` code once.
+    /// Reads the plain codes a source file refuses with, before its tests: the leading code
+    /// of each string literal that starts with `changes_`, so a log line naming a code, such
+    /// as `"changes_git_old found={} ..."`, counts as that code. Input: the file text.
+    /// Output: each `changes_` code once.
     fn refusals(source: &str) -> std::collections::BTreeSet<&str> {
         let code = source.split("mod tests").next().unwrap();
         code.match_indices("\"changes_")
             .filter_map(|(at, _)| {
                 let rest = &code[at + 1..];
-                rest.find('"').map(|end| &rest[..end])
+                rest.find(|letter: char| !(letter.is_ascii_lowercase() || letter == '_'))
+                    .map(|end| &rest[..end])
             })
             .collect()
     }
