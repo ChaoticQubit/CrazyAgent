@@ -1,8 +1,5 @@
 use super::*;
 
-/// One step a row does to a worktree, such as damaging or rewriting it.
-type WorktreeStep<'a> = &'a dyn Fn(&Path);
-
 /// Makes a real FIFO at `path` with `mkfifo`. Input: the path.
 fn fifo(path: &Path) {
     let output = crazyagent::spawn_gate::output(
@@ -885,7 +882,7 @@ async fn a_failed_checkout_stays_uncertain_on_a_plain_and_a_renumbered_volume() 
         |worktree: &Path| std::fs::remove_file(admin_folder(worktree).join("index")).unwrap();
     let locked =
         |worktree: &Path| std::fs::write(admin_folder(worktree).join("index.lock"), "").unwrap();
-    let damages: [(&str, WorktreeStep<'_>); 4] = [
+    let damages: [(&str, &dyn Fn(&Path)); 4] = [
         ("missing", &missing),
         ("short", &short),
         ("no index", &unindexed),
@@ -936,7 +933,7 @@ async fn an_uncertain_lease_whose_index_has_no_stat_data_is_checked_on_its_conte
         index_from_read_tree(worktree);
         std::fs::remove_file(worktree.join("tracked")).unwrap();
     };
-    let cases: [(&str, WorktreeStep<'_>, LeaseState); 3] = [
+    let cases: [(&str, &dyn Fn(&Path), LeaseState); 3] = [
         ("whole", &index_from_read_tree, LeaseState::RecoveryRequired),
         ("same size, other bytes", &altered, LeaseState::Uncertain),
         ("missing", &missing, LeaseState::Uncertain),
