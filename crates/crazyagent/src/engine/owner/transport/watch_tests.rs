@@ -183,7 +183,6 @@ async fn a_commit_on_another_connection_wakes_a_watch_within_a_second_as_unknown
     assert_ne!(moved, mark);
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn an_owner_request_wakes_a_watch_with_its_topic_and_the_next_watch_waits() {
     use std::os::unix::fs::PermissionsExt;

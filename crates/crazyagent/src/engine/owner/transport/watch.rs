@@ -28,7 +28,7 @@ const MARK_SEED_MAX: u64 = 1 << 52;
 const _: () = assert!(WATCH_TIMEOUT.as_millis() > WAIT_MS_MAX as u128);
 const _: () = assert!(REQUEST_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "watch_tests.rs"]
 mod tests;
 
