@@ -1485,7 +1485,7 @@ fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
     }
 }
 
-/// Keeps an RCLI master turn on the hidden folders list after it returns when its
+/// Keeps an RCLI or listed master turn on the hidden folders list after it returns when its
 /// retirement was uncertain or its stop left processes held as leftovers, since they may
 /// still run, until the engine starts again (SA-VID14 r1, r2 F1); a native turn asks its
 /// host whether it settled instead (r2 F2). Inputs: the guard and the result.

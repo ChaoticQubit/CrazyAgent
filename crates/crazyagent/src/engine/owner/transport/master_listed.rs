@@ -429,10 +429,11 @@ fn failure_observation(error: &EngineError) -> MasterRuntimeObservation {
 }
 
 /// Settles a listed master turn's place on the hidden folders list once its run returns:
-/// taken off the list. Inputs: the listing and the run's result. Output: none.
+/// kept until the engine starts again when the engine could not be sure its harness stopped
+/// or its process thread was lost, since the harness may still run, else taken off the list
+/// (SA-VID14). Inputs: the listing and the run's result. Output: none.
 fn listed_turn_ended<T>(listed: HiddenRun, ran: &Result<T, EngineError>) {
-    let _ = ran;
-    drop(listed);
+    super::master_runtime::keep_listed_if_uncertain(listed, ran);
 }
 
 /// The SHA-256 of the program a listed master turn runs, the artifact its stored run names,

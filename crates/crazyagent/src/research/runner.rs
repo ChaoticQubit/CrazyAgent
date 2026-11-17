@@ -2158,9 +2158,10 @@ impl ResearchRunner {
 
 /// Settles what a research agent's stop leaves behind: a clean stop lets go of the
 /// credential, the lease and the hidden folders listing; a stop that is not confirmed keeps
-/// the credential and the lease; leftover processes are held under the owner's leftover
-/// setting. Inputs: the stop's result, the credential, the lease, the listing, who left it and
-/// the setting. Output: none, or the uncertain stop's code.
+/// the credential, the lease and the listing until the engine starts again; leftover
+/// processes are held under the owner's leftover setting, listed while they run (SA-VID14).
+/// Inputs: the stop's result, the credential, the lease, the listing, who left it and the
+/// setting. Output: none, or the uncertain stop's code.
 fn settled(
     stopped: Result<(), Unstopped>,
     credential: Option<AgentCredential>,
@@ -2181,15 +2182,14 @@ fn settled(
                 credential.retain();
             }
             std::mem::forget(lease);
-            drop(listed);
+            std::mem::forget(listed);
             Err(RunError::Uncertain(leftovers::UNCERTAIN))
         }
         Err(Unstopped::Left(left)) => {
             let code = left.code();
             drop(credential);
             let account = lease.as_ref().map(|(profile, _)| profile.account().clone());
-            left.hold(account, lease, by, mode());
-            drop(listed);
+            left.hold_listed(account, lease, listed, by, mode());
             Err(RunError::Uncertain(code))
         }
     }
