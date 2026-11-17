@@ -295,7 +295,7 @@ pub fn package(sid: &[u8]) -> bool {
 /// Where an entry of a converged list came from: the container's own explicit entry, an entry
 /// still inherited from the folder above, or any other entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Part {
+enum Origin {
     Own,
     Inherited,
     Other,
@@ -323,18 +323,18 @@ pub fn converge(
     let mut body = parts(acl, sid, access, folder)?;
     let current: Vec<&[u8]> = body
         .iter()
-        .filter(|(_, part)| *part == Part::Own)
+        .filter(|(_, origin)| *origin == Origin::Own)
         .map(|(bytes, _)| bytes.as_slice())
         .collect();
     if current != target.iter().map(Vec::as_slice).collect::<Vec<_>>() {
-        body.retain(|(_, part)| *part != Part::Own);
+        body.retain(|(_, origin)| *origin != Origin::Own);
         let at = body
             .iter()
-            .position(|(_, part)| *part == Part::Inherited)
+            .position(|(_, origin)| *origin == Origin::Inherited)
             .unwrap_or(body.len());
         body.splice(
             at..at,
-            target.iter().map(|bytes| (bytes.clone(), Part::Own)),
+            target.iter().map(|bytes| (bytes.clone(), Origin::Own)),
         );
     }
     let aces: Vec<Vec<u8>> = body.into_iter().map(|(bytes, _)| bytes).collect();
@@ -359,10 +359,10 @@ fn parts(
     sid: &[u8],
     access: Access,
     folder: bool,
-) -> Result<Vec<(Vec<u8>, Part)>, &'static str> {
+) -> Result<Vec<(Vec<u8>, Origin)>, &'static str> {
     let spans = spans(acl)?;
     let (cut, narrow) = (access.cuts(), access.narrows_others());
-    let mut body: Vec<(Vec<u8>, Part)> = Vec::with_capacity(2 * spans.len());
+    let mut body: Vec<(Vec<u8>, Origin)> = Vec::with_capacity(2 * spans.len());
     for span in &spans {
         let mut bytes = acl[span.range.clone()].to_vec();
         let inherited = bytes[1] & INHERITED != 0;
@@ -370,16 +370,16 @@ fn parts(
             if narrow {
                 return Err("an access list holds an entry the boundary does not read");
             }
-            let part = if inherited {
-                Part::Inherited
+            let origin = if inherited {
+                Origin::Inherited
             } else {
-                Part::Other
+                Origin::Other
             };
-            body.push((bytes, part));
+            body.push((bytes, origin));
             continue;
         };
         if inherited && !cut {
-            body.push((bytes, Part::Inherited));
+            body.push((bytes, Origin::Inherited));
             continue;
         }
         let entry = Entry {
@@ -389,19 +389,19 @@ fn parts(
         bytes[1] = entry.flags;
         if entry.sid == sid {
             if !inherited {
-                body.push((bytes, Part::Own));
+                body.push((bytes, Origin::Own));
             }
             continue;
         }
         if narrow && entry.allows && package(entry.sid) {
             let kept = narrowed(&entry, access.rights(), folder);
-            body.extend(kept.into_iter().map(|bytes| (bytes, Part::Other)));
+            body.extend(kept.into_iter().map(|bytes| (bytes, Origin::Other)));
             continue;
         }
-        body.push((bytes, Part::Other));
+        body.push((bytes, Origin::Other));
     }
     assert!(body.len() <= 2 * spans.len());
-    assert!(!cut || body.iter().all(|(_, part)| *part != Part::Inherited));
+    assert!(!cut || body.iter().all(|(_, origin)| *origin != Origin::Inherited));
     Ok(body)
 }
 
@@ -509,6 +509,75 @@ pub fn explicit(acl: &[u8]) -> Result<Vec<u8>, &'static str> {
     let list = list_from(&acl[..ACL_HEADER_BYTES], &kept)?;
     assert!(list.len() <= acl.len());
     Ok(list)
+}
+
+/// Whether only the trusted accounts may change an object: one of them owns it
+/// ([`trusted_owner`]) and its access list gives no other SID any of `rights`
+/// ([`other_writer`]). Inputs: the owner, the list (None when it has none), the user's SID
+/// and the rights. Output: Ok, or the reason another account can change it.
+pub fn held_only_by(
+    owner: &[u8],
+    list: Option<&[u8]>,
+    user: &[u8],
+    rights: u32,
+) -> Result<(), &'static str> {
+    if !trusted_owner(owner, user) {
+        return Err("another account owns the program or a folder above it");
+    }
+    let Some(list) = list else {
+        return Err(
+            "the program or a folder above it has no access list, so everyone can change it",
+        );
+    };
+    match other_writer(list, user, rights)? {
+        None => Ok(()),
+        Some(_) => Err("another account can change the program or a folder above it"),
+    }
+}
+
+/// One part of a path as [`first_changeable_part`] reads it: missing, unreadable, or its
+/// owner SID, its access list (None when it has none) and whether it is a folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Part {
+    Missing,
+    Unreadable,
+    Found {
+        owner: Vec<u8>,
+        list: Option<Vec<u8>>,
+        folder: bool,
+    },
+}
+
+/// The first part, the entry first, that someone other than the trusted accounts can change
+/// ([`held_only_by`]): a file entry with [`FILE_CHANGES`], a folder entry, a file's own folder
+/// and a folder above a missing part with [`OWN_FOLDER_CHANGES`], any other folder with
+/// [`ANCESTOR_CHANGES`]. A missing part is never named, an unreadable one always. Inputs: the
+/// parts from the entry up and the user's SID. Output: the part's index, or none.
+pub fn first_changeable_part(parts: &[Part], user: &[u8]) -> Option<usize> {
+    let folder_entry = matches!(parts.first(), Some(Part::Found { folder: true, .. }));
+    let mut below_exists = false;
+    for (depth, part) in parts.iter().enumerate() {
+        let rights = match depth {
+            0 if folder_entry => OWN_FOLDER_CHANGES,
+            0 => FILE_CHANGES,
+            1 if !folder_entry => OWN_FOLDER_CHANGES,
+            _ if !below_exists => OWN_FOLDER_CHANGES,
+            _ => ANCESTOR_CHANGES,
+        };
+        let changeable = match part {
+            Part::Missing => false,
+            Part::Unreadable => true,
+            Part::Found { owner, list, .. } => {
+                held_only_by(owner, list.as_deref(), user, rights).is_err()
+            }
+        };
+        if changeable {
+            assert!(*part != Part::Missing);
+            return Some(depth);
+        }
+        below_exists = *part != Part::Missing;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1104,6 +1173,50 @@ mod tests {
             other_writer(&root, &OWNER, OWN_FOLDER_CHANGES),
             Ok(Some(&AUTHENTICATED_USERS[..]))
         );
+    }
+
+    /// V243-WIN-CHANGEABLE-BY-OTHERS: a file's own folder is judged as `owner_only` judges
+    /// it, a folder entry's parent only for swapping it, a folder above a missing part for
+    /// adding one; a missing part is never named, and an unreadable part, another owner or
+    /// no access list always is.
+    #[test]
+    fn the_first_changeable_part_reads_each_depth_with_its_own_rights() {
+        let own = acl(&[ace(ACCESS_ALLOWED, INHERITED, FULL, &OWNER)]);
+        let adds = acl(&[
+            ace(ACCESS_ALLOWED, INHERITED, FULL, &OWNER),
+            ace(ACCESS_ALLOWED, 0, ADD_SUBDIRECTORY, &AUTHENTICATED_USERS),
+        ]);
+        let found = |list: &[u8], folder: bool| Part::Found {
+            owner: OWNER.to_vec(),
+            list: Some(list.to_vec()),
+            folder,
+        };
+        let (file, folder, open) = (found(&own, false), found(&own, true), found(&adds, true));
+        let first = |parts: &[&Part]| {
+            let parts: Vec<Part> = parts.iter().map(|part| (*part).clone()).collect();
+            first_changeable_part(&parts, &OWNER)
+        };
+        assert_eq!(first(&[&file, &folder, &folder]), None);
+        assert_eq!(first(&[&file, &open, &folder]), Some(1));
+        assert_eq!(first(&[&file, &folder, &open]), None);
+        assert_eq!(first(&[&folder, &open]), None);
+        assert_eq!(first(&[&open, &folder]), Some(0));
+        assert_eq!(first(&[&Part::Missing, &Part::Missing, &open]), Some(2));
+        assert_eq!(first(&[&Part::Missing, &folder, &open]), None);
+        assert_eq!(first(&[&file, &Part::Unreadable]), Some(1));
+        let foreign = Part::Found {
+            owner: OTHER_ACCOUNT.to_vec(),
+            list: Some(own.clone()),
+            folder: true,
+        };
+        assert_eq!(first(&[&file, &folder, &foreign]), Some(2));
+        let bare = Part::Found {
+            owner: OWNER.to_vec(),
+            list: None,
+            folder: true,
+        };
+        assert_eq!(first(&[&file, &folder, &bare]), Some(2));
+        assert_eq!(first(&[]), None);
     }
 
     /// #306 sec F1: an inherit-only entry, which passes down without applying, and a deny

@@ -825,7 +825,7 @@ pub(super) fn session_name(path: &Path) -> String {
 /// A replaced or shortened record starts over; one whose volume a reboot renumbered keeps
 /// its place. A line longer than the read is skipped.
 /// Inputs: the record, its progress and the time. Output: the records and the last limits.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 fn read_record(
     path: &Path,
     format: Format,
@@ -874,7 +874,7 @@ fn read_record_with(
     )
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 fn read_opened(
     opened: (File, (u64, u64), u64),
     format: Format,
