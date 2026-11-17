@@ -305,3 +305,29 @@ fn a_folder_not_made_yet_is_one_folder_whatever_path_names_it() {
             .is_some()
     );
 }
+
+/// V243-SETUP-PARALLEL: a harness job waiting behind a setup job on one folder names that
+/// setup tool as the screens show it, not its program, then starts by itself once the
+/// setup job ends.
+#[test]
+fn a_harness_job_waiting_behind_a_setup_job_names_the_setup_tool() {
+    let queue = Queue::new();
+    let brew = queue.machine.root.path().join("brew");
+    let held = queue
+        .updates
+        .turns()
+        .take("node", vec![brew], Duration::from_secs(5))
+        .unwrap();
+    queue.install("aider").unwrap();
+    assert!(
+        eventually(|| queue.read("aider").waiting.as_deref() == Some("Node.js")),
+        "{:?}",
+        queue.read("aider")
+    );
+    assert_eq!(queue.logged(), "", "Aider's installer waits");
+    drop(held);
+    queue.open("aider");
+    assert!(eventually(|| queue.updates.idle()));
+    assert_eq!(queue.logged(), "start aider\nend aider\n");
+    assert_eq!(queue.read("aider").waiting, None);
+}
