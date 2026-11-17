@@ -68,7 +68,8 @@ const COPY: Record<string, string> = {
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
   home_add_cancelled: "Adding the folder stopped. Nothing was moved or copied.",
   home_add_in_progress: "A folder is being added to your projects folder. Try again when it finishes.",
-  job_busy: "Another job is running. Wait for it to finish on Home.",
+  job_busy: "Several folders are already waiting. Wait for one to finish on Home.",
+  job_same_folder: "This folder is already being moved or added. See it on Home.",
   intake_failed: "Adding the folder failed. Check your projects folder before trying again.",
   home_override_invalid: "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
@@ -368,14 +369,16 @@ export function cancelIcloudDownload(): Promise<Result<boolean>> {
  * copies the folder into the projects folder apart from the window, or attaches to the job
  * adding that folder already. The native bridge checks the path by the host's own rule, so a
  * Windows drive or network share folder goes through (RV-DS241-1). Inputs: the absolute folder,
- * move or copy and the overrides. Output: the job, home_source_invalid for a path that is not
- * absolute there, or job_busy while another job runs. */
+ * move or copy and the overrides. Output: the job, which may wait its turn, home_source_invalid
+ * for a path that is not absolute there, job_same_folder while a job holds this folder or one
+ * inside or around it, or job_busy once the waiting list is full (DEC-197). */
 export function startIntake(path: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<Result<IntakeJob>> {
   return wrap(() => intakeStart(path, mode, overrides));
 }
 
-/** Reads the engine's intake job, running or last ended. Output: the job, or null. */
-export function loadIntakeJob(): Promise<Result<IntakeJob | null>> {
+/** Reads every job the engine holds, running, waiting or ended since the last start (DEC-197).
+ * Output: the jobs in start order. */
+export function loadIntakeJobs(): Promise<Result<IntakeJob[]>> {
   return wrap(intakeStatus);
 }
 

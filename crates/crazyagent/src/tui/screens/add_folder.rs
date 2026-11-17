@@ -183,7 +183,7 @@ impl AddFolder {
     pub fn answering(ctx: &Ctx, job: &RequestId) -> Self {
         let mut page = Self::new(ctx);
         page.answering = Some(job.clone());
-        let waiting = ctx.store.intake.as_ref().filter(|view| &view.id == job);
+        let waiting = ctx.store.intake.iter().find(|view| &view.id == job);
         let refused = waiting.and_then(|view| match &view.state {
             JobState::NeedsAnswer { code } => Some((view, code.clone())),
             _ => None,
@@ -565,30 +565,28 @@ impl AddFolder {
 
     /// Decides a failed start from the read after it: a job for the same subject that runs,
     /// or ended done carrying this start's id, is the started one whose reply was lost; an
-    /// older ended add of that folder and anything else show the start's refusal, a busy one
-    /// naming the job the read found running. Takes the read and the context. Returns the flow.
+    /// older ended add of that folder and anything else show the start's refusal. A start
+    /// refused `job_same_folder` is never its own lost reply, as another job holds the folder
+    /// (DEC-197). Takes the read and the context. Returns the flow.
     fn checked(&mut self, result: &Result<IntakeView, String>, ctx: &mut Ctx) -> Flow {
         let (Some(subject), Some(code)) = (self.sent.take(), self.refused.take()) else {
             return Flow::Handled;
         };
         let sent_id = self.sent_id.take();
         assert!(sent_id.is_some());
-        let attached = match result {
-            Ok(IntakeView::Job(Some(job))) if job.subject().as_ref() == Some(&subject) => {
-                let ours = intake_job::running(job)
-                    || (job.state == JobState::Done && sent_id.as_ref() == Some(&job.id));
-                ours.then_some(job)
-            }
-            _ => None,
+        let jobs: &[JobView] = match result {
+            Ok(IntakeView::Jobs(jobs)) if code != "job_same_folder" => jobs.as_slice(),
+            _ => &[],
         };
+        let attached = jobs.iter().find(|job| {
+            job.subject().as_ref() == Some(&subject)
+                && (intake_job::running(job)
+                    || (job.state == JobState::Done && sent_id.as_ref() == Some(&job.id)))
+        });
         if let Some(job) = attached {
             return self.started(job, ctx);
         }
-        let held = match result {
-            Ok(IntakeView::Job(job)) => job.as_ref(),
-            _ => None,
-        };
-        self.problem = Some(intake_job::refusal(&code, held));
+        self.problem = Some(copy(&code));
         assert!(self.sent.is_none());
         Flow::Handled
     }

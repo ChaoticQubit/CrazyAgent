@@ -154,7 +154,7 @@ fn hide(ctx: &mut Ctx) -> u64 {
 
 /// One row of the project list: the New project draft kept after leaving the
 /// wizard, a projects folder entry that is not a ready project, or a project.
-/// Input: the engine's intake job, the kept draft, the found folders and the store. Output:
+/// Input: the engine's intake jobs, the kept draft, the found folders and the store. Output:
 /// drawn as a four-row card; Enter does the job's first action, continues the draft, sets up
 /// the folder or opens the project.
 enum Entry {
@@ -317,7 +317,7 @@ pub struct Home {
     folder: Load<ProjectsHome>,
     found: Load<Vec<FoundProject>>,
     sent: Option<IntakeQuery>,
-    job_shown: bool,
+    jobs_shown: Vec<crate::protocol::RequestId>,
 }
 
 impl Default for Home {
@@ -343,7 +343,7 @@ impl Home {
             folder: Load::Idle,
             found: Load::Idle,
             sent: None,
-            job_shown: false,
+            jobs_shown: Vec::new(),
         }
     }
 
@@ -501,20 +501,16 @@ impl Home {
             })
             .cloned()
             .map(Entry::Project);
-        let job = ctx.store.intake.clone().map(Entry::Job);
-        job.into_iter()
-            .chain(draft)
-            .chain(folders)
-            .chain(projects)
-            .collect()
+        let jobs = ctx.store.intake.iter().cloned().map(Entry::Job);
+        jobs.chain(draft).chain(folders).chain(projects).collect()
     }
 
-    /// The intake job when its card is the picked one: it is always the first card and no
-    /// filter hides it. Input: the context. Output: the job, or None.
+    /// The intake job whose card is the picked one: the job cards come first, one per job in
+    /// start order, and no filter hides them (DEC-197). Input: the context. Output: the job,
+    /// or None.
     fn picked_job<'a>(&self, ctx: &'a Ctx) -> Option<&'a JobView> {
-        let picked = self.panel == Panel::Projects && self.selected == 0 && !self.filtering;
-        let job = ctx.store.intake.as_ref().filter(|_| picked);
-        assert!(job.is_none() || ctx.store.intake.is_some());
+        let picked = self.panel == Panel::Projects && !self.filtering;
+        let job = ctx.store.intake.get(self.selected).filter(|_| picked);
         job.filter(|_| ctx.store.projects.ready().is_some())
     }
 
@@ -587,21 +583,25 @@ impl Home {
         self.job_action(&job, JobAction::Dismiss, ctx)
     }
 
-    /// Keeps the same card picked when the job card comes first or goes, since it is always
-    /// the first card. Input: the context with the intake job read. Output: none.
+    /// Keeps the same card picked as job cards come and go before the rest (DEC-197): a picked
+    /// job card follows its job by id, or once its job is gone the card that takes its place;
+    /// a picked card below the job cards moves by the change in their count. Input: the
+    /// context with the intake jobs read. Output: none.
     fn follow_job_card(&mut self, ctx: &Ctx) {
-        let card = ctx.store.intake.is_some();
-        if card == self.job_shown {
+        let ids: Vec<_> = ctx.store.intake.iter().map(|job| job.id.clone()).collect();
+        if ids == self.jobs_shown {
             return;
         }
-        self.job_shown = card;
-        self.selected = if card {
-            self.selected + 1
-        } else {
-            self.selected.saturating_sub(1)
+        self.selected = match self.jobs_shown.get(self.selected) {
+            Some(picked) => ids
+                .iter()
+                .position(|id| id == picked)
+                .unwrap_or_else(|| self.selected.min(ids.len())),
+            None => self.selected - self.jobs_shown.len() + ids.len(),
         };
+        self.jobs_shown = ids;
         self.keep_in_range(ctx);
-        assert_eq!(self.job_shown, ctx.store.intake.is_some());
+        assert_eq!(self.jobs_shown.len(), ctx.store.intake.len());
     }
 
     /// Keeps the picked card inside the list after it changed, and in view. Input: the
@@ -963,7 +963,7 @@ impl Home {
         match &ctx.store.projects {
             Load::Ready(projects)
                 if projects.is_empty()
-                    && ctx.store.intake.is_none()
+                    && ctx.store.intake.is_empty()
                     && kept_draft().is_none()
                     && self.folders().is_empty() =>
             {
@@ -1470,8 +1470,7 @@ impl Screen for Home {
             if self.sent.as_ref() == Some(&reply.query) {
                 self.sent = None;
                 if let Err(code) = &reply.result {
-                    let line = intake_job::refusal(code, ctx.store.intake.as_ref());
-                    ctx.say(Message::error(job_failed(&reply.query), &line));
+                    ctx.say(Message::error(job_failed(&reply.query), &copy(code)));
                 }
             }
             match (&reply.query, &reply.result) {
@@ -1489,7 +1488,7 @@ impl Screen for Home {
                     self.found = Load::Ready(found.clone());
                     self.keep_in_range(ctx);
                 }
-                (IntakeQuery::JobStatus, Ok(IntakeView::Job(_))) => self.keep_in_range(ctx),
+                (IntakeQuery::JobStatus, Ok(IntakeView::Jobs(_))) => self.keep_in_range(ctx),
                 (IntakeQuery::Found, Err(code)) => {
                     self.found = if not_ready(code) {
                         Load::NotReady
@@ -1516,7 +1515,7 @@ impl Screen for Home {
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
-        self.job_shown = ctx.store.intake.is_some();
+        self.jobs_shown = ctx.store.intake.iter().map(|job| job.id.clone()).collect();
         ctx.request(Request::Projects);
         ctx.request(Request::Pools);
         let ready = ctx
