@@ -1090,6 +1090,15 @@ mod tests {
         }
     }
 
+    /// V243-WIN-MCP-NPX: a check of a Windows batch command other than npm's npx.cmd says
+    /// what to point the command at instead, and the code is known to every client.
+    #[test]
+    fn a_check_of_a_batch_command_says_what_to_point_it_at() {
+        let words = "This command is a Windows batch file, which runs through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.";
+        assert_eq!(check_problem("server_batch_file"), words);
+        assert_eq!(known_code("server_batch_file"), Some("server_batch_file"));
+    }
+
     #[test]
     fn a_check_that_found_no_shared_install_says_why_in_its_own_words() {
         assert_eq!(
@@ -1187,6 +1196,10 @@ mod windows_tests {
             args: vec!["-y".into()],
         };
         assert!(stdio(r"C:\Program Files\nodejs\npx.cmd").validate().is_ok());
+        assert_eq!(
+            plain_problem("server_command_invalid"),
+            Some(r"Enter the full path to the command, such as C:\Program Files\nodejs\npx.cmd.")
+        );
         for command in [
             "/usr/local/bin/npx",
             "npx.cmd",
@@ -1201,5 +1214,55 @@ mod windows_tests {
             let refused = stdio(command).validate().unwrap_err();
             assert_eq!(refused.0, "server_command_invalid", "{command}");
         }
+    }
+
+    /// V243-WIN-MCP-NPX: npm's `npx.cmd`, found by its layout, runs as the `node.exe` beside
+    /// it with `npx-cli.js` before the approved arguments, in plain drive spelling; a `.cmd` or
+    /// `.bat` by any other name or layout gives none, and a program's spec is unchanged.
+    #[test]
+    fn npm_s_npx_cmd_runs_as_node_and_every_other_batch_command_is_left_out() {
+        let folder = tempfile::tempdir().unwrap();
+        let real = crate::sandbox::canonical(folder.path()).unwrap();
+        let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("where.exe");
+        std::fs::copy(&shipped, real.join("node.exe")).unwrap();
+        let bin = real.join("node_modules").join("npm").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("npx-cli.js"), "#!/usr/bin/env node\n").unwrap();
+        for name in ["npx.cmd", "other.cmd", "run.bat"] {
+            std::fs::write(real.join(name), "@ECHO off\r\n").unwrap();
+        }
+        let places = crate::tools::Places::new(vec![real.clone()], None);
+        let args = vec!["-y".to_owned(), "@scope/server".to_owned()];
+        let text = |path: PathBuf| path.to_str().unwrap().to_owned();
+        let mapped = npx_spec(&real.join("npx.cmd"), &args, &places);
+        assert_eq!(
+            mapped,
+            Some(ServerSpec::Stdio {
+                command: text(real.join("node.exe")),
+                args: vec![
+                    text(bin.join("npx-cli.js")),
+                    "-y".into(),
+                    "@scope/server".into()
+                ],
+            })
+        );
+        assert!(mapped.unwrap().validate().is_ok());
+        for name in ["other.cmd", "run.bat"] {
+            assert_eq!(npx_spec(&real.join(name), &args, &places), None, "{name}");
+            let spec = ServerSpec::Stdio {
+                command: text(real.join(name)),
+                args: args.clone(),
+            };
+            assert_eq!(without_cmd_exe(&real, spec), None, "{name}");
+        }
+        std::fs::remove_file(real.join("node.exe")).unwrap();
+        assert_eq!(npx_spec(&real.join("npx.cmd"), &args, &places), None);
+        let program = ServerSpec::Stdio {
+            command: text(shipped),
+            args,
+        };
+        assert_eq!(without_cmd_exe(&real, program.clone()), Some(program));
     }
 }
