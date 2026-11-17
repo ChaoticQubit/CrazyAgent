@@ -68,6 +68,7 @@ pub fn provider_line(provider: Provider) -> &'static str {
         Provider::AnthropicApi => "Pay-as-you-go Anthropic API key",
         Provider::OpenaiCompatible => "Any server that speaks the OpenAI API",
         Provider::Local => "Ollama, LM Studio or another server on this Mac",
+        Provider::Gemini => "Pay-as-you-go Google Gemini API key",
     }
 }
 
@@ -177,6 +178,11 @@ pub fn choices(entry: &ProviderEntry) -> Vec<Choice> {
                 "Use an API key",
                 "Pay per use with an Anthropic key.",
             )),
+            (Provider::Gemini, SignInMethod::ApiKey) => out.push(choice(
+                None,
+                "Use an API key",
+                "Pay per use with a Gemini key.",
+            )),
             (_, SignInMethod::ApiKey) => {
                 out.push(choice(None, "Use an API key", "Pay per use with a key."))
             }
@@ -195,6 +201,7 @@ fn key_owner(provider: Provider) -> &'static str {
         Provider::Chatgpt | Provider::OpenaiApi => "an OpenAI",
         Provider::Claude | Provider::AnthropicApi => "an Anthropic",
         Provider::Openrouter => "an OpenRouter",
+        Provider::Gemini => "a Gemini",
         _ => "this",
     }
 }

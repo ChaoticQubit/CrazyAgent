@@ -825,6 +825,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "linux_harness_unchecked" => Some(
             "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
         ),
+        "chatgpt_sign_in_expired" => {
+            Some(crate::model_gateway::relay::chatgpt::SIGN_IN_EXPIRED_LINE)
+        }
         "linux_sandbox_not_full" => Some(
             "This Linux cannot give this agent the full sandbox and the setting 'Refuse agents without the full Linux sandbox' is on, so it does not start. The lines under Agent access say what this Linux lacks. Turn the setting off in Settings to start agents with what this Linux holds.",
         ),
@@ -858,7 +861,8 @@ pub fn configured_profile_ref(connection: &ModelConnection) -> Option<Credential
 }
 
 /// The allowed master target a connection gets when its pool is assigned: the connection
-/// itself when signed in, or its own profile reference for an RCLI HTTP endpoint.
+/// itself when signed in or stored for a harness that runs listed masters and fits it
+/// (DEC-180 Task 20 Q8), or its own profile reference for an RCLI HTTP endpoint.
 pub(crate) fn connection_destination(connection: &ModelConnection) -> Option<CredentialRef> {
     match connection.auth {
         ModelAuthentication::NativeManaged { .. } => Some(connection.id.clone()),
@@ -866,6 +870,11 @@ pub(crate) fn connection_destination(connection: &ModelConnection) -> Option<Cre
             && matches!(connection.endpoint, ModelEndpoint::Http { .. }) =>
         {
             configured_profile_ref(connection)
+        }
+        _ if crate::master_session::listed_master(connection.harness.as_str())
+            .is_ok_and(|harness| harness.account_fits(connection)) =>
+        {
+            Some(connection.id.clone())
         }
         _ => None,
     }
@@ -877,8 +886,8 @@ pub(crate) fn connection_destination(connection: &ModelConnection) -> Option<Cre
 /// it now holds. Output: `routing.approved_accounts` loses accounts the edit removed and gains
 /// every account of an assigned pool; `allowed_destinations` loses the master target of a
 /// removed or replaced connection, an empty list gains the local execution target, and every
-/// signed-in or RCLI HTTP connection of an assigned pool gets its own target. More than 64
-/// of either is refused with `approved_accounts_limit` or `allowed_destinations_limit`.
+/// signed-in, RCLI HTTP or listed master connection of an assigned pool gets its own target;
+/// more than 64 of either is refused, `approved_accounts_limit` or `allowed_destinations_limit`.
 fn approve_assigned_accounts(
     document: &mut toml_edit::DocumentMut,
     previous: &ModelAccess,
@@ -1805,6 +1814,32 @@ pools = [{ id = "pool", members = ["codex-connection", "local-connection"], proj
         }
         pool.name = Some("é".repeat(64));
         edit_model_access(&bytes, "", &ModelAccessEdit::ReplacePool { pool }, &[]).unwrap();
+    }
+
+    /// DEC-180 Task 20 Q8: an HTTP account stored for a harness that runs listed masters and
+    /// fits it is its own master target once its pool is assigned, as a signed-in account is;
+    /// one stored for a harness without the master role gets none.
+    #[test]
+    fn a_listed_master_account_is_its_own_master_target() {
+        let connection = |harness: &str| -> ModelConnection {
+            serde_json::from_value(serde_json::json!({
+                "id": "listed-connection",
+                "provider": "google",
+                "harness": harness,
+                "protocol": "openai-chat",
+                "account_ref": "listed-account",
+                "endpoint": {"kind": "http", "url": "http://127.0.0.1:9/v1"},
+                "model": {"id": "m-1", "author": "google"},
+                "auth": {"method": "none"},
+            }))
+            .unwrap()
+        };
+        let listed = connection("standin-acp");
+        assert!(crate::master_session::listed_master("standin-acp").is_ok());
+        assert_eq!(connection_destination(&listed), Some(listed.id.clone()));
+        let other = connection("gemini-cli");
+        assert!(crate::master_session::listed_master("gemini-cli").is_err());
+        assert_eq!(connection_destination(&other), None);
     }
 
     #[test]

@@ -1,3 +1,6 @@
+use super::accounts::Handover;
+use super::drivers::acp::Acp;
+use super::drivers::{self, Piped};
 use super::interactive::KEY_FILE;
 use super::leftovers::{Follower, LINEAGE_VARIABLE, LineageToken, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
@@ -6,7 +9,7 @@ use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexS
 use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::credentials::SecretString;
-use crate::launch_context::{AgentContext, Installed};
+use crate::launch_context::{AgentContext, EngineServer, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -32,6 +35,14 @@ const LINE_BYTES_MAX: usize = crate::adapters::LINE_BYTES_MAX;
 /// The longest prompt a launch sends: half of one outbound Codex frame, which leaves room
 /// for the JSON-RPC envelope around it.
 pub(crate) const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
+/// The most input bytes a session keeps for a harness that has not taken them yet: room for
+/// the largest prompt frame with every byte escaped to six, its envelope and an interrupt, so
+/// only a harness that stopped reading reaches it (T20 sec r1 F1).
+const INPUT_PENDING_MAX: usize = 8 * PROMPT_BYTES_MAX;
+const _: () = assert!(6 * PROMPT_BYTES_MAX + 8192 <= INPUT_PENDING_MAX);
+/// How long `next_event` waits on output between tries to hand a harness the input it has
+/// not taken yet.
+const INPUT_RETRY: Duration = Duration::from_millis(20);
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -590,10 +601,12 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     else {
         return Ok((request, None));
     };
-    let default = match harness_id(&request) {
-        "codex" => CODEX_DEFAULT_BASE_URL,
-        "claude-code" => CLAUDE_DEFAULT_BASE_URL,
-        _ => return Err(failure("launch_key_relay_unsupported")),
+    let default = match drivers::piped(&request.harness) {
+        Ok(Piped::Codex) => CODEX_DEFAULT_BASE_URL,
+        Ok(Piped::Claude) => CLAUDE_DEFAULT_BASE_URL,
+        Ok(Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn) | Err(_) => {
+            return Err(failure("launch_key_relay_unsupported"));
+        }
     };
     let upstream = request.account.base_url().unwrap_or(default).to_owned();
     let secret = SecretString::new(key.reveal().as_bytes().to_vec())
@@ -614,11 +627,143 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     Ok((request, Some(relay)))
 }
 
+/// Routes a launch of a listed harness on a ChatGPT sign-in through a ChatGPT relay on
+/// 127.0.0.1: the relay holds the sign-in's access token in engine memory and forwards
+/// only Responses requests to the ChatGPT backend, and the returned request names the
+/// relay's base URL and a random placeholder instead. The launch runs in the harness's own
+/// private home made in the agent's home, never in the sign-in's managed home, where the
+/// engine hands Codex the sign-in's own copy, and its sandbox is made after routing, for
+/// that home. Codex and Claude Code keep their own sign-in paths. Inputs: the request bound
+/// to the sign-in, with no sandbox profile yet, the harness, the stored sign-in, the
+/// agent's own 0700 home and the sign-in source. Output: the request to launch and the
+/// relay, which must live as long as the agent. A source read from another sign-in than
+/// the stored one is a wiring fault and stops on an assertion before any relay starts.
+/// Refusals: `launch_chatgpt_unsupported` for an own adapter, a harness that does not list
+/// `openai-responses`, another account or a request not bound to a sign-in,
+/// `launch_chatgpt_sandbox_premade` for a request that already carries a sandbox profile,
+/// `launch_chatgpt_home_is_managed` for an agent home that is the sign-in's managed home,
+/// lies inside it or holds it, `launch_account_home_holds_sign_in` where a sign-in's record
+/// lies, or the private home's refusal.
+pub fn route_chatgpt(
+    mut request: LaunchRequest,
+    harness: &super::registry::Harness,
+    connection: &crate::config::ModelConnection,
+    base: &Path,
+    source: std::sync::Arc<crate::model_gateway::relay::chatgpt::ChatGptSource>,
+) -> Result<(LaunchRequest, Relay), LaunchError> {
+    let AccountBinding::Subscription { home: managed } = &request.account else {
+        return Err(failure("launch_chatgpt_unsupported"));
+    };
+    let routed = harness.takes_chatgpt_sign_in()
+        && harness.named(&request.harness)
+        && super::registry::is_chatgpt_sign_in(connection);
+    if !routed {
+        return Err(failure("launch_chatgpt_unsupported"));
+    }
+    if request.sandbox_profile.is_some() {
+        return Err(failure("launch_chatgpt_sandbox_premade"));
+    }
+    let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
+        return Err(failure("launch_chatgpt_unsupported"));
+    };
+    assert!(
+        source.profile() == profile_ref,
+        "a ChatGPT relay serves only the sign-in it was read from"
+    );
+    if overlaps(base, managed) {
+        return Err(failure("launch_chatgpt_home_is_managed"));
+    }
+    let home = chatgpt_home(base, harness, &connection.id)?;
+    let relay = Relay::start_chatgpt(source).map_err(|error| LaunchError(error.0, None))?;
+    request.account = AccountBinding::Url {
+        home,
+        base_url: relay.base_url(),
+        key: Some(Secret::new(relay.token().to_owned())?),
+    };
+    assert!(relay.is_chatgpt());
+    assert!(request.account.home().starts_with(base));
+    assert!(
+        request
+            .account
+            .key()
+            .is_some_and(|key| is_placeholder(key.reveal()))
+    );
+    Ok((request, relay))
+}
+
+/// Whether two folders overlap: one is the other or lies inside it, as written or as their
+/// real paths where they exist, so neither a link nor a folder made later hides it.
+/// Inputs: the two folders. Output: the answer.
+fn overlaps(left: &Path, right: &Path) -> bool {
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let within = |left: &Path, right: &Path| left.starts_with(right) || right.starts_with(left);
+    within(left, right) || within(&real(left), &real(right))
+}
+
+/// Makes the private home a ChatGPT launch runs in, `<agent home>/<harness id>/<account>`
+/// (T18), refusing an agent home or a private home that holds a sign-in's record.
+/// Inputs: the agent's own 0700 home, the harness and the account. Output: the home,
+/// `launch_account_home_holds_sign_in`, or the private home's refusal.
+#[cfg(unix)]
+fn chatgpt_home(
+    base: &Path,
+    harness: &super::registry::Harness,
+    account: &crate::protocol::CredentialRef,
+) -> Result<PathBuf, LaunchError> {
+    holds_no_sign_in(base)?;
+    let home = super::home::private_home(base, &harness.manifest().id, account)?;
+    holds_no_sign_in(&home)?;
+    Ok(home)
+}
+
+/// Refuses a private home where its Unix owner and 0700 mode cannot be checked. Inputs:
+/// unused. Output: `launch_account_home_unavailable`.
+#[cfg(not(unix))]
+fn chatgpt_home(
+    base: &Path,
+    harness: &super::registry::Harness,
+    account: &crate::protocol::CredentialRef,
+) -> Result<PathBuf, LaunchError> {
+    let _ = (base, harness, account);
+    Err(failure("launch_account_home_unavailable"))
+}
+
+/// Refuses a folder that holds a native sign-in's own record, Codex's or Claude Code's,
+/// as a file, a link or anything else, so a listed harness never runs where it could read
+/// a sign-in's tokens. Input: the folder. Output: Ok, or
+/// `launch_account_home_holds_sign_in`, also when the folder cannot be looked into.
+#[cfg(unix)]
+pub(crate) fn holds_no_sign_in(folder: &Path) -> Result<(), LaunchError> {
+    use crate::engine::bootstrap::{CLAUDE_RECORD, CODEX_RECORD};
+    for record in [CODEX_RECORD, CLAUDE_RECORD] {
+        match std::fs::symlink_metadata(folder.join(record)) {
+            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(failure("launch_account_home_holds_sign_in")),
+        }
+    }
+    Ok(())
+}
+
 /// Builds the exact command a launch would spawn, without spawning it.
 /// Input: the launch request. Output: the command, or a plain refusal code when an
 /// input is unsafe or the harness has no launch adapter.
 pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
     build(request, None)
+}
+
+/// Builds a context-less durable launch's command under its agent home's lock
+/// ([`crate::launch_context::lock_only`]): a listed harness's, on the drivers that lock reads
+/// as listed, with the variables its home block sets, Codex's and Claude Code's as
+/// [`command`] builds them.
+/// Input: the routed request. Output: the command and the lock guard, or the refusal.
+fn lone_command(request: &LaunchRequest) -> Result<(Command, Installed), LaunchError> {
+    let installed = crate::launch_context::lock_only(request.account.home(), &request.harness)?;
+    let listed = matches!(
+        drivers::piped(&request.harness),
+        Ok(Piped::Acp | Piped::JsonlTurn | Piped::TextTurn)
+    );
+    let command = build(request, listed.then_some(&installed))?;
+    Ok((command, installed))
 }
 
 /// Builds the command for an agent of one project: writes the project's approved skills,
@@ -657,26 +802,156 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .key()
         .map(|_| key_file_text(&home.join(KEY_FILE)))
         .transpose()?;
-    let (arguments, environment) = match harness_id(request) {
-        "codex" => codex_invocation(request, installed, key_file.as_deref())?,
-        "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
-        _ => return Err(failure("launch_harness_unsupported")),
+    let (arguments, environment) = match drivers::piped(&request.harness)? {
+        Piped::Codex => codex_invocation(request, installed, key_file.as_deref())?,
+        Piped::Claude => claude_invocation(request, installed, key_file.as_deref()),
+        Piped::Acp => acp_invocation(request)?,
+        Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
+            return Err(failure("launch_harness_unsupported"));
+        }
     };
+    sandboxed(request, installed, &arguments, &environment)
+}
+
+/// The command line of an ACP agent: its manifest's arguments filled for this launch, and no
+/// variable of its own, since the installed context gives its home block's variables.
+/// Input: the request. Output: the arguments and variables, or the refusal
+/// [`drivers::acp::arguments`] gives.
+fn acp_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> {
+    let listed = super::registry::registry()
+        .get(&request.harness)
+        .ok_or_else(|| failure("launch_harness_unsupported"))?;
+    let arguments = drivers::acp::arguments(
+        listed.manifest(),
+        request.account.home(),
+        &request.working_dir,
+        request.model.as_deref(),
+        request.tools,
+    )?;
+    Ok((
+        arguments.into_iter().map(OsString::from).collect(),
+        Vec::new(),
+    ))
+}
+
+/// Wraps a harness command line in the launch's sandbox, with the agent's own environment:
+/// its home, temporary folder, tool path, plain locale, the model proxy and git identity of
+/// an installed context, whose tool home, if any, holds the temporary folder, own `git` and
+/// cargo home in place of the binding's home (rv-code4 T19b F2), the harness's own variables, those a listed harness's home block
+/// sets and those of its account hand-over (T19b 19b-2), whose placeholder goes through the
+/// one exception to the variable guard, as a listed master's does. Inputs: the checked
+/// request, the installed context, if any, the harness arguments and variables. Output: the
+/// command with piped standard streams in the working folder, or
+/// `launch_sandbox_unavailable` off macOS, `launch_account_handover_mismatch` for a
+/// hand-over of another account than the binding's and `launch_environment_refused` when
+/// the environment cannot be built, which includes a hand-over at Full access.
+fn sandboxed(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    arguments: &[OsString],
+    environment: &[(&'static str, OsString)],
+) -> Result<Command, LaunchError> {
+    let handover = installed.and_then(Installed::handover);
+    if let Some(handover) = handover {
+        handover_fits(request, handover)?;
+    }
+    let listed = installed.map(Installed::environment).unwrap_or_default();
+    let handed_env = handover.map(Handover::env).unwrap_or_default();
+    let harness_env = environment
+        .iter()
+        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())))
+        .chain(
+            listed
+                .iter()
+                .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str()))),
+        )
+        .chain(
+            handed_env
+                .iter()
+                .map(|(name, value)| (OsStr::new(name), Some(OsStr::new(value)))),
+        );
+    let names: Vec<&str> = handed_env
+        .iter()
+        .filter(|(_, value)| handover.is_some_and(|handover| value == handover.token()))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let handed = handover
+        .map(|handover| crate::sandbox::Handed::new(&names, handover.token()))
+        .transpose()
+        .map_err(|_| failure("launch_environment_refused"))?;
+    assert_eq!(handed.is_some(), handover.is_some());
+    confined(request, installed, arguments, harness_env, handed)
+}
+
+/// Refuses an account hand-over made for another account than the launch is bound to: its
+/// address must be the binding's and its placeholder the binding's relay token, or the
+/// local placeholder for a keyless binding. The terminal path checks its hand-over with it
+/// too. Inputs: the request and the hand-over. Output: Ok, or
+/// `launch_account_handover_mismatch`.
+pub(super) fn handover_fits(
+    request: &LaunchRequest,
+    handover: &Handover,
+) -> Result<(), LaunchError> {
+    let address = request
+        .account
+        .base_url()
+        .map(|url| url.trim_end_matches('/'));
+    let token = request
+        .account
+        .key()
+        .map_or(LOCAL_PLACEHOLDER_KEY, Secret::reveal);
+    if address != Some(handover.base_url().trim_end_matches('/')) || token != handover.token() {
+        return Err(failure("launch_account_handover_mismatch"));
+    }
+    Ok(())
+}
+
+/// Builds the command one listed master turn spawns (DEC-180 Task 20): the request's sandbox
+/// and base variables as [`command`] gives them, the manifest's arguments, and the harness
+/// variables with the launch's exception to the variable guard. Inputs: the request, the
+/// arguments, the variables and the exception. Output: the command, or the refusals of
+/// [`command`].
+pub fn listed_command(
+    request: &LaunchRequest,
+    arguments: &[OsString],
+    environment: &[(OsString, OsString)],
+    handed: crate::sandbox::Handed<'_>,
+) -> Result<Command, LaunchError> {
+    validate(request)?;
+    let harness_env = environment
+        .iter()
+        .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str())));
+    confined(request, None, arguments, harness_env, Some(handed))
+}
+
+/// Wraps a harness command line as [`sandboxed`] says, with the launch's exception to the
+/// variable guard, if any, which only a confined launch may carry. Inputs: the checked
+/// request, the installed context, the harness arguments and variables and the exception.
+/// Output: the command, or the refusals of [`sandboxed`].
+fn confined<'a>(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    arguments: &[OsString],
+    harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    handed: Option<crate::sandbox::Handed<'_>>,
+) -> Result<Command, LaunchError> {
+    let home = request.account.home();
+    let tool_home = installed.and_then(Installed::tool_home).unwrap_or(home);
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
     }
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
     let path = toolchains::with_agent_git(
-        home,
+        tool_home,
         if request.tools {
             toolchains::agent_path(&homes, TOOLS_ON_PATH)
         } else {
             TOOLS_OFF_PATH.to_owned()
         },
     );
-    let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
+    let tmp = toolchains::existing_tmp(tool_home).unwrap_or_else(|| home.to_path_buf());
     let tools = if request.tools {
-        toolchains::agent_env(home, &homes)
+        toolchains::agent_env(tool_home, &homes)
     } else {
         Vec::new()
     };
@@ -704,22 +979,28 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
                 .map(|(name, value)| (name, OsStr::new(value))),
         );
     }
-    let harness_env = environment
-        .iter()
-        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())));
     let words = super::interactive::launch_words(&request.executable)?;
     let (program, script) = words
         .split_first()
         .ok_or_else(|| failure("launch_environment_refused"))?;
     let program = Path::new(program);
-    let mut command = match &request.sandbox_profile {
-        Some(profile) => crate::sandbox::agent_command(profile, program, &base, harness_env),
-        None => crate::sandbox::unconfined_command(program, &base, harness_env),
+    let mut command = match (&request.sandbox_profile, handed) {
+        #[cfg(unix)]
+        (Some(profile), Some(handed)) => {
+            crate::sandbox::agent_command_handing(profile, program, &base, harness_env, handed)
+        }
+        #[cfg(not(unix))]
+        (Some(_), Some(_)) => return Err(failure("launch_sandbox_unavailable")),
+        (Some(profile), None) => {
+            crate::sandbox::agent_command(profile, program, &base, harness_env)
+        }
+        (None, None) => crate::sandbox::unconfined_command(program, &base, harness_env),
+        (None, Some(_)) => return Err(failure("launch_environment_refused")),
     }
     .map_err(|_| failure("launch_environment_refused"))?;
     command
         .args(script)
-        .args(&arguments)
+        .args(arguments)
         .current_dir(&request.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1068,8 +1349,9 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
 }
 
 /// Checks that an account home is safe to launch in: an absolute 0700 directory owned by
-/// this user that is neither the owner's HOME nor their real `~/.codex` or `~/.claude`.
-/// Input: the home. Output: Ok, or a plain `launch_account_home_*` refusal code.
+/// this user that is neither the owner's HOME nor a folder any harness manifest names as
+/// the owner's own (`home.owner_folders`, such as `~/.codex`). Input: the home. Output: Ok,
+/// or a plain `launch_account_home_*` refusal code.
 #[cfg(unix)]
 pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
     let metadata =
@@ -1084,7 +1366,8 @@ pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
     let canonical =
         std::fs::canonicalize(home).map_err(|_| failure("launch_account_home_unavailable"))?;
     if let Some(owner) = std::env::var_os("HOME").map(PathBuf::from) {
-        for forbidden in [owner.clone(), owner.join(".codex"), owner.join(".claude")] {
+        let folders = crate::sandbox::harness_folders().map(|folder| owner.join(folder));
+        for forbidden in std::iter::once(owner.clone()).chain(folders) {
             if std::fs::canonicalize(&forbidden).is_ok_and(|forbidden| forbidden == canonical)
                 || forbidden == home
             {
@@ -1130,20 +1413,26 @@ enum Driver {
         interrupt: Option<String>,
         late: u64,
     },
+    Acp {
+        protocol: Box<Acp>,
+    },
 }
 
 impl Driver {
     /// Starts the protocol driver of one headless launch: a Codex native lead (PA-7) keeps
-    /// the sub-agent threads its Codex starts, any other Codex launch interrupts each one.
-    /// Inputs: the request and whether it is a Codex native lead. Output: the driver and its
-    /// first frames, or a plain refusal code.
+    /// the sub-agent threads its Codex starts, any other Codex launch interrupts each one,
+    /// and an ACP launch opens its session with the engine's own MCP servers.
+    /// Inputs: the request, whether it is a Codex native lead and the engine's servers.
+    /// Output: the driver and its first frames, or a plain refusal code.
     fn new(
         request: &LaunchRequest,
         native_threads: bool,
+        servers: &[EngineServer],
     ) -> Result<(Self, Vec<Vec<u8>>), LaunchError> {
-        assert!(!native_threads || (harness_id(request) == "codex" && request.tools));
-        match harness_id(request) {
-            "codex" => {
+        let piped = drivers::piped(&request.harness);
+        assert!(!native_threads || (matches!(piped, Ok(Piped::Codex)) && request.tools));
+        match piped? {
+            Piped::Codex => {
                 let mut protocol = CodexProtocol::new();
                 let start = protocol
                     .initialize()
@@ -1159,7 +1448,7 @@ impl Driver {
                 };
                 Ok((driver, vec![start]))
             }
-            "claude-code" => {
+            Piped::Claude => {
                 let local = |name: &str| format!("launch-{name}-{}", std::process::id());
                 let action = NativeAction::Launch {
                     session_id: SessionId::new(local("session"))
@@ -1184,7 +1473,16 @@ impl Driver {
                     Vec::new(),
                 ))
             }
-            _ => Err(failure("launch_harness_unsupported")),
+            Piped::Acp => {
+                let (protocol, start) = Acp::new(&request.working_dir, request.tools, None)?;
+                let driver = Self::Acp {
+                    protocol: Box::new(protocol.with_servers(servers)),
+                };
+                Ok((driver, vec![start]))
+            }
+            Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
+                Err(failure("launch_harness_unsupported"))
+            }
         }
     }
 
@@ -1229,6 +1527,7 @@ impl Driver {
                     .map(Some)
                     .map_err(|_| failure("launch_busy"))
             }
+            Self::Acp { protocol } => protocol.prompt(text),
         }
     }
 
@@ -1268,6 +1567,7 @@ impl Driver {
                 *interrupt = Some(id);
                 Ok(Some(bytes))
             }
+            Self::Acp { protocol } => protocol.cancel(),
         }
     }
 
@@ -1445,6 +1745,11 @@ impl Driver {
                     }
                 }
             }
+            Self::Acp { protocol } => {
+                let (decoded, answers) = protocol.receive(line)?;
+                events.extend(decoded);
+                writes.extend(answers);
+            }
         }
         Ok((events, writes))
     }
@@ -1461,6 +1766,7 @@ pub struct Session {
     uncertain: bool,
     follower: Option<Follower>,
     stdin: Option<File>,
+    pending: Vec<u8>,
     lines: Receiver<Line>,
     driver: Driver,
     queue: VecDeque<LaunchEvent>,
@@ -1483,7 +1789,21 @@ impl Session {
         let (request, relay) = route(request)?;
         let key = write_key_file(&request)?;
         let command = command(&request)?;
-        Self::spawn(request, command, None, None, (relay, key))
+        Self::spawn(request, command, None, None, None, (relay, key), &[])
+    }
+
+    /// Spawns one listed master turn's harness from the command [`listed_command`] built, its
+    /// ACP session opened with the given engine servers, holding the relay of a keyed account
+    /// and with it the engine's lifeline while the session lives (DEC-180 Task 20, T20 r1 F2).
+    /// Inputs: the checked request, the command, the relay, if any, and the servers. Output:
+    /// a running session, or a plain refusal code.
+    pub fn start_listed(
+        request: LaunchRequest,
+        command: Command,
+        relay: Option<Relay>,
+        servers: &[EngineServer],
+    ) -> Result<Self, LaunchError> {
+        Self::spawn(request, command, None, None, None, (relay, None), servers)
     }
 
     /// Spawns the harness for an agent of one project with the project's approved skills,
@@ -1494,11 +1814,41 @@ impl Session {
         request: LaunchRequest,
         context: AgentContext,
     ) -> Result<Self, LaunchError> {
+        Self::start_context(request, context, None)
+    }
+
+    /// Spawns the harness as [`Self::start_with_context`] does and keeps its raw output in
+    /// the run's logs, as a research run on pipes keeps it (T19b 19b-4, QUESTION-0151).
+    /// Inputs: the launch request, the project context and the logs. Output: a running
+    /// session, or a plain refusal code.
+    pub fn start_logged(
+        request: LaunchRequest,
+        context: AgentContext,
+        logs: RunLogs,
+    ) -> Result<Self, LaunchError> {
+        Self::start_context(request, context, Some(logs))
+    }
+
+    /// [`Self::start_with_context`] with the run's logs, if any. Inputs: the request, the
+    /// context and the logs. Output: a running session, or a plain refusal code.
+    fn start_context(
+        request: LaunchRequest,
+        context: AgentContext,
+        logs: Option<RunLogs>,
+    ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
         let (command, installed) = command_with_context(&request, &context)?;
         drop(context);
         let key = write_key_file(&request)?;
-        Self::spawn(request, command, Some(installed), None, (relay, key))
+        Self::spawn(
+            request,
+            command,
+            Some(installed),
+            None,
+            logs,
+            (relay, key),
+            &[],
+        )
     }
 
     /// Spawns a harness that outlives the engine, unless it is on an engine key relay it needs
@@ -1513,20 +1863,22 @@ impl Session {
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
         let (command, installed) = match &context {
-            Some(context) => {
-                let (command, installed) = command_with_context(&request, context)?;
-                (command, Some(installed))
-            }
-            None => {
-                let installed =
-                    crate::launch_context::lock_only(request.account.home(), &request.harness)?;
-                (command(&request)?, Some(installed))
-            }
+            Some(context) => command_with_context(&request, context)?,
+            None => lone_command(&request)?,
         };
         drop(context);
         let io = DurableIo::create(state)?;
         let key = write_key_file(&request)?;
-        Self::spawn(request, command, installed, Some(io), (relay, key))
+        let installed = Some(installed);
+        Self::spawn(
+            request,
+            command,
+            installed,
+            Some(io),
+            None,
+            (relay, key),
+            &[],
+        )
     }
 
     fn spawn(
@@ -1534,10 +1886,15 @@ impl Session {
         mut command: Command,
         context: Option<Installed>,
         durable: Option<DurableIo>,
+        logs: Option<RunLogs>,
         (relay, key): (Option<Relay>, Option<KeyFile>),
+        listed: &[EngineServer],
     ) -> Result<Self, LaunchError> {
+        assert!(context.is_none() || listed.is_empty());
+        assert!(durable.is_none() || logs.is_none());
         let native_threads = context.as_ref().is_some_and(Installed::native_threads);
-        let (driver, startup) = Driver::new(&request, native_threads)?;
+        let servers = context.as_ref().map_or(listed, Installed::engine_servers);
+        let (driver, startup) = Driver::new(&request, native_threads, servers)?;
         let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
         command.env(LINEAGE_VARIABLE, token.as_str());
         let (sender, lines) = sync_channel(LINES_AHEAD_MAX);
@@ -1572,16 +1929,30 @@ impl Session {
                     .stderr
                     .take()
                     .ok_or_else(|| failure("launch_stdio_unavailable"))?;
+                let (events, mut errors) = match logs {
+                    Some(logs) => (
+                        Some(Capped::new(logs.events, logs.bytes_max)),
+                        Some(Capped::new(logs.errors, logs.bytes_max)),
+                    ),
+                    None => (None, None),
+                };
                 std::thread::Builder::new()
                     .name("harness-stdout".into())
-                    .spawn(move || forward(stdout, sender))
+                    .spawn(move || forward_logged(stdout, sender, events))
                     .map_err(|_| failure("launch_reader_unavailable"))?;
                 std::thread::Builder::new()
                     .name("harness-stderr".into())
                     .spawn(move || {
                         let mut stderr = stderr;
                         let mut buffer = [0_u8; 4096];
-                        while matches!(stderr.read(&mut buffer), Ok(count) if count > 0) {}
+                        while let Ok(count) = stderr.read(&mut buffer) {
+                            if count == 0 {
+                                break;
+                            }
+                            if let Some(errors) = errors.as_mut() {
+                                errors.write(&buffer[..count]);
+                            }
+                        }
                     })
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
@@ -1592,12 +1963,19 @@ impl Session {
             crate::sandbox::LineageCheck::Unneeded
         };
         let follower = Follower::start(child.id(), Some(token), check);
+        #[cfg(unix)]
+        let relayed = relay.is_some()
+            || request
+                .account
+                .key()
+                .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()));
         let mut session = Self {
             child,
             warden,
             uncertain: false,
             follower,
             stdin,
+            pending: Vec::new(),
             lines,
             driver,
             queue: VecDeque::new(),
@@ -1612,14 +1990,14 @@ impl Session {
             lifeline: None,
         };
         #[cfg(unix)]
-        if request
-            .account
-            .key()
-            .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()))
-        {
+        if relayed {
             let lifeline = crate::research::runner::Lifeline::watch(session.child.id())
                 .map_err(|_| failure("launch_spawn_failed"))?;
             session.lifeline = Some(lifeline);
+        }
+        #[cfg(unix)]
+        if let Some(input) = &session.stdin {
+            never_waits(input)?;
         }
         for bytes in startup {
             session.write(&bytes)?;
@@ -1631,6 +2009,12 @@ impl Session {
     /// Returns the process group id that `stop` signals.
     pub fn process_group(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Returns how long a stop waits for the harness before it is killed, the request's
+    /// stop grace, which a turn asked to stop also waits on for the harness to end it.
+    pub fn stop_grace(&self) -> Duration {
+        self.limits.stop_grace
     }
 
     /// Sends one prompt. A prompt sent before the harness is ready is held until it is.
@@ -1670,10 +2054,17 @@ impl Session {
                 self.stop_group();
                 return Err(failure("launch_deadline"));
             }
+            self.flush_input()?;
             if now >= until {
                 return Ok(None);
             }
-            match self.lines.recv_timeout(until.min(self.deadline) - now) {
+            let wait = until.min(self.deadline) - now;
+            let wait = if self.pending.is_empty() {
+                wait
+            } else {
+                wait.min(INPUT_RETRY)
+            };
+            match self.lines.recv_timeout(wait) {
                 Ok(Line::Bytes(line)) => {
                     let (events, writes) = match self.driver.receive(&line) {
                         Ok(result) => result,
@@ -1727,15 +2118,45 @@ impl Session {
         Ok(())
     }
 
+    /// Hands bytes to the harness's input without ever waiting on it: what its pipe has room
+    /// for goes now and the rest is kept, in order, for the next write and each pass of
+    /// `next_event`, so a harness that stops reading never holds the engine past a stop or the
+    /// run clock (T20 sec r1 F1). Input: the bytes. Output: Ok, `launch_input_closed`, or
+    /// `launch_input_full` once more than `INPUT_PENDING_MAX` bytes would wait.
     fn write(&mut self, bytes: &[u8]) -> Result<(), LaunchError> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| failure("launch_input_closed"))?;
-        stdin
-            .write_all(bytes)
-            .and_then(|()| stdin.flush())
-            .map_err(|_| failure("launch_input_closed"))
+        if self.stdin.is_none() {
+            return Err(failure("launch_input_closed"));
+        }
+        if self.pending.len() + bytes.len() > INPUT_PENDING_MAX {
+            return Err(failure("launch_input_full"));
+        }
+        self.pending.extend_from_slice(bytes);
+        self.flush_input()
+    }
+
+    /// Writes as much of the input the harness has not taken yet as its pipe has room for
+    /// now, never waiting. Output: Ok, also with bytes still kept or with the input a stop
+    /// closed, or `launch_input_closed` once the harness's end of the pipe is gone, the kept
+    /// bytes dropped with it, so that call fails and later event passes do not.
+    fn flush_input(&mut self) -> Result<(), LaunchError> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Ok(());
+        };
+        while !self.pending.is_empty() {
+            match stdin.write(&self.pending) {
+                Ok(taken) if taken > 0 => {
+                    assert!(taken <= self.pending.len());
+                    self.pending.drain(..taken);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+                Ok(_) | Err(_) => {
+                    self.pending.clear();
+                    return Err(failure("launch_input_closed"));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn reap(&mut self, wait: Duration) -> Option<i32> {
@@ -1951,6 +2372,17 @@ pub fn trim_unread_output(output: &Path, probe: &File) -> bool {
     same && log.set_len(0).is_ok()
 }
 
+/// Makes the engine's own open of a harness's input never wait on the harness: a write takes
+/// what the pipe has room for now and reports would-block for the rest. The harness's end of
+/// the pipe is an open of its own and stays as it was. Input: the file. Output: Ok, or
+/// `launch_stdio_unavailable`.
+#[cfg(unix)]
+fn never_waits(input: &File) -> Result<(), LaunchError> {
+    let unavailable = |_: rustix::io::Errno| failure("launch_stdio_unavailable");
+    let flags = rustix::fs::fcntl_getfl(input).map_err(unavailable)?;
+    rustix::fs::fcntl_setfl(input, flags | OFlags::NONBLOCK).map_err(unavailable)
+}
+
 /// Turns a child's stdin pipe into the file the session writes prompts to.
 /// Takes the pipe. Returns a file owning the same descriptor.
 #[cfg(unix)]
@@ -1965,10 +2397,61 @@ fn stdin_file(pipe: std::process::ChildStdin) -> File {
     File::from(std::os::windows::io::OwnedHandle::from(pipe))
 }
 
+/// A run log written up to a byte cap, past which the bytes are dropped, so a harness's
+/// output never fills the disk while the harness runs on (T19b 19b-4, rv-secreview note 2).
+struct Capped {
+    file: File,
+    left: u64,
+}
+
+impl Capped {
+    /// A log that keeps at most `bytes_max` bytes. Inputs: the open file and the cap.
+    /// Output: the log.
+    fn new(file: File, bytes_max: u64) -> Self {
+        Self {
+            file,
+            left: bytes_max,
+        }
+    }
+
+    /// Writes as much of `bytes` as the cap leaves room for; a write that fails ends the
+    /// log. Input: the bytes. Output: none.
+    fn write(&mut self, bytes: &[u8]) {
+        let before = self.left;
+        let room = before.min(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let Ok(kept) = usize::try_from(room) else {
+            return;
+        };
+        if kept == 0 {
+            return;
+        }
+        self.left = match self.file.write_all(&bytes[..kept]) {
+            Ok(()) => before - room,
+            Err(_) => 0,
+        };
+        assert!(self.left < before);
+    }
+}
+
+/// The files a headless run keeps its harness's raw output in, as a research run on pipes
+/// keeps them: its stdout and its stderr, each up to `bytes_max` bytes (T19b 19b-4,
+/// QUESTION-0151).
+pub struct RunLogs {
+    pub events: File,
+    pub errors: File,
+    pub bytes_max: u64,
+}
+
 /// Hands each line of a harness's stdout to the session until the output ends. A line
 /// longer than `LINE_BYTES_MAX` is passed over to its newline and reported once as
 /// skipped, so no amount of output ends the session. Takes the stdout and the sender.
 fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
+    forward_logged(stdout, sender, None);
+}
+
+/// [`forward`], with every byte read also going to the run's events log, when it keeps one,
+/// up to its cap (T19b 19b-4, QUESTION-0151). Takes the stdout, the sender and the log.
+fn forward_logged(stdout: ChildStdout, sender: SyncSender<Line>, mut log: Option<Capped>) {
     let mut reader = BufReader::new(stdout);
     let mut skipping = false;
     loop {
@@ -1980,6 +2463,9 @@ fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
                 return;
             }
             Ok(_) => {
+                if let Some(log) = log.as_mut() {
+                    log.write(&line);
+                }
                 let ended = line.last() == Some(&b'\n');
                 if skipping {
                     skipping = !ended;
@@ -2064,6 +2550,9 @@ fn tail(output: File, probe: File, sender: SyncSender<Line>) {
         }
     }
 }
+
+mod turn_session;
+pub use turn_session::TurnSession;
 
 #[cfg(test)]
 mod tests;

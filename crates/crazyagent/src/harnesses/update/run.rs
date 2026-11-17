@@ -390,8 +390,8 @@ pub fn masked(output: &[u8], home: &Path) -> String {
     shown.to_owned()
 }
 
-/// Reads one vendor release pointer from the compiled table over HTTPS, with no credentials,
-/// inside the pointer's size bound and `POINTER_TIME`. Input: the pointer.
+/// Reads one vendor release pointer of a bundled harness manifest over HTTPS, with no
+/// credentials, inside the pointer's size bound and `POINTER_TIME`. Input: the pointer.
 /// Output: the reply body, kept in memory only, or `LOOKUP_FAILED` for any failure.
 pub fn lookup(pointer: &Pointer) -> Result<Vec<u8>, &'static str> {
     read_pointer(pointer.url, pointer.bytes_max, POINTER_TIME)

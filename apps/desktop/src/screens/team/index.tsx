@@ -4,7 +4,7 @@ import type { Result } from "../../api";
 import { useLoad } from "../../state";
 import { loadChanges } from "../../api-changes";
 import { AGENT_MESSAGE_BYTES_MAX, failureCopy, receiptState, sendAgentMessage, stopTeamAgent, stopTeammate } from "../../api-projects";
-import { HOOKLESS_WORDS, type GraphEdge, type GraphNode, type TeamGraph } from "../../engine-client";
+import { hooklessWords, type GraphEdge, type GraphNode, type TeamGraph } from "../../engine-client";
 import { Button, ConfirmDialog, Dialog, EmptyState, Icon, LoadError, Menu, NotReady, Notice, Skeleton, TextArea, navigate, type IconName, type MenuItem } from "../../ui";
 import { actions } from "../changes/model";
 import { displayText } from "../conversation";
@@ -156,10 +156,10 @@ export function actionNote(result: Receipted, what: string): string | null {
  * its receipts are unavailable when its launch fires no hooks, and the engine's sentence when
  * the Delivery setting leaves the agent no channel while it works. Input: the node. Output:
  * the helper text. */
-export function messageHelper(node: Pick<GraphNode, "hookless" | "message_note">): string {
+export function messageHelper(node: Pick<GraphNode, "hookless" | "message_note"> & Partial<Pick<GraphNode, "harness">>): string {
   if (node.message_note) return `${node.message_note} It waits in the agent's mailbox until then.`;
   return node.hookless
-    ? `It goes to the agent's mailbox. Its receipts are ${HOOKLESS_WORDS}.`
+    ? `It goes to the agent's mailbox. Its receipts are ${hooklessWords(node.harness)}.`
     : "It goes to the agent's mailbox. Its receipt shows on the graph: one tick sent, two delivered, then read and answered.";
 }
 

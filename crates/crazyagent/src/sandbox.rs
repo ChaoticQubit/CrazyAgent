@@ -38,7 +38,7 @@ pub mod windows;
 /// The variables that point an agent's tools at its tool cache (T8): uv's cache, and the
 /// pnpm store, the only store variable pnpm 12 reads (probe P5). [`agent_env`] keeps a
 /// harness from replacing either once the sandbox set it.
-const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
+pub(crate) const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
 
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -278,7 +278,7 @@ const KEYCHAIN_SERVICES: &[&str] = &[
     "com.apple.security.keychain-circle-notification",
 ];
 
-const OWNER_SECRET_PATHS: &[&str] = &[
+const OWNER_SECRET_PATHS_BEFORE_HARNESSES: &[&str] = &[
     "Library/Keychains",
     ".ssh",
     ".gnupg",
@@ -289,9 +289,9 @@ const OWNER_SECRET_PATHS: &[&str] = &[
     ".aws",
     ".docker",
     ".kube",
-    ".codex",
-    ".claude",
-    ".claude.json",
+];
+
+const OWNER_SECRET_PATHS_AFTER_HARNESSES: &[&str] = &[
     ".cargo/credentials",
     ".cargo/credentials.toml",
     ".npmrc",
@@ -451,11 +451,10 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
 }
 
 /// Tells whether one variable may reach an agent process with this value: a name
-/// [`agent_env_refused`] accepts, one of the fixed [`AGENT_GIT_ENV`] pairs, a model key
-/// name holding the local placeholder, never a real provider key, or the launch's lineage
-/// token in its own variable. No variable may hold a key relay token: any process of the
-/// owner's user can read another's environment, so a harness reads its token from the key
-/// file in its own home. Inputs: the name and value. Output: true when allowed.
+/// [`agent_env_refused`] accepts, a fixed [`AGENT_GIT_ENV`] pair, a model key name holding the
+/// placeholder or the lineage token in its own variable; never a real key or relay token, which
+/// other owner processes can read, save a launch's own token in [`Handed`] names on macOS only
+/// (its profile denies those reads; Linux is refused). Inputs: name, value. Output: allowed.
 pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     let token = crate::model_gateway::relay::TOKEN_PREFIX.as_bytes();
     if value
@@ -505,7 +504,69 @@ pub fn agent_env<'a>(
     base: &[(&str, &OsStr)],
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-    built_env(base, harness, &AGENT_HOME_ENV)
+    built_env(base, harness, &AGENT_HOME_ENV, None)
+}
+
+/// One launch's exception to the agent variable guard (DEC-180 Task 20, rv-sa241 ruling
+/// t20-q1): the names a listed master's manifest gives its account key, each allowed to
+/// hold only this launch's own relay token or the keyless placeholder.
+#[derive(Clone, Copy)]
+pub struct Handed<'a> {
+    names: &'a [&'a str],
+    value: &'a str,
+}
+
+impl<'a> Handed<'a> {
+    /// Builds one launch's exception, on macOS only, where the agent profile keeps every
+    /// other sandbox from reading the launch's environment. Inputs: the names, from the
+    /// manifest's accounts entry for the account's wire format, and the one value they may
+    /// hold. Output: the exception, or `Invalid` for a value that is neither a relay token
+    /// nor the keyless placeholder, a name refused for more than a key suffix, and off macOS.
+    pub fn new(names: &'a [&'a str], value: &'a str) -> Result<Self, SandboxError> {
+        let handed = crate::model_gateway::relay::is_relay_token(value)
+            || value == crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        if !cfg!(target_os = "macos") || !handed {
+            return Err(invalid("a launch hands only its own relay token"));
+        }
+        let other = |name: &&str| {
+            let upper = name.to_ascii_uppercase();
+            REFUSED_VARIABLES.contains(&upper.as_str())
+                || REFUSED_PREFIXES
+                    .iter()
+                    .any(|prefix| upper.starts_with(prefix))
+        };
+        if names.iter().any(other) {
+            return Err(invalid("a launch hands its value only under a key name"));
+        }
+        assert!(crate::model_gateway::relay::is_placeholder(value));
+        Ok(Self { names, value })
+    }
+
+    /// Tells whether this launch lets one harness variable hold a value: a name it lists
+    /// holding exactly its one value. Inputs: the name and the value. Output: true when it
+    /// does.
+    fn allows(&self, name: &OsStr, value: &OsStr) -> bool {
+        value == self.value && self.names.iter().any(|known| name == *known)
+    }
+}
+
+/// Builds the environment [`agent_env`] does, letting the harness variables `handed` names
+/// hold its one value; every other variable meets [`agent_variable_allowed`], and the
+/// engine's fixed variables still come last and win. Inputs: the base and harness variables
+/// and the launch's exception. Output: the variables, or `Invalid`.
+pub fn agent_env_handing<'a>(
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    handed: Handed<'_>,
+) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+    built_env(base, harness, &AGENT_HOME_ENV, Some(handed))
+}
+
+/// Tells whether one variable may reach an agent process of a launch with this exception:
+/// [`agent_variable_allowed`], or a name the exception lists holding its one value. Inputs:
+/// the launch's exception, if any, the name and the value. Output: true when allowed.
+fn handed_allowed(handed: Option<Handed<'_>>, name: &OsStr, value: &OsStr) -> bool {
+    agent_variable_allowed(name, value) || handed.is_some_and(|handed| handed.allows(name, value))
 }
 
 /// Builds the environment of the owner's confined IDE terminal as [`agent_env`] does for an
@@ -519,16 +580,18 @@ pub fn owner_terminal_env<'a>(
     base: &[(&str, &OsStr)],
     terminal: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-    built_env(base, terminal, &[])
+    built_env(base, terminal, &[], None)
 }
 
 /// Builds the environment [`agent_env`] describes, setting `home` after the fixed git and
-/// TLS settings. Inputs: the base and harness variables and the home settings. Output: the
-/// variables, or `Invalid` when any one fails [`agent_variable_allowed`].
+/// TLS settings. Inputs: the base and harness variables, the home settings and the launch's
+/// exception, if any. Output: the variables, or `Invalid` when any one fails
+/// [`agent_variable_allowed`] and is no variable the exception lets through.
 fn built_env<'a>(
     base: &[(&str, &OsStr)],
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
     home: &[(&'static str, &'static str)],
+    handed: Option<Handed<'_>>,
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
     let refused = || invalid("agent environment holds an owner secret");
     let mut env: Vec<(OsString, OsString)> = Vec::new();
@@ -550,7 +613,7 @@ fn built_env<'a>(
         set(&mut env, OsStr::new(name), Some(value));
     }
     for (name, value) in harness {
-        if value.is_some_and(|value| !agent_variable_allowed(name, value)) {
+        if value.is_some_and(|value| !handed_allowed(handed, name, value)) {
             return Err(refused());
         }
         let pinned_cache = TOOL_CACHE_ENV.iter().any(|pinned| name == *pinned)
@@ -579,7 +642,7 @@ fn built_env<'a>(
     }
     assert!(
         env.iter()
-            .all(|(name, value)| agent_variable_allowed(name, value))
+            .all(|(name, value)| handed_allowed(handed, name, value))
     );
     Ok(env)
 }
@@ -755,6 +818,29 @@ pub fn agent_command<'a>(
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Command, SandboxError> {
     let env = agent_env(base, harness)?;
+    Ok(confined_command(profile, program, env))
+}
+
+/// Builds the command [`agent_command`] does, with the environment [`agent_env_handing`]
+/// builds for one listed master's launch. Inputs: the installed profile, the absolute
+/// program, the base and harness variables and the launch's exception. Output: the command,
+/// or `Invalid` when a variable is refused.
+#[cfg(unix)]
+pub fn agent_command_handing<'a>(
+    profile: &Path,
+    program: &Path,
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    handed: Handed<'_>,
+) -> Result<Command, SandboxError> {
+    let env = agent_env_handing(base, harness, handed)?;
+    Ok(confined_command(profile, program, env))
+}
+
+/// The `sandbox-exec` command of [`agent_command`] around a built environment. Inputs: the
+/// installed profile, the absolute program and the checked variables. Output: the command.
+#[cfg(unix)]
+fn confined_command(profile: &Path, program: &Path, env: Vec<(OsString, OsString)>) -> Command {
     let mut command = Command::new(SANDBOX_EXEC);
     command
         .arg("-f")
@@ -770,7 +856,7 @@ pub fn agent_command<'a>(
         Some(program.as_os_str())
     );
     assert_eq!(command.get_envs().count(), env.len());
-    Ok(command)
+    command
 }
 
 /// Builds the command a Full access agent process starts from (DEC-102): the
@@ -1352,7 +1438,7 @@ pub struct ProjectSandbox {
     kept_ports: Vec<u16>,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
-    carved_home: Option<PathBuf>,
+    carved_home: Option<(PathBuf, PathBuf)>,
     checkout: Option<Checkout>,
     clone: Option<PathBuf>,
     sockets: Vec<PathBuf>,
@@ -1402,8 +1488,8 @@ struct Checkout {
 
 impl ProjectSandbox {
     /// Validates canonical, existing, quote-free directories that do not contain the
-    /// owner's home, do not sit inside `~/.codex` or `~/.claude`, and neither hold nor sit
-    /// inside an owner or system secret path. Output: the sandbox, or `Invalid`.
+    /// owner's home, do not sit inside a harness's own folder there, and neither hold nor
+    /// sit inside an owner or system secret path. Output: the sandbox, or `Invalid`.
     pub fn new(
         project_root: &Path,
         agent_home: &Path,
@@ -1701,12 +1787,12 @@ impl ProjectSandbox {
 
     /// Adds the engine root's secrets for an agent whose runtime folder is one folder in it,
     /// as an owner generation is for a master: every entry guard_engine would name for the
-    /// engine root except that folder itself, where the agent's home lives. An rcli master's
-    /// home may instead be one configured SDK home directly in the engine root's folder of
-    /// them: that folder stays a secret and only this home is carved back out of it, so every
-    /// other home, even one made later, stays denied. Call it after guard_engine on the
-    /// runtime folder, whose secrets stay. Inputs: the engine root and the runtime folder.
-    /// Output: the guarded sandbox, or a refusal.
+    /// engine root except that folder itself, where the agent's home lives. A master's home
+    /// may instead sit in one secret folder ([`carved_folder`]): that folder stays a secret and
+    /// only this home is carved back out of it, so every other home, even one made later,
+    /// stays denied. Call it after guard_engine on the runtime folder, whose secrets stay.
+    /// Inputs: the engine root and the runtime folder. Output: the guarded sandbox, or a
+    /// refusal.
     pub fn guard_engine_around(
         mut self,
         engine: &Path,
@@ -1722,16 +1808,15 @@ impl ProjectSandbox {
                 "engine root must be the existing folder around the runtime",
             ));
         }
-        let homes = engine.join(crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER);
-        let carved =
-            (self.agent_home.parent() == Some(homes.as_path())).then(|| self.agent_home.clone());
+        let carved = carved_folder(&engine, &self.agent_home)
+            .map(|folder| (self.agent_home.clone(), folder));
         let secrets: Vec<PathBuf> = engine_secrets_in(&engine)?
             .into_iter()
             .filter(|secret| *secret != runtime)
             .collect();
         let around_home: Vec<PathBuf> = secrets
             .iter()
-            .filter(|secret| **secret != homes)
+            .filter(|secret| carved.as_ref().is_none_or(|(_, folder)| *secret != folder))
             .cloned()
             .collect();
         for root in self
@@ -1740,7 +1825,7 @@ impl ProjectSandbox {
             .chain(self.tool_roots.iter())
             .chain(self.tool_files.iter())
         {
-            if carved.as_ref() == Some(root) {
+            if carved.as_ref().is_some_and(|(home, _)| home == root) {
                 clear_of_secrets(root, &around_home)?;
             } else {
                 clear_of_secrets(root, &secrets)?;
@@ -1752,15 +1837,15 @@ impl ProjectSandbox {
             }
         }
         assert!(!self.engine_secrets.contains(&runtime));
-        if let Some(home) = carved {
-            assert!(self.engine_secrets.contains(&homes));
+        if let Some((home, folder)) = carved {
+            assert!(self.engine_secrets.contains(&folder));
             assert!(
                 self.secret_paths()
                     .iter()
-                    .filter(|secret| **secret != homes)
+                    .filter(|secret| **secret != folder)
                     .all(|secret| !home.starts_with(secret) && !secret.starts_with(&home))
             );
-            self.carved_home = Some(home);
+            self.carved_home = Some((home, folder));
         }
         Ok(self)
     }
@@ -3169,18 +3254,24 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (global-name \"{service}\")"));
         }
         text.push_str(")\n");
-        if let Some((home, homes)) = self
+        if let Some((home, folder)) = self
             .carved_home
             .as_ref()
-            .and_then(|home| Some((home, home.parent()?)))
-            .filter(|(home, _)| clean_absolute(home))
+            .filter(|(home, folder)| clean_absolute(home) && home.starts_with(folder))
         {
-            assert!(self.engine_secrets.iter().any(|secret| secret == homes));
+            assert!(self.engine_secrets.iter().any(|secret| secret == folder));
             text.push_str(&format!(
-                "(allow file-read* file-write*\n  (subpath \"{}\"))\n(allow file-read-metadata\n  (literal \"{}\"))\n",
-                home.display(),
-                homes.display()
+                "(allow file-read* file-write*\n  (subpath \"{}\"))\n(allow file-read-metadata",
+                home.display()
             ));
+            for above in home
+                .ancestors()
+                .skip(1)
+                .take_while(|above| above.starts_with(folder))
+            {
+                text.push_str(&format!("\n  (literal \"{}\")", above.display()));
+            }
+            text.push_str(")\n");
         }
         if !self.hidden.is_empty() {
             text.push_str("(deny file-read* file-write* process-exec file-link file-clone");
@@ -4657,10 +4748,8 @@ fn owner_home() -> Result<PathBuf, SandboxError> {
 /// owner's under the home, the system's without their leading `/` and the credential names
 /// no allowed root may hold. Takes nothing. Returns the names.
 pub(crate) fn credential_places() -> impl Iterator<Item = &'static str> {
-    OWNER_SECRET_PATHS
-        .iter()
-        .chain(CREDENTIAL_NAMES)
-        .copied()
+    owner_secret_paths()
+        .chain(CREDENTIAL_NAMES.iter().copied())
         .chain(
             SYSTEM_SECRET_PATHS
                 .iter()
@@ -4668,9 +4757,26 @@ pub(crate) fn credential_places() -> impl Iterator<Item = &'static str> {
         )
 }
 
-fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
-    OWNER_SECRET_PATHS
+/// The folders and files in the owner's home that belong to a harness, as every harness
+/// manifest names them, in catalog order: agents never read them and no project or sandbox
+/// root may sit inside one. Takes nothing. Returns the names, relative to the home.
+pub(crate) fn harness_folders() -> impl Iterator<Item = &'static str> {
+    crate::harnesses::registry::registry()
+        .all()
         .iter()
+        .flat_map(|harness| harness.owner_folders().iter().map(String::as_str))
+}
+
+fn owner_secret_paths() -> impl Iterator<Item = &'static str> {
+    OWNER_SECRET_PATHS_BEFORE_HARNESSES
+        .iter()
+        .copied()
+        .chain(harness_folders())
+        .chain(OWNER_SECRET_PATHS_AFTER_HARNESSES.iter().copied())
+}
+
+fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
+    owner_secret_paths()
         .map(move |path| {
             path.split('/')
                 .fold(owner.to_path_buf(), |at, part| at.join(part))
@@ -4745,6 +4851,52 @@ fn bounded_entries(folder: &Path) -> Result<Vec<PathBuf>, SandboxError> {
         entries.push(entry?.path());
     }
     Ok(entries)
+}
+
+/// The engine secret folder a master's home may be carved back out of, the home alone: an
+/// rcli master's configured SDK home directly in its folder, or a listed master session's
+/// home in the native profiles folder ([`listed_master_folder`]). Inputs: the engine root and
+/// the canonical home. Output: the folder, or none for any other home.
+fn carved_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
+    let homes = engine.join(crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER);
+    if home.parent() == Some(homes.as_path()) {
+        return Some(homes);
+    }
+    listed_master_folder(engine, home)
+}
+
+/// The native profiles folder when the home is a listed master session's home,
+/// `<listed key of account>/home/<session>/<harness>/<account>` in it, so in that account's
+/// own listed slot, whose home holds no sign-in's record (DEC-180 Task 20). Inputs: the
+/// engine root and the canonical home. Output: the folder, or none for any other home.
+#[cfg(unix)]
+fn listed_master_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
+    let profiles = engine.join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER);
+    let parts: Vec<Component> = home.strip_prefix(&profiles).ok()?.components().collect();
+    let [
+        Component::Normal(key),
+        Component::Normal(slot),
+        Component::Normal(_),
+        Component::Normal(_),
+        Component::Normal(account),
+    ] = parts.as_slice()
+    else {
+        return None;
+    };
+    let listed = crate::engine::bootstrap::listed_slot_key(account.to_str()?);
+    let slot_home = profiles.join(key).join(slot);
+    (*key == listed.as_str()
+        && *slot == "home"
+        && crate::harnesses::launch::holds_no_sign_in(&slot_home).is_ok())
+    .then_some(profiles)
+}
+
+/// Carves no listed master home off Unix, where a listed master session's home is never made
+/// (its listed_home refuses with `launch_account_home_unavailable`). Takes the engine root
+/// and the home, both unused. Returns none.
+#[cfg(not(unix))]
+fn listed_master_folder(_engine: &Path, _home: &Path) -> Option<PathBuf> {
+    None
 }
 
 fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
@@ -5101,7 +5253,7 @@ fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), Sa
     if owner.starts_with(root) {
         return Err(invalid("sandbox roots must not contain the owner home"));
     }
-    for private in [".codex", ".claude"] {
+    for private in harness_folders() {
         if root.starts_with(owner.join(private)) {
             return Err(invalid("sandbox roots must not be owner harness homes"));
         }
@@ -5201,6 +5353,114 @@ pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
         return Ok(PathBuf::from(plain));
     }
     Ok(resolved)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod handed_tests {
+    use super::*;
+    use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+
+    const NAMES: [&str; 1] = ["OPENAI_API_KEY"];
+
+    fn token(fill: char) -> String {
+        format!("crazyagent-relay-{}", fill.to_string().repeat(64))
+    }
+
+    /// Builds one launch's environment with one harness variable, with the launch's
+    /// exception or, as for a teammate, with none. Inputs: the exception, the name and the
+    /// value. Output: the variables, or the refusal.
+    fn with(
+        handed: Option<Handed<'_>>,
+        name: &str,
+        value: &str,
+    ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+        let base = [("HOME", OsStr::new("/agent/home"))];
+        let harness = [(OsStr::new(name), Some(OsStr::new(value)))];
+        match handed {
+            Some(handed) => agent_env_handing(&base, harness, handed),
+            None => agent_env(&base, harness),
+        }
+    }
+
+    /// DEC-180 Task 20 (rv-sa241 ruling t20-q1, condition 6): a listed master's launch hands
+    /// its harness its own relay token only in the names its manifest lists. Another
+    /// launch's token, any other relay value, an unlisted key name and a launch with no
+    /// exception, such as a teammate's, are refused.
+    #[test]
+    fn a_launch_hands_its_own_relay_token_only_in_the_names_its_manifest_lists() {
+        let (own, other) = (token('a'), token('b'));
+        let handed = Handed::new(&NAMES, &own);
+        assert!(handed.is_ok(), "{:?}", handed.as_ref().err());
+        let handed = handed.unwrap();
+        let given = with(Some(handed), "OPENAI_API_KEY", &own);
+        assert!(given.is_ok(), "{given:?}");
+        let pair = (OsString::from("OPENAI_API_KEY"), OsString::from(&own));
+        assert!(given.unwrap().contains(&pair));
+        let refused = [
+            ("OPENAI_API_KEY", other.as_str()),
+            ("OPENAI_API_KEY", "crazyagent-relay-0"),
+            ("OTHER_API_KEY", own.as_str()),
+        ];
+        for (name, value) in refused {
+            assert!(with(Some(handed), name, value).is_err(), "{name}={value}");
+        }
+        assert!(with(None, "OPENAI_API_KEY", &own).is_err());
+    }
+
+    /// DEC-180 Task 20 (rv-sa241 ruling t20-q1, condition 3): a keyless launch hands only
+    /// the placeholder, and no exception is ever built for a saved key or a relay value that
+    /// is no token.
+    #[test]
+    fn a_keyless_launch_hands_only_the_placeholder_and_never_a_saved_key() {
+        let keyless = Handed::new(&NAMES, LOCAL_PLACEHOLDER);
+        assert!(keyless.is_ok(), "{:?}", keyless.as_ref().err());
+        let given = with(Some(keyless.unwrap()), "OPENAI_API_KEY", LOCAL_PLACEHOLDER);
+        assert!(given.is_ok(), "{given:?}");
+        assert!(with(None, "OPENAI_API_KEY", LOCAL_PLACEHOLDER).is_err());
+        for value in ["sk-saved", "crazyagent-relay-0", ""] {
+            assert!(Handed::new(&NAMES, value).is_err(), "{value}");
+        }
+    }
+
+    /// rv-sa241 M8 host guard N1: a launch hands its value only under key-shaped names; a
+    /// name the variable guard refuses for another reason, a credential setting, a perl
+    /// setting, a GitHub prefix or an engine variable, is refused when the exception is made.
+    #[test]
+    fn a_launch_never_hands_its_value_under_a_name_refused_for_another_reason() {
+        let others = ["PERL5OPT", "GIT_ASKPASS", "GH_HOST", "CRAZYAGENT_LINEAGE"];
+        for name in others {
+            let names = [name];
+            assert!(Handed::new(&names, LOCAL_PLACEHOLDER).is_err(), "{name}");
+        }
+        let keys = ["OPENAI_API_KEY", "STANDIN_TOKEN"];
+        assert!(Handed::new(&keys, LOCAL_PLACEHOLDER).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod harness_folder_tests {
+    use super::credential_places;
+    use crate::harnesses::registry::registry;
+
+    #[test]
+    fn the_owner_secret_list_holds_every_harness_folder_where_the_three_stood_before() {
+        let places: Vec<&str> = credential_places().collect();
+        let from = places.iter().position(|place| *place == ".kube").unwrap() + 1;
+        let to = places
+            .iter()
+            .position(|place| *place == ".cargo/credentials")
+            .unwrap();
+        let listed: Vec<&str> = registry()
+            .all()
+            .iter()
+            .flat_map(|harness| harness.owner_folders().iter().map(String::as_str))
+            .collect();
+        assert_eq!(
+            places[from..from + 3],
+            [".codex", ".claude", ".claude.json"]
+        );
+        assert_eq!(places[from..to], listed);
+    }
 }
 
 #[cfg(test)]

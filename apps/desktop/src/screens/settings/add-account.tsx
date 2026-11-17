@@ -12,6 +12,7 @@ import { discardAccount, SignInPanel, signInRunning, signInStage, useSignIn, typ
 export const TILE_LINES: Record<string, string> = {
   openai: "Sign in with ChatGPT or use an OpenAI API key.",
   anthropic: "Sign in with Claude or use an Anthropic API key.",
+  gemini: "Pay-as-you-go Google Gemini API key.",
   openrouter: "One key for many models.",
   openai_compatible: "Any server that speaks the OpenAI API.",
   local: "Ollama or another model running on this Mac.",
@@ -29,6 +30,7 @@ const METHOD_DETAILS: Record<string, string> = {
   "claude:api_key": "Pay per use with an Anthropic key.",
   "openai_api:api_key": "Pay per use with an OpenAI key.",
   "anthropic_api:api_key": "Pay per use with an Anthropic key.",
+  "gemini:api_key": "Pay per use with a Gemini key.",
 };
 
 /** One way to sign in, as step 2 lists it. `provider` is the engine provider the account is

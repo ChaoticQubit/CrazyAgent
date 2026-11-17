@@ -5,8 +5,8 @@
   Pool
   Agents in this project use accounts from one pool.
 
-  > (*) Main          3 accounts    rcli, Claude Code, Codex
-    ( ) Unnamed pool  1 account     rcli
+  > (*) Main          3 accounts    RCLI, Claude Code, Codex
+    ( ) Unnamed pool  1 account     RCLI
     ( ) No pool yet                 Work waits and shows "Needs a pool"
 
   a  Create a pool

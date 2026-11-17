@@ -55,6 +55,7 @@ test("Icon renders inline decorative SVG, or a labelled image when given a label
 test("provider marks use the CC0 logo where one exists and a monogram otherwise, never brand colors", () => {
   assert.ok(providerLogo("claude"));
   assert.ok(providerLogo("openrouter"));
+  assert.ok(providerLogo("gemini"), "the Gemini API key tile shows the Gemini logo");
   assert.equal(providerLogo("chatgpt"), undefined);
   const logo = renderToStaticMarkup(createElement(ProviderMark, { provider: "claude", name: "Claude" }));
   assert.match(logo, /<svg\b[^>]*fill="currentColor"/);

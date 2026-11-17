@@ -2,7 +2,7 @@
 
 use crazyagent::harnesses::interactive::{Support, support};
 use crazyagent::harnesses::{
-    AccountKind, HarnessStatus, Search, TeamUse, ToolControl, catalog, spec, specs,
+    AccountKind, HarnessStatus, Search, TeamUse, ToolControl, catalog, removed, spec, specs,
 };
 use crazyagent::team::launch_harness;
 use std::os::unix::fs::PermissionsExt;
@@ -33,36 +33,79 @@ fn entry<'a>(
 fn catalog_lists_owner_named_harnesses_first_in_priority_order() {
     let ids: Vec<_> = specs().iter().map(|spec| spec.id).collect();
     assert_eq!(
-        ids[..10],
+        ids[..8],
         [
             "codex",
             "claude-code",
             "opencode",
             "gemini-cli",
-            "cursor-agent",
             "fx",
-            "antigravity",
             "openclaw",
             "pi",
             "rcli"
         ]
     );
-    for other in [
-        "amp",
-        "goose",
-        "aider",
-        "qwen-code",
-        "crush",
-        "droid",
-        "kiro",
-        "copilot",
-    ] {
+    for other in ["goose", "aider", "qwen-code", "crush", "droid", "copilot"] {
         assert!(ids.contains(&other), "{other}");
     }
     let mut unique = ids.clone();
     unique.sort_unstable();
     unique.dedup();
     assert_eq!(unique.len(), ids.len());
+}
+
+const GONE: [&str; 5] = ["antigravity", "cursor-agent", "amp", "kiro", "auggie"];
+
+#[test]
+fn the_five_removed_harnesses_are_not_in_the_catalog_and_their_programs_are_never_found() {
+    assert_eq!(specs().len(), 18);
+    for gone in GONE {
+        assert!(spec(gone).is_none(), "{gone}");
+        assert!(specs().iter().all(|listed| listed.id != gone), "{gone}");
+        assert!(launch_harness(gone).is_none(), "{gone}");
+    }
+    let root = private_dir("ca-harness-gone-");
+    let bin = root.path().join("bin");
+    for name in [
+        "agy",
+        "antigravity",
+        "cursor-agent",
+        "amp",
+        "kiro-cli",
+        "kiro",
+        "auggie",
+    ] {
+        install(&bin, name, 0o755);
+    }
+    let home = private_dir("ca-harness-gone-home-");
+    install(&home.path().join(".cursor/bin"), "cursor-agent", 0o755);
+    install(&home.path().join(".amp/bin"), "amp", 0o755);
+    install(&home.path().join(".local/bin"), "agy", 0o755);
+    let entries = catalog(&Search::new(
+        vec![bin],
+        Some(home.path().to_path_buf()),
+        Vec::new(),
+    ));
+    assert_eq!(entries.len(), 18);
+    for found in &entries {
+        assert_eq!(found.status, HarnessStatus::NotInstalled, "{}", found.id);
+        assert!(found.executable.is_none(), "{}", found.id);
+        assert!(!GONE.contains(&found.id.as_str()), "{}", found.id);
+    }
+}
+
+#[test]
+fn a_removed_harness_keeps_its_plain_name_and_no_listed_harness_reads_as_removed() {
+    let names = ["Antigravity", "Cursor CLI", "Amp", "Kiro CLI", "Auggie"];
+    for (gone, name) in GONE.into_iter().zip(names) {
+        assert_eq!(removed(gone), Some(name), "{gone}");
+    }
+    for listed in specs() {
+        assert_eq!(removed(listed.id), None, "{}", listed.id);
+    }
+    for other in ["", "claude", "cursor", "Antigravity", "no-such-harness"] {
+        assert_eq!(removed(other), None, "{other}");
+    }
 }
 
 #[test]
@@ -85,7 +128,7 @@ fn search_finds_executable_files_on_path_and_skips_unusable_candidates() {
     let bin = root.path().join("bin");
     let opencode = install(&bin, "opencode", 0o755);
     install(&bin, "gemini", 0o644);
-    std::fs::create_dir_all(bin.join("cursor-agent")).unwrap();
+    std::fs::create_dir_all(bin.join("fx")).unwrap();
     let relative = install(&root.path().join("relative"), "goose", 0o755);
     assert!(relative.is_file());
     let entries = catalog(&Search::new(
@@ -105,17 +148,14 @@ fn search_finds_executable_files_on_path_and_skips_unusable_candidates() {
         entry(&entries, "gemini-cli").status,
         HarnessStatus::NotInstalled
     );
-    assert_eq!(
-        entry(&entries, "cursor-agent").status,
-        HarnessStatus::NotInstalled
-    );
+    assert_eq!(entry(&entries, "fx").status, HarnessStatus::NotInstalled);
     assert_eq!(entry(&entries, "goose").status, HarnessStatus::NotInstalled);
 }
 
 #[test]
 fn search_finds_known_install_locations_under_home_without_path() {
     let home = private_dir("ca-harness-home-");
-    let agy = install(&home.path().join(".local/bin"), "agy", 0o755);
+    let pi = install(&home.path().join(".local/bin"), "pi", 0o755);
     let opencode = install(&home.path().join(".opencode/bin"), "opencode", 0o755);
     let entries = catalog(&Search::new(
         Vec::new(),
@@ -123,8 +163,8 @@ fn search_finds_known_install_locations_under_home_without_path() {
         Vec::new(),
     ));
     assert_eq!(
-        entry(&entries, "antigravity").executable.as_deref(),
-        Some(agy.as_path())
+        entry(&entries, "pi").executable.as_deref(),
+        Some(pi.as_path())
     );
     assert_eq!(
         entry(&entries, "opencode").executable.as_deref(),
@@ -171,8 +211,8 @@ fn codex_and_claude_report_switchable_tools_models_and_account_kinds() {
     assert!(claude.model_selection);
     assert!(claude.account_kinds.contains(&AccountKind::Subscription));
     assert!(claude.account_kinds.contains(&AccountKind::ApiKey));
-    let antigravity = entry(&entries, "antigravity");
-    assert!(matches!(antigravity.tools, ToolControl::Limited { .. }));
+    let limited = entry(&entries, "fx");
+    assert!(matches!(limited.tools, ToolControl::Limited { .. }));
 }
 
 #[test]
@@ -240,8 +280,8 @@ fn only_harnesses_whose_replies_the_engine_reads_are_offered_for_team_agents() {
 #[test]
 fn entries_serialize_with_plain_wire_names() {
     let entries = catalog(&Search::new(Vec::new(), None, Vec::new()));
-    let value = serde_json::to_value(entry(&entries, "antigravity")).unwrap();
-    assert_eq!(value["id"], "antigravity");
+    let value = serde_json::to_value(entry(&entries, "openclaw")).unwrap();
+    assert_eq!(value["id"], "openclaw");
     assert_eq!(value["status"]["kind"], "not_installed");
     assert_eq!(value["tools"]["kind"], "limited");
     assert!(value["tools"]["reason"].as_str().unwrap().len() > 10);

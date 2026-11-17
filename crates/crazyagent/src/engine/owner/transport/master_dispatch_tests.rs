@@ -76,6 +76,7 @@ fn catalog(backend: MasterBackend) -> String {
             .replace("claude-", "codex-"),
         MasterBackend::Claude => CATALOG.replace("sandbox-profile", "claude-connection"),
         MasterBackend::Rcli => CATALOG.into(),
+        MasterBackend::Listed(id) => unreachable!("{id} is not a native backend"),
     }
 }
 
@@ -84,6 +85,7 @@ fn selection(backend: MasterBackend) -> MasterSelection {
         MasterBackend::Codex => ("codex-connection", "codex-account"),
         MasterBackend::Claude => ("claude-connection", "claude-account"),
         MasterBackend::Rcli => ("sandbox-profile", "claude-account"),
+        MasterBackend::Listed(id) => unreachable!("{id} is not a native backend"),
     };
     let target = CredentialRef::new(target).unwrap();
     MasterSelection {

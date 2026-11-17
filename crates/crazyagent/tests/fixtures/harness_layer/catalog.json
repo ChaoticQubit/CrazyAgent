@@ -1,0 +1,896 @@
+{
+  "empty": [
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "codex app-server: JSON-RPC over stdio",
+      "id": "codex",
+      "model_selection": true,
+      "name": "Codex",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "available"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key"
+      ],
+      "aliases": [
+        "claude"
+      ],
+      "executable": null,
+      "headless": "claude --print with stream-json input and output",
+      "id": "claude-code",
+      "model_selection": true,
+      "name": "Claude Code",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "available"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "opencode run --format json, or opencode serve over HTTP",
+      "id": "opencode",
+      "model_selection": true,
+      "name": "OpenCode",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "gemini --prompt with --output-format stream-json",
+      "id": "gemini-cli",
+      "model_selection": true,
+      "name": "Gemini CLI",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "fx ask --json: one request, JSON result on stdout",
+      "id": "fx",
+      "model_selection": true,
+      "name": "fx by Vercel",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "limited",
+        "reason": "no documented switch to turn tools off"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "openclaw agent --message through its gateway",
+      "id": "openclaw",
+      "model_selection": true,
+      "name": "OpenClaw",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "limited",
+        "reason": "tools are set in OpenClaw's own configuration"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "pi --mode json or --mode rpc over stdio",
+      "id": "pi",
+      "model_selection": true,
+      "name": "Pi",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "CrazyAgent's bundled RCLI host",
+      "id": "rcli",
+      "model_selection": true,
+      "name": "RCLI",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "master_only",
+        "reason": "runs only as a CrazyAgent master"
+      },
+      "tools": {
+        "kind": "limited",
+        "reason": "runs without tools"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "goose run --text with --output-format stream-json",
+      "id": "goose",
+      "model_selection": true,
+      "name": "Goose",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "aider --message: one prompt, plain text reply",
+      "id": "aider",
+      "model_selection": true,
+      "name": "Aider",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "limited",
+        "reason": "file edits cannot be switched off apart from a dry run"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "qwen --prompt with --output-format stream-json",
+      "id": "qwen-code",
+      "model_selection": true,
+      "name": "Qwen Code",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "crush run: one prompt, plain text reply",
+      "id": "crush",
+      "model_selection": true,
+      "name": "Crush",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "droid exec with --output-format stream-json",
+      "id": "droid",
+      "model_selection": true,
+      "name": "Factory Droid",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "copilot --prompt: one prompt, plain text reply",
+      "id": "copilot",
+      "model_selection": true,
+      "name": "GitHub Copilot CLI",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "cline with --json output",
+      "id": "cline",
+      "model_selection": true,
+      "name": "Cline CLI",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "cn --print: one prompt, plain text reply",
+      "id": "continue",
+      "model_selection": true,
+      "name": "Continue CLI",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "openhands --headless with a task",
+      "id": "openhands",
+      "model_selection": true,
+      "name": "OpenHands CLI",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "limited",
+        "reason": "headless mode always runs its tools"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key"
+      ],
+      "aliases": [],
+      "executable": null,
+      "headless": "kimi --print with stream-json output",
+      "id": "kimi",
+      "model_selection": true,
+      "name": "Kimi CLI",
+      "status": {
+        "kind": "not_installed"
+      },
+      "status_label": "Not installed",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    }
+  ],
+  "installed": [
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/codex",
+      "headless": "codex app-server: JSON-RPC over stdio",
+      "id": "codex",
+      "model_selection": true,
+      "name": "Codex",
+      "status": {
+        "kind": "ready"
+      },
+      "status_label": "Ready",
+      "team": {
+        "kind": "available"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key"
+      ],
+      "aliases": [
+        "claude"
+      ],
+      "executable": "<BIN>/claude",
+      "headless": "claude --print with stream-json input and output",
+      "id": "claude-code",
+      "model_selection": true,
+      "name": "Claude Code",
+      "status": {
+        "kind": "ready"
+      },
+      "status_label": "Ready",
+      "team": {
+        "kind": "available"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/opencode",
+      "headless": "opencode run --format json, or opencode serve over HTTP",
+      "id": "opencode",
+      "model_selection": true,
+      "name": "OpenCode",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/gemini",
+      "headless": "gemini --prompt with --output-format stream-json",
+      "id": "gemini-cli",
+      "model_selection": true,
+      "name": "Gemini CLI",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/fx",
+      "headless": "fx ask --json: one request, JSON result on stdout",
+      "id": "fx",
+      "model_selection": true,
+      "name": "fx by Vercel",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "limited",
+        "reason": "no documented switch to turn tools off"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/openclaw",
+      "headless": "openclaw agent --message through its gateway",
+      "id": "openclaw",
+      "model_selection": true,
+      "name": "OpenClaw",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "limited",
+        "reason": "tools are set in OpenClaw's own configuration"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/pi",
+      "headless": "pi --mode json or --mode rpc over stdio",
+      "id": "pi",
+      "model_selection": true,
+      "name": "Pi",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/crazyagent-rcli",
+      "headless": "CrazyAgent's bundled RCLI host",
+      "id": "rcli",
+      "model_selection": true,
+      "name": "RCLI",
+      "status": {
+        "kind": "limited",
+        "reason": "runs only as a CrazyAgent master"
+      },
+      "status_label": "Limited control: runs only as a CrazyAgent master",
+      "team": {
+        "kind": "master_only",
+        "reason": "runs only as a CrazyAgent master"
+      },
+      "tools": {
+        "kind": "limited",
+        "reason": "runs without tools"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/goose",
+      "headless": "goose run --text with --output-format stream-json",
+      "id": "goose",
+      "model_selection": true,
+      "name": "Goose",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/aider",
+      "headless": "aider --message: one prompt, plain text reply",
+      "id": "aider",
+      "model_selection": true,
+      "name": "Aider",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "limited",
+        "reason": "file edits cannot be switched off apart from a dry run"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/qwen",
+      "headless": "qwen --prompt with --output-format stream-json",
+      "id": "qwen-code",
+      "model_selection": true,
+      "name": "Qwen Code",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/crush",
+      "headless": "crush run: one prompt, plain text reply",
+      "id": "crush",
+      "model_selection": true,
+      "name": "Crush",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/droid",
+      "headless": "droid exec with --output-format stream-json",
+      "id": "droid",
+      "model_selection": true,
+      "name": "Factory Droid",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/copilot",
+      "headless": "copilot --prompt: one prompt, plain text reply",
+      "id": "copilot",
+      "model_selection": true,
+      "name": "GitHub Copilot CLI",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/cline",
+      "headless": "cline with --json output",
+      "id": "cline",
+      "model_selection": true,
+      "name": "Cline CLI",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/cn",
+      "headless": "cn --print: one prompt, plain text reply",
+      "id": "continue",
+      "model_selection": true,
+      "name": "Continue CLI",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    },
+    {
+      "account_kinds": [
+        "api_key",
+        "open_ai_compatible_url",
+        "local"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/openhands",
+      "headless": "openhands --headless with a task",
+      "id": "openhands",
+      "model_selection": true,
+      "name": "OpenHands CLI",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "limited",
+        "reason": "headless mode always runs its tools"
+      }
+    },
+    {
+      "account_kinds": [
+        "subscription",
+        "api_key"
+      ],
+      "aliases": [],
+      "executable": "<BIN>/kimi",
+      "headless": "kimi --print with stream-json output",
+      "id": "kimi",
+      "model_selection": true,
+      "name": "Kimi CLI",
+      "status": {
+        "kind": "limited",
+        "reason": "installed, but CrazyAgent cannot start it yet"
+      },
+      "status_label": "Limited control: installed, but CrazyAgent cannot start it yet",
+      "team": {
+        "kind": "unavailable",
+        "reason": "CrazyAgent cannot read its replies yet"
+      },
+      "tools": {
+        "kind": "switchable"
+      }
+    }
+  ]
+}

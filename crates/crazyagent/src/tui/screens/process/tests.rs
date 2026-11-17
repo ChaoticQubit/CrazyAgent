@@ -2025,12 +2025,13 @@ fn a_proposal_says_when_the_check_found_nothing_and_shows_findings_on_an_unchang
 }
 
 /// A project whose master harness cannot run Edit with AI is refused with one sentence
-/// that says nothing was sent (DEC-172 Q1).
+/// that names the harness kinds it runs on and says nothing was sent (DEC-172 Q1; T19b
+/// 19b-4, leader 01:01).
 #[test]
 fn an_edit_with_ai_run_on_a_master_harness_it_cannot_run_on_says_nothing_was_sent() {
     assert_eq!(
         message(crate::instruction_cleanup::MASTER_HARNESS),
-        "Edit with AI runs on this project's master harness, and it can't run on that one yet, so nothing was sent."
+        "Edit with AI runs on a Codex or Claude Code master, and this project's master is neither, so nothing was sent."
     );
 }
 
@@ -2434,4 +2435,145 @@ fn a_project_page_names_text_changed_outside_until_a_save_lands() {
     shell.arrive(saved(kept, 10));
     let shown = tall(&mut shell);
     assert!(!shown.contains(first), "{shown}");
+}
+
+fn harness_sources() -> Vec<crate::engine::owner::InstructionSource> {
+    vec![
+        crate::engine::owner::InstructionSource {
+            harness: "standin-pi".into(),
+            name: "Stand-in Pi".into(),
+            path: ".pi/agent/AGENTS.md".into(),
+            bytes: 2150,
+        },
+        crate::engine::owner::InstructionSource {
+            harness: "standin-two".into(),
+            name: "Stand-in two".into(),
+            path: ".two/RULES.md".into(),
+            bytes: 12,
+        },
+    ]
+}
+
+/// H-import (owner yes 20:1x, DEC-106, DEC-141 parity with the desktop): in the app page's
+/// import field Ctrl-O lists each harness's own instructions file the engine offers, read by
+/// harness id, never a path; Down and Enter read the picked one into a preview that saves
+/// nothing, a refusal says why in plain words, and an empty list says there is none.
+#[test]
+fn an_app_page_lists_harness_instruction_files_on_ctrl_o_and_reads_the_picked_one() {
+    let mut shell = opened(Scope::App, "Saved rule.");
+    shell.key(Key::Ctrl('g'));
+    assert_eq!(requests(&mut shell), vec![]);
+    assert!(screen(&mut shell).contains("Ctrl-O"), "the field names the harness list");
+
+    shell.key(Key::Ctrl('o'));
+    assert_eq!(requests(&mut shell), vec![ProcessQuery::Sources]);
+    shell.arrive(answered(
+        ProcessQuery::Sources,
+        Ok(ProcessReply::Sources(harness_sources())),
+    ));
+    let listed = screen(&mut shell);
+    assert!(listed.contains("Stand-in Pi"), "{listed}");
+    assert!(listed.contains("~/.pi/agent/AGENTS.md"), "{listed}");
+    assert!(listed.contains("Stand-in two"), "{listed}");
+
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let query = ProcessQuery::ReadSource {
+        harness: "standin-two".into(),
+    };
+    assert_eq!(requests(&mut shell), vec![query.clone()]);
+    shell.arrive(reply(query, Ok("HARNESS-RULE\n")));
+    let preview = screen(&mut shell);
+    assert!(preview.contains("HARNESS-RULE"), "{preview}");
+    assert_eq!(requests(&mut shell), vec![], "a preview saves nothing");
+    shell.key(Key::Esc);
+
+    shell.key(Key::Ctrl('g'));
+    shell.key(Key::Ctrl('o'));
+    assert_eq!(requests(&mut shell), vec![ProcessQuery::Sources]);
+    shell.arrive(answered(
+        ProcessQuery::Sources,
+        Ok(ProcessReply::Sources(harness_sources())),
+    ));
+    shell.key(Key::Enter);
+    let query = ProcessQuery::ReadSource {
+        harness: "standin-pi".into(),
+    };
+    assert_eq!(requests(&mut shell), vec![query.clone()]);
+    shell.arrive(reply(query, Err("process_import_agents_can_write")));
+    assert!(
+        screen(&mut shell).contains("sits where agents can write"),
+        "{}",
+        screen(&mut shell)
+    );
+
+    shell.key(Key::Ctrl('g'));
+    shell.key(Key::Ctrl('o'));
+    assert_eq!(requests(&mut shell), vec![ProcessQuery::Sources]);
+    shell.arrive(answered(ProcessQuery::Sources, Ok(ProcessReply::Sources(Vec::new()))));
+    let none = screen(&mut shell);
+    assert!(
+        none.contains("No harness you use keeps an instructions file to import."),
+        "{none}"
+    );
+}
+
+/// H-import, Q1: a project page offers no harness instructions file, and a list the engine
+/// cannot give leaves the import field as it was, with no failure line.
+#[test]
+fn a_project_page_offers_no_harness_file_and_a_failed_list_changes_nothing() {
+    let scope = Scope::Project {
+        id: ProjectId::new("harbor-notes").unwrap(),
+        name: "Harbor Notes".into(),
+    };
+    let mut project = opened(scope, "");
+    project.key(Key::Ctrl('o'));
+    assert_eq!(requests(&mut project), vec![]);
+
+    let mut shell = opened(Scope::App, "Saved rule.");
+    shell.key(Key::Ctrl('g'));
+    shell.key(Key::Ctrl('o'));
+    assert_eq!(requests(&mut shell), vec![ProcessQuery::Sources]);
+    shell.arrive(answered(
+        ProcessQuery::Sources,
+        Err("process_request_invalid".into()),
+    ));
+    let shown = screen(&mut shell);
+    assert!(shown.contains("Import from file"), "the field stays open: {shown}");
+    assert!(
+        shown.contains("No harness you use keeps an instructions file to import."),
+        "{shown}"
+    );
+}
+
+/// H-import code F2 (rv-code4 21:12): Enter on a typed path while the harness list is still
+/// on its way keeps the field open with the path, sending nothing; once the list arrives,
+/// the same Enter reads the typed file.
+#[test]
+fn a_typed_path_waits_for_the_harness_list_instead_of_vanishing() {
+    let mut shell = opened(Scope::App, "Saved rule.");
+    shell.key(Key::Ctrl('g'));
+    shell.key(Key::Ctrl('o'));
+    assert_eq!(requests(&mut shell), vec![ProcessQuery::Sources]);
+
+    typed(&mut shell, "/notes/rules.md");
+    shell.key(Key::Enter);
+
+    assert_eq!(requests(&mut shell), vec![], "nothing is sent while the list is pending");
+    let shown = screen(&mut shell);
+    assert!(shown.contains("Type the file's full path"), "the field stays open: {shown}");
+    assert!(shown.contains("/notes/rules.md"), "the typed path stays: {shown}");
+
+    shell.arrive(answered(
+        ProcessQuery::Sources,
+        Ok(ProcessReply::Sources(harness_sources())),
+    ));
+    shell.key(Key::Enter);
+
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::ReadFile {
+            path: std::path::PathBuf::from("/notes/rules.md"),
+        }]
+    );
 }

@@ -160,6 +160,7 @@ fn selection(backend: MasterBackend) -> MasterSelection {
         MasterBackend::Codex => ("codex-pool", "codex-target", "codex-account"),
         MasterBackend::Rcli => ("local-pool", "local-profile", "local-account"),
         MasterBackend::Claude => ("claude-pool", "claude-target", "claude-account"),
+        MasterBackend::Listed(id) => unreachable!("{id} is not a native backend"),
     };
     MasterSelection {
         backend,

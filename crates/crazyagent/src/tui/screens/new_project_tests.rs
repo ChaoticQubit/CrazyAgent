@@ -598,6 +598,53 @@ fn harnesses_that_cannot_run_team_agents_are_listed_but_not_picked() {
     );
 }
 
+/// DEC-180 addenda 1 and 2: a kept team that names a harness CrazyAgent no longer lists says
+/// so by the product's plain name, for the master and for an agent row.
+#[test]
+fn a_team_that_names_a_removed_harness_says_it_is_no_longer_supported() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::Builder::new()
+        .prefix("ca-tui-team-gone-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let path = bin.path().join("codex");
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let entries = crate::harnesses::catalog(&crate::harnesses::Search::new(
+        vec![bin.path().to_path_buf()],
+        None,
+        Vec::new(),
+    ));
+    let choices = super::new_project_page::harness_choices_from(&entries);
+    let mut wizard = wizard();
+    wizard.research = vec![ResearchKind::MarketResearch];
+    load_catalog(&mut wizard, &["c-codex"]);
+    wizard.go(Step::Team);
+    wizard.set_harnesses(choices);
+    assert!(wizard.check_team().is_ok());
+    assert!(!wizard.team.as_ref().unwrap().sub_harnesses.is_empty());
+    let kept = wizard.team.clone();
+    for (id, name) in [
+        ("antigravity", "Antigravity"),
+        ("cursor-agent", "Cursor CLI"),
+        ("amp", "Amp"),
+        ("kiro", "Kiro CLI"),
+        ("auggie", "Auggie"),
+    ] {
+        let wanted = format!("{name} is no longer supported. Pick another harness.");
+        wizard.team.as_mut().unwrap().master = id.into();
+        let note = wizard.check_team().unwrap_err();
+        assert_eq!((note.control, note.text), (Control::Team, wanted.clone()));
+        wizard.team = kept.clone();
+        wizard.team.as_mut().unwrap().sub_harnesses[0].harness = id.into();
+        assert_eq!(wizard.check_team().unwrap_err().text, wanted, "{id}");
+        wizard.team = kept.clone();
+        assert_eq!(harness_name(id, None), name);
+        assert!(entries.iter().all(|entry| entry.id != id), "{id}");
+    }
+    assert!(wizard.check_team().is_ok());
+}
+
 /// v241 HR-L1: a harness the engine lists as Can't run is never Ready, so Home never counts
 /// it, never the team default, listed but not picked, and a team kept on it says why.
 #[test]
@@ -1231,6 +1278,21 @@ fn sizes_paths_and_harness_names_read_plainly() {
     );
     assert_eq!(harness_name("claude", None), "Claude Code");
     assert_eq!(harness_name("mystery", None), "mystery");
+}
+
+#[test]
+fn a_harness_named_without_a_catalog_at_hand_gets_the_name_its_manifest_gives_it() {
+    let listed = crate::harnesses::specs();
+    assert_eq!(listed.len(), 18);
+    for spec in listed {
+        assert_eq!(harness_name(spec.id, None), spec.name, "{}", spec.id);
+    }
+    assert_eq!(harness_name("rcli", None), "RCLI");
+    assert_eq!(harness_name("claude", None), "Claude Code");
+    assert_eq!(harness_name("kiro", None), "Kiro CLI");
+    for unlisted in ["gemini", "claude-codex", "Codex", ""] {
+        assert_eq!(harness_name(unlisted, None), unlisted, "{unlisted}");
+    }
 }
 
 #[test]
