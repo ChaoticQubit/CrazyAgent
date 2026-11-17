@@ -295,10 +295,11 @@ async fn past_its_bound_a_watch_is_refused_busy_until_one_ends() {
     );
 }
 
-/// A revoked owner gets no reply. A watch woken before the revoke is refused at its second
-/// check, `owner_grant_stale_or_revoked`; a re-watch after it is refused at admission, which
-/// answers nothing, so the client reads `watch_outcome_unknown`, or `watch_unavailable` when
-/// the engine closed first. A fresh watch after the revoke ends the same way.
+/// A revoked owner gets no reply. A watch waiting at the revoke is refused at its second
+/// check with the handshake's code, `owner_authentication_failed`, or
+/// `owner_grant_stale_or_revoked`; a re-watch after it is refused at admission, which answers
+/// nothing, so the client reads `watch_outcome_unknown`, or `watch_unavailable` when the
+/// engine closed first. A fresh watch after the revoke ends at admission too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
     let owner = super::super::usage_tests::Usage::start().await;
@@ -356,17 +357,18 @@ async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
         .await
         .unwrap()
         .unwrap();
-    let ended = [
-        "owner_grant_stale_or_revoked",
-        "watch_outcome_unknown",
-        "watch_unavailable",
-    ];
+    let unanswered = ["watch_outcome_unknown", "watch_unavailable"];
     let refused = reply.expect_err("a revoked owner gets no reply");
-    assert!(ended.contains(&refused.0.as_str()), "{refused:?}");
+    assert!(
+        refused == failure("owner_authentication_failed")
+            || refused == failure("owner_grant_stale_or_revoked")
+            || unanswered.contains(&refused.0.as_str()),
+        "{refused:?}"
+    );
     let again = client
         .watch(Cursor::new(0), None, 1_000)
         .await
         .expect_err("a revoked owner is not admitted again");
-    assert!(ended[1..].contains(&again.0.as_str()), "{again:?}");
+    assert!(unanswered.contains(&again.0.as_str()), "{again:?}");
     owner.stop().await;
 }
