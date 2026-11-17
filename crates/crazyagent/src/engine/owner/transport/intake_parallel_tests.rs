@@ -1,9 +1,10 @@
 use super::*;
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
-use crate::projects_home::job::{JobState, JobSubject, JobView};
-use crate::projects_home::{AddMode, AddOverride};
+use crate::projects_home::job::{IntakeJob, JobKind, JobState, JobSubject, JobView};
+use crate::projects_home::{AddMode, AddOverride, CopyBounds, icloud};
 use std::os::unix::fs::PermissionsExt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ENGINE_WAIT: Duration = Duration::from_secs(10);
 const JOBS_RUNNING: usize = 3;
@@ -608,6 +609,59 @@ async fn a_stop_reaches_an_add_waiting_for_the_download_slot_at_once() {
     );
     assert!(!jobs.home().join("site").exists());
     drop(slot);
+    jobs.stop().await;
+}
+
+static PULLS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static PULLS_IN_FLIGHT_MOST: AtomicUsize = AtomicUsize::new(0);
+
+/// A download that counts itself in flight and waits up to two seconds for a second one, so
+/// two downloads that overlap in time both see two in flight. Inputs: unused. Output: Ok with
+/// no file brought down.
+fn overlapping_pull(_: &str, _: &icloud::Download, _: CopyBounds) -> Result<u64, EngineError> {
+    let now = PULLS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+    PULLS_IN_FLIGHT_MOST.fetch_max(now, Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while PULLS_IN_FLIGHT.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    PULLS_IN_FLIGHT_MOST.fetch_max(PULLS_IN_FLIGHT.load(Ordering::SeqCst), Ordering::SeqCst);
+    let before = PULLS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    assert!(before >= 1);
+    Ok(0)
+}
+
+/// V243-DOWNLOADS-SERIAL: two running adds download their iCloud files side by side through
+/// the engine's shared paced downloads (DEC-197), so one add's download never waits for the
+/// end of another's.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_running_adds_download_from_icloud_side_by_side() {
+    let jobs = Jobs::start().await;
+    let authority = jobs.authority();
+    let job = |id: &str, path: String| {
+        Arc::new(IntakeJob::new(
+            RequestId::new(id).unwrap(),
+            JobKind::Add,
+            None,
+            path,
+            AddMode::Move,
+            Vec::new(),
+        ))
+    };
+    let one = job("pull-one", jobs.folder("one", "1"));
+    let two = job("pull-two", jobs.folder("two", "2"));
+    let (first, second) = tokio::join!(
+        super::intake::fetch_with(&authority, &one, overlapping_pull),
+        super::intake::fetch_with(&authority, &two, overlapping_pull),
+    );
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(PULLS_IN_FLIGHT.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        PULLS_IN_FLIGHT_MOST.load(Ordering::SeqCst),
+        2,
+        "the second add's download waited for the first one's end"
+    );
     jobs.stop().await;
 }
 
