@@ -134,7 +134,7 @@ test("a release signs with pinned, checksum-checked Node and Rust on the owner's
   for (const [target, zip, arch] of [["x86_64-pc-windows-msvc", "bun-windows-x64", "x64"], ["aarch64-pc-windows-msvc", "bun-windows-aarch64", "arm64"]]) {
     assert(windows.includes(`\n            ${target})\n              name=${zip}\n              arch=${arch}\n              ;;\n`), `${target} downloads ${zip}`);
   }
-  assert(windows.includes('\n          *)\n            echo "::error::no Windows bun for $TARGET"\n            exit 1\n            ;;\n'), "any other target fails");
+  assert(windows.includes('\n            *)\n              echo "::error::no Windows bun for $TARGET"\n              exit 1\n              ;;\n'), "any other target fails");
   assert(windows.includes('/bun-v$BUN_VERSION/$name.zip"\n'), "the zip the case named");
   assert(windows.includes([
     '          if [ "$arch" = x64 ]; then',

@@ -312,7 +312,8 @@ test("the update manifests cover exactly the targets the release matrix builds, 
 test("the Windows signing tools are prepared only with all six Azure secrets: the step sees whether each is set, never its value; none set lets a dev build go on unsigned with a notice, and a stable build or a partial set fails naming what is missing (DEC-195 Q8)", async () => {
   const step = await releaseStep("build", "Prepare Windows signing tools");
   assert.match(step, /^ {6}- name: Prepare Windows signing tools\n {8}if: matrix\.os == 'windows'\n {8}env:\n/);
-  assert.deepEqual(step.split("\n").filter((line) => SECRET.test(line)).map((line) => line.trim()), SECRET_NAMES.map((name) => `${name}_SET: \${{ secrets.${name} != '' }}`), "the step sees whether each secret is set, never a value");
+  assert.deepEqual([...step.matchAll(/^ +(\S+: )?(\$\{\{.*?\}\})$/gm)].map((match) => `${match[1] ?? ""}${match[2]}`), SECRET_NAMES.map((name) => `${name}_SET: \${{ secrets.${name} != '' }}`), "the step's only expressions say whether each secret is set, never a value");
+  assert.equal(step.match(/\$\{\{/g).length, SECRET_NAMES.length, "no other expression in the step");
   const body = runBody(step);
   const run = (channel, set) => {
     const root = mkdtempSync(join(tmpdir(), "ca-relwf-winsign-"));

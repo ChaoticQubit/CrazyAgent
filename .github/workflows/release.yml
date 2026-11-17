@@ -22,6 +22,8 @@ env:
   BUN_DARWIN_X64_SHA256: 62660e6438eb872278877acca77e1152d5d031324df368d4a81b428211489d2d
   BUN_DARWIN_ARM64_SHA256: 80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403
   BUN_LINUX_X64_SHA256: 3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18
+  BUN_WINDOWS_X64_SHA256: 0bf84e808552beea67bf1202a287a35c6c825d837b287b3f8e9dd513dba35d3d
+  BUN_WINDOWS_ARM64_SHA256: 5e8f142ef722cbc9f67dc068a166e46ee72be8307b38cac7186589d2face668f
   NODE_DARWIN_ARM64_SHA256: 1901d539912c02afa10d1cc126943a8855a7eedebe830119463470db5e6c59e8
   RUSTC_DARWIN_ARM64_SHA256: 738e3f60114b20550fcf4f8a57c9cea0544239f214709f45594ff3fde327f577
   CARGO_DARWIN_ARM64_SHA256: de51d4fade4f31ad8ec405261cc96bedc000d905f98980027610d6e288dbe21b
@@ -105,6 +107,12 @@ jobs:
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             os: linux
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            os: windows
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            os: windows
     runs-on: ${{ matrix.runner }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -276,6 +284,40 @@ jobs:
           test "$("$work/bin/bun" --version)" = "$BUN_VERSION"
           test "$("$work/bin/bun" -e 'console.log(process.arch)')" = x64
           echo "bun-path=$work/bin/bun" >> "$GITHUB_OUTPUT"
+      - id: bun-windows
+        name: Install pinned bun for Windows
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            x86_64-pc-windows-msvc)
+              name=bun-windows-x64
+              arch=x64
+              ;;
+            aarch64-pc-windows-msvc)
+              name=bun-windows-aarch64
+              arch=arm64
+              ;;
+            *)
+              echo "::error::no Windows bun for $TARGET"
+              exit 1
+              ;;
+          esac
+          work="$RUNNER_TEMP/bun-windows"
+          rm -rf "$work"
+          mkdir -p "$work/bin"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$name.zip"
+          if [ "$arch" = x64 ]; then
+            echo "$BUN_WINDOWS_X64_SHA256  $work/bun.zip" | sha256sum -c -
+          else
+            echo "$BUN_WINDOWS_ARM64_SHA256  $work/bun.zip" | sha256sum -c -
+          fi
+          unzip -q "$work/bun.zip" -d "$work"
+          install -m 0755 "$work/$name/bun.exe" "$work/bin/bun.exe"
+          test "$("$work/bin/bun.exe" --version)" = "$BUN_VERSION"
+          test "$("$work/bin/bun.exe" -e 'console.log(process.arch)')" = "$arch"
+          echo "bun-path=$work/bin/bun.exe" >> "$GITHUB_OUTPUT"
+          echo "$work/bin" >> "$GITHUB_PATH"
       - name: Install Rust toolchain
         if: runner.environment == 'github-hosted'
         run: |
@@ -372,10 +414,15 @@ jobs:
         if: matrix.os == 'windows'
         run: |
           set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
+          case "$TARGET" in
+            x86_64-pc-windows-msvc) triplet=x64-windows-static-md ;;
+            aarch64-pc-windows-msvc) triplet=arm64-windows-static-md ;;
+            *) echo "::error::no SQLite triplet for $TARGET"; exit 1 ;;
+          esac
+          vcpkg install "sqlite3:$triplet"
           {
             echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+            echo "VCPKGRS_TRIPLET=$triplet"
           } >> "$GITHUB_ENV"
       - name: Use a clean Rust build folder
         if: runner.environment != 'github-hosted'
@@ -397,7 +444,7 @@ jobs:
       - name: Install rcli source dependencies
         working-directory: .local-state/tools/rcli-source
         env:
-          BUN_PATH: ${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path }}
+          BUN_PATH: ${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path || steps.bun-windows.outputs.bun-path }}
         run: '"$BUN_PATH" install --frozen-lockfile --ignore-scripts'
       - name: Build command line binaries
         run: |
@@ -412,7 +459,7 @@ jobs:
           fi
       - name: Build rcli host
         env:
-          BUN_PATH: ${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path }}
+          BUN_PATH: ${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path || steps.bun-windows.outputs.bun-path }}
         run: |
           set -euo pipefail
           exe=""
@@ -451,8 +498,28 @@ jobs:
           node scripts/release/assets.mjs stage --target "$TARGET" --cargo-dir "${CARGO_TARGET_DIR:-target}/$TARGET/release" --rcli "$RCLI_HOST" ${tmux[@]+"${tmux[@]}"} --tauri-dir apps/desktop/src-tauri
       - name: Prepare Windows signing tools
         if: matrix.os == 'windows'
+        env:
+          AZURE_CLIENT_ID_SET: ${{ secrets.AZURE_CLIENT_ID != '' }}
+          AZURE_CLIENT_SECRET_SET: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
+          AZURE_TENANT_ID_SET: ${{ secrets.AZURE_TENANT_ID != '' }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT_SET: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT != '' }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT_SET: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT != '' }}
+          AZURE_TRUSTED_SIGNING_PROFILE_SET: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE != '' }}
         run: |
           set -euo pipefail
+          unset_names=()
+          for name in AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID AZURE_TRUSTED_SIGNING_ENDPOINT AZURE_TRUSTED_SIGNING_ACCOUNT AZURE_TRUSTED_SIGNING_PROFILE; do
+            flag="${name}_SET"
+            if [ "${!flag}" != true ]; then unset_names+=("$name"); fi
+          done
+          if [ "${#unset_names[@]}" -eq 6 ] && [ "$CHANNEL" != stable ]; then
+            echo "::notice::Windows signing skipped: no AZURE_* signing secret is set, so this dev build ships unsigned (DEC-195 Q8)"
+            exit 0
+          fi
+          if [ "${#unset_names[@]}" -gt 0 ]; then
+            echo "::error::Windows signing needs all six Azure secrets, and a stable build is always signed: ${unset_names[*]} not set"
+            exit 1
+          fi
           package="$RUNNER_TEMP/artifact-signing.nupkg"
           curl -fsSL --retry 3 -o "$package" "https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/$ARTIFACT_SIGNING_CLIENT_VERSION/microsoft.artifactsigning.client.$ARTIFACT_SIGNING_CLIENT_VERSION.nupkg"
           echo "$ARTIFACT_SIGNING_CLIENT_SHA256  $package" | sha256sum -c -
@@ -715,7 +782,7 @@ jobs:
           fi
           cat notes.txt
       - name: Write update manifests and checksums
-        run: node scripts/release/manifest.mjs --dir dist --version "$VERSION" --channel "$CHANNEL" --commit "$GITHUB_SHA" --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$ASSET_TAG" --notes "$(cat update-notes.txt)" --targets aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-gnu
+        run: node scripts/release/manifest.mjs --dir dist --version "$VERSION" --channel "$CHANNEL" --commit "$GITHUB_SHA" --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$ASSET_TAG" --notes "$(cat update-notes.txt)" --targets aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-gnu,x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
       - name: Publish dev build
         if: needs.prepare.outputs.channel == 'dev'
         env:
