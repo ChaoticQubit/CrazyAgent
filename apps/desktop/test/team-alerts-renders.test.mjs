@@ -29,7 +29,7 @@ test("the root team alert look renders the app's tree only when the counts chang
     const idle = await evaluate(`Fixture.looks({ alpha: [3, 0], beta: [0, 0] }, 1)`);
     return { started, same, changed, settled, idle };
   });
-  assert.equal(seen.started.armed, true, "the next look is armed");
+  assert.equal(seen.started.watching, true, "the page watches the engine");
   assert.equal(seen.same.renders, seen.started.renders, `${LOOKS} looks that read the same counts render nothing`);
   assert.equal(seen.changed.renders, seen.same.renders + 1, "a changed count renders once");
   assert.equal(seen.settled.renders, seen.changed.renders, "the same counts again render nothing");

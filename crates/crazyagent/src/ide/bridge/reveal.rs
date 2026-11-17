@@ -137,10 +137,10 @@ impl Grants {
     }
 }
 
-/// Shows a file or folder in the project's running desktop IDE: checks that the target
-/// sits inside a folder the project's IDE workspace lists, sends one `reveal` event, marks
-/// the project's IDE tab for the desktop, and waits up to `REVEAL_WAIT` for the extension
-/// to acknowledge it. Inputs: the owner runtime, the project and the target. Output: the
+/// Shows a file or folder in the project's running desktop IDE: checks the target sits in a
+/// folder the project's IDE workspace lists, sends one `reveal` event, marks the IDE tab for
+/// the desktop, wakes its watch with `ide` (v2.5 S3c) and waits up to `REVEAL_WAIT` for the
+/// extension's ack. Inputs: the owner runtime, the project and the target. Output: the
 /// reveal's id, or `ide_not_running`, `ide_reveal_unanswered` or a target refusal.
 pub(crate) async fn reveal(
     runtime: &OwnerRuntimeHandle,
@@ -168,6 +168,7 @@ pub(crate) async fn reveal(
         },
     );
     grants.reveals.mark(project, &request, now_ms());
+    runtime.wake_watches(crate::protocol::Topic::Ide);
     let answered = tokio::time::timeout(REVEAL_WAIT, acked).await;
     grants.reveals.forget(&request);
     match answered {

@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { FAILURE_TEXT_MAX, KEPT_MIN, REFUSED_EXIT, REPORT_ONLY, REQUIRED, clickUntilUsable, compareExit, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, prepareKeychain, privateFolder, quiet, runSchedule, sampleMetrics, schedule, stayedQuiet, summary, verdict, webkitHelpersIn } from "./speed-budget.mjs";
+import { FAILURE_TEXT_MAX, KEPT_MIN, REFUSED_EXIT, REPORT_ONLY, REQUIRED, WATCH_CALLS_MAX, clickUntilUsable, compareExit, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, prepareKeychain, privateFolder, quiet, runSchedule, sampleMetrics, schedule, stayedQuiet, summary, verdict, webkitHelpersIn } from "./speed-budget.mjs";
 
 const QUIET = { load1: 0.8, compilers: [], memoryLevel: 80, onAC: true, screenLocked: false, busy: false };
 
@@ -74,6 +74,19 @@ test("call counts: fewer calls, or one more from poll timing, is no finding", ()
   const base = { idle: { desktop_overview: 12, desktop_status: 4 } };
   const candidate = { idle: { desktop_overview: 13, desktop_status: 1 } };
   assert.deepEqual(countFindings(base, candidate), []);
+});
+
+test("v2.5 S3c: the engine watch's own commands are allowed up to their named bound, and only those", () => {
+  const base = { start: {}, idle: {} };
+  const within = { start: { desktop_watch: 1, e2e_watch_next: 3 }, idle: { e2e_watch_next: WATCH_CALLS_MAX.e2e_watch_next } };
+  assert.deepEqual(countFindings(base, within), []);
+  const past = { start: { desktop_watch: 2, e2e_watch_next: 3 }, idle: { e2e_watch_next: WATCH_CALLS_MAX.e2e_watch_next + 1, desktop_ide_focus: 1 } };
+  assert.deepEqual(countFindings(base, past), [
+    { scenario: "idle", cmd: "desktop_ide_focus", base: 0, candidate: 1 },
+    { scenario: "idle", cmd: "e2e_watch_next", base: 0, candidate: WATCH_CALLS_MAX.e2e_watch_next + 1 },
+    { scenario: "start", cmd: "desktop_watch", base: 0, candidate: 2 },
+  ]);
+  assert.deepEqual(Object.keys(WATCH_CALLS_MAX).sort(), ["desktop_watch", "e2e_watch_next"]);
 });
 
 test("call counts refuse a scenario the base never ran", () => {

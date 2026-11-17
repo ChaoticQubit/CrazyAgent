@@ -20,6 +20,11 @@ export const QUIET_LIMITS = { load1_max: 2, memory_level_min: 50 };
 /** Processes whose presence means a build is running and timings are noise. */
 export const COMPILERS = ["rustc", "cargo", "clang", "ld", "ld64", "swift-frontend", "xcodebuild"];
 const COUNT_SLACK = 1;
+/** Commands 2.3.2 never made that the v2.5 engine watch adds (250-S3C), each with the most
+ * calls one scenario may make: the page's one `desktop_watch` at load, and one harness
+ * `e2e_watch_next` per delivery in place of the app's channel: the first at once, at most 12
+ * unknown turns (one per 5 s) and 3 empty 25 s waits in a one-minute scenario. */
+export const WATCH_CALLS_MAX = Object.freeze({ desktop_watch: 1, e2e_watch_next: 16 });
 /** A speed run's kept engine state folder, as speed-run.mjs makes it: new, private and short
  * enough for the engine's socket address. */
 export const SPEED_STATE = /^\/private\/tmp\/cas-(noise|compare)-(base|candidate)-[0-9a-f]{8}-[A-Za-z0-9]{6}$/;
@@ -98,8 +103,8 @@ export function verdict({ base, candidate, margin: share, floor }) {
 
 /** Compares bridge call counts per scenario (row C1). Inputs: the base's and the candidate's
  * `{ scenario: { cmd: count } }`, the same scenarios on both sides. Output: each command the
- * candidate calls that the base never did, or more than `COUNT_SLACK` times more often, sorted
- * by scenario and command. */
+ * candidate calls that the base never did, past its `WATCH_CALLS_MAX` for the watch's own, or
+ * more than `COUNT_SLACK` times more often, sorted by scenario and command. */
 export function countFindings(base, candidate) {
   const scenarios = Object.keys(candidate).sort();
   for (const scenario of scenarios) assert.ok(Object.hasOwn(base, scenario), `the base ran scenario ${scenario}`);
@@ -110,7 +115,8 @@ export function countFindings(base, candidate) {
       const now = candidate[scenario][cmd];
       const was = base[scenario][cmd] ?? 0;
       assert.ok(Number.isInteger(now) && now >= 0 && Number.isInteger(was) && was >= 0);
-      if ((was === 0 && now > 0) || now > was + COUNT_SLACK) findings.push({ scenario, cmd, base: was, candidate: now });
+      const limit = was > 0 ? was + COUNT_SLACK : Object.hasOwn(WATCH_CALLS_MAX, cmd) ? WATCH_CALLS_MAX[cmd] : 0;
+      if (now > limit) findings.push({ scenario, cmd, base: was, candidate: now });
     }
   }
   return findings;
