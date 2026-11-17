@@ -9,13 +9,13 @@ pub(super) const OUTPUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 pub(super) const LISTING_BYTES_MAX: usize = 64 * 1024;
 const STEP_TIME: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(2);
-/// The oldest git that every engine git call runs on, except the two that
-/// [`MERGE_VERSION_MIN`] guards: 2.39, the Apple Git-154 of Xcode 16 and its Command Line
-/// Tools (W-GIT-FLOOR).
-const VERSION_MIN: (u32, u32) = (2, 39);
-/// The oldest git with `merge-tree --merge-base` and `check-attr --source`, both new in
-/// git 2.40.0, which a squash merge and the attribute checks around it run (W-GIT-FLOOR).
-const MERGE_VERSION_MIN: (u32, u32) = (2, 40);
+/// The oldest git all of landing runs on, the floor the test farm's git is held to: 2.40,
+/// the first with `merge-tree --merge-base` and `check-attr --source`, which a squash merge
+/// and the attribute checks around it run (W-GIT-FLOOR).
+const VERSION_MIN: (u32, u32) = (2, 40);
+/// The oldest git that opening a repository and every engine git call outside those two
+/// run on: 2.39, the Apple Git-154 of Xcode 16 and its Command Line Tools (W-GIT-FLOOR).
+const OPEN_VERSION_MIN: (u32, u32) = (2, 39);
 
 #[cfg(test)]
 thread_local! {
@@ -456,7 +456,7 @@ impl Repo {
             #[cfg(target_os = "linux")]
             copies: false,
         };
-        repo.require_version(VERSION_MIN)?;
+        repo.require_version(OPEN_VERSION_MIN)?;
         let listing = repo.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
         let keys = crate::research::runner::listed_filter_keys(&listing)
             .ok_or_else(|| failure("changes_git_failed"))?;
@@ -789,7 +789,7 @@ impl Repo {
     /// Tools (W-GIT-FLOOR). Output: Ok, else `changes_git_old`, or `changes_git_unsupported`
     /// when `git version` names no version.
     pub(super) fn check_merge_version(&self) -> Result<(), EngineError> {
-        self.require_version(MERGE_VERSION_MIN)
+        self.require_version(VERSION_MIN)
     }
 
     /// Refuses a git older than `needed`, logging the version found and the one needed.
