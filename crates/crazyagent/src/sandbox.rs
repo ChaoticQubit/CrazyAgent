@@ -338,6 +338,7 @@ const ENGINE_SECRET_FOLDERS: &[&str] = &[
     crate::ide::FOLDER,
     crate::engine::bootstrap::NATIVE_PROFILES_FOLDER,
     crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER,
+    crate::storage::BACKUPS,
 ];
 
 const RUNTIME_ENTRIES_MAX: usize = 1024;
