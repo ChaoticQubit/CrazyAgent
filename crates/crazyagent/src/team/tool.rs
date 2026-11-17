@@ -20,9 +20,10 @@ pub const TOOL_NAME: &str = "delegate";
 pub const WAKE_TOOL: &str = "wake";
 /// What every hand-off's task asks for, in `spawn`, `delegate`, `wake` and the task block
 /// alike: the goal, the finding, the agent's part of the plan and its acceptance check; a
-/// probe that costs the owner is asked for once, never replaced by a guess
-/// (V243-MASTER-ANALYZE-FIRST, #388 F1, leader 16:33).
-pub(crate) const HAND_OFF_TASK: &str = "The goal, what you found (the cause with its evidence, or what is still unknown), this agent's part of your plan, and its acceptance check, in plain words. When confirming the cause needs paid calls, the owner's sign-in or other owner resources, ask the owner once for a small probe instead of handing out a guess; if the owner declines, state the cause as UNCONFIRMED and make reproducing it the agent's first step.";
+/// probe that costs the owner is asked for once, never replaced by a guess, and a refusal
+/// travels with the task so no agent spends what the owner declined
+/// (V243-MASTER-ANALYZE-FIRST, #388 F1, V243-MASTER-PROBE-REFUSAL-CARRY).
+pub(crate) const HAND_OFF_TASK: &str = "The goal, what you found (the cause with its evidence, or what is still unknown), this agent's part of your plan, and its acceptance check, in plain words. When confirming the cause needs paid calls, the owner's sign-in or other owner resources, ask the owner once for a small probe instead of handing out a guess; if the owner declines, state the cause as UNCONFIRMED, say what the owner declined, and make reproducing it without those resources the agent's first step.";
 /// The fence line that opens the one machine block a master without team tools hands out
 /// work with (L6): a JSON object read through the same schema as a `delegate` or `wake`
 /// record, never free prose.
