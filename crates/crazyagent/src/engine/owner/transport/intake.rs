@@ -80,10 +80,15 @@ impl Held {
     /// Whether this job may run beside `other`: two adds whose folders land under names the
     /// volume tells apart. Input: the other job. Output: the answer.
     fn beside(&self, other: &Held) -> bool {
-        let name = |held: &Held| held.real.file_name().and_then(std::ffi::OsStr::to_str);
         self.job.kind() == JobKind::Add
             && other.job.kind() == JobKind::Add
-            && matches!((name(self), name(other)), (Some(a), Some(b)) if crate::projects_home::names_apart(a, b))
+            && matches!((self.name(), other.name()), (Some(a), Some(b)) if crate::projects_home::names_apart(a, b))
+    }
+
+    /// The name the job's folder lands under in the home, its own last part. Output: the
+    /// name, or None for an empty folder or one whose name is not UTF-8.
+    fn name(&self) -> Option<&str> {
+        self.real.file_name().and_then(std::ffi::OsStr::to_str)
     }
 
     /// Whether this job's folder and `real` are the same, or one holds the other. An empty
