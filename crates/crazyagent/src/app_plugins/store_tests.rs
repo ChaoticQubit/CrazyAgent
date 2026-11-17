@@ -243,7 +243,7 @@ fn a_preview_shows_the_trust_screen_and_saves_nothing() {
         (problem.code.as_str(), problem.line),
         ("app_plugin_yaml_tab", Some(2))
     );
-    let bundled_name = ACME.replace("name: acme", "name: local");
+    let bundled_name = ACME.replace("name: acme", "name: openai");
     let Preview::Refused { problem } = preview(&case.root, &bundled_name).unwrap() else {
         panic!("refused");
     };
