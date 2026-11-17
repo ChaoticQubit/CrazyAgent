@@ -488,8 +488,9 @@ fn two_cleanups_started_in_the_same_millisecond_get_different_run_names() {
 #[cfg(unix)]
 #[test]
 fn pruning_never_removes_the_folder_of_a_run_still_running() {
-    use super::run::{KEPT_RUNS_MAX, prune, run_name, run_stem};
+    use super::run::{KEPT_RUNS_MAX, Slot, prune, run_name, run_stem};
     let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
     let agents = temp.path().join("agents");
     std::fs::create_dir(&agents).unwrap();
     let first = 1_800_000_000_000_i64;
@@ -502,7 +503,9 @@ fn pruning_never_removes_the_folder_of_a_run_still_running() {
         std::fs::create_dir(agents.join(run_name(stem, 1))).unwrap();
         std::fs::create_dir(agents.join(run_name(stem, 2))).unwrap();
     }
-    prune(&agents, std::slice::from_ref(&running));
+    let alpha = ProjectId::new("alpha").unwrap();
+    let _held = Slot::take(&root, Some(&alpha), &running).unwrap();
+    prune(&agents, &Slot::running(&root));
     assert!(
         agents.join(run_name(&running, 1)).join("home").is_dir(),
         "the oldest folder belongs to a run still running and stays"
