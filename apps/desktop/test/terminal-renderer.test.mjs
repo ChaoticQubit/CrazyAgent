@@ -202,15 +202,17 @@ test("#358 r2: letting a terminal go loses its WebGL context", async () => {
 });
 
 test("#358 r1 F1: the terminal's text and row height read the same under WebGL as with DOM rows", async () => {
-  const read = (offered) => withPage(async ({ evaluate }) => {
-    await live(evaluate, offered);
-    const drawn = await drawnWith(evaluate, offered ? "webgl" : "dom");
+  const seen = await withPage(async ({ evaluate }) => {
+    await live(evaluate, true);
+    const gpu = await drawnWith(evaluate, "webgl");
     const shown = await shows(evaluate, "drawn line");
-    return { drawn, shown, rowHeight: (await evaluate("Fixture.view()")).rowHeight };
+    const onGpu = (await evaluate("Fixture.view()")).rowHeight;
+    await evaluate('Fixture.choose("standard")');
+    const dom = await drawnWith(evaluate, "dom");
+    const row = await evaluate('document.querySelector(".tg-terminal-screen .xterm-rows > div")?.getBoundingClientRect().height ?? 0');
+    return { gpu, shown, dom, onGpu, row, onDom: (await evaluate("Fixture.view()")).rowHeight };
   });
-  const gpu = await read(true);
-  const dom = await read(false);
-  assert.deepEqual([gpu.drawn, gpu.shown, dom.drawn, dom.shown], [true, true, true, true]);
-  assert.ok(dom.rowHeight > 0, JSON.stringify(dom));
-  assert.equal(gpu.rowHeight, dom.rowHeight, JSON.stringify({ gpu, dom }));
+  assert.deepEqual([seen.gpu, seen.shown, seen.dom], [true, true, true], JSON.stringify(seen));
+  assert.ok(seen.row > 0, JSON.stringify(seen));
+  assert.deepEqual([seen.onGpu, seen.onDom], [seen.row, seen.row], JSON.stringify(seen));
 });
