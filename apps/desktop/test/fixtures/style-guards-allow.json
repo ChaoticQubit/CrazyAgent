@@ -1,8 +1,6 @@
 {
   "color": {
-    "src/screens/metrics/metrics.css": 4,
-    "src/screens/project/console.css": 6,
-    "src/screens/project/projects.css": 3
+    "src/screens/metrics/metrics.css": 4
   },
   "accent": {
     "src/screens/demo/demo.css": 1,
@@ -22,7 +20,7 @@
     "src/screens/intake/intake.css": 2,
     "src/screens/metrics/metrics.css": 4,
     "src/screens/process.css": 4,
-    "src/screens/project/projects.css": 14,
+    "src/screens/project/projects.css": 13,
     "src/screens/project/questions.css": 1,
     "src/screens/project/team-activity.css": 1,
     "src/screens/settings/settings.css": 11,
@@ -36,9 +34,8 @@
     "src/screens/intake/intake.css": 2,
     "src/screens/metrics/metrics.css": 18,
     "src/screens/process.css": 4,
-    "src/screens/project/console.css": 2,
     "src/screens/project/overview-tabs.css": 1,
-    "src/screens/project/projects.css": 36,
+    "src/screens/project/projects.css": 35,
     "src/screens/project/team-activity.css": 5,
     "src/screens/settings/settings.css": 26,
     "src/screens/team/agent-messages.css": 4,
