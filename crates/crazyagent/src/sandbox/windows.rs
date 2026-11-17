@@ -251,10 +251,17 @@ pub fn capabilities(network: &SandboxNetwork) -> Result<Vec<Capability>, Sandbox
 /// hold account sign-ins, is reachable by its own container only. Input: the policy.
 /// Output: a name the helper's container check accepts.
 pub fn container_name(sandbox: &ProjectSandbox) -> String {
+    container_for(sandbox.project_root(), sandbox.agent_home())
+}
+
+/// The AppContainer name [`container_name`] gives a policy with this project folder and agent
+/// home, for a release whose folders are already gone (V243-WIN-CHECK-PROFILE-BIND).
+/// Inputs: the project folder and the agent's home. Output: the container name.
+pub(crate) fn container_for(project_root: &Path, agent_home: &Path) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(sandbox.project_root().as_os_str().as_encoded_bytes());
+    hasher.update(project_root.as_os_str().as_encoded_bytes());
     hasher.update(b"\n");
-    hasher.update(sandbox.agent_home().as_os_str().as_encoded_bytes());
+    hasher.update(agent_home.as_os_str().as_encoded_bytes());
     let digest = hasher.finalize();
     let name: String = std::iter::once(CONTAINER_PREFIX.to_owned())
         .chain(

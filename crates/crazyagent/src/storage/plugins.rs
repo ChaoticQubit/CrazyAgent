@@ -508,12 +508,22 @@ pub(crate) fn check_profile(checks: &Path, id: &str) -> PathBuf {
     checks.join(CHECK_PROFILES).join(format!("{id}.sb"))
 }
 
+/// The project, home and temp folders the checks of one server run in, under the canonical
+/// check folder: the paths its boundary profile is made from and the release derives its
+/// container from (V243-WIN-CHECK-PROFILE-BIND). Inputs: the engine's check folder and the
+/// server id. Output: the three folders, or the error when the check folder is missing.
+pub(crate) fn check_sandbox_folders(checks: &Path, id: &str) -> std::io::Result<[PathBuf; 3]> {
+    let check = crate::sandbox::canonical(checks)?.join(id);
+    Ok(["project", "home", "tmp"].map(|name| check.join(name)))
+}
+
 /// Takes back what a server's check container holds, then deletes its check profile, so a
 /// release that stops keeps the profile and with it the record of what is left for a retry.
-/// Input: the check profile. A failure other than a missing profile is logged.
-pub(crate) fn withdraw_check_profile(profile: &Path) {
-    if grants_withdrawn(profile) {
-        match std::fs::remove_file(profile) {
+/// Inputs: the engine's check folder and the server id. A failure other than a missing
+/// profile is logged.
+pub(crate) fn withdraw_check_profile(checks: &Path, id: &str) {
+    if grants_withdrawn(checks, id) {
+        match std::fs::remove_file(check_profile(checks, id)) {
             Err(problem) if problem.kind() != std::io::ErrorKind::NotFound => {
                 eprintln!("plugin_check_folder_not_removed cause={problem}");
             }
@@ -522,18 +532,26 @@ pub(crate) fn withdraw_check_profile(profile: &Path) {
     }
 }
 
-/// Takes back every access entry the boundary helper granted a check container, read entries
-/// on the owner's folders included, drops its record and deletes the container with the
-/// folder Windows gave it ([`crazyagent_win_sandbox::release`]). Callers move the check folder
-/// aside first, so the entries on that folder, which is deleted whole, are not rewritten.
-/// Input: the check profile. Output: whether nothing is left, true for a missing profile.
+/// Takes back every access entry the boundary helper granted a server's check container and
+/// deletes the container ([`crazyagent_win_sandbox::release`]), once the profile names the
+/// container derived from [`check_sandbox_folders`]. Callers move the check folder aside
+/// first. Inputs: the check folder and the server id. Output: whether nothing is left, true
+/// for a missing profile, false for a folder that cannot be read or a refused release.
 #[cfg(windows)]
-fn grants_withdrawn(profile: &Path) -> bool {
-    match std::fs::symlink_metadata(profile) {
+fn grants_withdrawn(checks: &Path, id: &str) -> bool {
+    let profile = check_profile(checks, id);
+    match std::fs::symlink_metadata(&profile) {
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return true,
         _ => {}
     }
-    match crazyagent_win_sandbox::release(profile) {
+    let container = match check_sandbox_folders(checks, id) {
+        Ok([project, home, _]) => crate::sandbox::windows::container_for(&project, &home),
+        Err(problem) => {
+            eprintln!("plugin_check_grants_not_withdrawn cause={problem}");
+            return false;
+        }
+    };
+    match crazyagent_win_sandbox::release(&profile, &container) {
         Ok(()) => true,
         Err(problem) => {
             eprintln!("plugin_check_grants_not_withdrawn cause={problem}");
@@ -543,9 +561,9 @@ fn grants_withdrawn(profile: &Path) -> bool {
 }
 
 /// Reports nothing granted where checks run under a profile that grants no access entries.
-/// Input: the profile, unused. Output: true.
+/// Inputs: the check folder and the server id, unused. Output: true.
 #[cfg(not(windows))]
-fn grants_withdrawn(_profile: &Path) -> bool {
+fn grants_withdrawn(_checks: &Path, _id: &str) -> bool {
     true
 }
 
@@ -600,7 +618,7 @@ pub(crate) fn sweep_check_containers(
         if let Err(problem) = move_check_folder_aside(&checks, &id) {
             eprintln!("plugin_check_folder_not_removed cause={}", problem.0);
         }
-        withdraw_check_profile(&check_profile(&checks, &id));
+        withdraw_check_profile(&checks, &id);
         if let Err(problem) = remove_check_folder(root, &id) {
             eprintln!("plugin_check_folder_not_removed cause={}", problem.0);
         }
