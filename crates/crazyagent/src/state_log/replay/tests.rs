@@ -713,6 +713,7 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
         INSERT INTO state VALUES (1,0);",
     )
     .unwrap();
+    db.execute_batch("PRAGMA secure_delete=OFF;").unwrap();
     let pragma = |name: &str| -> i64 {
         db.query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
             .unwrap()
@@ -738,6 +739,10 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     let tx = db.transaction().unwrap();
     redact(&tx, seq).unwrap();
     tx.commit().unwrap();
+    let secure: i64 = db
+        .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(secure, 0, "redact puts secure_delete back");
     checkpoint(&db);
     assert!(!holds(&path, marker), "the redacted body is zeroed");
     let wal = path.with_extension("db-wal");
