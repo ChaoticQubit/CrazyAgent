@@ -269,7 +269,7 @@
   "crates/crazyagent/src/terminal/buffer/tests.rs": 2,
   "crates/crazyagent/src/terminal/kept.rs": 3,
   "crates/crazyagent/src/terminal/tmux/servers/refused_tests.rs": 1,
-  "crates/crazyagent/src/terminal/tmux/tests.rs": 21,
+  "crates/crazyagent/src/terminal/tmux/tests.rs": 16,
   "crates/crazyagent/src/tools/probe/tests.rs": 2,
   "crates/crazyagent/src/tui/client.rs": 9,
   "crates/crazyagent/src/tui/client/accounts.rs": 1,
