@@ -2739,3 +2739,30 @@ fn p_fixes_a_refused_tool_with_no_job_while_another_tools_fix_runs() {
         (Dependency::Graphify, "/h/py".into(), true)
     );
 }
+
+/// V243-SETUP-PARALLEL (leader 15:11, #378 F1): a lone job on one tool, this screen's own
+/// permission fix included, leaves Enter running setup, as the desktop offers Set up tools;
+/// the run takes its turn on that tool in the engine.
+#[test]
+fn enter_runs_setup_while_this_screens_own_fix_runs() {
+    let mut shell = first_run(120, 36);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::FixButton,
+    )))));
+    shell.key(Key::Char('p'));
+    shell.key(Key::Char('y'));
+    fix_sent(&mut shell);
+    shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
+    jobs(&mut shell);
+    let mut fixing = refused_status(crate::setup::RefusedTool::FixButton);
+    fixing.dependencies[2].busy = true;
+    shell.arrive(event(AppSetupEvent::Status(Ok(fixing))));
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Run { .. })),
+        "{}",
+        lead(&shell)
+    );
+}

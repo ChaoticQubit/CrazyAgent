@@ -1308,3 +1308,15 @@ test("a tool row waiting behind another job reads Waiting and names it, and a ro
   assert.equal(intake.setupBusy({ dependencies: [fixing], pack: [], running: false }), true);
   assert.equal(intake.setupBusy({ dependencies: [{ ...fixing, busy: false }], pack: [], running: false }), false);
 });
+
+test("a lone job on one tool leaves Set up tools and Install tools offered, the run taking its turn on that tool (DEC-199, #378 F1)", () => {
+  const node = { ...dep("node", { state: "installing" }, "Node.js"), busy: true };
+  const value = { dependencies: [dep("tmux", { state: "missing" }), node], pack, running: false };
+  const base = { status: ok(value), ticks: [], onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop };
+  const markup = html(ToolsSetupView, base);
+  assert.match(markup, />Set up tools<\/button>/);
+  assert.doesNotMatch(markup, /Installing: \d+ of \d+ done/);
+  assert.equal(intake.toolsOffer(value), true);
+  assert.equal(intake.setupBusy(value), true, "setup still reads again while the job runs");
+  assert.equal(intake.toolsOffer({ ...value, running: true }), false, "not while a setup run goes on");
+});

@@ -1247,11 +1247,13 @@ mod install_tests {
         assert_eq!(done.waiting, None);
     }
 
-    /// V243-SETUP-PARALLEL (leader 14:16): a setup run keeps the rows of the tools it has
-    /// not reached, a lone job begun during the run leaves the run's rows, its own tool's
-    /// included, and with no run a lone job clears only its own row.
+    /// V243-SETUP-PARALLEL (leader 14:16, 15:11 #378 F2): a new setup run clears the rows
+    /// the last run left, so a tool it has not reached reads as the check finds it, never an
+    /// old failure, and keeps the row of a tool a lone job holds; a lone job begun during the
+    /// run leaves the run's rows, its own tool's included; with no run a lone job clears only
+    /// its own row.
     #[test]
-    fn a_run_keeps_the_rows_it_has_not_reached_and_a_lone_job_keeps_the_runs_rows() {
+    fn a_run_clears_the_last_runs_rows_and_keeps_a_lone_jobs_row() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let failed = DependencyState::Failed {
@@ -1279,7 +1281,14 @@ mod install_tests {
             during.dependencies.get(&Dependency::Node),
             Some(&DependencyState::Installing)
         );
-        assert_eq!(during.dependencies.get(&Dependency::Uv), Some(&failed));
+        assert_eq!(
+            during.dependencies.get(&Dependency::Uv),
+            None,
+            "the last run's failure is not this run's"
+        );
+        progress::with(&root, |state| {
+            state.dependencies.insert(Dependency::Uv, failed.clone());
+        });
         let fix = begin_one(root.clone(), Dependency::Uv).unwrap();
         assert_eq!(
             progress::snapshot(&root).dependencies.get(&Dependency::Uv),
