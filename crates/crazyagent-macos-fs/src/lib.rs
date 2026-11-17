@@ -517,17 +517,25 @@ int main(void) {
 }
 "#;
 
-    /// A record of a TCP socket in `state` on `port` with the address flags and both
-    /// addresses set. Inputs: the state, the port and the flags. Output: the record.
-    fn record(state: i32, port: u16, flags: u8) -> SocketRecord {
+    /// A record of a TCP socket in `state` on `port` with the address flags and one local
+    /// address, written where its family sits: the IPv4 bytes are the last four of the IPv6
+    /// ones, as in the kernel's union. Inputs: the state, port, flags and address. Output: the
+    /// record.
+    fn record(state: i32, port: u16, flags: u8, address: IpAddr) -> SocketRecord {
         let mut record = SocketRecord([0; SOCKET_RECORD_SIZE]);
         record.0[AT_KIND..AT_KIND + 4].copy_from_slice(&KIND_TCP.to_ne_bytes());
         record.0[AT_STATE..AT_STATE + 4].copy_from_slice(&state.to_ne_bytes());
         record.0[AT_LOCAL_PORT..AT_LOCAL_PORT + 4]
             .copy_from_slice(&i32::from(port.to_be()).to_ne_bytes());
         record.0[AT_FLAGS] = flags;
-        record.0[AT_ADDRESS_V4..AT_ADDRESS_V4 + 4].copy_from_slice(&[127, 0, 0, 1]);
-        record.0[AT_ADDRESS_V6..AT_ADDRESS_V6 + 16].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
+        match address {
+            IpAddr::V4(v4) => {
+                record.0[AT_ADDRESS_V4..AT_ADDRESS_V4 + 4].copy_from_slice(&v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                record.0[AT_ADDRESS_V6..AT_ADDRESS_V6 + 16].copy_from_slice(&v6.octets());
+            }
+        }
         record
     }
 
@@ -594,47 +602,28 @@ int main(void) {
     #[test]
     fn a_record_is_a_listener_only_in_listen_on_the_port_and_one_with_no_family_fails_closed() {
         let port = 41_234;
-        let localhost_v4 = IpAddr::from(Ipv4Addr::LOCALHOST);
-        let localhost_v6 = IpAddr::from(Ipv6Addr::LOCALHOST);
+        let v4 = IpAddr::from(Ipv4Addr::LOCALHOST);
+        let v6 = IpAddr::from(Ipv6Addr::LOCALHOST);
+        let read =
+            |state, flags, address, asked| record(state, port, flags, address).listening_on(asked);
+        assert_eq!(read(STATE_LISTEN, INI_IPV4, v4, port).unwrap(), Some(v4));
         assert_eq!(
-            record(STATE_LISTEN, port, INI_IPV4)
-                .listening_on(port)
-                .unwrap(),
-            Some(localhost_v4)
+            read(STATE_LISTEN, INI_IPV4 | INI_IPV6, v4, port).unwrap(),
+            Some(v4),
+            "a socket taking both families reads as its IPv4 address"
         );
+        assert_eq!(read(STATE_LISTEN, INI_IPV6, v6, port).unwrap(), Some(v6));
+        assert_eq!(read(STATE_LISTEN, INI_IPV4, v4, port + 1).unwrap(), None);
         assert_eq!(
-            record(STATE_LISTEN, port, INI_IPV4 | INI_IPV6)
-                .listening_on(port)
-                .unwrap(),
-            Some(localhost_v4)
-        );
-        assert_eq!(
-            record(STATE_LISTEN, port, INI_IPV6)
-                .listening_on(port)
-                .unwrap(),
-            Some(localhost_v6)
-        );
-        assert_eq!(
-            record(STATE_LISTEN, port, INI_IPV4)
-                .listening_on(port + 1)
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            record(STATE_LISTEN + 3, port, INI_IPV4)
-                .listening_on(port)
-                .unwrap(),
+            read(STATE_LISTEN + 3, INI_IPV4, v4, port).unwrap(),
             None,
             "an established socket on the port is no listener"
         );
-        let mut udp = record(STATE_LISTEN, port, INI_IPV4);
+        let mut udp = record(STATE_LISTEN, port, INI_IPV4, v4);
         udp.0[AT_KIND..AT_KIND + 4].copy_from_slice(&1_i32.to_ne_bytes());
         assert_eq!(udp.listening_on(port).unwrap(), None);
         assert_eq!(
-            record(STATE_LISTEN, port, 0)
-                .listening_on(port)
-                .unwrap_err()
-                .kind(),
+            read(STATE_LISTEN, 0, v4, port).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
     }
