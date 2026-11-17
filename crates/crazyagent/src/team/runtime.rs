@@ -8831,8 +8831,8 @@ impl TeamRuntime {
     /// Accepts each resting native teammate's open change set onto its idle linked lead's
     /// task branch for `land_teammates`, and that of each one that ended before it rested,
     /// whose saved edits no rest lands (team-20 r1 M1), telling the lead the files of one
-    /// that conflicts. Takes the project, the lead and its repository, worktree and git
-    /// folder. Returns the names of the teammates whose work landed and the branch, None when
+    /// that conflicts; on a git older than 2.40 none is tried and each waits for the owner.
+    /// Takes the project, the lead and its repository, worktree and git folder. Returns the names of the teammates whose work landed and the branch, None when
     /// none landed, or a SQLite or coordination failure.
     fn accept_resting(
         &mut self,
@@ -8909,6 +8909,9 @@ impl TeamRuntime {
             let held = (format!("{} {}", seen.0, seen.1), open.clone());
             let told = self.teammate_conflicts_told.entry(lead).or_default();
             if told.get(set.id.as_str()) == Some(&seen) || told.get(&held_key) == Some(&held) {
+                continue;
+            }
+            if matches!(crate::landing::can_merge_again(repository), Ok(false)) {
                 continue;
             }
             let outcome = crate::projects_home::owner_home().and_then(|home| {

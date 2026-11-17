@@ -1605,6 +1605,21 @@ pub fn accept_into_as(
     }
 }
 
+/// Whether engine git can merge again in an owner repository, as every Accept must: false on
+/// a git older than 2.40 (W-GIT-FLOOR), whose Accept refuses `changes_git_old`, so a land the
+/// owner did not ask for leaves the set for the owner without trying. Input: the repository.
+/// Output: the answer, or the code of a git that cannot open it.
+pub(crate) fn can_merge_again(repository: &Path) -> Result<bool, EngineError> {
+    #[cfg(unix)]
+    return git::Repo::open(repository, &repository.join(".git"), None)
+        .map(|owner| !owner.old_git());
+    #[cfg(not(unix))]
+    {
+        let _ = repository;
+        Err(unavailable())
+    }
+}
+
 /// Lands the change set the project's master made the way an Accept does, when it holds
 /// nothing but fixes of real conflicts with other open sets, `team::master_lands` says
 /// Merges and "Ask me before merging" is off at that moment: one squash commit on the Land
