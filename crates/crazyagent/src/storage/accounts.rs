@@ -339,18 +339,20 @@ const KEY_SWEEP_MAX: usize = 10_000;
 
 /// Deletes, after a restore to a 2.4 copy (V250-L5-N5), the staged copies and every key in
 /// one of the engine root's owner-only key folders that `kept` does not keep, reading at most
-/// [`KEY_SWEEP_MAX`] entries; a name that is no plain reference is left alone. Inputs: the
-/// engine root, a folder from [`KEY_FOLDERS`] and the keep test by key name. Output: how many
-/// keys went, or the first refusal of the folder, the keep test or a removal.
+/// [`KEY_SWEEP_MAX`] entries; a name that is no plain reference is left alone. A failed
+/// removal does not stop the others; a failed keep test stops the sweep, keeping the rest.
+/// Inputs: the engine root, a folder from [`KEY_FOLDERS`] and the keep test by key name.
+/// Output: how many keys went, or the folder's refusal, the keep test's failure or the first
+/// failed removal.
 #[cfg(unix)]
 pub(crate) fn remove_unkept_in(
     root: &Path,
     folder: &str,
     kept: impl Fn(&str) -> Result<bool, EngineError>,
 ) -> Result<usize, EngineError> {
-    remove_staged_in(root, folder)?;
+    let mut failed = remove_staged_in(root, folder).err();
     let Some(directory) = open_key_folder(root, folder)? else {
-        return Ok(0);
+        return failed.map_or(Ok(0), Err);
     };
     let mut names = Vec::new();
     let mut read = 0;
@@ -373,18 +375,21 @@ pub(crate) fn remove_unkept_in(
     assert!(names.len() <= read && read <= KEY_SWEEP_MAX);
     let mut removed = 0;
     for name in &names {
-        if !kept(name.as_str())? {
-            remove_key_in(root, folder, name)?;
-            removed += 1;
+        if kept(name.as_str())? {
+            continue;
+        }
+        match remove_key_in(root, folder, name) {
+            Ok(()) => removed += 1,
+            Err(cause) => {
+                failed.get_or_insert(cause);
+            }
         }
     }
     assert!(removed <= names.len());
-    if removed > 0 {
-        directory
-            .sync_all()
-            .map_err(|_| error("account_key_store_unavailable"))?;
+    if removed > 0 && directory.sync_all().is_err() {
+        failed.get_or_insert(error("account_key_store_unavailable"));
     }
-    Ok(removed)
+    failed.map_or(Ok(removed), Err)
 }
 
 /// Refuses to read an account key where the Unix owner-only key folder does not exist.
