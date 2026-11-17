@@ -18,7 +18,13 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::provider_retry::ProviderRetry;
 use crazyagent::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crazyagent::roadmap_status::Refresh;
-use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy};
+use crazyagent::sandbox::policy::{
+    AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles,
+    ToolCacheScope, ToolchainChoice,
+};
+use crazyagent::sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope};
+use crazyagent::sandbox::toolchains::Toolchain;
+use crazyagent::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use crazyagent::sandbox_settings::SandboxSettings;
 use crazyagent::setup::RefusedTool;
 use crazyagent::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, ResultsShown};
@@ -568,23 +574,50 @@ async fn versioned_settings(
     Ok(())
 }
 
-/// The sandbox settings the fixture saves, each knob away from its default.
+/// The loopback port the fixture's agent policy grants: outside the engine's reserved,
+/// proxy, relay and dynamic ports, so the save's grant check keeps it.
+const SEED_PORT: u16 = 5173;
+
+/// The sandbox settings the fixture saves, each knob away from its default. They are Linux
+/// knobs, so a macOS engine only stores them.
 fn sandbox_seed() -> SandboxSettings {
-    SandboxSettings::default()
+    SandboxSettings {
+        linux_sockets: LinuxSockets::Refuse,
+        linux_supervisor: LinuxSupervisor::Off,
+        linux_strict: LinuxStrict::On,
+    }
 }
 
-/// The agent policy the fixture saves for its project, each field away from its default.
+/// The agent policy the fixture saves for its project, each field away from its default. The
+/// level is Own branch, never Full, since an upgrade row may read this fixture; the grant is
+/// one port, since a temp folder or socket grant would name a folder of this Mac.
 fn policy_seed() -> AgentPolicy {
     AgentPolicy {
+        access: AgentAccess::OwnBranch,
+        toolchains: vec![ToolchainChoice {
+            toolchain: Toolchain::Rust,
+            allowed: false,
+        }],
         ide_git_hooks: true,
-        ..AgentPolicy::default()
+        network: AgentNetwork::Https,
+        tool_cache: ToolCacheScope::PerAgent,
+        home_caches: HomeCaches::Keep,
+        ide_agent_files: IdeAgentFiles::NoDeleteOrRename,
+        apply_changes: AccessApply::NextStart,
+        grants: vec![AccessGrant::Port { port: SEED_PORT }],
+        shared_folders: SharedFolders {
+            scope: SharedScope::Chosen,
+            access: SharedAccess::ReadWrite,
+            chosen: vec!["notes".to_owned()],
+            secrets: Vec::new(),
+        },
     }
 }
 
 /// The cleanup settings the fixture saves, both away from their defaults.
 fn cleanup_seed() -> CleanupSettings {
     CleanupSettings {
-        mode: CleanupMode::AfterDays,
+        mode: CleanupMode::Manual,
         days: 14,
     }
 }
@@ -592,17 +625,18 @@ fn cleanup_seed() -> CleanupSettings {
 /// The quit settings the fixture saves, each away from its default.
 fn quit_seed() -> QuitSettings {
     QuitSettings {
-        on_quit: OnQuit::KeepRunning,
-        left_running: LeftRunning::AfterHours,
+        on_quit: OnQuit::Stop,
+        left_running: LeftRunning::Never,
         hours: 12,
     }
 }
 
-/// The harness update settings the fixture saves, each away from its default.
+/// The harness update settings the fixture saves, each away from its default. On open is
+/// read only by the TUI's harness settings screen, so the fixture engine runs no check.
 fn update_seed() -> UpdateSettings {
     UpdateSettings {
         mode: UpdateMode::CheckOnly,
-        when: CheckWhen::OnButton,
+        when: CheckWhen::OnOpen,
         online: OnlineLookup::Off,
         install: InstallFromApp::Off,
     }
