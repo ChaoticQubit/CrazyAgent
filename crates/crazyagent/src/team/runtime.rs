@@ -2559,6 +2559,7 @@ impl TeamRuntime {
                 end_reported(id, sender, || {
                     end_teammate(host.as_ref(), &name, mates.as_deref())
                 });
+                wake_loops();
             });
         if spawned.is_err() {
             return Ok(UnmanagedEnd::Untouched);
@@ -8120,7 +8121,10 @@ impl TeamRuntime {
         let keyed = launch.relay().is_some();
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
-            .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept, wrap, by))
+            .spawn(move || {
+                work(launch, inbox, outbox, flag, interrupt, kept, wrap, by);
+                wake_loops();
+            })
             .map_err(error)?;
         let team_tool =
             seat.role == AgentRole::Master && seat.tools && self.delegation_tool.is_some();
