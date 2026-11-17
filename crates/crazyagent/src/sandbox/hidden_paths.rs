@@ -400,7 +400,7 @@ const CHECK_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(unix)]
 const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 /// The most of git's answer the check reads; a tracked folder shows in the first bytes.
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 const CHECK_BYTES_MAX: u64 = 64 * 1024;
 
 /// Whether git tracks any file inside this folder, asked in the project's own checkout with
@@ -520,9 +520,13 @@ mod tests {
     use rusqlite::Connection;
 
     fn project() -> tempfile::TempDir {
+        #[cfg(unix)]
+        let parent = std::fs::canonicalize("/tmp").unwrap();
+        #[cfg(not(unix))]
+        let parent = canonical(&std::env::temp_dir()).unwrap();
         tempfile::Builder::new()
             .prefix("ca-hidden-")
-            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .tempdir_in(parent)
             .unwrap()
     }
 
@@ -570,6 +574,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_whose_name_holds_a_quote_or_backslash_is_refused() {
         let root = project();
@@ -578,6 +583,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_git_tracks_is_refused_and_an_untracked_one_is_accepted() {
         let root = project();
@@ -612,6 +618,7 @@ mod tests {
         assert_eq!(none_tracked(&path, &[untracked]), Ok(()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_with_no_repository_is_not_tracked() {
         let root = project();
@@ -622,6 +629,7 @@ mod tests {
         assert_eq!(none_tracked(&path, &[folder]), Ok(()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_hostile_fsmonitor_command_never_runs_during_the_check() {
         let root = project();
@@ -656,6 +664,7 @@ mod tests {
         assert!(!marker.exists(), "fsmonitor command ran: marker written");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_corrupt_index_fails_the_check_closed() {
         let root = project();
@@ -694,6 +703,7 @@ mod tests {
         assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_unchecked"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_with_more_than_64_kib_of_tracked_names_is_still_tracked() {
         let root = project();
