@@ -481,6 +481,14 @@ fn http_spec(value: &Value) -> Result<HttpSpec, Problem> {
         .host_str()
         .ok_or_else(|| problem("app_plugin_url_invalid", "http.url"))?
         .to_owned();
+    let address = match url.host() {
+        Some(url::Host::Ipv4(ip)) => Some(std::net::IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => Some(std::net::IpAddr::V6(ip)),
+        _ => None,
+    };
+    if address.is_some_and(crate::sandbox::metadata_address) {
+        return Err(problem("app_plugin_host_metadata", "http.url"));
+    }
     let secrets = secret_names(&fields)?;
     let local_unencrypted = match url.scheme() {
         "https" => false,
