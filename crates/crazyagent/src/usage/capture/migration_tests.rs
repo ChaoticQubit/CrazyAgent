@@ -327,3 +327,49 @@ fn progress_stored_without_a_file_identity_keeps_its_place_while_the_head_matche
     assert_eq!(progress.identity, live);
     assert_eq!(progress.offset, std::fs::metadata(&file).unwrap().len());
 }
+
+/// W10b: a record the walk leaves out whose progress an older Windows build stored as
+/// (0, 0) and read to its end holds nothing uncounted, so its home does not read as partial
+/// after the upgrade. Windows only: unix never stored that identity for a record.
+#[cfg(windows)]
+#[test]
+fn a_left_out_record_read_to_its_end_without_a_file_identity_is_not_uncounted() {
+    let (_root, db) = store_new();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    std::fs::create_dir_all(&folder).unwrap();
+    let line = |id: &str| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "assistant", "message": {"id": id,
+                "usage": {"input_tokens": 1, "output_tokens": 1}}})
+        )
+    };
+    let oldest = folder.join("s000.jsonl");
+    std::fs::write(&oldest, line("m0")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    for index in 1..=FILES_PER_SCAN_MAX {
+        std::fs::write(
+            folder.join(format!("s{index:03}.jsonl")),
+            line(&format!("m{index}")),
+        )
+        .unwrap();
+    }
+    let mut progress = Progress::default();
+    read_record(&oldest, Format::Claude, &mut progress, 1_795_000_000_000);
+    assert_eq!(progress.offset, std::fs::metadata(&oldest).unwrap().len());
+    progress.identity = (0, 0);
+    db.execute(
+        "INSERT INTO usage_files (path,progress) VALUES (?1,?2)",
+        params![
+            oldest.to_string_lossy(),
+            serde_json::to_string(&progress).unwrap()
+        ],
+    )
+    .unwrap();
+    let (_, left, _) = records(home.path(), Format::Claude);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].path, oldest);
+    let mut budget = READ_BYTES_MAX as u64;
+    assert!(!uncounted(&db, &left[0], &mut budget).unwrap());
+}
