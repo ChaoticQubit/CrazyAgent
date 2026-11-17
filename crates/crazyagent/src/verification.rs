@@ -439,57 +439,100 @@ pub(crate) fn is_mutation(command: &Command) -> bool {
             if !matches!(action, OwnerVerification::Inspect { .. } | OwnerVerification::History { .. } | OwnerVerification::Accept { .. }))
 }
 
-/// Executes baseline drafting or trusted host authority commands.
-/// Takes an actor transaction, live config, command and the store's revision before it.
-/// Returns an outcome without trusting deserialized execution claims.
+/// Runs one verification command; an applied one logs every row it wrote and every row the
+/// 128-row cap pruned as landing events at the request's next revision (QUESTION-1132 A).
+/// Inputs: the request's transaction, the config, the command and the store's revision
+/// before it. Output: the outcome, or the refusal.
 pub(crate) fn execute(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     command: &Command,
     revision: u64,
 ) -> Result<Outcome, EngineError> {
-    match command {
-        Command::ProposeBaseline { draft } => {
-            let id = draft.identity().map_err(db_error)?;
-            let project: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
-                    [draft.project_id.as_str()],
-                    |r| r.get(0),
-                )
-                .map_err(db_error)?;
-            if !project {
-                return rejected("project_missing");
-            }
-            let exists: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM verification_baselines WHERE id=?1)",
-                    [id.as_str()],
-                    |r| r.get(0),
-                )
-                .map_err(db_error)?;
-            if exists {
-                let (stored, _, _) = baseline(tx, &id)?;
-                if stored != *draft {
-                    return Err(db_error("baseline_tampered"));
-                }
-                return Ok(Outcome::Applied);
-            }
-            capacity(tx, "verification_baselines")?;
-            tx.execute(
-                "INSERT OR IGNORE INTO verification_baselines(id,project,body) VALUES (?1,?2,?3)",
-                params![
-                    id.as_str(),
-                    draft.project_id.as_str(),
-                    serde_json::to_string(draft).map_err(db_error)?
-                ],
-            )
-            .map_err(db_error)?;
-            Ok(Outcome::Applied)
-        }
-        Command::OwnerVerification { action } => owner(tx, config, action, revision),
-        _ => Err(db_error("unsupported_verification_command")),
+    let mut written = Vec::new();
+    let outcome = match command {
+        Command::ProposeBaseline { draft } => propose(tx, draft, &mut written)?,
+        Command::OwnerVerification { action } => owner(tx, config, action, revision, &mut written)?,
+        _ => return Err(db_error("unsupported_verification_command")),
+    };
+    if outcome != Outcome::Applied {
+        assert!(
+            written.is_empty(),
+            "a refused verification command writes no row"
+        );
+        return Ok(outcome);
     }
+    if !written.is_empty() {
+        let next = revision
+            .checked_add(1)
+            .ok_or_else(|| db_error("revision_exhausted"))?;
+        crate::landing_log::record_verification_at(tx, next, &written)?;
+    }
+    assert_eq!(outcome, Outcome::Applied);
+    Ok(outcome)
+}
+
+/// Stores a proposed baseline draft under its content id, a draft already stored applied
+/// again with no write. Inputs: the transaction, the draft and the request's writes.
+/// Output: the outcome, `project_missing`, or the refusal.
+fn propose(
+    tx: &Transaction<'_>,
+    draft: &BaselineDraft,
+    written: &mut Vec<VerificationWrite>,
+) -> Result<Outcome, EngineError> {
+    let id = draft.identity().map_err(db_error)?;
+    let project: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [draft.project_id.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(db_error)?;
+    if !project {
+        return rejected("project_missing");
+    }
+    if exists(tx, BASELINES, id.as_str())? {
+        let (stored, _, _) = baseline(tx, &id)?;
+        if stored != *draft {
+            return Err(db_error("baseline_tampered"));
+        }
+        return Ok(Outcome::Applied);
+    }
+    capacity(tx, BASELINES, written)?;
+    let changed = tx
+        .execute(
+            "INSERT INTO verification_baselines(id,project,body) VALUES (?1,?2,?3)",
+            params![
+                id.as_str(),
+                draft.project_id.as_str(),
+                serde_json::to_string(draft).map_err(db_error)?
+            ],
+        )
+        .map_err(db_error)?;
+    assert_eq!(changed, 1);
+    written.push((BASELINES, id.as_str().to_owned(), false));
+    Ok(Outcome::Applied)
+}
+
+/// The verification rows one request wrote or pruned, logged once it is applied.
+type VerificationWrite = crate::landing_log::VerificationWrite;
+
+/// The three verification tables a request writes.
+const BASELINES: &str = "verification_baselines";
+const CANDIDATES: &str = "verification_candidates";
+const ATTEMPTS: &str = "verification_attempts";
+
+/// Whether a verification table holds a row of that id. Inputs: the transaction, the table
+/// and the id. Output: the answer, or the store's refusal.
+fn exists(tx: &Transaction<'_>, table: &'static str, id: &str) -> Result<bool, EngineError> {
+    assert!([BASELINES, CANDIDATES, ATTEMPTS].contains(&table));
+    assert!(!id.is_empty(), "an id names a row");
+    tx.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id=?1)"),
+        [id],
+        |r| r.get(0),
+    )
+    .map_err(db_error)
 }
 
 /// Candidates (alias `c`) that can never be accepted again: their task is gone, their
@@ -508,17 +551,15 @@ const STALE_BASELINES: &str = "SELECT b.rowid FROM verification_baselines b WHER
     ORDER BY b.rowid";
 
 /// Bounds persistent authority records before inserting new material. At the ceiling it
-/// first prunes the oldest records that can never be used again, in this transaction.
-/// Takes a transaction and an internal table name. Returns an error while still full.
-fn capacity(tx: &Transaction<'_>, table: &str) -> Result<(), EngineError> {
-    assert!(
-        [
-            "verification_baselines",
-            "verification_candidates",
-            "verification_attempts"
-        ]
-        .contains(&table)
-    );
+/// first prunes the oldest records that can never be used again, in this transaction, each
+/// pruned row added to the request's writes. Takes a transaction, an internal table name and
+/// the writes. Returns an error while still full.
+fn capacity(
+    tx: &Transaction<'_>,
+    table: &'static str,
+    written: &mut Vec<VerificationWrite>,
+) -> Result<(), EngineError> {
+    assert!([BASELINES, CANDIDATES, ATTEMPTS].contains(&table));
     let counted = |tx: &Transaction<'_>| -> Result<i64, EngineError> {
         tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
             .map_err(db_error)
@@ -534,17 +575,12 @@ fn capacity(tx: &Transaction<'_>, table: &str) -> Result<(), EngineError> {
                 "SELECT a.rowid FROM verification_attempts a LEFT JOIN verification_candidates c ON c.id=a.candidate WHERE c.id IS NULL OR {STALE_CANDIDATE} ORDER BY a.rowid"
             ),
         };
-        tx.execute(
-            &format!("DELETE FROM {table} WHERE rowid IN ({stale} LIMIT ?1)"),
-            [count - 127],
-        )
-        .map_err(db_error)?;
-        if table == "verification_candidates" {
-            tx.execute(
-                "DELETE FROM verification_attempts WHERE candidate NOT IN (SELECT id FROM verification_candidates)",
-                [],
-            )
-            .map_err(db_error)?;
+        let pruned = format!("DELETE FROM {table} WHERE rowid IN ({stale} LIMIT ?1) RETURNING id");
+        prune(tx, (pruned.as_str(), [count - 127]), table, written)?;
+        if table == CANDIDATES {
+            let orphans = "DELETE FROM verification_attempts WHERE candidate NOT IN \
+                (SELECT id FROM verification_candidates) RETURNING id";
+            prune(tx, (orphans, params![]), ATTEMPTS, written)?;
         }
         count = counted(tx)?;
     }
@@ -555,14 +591,37 @@ fn capacity(tx: &Transaction<'_>, table: &str) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Deletes the rows one prune statement names and adds each to the request's writes as
+/// pruned. Inputs: the transaction, the `DELETE ... RETURNING id` statement, its parameters,
+/// its table and the writes. Output: Ok, or the store's refusal.
+fn prune(
+    tx: &Transaction<'_>,
+    (statement, params): (&str, impl rusqlite::Params),
+    table: &'static str,
+    written: &mut Vec<VerificationWrite>,
+) -> Result<(), EngineError> {
+    assert!(statement.starts_with("DELETE FROM "));
+    assert!(statement.ends_with(" RETURNING id"));
+    let mut deleting = tx.prepare(statement).map_err(db_error)?;
+    let ids = deleting
+        .query_map(params, |r| r.get::<_, String>(0))
+        .map_err(db_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(db_error)?;
+    written.extend(ids.into_iter().map(|id| (table, id, true)));
+    assert!(written.len() <= crate::state_log::TRANSACTION_EVENTS_MAX);
+    Ok(())
+}
+
 /// Dispatches host-only baseline and candidate authority operations.
-/// Takes live actor state, a typed host action and the store's revision before it.
-/// Plan and merge approval are never changed here.
+/// Takes live actor state, a typed host action, the store's revision before it and the
+/// request's writes. Plan and merge approval are never changed here.
 fn owner(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     action: &OwnerVerification,
     revision: u64,
+    written: &mut Vec<VerificationWrite>,
 ) -> Result<Outcome, EngineError> {
     match action {
         OwnerVerification::Approve { baseline_id } => approve(tx, baseline_id, revision),
@@ -577,6 +636,7 @@ fn owner(
                 return rejected("baseline_missing");
             }
             assert_eq!(changed, 1);
+            written.push((BASELINES, baseline_id.as_str().to_owned(), false));
             Ok(Outcome::Applied)
         }
         OwnerVerification::Register {
@@ -584,23 +644,23 @@ fn owner(
             task_id,
             snapshot,
             environment_id,
-        } => register(tx, config, id, task_id, snapshot, environment_id),
+        } => register(tx, config, id, task_id, snapshot, environment_id, written),
         OwnerVerification::Escalate { candidate_id, risk } => {
             let mut candidate = load_candidate(tx, candidate_id)?;
             candidate.escalation = candidate.escalation.max(*risk);
-            save_candidate(tx, &candidate)?;
+            save_candidate(tx, &candidate, written)?;
             Ok(Outcome::Applied)
         }
         OwnerVerification::FullSuite { candidate_id } => {
             let mut candidate = load_candidate(tx, candidate_id)?;
             candidate.full_suite = true;
-            save_candidate(tx, &candidate)?;
+            save_candidate(tx, &candidate, written)?;
             Ok(Outcome::Applied)
         }
         OwnerVerification::Verify {
             candidate_id,
             attempt_id,
-        } => record_attempt(tx, config, candidate_id, attempt_id),
+        } => record_attempt(tx, config, candidate_id, attempt_id, written),
         OwnerVerification::Inspect { candidate_id } => Ok(Outcome::Verification {
             state: Box::new(state(tx, config, candidate_id, None)?),
         }),
@@ -719,8 +779,9 @@ fn current_baseline(
 }
 
 /// Registers immutable candidate bytes against a pinned task contract.
-/// Takes host-captured source and environment identity plus task context.
-/// Existing candidate IDs cannot replace source or targets.
+/// Takes host-captured source and environment identity plus task context and the request's
+/// writes. An existing candidate id is refused before the cap prunes anything, so a refusal
+/// writes no row; existing candidate IDs cannot replace source or targets.
 fn register(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -728,6 +789,7 @@ fn register(
     task: &TaskId,
     snapshot: &CandidateSnapshot,
     environment: &EnvironmentId,
+    written: &mut Vec<VerificationWrite>,
 ) -> Result<Outcome, EngineError> {
     let context =
         crate::storage::task_context(tx, task)?.ok_or_else(|| db_error("task_missing"))?;
@@ -754,21 +816,22 @@ fn register(
         escalation: Risk::Low,
         full_suite: false,
     };
-    capacity(tx, "verification_candidates")?;
+    if exists(tx, CANDIDATES, id.as_str())? {
+        return rejected("candidate_exists");
+    }
+    capacity(tx, CANDIDATES, written)?;
     let changed = tx
         .execute(
-            "INSERT OR IGNORE INTO verification_candidates VALUES (?1,?2)",
+            "INSERT INTO verification_candidates VALUES (?1,?2)",
             params![
                 id.as_str(),
                 serde_json::to_string(&candidate).map_err(db_error)?
             ],
         )
         .map_err(db_error)?;
-    if changed == 0 {
-        return rejected("candidate_exists");
-    }
     assert_eq!(changed, 1);
     assert_eq!(load_candidate(tx, id)?, candidate);
+    written.push((CANDIDATES, id.as_str().to_owned(), false));
     Ok(Outcome::Applied)
 }
 
@@ -801,9 +864,13 @@ fn load_candidate(tx: &Transaction<'_>, id: &RequestId) -> Result<Candidate, Eng
 }
 
 /// Persists monotone host risk or full-suite updates.
-/// Takes a validated candidate and updates only that record.
-/// Immutable snapshot bytes remain bound to their original ID.
-fn save_candidate(tx: &Transaction<'_>, candidate: &Candidate) -> Result<(), EngineError> {
+/// Takes a validated candidate and the request's writes, updates only that record and adds
+/// it to the writes. Immutable snapshot bytes remain bound to their original ID.
+fn save_candidate(
+    tx: &Transaction<'_>,
+    candidate: &Candidate,
+    written: &mut Vec<VerificationWrite>,
+) -> Result<(), EngineError> {
     assert_eq!(
         candidate.snapshot.identity().map_err(db_error)?,
         candidate.snapshot_id
@@ -818,6 +885,7 @@ fn save_candidate(tx: &Transaction<'_>, candidate: &Candidate) -> Result<(), Eng
         )
         .map_err(db_error)?;
     assert_eq!(changed, 1);
+    written.push((CANDIDATES, candidate.id.as_str().to_owned(), false));
     Ok(())
 }
 
@@ -960,13 +1028,15 @@ fn attempt_page(
 }
 
 /// Retains an actual unavailable execution attempt without spawning code.
-/// Takes an immutable candidate and unique host attempt identity.
-/// No success claim or automatic retry can replace this evidence.
+/// Takes an immutable candidate, unique host attempt identity and the request's writes; an
+/// existing attempt id is refused before the cap prunes anything. No success claim or
+/// automatic retry can replace this evidence.
 fn record_attempt(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     candidate: &RequestId,
     attempt: &RequestId,
+    written: &mut Vec<VerificationWrite>,
 ) -> Result<Outcome, EngineError> {
     let state = state(tx, config, candidate, None)?;
     let unavailable =
@@ -994,10 +1064,13 @@ fn record_attempt(
         completed_at,
         execution_proven: false,
     };
-    capacity(tx, "verification_attempts")?;
+    if exists(tx, ATTEMPTS, attempt.as_str())? {
+        return rejected("attempt_exists");
+    }
+    capacity(tx, ATTEMPTS, written)?;
     let changed = tx
         .execute(
-            "INSERT OR IGNORE INTO verification_attempts VALUES (?1,?2,?3)",
+            "INSERT INTO verification_attempts VALUES (?1,?2,?3)",
             params![
                 attempt.as_str(),
                 candidate.as_str(),
@@ -1005,11 +1078,9 @@ fn record_attempt(
             ],
         )
         .map_err(db_error)?;
-    if changed == 0 {
-        return rejected("attempt_exists");
-    }
     assert_eq!(changed, 1);
     assert!(!receipt.execution_proven);
+    written.push((ATTEMPTS, attempt.as_str().to_owned(), false));
     Ok(Outcome::Applied)
 }
 
@@ -1116,6 +1187,6 @@ mod tests {
             .next()
             .unwrap()
             .push(0);
-        save_candidate(&transaction, &candidate).unwrap();
+        save_candidate(&transaction, &candidate, &mut Vec::new()).unwrap();
     }
 }

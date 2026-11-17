@@ -4,24 +4,29 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 /// Keeps a kept table's stored row, its cells by column name, as an owner text in parts
 /// under the row's part holders, releasing every part an earlier write kept past them.
-/// Inputs: the writer's transaction, the table and the row's id. Output: the row's project
-/// and the part digests, none without the row, `landing_log_change_set_too_large` past
-/// 64 MiB, `landing_log_row` or the owner text's refusal.
+/// A table without a project column, such as verification candidates and attempts, keeps
+/// its row with no project (QUESTION-1132 A). Inputs: the writer's transaction, the table
+/// and the row's id. Output: the row's project and the part digests, none without the row,
+/// `landing_log_change_set_too_large` past 64 MiB, `landing_log_row` or the owner text's
+/// refusal.
 pub(super) fn keep_row(
     tx: &Transaction<'_>,
     table: &str,
     key: &serde_json::Value,
-) -> Result<Option<(String, Parts)>, EngineError> {
+) -> Result<Option<(Option<String>, Parts)>, EngineError> {
     let Some(cells) = row_cells(tx, table, key)? else {
         return Ok(None);
     };
     let refused = || failure("landing_log_row");
-    let project = cells
-        .get("project")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(refused)?
-        .to_owned();
-    let owner = crate::protocol::ProjectId::new(project.as_str()).map_err(|_| refused())?;
+    let project = match cells.get("project") {
+        None => None,
+        Some(named) => Some(named.as_str().ok_or_else(refused)?.to_owned()),
+    };
+    let owner = project
+        .as_deref()
+        .map(crate::protocol::ProjectId::new)
+        .transpose()
+        .map_err(|_| refused())?;
     let text = serde_json::to_vec(&cells).map_err(|_| refused())?;
     if text.len() > ROW_BYTES_MAX {
         return Err(failure(ROW_TOO_LARGE));
@@ -29,7 +34,7 @@ pub(super) fn keep_row(
     let mut parts = Vec::with_capacity(ROW_PARTS_MAX);
     for (index, part) in text.chunks(crate::owner_texts::TEXT_BYTES_MAX).enumerate() {
         let holder = part_holder(table, key, index);
-        parts.push(crate::owner_texts::keep(tx, &holder, Some(&owner), part)?);
+        parts.push(crate::owner_texts::keep(tx, &holder, owner.as_ref(), part)?);
     }
     assert!(
         (1..=ROW_PARTS_MAX).contains(&parts.len()),
@@ -38,8 +43,30 @@ pub(super) fn keep_row(
     for index in parts.len()..ROW_PARTS_MAX {
         crate::owner_texts::release(tx, &part_holder(table, key, index))?;
     }
-    assert_eq!(owner.as_str(), project);
+    assert_eq!(
+        owner.as_ref().map(|owner| owner.as_str()),
+        project.as_deref()
+    );
     Ok(Some((project, parts)))
+}
+
+/// Releases every part a kept row's text was kept in, for a row its writer deleted, so a
+/// replay skips the saves before it as superseded. Inputs: the writer's transaction, the table
+/// and the row's id. Output: Ok, or the owner text's refusal.
+pub(super) fn release_row(
+    tx: &Transaction<'_>,
+    table: &str,
+    key: &serde_json::Value,
+) -> Result<(), EngineError> {
+    assert!(KEPT_TABLES.contains(&table), "a kept table");
+    assert!(
+        !tx.is_autocommit(),
+        "a row is released in its writer's transaction"
+    );
+    for index in 0..ROW_PARTS_MAX {
+        crate::owner_texts::release(tx, &part_holder(table, key, index))?;
+    }
+    Ok(())
 }
 
 /// The part digests of one change set row's text, in order.
@@ -77,11 +104,23 @@ pub(super) fn bound(key: &serde_json::Value) -> Result<rusqlite::types::Value, E
     }
 }
 
-/// The change set table and the rule request table, logged by their rows' part digests
-/// rather than by cells (QUESTION-1056 A, QUESTION-1120 A), in run order.
+/// The change set table, the rule request table and the three verification tables, logged
+/// by their rows' part digests rather than by cells (QUESTION-1056 A, QUESTION-1120 A,
+/// QUESTION-1132 A), in run order.
 pub(super) const CHANGE_SETS: &str = "landing_change_sets";
 pub(super) const RULE_REQUESTS: &str = "github_rule_requests";
-pub(super) const KEPT_TABLES: [&str; 2] = [CHANGE_SETS, RULE_REQUESTS];
+pub(super) const VERIFICATION_TABLES: [&str; 3] = [
+    "verification_baselines",
+    "verification_candidates",
+    "verification_attempts",
+];
+pub(super) const KEPT_TABLES: [&str; 5] = [
+    CHANGE_SETS,
+    RULE_REQUESTS,
+    VERIFICATION_TABLES[0],
+    VERIFICATION_TABLES[1],
+    VERIFICATION_TABLES[2],
+];
 
 /// The most columns a kept row has, a bound on the reads of its cells.
 pub(super) const ROW_COLUMNS_MAX: usize = 64;
@@ -128,15 +167,15 @@ pub(super) fn row_cells(
 }
 
 /// Upserts a change set row from the text kept in its parts; a row with a part a later
-/// write released is superseded and is skipped. Inputs: the connection, the set's id and
-/// project and the part digests. Output: whether the row was upserted, `landing_log_row` for
-/// a part count past the bound or a text that is not one row's cells, or the refusal of
-/// [`upsert_row`].
+/// write released is superseded and is skipped. Inputs: the connection, the row's id and
+/// project, none for a table without one, and the part digests. Output: whether the row was
+/// upserted, `landing_log_row` for a part count past the bound or a text that is not one
+/// row's cells, or the refusal of [`upsert_row`].
 pub(super) fn upsert_kept(
     db: &Connection,
     table: &str,
     key: &serde_json::Value,
-    project: &str,
+    project: Option<&str>,
     parts: &[crate::owner_texts::TextDigest],
 ) -> Result<bool, EngineError> {
     if !(1..=ROW_PARTS_MAX).contains(&parts.len()) {
@@ -160,14 +199,14 @@ pub(super) fn upsert_kept(
 
 /// Upserts a change set row from its cells by column name: a cell the table has no column
 /// for, or of a type no column holds, fails closed; a column with no cell takes its default.
-/// A store without the table refuses every cell. Inputs: the connection, the set's id and
-/// project and the cells. Output: Ok, `landing_log_row` for cells of another set,
-/// `landing_log_row_cell`, or the store's refusal.
+/// A store without the table refuses every cell. Inputs: the connection, the row's id and
+/// project, none for a table without one, and the cells. Output: Ok, `landing_log_row` for
+/// cells of another row, `landing_log_row_cell`, or the store's refusal.
 pub(super) fn upsert_row(
     db: &Connection,
     table: &str,
     key: &serde_json::Value,
-    project: &str,
+    project: Option<&str>,
     cells: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), EngineError> {
     use rusqlite::types::Value as Stored;
@@ -175,7 +214,7 @@ pub(super) fn upsert_row(
     assert!(KEPT_TABLES.contains(&table), "a kept table");
     let refused = || failure("landing_log_row_cell");
     let named = cells.get("project").and_then(Cell::as_str);
-    if cells.get("id") != Some(key) || named != Some(project) {
+    if cells.get("id") != Some(key) || named != project {
         return Err(failure("landing_log_row"));
     }
     let columns = table_columns(db, table)?;
@@ -208,7 +247,7 @@ pub(super) fn upsert_row(
     db.execute(&sql, rusqlite::params_from_iter(values))
         .map_err(|_| failure("changes_unavailable"))?;
     assert!(names.len() <= columns.len());
-    assert!(names.len() >= 2, "a row has its id and project");
+    assert!(names.len() >= 2, "a row has its id and a cell");
     Ok(())
 }
 
@@ -231,7 +270,8 @@ pub(super) fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>,
     Ok(columns)
 }
 
-/// Every row of a kept table as a snapshot carries it: its id, project and the part digests
+/// Every row of a kept table as a snapshot carries it: its id, project (null for a table
+/// without one) and the part digests
 /// of its row, kept in the run's transaction; a row past 64 MiB is left out by code, never
 /// refused, so the store opens; a store without the table has none. Inputs: the run's
 /// transaction and the table. Output: the rows by id, `landing_log_snapshot_rows` past
@@ -289,13 +329,13 @@ pub(super) fn restore_kept(db: &Connection, chunk: &Chunk) -> Result<(), EngineE
         return Err(failure("landing_log_chunk_invalid"));
     }
     for row in &chunk.rows {
-        let (key, project, parts): (serde_json::Value, String, Parts) =
+        let (key, project, parts): (serde_json::Value, Option<String>, Parts) =
             serde_json::from_value(row.clone())
                 .map_err(|_| failure("landing_log_chunk_invalid"))?;
         if !(1..=ROW_PARTS_MAX).contains(&parts.len()) {
             return Err(failure("landing_log_chunk_invalid"));
         }
-        upsert_kept(db, table, &key, &project, &parts)?;
+        upsert_kept(db, table, &key, project.as_deref(), &parts)?;
     }
     assert!(chunk.rows.len() <= SNAPSHOT_ROWS_MAX);
     Ok(())

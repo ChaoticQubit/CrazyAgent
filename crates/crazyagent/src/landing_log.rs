@@ -6,8 +6,8 @@ use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSH
 mod kept;
 
 use kept::{
-    CHANGE_SETS, KEPT_TABLES, ROW_PARTS_MAX, RULE_REQUESTS, keep_row, kept_rows, restore_kept,
-    upsert_kept,
+    CHANGE_SETS, KEPT_TABLES, ROW_PARTS_MAX, RULE_REQUESTS, VERIFICATION_TABLES, keep_row,
+    kept_rows, release_row, restore_kept, upsert_kept,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -47,13 +47,16 @@ pub const RULE_REQUEST_SAVED: &str = "RuleRequestSaved";
 /// A verification baseline, candidate or attempt written: the stored row is an owner text,
 /// the body its table, id, project and part digests (QUESTION-1132 A).
 pub const VERIFICATION_SAVED: &str = "VerificationSaved";
+/// A verification candidate, attempt or baseline the 128-row cap pruned: the body its table
+/// and id (QUESTION-1132 A).
+pub const VERIFICATION_FORGOTTEN: &str = "VerificationForgotten";
 /// A Not now to a project's publish prompt, kept with the time it asks again
 /// (`github_publish_prompt`).
 pub const PUBLISH_PROMPT_SNOOZED: &str = "PublishPromptSnoozed";
 /// A Don't ask again to a project's publish prompt.
 pub const PUBLISH_PROMPT_NEVER: &str = "PublishPromptNever";
 /// Every landing event kind.
-pub const KINDS: [&str; 15] = [
+pub const KINDS: [&str; 17] = [
     AGENT_BRANCH_SET,
     AGENT_BRANCH_FORGOTTEN,
     BASE_SET,
@@ -69,6 +72,8 @@ pub const KINDS: [&str; 15] = [
     PUBLISH_PROMPT_NEVER,
     CHANGE_SET_SAVED,
     RULE_REQUEST_SAVED,
+    VERIFICATION_SAVED,
+    VERIFICATION_FORGOTTEN,
 ];
 
 /// Whether a body path is absolute: `/`, then names `owner_edit::check_path` accepts, so
@@ -174,6 +179,37 @@ pub struct Requested {
     pub row: Vec<crate::owner_texts::TextDigest>,
 }
 
+/// A verification table's stored row: the table, the row's id, its project (a baseline's
+/// only, as only that table has one) and the digests of the row's cells, kept as an owner
+/// text in parts (QUESTION-1132 A).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Verified {
+    pub table: String,
+    pub id: String,
+    pub project: Option<String>,
+    pub row: Vec<crate::owner_texts::TextDigest>,
+}
+
+/// A verification table's row the 128-row cap pruned: the table and the row's id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pruned {
+    pub table: String,
+    pub id: String,
+}
+
+/// Whether a verification body names one of the three tables and an id that table's rows
+/// take: a baseline id for baselines, a request id for candidates and attempts. Inputs:
+/// the table and the id. Output: the answer.
+fn verification_key(table: &str, id: &str) -> bool {
+    match VERIFICATION_TABLES.iter().position(|known| *known == table) {
+        Some(0) => crate::protocol::BaselineId::new(id).is_ok(),
+        Some(_) => crate::protocol::RequestId::new(id).is_ok(),
+        None => false,
+    }
+}
+
 /// A Not now to a project's publish prompt: the project id and the time in ms it asks again,
 /// from 0.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +258,8 @@ pub enum Change {
     PublishPromptNever(Project),
     ChangeSetSaved(Saved),
     RuleRequestSaved(Requested),
+    VerificationSaved(Verified),
+    VerificationForgotten(Pruned),
 }
 
 impl Change {
@@ -280,6 +318,16 @@ impl Change {
                         .number
                         .is_none_or(|number| number >= 1 && i64::try_from(number).is_ok())
             }
+            Self::VerificationSaved(saved) => {
+                (1..=ROW_PARTS_MAX).contains(&saved.row.len())
+                    && verification_key(&saved.table, &saved.id)
+                    && saved.project.is_some() == (saved.table == VERIFICATION_TABLES[0])
+                    && saved
+                        .project
+                        .as_deref()
+                        .is_none_or(|project| crate::protocol::ProjectId::new(project).is_ok())
+            }
+            Self::VerificationForgotten(gone) => verification_key(&gone.table, &gone.id),
         }
     }
 
@@ -303,7 +351,9 @@ impl Change {
             | Self::ChangeSetNumbered(_)
             | Self::BaselineApproved(_)
             | Self::ChangeSetSaved(_)
-            | Self::RuleRequestSaved(_) => None,
+            | Self::RuleRequestSaved(_)
+            | Self::VerificationSaved(_)
+            | Self::VerificationForgotten(_) => None,
         }
     }
 
@@ -323,7 +373,9 @@ impl Change {
             | Self::PublishPromptSnoozed(_)
             | Self::PublishPromptNever(_)
             | Self::ChangeSetSaved(_)
-            | Self::RuleRequestSaved(_) => Some(1),
+            | Self::RuleRequestSaved(_)
+            | Self::VerificationSaved(_)
+            | Self::VerificationForgotten(_) => Some(1),
             Self::OwnerEditsSettled(_) | Self::OwnerEditsDropped(_) => Some(PATHS_PER_WORKTREE_MAX),
             Self::OwnerEditsForgotten(_) | Self::WorktreeOwnerEditsForgotten(_) => None,
         }
@@ -347,6 +399,8 @@ impl Change {
             Self::PublishPromptNever(_) => PUBLISH_PROMPT_NEVER,
             Self::ChangeSetSaved(_) => CHANGE_SET_SAVED,
             Self::RuleRequestSaved(_) => RULE_REQUEST_SAVED,
+            Self::VerificationSaved(_) => VERIFICATION_SAVED,
+            Self::VerificationForgotten(_) => VERIFICATION_FORGOTTEN,
         };
         assert!(KINDS.contains(&kind), "the landing kind {kind} is in KINDS");
         kind
@@ -376,6 +430,8 @@ impl Change {
             Self::PublishPromptNever(never) => serde_json::to_vec(never),
             Self::ChangeSetSaved(saved) => serde_json::to_vec(saved),
             Self::RuleRequestSaved(requested) => serde_json::to_vec(requested),
+            Self::VerificationSaved(saved) => serde_json::to_vec(saved),
+            Self::VerificationForgotten(gone) => serde_json::to_vec(gone),
         };
         body.map_err(|_| failure("landing_log_body"))
     }
@@ -407,6 +463,8 @@ impl Change {
             PUBLISH_PROMPT_NEVER => serde_json::from_slice(body).map(Self::PublishPromptNever),
             CHANGE_SET_SAVED => serde_json::from_slice(body).map(Self::ChangeSetSaved),
             RULE_REQUEST_SAVED => serde_json::from_slice(body).map(Self::RuleRequestSaved),
+            VERIFICATION_SAVED => serde_json::from_slice(body).map(Self::VerificationSaved),
+            VERIFICATION_FORGOTTEN => serde_json::from_slice(body).map(Self::VerificationForgotten),
             _ => return Err(refused()),
         };
         let change = change.map_err(|_| refused())?;
@@ -447,6 +505,14 @@ pub(crate) fn record_at(
     next: u64,
     change: &Change,
 ) -> Result<u64, EngineError> {
+    record_all_at(tx, next, std::slice::from_ref(change))
+}
+
+/// Logs a write group inside an owner request whose next revision is already signed, as
+/// [`record_at`] logs one change. Inputs: the request's transaction, its next revision and
+/// the changes, at least one and at most `TRANSACTION_EVENTS_MAX`. Output: the last event's
+/// seq, `state_log_revision_stale`, or the refusal.
+fn record_all_at(tx: &Transaction<'_>, next: u64, changes: &[Change]) -> Result<u64, EngineError> {
     let stale = || failure("state_log_revision_stale");
     let before = next.checked_sub(1).ok_or_else(stale)?;
     let next_signed = i64::try_from(next).map_err(|_| stale())?;
@@ -461,13 +527,57 @@ pub(crate) fn record_at(
     }
     let fence = crate::worktrees::log::store_fence(tx)?;
     let mut appender = Appender::owner(tx, next, fence)?;
-    let seq = append_all(&mut appender, std::slice::from_ref(change))?;
+    let seq = append_all(&mut appender, changes)?;
     assert_eq!(
         appender.revision(),
         next,
         "the change is logged at the request's revision"
     );
     Ok(seq)
+}
+
+/// One verification row an owner request wrote or the 128-row cap pruned: the table, one of
+/// [`VERIFICATION_TABLES`], the row's id and whether it was pruned (QUESTION-1132 A).
+pub(crate) type VerificationWrite = (&'static str, String, bool);
+
+/// Logs the verification rows an applied owner request wrote and pruned at its signed next
+/// revision, in write order: a written row kept as an owner text and logged as
+/// `VerificationSaved`, a pruned one released and logged as `VerificationForgotten`. Inputs:
+/// the request's transaction, its next revision and the writes, at least one. Output: the
+/// last event's seq, `landing_log_row` for a written row the store lacks, or the refusal.
+pub(crate) fn record_verification_at(
+    tx: &Transaction<'_>,
+    next: u64,
+    writes: &[VerificationWrite],
+) -> Result<u64, EngineError> {
+    assert!(
+        !writes.is_empty(),
+        "an applied request logs the rows it wrote"
+    );
+    let mut changes = Vec::with_capacity(writes.len());
+    for (table, id, pruned) in writes {
+        assert!(VERIFICATION_TABLES.contains(table), "a verification table");
+        let key = serde_json::json!(id);
+        let change = if *pruned {
+            release_row(tx, table, &key)?;
+            Change::VerificationForgotten(Pruned {
+                table: (*table).to_owned(),
+                id: id.clone(),
+            })
+        } else {
+            let (project, row) =
+                keep_row(tx, table, &key)?.ok_or_else(|| failure("landing_log_row"))?;
+            Change::VerificationSaved(Verified {
+                table: (*table).to_owned(),
+                id: id.clone(),
+                project,
+                row,
+            })
+        };
+        changes.push(change);
+    }
+    assert_eq!(changes.len(), writes.len());
+    record_all_at(tx, next, &changes)
 }
 
 /// Appends and applies a write group in order: every body is checked first, then each
@@ -537,6 +647,7 @@ pub(crate) fn record_row(tx: &Transaction<'_>, id: &str) -> Result<bool, EngineE
     let Some((project, parts)) = keep_row(tx, CHANGE_SETS, &serde_json::json!(id))? else {
         return Ok(false);
     };
+    let project = project.ok_or_else(|| failure("landing_log_row"))?;
     let refused = || failure("landing_log_row");
     let number: Option<i64> = tx
         .query_row(
@@ -603,6 +714,7 @@ fn request_change(tx: &Transaction<'_>, id: i64) -> Result<Option<Change>, Engin
     let Some((project, row)) = keep_row(tx, RULE_REQUESTS, &serde_json::json!(id))? else {
         return Ok(None);
     };
+    let project = project.ok_or_else(|| failure("landing_log_row"))?;
     let request = u64::try_from(id).map_err(|_| failure("landing_log_row"))?;
     assert!(request >= 1, "a rule request id is positive");
     Ok(Some(Change::RuleRequestSaved(Requested {
@@ -618,7 +730,13 @@ fn request_change(tx: &Transaction<'_>, id: i64) -> Result<Option<Change>, Engin
 /// store's refusal.
 fn apply_saved(db: &Connection, saved: &Saved) -> Result<(), EngineError> {
     let key = serde_json::json!(saved.change_set);
-    if !upsert_kept(db, CHANGE_SETS, &key, &saved.project, &saved.row)? {
+    if !upsert_kept(
+        db,
+        CHANGE_SETS,
+        &key,
+        Some(saved.project.as_str()),
+        &saved.row,
+    )? {
         return Ok(());
     }
     if let Some(number) = saved.number {
@@ -642,7 +760,16 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
     }
     if let Change::RuleRequestSaved(requested) = change {
         let key = serde_json::json!(requested.request);
-        return upsert_kept(db, RULE_REQUESTS, &key, &requested.project, &requested.row).map(drop);
+        let project = Some(requested.project.as_str());
+        return upsert_kept(db, RULE_REQUESTS, &key, project, &requested.row).map(drop);
+    }
+    if let Change::VerificationSaved(saved) = change {
+        let table = VERIFICATION_TABLES
+            .into_iter()
+            .find(|table| *table == saved.table)
+            .ok_or_else(|| failure("landing_log_row"))?;
+        let key = serde_json::json!(saved.id);
+        return upsert_kept(db, table, &key, saved.project.as_deref(), &saved.row).map(drop);
     }
     let unavailable = |error: rusqlite::Error| store_refusal(change, &error);
     if let Some(schema) = change.schema() {
@@ -664,7 +791,9 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
 /// error. Output: the refusal.
 fn store_refusal(change: &Change, error: &rusqlite::Error) -> EngineError {
     let refusal = match change {
-        Change::BaselineApproved(_) => EngineError(error.to_string()),
+        Change::BaselineApproved(_)
+        | Change::VerificationSaved(_)
+        | Change::VerificationForgotten(_) => EngineError(error.to_string()),
         _ => failure("changes_unavailable"),
     };
     assert!(!refusal.0.is_empty(), "a refusal names its cause");
@@ -740,7 +869,14 @@ fn statements(db: &Connection, change: &Change) -> rusqlite::Result<usize> {
              ON CONFLICT(project) DO UPDATE SET never = 1",
             [&never.project],
         ),
-        Change::ChangeSetSaved(_) | Change::RuleRequestSaved(_) => {
+        Change::VerificationForgotten(gone) => match VERIFICATION_TABLES
+            .into_iter()
+            .find(|table| *table == gone.table)
+        {
+            Some(table) => db.execute(&format!("DELETE FROM {table} WHERE id=?1"), [&gone.id]),
+            None => Err(rusqlite::Error::InvalidParameterName(gone.table.clone())),
+        },
+        Change::ChangeSetSaved(_) | Change::RuleRequestSaved(_) | Change::VerificationSaved(_) => {
             unreachable!("apply runs a kept row's save on its own")
         }
     }
@@ -999,13 +1135,14 @@ fn restore(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
 }
 
 /// The landing kinds whose body names a project by the key `project`.
-const PROJECT_KINDS: [&str; 6] = [
+const PROJECT_KINDS: [&str; 7] = [
     CHANGE_SET_NUMBERED,
     BASELINE_APPROVED,
     PUBLISH_PROMPT_SNOOZED,
     PUBLISH_PROMPT_NEVER,
     CHANGE_SET_SAVED,
     RULE_REQUEST_SAVED,
+    VERIFICATION_SAVED,
 ];
 
 /// Tombstones every logged landing event of a project, for Create demo's clear of an earlier
