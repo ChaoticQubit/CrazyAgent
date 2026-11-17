@@ -1220,12 +1220,20 @@ async fn homed(engine: &Engine, home: &Path) -> Owner {
     owner
 }
 
+/// The one intake job a status read lists, for a row that holds one job at a time.
+/// Inputs: the listed jobs and what the one job is, for the failure message.
+/// Output: that job; fails when the read lists none or several.
+fn only(jobs: Vec<JobView>, what: &str) -> JobView {
+    assert_eq!(jobs.len(), 1, "{what}: {jobs:?}");
+    jobs.into_iter().next().expect("the one job")
+}
+
 /// Reads the intake job until `want` holds, failing at once when it ended otherwise.
 async fn job_until(owner: &OwnerController, want: impl Fn(&JobView) -> bool) -> JobView {
     let client = owner.owner_client().unwrap();
     let start = Instant::now();
     loop {
-        let job = client.job_status().await.unwrap().expect("a job");
+        let job = only(client.job_status().await.unwrap(), "a job");
         if want(&job) {
             return job;
         }
@@ -1306,7 +1314,7 @@ async fn an_intake_job_adds_a_folder_apart_from_its_client_and_records_the_add()
         "{recorded:?}"
     );
     assert!(client.job_dismiss(id("intake-copy")).await.unwrap());
-    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(client.job_status().await.unwrap().is_empty());
     engine.stop().await;
 }
 
@@ -1550,7 +1558,10 @@ async fn a_job_start_is_refused_job_busy_while_a_direct_add_copies() {
         refused.0, "job_busy",
         "a job start while a direct add copies"
     );
-    assert_eq!(client.job_status().await.unwrap(), None, "no job was made");
+    assert!(
+        client.job_status().await.unwrap().is_empty(),
+        "no job was made"
+    );
     let answered = running.await.unwrap().unwrap();
     assert!(
         matches!(&answered, OwnerResponse::Applied { operation }
@@ -1765,7 +1776,7 @@ async fn an_engine_stop_ends_a_running_intake_job_with_no_copy_left() {
     );
     let after = engine.owner().await;
     let status = after.owner_client().unwrap().job_status().await.unwrap();
-    assert_eq!(status, None, "a new engine has no job");
+    assert!(status.is_empty(), "a new engine has no job");
     engine.stop().await;
 }
 
@@ -1838,7 +1849,7 @@ async fn an_engine_start_clears_an_add_cut_short_and_shows_how_it_ended() {
     engine.restart().await;
     let after = engine.owner().await;
     let client = after.owner_client().unwrap();
-    let restored = client.job_status().await.unwrap().expect("the cut add");
+    let restored = only(client.job_status().await.unwrap(), "the cut add");
     assert_eq!(restored.id, id("cut-1"));
     let interrupted = JobState::Failed {
         code: "home_add_interrupted".into(),
@@ -1851,14 +1862,14 @@ async fn an_engine_start_clears_an_add_cut_short_and_shows_how_it_ended() {
         "1 1\n"
     );
     assert!(client.job_dismiss(id("cut-1")).await.unwrap());
-    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(client.job_status().await.unwrap().is_empty());
 
     fs::create_dir(&landed).unwrap();
     sql(&database, &cut("cut-2"));
     engine.restart().await;
     let again = engine.owner().await;
     let client = again.owner_client().unwrap();
-    let restored = client.job_status().await.unwrap().expect("the landed move");
+    let restored = only(client.job_status().await.unwrap(), "the landed move");
     let left = JobState::Failed {
         code: "home_move_source_left".into(),
         phase: Phase::Clearing,
@@ -1988,7 +1999,7 @@ async fn an_intake_job_downloads_a_real_icloud_folder_with_moving_counts_and_cop
     let start = Instant::now();
     let mut counts = std::collections::BTreeSet::new();
     let ended = loop {
-        let job = client.job_status().await.unwrap().expect("a job");
+        let job = only(client.job_status().await.unwrap(), "a job");
         match &job.state {
             JobState::Downloading { progress } => {
                 counts.insert(progress.done);
@@ -2058,7 +2069,7 @@ async fn an_evicted_icloud_folder_is_not_asked_about_a_linked_checkout_before_it
         .unwrap();
     let start = Instant::now();
     let ended = loop {
-        let job = client.job_status().await.unwrap().expect("a job");
+        let job = only(client.job_status().await.unwrap(), "a job");
         match &job.state {
             JobState::Downloading { .. } | JobState::Copying { .. } | JobState::Clearing => {}
             _ => break job,
@@ -2184,9 +2195,12 @@ async fn a_move_job_moves_a_project_apart_from_its_client_and_records_the_move()
         .await
         .unwrap_err();
     assert_eq!(again.0, "move_project_already_home");
-    assert_eq!(client.job_status().await.unwrap().unwrap().id, id("move-1"));
+    assert_eq!(
+        only(client.job_status().await.unwrap(), "move-1").id,
+        id("move-1")
+    );
     assert!(client.job_dismiss(id("move-1")).await.unwrap());
-    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(client.job_status().await.unwrap().is_empty());
     engine.stop().await;
 }
 
@@ -2411,7 +2425,7 @@ async fn an_engine_start_shows_a_project_move_an_engine_stop_cut_short() {
     engine.restart().await;
     let mut after = engine.owner().await;
     let client = after.owner_client().unwrap();
-    let restored = client.job_status().await.unwrap().expect("the cut move");
+    let restored = only(client.job_status().await.unwrap(), "the cut move");
     assert_eq!(restored.id, id("move-cut"));
     assert_eq!(restored.kind, JobKind::MoveProject);
     assert_eq!(restored.project_id.as_ref(), Some(&reading));
@@ -2425,14 +2439,13 @@ async fn an_engine_start_shows_a_project_move_an_engine_stop_cut_short() {
     assert_eq!(repositories(&database, &reading), [text(&origin)]);
     assert_eq!(pending_moves(&database), 0);
     assert!(client.job_dismiss(id("move-cut")).await.unwrap());
-    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(client.job_status().await.unwrap().is_empty());
     after.detach();
     engine.restart().await;
     let mut again = engine.owner().await;
     let client = again.owner_client().unwrap();
-    assert_eq!(
-        client.job_status().await.unwrap(),
-        None,
+    assert!(
+        client.job_status().await.unwrap().is_empty(),
         "a dismissed move stays gone"
     );
 
@@ -2442,7 +2455,7 @@ async fn an_engine_start_shows_a_project_move_an_engine_stop_cut_short() {
     engine.restart().await;
     let last = engine.owner().await;
     let client = last.owner_client().unwrap();
-    let landed = client.job_status().await.unwrap().expect("the landed move");
+    let landed = only(client.job_status().await.unwrap(), "the landed move");
     assert_eq!(landed.id, id("move-landed"));
     assert_eq!(landed.state, JobState::Done);
     assert_eq!(repositories(&database, &reading), [text(&target)]);
@@ -2545,14 +2558,10 @@ async fn an_engine_start_shows_a_project_move_whose_old_folder_was_left() {
     engine.restart().await;
     let mut after = engine.owner().await;
     let client = after.owner_client().unwrap();
-    let restored = client
-        .job_status()
-        .await
-        .unwrap()
-        .map(|job| (job.id, job.kind, job.project_id, job.source, job.state));
+    let job = only(client.job_status().await.unwrap(), "the left move");
     assert_eq!(
-        restored,
-        Some((
+        (job.id, job.kind, job.project_id, job.source, job.state),
+        (
             id("move-left"),
             JobKind::MoveProject,
             Some(reading.clone()),
@@ -2561,7 +2570,7 @@ async fn an_engine_start_shows_a_project_move_whose_old_folder_was_left() {
                 code: "move_project_old_folder_left".into(),
                 phase: Phase::Clearing,
             }
-        ))
+        )
     );
     assert_eq!(fs::read(origin.join("notes.txt")).unwrap(), b"left\n");
     assert!(client.job_dismiss(id("move-left")).await.unwrap());
@@ -2569,9 +2578,8 @@ async fn an_engine_start_shows_a_project_move_whose_old_folder_was_left() {
     engine.restart().await;
     let mut again = engine.owner().await;
     let client = again.owner_client().unwrap();
-    assert_eq!(
-        client.job_status().await.unwrap(),
-        None,
+    assert!(
+        client.job_status().await.unwrap().is_empty(),
         "a dismissed warning stays gone"
     );
 
@@ -2581,7 +2589,7 @@ async fn an_engine_start_shows_a_project_move_whose_old_folder_was_left() {
     engine.restart().await;
     let last = engine.owner().await;
     let client = last.owner_client().unwrap();
-    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(client.job_status().await.unwrap().is_empty());
     engine.stop().await;
 }
 

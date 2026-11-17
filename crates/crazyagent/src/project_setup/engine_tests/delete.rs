@@ -1939,7 +1939,9 @@ async fn an_engine_start_shows_a_delete_cut_short_as_the_job_and_keep_clears_it_
     engine.restart().await;
     let owner = engine.owner().await;
     let client = owner.owner_client().unwrap();
-    let shown = client.job_status().await.unwrap().expect("the cut delete");
+    let jobs = client.job_status().await.unwrap();
+    assert_eq!(jobs.len(), 1, "the cut delete alone");
+    let shown = &jobs[0];
     assert_eq!(shown.id.as_str(), "delete-9");
     assert_eq!(shown.kind, crate::projects_home::job::JobKind::Delete);
     assert_eq!(shown.source, NAME);
@@ -1960,7 +1962,7 @@ async fn an_engine_start_shows_a_delete_cut_short_as_the_job_and_keep_clears_it_
             .await
             .unwrap()
     );
-    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(client.job_status().await.unwrap().is_empty());
     assert!(
         delete_notices(&owner, &project).await.is_empty(),
         "Keep the project clears the banner"
@@ -1972,15 +1974,14 @@ async fn an_engine_start_shows_a_delete_cut_short_as_the_job_and_keep_clears_it_
     engine.restart().await;
     let owner = engine.owner().await;
     let client = owner.owner_client().unwrap();
-    assert!(client.job_status().await.unwrap().is_some());
+    assert_eq!(client.job_status().await.unwrap().len(), 1);
     let notice = delete_notices(&owner, &project).await.remove(0);
     owner
         .recovery_dismiss(notice.action_kind, notice.id)
         .await
         .unwrap();
-    assert_eq!(
-        client.job_status().await.unwrap(),
-        None,
+    assert!(
+        client.job_status().await.unwrap().is_empty(),
         "the banner's Dismiss clears the Home job"
     );
     drop(owner);
