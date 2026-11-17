@@ -259,6 +259,7 @@ fn read_dacl(path: &[u16]) -> Result<(Option<Words>, u16), u32> {
     assert_eq!(path.last(), Some(&0));
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     let mut dacl: *mut ACL = std::ptr::null_mut();
+    let started = std::time::Instant::now();
     let status = unsafe {
         GetNamedSecurityInfoW(
             path.as_ptr(),
@@ -271,6 +272,7 @@ fn read_dacl(path: &[u16]) -> Result<(Option<Words>, u16), u32> {
             &mut descriptor,
         )
     };
+    probe_note("get", path, started);
     if status != ERROR_SUCCESS {
         return Err(status);
     }
@@ -298,6 +300,7 @@ fn read_dacl(path: &[u16]) -> Result<(Option<Words>, u16), u32> {
 fn write_dacl(path: &[u16], dacl: &Words, info: OBJECT_SECURITY_INFORMATION) -> Result<(), u32> {
     assert_eq!(path.last(), Some(&0));
     assert_ne!(info & DACL_SECURITY_INFORMATION, 0);
+    let started = std::time::Instant::now();
     let status = unsafe {
         SetNamedSecurityInfoW(
             path.as_ptr(),
@@ -309,8 +312,28 @@ fn write_dacl(path: &[u16], dacl: &Words, info: OBJECT_SECURITY_INFORMATION) -> 
             std::ptr::null(),
         )
     };
+    probe_note("set", path, started);
     if status != ERROR_SUCCESS {
         return Err(status);
     }
     Ok(())
+}
+
+/// Appends one timed access-list call to the file CRAZYAGENT_PROBE_ACL_LOG names, when it is
+/// set, for the ARM64 Defender probe on a test-only farm branch. Inputs: the call kind, the
+/// NUL-terminated UTF-16 path and when the call started. Output: none; a failed append is
+/// dropped, so the probe never changes what the boundary does.
+fn probe_note(kind: &str, path: &[u16], started: std::time::Instant) {
+    let elapsed = started.elapsed();
+    let Some(log) = std::env::var_os("CRAZYAGENT_PROBE_ACL_LOG") else {
+        return;
+    };
+    assert_eq!(path.last(), Some(&0));
+    let shown = String::from_utf16_lossy(&path[..path.len() - 1]);
+    let line = format!("{kind} {:.3} {shown}\n", elapsed.as_secs_f64() * 1000.0);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
 }

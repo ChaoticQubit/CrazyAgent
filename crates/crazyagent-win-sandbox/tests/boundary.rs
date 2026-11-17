@@ -170,6 +170,15 @@ fn container_sid(case: &Case) -> String {
     sid
 }
 
+/// Prints how long one step of the probed row took, for the ARM64 Defender probe on a
+/// test-only farm branch. Inputs: the step name and when it started. Output: none.
+fn step(name: &str, started: std::time::Instant) {
+    eprintln!(
+        "probe-step {name} {:.0} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
 fn ran(output: &Output) -> String {
     format!(
         "exit {:?} stdout {:?} stderr {:?}",
@@ -289,7 +298,10 @@ fn an_agent_reads_its_project_but_not_a_secret_under_the_owners_home() {
 
 #[test]
 fn an_agent_writes_in_its_roots_but_not_outside_them_or_into_protected_paths() {
+    let row = std::time::Instant::now();
+    let t = std::time::Instant::now();
     let case = case("crazyagent.test.write");
+    step("case", t);
     let inside = case.project.join("inside.txt");
     let home = case.home.join("home.txt");
     let escape = case.outside.join("escape.txt");
@@ -303,13 +315,28 @@ fn an_agent_writes_in_its_roots_but_not_outside_them_or_into_protected_paths() {
         context.as_path(),
         brief.as_path(),
     ];
+    let t = std::time::Instant::now();
     let before = sddl(&watched);
+    step("sddl-before", t);
+    let t = std::time::Instant::now();
     run(&case, &["/C", "echo", "inside>", &plain(&inside)]);
+    step("run-inside", t);
+    let t = std::time::Instant::now();
     let granted = sddl(&watched);
+    step("sddl-granted", t);
+    let t = std::time::Instant::now();
     run(&case, &["/C", "echo", "home>", &plain(&home)]);
+    step("run-home", t);
+    let t = std::time::Instant::now();
     run(&case, &["/C", "echo", "escape>", &plain(&escape)]);
+    step("run-escape", t);
+    let t = std::time::Instant::now();
     let changed = run(&case, &["/C", "echo", "changed>", &plain(&brief)]);
+    step("run-changed", t);
+    let t = std::time::Instant::now();
     let deleted = call(&case, &["delete", &plain(&brief)]);
+    step("call-delete", t);
+    step("row-before-asserts", row);
     assert!(denied(&deleted), "delete: {}", ran(&deleted));
     assert!(fs::read_to_string(&inside).unwrap().starts_with("inside"));
     assert!(fs::read_to_string(&home).unwrap().starts_with("home"));
