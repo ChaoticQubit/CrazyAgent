@@ -158,6 +158,10 @@ jobs:
         run: make caps-check
       - name: Check the file line cap script
         run: make test-caps-script
+      - name: Check for new sleeps in test code
+        run: make sleeps-check
+      - name: Check the sleeps check script
+        run: make test-sleeps-script
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci --ignore-scripts --no-audit --no-fund
