@@ -250,5 +250,5 @@ export function promptRows(text: string): number {
  * input, else after the owner's own text and a blank line, so nothing typed is lost. Inputs:
  * the input's text and the draft. Output: the new text. */
 export function seededText(text: string, draft: string): string {
-  return draft.length > 0 ? text : draft;
+  return text.trim() === "" ? draft : `${text}\n\n${draft}`;
 }

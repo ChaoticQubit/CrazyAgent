@@ -11,7 +11,12 @@ export const REINSTALL_SIGN_IN = "Add an account first; the master can reinstall
 /** What a project's reinstall notice says: the folders a job left in iCloud, the first three
  * named and the rest counted, and why. Input: the offer. Output: the sentence. */
 export function reinstallLine(offer: ReinstallOffer): string {
-  return offer.folders.map(displayText).join(", ");
+  const names = offer.folders.map(displayText);
+  const count = names.length + offer.more;
+  const listed = offer.more > 0 ? `${names.join(", ")} and ${offer.more} more`
+    : names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  const one = count === 1;
+  return `${listed} ${one ? "was" : "were"} left out when this project came into your projects folder, as ${one ? "it" : "they"} can be rebuilt.`;
 }
 
 /** The reinstall notice as drawn: the sentence, Ask the master when an account is set up, else
@@ -27,10 +32,12 @@ export function ReinstallView({ offer, signedIn, problem, busy, onAsk, onDismiss
   onAccounts: () => void;
 }) {
   return <div className="pj-note" role="status">
-    <p>{reinstallLine(offer)}</p>
+    <p>{reinstallLine(offer)}{signedIn ? "" : ` ${REINSTALL_SIGN_IN}`}</p>
     {problem && <p className="pj-error" role="alert">{problem}</p>}
     <div className="pj-row">
-      <button type="button" className="btn" disabled={busy || !signedIn} onClick={signedIn ? onAsk : onAccounts}>Ask the master</button>
+      {signedIn
+        ? <button type="button" className="btn" disabled={busy} onClick={onAsk}>Ask the master</button>
+        : <button type="button" className="btn" onClick={onAccounts}>Open accounts</button>}
       <button type="button" className="btn" disabled={busy} onClick={onDismiss}>Dismiss</button>
     </div>
   </div>;

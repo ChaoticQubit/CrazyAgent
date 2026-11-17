@@ -453,7 +453,8 @@ export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "rein
  * folders in iCloud, whose project the engine keeps the offer for. A done add has no project
  * until it is set up, so its line alone says to reinstall. Input: the job. Output: the answer. */
 export function reinstallHere(job: IntakeJob): boolean {
-  return job.kind !== job.kind;
+  const left = (job.left ?? []).length + (job.left_more?.folders ?? 0);
+  return job.kind === "move_project" && job.project_id !== null && left > 0;
 }
 
 /** Where Home's reinstall action goes: the moved project's conversation, where its offer is.
