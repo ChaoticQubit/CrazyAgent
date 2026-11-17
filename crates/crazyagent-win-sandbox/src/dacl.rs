@@ -1055,6 +1055,24 @@ mod tests {
             &ALL_APPLICATION_PACKAGES,
         )]);
         assert!(converge(&plain, &CONTAINER, Access::Modify, true).is_ok());
+        let edges = [
+            (Access::RootAnchor, MODIFY, false),
+            (Access::RootAnchor, GENERIC_ALL, false),
+            (Access::RootAnchor, ANCHOR, true),
+            (Access::RootKeep, ANCHOR, false),
+            (Access::RootKeep, KEEP_ENTRIES, true),
+        ];
+        for (access, mask, kept) in edges {
+            let list = acl(&[ace(
+                ACCESS_ALLOWED,
+                OICI | INHERITED,
+                mask,
+                &ALL_APPLICATION_PACKAGES,
+            )]);
+            let converged = converge(&list, &CONTAINER, access, true);
+            assert_eq!(converged.is_ok(), kept, "{access:?} {mask:#x}");
+            assert!(kept || converged == Err(refused), "{access:?} {mask:#x}");
+        }
     }
 
     #[test]
