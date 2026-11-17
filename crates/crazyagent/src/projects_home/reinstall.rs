@@ -92,17 +92,20 @@ const VENV: [(&str, Hint); 4] = [
 ];
 
 impl Hint {
-    /// The command that rebuilds the folder, run in the folder that holds it.
+    /// The command that rebuilds the folder, run in the folder that holds it, each command
+    /// quoted in backticks.
     fn command(self) -> &'static str {
         match self {
-            Self::Pnpm => "pnpm install",
-            Self::Yarn => "yarn install",
-            Self::Bun | Self::BunBinary => "bun install",
-            Self::NpmCi => "npm ci",
-            Self::Npm => "npm install",
-            Self::Uv => "uv sync",
-            Self::Poetry => "poetry install",
-            Self::Pip => "python3 -m venv .venv, then .venv/bin/pip install -r requirements.txt",
+            Self::Pnpm => "`pnpm install`",
+            Self::Yarn => "`yarn install`",
+            Self::Bun | Self::BunBinary => "`bun install`",
+            Self::NpmCi => "`npm ci`",
+            Self::Npm => "`npm install`",
+            Self::Uv => "`uv sync`",
+            Self::Poetry => "`poetry install`",
+            Self::Pip => {
+                "`python3 -m venv .venv`, then `.venv/bin/pip install -r requirements.txt`"
+            }
             Self::Python => "the project's Python installer",
             Self::Build => "the project's build command",
         }
@@ -183,17 +186,21 @@ fn hint(
         .map(|(_, hint)| *hint)
 }
 
-/// A path as a reader sees it: control characters, line breaks among them, shown as "?",
-/// and characters a reader cannot see or that reorder the line taken out. Input: the path.
-/// Output: the plain text, never longer than the path.
+/// A path as a reader sees it: control characters, line breaks among them, and backticks,
+/// which would end the draft's quote, shown as "?", and characters a reader cannot see or
+/// that reorder the line taken out. Input: the path. Output: the plain text, never longer
+/// than the path.
 fn plain(path: &str) -> String {
     let controls: String = path
         .chars()
-        .map(|c| if c.is_control() { '?' } else { c })
+        .map(|c| match c.is_control() || c == '`' {
+            true => '?',
+            false => c,
+        })
         .collect();
     let shown = crate::memory::without_hidden(&controls);
     assert!(shown.len() <= path.len());
-    assert!(!shown.contains('\n'));
+    assert!(!shown.contains('\n') && !shown.contains('`'));
     shown
 }
 
@@ -201,18 +208,18 @@ fn plain(path: &str) -> String {
 fn line(left: &Left) -> String {
     let path = plain(&left.path);
     let within = match path.rsplit_once('/') {
-        Some((parent, _)) => format!("in ./{parent}"),
+        Some((parent, _)) => format!("in `./{parent}`"),
         None => "in the project folder".to_owned(),
     };
     match left.hint {
-        None => format!("- ./{path}"),
-        Some(Hint::Build) => format!("- ./{path}: rebuild it with {}", Hint::Build.command()),
+        None => format!("- `./{path}`"),
+        Some(Hint::Build) => format!("- `./{path}`: rebuild it with {}", Hint::Build.command()),
         Some(Hint::Python) => format!(
-            "- ./{path}: {within}, install it with {} (pyproject.toml found)",
+            "- `./{path}`: {within}, install it with {} (pyproject.toml found)",
             Hint::Python.command()
         ),
         Some(hint) => format!(
-            "- ./{path}: {within}, run {} ({} found)",
+            "- `./{path}`: {within}, run {} ({} found)",
             hint.command(),
             hint.file().unwrap_or("a lockfile")
         ),

@@ -170,27 +170,28 @@ fn the_draft_names_each_folder_where_to_run_its_command_and_why() {
         draft(&record),
         "Some folders of this project were left out when it came into the projects folder, as \
          they can be rebuilt. Please reinstall them in the agent sandbox:\n\
-         - ./node_modules: in the project folder, run npm ci (package-lock.json found)\n\
-         - ./api/.venv: in ./api, run uv sync (uv.lock found)\n\
-         - ./tools/.venv: in ./tools, run python3 -m venv .venv, then .venv/bin/pip install -r \
-         requirements.txt (requirements.txt found)\n\
-         - ./py/.venv: in ./py, install it with the project's Python installer (pyproject.toml \
-         found)\n\
-         - ./site/dist: rebuild it with the project's build command\n\
-         - ./lib/node_modules\n\
+         - `./node_modules`: in the project folder, run `npm ci` (package-lock.json found)\n\
+         - `./api/.venv`: in `./api`, run `uv sync` (uv.lock found)\n\
+         - `./tools/.venv`: in `./tools`, run `python3 -m venv .venv`, then `.venv/bin/pip \
+         install -r requirements.txt` (requirements.txt found)\n\
+         - `./py/.venv`: in `./py`, install it with the project's Python installer \
+         (pyproject.toml found)\n\
+         - `./site/dist`: rebuild it with the project's build command\n\
+         - `./lib/node_modules`\n\
          CrazyAgent also counted 2 more rebuildable folders it did not name; check the project \
          for those too."
     );
 }
 
-/// Slice 3: a path's control characters show as "?" and characters a reader cannot see are
-/// taken out, so the draft keeps one line per folder; the widest record, every named path
-/// at its byte bound with the longest command, stays within `DRAFT_BYTES_MAX`.
+/// Slice 3: a path's control characters and backticks show as "?" and characters a reader
+/// cannot see are taken out, so the draft keeps one line per folder and each path stays in
+/// its quote; the widest record, every named path at its byte bound with the longest
+/// command, stays within `DRAFT_BYTES_MAX`.
 #[test]
 fn the_draft_shows_hidden_characters_plainly_and_fits_its_bound() {
     let record = Kept {
         left: vec![Left {
-            path: "we\nb/\u{1b}[31m/\u{202e}x/node_modules".into(),
+            path: "we\nb/\u{1b}[31m/\u{202e}x`/node_modules".into(),
             hint: Some(Hint::Npm),
         }],
         more: 0,
@@ -198,7 +199,8 @@ fn the_draft_shows_hidden_characters_plainly_and_fits_its_bound() {
     let text = draft(&record);
     assert!(
         text.contains(
-            "- ./we?b/?[31m/x/node_modules: in ./we?b/?[31m/x, run npm install (package.json found)"
+            "- `./we?b/?[31m/x?/node_modules`: in `./we?b/?[31m/x?`, run `npm install` \
+             (package.json found)"
         ),
         "{text}"
     );
