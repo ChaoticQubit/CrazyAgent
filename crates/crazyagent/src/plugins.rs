@@ -487,6 +487,57 @@ pub(crate) fn context_mode_on<'a>(
     Err(ContextModeOff::NpxNotFound)
 }
 
+/// The spec a harness or a server check runs for one approved server, never a batch file
+/// through cmd.exe (V243-WIN-MCP-NPX): on Windows a `.cmd` or `.bat` command, as written or
+/// as its real file, runs only as npm's own `npx.cmd` mapped by its layout ([`npx_spec`]);
+/// any other batch file is left out. Every other spec is unchanged. Inputs: the engine root
+/// and the spec. Output: the spec to run, or none to leave the server out.
+pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Option<ServerSpec> {
+    #[cfg(windows)]
+    if let ServerSpec::Stdio { command, args } = &spec {
+        let command = Path::new(command);
+        let batch = crate::tools::batch_file(command)
+            || command
+                .canonicalize()
+                .is_ok_and(|real| crate::tools::batch_file(&real));
+        if batch {
+            let places = crate::tools::Places::from_environment(Some(root));
+            return npx_spec(command, args, &places);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = root;
+    Some(spec)
+}
+
+/// npm's `npx.cmd` as the tool resolver runs it ([`crate::tools::resolve_entry`]), kept only
+/// when the resolver mapped it by npx's layout ([`crate::tools::npx_real`]): `node.exe` with
+/// `npx-cli.js` before the approved arguments, both in plain drive spelling. Inputs: the
+/// command, its arguments and the places. Output: the spec, none for any other batch file.
+#[cfg(windows)]
+fn npx_spec(command: &Path, args: &[String], places: &crate::tools::Places) -> Option<ServerSpec> {
+    let tool = crate::tools::resolve_entry(command, places).ok()?;
+    let (node, cli) = crate::tools::npx_real(command)?;
+    if tool.program != cli || tool.interpreter().map(|found| &found.program) != Some(&node) {
+        return None;
+    }
+    let plain = |file: &Path| {
+        crate::sandbox::canonical(file)
+            .ok()?
+            .into_os_string()
+            .into_string()
+            .ok()
+    };
+    let mut words = Vec::with_capacity(args.len() + 1);
+    words.push(plain(&cli)?);
+    words.extend_from_slice(args);
+    assert!(words.len() <= ARGS_MAX + 1);
+    Some(ServerSpec::Stdio {
+        command: plain(&node)?,
+        args: words,
+    })
+}
+
 #[cfg(unix)]
 fn npx_program(command: &Path) -> bool {
     command.file_name() == Some("npx".as_ref())
@@ -613,9 +664,15 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     ("server_limit", "You can add up to 50 MCP servers here."),
     ("server_not_found", "This MCP server was removed."),
+    #[cfg(unix)]
     (
         "server_command_invalid",
         "Enter the full path to the command, starting with /.",
+    ),
+    #[cfg(not(unix))]
+    (
+        "server_command_invalid",
+        "Enter the full path to the command, such as C:\\Program Files\\nodejs\\npx.cmd.",
     ),
     (
         "server_args_invalid",
@@ -661,6 +718,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "Can't start: this file can't be run.",
     ),
     ("server_cant_start", "The server can't start."),
+    (
+        "server_batch_file",
+        "This command is a Windows batch file, which runs through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.",
+    ),
     (
         "server_stored_spec_invalid",
         "This server's command or address holds hidden or control characters, so it can't start. Remove it, then add it again.",
