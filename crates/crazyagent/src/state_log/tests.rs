@@ -473,3 +473,193 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
         "a chunk over the cap"
     );
 }
+
+/// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
+/// rule for each and fails for a kind listed here without one.
+const KINDS: [&str; 5] = [
+    SNAPSHOT_CHUNK,
+    SNAPSHOT_DONE,
+    replay::PROCESS_EXITED,
+    crate::project_setup::removed::event::KIND,
+    crate::master_session::SESSION_DELETED,
+];
+
+/// The source files outside tests that name the log's appender, as paths under `src` in
+/// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
+const WRITERS: [(&str, &[&str]); 3] = [
+    ("project_setup/removed/event.rs", &["KIND,"]),
+    ("state_log.rs", &["SNAPSHOT_CHUNK,", "SNAPSHOT_DONE,"]),
+    (
+        "storage/master_session/delete.rs",
+        &["SESSION_DELETED,", "SESSION_DELETED.into(),"],
+    ),
+];
+
+/// Text no event body may hold: prose with a key in it, longer than any identity.
+/// Output: the text.
+fn free_text() -> String {
+    format!(
+        "the owner's secret prompt with sk-ant-api03-{}",
+        "x".repeat(128)
+    )
+}
+
+/// Checks a typed body: the sample decodes, its keys are exactly `keys`, and the decoder
+/// refuses it with free text in any one key or with one key more. Inputs: whether the kind's
+/// decoder takes a body, the sample and its keys.
+fn closed_body(decodes: impl Fn(&[u8]) -> bool, sample: serde_json::Value, keys: &[&str]) {
+    let mut found: Vec<&str> = sample
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    found.sort_unstable();
+    let mut wanted = keys.to_vec();
+    wanted.sort_unstable();
+    assert_eq!(found, wanted);
+    assert!(decodes(&serde_json::to_vec(&sample).unwrap()), "{sample}");
+    for key in keys {
+        let mut changed = sample.clone();
+        changed[*key] = json!(free_text());
+        assert!(
+            !decodes(&serde_json::to_vec(&changed).unwrap()),
+            "{key} took free text"
+        );
+    }
+    let mut widened = sample.clone();
+    widened["key"] = json!("sk-ant-api03-key");
+    assert!(
+        !decodes(&serde_json::to_vec(&widened).unwrap()),
+        "a body took one key more"
+    );
+}
+
+/// The source files outside tests whose text names the log's appender, each as its path
+/// under `src` with `/` between parts, and its text. A file or folder whose name ends in
+/// `tests` or `tests.rs` is left out. Output: the files.
+fn writer_sources() -> Vec<(String, String)> {
+    const ENTRIES_MAX: usize = 100_000;
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut folders = vec![src.clone()];
+    let mut found = Vec::new();
+    let mut seen = 0;
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            seen += 1;
+            assert!(seen <= ENTRIES_MAX);
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if name.ends_with("tests") || name.ends_with("tests.rs") {
+                continue;
+            }
+            if path.is_dir() {
+                folders.push(path);
+                continue;
+            }
+            if !name.ends_with(".rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            if text.contains("Appender") {
+                let parts: Vec<String> = path
+                    .strip_prefix(&src)
+                    .unwrap()
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                found.push((parts.join("/"), text));
+            }
+        }
+    }
+    found
+}
+
+/// L1-N1: no event body can carry a secret, a key, a token or prompt text. Each typed kind's
+/// body holds a closed set of keys, and its decoder refuses free text in any of them and any
+/// key more; ids decode only as 1 to 128 safe ASCII bytes. A snapshot's closing hash is 64
+/// hex digits. A chunk's rows are any JSON, so no writer outside this module takes a
+/// snapshot until a rule names the tables one may carry. The writers outside tests are the
+/// files in [`WRITERS`], each appending only its own kind.
+#[test]
+fn no_event_body_can_carry_a_secret() {
+    let writers = writer_sources();
+    let mut names: Vec<&str> = writers.iter().map(|(name, _)| name.as_str()).collect();
+    names.sort_unstable();
+    let listed: Vec<&str> = WRITERS.iter().map(|(name, _)| *name).collect();
+    assert_eq!(names, listed, "a new log writer needs its kinds in KINDS");
+    for (name, text) in &writers {
+        let (_, own) = WRITERS
+            .iter()
+            .find(|(path, _)| *path == name.as_str())
+            .unwrap();
+        for line in text.lines().map(str::trim) {
+            if let Some(written) = line.strip_prefix("kind: ") {
+                assert!(own.iter().any(|kind| *kind == written), "{name}: {line}");
+            }
+        }
+    }
+    for kind in KINDS {
+        match kind {
+            SNAPSHOT_CHUNK => {
+                for (name, text) in &writers {
+                    assert!(
+                        name.as_str() == "state_log.rs" || !text.contains(".snapshot("),
+                        "{name} takes a snapshot"
+                    );
+                }
+            }
+            SNAPSHOT_DONE => {
+                let mut db = db();
+                let tx = db.transaction().unwrap();
+                let mut log = Appender::own(&tx, fence::engine()).unwrap();
+                let done = log.snapshot(Aggregate::Worktrees, 9, chunks()).unwrap();
+                let seq = i64::try_from(done).expect("a log seq fits in i64");
+                let body: Vec<u8> = tx
+                    .query_row("SELECT body FROM state_log WHERE seq=?1", [seq], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                let closing: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let mut keys: Vec<&str> = closing
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                keys.sort_unstable();
+                assert_eq!(keys, ["aggregate", "chunks", "sha256"]);
+                let sha256 = closing["sha256"].as_str().unwrap();
+                assert_eq!(sha256.len(), 64);
+                assert!(
+                    sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                );
+            }
+            replay::PROCESS_EXITED => closed_body(
+                |body| serde_json::from_slice::<replay::ProcessExited>(body).is_ok(),
+                json!({"pid": 7, "code": 0, "signal": null}),
+                &["pid", "code", "signal"],
+            ),
+            crate::project_setup::removed::event::KIND => closed_body(
+                |body| {
+                    serde_json::from_slice::<crate::project_setup::removed::event::ProjectRemoved>(
+                        body,
+                    )
+                    .is_ok()
+                },
+                json!({"project": "app", "kept": true}),
+                &["project", "kept"],
+            ),
+            crate::master_session::SESSION_DELETED => closed_body(
+                |body| {
+                    serde_json::from_slice::<crate::master_session::SessionDeleted>(body).is_ok()
+                },
+                json!({"project": "app", "session": "s1"}),
+                &["project", "session"],
+            ),
+            other => panic!("the kind {other} has no body rule"),
+        }
+    }
+}
