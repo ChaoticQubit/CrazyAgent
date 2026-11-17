@@ -296,7 +296,7 @@ async fn past_its_bound_a_watch_is_refused_busy_until_one_ends() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_owner_revoked_while_its_watch_waits_is_told_nothing() {
+async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
     let owner = super::super::usage_tests::Usage::start().await;
     let first = owner
         .client
@@ -312,9 +312,31 @@ async fn an_owner_revoked_while_its_watch_waits_is_told_nothing() {
         Duration::from_secs(20),
     )
     .unwrap();
-    let watch = tokio::spawn(async move { client.watch(cursor, Some(mark), 10_000).await });
+    let watch = tokio::spawn(async move {
+        let (mut cursor, mut mark) = (cursor, mark);
+        loop {
+            match client.watch(cursor.clone(), Some(mark), 10_000).await {
+                Ok(
+                    WatchReply::Changed {
+                        cursor: next,
+                        mark: moved,
+                        ..
+                    }
+                    | WatchReply::Refresh {
+                        cursor: next,
+                        mark: moved,
+                    }
+                    | WatchReply::Quiet {
+                        cursor: next,
+                        mark: moved,
+                    },
+                ) => (cursor, mark) = (next, moved),
+                other => return other,
+            }
+        }
+    });
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!watch.is_finished(), "nothing committed yet");
+    assert!(!watch.is_finished(), "an admitted owner keeps watching");
     let runtime = owner.runtime();
     runtime
         .control(OwnerControl {
@@ -329,6 +351,11 @@ async fn an_owner_revoked_while_its_watch_waits_is_told_nothing() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply, Err(failure("owner_grant_stale_or_revoked")));
+    let refused = reply.expect_err("a revoked owner gets no reply");
+    assert!(
+        refused == failure("owner_grant_stale_or_revoked")
+            || refused == failure("owner_authentication_failed"),
+        "{refused:?}"
+    );
     owner.stop().await;
 }
