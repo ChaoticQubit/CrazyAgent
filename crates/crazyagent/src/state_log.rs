@@ -156,6 +156,7 @@ impl<'a, 'c> Appender<'a, 'c> {
     /// proof in place of a host or owner fence (v2.5 L6). It moves the `state` revision
     /// once, as [`Self::own`]. Inputs: the transaction and the proof. Output: the appender,
     /// `state_log_opening_host_running` or `state_log_revision_exhausted`.
+    #[cfg(any(unix, test))]
     pub(crate) fn opening(
         tx: &'a Transaction<'c>,
         opening: crate::storage::opening::Opening,

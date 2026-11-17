@@ -4,6 +4,7 @@ use crate::project_setup::removed::event as removed;
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::{self, Clock, Logged};
 use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
+#[cfg(any(unix, test))]
 use crate::storage::opening::Opening;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -254,6 +255,7 @@ pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineErr
 /// write, and one with no worktree row needs no run, so it moves no revision. Inputs: the
 /// step's transaction and the open's proof. Output: whether a run was appended, or the
 /// log's refusal.
+#[cfg(any(unix, test))]
 pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     let present: i64 = tx
         .query_row(

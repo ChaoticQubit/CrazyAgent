@@ -826,6 +826,7 @@ fn a_checkpoint_after_a_redact_tries_again_past_a_held_reader_up_to_its_bound() 
     db.busy_timeout(Duration::from_millis(10)).unwrap();
     db.execute_batch(
         "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
         INSERT INTO state VALUES (1,0);",
     )
     .unwrap();
