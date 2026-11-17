@@ -12,6 +12,8 @@ import { foundPollMs, intakePollMs, jobEndLine } from "./screens/intake/intake";
 import { carryFollowUps } from "./screens/new-project/carry";
 import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
 import type { InputChoice } from "./screens/team/terminal-io";
+import { rendererChoice, rendererDefault } from "./screens/team/terminal-renderer";
+import type { RendererChoice } from "./screens/team/terminal-renderer";
 import { QUESTIONS_SHOWN_DEFAULT, questionsShown } from "./api-questions";
 import type { QuestionsShown } from "./api-questions";
 export type Loaded<T> = { kind: "loading" } | Result<T>;
@@ -20,6 +22,7 @@ export type ProjectRow = ProjectPage["items"][number];
 
 const THEME_KEY = "crazyagent.theme";
 const TERMINAL_INPUT_KEY = "crazyagent.terminal-input";
+const TERMINAL_RENDERER_KEY = "crazyagent.terminal-renderer";
 const QUESTIONS_SHOWN_KEY = "crazyagent.questions-shown";
 
 /** Reads where a waiting question shows on a project page, as kept in this app (not in the
@@ -100,6 +103,46 @@ export function saveTerminalInput(choice: InputChoice): void {
   } catch {
     return;
   }
+}
+
+/** Reads how every terminal draws, as kept in this app (not in the engine). Output: the
+ * choice; the platform's default when storage is unavailable or holds something else. */
+export function readTerminalRenderer(): RendererChoice {
+  try {
+    return rendererChoice(window.localStorage.getItem(TERMINAL_RENDERER_KEY));
+  } catch {
+    return rendererDefault();
+  }
+}
+
+const rendererHeard = new Set<() => void>();
+let rendererWatched = false;
+
+/** Remembers how every terminal draws and tells this window's listeners at once; other
+ * windows hear it through the storage event. Input: the choice. Output: none. */
+export function saveTerminalRenderer(choice: RendererChoice): void {
+  try {
+    window.localStorage.setItem(TERMINAL_RENDERER_KEY, choice);
+  } catch {
+    return;
+  }
+  for (const listener of [...rendererHeard]) listener();
+}
+
+/** Calls `listener` after each Terminal renderer choice, made in this window or in another
+ * window of the app. Input: the listener. Output: the call that stops it. */
+export function onTerminalRenderer(listener: () => void): () => void {
+  if (!rendererWatched) {
+    rendererWatched = true;
+    window.addEventListener("storage", (event) => {
+      if (event.key !== TERMINAL_RENDERER_KEY) return;
+      for (const heard of [...rendererHeard]) heard();
+    });
+  }
+  rendererHeard.add(listener);
+  return () => {
+    rendererHeard.delete(listener);
+  };
 }
 
 /** Reads the owner's appearance choice kept in this app (not in the engine profile).

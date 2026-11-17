@@ -4,11 +4,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 
+pub(in crate::tui) use crate::terminal::PASTE_CLOSE;
+
 const SCROLLBACK_ROWS: usize = 0;
 /// The marker that opens a bracketed paste.
 pub(in crate::tui) const PASTE_OPEN: &[u8] = b"\x1b[200~";
-/// The marker that closes a bracketed paste.
-pub(in crate::tui) const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 const ESC: char = '\x1b';
 
 /// The key that leaves an attached terminal for the team tree; every other key

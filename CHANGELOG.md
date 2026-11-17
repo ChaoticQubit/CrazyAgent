@@ -29,6 +29,7 @@ Status of each version:
 - Edit with AI also checks the instructions file, on the project's master harness, and lists what it found above the diff: contradictions, references to files, skills, MCP servers or commands that don't exist, duplicates, and length over budget.
 - A Tool caches in agent homes setting: Keep, Clear when access is raised (the default) or Clear every launch, in the TUI and on the app's Agent access page. Clearing removes an agent home's .cache and npm cache, so code planted there cannot run with more access in a later launch.
 - The app icon follows the app theme: the macOS Dock tile and the app's windows change with it, System follows the operating system's changes, and the macOS app ships light and dark icons. Windows sets its icon too, and Linux keeps one icon.
+- A Terminal renderer setting under Profile, Appearance: GPU (the default on macOS and Windows), Automatic, or Standard (the default on Linux). GPU and Automatic draw terminals with WebGL on the graphics card, and keep the standard drawing on a software or virtual machine graphics driver or without WebGL2. Automatic also keeps the standard drawing for new terminals after one failed start on the graphics card. A hidden terminal gives back its graphics memory.
 
 ### Faster
 
@@ -38,6 +39,7 @@ Status of each version:
 - The app reads less while idle: Add folder and move status every 30 seconds and again when the window gets focus, found projects every 3 seconds on Home only (30 seconds elsewhere), and the Overview when the engine says it is due, at least 5 seconds apart.
 - Removing the IDE's temp folder no longer holds the IDE up: the removal is bounded and the rest is swept in the background.
 - The engine starts faster on a busy Mac. Its login service now runs it as an interactive process, so macOS no longer limits its CPU and disk use. An engine service set up by an earlier version is set up again the next time CrazyAgent starts or updates the engine.
+- Agent terminals draw on the graphics card, and a long paste no longer holds up the other terminals: the engine types it in short pieces that never split a character, a key or a mouse report. On a Mac, a 64 KB paste reached the agent in about 0.4 s instead of 2.2 s, and keys typed into another terminal meanwhile arrived in about 1 ms instead of 95 ms (middle values). A terminal goes back to the standard drawing when WebGL2 fails or its graphics context is lost.
 
 ### Fixed
 

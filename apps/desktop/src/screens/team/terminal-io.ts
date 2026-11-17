@@ -1,4 +1,5 @@
-import type { IFunctionIdentifier, IParser } from "@xterm/xterm";
+import type { WebglAddon } from "@xterm/addon-webgl";
+import type { IFunctionIdentifier, IParser, Terminal } from "@xterm/xterm";
 import type { TerminalMessage } from "../../engine-client";
 
 export const INPUT_BYTES_MAX = 4096;
@@ -281,6 +282,64 @@ export function muteQueries(terminal: { parser: Pick<IParser, "registerCsiHandle
   for (const id of QUERY_CSI) terminal.parser.registerCsiHandler(id, () => true);
   for (const id of QUERY_DCS) terminal.parser.registerDcsHandler(id, () => true);
   for (const id of QUERY_OSC) terminal.parser.registerOscHandler(id, (data) => data.split(";").includes("?"));
+}
+
+/** A view's drawing on the GPU, released at most once. */
+export type GpuDrawing = { release(): void };
+
+/** Moves an opened view's drawing onto the GPU with xterm's WebGL addon, so a busy pane stops
+ * rebuilding DOM rows on every frame. A load that fails, as on a machine without WebGL2, keeps
+ * the DOM renderer. Releasing disposes the addon, which hands drawing back to DOM rows, then
+ * loses its context and empties its canvas, so the GPU memory goes at once; disposing first
+ * means a release never reads as a context loss. A lost context releases it and tells `lost`.
+ * Inputs: the opened terminal, the addon class and what hears a loss. Output: the drawing, or
+ * null when the GPU refused it. */
+export function drawOnGpu(terminal: Pick<Terminal, "element" | "loadAddon">, Webgl: new () => WebglAddon, lost: () => void): GpuDrawing | null {
+  const element = terminal.element;
+  assert(element !== undefined, "the view is open before its GPU renderer loads");
+  const before = new Set(element.querySelectorAll("canvas"));
+  const addon = new Webgl();
+  try {
+    terminal.loadAddon(addon);
+  } catch {
+    addon.dispose();
+    return null;
+  }
+  const canvases = [...element.querySelectorAll("canvas")].filter((canvas) => !before.has(canvas));
+  const contexts = canvases.flatMap((canvas) => canvas.getContext("webgl2") ?? []);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    addon.dispose();
+    for (const context of contexts) if (!context.isContextLost()) context.getExtension("WEBGL_lose_context")?.loseContext();
+    for (const canvas of canvases) {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+  };
+  addon.onContextLoss(() => {
+    release();
+    lost();
+  });
+  return { release };
+}
+
+/** The lines a terminal shows now, read from its buffer, so they read the same whichever
+ * renderer draws them. Input: the terminal. Output: one line per row of the screen, with
+ * trailing blanks cut. */
+export function screenLines(terminal: Pick<Terminal, "buffer" | "rows">): string[] {
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+  for (let row = 0; row < terminal.rows; row += 1) lines.push(buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? "");
+  return lines;
+}
+
+/** Lets a reader on the page, such as an end-to-end check, read a view's screen from its
+ * element: `readScreen()` on the element returns `screenLines` of its terminal, read only when
+ * asked, so nothing runs per write. Inputs: the view's element and its terminal. Output: none. */
+export function readableScreen(host: HTMLElement, terminal: Pick<Terminal, "buffer" | "rows">): void {
+  Object.defineProperty(host, "readScreen", { configurable: true, value: () => screenLines(terminal) });
 }
 
 /** The text a clipboard paste may type into an agent: every control character is dropped

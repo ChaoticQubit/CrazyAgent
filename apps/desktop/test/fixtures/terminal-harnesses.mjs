@@ -6,10 +6,120 @@ import styles from "../../src/style.css?inline";
 import projectStyles from "../../src/screens/project/projects.css?inline";
 import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { keepTerminalsOf, TerminalPanel, useKeptTerminalProjects } from "../../src/screens/team/terminal-panel.tsx";
+import * as state from "../../src/state.ts";
 
 let root = null;
 let probe = null;
+let gpu = false;
+let identity = "";
+let failing = 0;
+const contexts = [];
 const engine = { callbacks: new Map(), channel: null, next: 0, typed: [], attaches: 0, detaches: 0, nodes: [], graphs: [], resizes: [] };
+const canvasContext = HTMLCanvasElement.prototype.getContext;
+const glParameter = WebGL2RenderingContext.prototype.getParameter;
+const UNMASKED_VENDOR = 0x9245;
+const UNMASKED_RENDERER = 0x9246;
+
+/** The renderer a Mac's GPU reports, as test Chrome on the build Mac does. */
+export const HARDWARE = "ANGLE (Apple, ANGLE Metal Renderer: Apple M2 Max, Unspecified Version)";
+
+/** The renderer a machine without a GPU reports, as the Linux farm's Chrome does. */
+export const SOFTWARE = "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)";
+
+/** Lets the page's canvases hand out a WebGL2 context that reports one renderer, or answers
+ * null for one as a machine without WebGL2 does. Off by default, so every row that does not
+ * name a renderer runs on the DOM renderer; a renderer row turns it on before `open`. Inputs:
+ * whether WebGL2 is offered and the renderer it reports. */
+export function offerGpu(offered, renderer = HARDWARE) {
+  gpu = offered;
+  identity = renderer;
+}
+
+/** Makes the next WebGL2 contexts the page asks for fail, as a GPU that refuses a context
+ * does. Input: how many. */
+export function failGpu(count) {
+  failing = count;
+}
+
+HTMLCanvasElement.prototype.getContext = function getContext(kind, ...rest) {
+  if (kind !== "webgl2") return canvasContext.call(this, kind, ...rest);
+  if (!gpu) return null;
+  if (failing > 0) {
+    failing -= 1;
+    return null;
+  }
+  const context = canvasContext.call(this, kind, ...rest);
+  if (context && !contexts.includes(context)) contexts.push(context);
+  return context;
+};
+
+WebGL2RenderingContext.prototype.getParameter = function getParameter(name) {
+  if (name === UNMASKED_RENDERER) return identity;
+  if (name === UNMASKED_VENDOR) return "Google Inc.";
+  return glParameter.call(this, name);
+};
+
+/** How many WebGL2 contexts the page holds that were not lost. Output: the count. */
+export function liveGpu() {
+  return contexts.filter((context) => !context.isContextLost()).length;
+}
+
+/** Gives the page a working store: the test page is about:blank, whose storage refuses every
+ * call, so an in-memory store takes its place, as the app's own window storage keeps a
+ * choice. Output: none. */
+function keepStorage() {
+  try {
+    window.localStorage.getItem("crazyagent.terminal-renderer");
+  } catch {
+    const kept = new Map();
+    const store = { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, String(value)), removeItem: (key) => kept.delete(key), clear: () => kept.clear() };
+    Object.defineProperty(window, "localStorage", { configurable: true, value: store });
+  }
+}
+
+/** Saves a Terminal renderer choice as the Profile setting does. Input: the choice. */
+export function choose(choice) {
+  keepStorage();
+  state.saveTerminalRenderer(choice);
+}
+
+/** Saves a Terminal renderer choice as another window of the app does: the store changes
+ * and this window hears only the storage event. Input: the choice. */
+export function chooseElsewhere(choice) {
+  keepStorage();
+  window.localStorage.setItem("crazyagent.terminal-renderer", choice);
+  window.dispatchEvent(new StorageEvent("storage", { key: "crazyagent.terminal-renderer", newValue: choice }));
+}
+
+/** Makes the page report one platform with nothing chosen yet, as a first start on that
+ * machine. Input: the platform name, as navigator.platform gives it. */
+export function startOn(platform) {
+  keepStorage();
+  Object.defineProperty(navigator, "platform", { configurable: true, value: platform });
+}
+
+/** Which renderer draws the page's one terminal, shown or parked: "webgl" while its screen
+ * holds the WebGL canvas and no DOM rows, "dom" while it holds DOM rows, "none" before it
+ * opens. Output: the name. */
+export function renderer() {
+  const screen = document.querySelector(".tg-terminal-host .xterm-screen");
+  if (!screen) return "none";
+  if (screen.querySelector(".xterm-rows")) return "dom";
+  return screen.querySelector("canvas") ? "webgl" : "none";
+}
+
+/** Loses the shown terminal's WebGL context, as a GPU reset or a sleeping Mac does. Output:
+ * whether a context was there to lose. */
+export function loseGpu() {
+  for (const canvas of document.querySelectorAll(".tg-terminal-screen .xterm-screen canvas")) {
+    const context = canvasContext.call(canvas, "webgl2");
+    const lose = context instanceof WebGL2RenderingContext ? context.getExtension("WEBGL_lose_context") : null;
+    if (!lose) continue;
+    lose.loseContext();
+    return true;
+  }
+  return false;
+}
 
 /** Sends one message down the attached terminal's channel as the bridge does, in order.
  * Input: the message, a control frame or raw output bytes. */
@@ -138,6 +248,13 @@ export function away() {
   root = null;
 }
 
+/** Takes the panel off the page and lets the window's views go, as closing the project does.
+ * Output: none. */
+export function drop() {
+  away();
+  keepTerminalsOf(() => false);
+}
+
 /** Mounts the panel for the agent again over the same stand-in engine, as a switch back does.
  * Inputs: the agent's role and its harness id. Output: the ms the mount took. */
 export function back(role, harness) {
@@ -180,22 +297,24 @@ export async function until(check, limitMs = 5000) {
 }
 
 /** The panel as the owner sees it: whether its terminal is live, its status line, the text on
- * its screen, the screen's box and the height of one row in page coordinates, the open
- * right-click menu's items with their boxes, and every chunk the engine got typed. */
+ * its screen, the screen's box and the height of one row in page coordinates (the screen's
+ * height over its lines, so it holds under every Terminal renderer), the open right-click
+ * menu's items with their boxes, and every chunk the engine got typed. */
 export function view() {
   const box = (element) => {
     if (!element) return null;
     const rect = element.getBoundingClientRect();
     return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
   };
-  const rows = document.querySelector(".tg-terminal-screen .xterm-rows");
+  const lines = document.querySelector(".tg-terminal-screen .tg-terminal-host")?.readScreen?.() ?? [];
+  const screen = document.querySelector(".tg-terminal-screen .xterm-screen");
   const status = document.querySelector(".tg-terminal-note [role=status]");
   return {
     live: status !== null,
     note: status?.textContent ?? null,
-    text: rows?.textContent ?? "",
-    screen: box(document.querySelector(".tg-terminal-screen .xterm-screen")),
-    rowHeight: rows?.firstElementChild?.getBoundingClientRect().height ?? 0,
+    text: lines.join("\n"),
+    screen: box(screen),
+    rowHeight: screen && lines.length ? screen.getBoundingClientRect().height / lines.length : 0,
     menu: [...document.querySelectorAll(".tg-terminal-menu [role=menuitem]")].map((item) => ({ text: item.textContent.trim(), disabled: item.disabled, ...box(item) })),
     typed: [...engine.typed],
   };

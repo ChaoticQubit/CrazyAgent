@@ -1,8 +1,9 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { chooseTheme, readQuestionsShown, readTerminalInput, readTheme, saveQuestionsShown, saveTerminalInput, useAppSession, type ThemeChoice } from "../../state";
+import { chooseTheme, readQuestionsShown, readTerminalInput, readTerminalRenderer, readTheme, saveQuestionsShown, saveTerminalInput, saveTerminalRenderer, useAppSession, type ThemeChoice } from "../../state";
 import type { QuestionsShown } from "../../api-questions";
 import { QuestionsShownSetting } from "../project/question-popup";
 import { INPUT_CHOICES, type InputChoice } from "../team/terminal-io";
+import { RENDERER_CHOICES, type RendererChoice } from "../team/terminal-renderer";
 import { Button, LoadError, NotReady, Notice, Segmented, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { ProfileFields, draftFromProfile, emptyProfileDraft, submitProfile, type ProfileDraft, type ProfileErrors } from "../first-run";
 import { LearningReplay } from "../dashboard/learn";
@@ -10,6 +11,7 @@ import { LearningReplay } from "../dashboard/learn";
 function Appearance() {
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
   const [input, setInput] = useState<InputChoice>(readTerminalInput);
+  const [renderer, setRenderer] = useState<RendererChoice>(readTerminalRenderer);
   const [questions, setQuestions] = useState<QuestionsShown>(readQuestionsShown);
   return <SettingSection title="Appearance">
     <SettingLine label="Theme" help="System follows your Mac. This choice is kept in this app only.">
@@ -19,6 +21,9 @@ function Appearance() {
     </SettingLine>
     <SettingLine label="Terminal input" help="Where you type to the master and every agent, on every screen: straight into the terminal, in a message box under it that sends your text as one message, or both. Kept in this app only.">
       <Segmented label="Terminal input" value={input} onValue={(value) => { setInput(value); saveTerminalInput(value); }} options={INPUT_CHOICES} />
+    </SettingLine>
+    <SettingLine label="Terminal renderer" help="How every terminal draws its text. GPU draws on the graphics card, except on a software graphics driver, without WebGL2 or after the graphics card reset. Automatic also stays on standard drawing once a start on the graphics card failed, until you change this. Standard draws text rows without the graphics card. GPU is the default on macOS and Windows, Standard on Linux. A change applies to open terminals at once. Kept in this app only.">
+      <Segmented label="Terminal renderer" value={renderer} onValue={(value) => { setRenderer(value); saveTerminalRenderer(value); }} options={RENDERER_CHOICES} />
     </SettingLine>
     <QuestionsShownSetting value={questions} onValue={(value) => { setQuestions(value); saveQuestionsShown(value); }} />
   </SettingSection>;
