@@ -28184,6 +28184,58 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
     team.shutdown().unwrap();
 }
 
+/// #393 F1 (DEC-200): a native teammate's end that fails with a host error other than an
+/// unknown agent leaves its row to a later tick, so its end thread does not wake the team
+/// loop; a wake there would run the loop back to back for as long as the error lasts. The
+/// host here has no tmux, so every end the owner's stop pass starts fails the same way.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
+    use crate::team::StoppedBy;
+    const PASSES: u64 = 40;
+    let fixture = Fixture::new(1);
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(None, &fixture.base.join(FOLDER)));
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+            params![mate, PROJECT],
+        )
+        .unwrap();
+
+    let before = wakes_seen();
+    for _ in 0..PASSES {
+        assert_eq!(team.stop_unmanaged().unwrap(), Vec::new());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let woken = wakes_seen().wrapping_sub(before);
+    assert!(
+        woken < PASSES / 2,
+        "{woken} wakes in {PASSES} stop passes over an end that keeps failing"
+    );
+    let status: String = fixture
+        .connection
+        .query_row(
+            "SELECT status FROM team_agents WHERE id=?1",
+            [mate],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "working");
+    team.shutdown().unwrap();
+}
+
 /// S4B-B1-L1 r1: a teammate's row stopped elsewhere while its end ran, as by its lead's
 /// end, keeps that first mark, and the finished end reports no stop for it.
 #[cfg(target_os = "macos")]
