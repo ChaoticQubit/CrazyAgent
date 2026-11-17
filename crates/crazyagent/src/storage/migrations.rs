@@ -1,3 +1,4 @@
+use super::BACKUPS;
 use super::error;
 use super::settings::SettingsSources;
 use crate::engine::EngineError;
@@ -10,9 +11,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 mod tests;
-
-/// The folder beside engine.db that holds one folder per upgrade backup.
-pub(crate) const BACKUPS: &str = "backups";
 
 /// How many upgrade backups stay on disk. Older ones are removed once a new one exists.
 pub(crate) const BACKUPS_KEPT: usize = 5;
