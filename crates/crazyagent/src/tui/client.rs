@@ -1525,10 +1525,11 @@ impl NativeOwner {
                     pending.hash().to_owned(),
                 ));
                 self.master_pending = Some(submission.clone());
-                controller
-                    .send_pending()
-                    .await
-                    .map_err(|error| bounded_problem(&error.0))
+                let sent = controller.send_pending().await;
+                if let Some(resent) = controller.resent() {
+                    self.master_operation = Some(resent.clone());
+                }
+                sent.map_err(|error| bounded_problem(&error.0))
             }
             MutationDelivery::Reconcile | MutationDelivery::Retry => {
                 if self.master_pending.as_ref() != Some(submission)
@@ -1869,10 +1870,11 @@ impl NativeOwner {
                     pending.hash().to_owned(),
                 ));
                 self.model_pending = Some(submission.clone());
-                controller
-                    .send_pending()
-                    .await
-                    .map_err(|error| bounded_problem(&error.0))
+                let sent = controller.send_pending().await;
+                if let Some(resent) = controller.resent() {
+                    self.model_operation = Some(resent.clone());
+                }
+                sent.map_err(|error| bounded_problem(&error.0))
             }
             MutationDelivery::Reconcile | MutationDelivery::Retry => {
                 if self.model_pending.as_ref() != Some(submission) || controller.pending().is_none()
@@ -2057,10 +2059,11 @@ impl NativeOwner {
                     pending.hash().to_owned(),
                 ));
                 self.conversation_pending = Some(submission.clone());
-                controller
-                    .send_pending()
-                    .await
-                    .map_err(|e| bounded_problem(&e.0))
+                let sent = controller.send_pending().await;
+                if let Some(resent) = controller.resent() {
+                    self.conversation_operation = Some(resent.clone());
+                }
+                sent.map_err(|e| bounded_problem(&e.0))
             }
             MutationDelivery::Reconcile | MutationDelivery::Retry => {
                 if self.conversation_pending.as_ref() != Some(submission)
@@ -2219,7 +2222,13 @@ impl NativeOwner {
             .as_mut()
             .ok_or("trusted_connection_unavailable")?;
         let response = match delivery {
-            MutationDelivery::Submit => controller.send_pending().await,
+            MutationDelivery::Submit => {
+                let sent = controller.send_pending().await;
+                if let Some(resent) = controller.resent() {
+                    self.creation_operation = Some(resent.clone());
+                }
+                sent
+            }
             MutationDelivery::Reconcile => controller.reconcile_pending().await,
             MutationDelivery::Retry => controller.retry_pending().await,
         }
