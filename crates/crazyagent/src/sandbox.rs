@@ -2526,11 +2526,13 @@ impl ProjectSandbox {
             .collect();
         let prefix = format!("^{}/(.*/)?", seatbelt_pattern(root));
         let mut text = String::new();
-        for body in regex_bodies(&prefix, &names, "(/.*)?$") {
-            text.push_str(&format!(
-                "{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"{body}\")\n    (require-not (subpath \"{}/.git\")){own}))\n",
-                root.display()
-            ));
+        for suffix in ["$", "/"] {
+            for body in regex_bodies(&prefix, &names, suffix) {
+                text.push_str(&format!(
+                    "{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"{body}\")\n    (require-not (subpath \"{}/.git\")){own}))\n",
+                    root.display()
+                ));
+            }
         }
         text.push_str("(deny file-clone (vnode-type DIRECTORY))\n");
         for folder in self
@@ -3175,8 +3177,8 @@ impl ProjectSandbox {
             .join("|");
         for root in &self.tool_roots {
             text.push_str(&format!(
-                "\n  (regex #\"^{}/(.*/)?({credentials})(/.*)?$\")",
-                seatbelt_pattern(root)
+                "\n  {}",
+                at_or_below(&format!("{}/(.*/)?({credentials})", seatbelt_pattern(root)))
             ));
         }
         text.push_str(")\n(deny mach-lookup");
@@ -3450,14 +3452,20 @@ impl ProjectSandbox {
         entries.extend(GIT_STATE_FILES.map(|name| format!("{git}/{}", any_case(name))));
         let mut text = String::from("(deny file-write* file-link");
         for path in &below {
-            text.push_str(&format!("\n  (regex #\"^{project}/{path}(/.*)?$\")"));
+            text.push_str(&format!(
+                "\n  {}",
+                at_or_below(&format!("{project}/{path}"))
+            ));
         }
         for path in &entries {
             text.push_str(&format!("\n  (regex #\"^{project}/{path}$\")"));
         }
         text.push_str(")\n");
         assert_eq!(below.len() + entries.len(), 19);
-        assert_eq!(text.matches("(regex #\"^/").count(), 19);
+        assert_eq!(
+            text.matches("(regex #\"^/").count(),
+            2 * below.len() + entries.len()
+        );
         text
     }
 
@@ -3534,9 +3542,12 @@ impl ProjectSandbox {
         let worktrees = any_case("worktrees");
         let modules = any_case("modules");
         let text = format!(
-            "(deny file-write*\n  (regex #\"^{pattern}/{dot_git}(/{worktrees}/[^/]+)?/{modules}(/.*)?$\"))\n"
+            "(deny file-write*\n  {})\n",
+            at_or_below(&format!(
+                "{pattern}/{dot_git}(/{worktrees}/[^/]+)?/{modules}"
+            ))
         );
-        assert_eq!(text.matches("(regex #\"^/").count(), 1);
+        assert_eq!(text.matches("(regex #\"^/").count(), 2);
         text
     }
 
@@ -3565,8 +3576,8 @@ impl ProjectSandbox {
         let mut nested = String::new();
         for root in &working {
             nested.push_str(&format!(
-                "\n      (regex #\"^{}/.+/{dot_git}(/.*)?$\")",
-                seatbelt_pattern(root)
+                "\n      {}",
+                at_or_below(&format!("{}/.+/{dot_git}", seatbelt_pattern(root)))
             ));
         }
         for root in &other {
@@ -3603,7 +3614,7 @@ impl ProjectSandbox {
             format!("(deny file-write*\n  (require-all\n    (require-any{nested}){exempt}))\n");
         assert!(
             text.matches("(regex #\"^/").count()
-                == working.len()
+                == 2 * working.len()
                     + 2 * other.len()
                     + usize::from(self.adds_worktrees)
                     + usize::from(self.clone.is_some())
@@ -3634,25 +3645,20 @@ impl ProjectSandbox {
         if let Some(checkout) = &self.checkout {
             stores.push(seatbelt_pattern(&checkout.objects));
         }
+        let info = any_case("info");
         let mut text = format!(
-            "(deny file-write*\n  (regex #\"^{git}/({}(/.*)?|{})$\")",
-            any_case("info"),
+            "(deny file-write*\n  (regex #\"^{git}/({info}|{})$\")\n  (regex #\"^{git}/{info}/\")",
             any_case("shallow")
         );
         let [alternates, http_alternates] = STORE_ALTERNATES.map(any_case);
-        let held = format!(
-            "{}{}?(/.*)?|{alternates}|{http_alternates}",
-            any_case("commit-graph"),
-            any_case("s")
-        );
+        let graph = format!("{}{}?", any_case("commit-graph"), any_case("s"));
         for store in &stores {
             text.push_str(&format!(
-                "\n  (regex #\"^{store}/{}/({held})$\")",
-                any_case("info")
+                "\n  (regex #\"^{store}/{info}/({graph}|{alternates}|{http_alternates})$\")\n  (regex #\"^{store}/{info}/{graph}/\")"
             ));
         }
         text.push_str(")\n");
-        assert_eq!(text.matches("(regex #\"^/").count(), stores.len() + 1);
+        assert_eq!(text.matches("(regex #\"^/").count(), 2 * stores.len() + 2);
         text
     }
 
@@ -4102,11 +4108,15 @@ impl Checkout {
         const HEX: &str = "[0-9a-fA-F]";
         let objects = self.objects.display();
         let pattern = seatbelt_pattern(&self.objects);
-        let held = format!("({}|{})", any_case("info"), any_case("pack"));
+        let held = at_or_below(&format!(
+            "{pattern}/({}|{})",
+            any_case("info"),
+            any_case("pack")
+        ));
         let text = format!(
-            "(deny file-write*\n  (regex #\"^{pattern}/{held}(/.*)?$\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data file-link\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n(deny file-write-mode file-write-flags file-write-acl\n  (subpath \"{objects}\"))\n"
+            "(deny file-write*\n  {held})\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data file-link\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n(deny file-write-mode file-write-flags file-write-acl\n  (subpath \"{objects}\"))\n"
         );
-        assert!(text.matches("(regex #\"^/").count() == 5);
+        assert!(text.matches("(regex #\"^/").count() == 6);
         assert!(text.contains("(vnode-type SYMLINK)"));
         assert!(text.contains("(deny file-write-mode file-write-flags file-write-acl"));
         assert!(text.contains("(deny file-write-unlink file-write-data file-link"));
@@ -4217,10 +4227,11 @@ fn clone_store_denies(clone: &Path) -> String {
     let index = format!("{pack}/{}", any_case(MULTI_PACK_INDEX));
     let [alternates, http_alternates] = STORE_ALTERNATES.map(any_case);
     let [commondir, _] = ADMIN_LINKS.map(any_case);
+    let below = at_or_below(&fallback);
     let text = format!(
-        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{fallback}(/.*)?$\")\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({alternates}|{http_alternates})$\")\n  (regex #\"^{git}/{commondir}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n"
+        "(deny file-write*\n  (regex #\"^{git}$\")\n  {below}\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({alternates}|{http_alternates})$\")\n  (regex #\"^{git}/{commondir}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n"
     );
-    assert_eq!(text.matches("(regex #\"^/").count(), 10);
+    assert_eq!(text.matches("(regex #\"^/").count(), 11);
     assert!(text.contains("(vnode-type SYMLINK)"));
     text
 }
@@ -4822,8 +4833,8 @@ fn launch_denies(home: &Path) -> String {
     let mut text = String::from("(deny file-write*\n");
     for folder in folders {
         text.push_str(&format!(
-            "  (regex #\"^{home}/{}(/.*)?$\")\n",
-            any_case(folder)
+            "  {}\n",
+            at_or_below(&format!("{home}/{}", any_case(folder)))
         ));
     }
     for file in files {
@@ -4854,7 +4865,10 @@ fn launch_denies(home: &Path) -> String {
         spelled("  "),
         spelled("      "),
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 20 + 2 * walked.len());
+    assert_eq!(
+        text.matches("(regex #\"^/").count(),
+        20 + folders.len() + 2 * walked.len()
+    );
     text
 }
 
@@ -4964,7 +4978,7 @@ fn agent_config_denies(home: &Path) -> String {
         text.matches("(regex #\"^/").count(),
         2 * AGENT_CONFIG.len() + CONFIG_PARENTS.len() + 2 * kept.len()
     );
-    assert!(!text.contains("(/.*)?$"));
+    assert!(!text.contains("(/.*)"));
     text
 }
 
@@ -5030,10 +5044,11 @@ fn root_pin(root: &Path) -> String {
 }
 
 /// The Seatbelt filters for a path and everything below it: `^X$` and `^X/` in place of one
-/// `^X(/.*)?$`, whose optional tail libsandbox fails to compile again in lower case once an
-/// escaped character comes before it (V241-SANDBOX-REGEX, V243-FARM2-PRODUCT-SMALL).
+/// `^X(/.*)?$`, whose `(/.*)` tail libsandbox fails to compile again in lower case after a
+/// fold group with no bracket class or wildcard before it, as `^/x/(s|S)(/.*)?$`
+/// (V241-SANDBOX-REGEX, V243-FARM2-PRODUCT-SMALL). Profiles hold no `(/.*)` but the HFS rule.
 /// Input: the pattern after `^`, an absolute path first. Output: both filters on one line.
-fn at_or_below(pattern: &str) -> String {
+pub(crate) fn at_or_below(pattern: &str) -> String {
     assert!(pattern.starts_with('/'));
     format!("(regex #\"^{pattern}$\") (regex #\"^{pattern}/\")")
 }
