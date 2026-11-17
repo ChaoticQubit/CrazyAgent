@@ -1436,6 +1436,7 @@ export interface FolderSize {
   size_problem?: string | null;
   placeholders?: number;
   skipped?: SkippedFolder[];
+  skipped_more?: SkippedMore;
   github?: string | null;
   worktrees?: number;
   worktree_paths?: string[];
@@ -1894,6 +1895,7 @@ export interface IntakeJob {
   stopping: boolean;
   state: IntakeJobState;
   left?: SkippedFolder[];
+  left_more?: SkippedMore;
 }
 
 /** Starts the engine's intake job for a folder, or attaches to the one adding it already.

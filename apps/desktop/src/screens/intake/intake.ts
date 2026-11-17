@@ -144,8 +144,7 @@ export function icloudSkipped(size: Loaded<FolderSize> | null): SkippedFolder[] 
 /** The rebuildable folders the folder-size read counted past the ones it named. Input: the read,
  * if any. Output: their count and files, null when it named them all. */
 export function icloudSkippedMore(size: Loaded<FolderSize> | null): SkippedMore | null {
-  void size;
-  return null;
+  return size?.kind === "ok" ? size.value.skipped_more ?? null : null;
 }
 
 /** Whether an add of the folder asks about iCloud first: some of its files must be downloaded,
@@ -155,19 +154,31 @@ export function icloudAsks(size: Loaded<FolderSize> | null): boolean {
 }
 
 /** How many files the download asks macOS for. Inputs: the files only in iCloud outside the
- * left folders (null when only the engine's refusal said some are), the left folders and whether
- * the owner chose Download everything. Output: the count, null when one count is unknown. */
-export function icloudWanted(placeholders: number | null, skipped: SkippedFolder[], everything: boolean): number | null {
+ * left folders (null when only the engine's refusal said some are), the left folders, whether
+ * the owner chose Download everything and the left folders the engine only counted. Output: the
+ * count, null when one count is unknown. */
+export function icloudWanted(placeholders: number | null, skipped: SkippedFolder[], everything: boolean, more: SkippedMore | null = null): number | null {
   if (!everything) return placeholders;
-  if (placeholders === null || skipped.some((folder) => folder.files === null)) return null;
-  return skipped.reduce((sum, folder) => sum + (folder.files ?? 0), placeholders);
+  if (placeholders === null || skipped.some((folder) => folder.files === null) || more?.files === null) return null;
+  return skipped.reduce((sum, folder) => sum + (folder.files ?? 0), placeholders + (more?.files ?? 0));
 }
 
 /** One left folder as the iCloud question lists it. Input: the folder. Output: its path and
  * file count. */
 export function icloudSkippedLine(folder: SkippedFolder): string {
-  const files = folder.files === null ? "files not counted" : folder.files === 1 ? "1 file" : `${folder.files} files`;
-  return `${displayText(folder.path)} (${files})`;
+  return `${displayText(folder.path)} (${filesLabel(folder.files)})`;
+}
+
+/** The left folders the engine only counted, as the iCloud question lists them last. Input: their
+ * count and files. Output: the line. */
+export function icloudSkippedMoreLine(more: SkippedMore): string {
+  return `and ${more.folders} more ${more.folders === 1 ? "folder" : "folders"} (${filesLabel(more.files)})`;
+}
+
+/** A count of files as the iCloud question shows it. Input: the count, null when not counted.
+ * Output: "1 file", "N files" or "files not counted". */
+function filesLabel(files: number | null): string {
+  return files === null ? "files not counted" : files === 1 ? "1 file" : `${files} files`;
 }
 
 /** The overrides an add sends, with Download everything when the owner chose it. Inputs: the
@@ -213,11 +224,12 @@ const LEFT_SHOWN = 3;
  * with a leading space, empty when it left none. */
 function leftLine(job: IntakeJob): string {
   const left = (job.left ?? []).map((folder) => displayText(folder.path));
-  if (left.length === 0) return "";
+  const count = left.length + (job.left_more?.folders ?? 0);
+  if (count === 0) return "";
   const shown = left.slice(0, LEFT_SHOWN);
-  const names = left.length > LEFT_SHOWN ? `${shown.join(", ")} and ${left.length - LEFT_SHOWN} more`
+  const names = count > shown.length ? `${shown.join(", ")} and ${count - shown.length} more`
     : shown.length === 1 ? shown[0] : `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}`;
-  const one = left.length === 1;
+  const one = count === 1;
   const where = job.mode === "move" ? `stayed in ${displayText(job.source)}` : `${one ? "was" : "were"} not copied`;
   return ` ${names} ${where}; reinstall ${one ? "it" : "them"} in the project.`;
 }

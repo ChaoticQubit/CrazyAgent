@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { pickFolder } from "../../api";
 import { ADD_WARNINGS, loadFolderSize, loadIntakeJobs, loadProjectsHome, startIntake } from "../../api-intake";
-import type { AddFolderMode, AddOverride, FolderSize, ProjectsHome, SkippedFolder } from "../../engine-client";
+import type { AddFolderMode, AddOverride, FolderSize, ProjectsHome, SkippedFolder, SkippedMore } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, Notice, NotReady, PageHeader, Segmented, Skeleton, Switch, formatRoute, navigate } from "../../ui";
 import { displayText } from "../conversation";
@@ -9,7 +9,7 @@ import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
 import {
   addWay, anywayIssues, anywayOverrides, anywayWarnings, folderName, icloudAsks, icloudCountLine, icloudMoveLine,
-  icloudPlaceholders, icloudSkipped, icloudSkippedLine, icloudWanted, joinPath, withEverything, pickedFolderProblem, sizeLine, startReached, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayIssue, type AnywayWarning,
+  icloudPlaceholders, icloudSkipped, icloudSkippedLine, icloudSkippedMore, icloudSkippedMoreLine, icloudWanted, joinPath, withEverything, pickedFolderProblem, sizeLine, startReached, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayIssue, type AnywayWarning,
 } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
@@ -164,19 +164,20 @@ export function MoveConfirmDialog({ open, way, name, source, root, sameVolume, b
  * is open, the folder name and path, the count outside the left folders (null when only the
  * engine's refusal said some are), the way, the left folders, the switch and the handlers.
  * Output: the dialog. */
-export function ICloudDialog({ open, name, source, placeholders, way, skipped, everything, onEverything, onDownload, onCancel }: {
+export function ICloudDialog({ open, name, source, placeholders, way, skipped, skippedMore, everything, onEverything, onDownload, onCancel }: {
   open: boolean;
   name: string;
   source: string;
   placeholders: number | null;
   way: AddFolderMode;
   skipped: SkippedFolder[];
+  skippedMore: SkippedMore | null;
   everything: boolean;
   onEverything: (everything: boolean) => void;
   onDownload: (way: AddFolderMode) => void;
   onCancel: () => void;
 }) {
-  const wanted = icloudWanted(placeholders, skipped, everything);
+  const wanted = icloudWanted(placeholders, skipped, everything, skippedMore);
   const fetches = wanted !== 0;
   const choice = (option: AddFolderMode, label: string) => <Button variant={option === way ? "primary" : "secondary"}
     icon={option === "move" ? "folder-input" : "copy"} onClick={() => onDownload(option)} data-autofocus={option === way || undefined}>{label}</Button>;
@@ -186,7 +187,8 @@ export function ICloudDialog({ open, name, source, placeholders, way, skipped, e
     {fetches && <p>{icloudCountLine(wanted)}</p>}
     {skipped.length > 0 && <>
       <p>{everything ? "Downloaded too:" : "Left in iCloud, as they can be rebuilt:"}</p>
-      <ul>{skipped.map((folder) => <li key={folder.path} className="pj-mono">{icloudSkippedLine(folder)}</li>)}</ul>
+      <ul>{skipped.map((folder) => <li key={folder.path} className="pj-mono">{icloudSkippedLine(folder)}</li>)}
+        {skippedMore && <li>{icloudSkippedMoreLine(skippedMore)}</li>}</ul>
       {!everything && <p className="pj-secondary">They stay in {displayText(source)}; reinstall them in the project after the add.</p>}
       <Switch id="icloud-everything" label="Download everything (slow)" checked={everything} onChecked={onEverything} />
     </>}
@@ -300,7 +302,7 @@ export function AddFolder() {
     {way !== "here" && <AnywayDialog open={asking} way={way} name={name} size={size} refused={null} busy={busy}
       onUseHere={useHere} onAnyway={anyway} onCancel={() => setAsking(false)} />}
     {way !== "here" && source && icloud && <ICloudDialog open name={name} source={source} placeholders={icloud.placeholders} way={way}
-      skipped={icloudSkipped(size)} everything={everything}
+      skipped={icloudSkipped(size)} skippedMore={icloudSkippedMore(size)} everything={everything}
       onEverything={setEverything} onDownload={download}
       onCancel={() => setIcloud(null)} />}
   </>;

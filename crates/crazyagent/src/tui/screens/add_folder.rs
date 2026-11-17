@@ -125,17 +125,23 @@ struct Icloud {
 
 impl Icloud {
     /// How many files the download asks macOS for: the count outside the left folders, and
-    /// theirs too with Download everything. Returns None when one count is unknown.
+    /// theirs too with Download everything, the ones only counted included. Returns None when
+    /// one count is unknown.
     fn wanted(&self) -> Option<u64> {
         if !self.everything {
             return self.placeholders;
         }
-        self.skipped
+        let named = self
+            .skipped
             .listed
             .iter()
             .try_fold(self.placeholders?, |sum, folder| {
                 sum.checked_add(folder.files?)
-            })
+            })?;
+        match self.skipped.more {
+            Some(more) => named.checked_add(more.files?),
+            None => Some(named),
+        }
     }
 
     /// The answers' labels: with a download, or plain Move and Copy when nothing is fetched.
@@ -1251,6 +1257,16 @@ fn question_lines(
 /// Draws the iCloud question: how many files are only in iCloud, the rebuildable folders the
 /// add leaves there with their file counts and where they stay, the Download everything
 /// switch, that a move takes the folder out of iCloud on the owner's other Macs, and the
+
+/// A count of files as the iCloud question shows it. Takes the count, None when it is not
+/// known. Returns "1 file", "N files" or "files not counted".
+fn files_label(files: Option<u64>) -> String {
+    match files {
+        Some(1) => "1 file".to_owned(),
+        Some(count) => format!("{count} files"),
+        None => "files not counted".to_owned(),
+    }
+}
 /// three answers. Takes the question, the width, the context and the lines to add to.
 fn icloud_lines(icloud: &Icloud, limit: usize, ctx: &Ctx, lines: &mut Vec<Line<'static>>) {
     let theme = &ctx.theme;
@@ -1273,14 +1289,25 @@ fn icloud_lines(icloud: &Icloud, limit: usize, ctx: &Ctx, lines: &mut Vec<Line<'
             }
             .to_owned(),
         );
-        texts.extend(icloud.skipped.listed.iter().map(|folder| {
-            let files = match folder.files {
-                Some(1) => "1 file".to_owned(),
-                Some(count) => format!("{count} files"),
-                None => "files not counted".to_owned(),
+        texts.extend(
+            icloud
+                .skipped
+                .listed
+                .iter()
+                .map(|folder| format!("  {} ({})", folder.path, files_label(folder.files))),
+        );
+        if let Some(more) = icloud.skipped.more {
+            let folders = if more.folders == 1 {
+                "folder"
+            } else {
+                "folders"
             };
-            format!("  {} ({files})", folder.path)
-        }));
+            texts.push(format!(
+                "  and {} more {folders} ({})",
+                more.folders,
+                files_label(more.files)
+            ));
+        }
         if !icloud.everything {
             texts.push(format!(
                 "They stay in {}; reinstall them in the project after the add.",

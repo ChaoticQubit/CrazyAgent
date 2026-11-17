@@ -514,7 +514,15 @@ impl SkippedFolders {
     /// Adds one folder, named while fewer than `SKIPPED_LISTED_MAX` are, else counted.
     /// Input: the folder. Output: none.
     pub fn push(&mut self, folder: Skipped) {
-        self.listed.push(folder);
+        if self.listed.len() < SKIPPED_LISTED_MAX {
+            self.listed.push(folder);
+        } else {
+            self.count(SkippedMore {
+                folders: 1,
+                files: folder.files,
+            });
+        }
+        assert!(self.listed.len() <= SKIPPED_LISTED_MAX);
     }
 
     fn count(&mut self, extra: SkippedMore) {
@@ -553,8 +561,19 @@ impl SkippedFolders {
     /// The folders as a reply names them. Input: the most to name. Output: the named folders
     /// and the count of the rest.
     pub fn cut(&self, cap: usize) -> (Vec<Skipped>, Option<SkippedMore>) {
-        let _ = cap;
-        (self.listed.clone(), self.more)
+        let at = cap.min(self.listed.len());
+        let mut rest = SkippedFolders {
+            listed: Vec::new(),
+            more: self.more,
+        };
+        for folder in &self.listed[at..] {
+            rest.count(SkippedMore {
+                folders: 1,
+                files: folder.files,
+            });
+        }
+        assert_eq!(at as u64 + rest.len(), self.len());
+        (self.listed[..at].to_vec(), rest.more)
     }
 }
 
@@ -790,13 +809,21 @@ fn gitignore(path: &Path, look: &Look<'_>) -> Option<String> {
     Some(text)
 }
 
-/// A path below the added folder as Home shows it. Inputs: the added folder and the path.
-/// Output: the text.
+/// A path below the added folder as Home shows it, cut at a character edge to
+/// `SKIPPED_PATH_MAX` bytes ending in "..." when longer. Inputs: the added folder and the
+/// path. Output: the text.
 pub(super) fn shown(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
+    let text = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
+    if text.len() <= SKIPPED_PATH_MAX {
+        return text.into_owned();
+    }
+    let mut end = SKIPPED_PATH_MAX - "...".len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = format!("{}...", &text[..end]);
+    assert!(cut.len() <= SKIPPED_PATH_MAX);
+    cut
 }
 
 /// Downloads what of a folder is only in iCloud, paced through the engine's one queue: lists
