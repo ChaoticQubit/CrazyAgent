@@ -2,6 +2,13 @@ use crazyagent::restore::RestoreState;
 use std::path::Path;
 use std::time::SystemTime;
 
+/// Whether the engine's login service still runs a process, as a restore's pending record is
+/// weighed (L5). A status that can't be read counts as running, so a restore that may still
+/// copy is never stopped. Input: the service. Output: the answer.
+pub fn service_running(service: &crazyagent::service::Service) -> bool {
+    service.status().map_or(true, |status| status.running)
+}
+
 /// What Settings shows about bringing back the 2.4 data (L5): until when the pinned backup
 /// can be restored, in milliseconds since 1970, and how the last restore ended. Empty when
 /// there is nothing to restore and no restore was asked.

@@ -310,7 +310,8 @@ async fn ensure_default_engine() -> Result<(), BridgeError> {
     }
     let (layout, service) = default_engine()?;
     if !crazyagent::service::answering(&layout.socket()) {
-        if let Some(code) = crazyagent::restore::blocks_start(layout.root()) {
+        let running = restore::service_running(&service);
+        if let Some(code) = crazyagent::restore::blocks_start(layout.root(), running) {
             return Err(engine_failure(code));
         }
         start_engine(&layout, &service, false).await?;
@@ -410,6 +411,9 @@ async fn desktop_restart_engine(
     let _update = updates::hold(&update)?;
     let mut bridge = lock(&state).await?;
     let (layout, service) = default_engine()?;
+    if crazyagent::restore::holds_restart(layout.root(), restore::service_running(&service)) {
+        return Err(engine_failure(crazyagent::restore::ENGINE_RESTORING));
+    }
     start_engine(&layout, &service, true).await?;
     ensure_default_engine().await?;
     bridge.connect().await

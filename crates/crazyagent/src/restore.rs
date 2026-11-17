@@ -122,15 +122,28 @@ fn parse(line: &str) -> Option<RestoreState> {
     Some(state)
 }
 
-/// Why a client must not start the engine at `root` by itself: a restore runs or brought
-/// the 2.4 data back, and one 2.5 start would upgrade it again. The owner's explicit restart
-/// never asks. Input: the engine root. Output: `engine_restoring`, `engine_restored` or none.
-pub fn blocks_start(root: &Path) -> Option<&'static str> {
+/// Why a client must not start the engine at `root` by itself: a restore runs, or brought
+/// the 2.4 data back and one 2.5 start would upgrade it again. A pending record whose engine
+/// process is gone was left by a restore that died, and the start that follows clears it.
+/// Inputs: the engine root and whether its login service still runs a process. Output:
+/// `engine_restoring`, `engine_restored` or none.
+pub fn blocks_start(root: &Path, running: bool) -> Option<&'static str> {
     match state(root)? {
-        RestoreState::Pending => Some(ENGINE_RESTORING),
+        RestoreState::Pending if running => Some(ENGINE_RESTORING),
+        RestoreState::Pending => None,
         RestoreState::Restored { .. } => Some(ENGINE_RESTORED),
         RestoreState::Failed { .. } => None,
     }
+}
+
+/// Whether the owner's explicit restart of the engine at `root` must wait: a restore still
+/// runs, and a restart would stop its process in the middle of the copy. After a restore it
+/// never waits; that restart is the way back to 2.5. Inputs: the engine root and whether its
+/// login service still runs a process. Output: the answer.
+pub fn holds_restart(root: &Path, running: bool) -> bool {
+    let held = blocks_start(root, running) == Some(ENGINE_RESTORING);
+    assert!(!held || running);
+    held
 }
 
 /// Until when the owner can restore the pinned 2.4 backup of the engine at `root`, read
