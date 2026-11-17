@@ -610,3 +610,93 @@ async fn a_stop_reaches_an_add_waiting_for_the_download_slot_at_once() {
     drop(slot);
     jobs.stop().await;
 }
+
+/// #380 F3: a waiting job stopped while its task still waits on storage keeps its claim on
+/// its id, so eleven claims stay held with ten jobs live. With every client-change place held
+/// too, the next start answers `job_busy` and never trips the engine's bound on running
+/// changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_counts_the_claim_a_stopped_waiting_job_still_holds() {
+    let mut jobs = Jobs::start().await;
+    let linked = jobs.folder("linked", "l");
+    std::fs::write(
+        Path::new(&linked).join(".git"),
+        "gitdir: /nowhere/.git/worktrees/linked\n",
+    )
+    .unwrap();
+    jobs.add("add-linked", &linked, AddMode::Copy)
+        .await
+        .unwrap();
+    assert!(matches!(
+        jobs.ended("add-linked").await.state,
+        JobState::NeedsAnswer { .. }
+    ));
+    let total = JOBS_RUNNING + JOBS_WAITING;
+    let folders: Vec<String> = (0..total)
+        .map(|n| jobs.folder(&format!("folder-{n}"), &n.to_string()))
+        .collect();
+    let release = jobs.hold();
+    for (n, folder) in folders.iter().take(JOBS_RUNNING).enumerate() {
+        jobs.add(&format!("add-{n}"), folder, AddMode::Copy)
+            .await
+            .unwrap();
+    }
+    let answer = jobs
+        .owner
+        .job_start(
+            RequestId::new("add-linked-anyway").unwrap(),
+            JobSubject::Add {
+                path: linked.clone(),
+            },
+            AddMode::Copy,
+            vec![AddOverride::LinkedCheckout],
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(answer.state, JobState::Waiting { .. }),
+        "the answer waits behind three running adds: {:?}",
+        answer.state
+    );
+    for (n, folder) in folders
+        .iter()
+        .enumerate()
+        .skip(JOBS_RUNNING)
+        .take(JOBS_WAITING - 1)
+    {
+        jobs.add(&format!("add-{n}"), folder, AddMode::Copy)
+            .await
+            .unwrap();
+    }
+    let stopped = jobs
+        .owner
+        .job_stop(RequestId::new("add-linked-anyway").unwrap())
+        .await
+        .unwrap();
+    assert!(stopped, "the stop reaches the waiting answer");
+    let authority = jobs.authority();
+    let places: Vec<_> = (0..DEFERRED_MAX)
+        .map(|n| {
+            let id = RequestId::new(format!("client-change-{n}")).unwrap();
+            super::projects_home::Running::claim(&authority, "owner", &id)
+                .expect("a client change takes a free place")
+        })
+        .collect();
+    let past = jobs.folder("past", "p");
+    let refused = jobs
+        .add("add-past", &past, AddMode::Copy)
+        .await
+        .expect_err("a start while every claim is held is refused");
+    assert_eq!(refused.0, "job_busy");
+    drop(places);
+    release.send(()).unwrap();
+    for n in 0..total - 1 {
+        assert_eq!(jobs.ended(&format!("add-{n}")).await.state, JobState::Done);
+    }
+    assert!(matches!(
+        jobs.ended("add-linked-anyway").await.state,
+        JobState::Cancelled { .. }
+    ));
+    assert!(!jobs.home().join("past").exists());
+    jobs.stop().await;
+}
