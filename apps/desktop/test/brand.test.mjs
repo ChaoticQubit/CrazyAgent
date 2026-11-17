@@ -1,6 +1,7 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import test from "node:test";
 import { inflateSync } from "node:zlib";
 import { createElement } from "react";
@@ -131,7 +132,7 @@ test("index.html links the brand favicon as SVG with a 32 px PNG fallback", () =
 test("tauri bundles the dark night tile as the fixed icon and the Icon Composer file for macOS 26 (DEC-181)", () => {
   const conf = JSON.parse(read("../src-tauri/tauri.conf.json").toString("utf8"));
   assert.deepEqual(conf.bundle.icon, [
-    "icons/icon.png", "icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico", "icons/AppIcon.icon",
+    "icons/icon.png", "icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico", "icons/AppIcon.icon", "icons/Assets.car",
   ]);
   for (const [file, size] of [["icon.png", 1024], ["32x32.png", 32], ["128x128.png", 128], ["128x128@2x.png", 256]]) {
     assert.deepEqual(pngSize(`../src-tauri/icons/${file}`), [size, size], file);
@@ -184,4 +185,17 @@ test("the Icon Composer file gives the fill and the mark a dark look the Mac pic
     for (const color of colors) assert.ok(svg.includes(color), `${name} uses ${color}`);
     assert.doesNotMatch(svg, /<script|href=|on[a-z]+=/i);
   }
+});
+
+test("the macOS bundle ships the Assets.car compiled from the Icon Composer file as it stands, so the release build never runs actool (DEC-181)", () => {
+  const icons = new URL("../src-tauri/icons/", import.meta.url);
+  const sha = (path) => createHash("sha256").update(readFileSync(new URL(path, icons))).digest("hex");
+  const sources = readdirSync(new URL("AppIcon.icon/", icons), { recursive: true })
+    .map((name) => `AppIcon.icon/${name.replaceAll("\\", "/")}`)
+    .filter((path) => !path.endsWith("/.DS_Store") && statSync(new URL(path, icons)).isFile())
+    .sort();
+  assert.ok(sources.includes("AppIcon.icon/icon.json"), "the Icon Composer file is read");
+  const pinned = [...sources, "Assets.car"].map((path) => `${sha(path)}  ${path}\n`).join("");
+  assert.equal(read("../src-tauri/icons/Assets.car.sha256").toString("utf8"), pinned, "icons/AppIcon.icon or icons/Assets.car changed: run scripts/release/assets-car.sh on macOS 26 with Xcode 26 or newer and commit both files");
+  assert.equal(read("../src-tauri/icons/Assets.car").toString("latin1", 0, 8), "BOMStore", "Assets.car is a compiled asset catalog");
 });
