@@ -485,7 +485,7 @@ pub const SKIPPED_PATH_MAX: usize = 256;
 
 /// The most bytes one named folder takes in a reply: its path with every byte escaped as JSON
 /// escapes a control character, six bytes each, and the field names and file count around it.
-const SKIPPED_ENTRY_BYTES_MAX: usize = 6 * SKIPPED_PATH_MAX + 64;
+pub const SKIPPED_ENTRY_BYTES_MAX: usize = 6 * SKIPPED_PATH_MAX + 64;
 const _: () = assert!(
     SKIPPED_LISTED_MAX * SKIPPED_ENTRY_BYTES_MAX + 4096 <= crate::protocol::FRAME_BYTES_MAX
 );

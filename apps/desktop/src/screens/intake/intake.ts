@@ -220,16 +220,17 @@ function landedCounts(progress: IcloudProgress): string {
 const LEFT_SHOWN = 3;
 
 /** What a done add says about the rebuildable folders it left in iCloud: where they stayed after
- * a Move, that a Copy left them out, and to reinstall them. Input: the job. Output: the sentence
- * with a leading space, empty when it left none. */
+ * a Move, that a Copy left them out, and to reinstall them, by count when the engine named none.
+ * Input: the job. Output: the sentence with a leading space, empty when it left none. */
 function leftLine(job: IntakeJob): string {
   const left = (job.left ?? []).map((folder) => displayText(folder.path));
   const count = left.length + (job.left_more?.folders ?? 0);
   if (count === 0) return "";
   const shown = left.slice(0, LEFT_SHOWN);
-  const names = count > shown.length ? `${shown.join(", ")} and ${count - shown.length} more`
-    : shown.length === 1 ? shown[0] : `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}`;
   const one = count === 1;
+  const names = shown.length === 0 ? `${count} rebuildable folder${one ? "" : "s"}`
+    : count > shown.length ? `${shown.join(", ")} and ${count - shown.length} more`
+    : shown.length === 1 ? shown[0] : `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}`;
   const where = job.mode === "move" ? `stayed in ${displayText(job.source)}` : `${one ? "was" : "were"} not copied`;
   return ` ${names} ${where}; reinstall ${one ? "it" : "them"} in the project.`;
 }

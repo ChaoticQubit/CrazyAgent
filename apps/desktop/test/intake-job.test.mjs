@@ -36,6 +36,13 @@ test("#383 F1: a done add counts the left folders the engine named no more of", 
     / a\/node_modules, b\/node_modules, c\/node_modules and 1997 more were not copied; reinstall them/);
 });
 
+test("V243-JOBLIST-FRAME-BOUND: a done add whose left folders are only counted says how many", () => {
+  assert.equal(intake.jobLine(job({ state: "done" }, { left_more: { folders: 3, files: null } })),
+    `shop is in your projects folder. Set it up from Home. 3 rebuildable folders stayed in ${SOURCE}; reinstall them in the project.`);
+  assert.match(intake.jobLine(job({ state: "done" }, { left_more: { folders: 1, files: 4 }, mode: "copy" })),
+    / 1 rebuildable folder was not copied; reinstall it in the project\.$/);
+});
+
 test("#383 code F1: a done project move says which rebuildable folders stayed in the old folder", () => {
   const left = [{ path: "packages/web/node_modules", files: 57108 }];
   assert.equal(intake.jobLine(job({ state: "done" }, { kind: "move_project", project_id: "reading", source: "/Users/mira/Code/reading-list", left })),

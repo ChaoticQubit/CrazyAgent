@@ -525,23 +525,27 @@ fn a_setup_cut_short_restores_failed_interrupted_with_no_subject_to_restart() {
     assert_eq!(started.kind(), JobKind::Setup);
 }
 
-#[test]
-fn a_status_list_of_every_held_job_at_its_longest_fits_one_frame() {
-    let quotes = |bytes: usize| "\"".repeat(bytes);
+fn quotes(bytes: usize) -> String {
+    "\"".repeat(bytes)
+}
+
+/// Held jobs at their longest: project moves with 128-byte ids, a source of 1024 quotes and
+/// every override; the first eight wait behind a long name, the ninth asks, the rest failed
+/// with a long code. Input: how many jobs. Output: the jobs in start order.
+fn longest_jobs(count: usize) -> Vec<IntakeJob> {
     let project = ProjectId::new("p".repeat(128)).unwrap();
-    let source = format!("/{}", quotes(1023));
     let overrides = vec![
         AddOverride::Worktrees,
         AddOverride::LinkedCheckout,
         AddOverride::TooLarge,
     ];
-    let mut views = Vec::new();
-    for at in 0..22 {
+    let mut jobs = Vec::new();
+    for at in 0..count {
         let job = IntakeJob::new(
             RequestId::new(format!("{at:0>128}")).unwrap(),
             JobKind::MoveProject,
             Some(project.clone()),
-            source.clone(),
+            format!("/{}", quotes(1023)),
             AddMode::Copy,
             overrides.clone(),
         );
@@ -553,8 +557,16 @@ fn a_status_list_of_every_held_job_at_its_longest_fits_one_frame() {
                 quotes(4096)
             )))),
         }
-        views.push(job.view());
+        jobs.push(job);
     }
+    assert_eq!(jobs.len(), count);
+    jobs
+}
+
+#[test]
+fn a_status_list_of_every_held_job_at_its_longest_fits_one_frame() {
+    let source = format!("/{}", quotes(1023));
+    let views: Vec<JobView> = longest_jobs(22).iter().map(IntakeJob::view).collect();
     let reply = serde_json::json!({"kind": "jobs", "jobs": views});
     let frame = crate::protocol::encode_frame(&reply).expect("every held job fits one frame");
     let read: serde_json::Value = serde_json::from_slice(&frame[4..]).unwrap();
@@ -564,7 +576,7 @@ fn a_status_list_of_every_held_job_at_its_longest_fits_one_frame() {
         assert_eq!(view.id.as_str(), format!("{at:0>128}"));
         assert_eq!(view.source, source, "a source is never cut");
         let bytes = serde_json::to_vec(view).unwrap().len();
-        assert!(bytes <= JOB_VIEW_BYTES_MAX, "{bytes} bytes");
+        assert!(bytes <= JOB_VIEW_NAMELESS_BYTES_MAX, "{bytes} bytes");
     }
     assert_eq!(
         listed[8].state,
@@ -604,5 +616,80 @@ fn a_delete_name_past_the_bound_shows_as_a_label_within_it() {
     assert!(view.source.starts_with("Old notes "), "{}", view.source);
     assert!(view.source.len() <= PATH_BYTES_MAX);
     let bytes = serde_json::to_vec(&view).unwrap().len();
-    assert!(bytes <= JOB_VIEW_BYTES_MAX, "{bytes} bytes");
+    assert!(bytes <= JOB_VIEW_NAMELESS_BYTES_MAX, "{bytes} bytes");
+}
+
+/// Rebuildable folders a download left, each named by 256 bytes JSON writes at six bytes each,
+/// one file in each. Input: how many. Output: the folders as the download gathered them.
+fn left_folders(count: usize) -> crate::projects_home::icloud::SkippedFolders {
+    let mut left = crate::projects_home::icloud::SkippedFolders::default();
+    for at in 0..count {
+        left.push(Skipped {
+            path: format!("{}{}", at % 10, "\u{1}".repeat(255)),
+            files: Some(1),
+        });
+    }
+    assert_eq!(left.len(), count as u64);
+    left
+}
+
+/// The folders a view names and counts, and the files in them. Input: the view. Output: the
+/// folder count and the file count, None when a count is unknown.
+fn left_total(view: &JobView) -> (u64, Option<u64>) {
+    let named_files: Option<u64> = view.left.iter().map(|folder| folder.files).sum();
+    let folders = view.left.len() as u64 + view.left_more.map_or(0, |more| more.folders);
+    let files = view
+        .left_more
+        .map_or(Some(0), |more| more.files)
+        .zip(named_files)
+        .map(|(counted, named)| counted + named);
+    (folders, files)
+}
+
+#[test]
+fn a_status_list_of_every_held_job_naming_its_left_folders_fits_one_frame() {
+    let jobs = longest_jobs(22);
+    for job in &jobs {
+        job.download().leave(left_folders(5), true);
+    }
+    let mut views: Vec<JobView> = jobs.iter().map(IntakeJob::view).collect();
+    for view in &views {
+        assert_eq!(view.left.len(), JOB_SKIPPED_LISTED_MAX);
+        assert_eq!(left_total(view), (5, Some(5)));
+        let bytes = serde_json::to_vec(view).unwrap().len();
+        assert!(bytes <= JOB_VIEW_BYTES_MAX, "{bytes} bytes");
+    }
+    fit_left(&mut views, crate::protocol::FRAME_BYTES_MAX - 64);
+    let reply = serde_json::json!({"kind": "jobs", "jobs": views});
+    crate::protocol::encode_frame(&reply)
+        .expect("every held job with its left folders fits one frame");
+    for view in &views {
+        assert_eq!(
+            left_total(view),
+            (5, Some(5)),
+            "a folder no longer named is counted"
+        );
+        if view.left.is_empty() {
+            let bytes = serde_json::to_vec(view).unwrap().len();
+            assert!(bytes <= JOB_VIEW_NAMELESS_BYTES_MAX, "{bytes} bytes");
+        }
+    }
+    if let Some(first) = views.iter().position(|view| !view.left.is_empty()) {
+        assert!(
+            views[first..].iter().all(|view| !view.left.is_empty()),
+            "the newest jobs keep their names first"
+        );
+    }
+}
+
+#[test]
+fn a_short_status_list_keeps_every_left_folder_named() {
+    let jobs = longest_jobs(3);
+    for job in &jobs {
+        job.download().leave(left_folders(5), true);
+    }
+    let views: Vec<JobView> = jobs.iter().map(IntakeJob::view).collect();
+    let mut fitted = views.clone();
+    fit_left(&mut fitted, crate::protocol::FRAME_BYTES_MAX - 64);
+    assert_eq!(fitted, views);
 }

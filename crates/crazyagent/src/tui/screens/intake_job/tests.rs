@@ -683,6 +683,30 @@ fn a_done_add_counts_the_left_folders_it_does_not_name() {
 }
 
 #[test]
+fn a_done_add_whose_left_folders_are_only_counted_says_how_many() {
+    let counted = |folders: u64, mode: AddMode| JobView {
+        left_more: Some(crate::projects_home::icloud::SkippedMore {
+            folders,
+            files: None,
+        }),
+        mode,
+        ..job(JobState::Done)
+    };
+    assert_eq!(
+        line(&counted(3, AddMode::Move)),
+        "shop is in your projects folder. Set it up from Home. 3 rebuildable folders stayed in \
+         /Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop; reinstall them in the \
+         project."
+    );
+    assert!(
+        line(&counted(1, AddMode::Copy))
+            .ends_with(" 1 rebuildable folder was not copied; reinstall it in the project."),
+        "{}",
+        line(&counted(1, AddMode::Copy))
+    );
+}
+
+#[test]
 fn a_done_add_says_which_rebuildable_folders_it_left_in_icloud_and_where() {
     let folder = |path: &str, files| crate::projects_home::icloud::Skipped {
         path: path.into(),

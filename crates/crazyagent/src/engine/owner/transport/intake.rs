@@ -2,7 +2,8 @@ use super::projects_home::{Running, Sink, UNKNOWN};
 use super::*;
 use crate::projects_home::icloud;
 use crate::projects_home::job::{
-    IntakeJob, JOB_VIEW_BYTES_MAX, JobKind, JobState, JobSubject, JobView,
+    IntakeJob, JOB_VIEW_BYTES_MAX, JOB_VIEW_NAMELESS_BYTES_MAX, JobKind, JobState, JobSubject,
+    JobView, fit_left,
 };
 use crate::projects_home::{AddMode, AddOverride, HomeAction};
 
@@ -26,12 +27,19 @@ pub(super) const JOBS_ENDED_MAX: usize = JOBS_RUNNING_MAX + JOBS_WAITING_MAX;
 /// The most jobs held at once: the live ones and the ended ones kept.
 const JOBS_HELD_MAX: usize = JOBS_RUNNING_MAX + JOBS_WAITING_MAX + JOBS_ENDED_MAX;
 
-/// The most bytes of JSON a status reply takes: every job held at its largest view, the
-/// commas between them and the reply's kind around the list, within one frame (#380 N3).
-const JOBS_REPLY_BYTES_MAX: usize = JOBS_HELD_MAX * JOB_VIEW_BYTES_MAX + JOBS_HELD_MAX + 64;
+/// The most bytes of JSON the list of a status reply takes: a frame less the reply's kind
+/// and names around the list.
+const JOBS_LIST_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX - 64;
+
+/// The most bytes of JSON a status reply's list takes with no job naming a left folder: every
+/// job held at its largest such view, the commas between them and the brackets (#380 N3). The
+/// list fits its room this way, so `fit_left` always ends within it (V243-JOBLIST-FRAME-BOUND).
+const JOBS_NAMELESS_LIST_BYTES_MAX: usize =
+    JOBS_HELD_MAX * JOB_VIEW_NAMELESS_BYTES_MAX + JOBS_HELD_MAX + 2;
 
 const _: () = assert!(JOBS_RUNNING_MAX <= REVISION_TRIES);
-const _: () = assert!(JOBS_REPLY_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
+const _: () = assert!(JOBS_NAMELESS_LIST_BYTES_MAX <= JOBS_LIST_BYTES_MAX);
+const _: () = assert!(JOB_VIEW_BYTES_MAX + 64 <= crate::protocol::FRAME_BYTES_MAX);
 
 /// What a client asks a job to do: the change's request id, which names the job, the subject,
 /// the mode and the overrides.
@@ -452,7 +460,8 @@ impl Intake {
     pub(super) fn status(&self) -> Vec<JobView> {
         let mut held = self.lock();
         assert!(held.len() <= JOBS_HELD_MAX);
-        let views: Vec<JobView> = held.iter().map(|current| current.job.view()).collect();
+        let mut views: Vec<JobView> = held.iter().map(|current| current.job.view()).collect();
+        fit_left(&mut views, JOBS_LIST_BYTES_MAX);
         for (current, view) in held.iter_mut().zip(&views) {
             if view.state.over() {
                 current.seen = true;
