@@ -195,8 +195,9 @@ pub(super) mod tests {
     }
 
     /// Any text but the generator's exact layout names nothing: line ends changed, a line
-    /// added or changed inside the layout, another program, a setting, arguments, the layout for a native target, a program given by path,
-    /// or a target that climbs, has a `%`, a quote, a drive or a part Windows trims.
+    /// added or changed inside the layout, another program, a setting, arguments, the native
+    /// target layout, a program given by path, or a target that climbs, has a `%`, a quote,
+    /// a drive, an empty part, a part Windows trims or too many bytes.
     #[test]
     fn every_other_batch_text_names_nothing() {
         let codex_js = r"node_modules\@openai\codex\bin\codex.js";
