@@ -819,14 +819,22 @@ fn one_line_rule<'a>(body: &'a str, folders: &'a [String]) -> Option<(&'a str, &
 }
 
 /// Tells whether one profile line, its closing parentheses taken off, is the credential deny
-/// the engine writes below a toolchain folder, anchored at one machine folder. Inputs: the
-/// line so trimmed and the folders. Output: the folder, or none.
+/// the engine writes below a toolchain folder, anchored at one machine folder: the 2.4.2
+/// spelling with an optional `(/.*)?$` tail, or the 2.5 pair of an exact `$` regex and a
+/// `/` regex naming the same files. Inputs: the line so trimmed and the folders. Output: the
+/// folder, or none.
 fn credential_deny<'a>(open: &str, folders: &'a [String]) -> Option<&'a str> {
     folders
         .iter()
         .find(|folder| {
-            open.starts_with(&format!("(regex #\"^{}/(.*/)?(", seatbelt_escape(folder)))
-                && open.ends_with(")(/.*)?$\"")
+            let head = format!("(regex #\"^{}/(.*/)?(", seatbelt_escape(folder));
+            let Some(names) = open.strip_prefix(&head) else {
+                return false;
+            };
+            names.ends_with(")(/.*)?$\"")
+                || names
+                    .split_once(")$\") ")
+                    .is_some_and(|(files, below)| below == format!("{head}{files})/\""))
         })
         .map(String::as_str)
 }
@@ -949,6 +957,29 @@ fn machine_read_facts_read_the_same_on_a_mac_with_no_machine_folders() {
         facts,
         json!({"read_only": true, "named_elsewhere": false, "credentials_denied": true})
     );
+}
+
+#[test]
+fn a_credential_deny_in_the_pair_spelling_is_taken_out_like_the_optional_tail_one() {
+    let developer = "/Applications/Xcode.app/Contents/Developer".to_owned();
+    let below = "^/Applications/Xcode\\.app/Contents/Developer/(.*/)?(\\.netrc|\\.npmrc)";
+    let base = "(allow file-read*\n  (subpath \"/opt/x\"))\n(deny file-read* file-write*\n  (subpath \"/s\"))\n";
+    let profile = format!(
+        "(allow file-read*\n  (subpath \"/opt/x\")\n  (subpath \"{developer}\"))\n(deny file-read* file-write*\n  (subpath \"/s\")\n  (regex #\"{below}$\") (regex #\"{below}/\"))\n"
+    );
+    let (kept, facts) = without_machine_reads(&profile, std::slice::from_ref(&developer));
+    assert_eq!(kept, base);
+    assert_eq!(
+        facts,
+        json!({"read_only": true, "named_elsewhere": false, "credentials_denied": true})
+    );
+    let other = "^/Applications/Xcode\\.app/Contents/Developer/(.*/)?(\\.netrc)";
+    let mismatched = format!(
+        "(allow file-read*\n  (subpath \"/opt/x\")\n  (subpath \"{developer}\"))\n(deny file-read* file-write*\n  (subpath \"/s\")\n  (regex #\"{below}$\") (regex #\"{other}/\"))\n"
+    );
+    let (kept, facts) = without_machine_reads(&mismatched, &[developer]);
+    assert!(kept.contains(&format!("(regex #\"{other}/\")")), "{kept}");
+    assert_eq!(facts["credentials_denied"], json!(false));
 }
 
 #[test]
