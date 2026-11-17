@@ -427,3 +427,26 @@ fn a_change_set_reveal_opens_its_worktree_or_a_file_in_it() {
         "a worktree the IDE workspace no longer lists is never revealed"
     );
 }
+
+#[test]
+fn a_reveal_names_the_file_it_checked_with_links_inside_the_folder_resolved() {
+    let mut case = crate::ide::workspace::tests::Case::new();
+    let agent = case.agent("sub", "working");
+    case.change(&agent);
+    let id: String = case
+        .db
+        .query_row("SELECT id FROM landing_change_sets", [], |row| row.get(0))
+        .unwrap();
+    std::fs::create_dir_all(agent.worktree.join("real")).unwrap();
+    std::fs::write(agent.worktree.join("real").join("inner.txt"), "inner").unwrap();
+    std::os::unix::fs::symlink("real", agent.worktree.join("alias")).unwrap();
+    let target = RevealTarget::ChangeSet {
+        id: ChangeSetId::new(id).unwrap(),
+        path: Some("alias/inner.txt".into()),
+    };
+    assert_eq!(
+        resolve(&case.root, &case.project, &target).unwrap(),
+        format!("{}/real/inner.txt", agent.worktree.to_str().unwrap()),
+        "the IDE opens the file that was checked, not a link an agent can repoint afterwards"
+    );
+}
