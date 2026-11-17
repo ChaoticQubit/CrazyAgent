@@ -500,10 +500,10 @@ fn append_all(appender: &mut Appender<'_, '_>, changes: &[Change]) -> Result<u64
 }
 
 /// Writes one landing change in a transaction of its own: opens it, records the event and
-/// commits. Every landing writer runs outside a transaction (none runs inside the open's
-/// sweep), so one called inside a caller's transaction is refused rather than left without
-/// its event. Inputs: the connection and the change. Output: Ok, or the refusal
-/// (`landing_log_unavailable` inside a transaction), which writes nothing.
+/// commits. A writer inside a transaction logs through [`record`], [`record_at`] or the
+/// open's proof instead, so this one called inside a caller's transaction is refused rather
+/// than left without its event. Inputs: the connection and the change. Output: Ok, or the
+/// refusal (`landing_log_unavailable` inside a transaction), which writes nothing.
 pub(crate) fn write(db: &Connection, change: &Change) -> Result<(), EngineError> {
     within(db, |tx| record(tx, change).map(drop))
 }
