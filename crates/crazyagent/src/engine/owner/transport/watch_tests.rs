@@ -479,3 +479,119 @@ async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refus
     }
     panic!("background commits woke the watch before every revoke");
 }
+
+/// Creates one project through the engine's owner client, at the revision a capabilities
+/// read gives, so the commit names the projects topic. Inputs: the engine and the project's
+/// id. Output: none; it panics unless the change applied.
+async fn create_project(owner: &super::super::usage_tests::Usage, id: &str) {
+    let read = OwnerRequest {
+        protocol_version: crate::protocol::PROTOCOL_VERSION,
+        request_id: RequestId::new(format!("{id}-read")).unwrap(),
+        expected_revision: Cursor::new(0),
+        operation: OwnerOperation::Read {
+            query: OwnerRead::Capabilities,
+        },
+    };
+    let OwnerResponse::Read { state } = owner.client.request(read).await.unwrap().response else {
+        panic!("the capabilities read failed");
+    };
+    let created = owner
+        .client
+        .request(OwnerRequest {
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+            request_id: RequestId::new(id).unwrap(),
+            expected_revision: state.revision,
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::CreateProject {
+                    project_id: ProjectId::new(id).unwrap(),
+                    spec: ProjectSpec {
+                        name: id.into(),
+                        repositories: vec![],
+                    },
+                },
+            },
+        })
+        .await
+        .unwrap();
+    let OwnerResponse::Applied { operation } = &created.response else {
+        panic!("not applied: {created:?}");
+    };
+    assert_eq!(operation.result, OwnerResult::Applied, "{created:?}");
+}
+
+/// Reads the turns a follow hands on until one names `topic`, for at most ten seconds, two
+/// poll periods. Inputs: the receiver and the topic. Output: that turn's topics.
+async fn handed(
+    received: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<Topic>>,
+    topic: Topic,
+) -> Vec<Topic> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let topics = tokio::time::timeout_at(deadline, received.recv())
+            .await
+            .unwrap_or_else(|_| panic!("no turn named {topic:?} in time"))
+            .expect("the follow still runs");
+        if topics.contains(&topic) {
+            return topics;
+        }
+    }
+}
+
+/// The bridge's follow on a live engine (v2.5 S3b): an owner change reaches its receiver
+/// with its topic, and a change made while the follow has no connection arrives once it has
+/// one again, from the cursor it kept, after which nothing is handed on a second time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_followed_watch_hands_on_each_change_and_one_made_while_it_had_no_connection() {
+    let owner = super::super::usage_tests::Usage::start().await;
+    let watcher = Arc::new(
+        OwnerClient::attach(
+            &owner.client.root.path,
+            OwnerClientKind::Tui,
+            Duration::from_secs(20),
+        )
+        .unwrap(),
+    );
+    let connected = Arc::new(AtomicBool::new(true));
+    let (missed, mut missing) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel::<Vec<Topic>>();
+    let link = Arc::clone(&connected);
+    let following = tokio::spawn(crate::watch_feed::follow(
+        move || {
+            let client = link.load(Ordering::SeqCst).then(|| Arc::clone(&watcher));
+            if client.is_none() {
+                let _ = missed.send(());
+            }
+            std::future::ready(client)
+        },
+        move |topics: &[Topic]| sent.send(topics.to_vec()).is_ok(),
+    ));
+    let first = tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .expect("a first watch has no mark, so it is answered at once")
+        .unwrap();
+    assert_eq!(first.last(), Some(&Topic::Unknown), "{first:?}");
+    create_project(&owner, "followed-1").await;
+    let applied = Clock::now();
+    handed(&mut received, Topic::Projects).await;
+    assert!(applied.elapsed() < WAKE, "{:?}", applied.elapsed());
+    connected.store(false, Ordering::SeqCst);
+    create_project(&owner, "followed-2").await;
+    tokio::time::timeout(Duration::from_secs(5), missing.recv())
+        .await
+        .expect("a watch in flight ends with the change, and the next turn has no connection")
+        .unwrap();
+    create_project(&owner, "followed-3").await;
+    while received.try_recv().is_ok() {}
+    connected.store(true, Ordering::SeqCst);
+    handed(&mut received, Topic::Projects).await;
+    let deadline = tokio::time::Instant::now() + WAKE;
+    while let Ok(topics) = tokio::time::timeout_at(deadline, received.recv()).await {
+        let topics = topics.expect("the follow still runs");
+        assert!(
+            !topics.contains(&Topic::Projects),
+            "handed on twice: {topics:?}"
+        );
+    }
+    following.abort();
+    owner.stop().await;
+}
