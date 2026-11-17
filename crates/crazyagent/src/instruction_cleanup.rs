@@ -27,7 +27,7 @@ pub const PROJECT_POOL_MISSING: &str = "instructions_cleanup_project_pool_missin
 pub const NO_ACCOUNT: &str = "instructions_cleanup_no_account";
 /// Every fitting account in the pool is paused after a limit.
 pub const PAUSED: &str = "instructions_cleanup_paused";
-/// Another cleanup is running in this engine.
+/// Another cleanup of the same text, one project's or the app text, is running in this engine.
 pub const BUSY: &str = "instructions_cleanup_busy";
 /// The saved text is blank, so there is nothing to clean up.
 pub const EMPTY: &str = "instructions_cleanup_empty";
@@ -437,8 +437,11 @@ mod run {
         pub(super) fn take(root: &Path, text: Option<&ProjectId>, stem: &str) -> Option<Self> {
             assert!(stem.starts_with(NAME_PREFIX));
             let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
-            let _ = text;
-            if running.len() >= RUNNING_MAX || running.iter().any(|held| held.root == root) {
+            if running.len() >= RUNNING_MAX
+                || running
+                    .iter()
+                    .any(|held| held.root == root && held.text.as_ref() == text)
+            {
                 return None;
             }
             let held = Held {
@@ -490,7 +493,6 @@ mod run {
     /// folders this module named are removed, never one of a run still running; one that
     /// cannot be removed stays. Inputs: the runner's agents folder and the running stems.
     pub(super) fn prune(agents: &Path, running: &[String]) {
-        let _ = running;
         let Ok(entries) = std::fs::read_dir(agents) else {
             return;
         };
@@ -499,6 +501,12 @@ mod run {
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .filter_map(|entry| entry.file_name().into_string().ok())
             .filter(|name| name.starts_with(NAME_PREFIX))
+            .filter(|name| {
+                !running.iter().any(|stem| {
+                    name.strip_prefix(stem.as_str())
+                        .is_some_and(|rest| rest.starts_with("-t"))
+                })
+            })
             .collect();
         names.sort_unstable();
         let extra = names.len().saturating_sub(KEPT_RUNS_MAX - 1);
@@ -512,8 +520,8 @@ mod run {
     /// the stem.
     pub(super) fn run_stem(started_ms: i64) -> String {
         assert!(started_ms >= 0);
-        let _ = &SEQUENCE;
-        format!("{NAME_PREFIX}{started_ms:013}")
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        format!("{NAME_PREFIX}{started_ms:013}-{sequence:010}")
     }
 
     /// The name of one try's run. Inputs: the cleanup's stem from [`run_stem`] and the try.
