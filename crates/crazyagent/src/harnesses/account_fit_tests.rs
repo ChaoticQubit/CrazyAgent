@@ -476,9 +476,10 @@ fn a_relayed_harness_is_offered_keyed_accounts_only_where_the_key_relay_starts()
     let rcli = spec("rcli").unwrap();
     assert!(keyed_runs_here("rcli"));
     assert_eq!(account_kinds_here(rcli), rcli.account_kinds);
-    assert!(
-        keyed
-            .iter()
-            .all(|(.., connection)| account_fits("rcli", connection))
-    );
+    for (provider, method, _, connection) in &keyed {
+        assert_eq!(
+            account_fits("rcli", connection),
+            runs_on(HarnessKind::Rcli, *provider, *method)
+        );
+    }
 }
