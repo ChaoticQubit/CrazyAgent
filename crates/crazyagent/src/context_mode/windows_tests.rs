@@ -317,10 +317,16 @@ fn local_tarball(folder: &Path) -> PathBuf {
     tarball
 }
 
-/// The install step `fill` runs, with its arguments, for a staging folder `fill` did not
-/// prepare. Inputs: the case, the staging and work folders, npm's folder and the tarball.
-/// Output: whether npm passed.
-fn bare_install(case: &Case, staged: &Path, work: &Path, bin: &Path, tarball: &Path) -> bool {
+/// The install step `fill` runs, with its arguments, for a staging folder the caller
+/// prepared, with npm's output kept so a refusal shows npm's own reason. Inputs: the case,
+/// the staging and work folders, npm's folder and the tarball. Output: npm's exit and output.
+fn install_output(
+    case: &Case,
+    staged: &Path,
+    work: &Path,
+    bin: &Path,
+    tarball: &Path,
+) -> std::process::Output {
     let mut command = npm_command(&case.root, staged, work, bin, VERSION).unwrap();
     command
         .arg("install")
@@ -335,25 +341,45 @@ fn bare_install(case: &Case, staged: &Path, work: &Path, bin: &Path, tarball: &P
             "--no-save",
         ])
         .arg(tarball);
-    run_quiet(command, INSTALL_TIME).unwrap()
+    crate::spawn_gate::collected(&mut command).unwrap()
+}
+
+/// npm's exit and the first 4 KiB of each of its streams, for a failed assertion. Input:
+/// the output. Output: the text.
+fn shown(output: &std::process::Output) -> String {
+    let text = |bytes: &[u8]| String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).into_owned();
+    format!(
+        "{:?}\nstdout: {}\nstderr: {}",
+        output.status,
+        text(&output.stdout),
+        text(&output.stderr)
+    )
 }
 
 /// WIN-1 (DEC-193): inside its AppContainer boundary the runner's own npm installs a local
-/// package into a fresh staging folder, whose root lets it add entries only inside folders
-/// already there, so only the pin refuses the unpinned tarball. The same install into a
-/// staging folder without the `node_modules` that `fill` makes first is refused, so the row
-/// fails if `fill` stops making it.
+/// package into a fresh staging folder once its `node_modules` is there, so only the pin
+/// refuses the unpinned tarball, by hand and through `fill`. The same install into a staging
+/// folder without `node_modules` is refused, since its root lets npm add entries only inside
+/// folders already there, so the row fails if `fill` stops making it.
 #[test]
 fn npm_installs_into_a_fresh_staging_folder_through_the_node_modules_made_first() {
     let bin = system_bin();
     let case = case();
     let npm = case.root.join("setup").join("npm");
     let prefix = format!("{PACKAGE}@{VERSION}");
-    let staged = staging_folder(&npm, &prefix).unwrap();
     let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
     let packing = work.join("tmp");
     private_folder(&packing).unwrap();
     let tarball = local_tarball(&packing);
+    let made = staging_folder(&npm, &prefix).unwrap();
+    fs::create_dir(made.join(MODULES)).unwrap();
+    let installed = install_output(&case, &made, &work, &bin, &tarball);
+    assert!(installed.status.success(), "{}", shown(&installed));
+    assert_eq!(
+        checked(&made, VERSION),
+        Err("context_mode_integrity_mismatch")
+    );
+    let staged = staging_folder(&npm, &prefix).unwrap();
     assert_eq!(
         fill(
             &case.root,
@@ -364,15 +390,11 @@ fn npm_installs_into_a_fresh_staging_folder_through_the_node_modules_made_first(
             tarball.as_os_str()
         ),
         Err(InstallError("context_mode_integrity_mismatch")),
-        "npm installs; only the pin refuses a tarball other than the pinned one"
+        "fill makes node_modules and npm installs; only the pin refuses the tarball"
     );
-    let installed = staged.join(MODULES).join(PACKAGE);
-    assert!(installed.join("package.json").is_file());
-    assert!(installed.join(PROGRAM).is_file());
+    assert!(staged.join(MODULES).join(PACKAGE).join(PROGRAM).is_file());
     let bare = staging_folder(&npm, &prefix).unwrap();
-    assert!(
-        !bare_install(&case, &bare, &work, &bin, &tarball),
-        "npm cannot add node_modules at the top of a staging folder"
-    );
+    let refused = install_output(&case, &bare, &work, &bin, &tarball);
+    assert!(!refused.status.success(), "{}", shown(&refused));
     assert!(!bare.join(MODULES).exists());
 }
