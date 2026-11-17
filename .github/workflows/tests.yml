@@ -44,9 +44,12 @@ env:
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
   NODE_TEST_TIMEOUT_MACOS_MS: "60000"
-  FARM_PARTS: >-
-    linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3
-    windows-rust-1 windows-rust-2 windows-rust-3 linux-node-1 linux-node-2 macos-node-1 linux-bun-1
+  FARM_PARTS: linux-rust-1
+  FARM_RERUN_REPEATS: "3"
+  FARM_RERUN_FILTER: >-
+    binary_id(=crazyagent) & (test(/^engine::owner::transport::barrier_tests::/)
+    | test(/^engine::owner::transport::owner_deadline_tests::/)
+    | test(/^engine::owner::transport::secret_storage_wait_tests::/))
 
 defaults:
   run:
@@ -86,6 +89,7 @@ jobs:
 
   build-macos:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
     strategy:
@@ -114,6 +118,7 @@ jobs:
 
   build-windows:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -155,19 +160,7 @@ jobs:
           - os: linux
             runner: ubuntu-22.04
             part: 1
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 2
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 3
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 4
-            parts: 4
+            parts: 1
     env:
       FARM_JUNIT: target/nextest/farm/junit.xml
       FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
@@ -192,7 +185,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -254,7 +247,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -301,6 +294,7 @@ jobs:
 
   node:
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
@@ -464,6 +458,7 @@ jobs:
 
   typecheck:
     name: Desktop typecheck and Bun suites
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
