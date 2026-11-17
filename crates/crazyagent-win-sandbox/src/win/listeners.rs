@@ -13,10 +13,11 @@ use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 const TABLE_READS_MAX: usize = 4;
 
 /// Whether a TCP listener on another address holds the port of `own`, a listener of this
-/// process, where it could take `own`'s connections: any other address of `own`'s family,
-/// or the IPv6 unspecified address beside an IPv4 `own`, since a dual-stack listener there
-/// takes both families. Input: the listener's address. Output: the answer, or the I/O error
-/// of reading the system's listener table.
+/// process: any other address of `own`'s family, a wildcard among them, or the IPv6
+/// unspecified address beside an IPv4 `own`, since a dual-stack listener there may take both
+/// families. It counts a listener that could not take `own`'s connections too, so a port is
+/// given up rather than shared. Input: the listener's address. Output: the answer, or the
+/// I/O error of reading the system's listener table.
 pub fn listener_beside(own: SocketAddr) -> io::Result<bool> {
     let port = own.port();
     let beside = listeners(own.is_ipv6())?

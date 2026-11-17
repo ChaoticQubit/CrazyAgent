@@ -631,9 +631,14 @@ pub(super) fn file_identity(_: &Path, metadata: &std::fs::Metadata) -> Option<(u
 
 /// The identity a record's progress is kept under: its volume serial number and file index,
 /// read from an open handle as [`open_record`] reads it, since `std` metadata holds neither.
-/// Inputs: the path and its metadata. Output: the identity, or none when it cannot be read.
+/// A path whose metadata is not a plain file, such as a link, has none, so a link is never
+/// listed under its target's identity. Inputs: the path and its metadata. Output: the
+/// identity, or none when it cannot be read.
 #[cfg(not(unix))]
-pub(super) fn file_identity(path: &Path, _: &std::fs::Metadata) -> Option<(u64, u64)> {
+pub(super) fn file_identity(path: &Path, metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    if !metadata.is_file() {
+        return None;
+    }
     let file = File::open(path).ok()?;
     crazyagent_win_sandbox::file_id(&file).ok()
 }
