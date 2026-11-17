@@ -317,6 +317,9 @@ test("pools are summarised by provider and the biggest pool is preselected", () 
   const members = [member("a", "codex", managed), member("b", "codex", managed), member("c", "claude", managed),
     member("d", "codex", { method: "api_key", credential_ref: "k" }, "https://api.openai.com/v1"), member("e", "codex", { method: "none" }, "http://127.0.0.1:11434/v1")];
   assert.equal(wizard.poolSummary(members), "2 ChatGPT, 1 Claude, 1 API key, 1 local model");
+  const more = [member("f", "codex", { method: "none" }, "http://localhost:8080/v1"), member("g", "codex", { method: "api_key", credential_ref: "k2" }, "https://api.openai.com/v1"),
+    member("h", "codex", { method: "none" }, "https://models.example.invalid/v1"), member("i", "codex", { method: "none" }, "https://other.example.invalid/v1")];
+  assert.equal(wizard.poolSummary([...members, ...more]), "2 ChatGPT, 1 Claude, 2 API keys, 2 local models, 2 URLs", "V243-POOL-SUMMARY-PLURAL");
   assert.equal(wizard.poolSummary([]), "No accounts");
   const pools = [{ pool: { id: "small", members: ["a"] }, members: [] }, { pool: { id: "big", members: ["a", "b"] }, members: [] }];
   assert.equal(wizard.preselectPool(pools), "big");

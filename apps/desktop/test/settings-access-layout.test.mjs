@@ -8,6 +8,7 @@ const run = tabRunner(fixture);
 const onAccounts = (scene, check, ...rest) => run({ tab: "accounts", ...scene }, check, ...rest);
 const onGitHub = (scene, check, ...rest) => run({ tab: "github", ...scene }, check, ...rest);
 const onProfile = (scene, check, ...rest) => run({ tab: "profile", ...scene }, check, ...rest);
+const onTerminal = (scene, check, ...rest) => run({ tab: "terminal", ...scene }, check, ...rest);
 const DIALOG = "dialog[open]:not(:has(> .dialog-body > .user-dialog))";
 const top = (page) => page.evaluate("Fixture.top()");
 const read = (page) => page.evaluate("Fixture.sections()");
@@ -486,6 +487,37 @@ test("#358 r2: choosing Standard saves it under the Terminal renderer key alone 
     return { saved, chosen: await page.evaluate(`[...document.querySelectorAll('${group} button[aria-checked="true"]')].map((button) => button.textContent.trim())`) };
   });
   assert.deepEqual(seen, { saved: [["crazyagent.terminal-renderer", "standard"]], chosen: ["Standard"] });
+});
+
+test("V243-TERMINAL-SETTINGS-PLACE: Settings lists Terminal under App, and its section holds Terminal input and Terminal renderer as Profile's Appearance does", async () => {
+  const seen = await onTerminal({}, async (page) => ({
+    top: await top(page),
+    sections: await read(page),
+    app: await page.evaluate(`[...document.querySelectorAll('.settings-nav [role=group]')].filter((group) => group.querySelector('.settings-nav-title')?.textContent.trim() === "App").flatMap((group) => [...group.querySelectorAll('.settings-nav-item')].map((item) => [item.textContent.trim(), item.getAttribute("aria-current")]))`),
+  }));
+  assert.equal(seen.top?.heading, "Terminal", JSON.stringify(seen));
+  assert.deepEqual(seen.app, [["Sandbox", null], ["Team alerts", null], ["Terminal", "page"]]);
+  assert.deepEqual(seen.sections.map((section) => section.heading), ["Terminal"]);
+  assert.deepEqual(seen.sections[0].rows.map((row) => row.label), ["Terminal input", "Terminal renderer"]);
+  const by = Object.fromEntries(seen.sections[0].rows.map((row) => [row.label, row]));
+  assert.match(by["Terminal input"].help, /Where you type to the master and every agent, on every screen/);
+  assert.match(by["Terminal renderer"].help, /^How every terminal draws its text\. GPU draws on the graphics card/);
+});
+
+test("V243-TERMINAL-SETTINGS-PLACE: a Terminal input and renderer chosen in Settings are the ones Profile's Appearance reads back, under the same keys", async () => {
+  const seen = await onTerminal({}, async (page) => {
+    await page.evaluate(`Object.defineProperty(window, "localStorage", { configurable: true, value: (() => { const kept = new Map(); window.keptTerminal = kept; return { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) }; })() }); true`);
+    await press(page, '[role=radiogroup][aria-label="Terminal input"] button', "Both");
+    await press(page, '[role=radiogroup][aria-label="Terminal renderer"] button', "Standard");
+    const saved = await page.evaluate("[...window.keptTerminal.entries()].sort()");
+    await page.evaluate(`Fixture.mount(${JSON.stringify({ tab: "profile" })}, "light")`);
+    const chosen = await page.evaluate(`["Terminal input", "Terminal renderer"].map((label) => [...document.querySelectorAll('[role=radiogroup][aria-label="' + label + '"] button[aria-checked="true"]')].map((button) => button.textContent.trim()))`);
+    return { saved, chosen };
+  });
+  assert.deepEqual(seen, {
+    saved: [["crazyagent.terminal-input", "both"], ["crazyagent.terminal-renderer", "standard"]],
+    chosen: [["Both"], ["Standard"]],
+  });
 });
 
 test("Theme changes the app's look from its line", async () => {
