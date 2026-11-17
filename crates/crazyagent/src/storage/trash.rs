@@ -173,8 +173,12 @@ fn in_catalog(catalog: Option<&ModelAccess>, name: &str) -> bool {
     })
 }
 
+/// Whether a live record or a catalog connection still names a file of a kind, so neither
+/// the start sweep nor a restore's key sweep deletes it. Inputs: the engine connection, the
+/// catalog, the kind and the name. Output: the answer, `file_trash_kind_unknown`, or any
+/// SQLite failure, a missing table included.
 #[cfg(unix)]
-fn referenced(
+pub(super) fn referenced(
     connection: &Connection,
     catalog: Option<&ModelAccess>,
     kind: &str,

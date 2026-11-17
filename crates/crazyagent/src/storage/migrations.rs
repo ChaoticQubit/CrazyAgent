@@ -151,10 +151,10 @@ fn usage_counts_by_model(tx: &Transaction<'_>) -> Result<(), EngineError> {
     crate::usage::capture::migrate_counts(tx)
 }
 
-/// Says whether a table of that name exists. Inputs: the open transaction and the name.
-/// Output: true when `sqlite_schema` holds a table row for it.
-fn has_table(tx: &Transaction<'_>, name: &str) -> Result<bool, EngineError> {
-    tx.query_row(
+/// Says whether a table of that name exists. Inputs: the connection or open transaction and
+/// the name. Output: true when `sqlite_schema` holds a table row for it.
+fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
+    db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
         [name],
         |row| row.get(0),
@@ -622,8 +622,58 @@ fn restore_pinned_at(
     if let Err(cause) = restored {
         return Err(drop_unneeded(&db, &kept, cause));
     }
+    sweep_unbound_keys(&db, root, settings, &kept);
     assert!(kept.starts_with(&folder));
     Ok(kept)
+}
+
+/// Moves the owner's key files the restored 2.4 rows no longer name into the same key
+/// folders of the dated copy of the replaced 2.5 data (V250-L5-N5, DEC-192), where they stay
+/// with the data that names them: each plugin key no restored app plugin binding holds, so
+/// every one for a 2.4 copy, and each account key neither a restored account nor the live
+/// settings name, as the start sweep judges ([`super::trash::referenced`]); no settings, or
+/// settings that cannot be read, keep every account key in place. A failure is logged by
+/// folder and code and never fails the checked restore. Inputs: the restored connection,
+/// still held alone, the engine root, the settings sources and the dated copy's folder.
+fn sweep_unbound_keys(
+    db: &Connection,
+    root: &Path,
+    settings: Option<&SettingsSources>,
+    copy: &Path,
+) {
+    use super::accounts::{ACCOUNT_KEYS, PLUGIN_KEYS, move_unkept_in};
+    let plugin = move_unkept_in(root, PLUGIN_KEYS, copy, |name| plugin_key_bound(db, name));
+    let account = match settings.map(SettingsSources::config) {
+        Some(Ok(config)) => {
+            let catalog = config.settings.model_access.as_ref();
+            move_unkept_in(root, ACCOUNT_KEYS, copy, |name| {
+                super::trash::referenced(db, catalog, super::trash::ACCOUNT_KEY, name)
+            })
+        }
+        Some(Err(cause)) => Err(cause),
+        None => Ok(0),
+    };
+    for (folder, swept) in [(PLUGIN_KEYS, plugin), (ACCOUNT_KEYS, account)] {
+        if let Err(cause) = swept {
+            let code = cause.0.split(':').next().unwrap_or_default();
+            eprintln!("restore_key_sweep_failed folder={folder} cause={code}");
+        }
+    }
+}
+
+/// Whether a restored app plugin binding holds a plugin key by its file name; a database
+/// with no binding table, as every 2.4 copy, holds none. Inputs: the restored connection
+/// and the name. Output: the answer, or any SQLite failure.
+fn plugin_key_bound(db: &Connection, name: &str) -> Result<bool, EngineError> {
+    if !has_table(db, "app_plugin_secrets")? {
+        return Ok(false);
+    }
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM app_plugin_secrets WHERE source='key' AND reference=?1)",
+        [name],
+        |row| row.get(0),
+    )
+    .map_err(error)
 }
 
 /// Settles the copy a failed restore kept: it is removed when the live database still holds
