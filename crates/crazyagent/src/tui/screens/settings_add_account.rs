@@ -698,7 +698,10 @@ impl TooOld {
             }
             (UpdateOffer::Running, _) => lines.push(Line::from(vec![
                 Span::styled(ctx.spinner(), theme.running),
-                Span::raw(format!(" Updating {harness}...")),
+                Span::raw(format!(
+                    " {}",
+                    update_running_line(harness, self.versions.as_ref())
+                )),
             ])),
             (UpdateOffer::Command(command), _) => {
                 lines.push(Line::raw(format!(
@@ -1274,6 +1277,7 @@ impl AddAccount {
         };
         match event {
             SettingsEvent::HarnessVersions(id, Ok(versions)) if id == harness_id(native) => {
+                old.polls = follow_polls(old.polls, old.versions.as_ref(), versions);
                 old.versions = Some(versions.clone());
                 if old.mode.is_none() {
                     self.read_harness(ctx);
@@ -1963,6 +1967,22 @@ pub(super) enum UpdateOffer {
 /// may run and the harness has an update line, else that line to run in Terminal, else why it
 /// can't be updated here. Inputs: the versions row and update mode, None until read.
 /// Output: the offer.
+/// What the too-old panel says while the harness's update runs. Inputs: the harness name and
+/// its versions row. Output: the sentence.
+pub(super) fn update_running_line(harness: &str, _versions: Option<&HarnessVersions>) -> String {
+    format!("Updating {harness}...")
+}
+
+/// The reads of a running update the too-old panel has used after a fresh read. Inputs: the
+/// reads used, the row before and the fresh row. Output: the reads used.
+pub(super) fn follow_polls(
+    polls: u32,
+    _before: Option<&HarnessVersions>,
+    _after: &HarnessVersions,
+) -> u32 {
+    polls
+}
+
 pub(super) fn update_offer(
     versions: Option<&HarnessVersions>,
     mode: Option<UpdateMode>,
