@@ -1203,29 +1203,29 @@ const WORKTREE_TABLES: [&str; 3] = [
 /// The most agent worktrees one Delete everything forgets.
 const WORKTREES_MAX: usize = 65_536;
 
-/// The agent worktrees only one project names, in its team worktree rows or its change
-/// sets, read before a Delete everything deletes those rows; a path another project still
-/// names is left out, so its rows and events stay. Inputs: the delete's transaction and the
-/// project. Output: the paths, or `changes_unavailable` past [`WORKTREES_MAX`].
+/// The agent worktrees only one project names, in its agent rows (a cleaned-up agent's
+/// too), its team worktree rows or its change sets, read before a Delete everything deletes
+/// them; a path another project still names is left out, so its rows and events stay.
+/// Inputs: the delete's transaction and the project. Output: the paths, or
+/// `changes_unavailable` past [`WORKTREES_MAX`].
 pub(crate) fn project_worktrees(
     tx: &Transaction<'_>,
     project: &str,
 ) -> Result<Vec<String>, EngineError> {
     let mut sources = Vec::new();
-    for table in ["team_worktrees", "landing_change_sets"] {
+    for table in ["team_agents", "team_worktrees", "landing_change_sets"] {
         if has(tx, table)? {
             sources.push(table);
         }
     }
-    let Some(first) = sources.first() else {
+    if sources.is_empty() {
         return Ok(Vec::new());
-    };
-    let mut sql = format!("SELECT worktree FROM {first} WHERE project=?1");
-    for table in &sources[1..] {
-        sql.push_str(&format!(
-            " UNION SELECT worktree FROM {table} WHERE project=?1"
-        ));
     }
+    let ours: Vec<String> = sources
+        .iter()
+        .map(|table| format!("SELECT worktree FROM {table} WHERE project=?1 AND worktree<>''"))
+        .collect();
+    let mut sql = ours.join(" UNION ");
     for table in &sources {
         sql.push_str(&format!(
             " EXCEPT SELECT worktree FROM {table} WHERE project<>?1"
@@ -1242,7 +1242,7 @@ pub(crate) fn project_worktrees(
     if worktrees.len() > WORKTREES_MAX {
         return Err(failure("changes_unavailable"));
     }
-    assert!(sources.len() <= 2);
+    assert!(sources.len() <= 3);
     Ok(worktrees)
 }
 
