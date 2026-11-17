@@ -567,48 +567,53 @@ async fn a_start_past_the_waiting_list_is_busy_while_client_changes_hold_their_p
     jobs.stop().await;
 }
 
-/// #380 F4: a stop reaches an add that waits for the download slot another download holds at
-/// once: it ends cancelled while that download still runs, its folder where it was.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_stop_reaches_an_add_waiting_for_the_download_slot_at_once() {
-    let mut jobs = Jobs::start().await;
-    let site = jobs.folder("site", "s");
-    let authority = jobs.authority();
-    let slot = authority.intake.downloads.lock().await;
-    jobs.add("add-site", &site, AddMode::Move).await.unwrap();
-    let stopped = jobs
-        .owner
-        .job_stop(RequestId::new("add-site").unwrap())
-        .await
-        .unwrap();
-    assert!(stopped, "the stop reaches the running job");
+/// A download that runs until its stop is asked, for at most five seconds. Inputs: the
+/// download, read for its stop. Output: `home_icloud_not_downloaded` once the stop reached it,
+/// else Ok with no file brought down.
+fn pull_until_stopped(
+    _: &str,
+    download: &icloud::Download,
+    _: CopyBounds,
+) -> Result<u64, EngineError> {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let ended = loop {
-        let jobs_now = jobs.owner.job_status().await.unwrap();
-        let found = jobs_now
-            .into_iter()
-            .find(|job| job.id.as_str() == "add-site");
-        if let Some(job) = found.filter(|job| job.state.over()) {
-            break job;
+    while std::time::Instant::now() < deadline {
+        if download.cancelled() {
+            return Err(EngineError("home_icloud_not_downloaded".into()));
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the stop never reached the add waiting for the download slot"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    };
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(0)
+}
+
+/// #380 F4: a stop asked while an add downloads from iCloud reaches the very download the add
+/// runs, so the download ends at its next check and the add with it; the paced download's own
+/// checks are fix8's cancel rows in `projects_home::icloud::tests`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_reaches_the_download_an_add_runs() {
+    let jobs = Jobs::start().await;
+    let authority = jobs.authority();
+    let job = Arc::new(IntakeJob::new(
+        RequestId::new("add-site").unwrap(),
+        JobKind::Add,
+        None,
+        jobs.folder("site", "s"),
+        AddMode::Move,
+        Vec::new(),
+    ));
+    let fetching = tokio::spawn({
+        let authority = Arc::clone(&authority);
+        let job = Arc::clone(&job);
+        async move { super::intake::fetch_with(&authority, &job, pull_until_stopped).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let asked = std::time::Instant::now();
+    assert!(job.stop(), "the stop reaches the running add");
+    let fetched = fetching.await.unwrap();
     assert!(
-        matches!(ended.state, JobState::Cancelled { .. }),
-        "{:?}",
-        ended.state
+        asked.elapsed() < Duration::from_secs(2),
+        "the stop never reached the add's download"
     );
-    assert_eq!(
-        note(Path::new(&site)),
-        "s",
-        "a stopped move leaves its folder"
-    );
-    assert!(!jobs.home().join("site").exists());
-    drop(slot);
+    assert_eq!(fetched.unwrap_err().0, "home_icloud_not_downloaded");
     jobs.stop().await;
 }
 
