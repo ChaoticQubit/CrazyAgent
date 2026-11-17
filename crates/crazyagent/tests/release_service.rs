@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_crazyagent");
@@ -588,27 +589,59 @@ fn tui_auto_start_runs_a_detached_engine_where_the_service_manager_is_missing() 
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Lays out a release folder holding copies of the built engine, runner and Landlock helper.
-/// Copies, never hard links: a link moves the change time of the built file every other
-/// row's engine pins at start, and an engine starting meanwhile exits
-/// `native_auth_host_executable_changed`. Input: the new folder. Output: none.
-fn release_folder(folder: &Path) {
+const BUILT: [&str; 3] = ["crazyagent", "crazyagent-runner", "crazyagent-landlock"];
+
+/// Held for the whole of every row that lays out a release folder: those rows hard-link the
+/// one copy of the built binaries ([`built_copies`]), and a link moves the change time that
+/// an engine started from that copy pins at start, so no two such rows run at once.
+static RELEASE_ROWS: Mutex<()> = Mutex::new(());
+
+/// Copies the built engine, runner and Landlock helper once per test process into /tmp and
+/// keeps them until the process exits, so macOS assesses each copy once and never sees one
+/// deleted mid-run, and no row ever links the built files other rows start.
+/// Output: the folder holding the copies, removed at exit.
+fn built_copies() -> &'static Path {
+    static COPIES: OnceLock<PathBuf> = OnceLock::new();
+    extern "C" fn remove() {
+        if let Some(folder) = COPIES.get() {
+            let _ = std::fs::remove_dir_all(folder);
+        }
+    }
+    COPIES.get_or_init(|| {
+        let folder = tempfile::tempdir_in("/tmp").unwrap().keep();
+        let built = Path::new(BIN).parent().unwrap();
+        for name in BUILT {
+            if built.join(name).is_file() {
+                std::fs::copy(built.join(name), folder.join(name)).unwrap();
+            }
+        }
+        assert!(folder.join("crazyagent").is_file());
+        assert_eq!(unsafe { libc::atexit(remove) }, 0);
+        folder
+    })
+}
+
+/// Lays out a release folder of hard links to this process's copies of the built binaries,
+/// never to the built files: a link moves the change time an engine pins at start, and a row
+/// starting the built engine meanwhile would exit `native_auth_host_executable_changed`.
+/// Inputs: the held `RELEASE_ROWS` guard and the new folder. Output: none.
+fn release_folder(_rows: &MutexGuard<'_, ()>, folder: &Path) {
     std::fs::create_dir(folder).unwrap();
-    let built = Path::new(BIN).parent().unwrap();
-    for name in ["crazyagent", "crazyagent-runner", "crazyagent-landlock"] {
-        if built.join(name).is_file() {
-            std::fs::copy(built.join(name), folder.join(name)).unwrap();
+    let copies = built_copies();
+    for name in BUILT {
+        if copies.join(name).is_file() {
+            std::fs::hard_link(copies.join(name), folder.join(name)).unwrap();
         }
     }
 }
 
 #[test]
 fn a_release_folder_leaves_the_built_binaries_other_rows_run_unchanged() {
+    let rows = RELEASE_ROWS.lock().unwrap_or_else(PoisonError::into_inner);
     let temp = tempfile::tempdir_in("/tmp").unwrap();
     let built = Path::new(BIN).parent().unwrap();
-    let names = ["crazyagent", "crazyagent-runner", "crazyagent-landlock"];
     let identity = || {
-        names
+        BUILT
             .iter()
             .filter_map(|name| std::fs::metadata(built.join(name)).ok())
             .map(|seen| (seen.ino(), seen.nlink(), seen.ctime(), seen.ctime_nsec()))
@@ -616,8 +649,9 @@ fn a_release_folder_leaves_the_built_binaries_other_rows_run_unchanged() {
     };
     let before = identity();
     assert!(!before.is_empty());
-    release_folder(&temp.path().join("install"));
-    assert!(temp.path().join("install/crazyagent").is_file());
+    release_folder(&rows, &temp.path().join("install"));
+    let linked = std::fs::metadata(temp.path().join("install/crazyagent")).unwrap();
+    assert_ne!(linked.ino(), std::fs::metadata(BIN).unwrap().ino());
     drop(temp);
     assert_eq!(identity(), before);
 }
@@ -644,12 +678,13 @@ fn readies(layout: &Layout) -> usize {
 
 #[test]
 fn an_update_stops_an_engine_running_without_the_service_and_restarts_it_from_the_new_binary() {
+    let rows = RELEASE_ROWS.lock().unwrap_or_else(PoisonError::into_inner);
     let temp = tempfile::tempdir_in("/tmp").unwrap();
     let layout = Layout::new(temp.path().join("engine")).unwrap();
     let install = temp.path().join("install");
     let unpacked = temp.path().join("unpacked");
-    release_folder(&install);
-    release_folder(&unpacked);
+    release_folder(&rows, &install);
+    release_folder(&rows, &unpacked);
     let executable = install.join("crazyagent");
     let mut service = unused_service(temp.path(), layout.root());
     service.executable = executable.clone();
@@ -685,12 +720,13 @@ fn an_update_stops_an_engine_running_without_the_service_and_restarts_it_from_th
 
 #[test]
 fn an_update_with_no_engine_running_and_no_service_only_swaps_the_files() {
+    let rows = RELEASE_ROWS.lock().unwrap_or_else(PoisonError::into_inner);
     let temp = tempfile::tempdir_in("/tmp").unwrap();
     let layout = Layout::new(temp.path().join("engine")).unwrap();
     let install = temp.path().join("install");
     let unpacked = temp.path().join("unpacked");
-    release_folder(&install);
-    release_folder(&unpacked);
+    release_folder(&rows, &install);
+    release_folder(&rows, &unpacked);
     let said = crazyagent::update::swap_around_engine(&layout, &install, &unpacked, VERSION);
     assert!(!crazyagent::service::answering(&layout.socket()));
     assert_eq!(said.unwrap(), format!("Updated crazyagent to {VERSION}."));
