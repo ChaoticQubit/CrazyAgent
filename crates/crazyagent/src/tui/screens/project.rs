@@ -659,7 +659,8 @@ pub(in crate::tui) enum ProjectReply {
     Session(SessionsAction),
     AccountOrder(Option<crate::scheduling::Strategy>),
     RefreshOverview,
-    MoveHome(crate::projects_home::AddMode),
+    MoveRead,
+    MoveHome(crate::projects_home::AddMode, bool),
     DeleteEverything(String),
     GitHubRules,
     TeamChange(Box<crate::team::TeamAction>),
@@ -708,6 +709,8 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
     pub confirm_move: bool,
+    pub move_left: Option<crate::projects_home::icloud::SkippedFolders>,
+    pub move_everything: bool,
     pub removal: Option<crate::team::cleanup::RemovalPreview>,
     pub remove_choice: RemoveChoice,
     remove_everything: bool,
@@ -804,6 +807,8 @@ impl ProjectScreen {
             confirm_stop: None,
             confirm_remove: false,
             confirm_move: false,
+            move_left: None,
+            move_everything: false,
             removal: None,
             remove_choice: RemoveChoice::Dashboard,
             remove_everything: false,
@@ -2490,6 +2495,12 @@ impl ProjectScreen {
         }
     }
 
+    /// Takes the folder read for the move ask: the rebuildable folders a move would leave in
+    /// iCloud, empty when there are none or the read failed. Takes the folders.
+    pub fn move_read(&mut self, left: crate::projects_home::icloud::SkippedFolders) {
+        let _ = left;
+    }
+
     /// Answers one key in the move ask: m moves the project into the projects home, c copies
     /// it there, and n or Esc keeps it where it is. Takes the key. Returns the move to send,
     /// or Handled.
@@ -2506,7 +2517,7 @@ impl ProjectScreen {
             _ => return ProjectReply::Handled,
         };
         self.confirm_move = false;
-        ProjectReply::MoveHome(mode)
+        ProjectReply::MoveHome(mode, false)
     }
 
     /// Closes the remove ask and forgets its preview, choice and typed name.

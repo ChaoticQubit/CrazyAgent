@@ -159,6 +159,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 Request::Intake(job) => {
                     sent.push(match job.query() {
                         IntakeQuery::JobStart { .. } => "job start",
+                        IntakeQuery::FolderSize { .. } => "folder size",
                         IntakeQuery::JobStatus => "job status",
                         IntakeQuery::JobDismiss { .. } => "job dismiss",
                         IntakeQuery::Found => "found",
@@ -912,6 +913,11 @@ async fn a_project_kept_outside_the_projects_folder_moves_in_as_the_engine_s_job
     shell.key(Key::ShiftLeft);
     pump(&mut shell, &mut connection).await;
     shell.key(Key::Char('M'));
+    let read = pump(&mut shell, &mut connection).await;
+    assert!(
+        read.contains(&"folder size"),
+        "the ask reads the folder: {read:?}"
+    );
     let shown = render(&mut shell, 120, 30);
     assert!(
         shown.contains("Move Notes CLI into your CrazyAgent folder?"),
@@ -1055,6 +1061,11 @@ async fn move_from_settings(
     shell.key(Key::ShiftLeft);
     pump(shell, connection).await;
     shell.key(Key::Char('M'));
+    let read = pump(shell, connection).await;
+    assert!(
+        read.contains(&"folder size"),
+        "the ask reads the folder: {read:?}"
+    );
     let shown = render(shell, 120, 30);
     assert!(
         shown.contains(&format!("Move {name} into your CrazyAgent folder?")),

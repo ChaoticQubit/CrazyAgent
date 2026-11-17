@@ -1975,7 +1975,9 @@ impl ProjectPage {
                 self.set_order(strategy, ctx);
                 Flow::Handled
             }
-            ProjectReply::MoveHome(mode) => {
+            ProjectReply::MoveRead => Flow::Handled,
+            ProjectReply::MoveHome(mode, everything) => {
+                let _ = everything;
                 let project_id = self.screen.project.clone();
                 self.start_job(JobSubject::MoveProject { project_id }, mode, ctx);
                 Flow::Handled

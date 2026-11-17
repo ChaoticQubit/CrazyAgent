@@ -53,6 +53,21 @@ test("Stop the team and move stops the team before the move, and a refused stop 
   assert.equal(unconfirmed.stopped, false);
 });
 
+test("#383 code F1: the move question lists the folders a move leaves in iCloud, with Download everything, and the move sends it", () => {
+  const skipped = [{ path: "node_modules", files: 57108 }, { path: "web/.venv", files: null }];
+  const props = { open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI", home: "/Users/o/CrazyAgent", way: "move",
+    size: { kind: "ok", value: { bytes: 2048, same_volume: true, skipped, skipped_more: { folders: 3, files: 9 } } },
+    busy: false, problem: "", everything: false, onEverything: idle, onWay: idle, onConfirm: idle, onCancel: idle };
+  const page = renderToStaticMarkup(createElement(view.MoveHomeDialog, props));
+  for (const text of [/Left in iCloud, as they can be rebuilt:/, /node_modules \(57108 files\)/, /web\/\.venv \(files not counted\)/,
+    /and 3 more folders \(9 files\)/, /They stay in [^<]*TessyAI; reinstall them in the project after the move\./, /role="switch"/, /Download everything \(slow\)/]) {
+    assert.match(page, text);
+  }
+  assert.match(renderToStaticMarkup(createElement(view.MoveHomeDialog, { ...props, everything: true })), /Downloaded too:/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(view.MoveHomeDialog, { ...props, size: { kind: "ok", value: { bytes: 2048 } } })), /role="switch"|Left in iCloud/);
+  assert.match(read("src/screens/project/move-home.tsx"), /stopThenMove\(data\.id, chosen, withEverything\(overrides, everything\)/);
+});
+
 test("the move question says the team stops first and work not landed follows the move", () => {
   const dialog = (patch = {}) => renderToStaticMarkup(createElement(view.MoveHomeDialog, {
     open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI", home: "/Users/o/CrazyAgent", way: "move",

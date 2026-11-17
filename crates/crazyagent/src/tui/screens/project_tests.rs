@@ -4475,19 +4475,84 @@ fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
     }
 }
 
+/// #383 code F1 (DEC-198): the move ask reads the folder first; until the read lands m and c
+/// wait. It then lists the rebuildable folders a move leaves in iCloud, with the ones only
+/// counted, says where they stay, and Space switches Download everything, which m sends.
+#[test]
+fn the_move_ask_lists_the_folders_a_move_leaves_in_icloud_and_space_downloads_everything() {
+    use crate::projects_home::AddMode;
+    use crate::projects_home::icloud::{Skipped, SkippedFolders, SkippedMore};
+    let project = ProjectId::new("kept").unwrap();
+    let mut screen = ProjectScreen::new(project, "Kept".into(), None);
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::MoveRead);
+    let reading = text(&project_screen(&mut screen, 80, 30, &Look::plain()).rows);
+    assert!(reading.contains("Reading the folder..."), "{reading}");
+    assert_eq!(screen.key(key(KeyCode::Char('m'))), ProjectReply::Handled);
+    assert!(screen.confirm_move, "no move before the read");
+    screen.move_read(SkippedFolders {
+        listed: vec![
+            Skipped {
+                path: "node_modules".into(),
+                files: Some(57_108),
+            },
+            Skipped {
+                path: "web/.venv".into(),
+                files: None,
+            },
+        ],
+        more: Some(SkippedMore {
+            folders: 1968,
+            files: Some(1968),
+        }),
+    });
+    let shown = text(&project_screen(&mut screen, 80, 40, &Look::plain()).rows);
+    for line in [
+        "Left in iCloud, as they can be rebuilt:",
+        "node_modules (57108 files)",
+        "web/.venv (files not counted)",
+        "and 1968 more folders (1968 files)",
+        "They stay in the old folder;",
+        "[ ] Download everything (slow)",
+    ] {
+        assert!(shown.contains(line), "{line} missing: {shown}");
+    }
+    assert_eq!(screen.key(key(KeyCode::Char(' '))), ProjectReply::Handled);
+    let shown = text(&project_screen(&mut screen, 80, 40, &Look::plain()).rows);
+    assert!(shown.contains("[x] Download everything (slow)"), "{shown}");
+    assert!(shown.contains("Downloaded too:"), "{shown}");
+    assert_eq!(
+        screen.key(key(KeyCode::Char('m'))),
+        ProjectReply::MoveHome(AddMode::Move, true)
+    );
+    assert!(!screen.confirm_move);
+    screen.key(key(KeyCode::Char('M')));
+    let opened = text(&project_screen(&mut screen, 80, 30, &Look::plain()).rows);
+    assert!(
+        opened.contains("Reading the folder..."),
+        "a new ask reads again: {opened}"
+    );
+    assert!(
+        !screen.move_everything,
+        "a new ask starts with the switch off"
+    );
+}
+
 /// The Settings key M asks before a project moves into the projects home: the ask says the
 /// team must be stopped and its work follows, m sends a Move, c a Copy, and n or Esc keeps the
 /// project where it is. A refused start of the move job shows as a plain line (DEC-177).
 #[test]
 fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     use crate::projects_home::AddMode;
+    use crate::projects_home::icloud::SkippedFolders;
     let project = ProjectId::new("kept").unwrap();
     let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
     screen.open(Tab::Settings);
     let shown = text(&project_screen(&mut screen, 120, 30, &Look::plain()).rows);
     assert!(shown.contains("M Move into CrazyAgent folder"), "{shown}");
-    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::MoveRead);
     assert!(screen.confirm_move);
+    screen.move_read(SkippedFolders::default());
     let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
     let shown = text(&drawn.rows);
     assert!(
@@ -4510,18 +4575,21 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(!screen.confirm_move);
     screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders::default());
     assert_eq!(screen.key(key(KeyCode::Char('n'))), ProjectReply::Handled);
     assert!(!screen.confirm_move);
     screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders::default());
     assert_eq!(
         screen.key(key(KeyCode::Char('m'))),
-        ProjectReply::MoveHome(AddMode::Move)
+        ProjectReply::MoveHome(AddMode::Move, false)
     );
     assert!(!screen.confirm_move);
     screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders::default());
     assert_eq!(
         screen.key(key(KeyCode::Char('c'))),
-        ProjectReply::MoveHome(AddMode::Copy)
+        ProjectReply::MoveHome(AddMode::Copy, false)
     );
     assert!(!screen.confirm_move);
 
