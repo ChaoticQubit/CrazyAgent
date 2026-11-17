@@ -285,7 +285,10 @@ impl Record {
     pub fn measure(&mut self, name: &'static str, value: u64) {
         let named = |byte: u8| byte.is_ascii_lowercase() || byte == b'_';
         assert!(!name.is_empty() && name.bytes().all(named) && !self.finished);
-        assert!(self.measures.iter().all(|(kept, _)| *kept != name), "{name}");
+        assert!(
+            self.measures.iter().all(|(kept, _)| *kept != name),
+            "{name}"
+        );
         assert!(self.measures.len() < STEPS_MAX);
         self.measures.push((name, value));
     }
