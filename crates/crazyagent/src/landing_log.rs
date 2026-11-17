@@ -44,6 +44,9 @@ pub const CHANGE_SET_SAVED: &str = "ChangeSetSaved";
 /// A GitHub rule request written (`github_rule_requests`): the stored row is an owner text,
 /// the body its part digests (QUESTION-1120 A).
 pub const RULE_REQUEST_SAVED: &str = "RuleRequestSaved";
+/// A verification baseline, candidate or attempt written: the stored row is an owner text,
+/// the body its table, id, project and part digests (QUESTION-1132 A).
+pub const VERIFICATION_SAVED: &str = "VerificationSaved";
 /// A Not now to a project's publish prompt, kept with the time it asks again
 /// (`github_publish_prompt`).
 pub const PUBLISH_PROMPT_SNOOZED: &str = "PublishPromptSnoozed";

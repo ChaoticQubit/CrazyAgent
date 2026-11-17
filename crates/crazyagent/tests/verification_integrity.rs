@@ -273,6 +273,9 @@ async fn an_approval_is_logged_once_at_the_revision_its_reply_carries() {
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .unwrap()
         .map(Result::unwrap)
+        .filter(|event: &(String, i64, Vec<u8>)| {
+            event.0 == crazyagent::landing_log::BASELINE_APPROVED
+        })
         .collect()
     } else {
         Vec::new()
@@ -287,6 +290,92 @@ async fn an_approval_is_logged_once_at_the_revision_its_reply_carries() {
     let body: serde_json::Value = serde_json::from_slice(&events[0].2).unwrap();
     let expected = serde_json::json!({"project": "project", "baseline": baseline_id.as_str()});
     assert_eq!(body, expected);
+}
+
+/// The three verification tables' rows as they stand, every column, by id. Input: the
+/// store. Output: each table's rows.
+fn verification_rows(db: &rusqlite::Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    let tables = [
+        "verification_baselines",
+        "verification_candidates",
+        "verification_attempts",
+    ];
+    tables
+        .iter()
+        .map(|table| {
+            let mut statement = db
+                .prepare(&format!("SELECT * FROM {table} ORDER BY id"))
+                .unwrap();
+            let width = statement.column_count();
+            statement
+                .query_map([], |row| {
+                    (0..width)
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        })
+        .collect()
+}
+
+/// V250-L9 (QUESTION-1132 A): every write of the three verification tables logs a
+/// VerificationSaved whose body holds only the table, the id, the project and the row's part
+/// digests, never the requirements, and a landing rebuild of the closed store equals the
+/// live rows.
+#[tokio::test]
+async fn verification_writes_log_their_rows_and_a_rebuild_equals_the_live_rows() {
+    let mut h = Harness::open().await;
+    let baseline_id = h.setup().await;
+    let request = h.request(Command::OwnerVerification {
+        action: OwnerVerification::Verify {
+            candidate_id: id("candidate"),
+            attempt_id: id("attempt"),
+        },
+    });
+    let first = h.engine.apply(request).await.unwrap();
+    assert_eq!(first.outcome, Outcome::Applied);
+    h.revision = first.revision.value();
+    let revoke = OwnerVerification::Revoke { baseline_id };
+    assert_eq!(h.owner(revoke).await, Outcome::Applied);
+    h.engine.close().await.unwrap();
+    let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+    let saved: Vec<serde_json::Value> = db
+        .prepare("SELECT body FROM state_log WHERE aggregate='landing' AND kind=?1 ORDER BY seq")
+        .unwrap()
+        .query_map([crazyagent::landing_log::VERIFICATION_SAVED], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .unwrap()
+        .map(|body| serde_json::from_slice(&body.unwrap()).unwrap())
+        .collect();
+    let tables: std::collections::BTreeSet<&str> = saved
+        .iter()
+        .filter_map(|body| body["table"].as_str())
+        .collect();
+    let expected = [
+        "verification_attempts",
+        "verification_baselines",
+        "verification_candidates",
+    ];
+    assert_eq!(tables, expected.into_iter().collect());
+    let requirements = draft().requirements;
+    for body in &saved {
+        let mut keys: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["id", "project", "row", "table"]);
+        assert!(!body.to_string().contains(&requirements), "{body}");
+    }
+    let live = verification_rows(&db);
+    assert!(live.iter().all(|rows| !rows.is_empty()));
+    crazyagent::landing_log::rebuild(&db).unwrap();
+    assert_eq!(verification_rows(&db), live);
 }
 
 #[tokio::test]
