@@ -174,6 +174,7 @@ async fn fifo_apply_revoke_and_dropped_ack_have_real_actor_barriers() {
     let baseline = draft.identity().unwrap();
     {
         let (mut db, _lock) = open_database(&path, false).unwrap();
+        let seeding = owner_start(&mut db).unwrap();
         for (n, command) in [
             Command::CreateProject {
                 project_id: draft.project_id.clone(),
@@ -199,6 +200,8 @@ async fn fifo_apply_revoke_and_dropped_ack_have_real_actor_barriers() {
                 Outcome::Applied
             );
         }
+        owner_stop(&mut db, &seeding.host).unwrap();
+        crate::state_log::fence::host_stopped(&seeding.host);
     }
     let storage = Storage::open(&path, cfg.clone(), false).await.unwrap();
     let started = start(&storage).await;
@@ -507,13 +510,13 @@ fn a_database_with_the_b19_team_settings_revision_table_opens_and_removes_projec
 /// A project's change sets stay when the project is removed, so their numbers stay too:
 /// sets A and B keep 1 and 2 through the removal, and a set D the project adds once it is
 /// added again under the same id gets 3 (AL17, rv-code M1).
-/// Input: a fresh engine database. Output: none.
+/// Input: a fresh engine database, its owner running as each numbering logs (v2.5 L9).
+/// Output: none.
 #[test]
 fn removing_a_project_keeps_its_change_set_numbers() {
     let (_root, path, cfg) = fixture();
     let (mut db, _lock) = open_database(&path, false).unwrap();
-    let started = owner_start(&mut db).unwrap();
-    owner_stop(&mut db, &started.host).unwrap();
+    let _running = owner_start(&mut db).unwrap();
     let add_project = |db: &Connection| {
         db.execute("INSERT INTO projects(id, body) VALUES ('kept', '{}')", [])
             .unwrap();
@@ -832,12 +835,8 @@ fn owner_ledger_abort_rolls_back_domain_effect_and_pages_bound_corrupt_body() {
             },
         },
     };
-    assert!(
-        owner_apply(&mut db, &cfg, &path, a, &approve)
-            .unwrap_err()
-            .0
-            .contains("real_sqlite_abort")
-    );
+    let refused = owner_apply(&mut db, &cfg, &path, a, &approve).unwrap_err();
+    assert!(refused.0.contains("real_sqlite_abort"), "{}", refused.0);
     assert_eq!(
         db.query_row("SELECT COUNT(*) FROM owner_operations", [], |r| r
             .get::<_, i64>(0))

@@ -4101,6 +4101,9 @@ fallback_allowed = false
             rules: vec![],
             retry_limit: 0,
         };
+        let (server, host) = OwnerServer::bind(root.path(), engine.clone(), &config)
+            .await
+            .unwrap();
         let id = draft.identity().unwrap();
         for (n, command) in [
             Command::CreateProject {
@@ -4124,9 +4127,6 @@ fallback_allowed = false
             };
             assert_eq!(engine.apply(req).await.unwrap().outcome, Outcome::Applied);
         }
-        let (server, host) = OwnerServer::bind(root.path(), engine.clone(), &config)
-            .await
-            .unwrap();
         let mut client = crate::spawn_gate::connect_unix(root.path().join(SOCKET))
             .await
             .unwrap();

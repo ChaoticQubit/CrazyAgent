@@ -467,6 +467,7 @@ async fn unavailable_attempts_survive_restart_replay_and_revocation() {
     h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
         .await
         .unwrap();
+    h.engine.start_owner_runtime().await.unwrap();
     assert_eq!(h.state().await, state);
     assert_eq!(h.engine.apply(request.clone()).await.unwrap(), first);
     assert_eq!(
@@ -991,6 +992,7 @@ async fn storage_interruption_rolls_back_admission_and_operation_acknowledgement
     h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
         .await
         .unwrap();
+    h.engine.start_owner_runtime().await.unwrap();
     assert_eq!(
         h.engine.apply(request).await.unwrap().outcome,
         Outcome::Applied

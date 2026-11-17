@@ -550,6 +550,9 @@ const SNAPSHOTS: [(&str, &[&str]); 2] = [
         &[
             "landing_change_sets",
             "github_rule_requests",
+            "verification_baselines",
+            "verification_candidates",
+            "verification_attempts",
             "landing_agent_branches",
             "landing_bases",
             "landing_owner_edits",
