@@ -300,6 +300,7 @@ fn a_gemini_placeholder_in_x_goog_api_key_is_replaced_by_the_real_key_in_the_sam
             .iter()
             .all(|(_, value)| !value.contains(relay.token()))
     );
+    drop(seen);
     let other = format!("{TOKEN_PREFIX}{}", "0".repeat(64));
     for wrong in [other.as_str(), KEY] {
         let request = format!(
