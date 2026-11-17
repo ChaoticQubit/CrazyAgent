@@ -95,7 +95,6 @@
   "apps/desktop/test/native/pools-spend.e2e.mjs": 2,
   "apps/desktop/test/native/process-layout.e2e.mjs": 2,
   "apps/desktop/test/native/project-header.e2e.mjs": 9,
-  "apps/desktop/test/native/project-memory.e2e.mjs": 1,
   "apps/desktop/test/native/provider-retry.e2e.mjs": 1,
   "apps/desktop/test/native/questions-flow.mjs": 15,
   "apps/desktop/test/native/questions.e2e.mjs": 5,
