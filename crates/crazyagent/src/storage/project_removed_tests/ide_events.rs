@@ -119,8 +119,9 @@ fn a_removed_projects_ide_events_are_tombstoned_and_an_ide_rebuild_brings_none_b
 fn a_cleared_ids_ide_events_are_tombstoned_and_an_ide_rebuild_brings_none_back() {
     let (mut s, before) = two_projects_with_ide_events();
     let cleared = ProjectId::new(REMOVED).unwrap();
+    let owner = fence::Fence::Owner(s.started.owners[0].admission.clone());
     let tx = s.db.transaction().unwrap();
-    crate::project_setup::removed::clear(&tx, &cleared).unwrap();
+    crate::project_setup::removed::clear(&tx, &cleared, &owner).unwrap();
     tx.commit().unwrap();
     only_removed_ide_is_gone(&s, &before);
 }

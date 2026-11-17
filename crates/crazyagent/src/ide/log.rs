@@ -94,7 +94,11 @@ impl TryFrom<String> for WorktreePath {
     /// `changes_path_invalid`.
     fn try_from(path: String) -> Result<Self, String> {
         crate::landing::owner_edit::check_path(&path).map_err(|refused| refused.0)?;
-        assert!(!path.is_empty() && !path.starts_with('/'));
+        assert!(!path.is_empty(), "check_path refuses an empty path");
+        assert!(
+            !path.starts_with('/'),
+            "check_path refuses an absolute path"
+        );
         Ok(Self(path))
     }
 }
@@ -133,17 +137,18 @@ pub enum Change {
 }
 
 impl Change {
-    /// The event kind of the change.
-    /// Input: none.
-    /// Output: the kind name.
+    /// The event kind of the change, always one of [`KINDS`], so a removal redacts it
+    /// (rv-sec2 L7 r2 N2). Input: none. Output: the kind name.
     pub fn kind(&self) -> &'static str {
-        match self {
+        let kind = match self {
             Self::Asked(_) => IDE_ASKED,
             Self::RunModeSet(_) => RUN_MODE_SET,
             Self::FileUnlocked(_) => FILE_UNLOCKED,
             Self::WorkspaceWritten(_) => WORKSPACE_WRITTEN,
             Self::WorkspaceForgotten(_) => WORKSPACE_FORGOTTEN,
-        }
+        };
+        assert!(KINDS.contains(&kind), "the ide kind {kind} is in KINDS");
+        kind
     }
 
     /// The project the change is about, the top-level `project` of every ide body, so a
@@ -389,25 +394,27 @@ pub(crate) fn forget_rows(db: &Connection, project: &ProjectId) -> Result<(), En
     Ok(())
 }
 
-/// Tombstones, for a project removal, every logged ide event of the removed project, of
-/// each of [`KINDS`], so its asks, unlocked paths and workspaces leave the log's events
-/// (rv-sec2 #309 N1); snapshot runs keep theirs until compaction (L1b). The caller
-/// checkpoints the WAL after commit. Inputs: the removal's transaction, the project, the
-/// removal's own `seq` and its fence. Output: how many were tombstoned, or the refusal.
+/// Tombstones every logged ide event of a project, of each of [`KINDS`], for a removal or
+/// Create demo's clear of an earlier id (rv-sec2 #309 N1, L7 r2 N1); snapshot runs keep theirs
+/// until compaction (L1b), and only a removal checkpoints the WAL after commit. Inputs: the
+/// transaction, the project, the removal's own `seq` (none for a clear, which logs none; seqs
+/// start at 1) and the fence. Output: how many were tombstoned, or the refusal.
 pub(crate) fn forget_project(
     tx: &Transaction<'_>,
     project: &str,
-    keep: u64,
+    keep: Option<u64>,
     fence: &Fence,
 ) -> Result<usize, EngineError> {
-    assert!(keep > 0, "the removal is logged before its redaction");
+    if let Some(seq) = keep {
+        assert!(seq > 0, "the removal is logged before its redaction");
+    }
     let redacted = replay::redact_matching(
         tx,
         &[Aggregate::Ide],
         Some(KINDS.as_slice()),
         "project",
         project,
-        keep,
+        keep.unwrap_or(0),
         fence,
     )?;
     assert!(!tx.is_autocommit(), "the redaction is part of the removal");
