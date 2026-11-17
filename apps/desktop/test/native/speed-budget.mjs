@@ -37,7 +37,7 @@ export const FAILURE_TEXT_MAX = 4000;
 const SECURITY = "/usr/bin/security";
 const SECURITY_MS_MAX = 30_000;
 
-const round = (value) => Number(value.toFixed(2));
+export const round = (value) => Number(value.toFixed(2));
 
 /** Summarises timed samples. Input: 1 to `SAMPLES_MAX` finite, non-negative numbers. Output:
  * the count, the median and the nearest-rank 90th percentile. */
@@ -151,7 +151,7 @@ export function stayedQuiet(reading) {
 
 /** Runs one fixed-path read-only command. Input: the program and its arguments. Output: its
  * standard output. */
-function output(program, args) {
+export function output(program, args) {
   const result = spawnSync(program, args, { encoding: "utf8", timeout: 10000, maxBuffer: 16 << 20 });
   assert.equal(result.status, 0, `${program} ${args.join(" ")} failed: ${result.stderr}`);
   return result.stdout;
