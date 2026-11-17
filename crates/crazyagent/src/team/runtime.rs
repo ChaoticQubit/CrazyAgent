@@ -2556,10 +2556,12 @@ impl TeamRuntime {
         let spawned = std::thread::Builder::new()
             .name(format!("team-end-{id}"))
             .spawn(move || {
-                end_reported(id, sender, || {
+                let settled = end_reported(id, sender, || {
                     end_teammate(host.as_ref(), &name, mates.as_deref())
                 });
-                wake_loops();
+                if settled {
+                    wake_loops();
+                }
             });
         if spawned.is_err() {
             return Ok(UnmanagedEnd::Untouched);
@@ -2612,10 +2614,8 @@ impl TeamRuntime {
                 .unmanaged_ending
                 .remove(&id)
                 .expect("an end finished only after it was handed over");
-            let confirmed = match outcome {
-                Ok(confirmed) => confirmed,
-                Err(problem) if problem.0 == "terminal_agent_unknown" => true,
-                Err(_) => continue,
+            let Some(confirmed) = end_settled(&outcome) else {
+                continue;
             };
             if !self.mark_unmanaged(id, pending.reason, confirmed)? {
                 continue;
@@ -12855,19 +12855,33 @@ fn socket_refuses(_: &Path) -> bool {
 /// Runs one native teammate's end on its thread and sends what it found, also when the end
 /// panics: a guard then sends it as not proven, so its row is still marked, with the
 /// uncertain cleanup code, and no agent stays handed over (S4B-B1-L1 r1). Takes the agent,
-/// the channel and the end. Returns nothing.
+/// the channel and the end. Returns whether the end settled (see [`end_settled`]), so only
+/// a settled end wakes the team loop (#393 F1).
 fn end_reported(
     id: i64,
     sender: Sender<PaneEnd>,
     end: impl FnOnce() -> Result<bool, crate::terminal::HostError>,
-) {
+) -> bool {
     let mut guard = EndGuard {
         id,
         sender: Some(sender),
     };
     let outcome = end();
+    let settled = end_settled(&outcome).is_some();
     if let Some(sender) = guard.sender.take() {
         let _ = sender.send((id, outcome));
+    }
+    settled
+}
+
+/// Whether a native teammate's end settled its row: it ran, or the host no longer knows the
+/// agent. Takes the end's outcome. Returns whether the cleanup was confirmed when it
+/// settled, or None when another host failure leaves the row to a later tick.
+fn end_settled(outcome: &Result<bool, crate::terminal::HostError>) -> Option<bool> {
+    match outcome {
+        Ok(confirmed) => Some(*confirmed),
+        Err(problem) if problem.0 == "terminal_agent_unknown" => Some(true),
+        Err(_) => None,
     }
 }
 
