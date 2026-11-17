@@ -337,7 +337,7 @@ impl Table {
     /// Output: Ok, or `ide_snapshot_row` for a row of another shape.
     fn insert(&self, db: &Connection, rows: &[serde_json::Value]) -> Result<(), EngineError> {
         db.execute_batch(self.schema).map_err(unavailable)?;
-        let mut statement = db.prepare_cached(self.insert).map_err(unavailable)?;
+        let mut statement = db.prepare(self.insert).map_err(unavailable)?;
         let refused = || failure("ide_snapshot_row");
         for row in rows {
             let object = row
