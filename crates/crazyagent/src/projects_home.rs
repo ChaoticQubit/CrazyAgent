@@ -270,8 +270,55 @@ pub fn owner_home() -> Result<PathBuf, EngineError> {
     let home = std::env::var_os(platform::OWNER_HOME_VARIABLE)
         .ok_or_else(|| refused("owner_home_unknown"))?;
     let home = std::fs::canonicalize(home).map_err(|_| refused("owner_home_unknown"))?;
+    let home = one_spelling(home);
     assert!(home.is_absolute());
     Ok(home)
+}
+
+/// The mount of the macOS data volume, under which every firmlinked folder (/Users,
+/// /private, /Applications and the rest) has a second name.
+#[cfg(target_os = "macos")]
+const DATA_VOLUME: &str = "/System/Volumes/Data";
+
+/// True when two paths name one existing entry (device and inode). Inputs: the paths.
+/// Output: the answer, false when either does not resolve.
+#[cfg(target_os = "macos")]
+fn same_entry(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(left), std::fs::metadata(right)) {
+        (Ok(left), Ok(right)) => (left.dev(), left.ino()) == (right.dev(), right.ino()),
+        _ => false,
+    }
+}
+
+/// One spelling for a real path: on macOS a path under the data volume that names the same
+/// entry as the path without that prefix is given without it, the spelling `canonicalize`
+/// gives the short form, so both compare equal as text. Input: a canonical path. Output:
+/// the path in that spelling, unchanged elsewhere.
+pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Ok(rest) = real.strip_prefix(DATA_VOLUME) {
+        let short = Path::new("/").join(rest);
+        if same_entry(&real, &short) {
+            return short;
+        }
+    }
+    real
+}
+
+/// The data volume's name for a path in its one spelling, when that names the same entry,
+/// so a folder above the firmlink, such as the data volume itself, is seen to hold it.
+/// Input: the path. Output: the other name, none for a path with no other.
+#[cfg(target_os = "macos")]
+fn data_twin(path: &Path) -> Option<PathBuf> {
+    let twin = Path::new(DATA_VOLUME).join(path.strip_prefix("/").ok()?);
+    same_entry(path, &twin).then_some(twin)
+}
+
+/// Off macOS a path has one name. Input: the path. Output: none.
+#[cfg(not(target_os = "macos"))]
+fn data_twin(_path: &Path) -> Option<PathBuf> {
+    None
 }
 
 /// Resolves an owner-picked folder that must be a real directory, not a link.
@@ -286,14 +333,17 @@ fn real_folder(path: &Path, missing: &str, not_folder: &str) -> Result<PathBuf, 
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(refused(not_folder));
     }
-    let real = std::fs::canonicalize(path).map_err(|_| refused(missing))?;
+    let real = one_spelling(std::fs::canonicalize(path).map_err(|_| refused(missing))?);
     assert!(real.is_absolute());
     Ok(real)
 }
 
-/// True when `path` is `/`, the owner's home folder or a folder holding it.
-fn holds_owner_home(path: &Path, owner: &Path) -> bool {
-    path.parent().is_none() || owner.starts_with(path)
+/// True when `path` is `/`, the owner's home folder or a folder holding it, under either of
+/// the home's names on macOS. Inputs: a path in its one spelling and the owner's home.
+pub(crate) fn holds_owner_home(path: &Path, owner: &Path) -> bool {
+    path.parent().is_none()
+        || owner.starts_with(path)
+        || data_twin(owner).is_some_and(|twin| twin.starts_with(path))
 }
 
 /// True when one of the two folders is inside the other or they are the same.
@@ -312,7 +362,8 @@ pub(crate) fn in_use(real: &Path, project: &Registered) -> bool {
         .filter(|used| used.is_absolute())
         .any(|used| {
             overlaps(real, used)
-                || std::fs::canonicalize(used).is_ok_and(|canonical| overlaps(real, &canonical))
+                || std::fs::canonicalize(used)
+                    .is_ok_and(|canonical| overlaps(real, &one_spelling(canonical)))
         })
 }
 
@@ -541,11 +592,12 @@ pub fn check_add(
         "home_source_missing",
         "home_source_not_folder",
     )?;
-    if real.starts_with(home) {
+    let saved = one_spelling(home.to_path_buf());
+    if real.starts_with(&saved) {
         return Err(refused("home_source_in_home"));
     }
     let owner = owner_home()?;
-    if holds_owner_home(&real, &owner) || home.starts_with(&real) || overlaps(&real, engine_root) {
+    if holds_owner_home(&real, &owner) || saved.starts_with(&real) || overlaps(&real, engine_root) {
         return Err(refused("home_source_unsafe"));
     }
     let name = real
@@ -701,7 +753,8 @@ pub fn plan_trash(
         "home_trash_missing",
         "home_trash_not_folder",
     )?;
-    if real.parent() != Some(home) {
+    let home = one_spelling(home.to_path_buf());
+    if real.parent() != Some(home.as_path()) {
         return Err(refused("home_trash_outside"));
     }
     let name = real
@@ -712,7 +765,7 @@ pub fn plan_trash(
     if registered.iter().any(|project| in_use(&real, project)) {
         return Err(refused("home_trash_still_set_up"));
     }
-    assert!(real.starts_with(home) && real != home);
+    assert!(real.starts_with(&home) && real != home);
     Ok(real)
 }
 
@@ -734,6 +787,7 @@ pub fn trash(folder: &Path) -> Result<(), EngineError> {
 /// strictly below the home.
 pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, EngineError> {
     assert!(home.is_absolute());
+    let home = one_spelling(home.to_path_buf());
     let mut real = Vec::with_capacity(folders.len());
     for folder in folders {
         let climbs = folder
@@ -743,7 +797,7 @@ pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, Eng
             return Err(refused("delete_outside_home"));
         }
         match real_folder(folder, "delete_folder_missing", "delete_outside_home") {
-            Ok(path) if path.starts_with(home) && path != home => real.push(path),
+            Ok(path) if path.starts_with(&home) && path != home => real.push(path),
             Ok(_) => return Err(refused("delete_outside_home")),
             Err(missing) if missing.0 == "delete_folder_missing" => {}
             Err(refusal) => return Err(refusal),
@@ -761,7 +815,7 @@ pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, Eng
     assert!(
         moved
             .iter()
-            .all(|path| path.starts_with(home) && path != home)
+            .all(|path| path.starts_with(&home) && *path != home)
     );
     Ok(moved)
 }
@@ -1141,10 +1195,11 @@ pub fn plan_move(
     engine_root: &Path,
 ) -> Result<MovePlan, EngineError> {
     let next = check_home(picked, engine_root)?;
-    if next == current {
+    let saved = one_spelling(current.to_path_buf());
+    if next == saved {
         return Err(refused("home_move_same"));
     }
-    if overlaps(&next, current) {
+    if overlaps(&next, &saved) {
         return Err(refused("home_move_nested"));
     }
     let folders = watch::scan_all(current)?.ok_or_else(|| refused("home_move_too_many"))?;
@@ -1310,9 +1365,10 @@ pub(crate) fn move_holds(
         )
         .optional()?;
     Ok(origin.is_some_and(|origin| {
-        let origin = Path::new(&origin);
-        folder.starts_with(origin)
-            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(origin))
+        let origin = one_spelling(PathBuf::from(origin));
+        folder.starts_with(&origin)
+            || std::fs::canonicalize(folder)
+                .is_ok_and(|real| one_spelling(real).starts_with(&origin))
     }))
 }
 
