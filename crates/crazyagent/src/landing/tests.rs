@@ -15100,43 +15100,38 @@ fn two_connections_saving_at_once_each_take_the_next_number() {
     assert_eq!(given, (1..=7).collect::<Vec<u64>>());
 }
 
-/// A save inside a caller's transaction nests in it: a refused save leaves the caller's
-/// earlier work to commit, and rolling the caller back undoes the set and its number
-/// (MOCK-FIX-C r1, rv-sec F4).
+/// A save inside a caller's transaction is refused with `landing_log_unavailable` and writes
+/// nothing, since a landing write owns its logged transaction (v2.5 L9, QUESTION-1638 2 A):
+/// the caller's earlier work still commits, and a save on its own numbers the set (MOCK-FIX-C
+/// r1, rv-sec F4: a save never commits or splits a caller's transaction).
 #[test]
-fn a_save_inside_a_callers_transaction_commits_and_rolls_back_with_it() {
+fn a_save_inside_a_callers_transaction_is_refused_and_leaves_the_callers_work() {
     let case = Case::new();
     case.edit("README", "one\ntwo\nthree\nfour\n");
     let first = case.turn(TurnOutcome::Succeeded).unwrap();
     let record = store::load(&case.db, &first).unwrap();
     let copy = |digit| unsaved_copy(&record, digit, record.created_ms - 10, "project-1");
     let tx = case.db.unchecked_transaction().unwrap();
-    let kept = copy('b');
-    store::save(&tx, &kept).unwrap();
-    let mut second_open = copy('c');
-    second_open.state = ChangeState::Pending;
-    second_open.restorable_until_ms = None;
+    tx.execute_batch("CREATE TABLE caller_work (n INTEGER); INSERT INTO caller_work VALUES (1);")
+        .unwrap();
+    let inside = copy('b');
     assert_eq!(
-        refused(store::save(&tx, &second_open)),
-        "changes_agent_has_pending"
+        refused(store::save(&tx, &inside)),
+        "landing_log_unavailable"
     );
     tx.commit().unwrap();
-    assert_eq!(case.view(&kept.id).number, Some(2));
+    let work: i64 = case
+        .db
+        .query_row("SELECT COUNT(*) FROM caller_work", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(work, 1, "the caller's earlier work commits");
     assert_eq!(
-        refused(store::load(&case.db, &second_open.id)),
-        "changes_not_found"
-    );
-    let tx = case.db.unchecked_transaction().unwrap();
-    let dropped = copy('d');
-    store::save(&tx, &dropped).unwrap();
-    tx.rollback().unwrap();
-    assert_eq!(
-        refused(store::load(&case.db, &dropped.id)),
+        refused(store::load(&case.db, &inside.id)),
         "changes_not_found"
     );
     let next = copy('e');
     store::save(&case.db, &next).unwrap();
-    assert_eq!(case.view(&next.id).number, Some(3));
+    assert_eq!(case.view(&next.id).number, Some(2));
 }
 
 /// AL17 (2): change sets stored before numbers existed get numbers at the next engine
