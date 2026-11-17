@@ -130,21 +130,18 @@ fn a_send_keys_run_never_cuts_a_paste_end_marker_inside_the_input() {
 /// #359 r2, rv-code2 r2 F1: the desktop joins whole events into one input, and no
 /// `send-keys` run ends inside one of them, so an app never reads half an escape sequence
 /// and takes its lone ESC for the Escape key. V243-PASTE-SS3-X10-UTF8: that holds for an SS3
-/// key whose final is a UTF-8 character, and for an X10 report past column 95, whose
-/// coordinates xterm.js sends as 2-byte UTF-8 characters.
+/// key whose final is a UTF-8 character, and for an X10 report past column or row 95, whose
+/// three bytes xterm.js sends raw, one byte per value up to 0xFF and never as UTF-8 (#398
+/// r1 F1), after any count of typed bytes.
 #[test]
 fn a_send_keys_run_never_cuts_an_escape_sequence_of_a_batched_input() {
     let text = |times: usize| vec![&b"x"[..]; times];
-    let cases: Vec<(&str, Vec<&[u8]>)> = vec![
+    let mut cases: Vec<(&str, Vec<&[u8]>)> = vec![
         ("wheel reports", vec![&b"\x1b[<65;40;12M"[..]; 341]),
         ("held arrow keys", vec![&b"\x1b[A"[..]; 300]),
         ("held application arrow keys", vec![&b"\x1bOA"[..]; 300]),
         ("alt keys", [text(1), vec![&b"\x1bx"[..]; 300]].concat()),
         ("x10 mouse reports", vec![&b"\x1b[M`!!"[..]; 100]),
-        (
-            "x10 mouse reports past column 95",
-            [text(1), vec![&b"\x1b[M \xc2\x84\xc2\x98"[..]; 100]].concat(),
-        ),
         (
             "ss3 keys with a utf-8 final",
             [text(1), vec![&b"\x1bO\xc3\xa9"[..]; 100]].concat(),
@@ -164,6 +161,18 @@ fn a_send_keys_run_never_cuts_an_escape_sequence_of_a_batched_input() {
             .concat(),
         ),
     ];
+    for (case, report) in [
+        ("raw x10 wheel past column 95", &b"\x1b[M`\x84\x34"[..]),
+        (
+            "raw x10 click past column and row 95",
+            &b"\x1b[M \x84\x98"[..],
+        ),
+        ("raw x10 release past column 95", &b"\x1b[M#\xa2\x48"[..]),
+    ] {
+        for typed in 0..12 {
+            cases.push((case, [text(typed), vec![report; 200]].concat()));
+        }
+    }
     for (case, events) in cases {
         let bytes = events.concat();
         let bounds: Vec<usize> = events
