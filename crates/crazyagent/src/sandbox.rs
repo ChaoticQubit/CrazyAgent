@@ -340,6 +340,8 @@ const ENGINE_SECRET_FOLDERS: &[&str] = &[
     crate::engine::bootstrap::NATIVE_PROFILES_FOLDER,
     crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER,
     #[cfg(unix)]
+    "plugin-keys",
+    #[cfg(unix)]
     crate::storage::migrations::BACKUPS,
 ];
 
@@ -1677,9 +1679,9 @@ impl ProjectSandbox {
     }
 
     /// Names the engine runtime folder whose secrets no granted root may hold or sit inside:
-    /// engine.db, the owner socket, the GitHub files, the account keys, the upgrade backups,
-    /// the native profiles, the configured SDK homes, the terminal and IDE folders and every
-    /// engine socket and socket folder in it now; the agent's home and temp may sit in it.
+    /// engine.db, the owner socket, the GitHub files, the account and plugin keys, the upgrade
+    /// backups, the native profiles, the configured SDK homes, the terminal and IDE folders and
+    /// every engine socket and socket folder in it now; the agent's home and temp may sit in it.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
         let runtime = canonical(runtime)?;
