@@ -1,5 +1,7 @@
 use super::*;
+#[cfg(target_os = "macos")]
 use crate::harnesses::interactive::settings::TerminalSettings;
+#[cfg(target_os = "macos")]
 use crate::harnesses::interactive::{Run, command_with};
 use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest};
 
