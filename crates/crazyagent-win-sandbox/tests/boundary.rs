@@ -1301,3 +1301,26 @@ fn releasing_under_a_parent_without_auto_inheritance_keeps_each_exact_access_lis
         shown(&after)
     );
 }
+
+#[test]
+fn probe_a_parent_grant_and_removal_reach_a_folder_holding_explicit_copies() {
+    let case = case_in("crazyagent.test.probe", false);
+    let root = case.project.parent().unwrap().to_path_buf();
+    let icacls = |args: &[&str]| {
+        let output = Command::new(system("icacls.exe"))
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", ran(&output));
+    };
+    let before = read_sddl(&case.outside);
+    icacls(&["/grant", "*S-1-5-19:(OI)(CI)(RX)"]);
+    let granted = read_sddl(&case.outside);
+    let root_granted = read_sddl(&root);
+    icacls(&["/remove:g", "*S-1-5-19"]);
+    let removed = read_sddl(&case.outside);
+    println!(
+        "PROBE outside before: {before}\nPROBE root after grant: {root_granted}\nPROBE outside after root grant: {granted}\nPROBE outside after root removal: {removed}"
+    );
+}
