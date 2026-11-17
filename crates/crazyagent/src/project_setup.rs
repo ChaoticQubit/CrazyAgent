@@ -2876,7 +2876,6 @@ fn remove(
         .map_err(error)?;
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
-    crate::github::proposals::forget_project(tx, project_id)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::hidden_paths_item(project_id),
@@ -2888,11 +2887,6 @@ fn remove(
     ] {
         crate::storage::versioned::retire(tx, &item)?;
     }
-    crate::scheduling::forget_project(tx, project_id.as_str())?;
-    crate::coord::forget_project(tx, project_id)?;
-    crate::activity::forget_project(tx, project_id)?;
-    crate::usage::forget_project(tx, project_id.as_str())?;
-    crate::ide::bridge::run_command::forget_project(tx, project_id)?;
     finish_removed_agent_notices(tx, project_id)?;
     crate::projects_home::delete_mark::forget(tx, project_id)?;
     let removed = tx
