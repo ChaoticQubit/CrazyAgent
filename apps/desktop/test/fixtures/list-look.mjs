@@ -17,7 +17,8 @@ const setOf = (id, label) => ({
 /**
  * Mounts the list rows with the real stylesheets: a windowed account table with its column
  * head and two picked rows drawn as the Accounts page draws them, an item row, and the real
- * Changes list with its second row shown. Input: the theme. Output: none.
+ * Changes list of three with its middle row shown, so the shown row is not the last one, which
+ * draws no divider. Input: the theme. Output: none.
  */
 export function mount(theme = "light") {
   root?.unmount();
@@ -32,7 +33,7 @@ export function mount(theme = "light") {
   const row = (index) => h("div", { className: "account-line" },
     h("input", { type: "checkbox", className: "account-pick", checked: true, readOnly: true, "aria-label": `Pick ${index}` }),
     h("button", { type: "button", className: "account-row" }, h("span", { className: "cell" }, `Account ${index}`)));
-  const sets = [setOf("cs-1", "Bo (@south) · Codex"), setOf("cs-2", "Ada (@north) · Codex")];
+  const sets = [setOf("cs-1", "Bo (@south) · Codex"), setOf("cs-2", "Ada (@north) · Codex"), setOf("cs-3", "Cy (@east) · Codex")];
   flushSync(() => root.render(h("div", { style: { display: "grid", gap: "16px" } },
     h("div", { className: "account-table" }, h(WindowedList, { label: "Accounts", head, count: 2, viewport: 200, renderRow: row })),
     h("div", { className: "item-row" }, h("span", { className: "title" }, "Item"), h("span", null, "Meta")),
