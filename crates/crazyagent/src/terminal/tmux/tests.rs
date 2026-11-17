@@ -79,6 +79,54 @@ fn a_send_keys_run_never_cuts_a_character_or_the_paste_end_marker() {
     }
 }
 
+/// #359 r2: a paste end marker inside the input, as the desktop sends one when keys typed
+/// during a send join the paste's batch (`...\x1b[201~\r`), stays whole in one run too.
+#[test]
+fn a_send_keys_run_never_cuts_a_paste_end_marker_inside_the_input() {
+    let mut inputs: Vec<Vec<u8>> = (SEND_KEYS_BYTES_MAX - 5..SEND_KEYS_BYTES_MAX)
+        .map(|at| {
+            [
+                &vec![b'x'; at][..],
+                PASTE_CLOSE,
+                &b"\r"[..],
+                &[b'y'; 300][..],
+            ]
+            .concat()
+        })
+        .collect();
+    inputs.push(
+        [
+            &[b'x'; 252][..],
+            PASTE_CLOSE,
+            &[b'y'; 250][..],
+            PASTE_CLOSE,
+            &b"\r"[..],
+        ]
+        .concat(),
+    );
+    for bytes in inputs {
+        let runs = typed_runs(&send_keys_lines("%7", &bytes));
+        assert_eq!(runs.concat(), bytes);
+        assert!(runs.iter().all(|run| run.len() <= SEND_KEYS_BYTES_MAX));
+        let ends: Vec<usize> = runs
+            .iter()
+            .scan(0, |end, run| {
+                *end += run.len();
+                Some(*end)
+            })
+            .collect();
+        for marker in (0..bytes.len()).filter(|&at| bytes[at..].starts_with(PASTE_CLOSE)) {
+            assert!(
+                !ends
+                    .iter()
+                    .any(|&end| marker < end && end < marker + PASTE_CLOSE.len()),
+                "{} bytes: a run cuts the marker at {marker}",
+                bytes.len()
+            );
+        }
+    }
+}
+
 /// Reads typed bytes back out of `send-keys -H` commands for `%7`. Input: the commands.
 /// Output: each command's bytes, in order.
 fn typed_runs(lines: &[String]) -> Vec<Vec<u8>> {
