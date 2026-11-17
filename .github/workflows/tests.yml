@@ -55,7 +55,7 @@ jobs:
   build:
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
+    timeout-minutes: ${{ matrix.os == 'macos' && 330 || 150 }}
     strategy:
       fail-fast: false
       matrix:
@@ -145,11 +145,26 @@ jobs:
           mkdir -p target/debug/deps
           cp "target/debug/crazyagent-landlock$exe" "target/debug/deps/crazyagent-landlock$exe"
       - name: Build and archive every workspace test
-        run: cargo nextest archive --workspace --locked --offline --archive-file "$RUNNER_TEMP/farm-${{ matrix.os }}.tar.zst"
+        run: |
+          set -euo pipefail
+          exclude=()
+          if [ "$RUNNER_OS" = Windows ]; then exclude=(--exclude crazyagent-desktop); fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            export CARGO_BUILD_JOBS=2
+            (while sleep 300; do echo "memory $(date +%H:%M) $(sysctl -n vm.swapusage)"; done) &
+            sampler=$!
+            trap 'kill "$sampler" 2> /dev/null || true' EXIT
+          fi
+          cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} --locked --offline --archive-file "$RUNNER_TEMP/farm-${{ matrix.os }}.tar.zst"
       - name: Show the free disk, the target and the archive size
         if: always()
         run: |
           set -euo pipefail
+          case "$RUNNER_OS" in
+            macOS) echo "cpus $(sysctl -n hw.ncpu), memory $(( $(sysctl -n hw.memsize) / 1073741824 )) GiB, $(sysctl -n vm.swapusage)" ;;
+            Linux) echo "cpus $(nproc)"; free -g ;;
+            *) echo "cpus $(nproc)" ;;
+          esac
           df -h .
           if [ -d target ]; then du -sh target; fi
           if [ -f "$RUNNER_TEMP/farm-${{ matrix.os }}.tar.zst" ]; then du -h "$RUNNER_TEMP/farm-${{ matrix.os }}.tar.zst"; fi
@@ -416,18 +431,21 @@ jobs:
             parts: 2
             chrome: linux64
             chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
+            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
           - os: linux
             runner: ubuntu-22.04
             part: 2
             parts: 2
             chrome: linux64
             chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
+            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
           - os: macos
             runner: macos-15
             part: 1
             parts: 1
             chrome: mac-arm64
             chrome_sha256: 01a23ef9501b2745e0c2944c2e583207e6f6132d8d91c3a87ff65b5079e438ef
+            headless_sha256: cb46a336dbe3d6f1339c5039c3083e4e5dd8e4379710790e34f8f4a865e2452d
     env:
       FARM_JUNIT: ${{ github.workspace }}/farm-junit/node.xml
       FARM_PART: ${{ matrix.os }}-node-${{ matrix.part }}
@@ -483,7 +501,59 @@ jobs:
           fi
           "$chrome" --version
           echo "CRAZYAGENT_CHROME=$chrome" >> "$GITHUB_ENV"
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
+      - name: Install Linux packages
+        if: matrix.os == 'linux'
+        timeout-minutes: 10
+        run: bash scripts/ci/linux-packages.sh
+      - name: Install tmux on Linux
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/tmux"
+          prefix="$RUNNER_TEMP/tmux-$TMUX_VERSION"
+          mkdir -p "$work"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/tmux.tar.gz" "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
+          echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -
+          tar -xzf "$work/tmux.tar.gz" -C "$work"
+          (cd "$work/tmux-$TMUX_VERSION" && ./configure --prefix="$prefix" && make -j"$(nproc)" && make install)
+          sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
+          test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Install tmux on macOS
+        if: matrix.os == 'macos'
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
+          sudo mkdir -p /usr/local/bin
+          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
+          test "$(command -v tmux)" = /usr/local/bin/tmux
+          test "$(tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Install the pinned Chrome headless shell for the PDF rows
+        env:
+          HEADLESS_PLATFORM: ${{ matrix.chrome }}
+          HEADLESS_SHA256: ${{ matrix.headless_sha256 }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/chrome-headless-shell"
+          mkdir -p "$work"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/headless.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$HEADLESS_PLATFORM/chrome-headless-shell-$HEADLESS_PLATFORM.zip"
+          echo "$HEADLESS_SHA256  $work/headless.zip" | shasum -a 256 -c -
+          if [ "$RUNNER_OS" = macOS ]; then ditto -x -k "$work/headless.zip" "$work"; else unzip -q "$work/headless.zip" -d "$work"; fi
+          shell="$work/chrome-headless-shell-$HEADLESS_PLATFORM/chrome-headless-shell"
+          "$shell" --version
+          echo "CRAZYAGENT_PDF_CHROME=$shell" >> "$GITHUB_ENV"
       - name: Run this share of the node suites
+        timeout-minutes: 60
         env:
           BUN: ${{ steps.bun.outputs.bun-path }}
         run: |

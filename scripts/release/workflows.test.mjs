@@ -950,6 +950,41 @@ test("the test farm installs tmux only from pinned, checked sources: the Linux t
   assert(farm.includes(`  TMUX_VERSION: "${pinned}"\n`), "the Linux build and the release script pin one tmux version");
 });
 
+test("the test farm macOS build gets the hosted job's 330-minute budget and two cargo jobs, logging memory and swap, and Windows leaves only the desktop crate out of its archive, whose test exe cannot load without the app manifest (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  assert(block(block(farm, 0, "jobs").join("\n"), 2, "build").includes("    timeout-minutes: ${{ matrix.os == 'macos' && 330 || 150 }}"));
+  const archive = steps(farm, "build").find((step) => step.startsWith("      - name: Build and archive every workspace test\n"));
+  assert(archive.includes('if [ "$RUNNER_OS" = Windows ]; then exclude=(--exclude crazyagent-desktop); fi'));
+  assert(archive.includes("export CARGO_BUILD_JOBS=2"));
+  assert(archive.includes("sysctl -n vm.swapusage"));
+  assert(archive.includes('cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} --locked --offline'));
+  assert.equal(farm.match(/--exclude /g).length, 1, "no other crate is left out of any archive");
+  const size = steps(farm, "build").find((step) => step.startsWith("      - name: Show the free disk, the target and the archive size\n"));
+  assert(size.includes("hw.memsize") && size.includes("free -g"), "every build prints its CPUs and memory");
+});
+
+test("every test farm node part installs what its rows run, tmux, the locked crates and the PDF Chrome, from the same pinned steps as the Rust jobs, and stops before the job limit so its JUnit is kept (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  const build = steps(farm, "build");
+  const rust = steps(farm, "rust");
+  const node = steps(farm, "node");
+  const named = (all, name) => all.findIndex((step) => step.startsWith(`      - name: ${name}\n`));
+  const run = named(node, "Run this share of the node suites");
+  assert(run >= 0, "the node run step exists");
+  for (const [source, name] of [[build, "Install Rust toolchain"], [build, "Fetch Rust dependencies"], [rust, "Install Linux packages"], [rust, "Install tmux on Linux"], [rust, "Install tmux on macOS"]]) {
+    const at = named(node, name);
+    assert(at >= 0 && at < run, `${name} runs before the node suites`);
+    assert.equal(node[at], source[named(source, name)], `${name} is the same step as in the Rust jobs`);
+  }
+  const shell = node[named(node, "Install the pinned Chrome headless shell for the PDF rows")];
+  assert(shell.includes('echo "$HEADLESS_SHA256  $work/headless.zip" | shasum -a 256 -c -'));
+  assert(shell.includes('echo "CRAZYAGENT_PDF_CHROME=$shell" >> "$GITHUB_ENV"'));
+  for (const entry of matrixEntries(farm, "node")) assert.match(entry.headless_sha256, /^[0-9a-f]{64}$/, JSON.stringify(entry));
+  const job = Number(block(block(farm, 0, "jobs").join("\n"), 2, "node").find((line) => line.startsWith("    timeout-minutes: ")).split(": ")[1]);
+  const step = Number(node[run].match(/^ {8}timeout-minutes: (\d+)$/m)[1]);
+  assert(step + 10 <= job, `the node run stops at ${step} min, leaving the JUnit steps time before the ${job}-min job limit`);
+});
+
 test("CI runs the price snapshot script's check on Linux, so a bad refresh fails a pull request", async () => {
   const linux = steps(await workflow("ci.yml"), "linux");
   assert(
