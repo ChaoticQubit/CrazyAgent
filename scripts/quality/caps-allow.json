@@ -22,7 +22,7 @@
   "apps/desktop/src/screens/team/graph.ts": 685,
   "apps/desktop/src/screens/team/terminal-panel.tsx": 963,
   "apps/desktop/src/state.ts": 641,
-  "apps/desktop/test/intake.test.mjs": 1298,
+  "apps/desktop/test/intake.test.mjs": 1297,
   "apps/desktop/test/live-master.test.mjs": 836,
   "apps/desktop/test/native/ide-window.e2e.mjs": 668,
   "apps/desktop/test/native/pools-screen.e2e.mjs": 618,
