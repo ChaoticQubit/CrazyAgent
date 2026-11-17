@@ -127,10 +127,13 @@ test("a Go to file the engine refuses says why in plain words", () => {
   assert.equal(ide.revealCopy("something_else"), "");
 });
 
-test("Go to reads the open project's files and agents only while it is open, and the pick reaches the IDE and Team views", () => {
+test("Go to reads the open project's files and agents only while it is open, files only while the IDE can open, and the pick reaches the IDE and Team views", () => {
   const read = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
   const source = read("ui/go-to.tsx");
-  assert.match(source, /useProjectFiles\(project \?\? "", open && project !== null \? query : null\)/);
+  assert.match(source, /const ideOpens = ideReplacesTabs\(cachedIdeView\(\)\?\.value\);/, "the project page's own rule for listing its IDE tab");
+  assert.match(source, /useProjectFiles\(project \?\? "", open && project !== null && ideOpens \? query : null\)/);
+  assert.match(source, /files: ideOpens \? files \?\? \[\] : \[\]/);
+  assert.equal(ide.ideReplacesTabs(undefined), false, "no IDE state read yet lists no files");
   assert.match(source, /useOpenAgents\(open \? project : null\)/);
   assert.match(read("app.tsx"), /<GoToLayer projects=\{projects \?\? \[\]\} project=\{page\.name === "project" \? page\.id : null\} \/>/);
   assert.match(read("screens/project/index.tsx"), /<IdeTab key=\{data\.id\} projectId=\{projectId\} reveal=\{sectionFile\(settingsSection\)\}/);

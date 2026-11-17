@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { keyLabel, shortcutKey } from "./keys";
 import { Dialog } from "./overlay";
 import { formatRoute, navigate, type Route } from "./router";
+import { cachedIdeView, ideReplacesTabs } from "../api-ide";
 import { loadTeamStatus } from "../api-projects";
 import type { TeamStatus } from "../engine-client";
 import { IDE_TAB, TABS } from "../screens/project/index";
@@ -130,7 +131,8 @@ function useOpenAgents(projectId: string | null): readonly GoToAgent[] {
 
 /** The Go to dialog: a search box driving a list of places, arrow keys to move, Enter to go.
  * While open on a project page it also lists that project's running agents and its files,
- * read only while the dialog is open. Inputs: whether it is open, the projects, the open
+ * read only while the dialog is open; files only while the IDE that shows them can open, as
+ * the project page lists its IDE tab, so a file pick never lands on Changes. Inputs: whether it is open, the projects, the open
  * project's id, if any, and the go and close actions. Output: the dialog. */
 export function GoToDialog({ open, projects, project = null, onGo, onClose }: {
   open: boolean;
@@ -143,9 +145,10 @@ export function GoToDialog({ open, projects, project = null, onGo, onClose }: {
   const [selected, setSelected] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const ids = useId();
-  const files = useProjectFiles(project ?? "", open && project !== null ? query : null);
+  const ideOpens = ideReplacesTabs(cachedIdeView()?.value);
+  const files = useProjectFiles(project ?? "", open && project !== null && ideOpens ? query : null);
   const agents = useOpenAgents(open ? project : null);
-  const here = project === null ? undefined : { id: project, agents, files: files ?? [] };
+  const here = project === null ? undefined : { id: project, agents, files: ideOpens ? files ?? [] : [] };
   const matches = matchTargets(goToTargets(projects, here), query);
   const current = Math.min(selected, Math.max(0, matches.length - 1));
   useEffect(() => {
