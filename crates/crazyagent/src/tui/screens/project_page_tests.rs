@@ -166,6 +166,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         IntakeQuery::GitHubPublishStart { .. } => "github publish",
                         IntakeQuery::GitHubPublishStatus { .. } => "github publish status",
                         IntakeQuery::GitHubPublishPrompt { .. } => "github publish prompt",
+                        IntakeQuery::ReinstallOffer { .. } => "reinstall offer",
                         _ => "intake",
                     });
                     connection.intake(*job).unwrap();
@@ -762,6 +763,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             "pool projects",
             "pending import",
             "uncommitted",
+            "reinstall offer",
             "recovery",
             "setup",
             "team graph",
@@ -770,7 +772,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             "context",
             "memories"
         ],
-        "a project page also reads its instruction files waiting to import, its uncommitted move and its recovery notices"
+        "a project page also reads its instruction files waiting to import, its uncommitted move, its reinstall offer and its recovery notices"
     );
     let shown = render(&mut shell, 80, 24);
     assert!(
@@ -8795,4 +8797,60 @@ fn settings_with_jobs_loaded_sends_restart_them_on_capital_r_and_r_still_refresh
             .any(|request| matches!(request, Request::Setup(SetupQuery::TeamChange { .. }))),
         "r restarts nothing: {refresh:?}"
     );
+}
+
+/// DEC-198 slice 3: a project page reads its reinstall offer by the project's id once shown,
+/// draws the offer that arrives under the master and sends d as a dismiss by the same id; a
+/// refused dismiss keeps the offer, and one the engine made clears it.
+#[test]
+fn the_project_page_reads_its_reinstall_offer_and_d_dismisses_it_by_the_project_id() {
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(120, 30);
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let read = IntakeQuery::ReinstallOffer {
+        project: project.clone(),
+    };
+    let sent = drain(&mut shell);
+    assert!(intake_asks(&sent).contains(&read), "{sent:?}");
+    shell.arrive(intake_reply(
+        read,
+        Ok(IntakeView::Reinstall(Some(
+            crate::projects_home::reinstall::Offer {
+                folders: vec!["node_modules".into()],
+                more: 0,
+                draft: "Please reinstall it.".into(),
+            },
+        ))),
+    ));
+    assert!(render(&mut shell, 120, 30).contains("node_modules was left out"));
+    shell.key(Key::Tab);
+    shell.key(Key::Char('d'));
+    let dismiss = IntakeQuery::ReinstallDismiss {
+        project: project.clone(),
+    };
+    let sent = drain(&mut shell);
+    assert!(intake_asks(&sent).contains(&dismiss), "{sent:?}");
+    shell.arrive(intake_reply(
+        dismiss.clone(),
+        Err("owner_read_failed".into()),
+    ));
+    assert!(
+        render(&mut shell, 120, 30).contains("node_modules was left out"),
+        "a refused dismiss keeps the offer"
+    );
+    shell.key(Key::Char('d'));
+    assert!(intake_asks(&drain(&mut shell)).contains(&dismiss));
+    shell.arrive(intake_reply(
+        dismiss,
+        Ok(IntakeView::ReinstallDismissed(true)),
+    ));
+    assert!(!render(&mut shell, 120, 30).contains("left out"));
 }

@@ -2119,6 +2119,32 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.intake_dismiss(id)?; call.await }.await;
             routed(result)
         }
+        "desktop_reinstall_offer" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+            }
+            let Args { project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.reinstall_offer(project_id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_reinstall_dismiss" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+            }
+            let Args { project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.reinstall_dismiss(project_id)?; call.await }.await;
+            routed(result)
+        }
         "desktop_setup_status" => {
             let result: Result<_, BridgeError> = async { read(state).await?.setup_status().await }.await;
             routed(result)

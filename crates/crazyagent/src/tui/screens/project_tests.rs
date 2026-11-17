@@ -5445,3 +5445,136 @@ fn settings_read_the_hidden_folders_again_while_runs_are_listed() {
         screen.apply(&query, Err("trusted_connection_unavailable".into()));
     }
 }
+
+/// A Notes CLI screen on the Conversation tab with pool Main assigned, a stopped master in
+/// the given state and a kept reinstall offer for node_modules and api/.venv. Takes the
+/// master's state. Returns the screen, typing as the tab opens.
+fn reinstall_screen(status: MasterStatus) -> ProjectScreen {
+    let mut screen = ProjectScreen::new(
+        ProjectId::new("notes-cli").unwrap(),
+        "Notes CLI".into(),
+        None,
+    );
+    screen.pool = Some(PoolInfo {
+        id: CredentialRef::new("pool-main").unwrap(),
+        name: "Main".into(),
+        accounts: 1,
+        assigned: true,
+    });
+    screen.transcript = Some(Transcript {
+        harness: "RCLI".into(),
+        account: None,
+        tools: true,
+        open: false,
+        status,
+        messages: Vec::new(),
+    });
+    screen.reinstall = Some(crate::projects_home::reinstall::Offer {
+        folders: vec!["node_modules".into(), "api/.venv".into()],
+        more: 0,
+        draft: "Please reinstall them.".into(),
+    });
+    screen.open(Tab::Conversation);
+    screen
+}
+
+/// The drawn rows as one line of words, so a sentence reads whole across its wraps.
+fn words(rows: &[Row]) -> String {
+    text(rows).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// DEC-198 slice 3: a kept reinstall offer reads under the master with its keys after Tab
+/// while typing; out of the input, a puts the drafted message after what the owner typed and
+/// starts typing again, the offer staying, and d asks for the dismiss.
+#[test]
+fn a_kept_reinstall_offer_asks_the_master_with_a_and_dismisses_with_d() {
+    let mut screen = reinstall_screen(MasterStatus::Stopped);
+    let look = Look::plain();
+    let shown = words(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains(
+            "node_modules and api/.venv were left out when this project came into your projects \
+             folder, as they can be rebuilt. Press Tab, then a to put the drafted message in \
+             your input, d to dismiss this."
+        ),
+        "{shown}"
+    );
+    screen.input.set("Hi");
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert!(!screen.typing);
+    let shown = words(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Press a to put the drafted message in your input, d to dismiss this."),
+        "{shown}"
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert!(screen.typing);
+    assert_eq!(screen.input.value(), "Hi\n\nPlease reinstall them.");
+    assert!(screen.reinstall.is_some(), "asking keeps the offer");
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('d'))),
+        ProjectReply::ReinstallDismiss
+    );
+}
+
+/// DEC-198 slice 3: while the master's accounts aren't signed in the offer adds that an
+/// account is needed first and takes no a; d still dismisses it.
+#[test]
+fn a_reinstall_offer_while_the_master_is_not_signed_in_says_so_and_takes_no_a() {
+    let mut screen = reinstall_screen(MasterStatus::NotSignedIn);
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert!(!screen.typing);
+    let look = Look::plain();
+    let shown = words(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains(&format!(
+            "as they can be rebuilt. {} Press d to dismiss this.",
+            super::project_view::REINSTALL_SIGN_IN
+        )),
+        "{shown}"
+    );
+    assert!(!shown.contains("Press a"), "{shown}");
+    assert_ne!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "");
+    assert!(!screen.typing);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('d'))),
+        ProjectReply::ReinstallDismiss
+    );
+}
+
+/// DEC-198 slice 3: the offer's sentence names one folder, two, and three with the rest
+/// counted, as the desktop; the draft goes alone into an empty input and after a blank line
+/// into one the owner typed in.
+#[test]
+fn the_reinstall_line_counts_like_the_desktop_and_the_draft_keeps_typed_text() {
+    let line = |folders: &[&str], more| {
+        super::project_view::reinstall_line(&crate::projects_home::reinstall::Offer {
+            folders: folders.iter().map(|folder| (*folder).to_owned()).collect(),
+            more,
+            draft: String::new(),
+        })
+    };
+    let came = "left out when this project came into your projects folder";
+    assert_eq!(
+        line(&["node_modules"], 0),
+        format!("node_modules was {came}, as it can be rebuilt.")
+    );
+    assert_eq!(
+        line(&["node_modules", "api/.venv"], 0),
+        format!("node_modules and api/.venv were {came}, as they can be rebuilt.")
+    );
+    assert_eq!(
+        line(&["a/node_modules", "b/node_modules", "c/dist"], 4),
+        format!(
+            "a/node_modules, b/node_modules, c/dist and 4 more were {came}, as they can be rebuilt."
+        )
+    );
+    assert_eq!(super::console::seeded("", "Reinstall."), "Reinstall.");
+    assert_eq!(super::console::seeded("  \n", "Reinstall."), "Reinstall.");
+    assert_eq!(
+        super::console::seeded("Hello", "Reinstall."),
+        "Hello\n\nReinstall."
+    );
+}

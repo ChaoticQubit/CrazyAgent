@@ -150,6 +150,8 @@ fn main() {
         "desktop_intake_status",
         "desktop_intake_stop",
         "desktop_intake_dismiss",
+        "desktop_reinstall_offer",
+        "desktop_reinstall_dismiss",
         "desktop_setup_status",
         "desktop_run_setup",
         "desktop_install_dependency",

@@ -7,6 +7,7 @@ mod move_project;
 #[cfg(all(test, unix))]
 mod move_tests;
 mod platform;
+pub mod reinstall;
 pub(crate) mod setup_mark;
 mod watch;
 

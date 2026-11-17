@@ -5,13 +5,13 @@ import { githubPublishPrompt, githubPublishPromptSet } from "./engine-client";
 import type { GitHubPromptAnswer } from "./engine-client";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubOwners, githubPublishApprove, githubPublishContinue, githubPublishDiscard, githubPublishExclude, githubPublishRecheck, githubPublishStart, githubPublishStatus, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
-  githubUseCli, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
+  githubUseCli, intakeDismiss, intakeStart, intakeStatus, intakeStop, reinstallDismiss, reinstallOffer, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
   fixToolPermissions as startFix, setRefusedTool as saveRefusedTool,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
   AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan, GitHubRepoPage, GitHubStatus, IntakeJob,
-  IntentReceipt, OnboardingView,
+  IntentReceipt, OnboardingView, ReinstallOffer,
   DependencyName, ProjectsHome, RefusedTool, SetupStatus,
 } from "./engine-client";
 import { githubRuleDefaults, githubRuleDefaultsSet, githubRules, githubRuleSet } from "./engine-client";
@@ -373,6 +373,16 @@ export function stopIntake(id: string): Promise<Result<boolean>> {
  * was forgotten. */
 export function dismissIntake(id: string): Promise<Result<boolean>> {
   return wrap(() => intakeDismiss(id));
+}
+
+/** Reads a project's reinstall offer. Input: the project id. Output: the offer, or null. */
+export function loadReinstallOffer(projectId: string): Promise<Result<ReinstallOffer | null>> {
+  return wrap(() => reinstallOffer(projectId));
+}
+
+/** Dismisses a project's reinstall offer. Input: the project id. Output: whether one was. */
+export function dismissReinstallOffer(projectId: string): Promise<Result<boolean>> {
+  return wrap(() => reinstallDismiss(projectId));
 }
 
 /** Moves or copies a folder into the projects folder, where it then shows as found.

@@ -11,7 +11,9 @@ import { entry } from "../new-project/wizard";
 import { TerminalPanel } from "../team";
 import { changeNote } from "../team/controls";
 import "../team/team-graph.css";
+import { seedOf, type Seed } from "./console-model";
 import { ConversationTab, MasterSettingsButton, MasterSettingsDrawer } from "./conversation";
+import { ReinstallNotice } from "./reinstall";
 import { accountName } from "./research";
 import { LiveConversation } from "./session-messages";
 import { SessionsBar, SwitchDivider } from "./sessions";
@@ -264,16 +266,22 @@ export function liveStaleNote(name: string): string {
  * any other master, a project with Live terminal off, a project without a team plan and a plan
  * that couldn't be read keep the engine-driven conversation. */
 export function MasterArea({ data }: { data: ProjectData }) {
+  const [seed, setSeed] = useState<Seed | null>(null);
+  const asks = useRef(0);
   if (data.setup === undefined || data.harnesses === undefined) return <p className="pj-small pj-muted" role="status">Loading the master...</p>;
   const stored = valueOf(data.setup)?.team.master;
   const harness = stored === undefined ? undefined : entry(valueOf(data.harnesses), stored)?.id ?? stored;
+  const ask = (text: string) => {
+    asks.current += 1;
+    setSeed(seedOf(asks.current, text, setSeed));
+  };
   const area = harness === undefined || !runsLive(harness) || liveTerminalOff(data.team.result, data.id)
-    ? <ConversationTab data={data} />
-    : <LiveMaster key={`${data.id}:${harness}`} data={data} harness={harness} />;
+    ? <ConversationTab data={data} seed={seed} onAsk={ask} />
+    : <LiveMaster key={`${data.id}:${harness}`} data={data} harness={harness} seed={seed} onAsk={ask} />;
   return <MasterSettingsDrawer data={data} liveHarness={harness === undefined || runsLive(harness)}>{area}</MasterSettingsDrawer>;
 }
 
-function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
+function LiveMaster({ data, harness, seed, onAsk }: { data: ProjectData; harness: string; seed: Seed | null; onAsk: (draft: string) => void }) {
   const [live, setLive] = useState<Live>({ kind: "starting" });
   const [want, setWant] = useState<Want | null>(null);
   const [openNote, setOpenNote] = useState<string | null>(null);
@@ -383,7 +391,7 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
     opened.current = open;
     setLive((prior) => prior.kind === "running" ? runningState(prior, prior.node, Date.now(), open) : prior);
   };
-  return <LiveMasterView data={data} harness={harness} live={shown} onStart={() => start()} onSession={() => start(false)} sessions={sessions} openNote={openNote} onOpened={terminalOpened} />;
+  return <LiveMasterView data={data} harness={harness} live={shown} onStart={() => start()} onSession={() => start(false)} sessions={sessions} openNote={openNote} onOpened={terminalOpened} seed={seed} onAsk={onAsk} />;
 }
 
 /** The master ticket and live session the live master's New session and Sessions controls
@@ -461,7 +469,7 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
  * area's sessions when its owner already holds them, why the owner's Open opened no
  * session, if it did not, and what hears the master's terminal open or close. Output: the
  * area. */
-export function LiveMasterView({ data, harness, live, onStart, onSession, sessions: held, openNote = null, onOpened }: { data: ProjectData; harness: string; live: Live; onStart: () => Promise<void>; onSession?: () => Promise<void>; sessions?: MasterSessions; openNote?: string | null; onOpened?: (open: boolean) => void }) {
+export function LiveMasterView({ data, harness, live, onStart, onSession, sessions: held, openNote = null, onOpened, seed = null, onAsk }: { data: ProjectData; harness: string; live: Live; onStart: () => Promise<void>; onSession?: () => Promise<void>; sessions?: MasterSessions; openNote?: string | null; onOpened?: (open: boolean) => void; seed?: Seed | null; onAsk?: (draft: string) => void }) {
   const [resuming, setResuming] = useState(false);
   const [resumeNote, setResumeNote] = useState("");
   const own = useMasterSessions(data.id, held === undefined);
@@ -516,6 +524,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
     {openNote && <div className="pj-note warn" role="alert">
       <p>{`${NO_SESSION} ${displayText(openNote)}`}</p>
     </div>}
+    {onAsk && <ReinstallNotice projectId={data.id} onAsk={onAsk} onAccounts={() => data.navigate("/settings/accounts")} />}
     {live.kind === "stopped" && <div className={`pj-note${live.problem ? " warn" : ""}`} role={live.problem ? "alert" : "status"}>
       <p>{displayText(live.problem ?? STOPPED)}</p>
       {live.idle && <Button size="small" variant="primary" onClick={() => void onStart()}>Start again</Button>}
@@ -537,6 +546,6 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
       <Button size="small" icon="refresh-cw" onClick={() => void onStart()}>Try again</Button>
     </div>}
     {live.kind === "running" && !overdue && (!live.node || waits !== null) && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(waits ?? WAITING)}</p>}
-    {live.kind === "running" && live.node && <TerminalPanel key={`${live.node.terminal ?? live.node.id}:${sessions.liveId ?? ""}`} node={live.node} harness={name} projectId={data.id} embedded follow onOpened={onOpened} />}
+    {live.kind === "running" && live.node && <TerminalPanel key={`${live.node.terminal ?? live.node.id}:${sessions.liveId ?? ""}`} node={live.node} harness={name} projectId={data.id} embedded follow onOpened={onOpened} seed={seed} />}
   </div>;
 }
