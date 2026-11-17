@@ -1009,29 +1009,48 @@ fn orphans(scenarios: &[Scenario]) -> Vec<String> {
 }
 
 /// Writes both normalised captures of a scenario whose two captures differ to the folder
-/// `SNAPSHOT_V242_DIFF_DIR` names, so the whole difference is readable; nothing is written
-/// when either text holds a private value. Inputs: the scenario's `kind/name` and both texts.
-/// Output: a note for the failure line, empty when no folder is named.
+/// `SNAPSHOT_V242_DIFF_DIR` names, so the whole difference is readable, each line that holds
+/// a private value replaced by `<withheld>` ([`redacted`]). Inputs: the scenario's `kind/name`
+/// and both texts. Output: a note for the failure line, empty when no folder is named.
 fn dump_differing(at: &str, first: &str, second: &str) -> String {
     let Some(folder) = std::env::var_os("SNAPSHOT_V242_DIFF_DIR").map(PathBuf::from) else {
         return String::new();
     };
     let home = std::env::var("HOME").ok();
     let user = std::env::var("USER").ok();
-    for text in [first, second] {
+    let texts = [first, second].map(|text| redacted(text, home.as_deref(), user.as_deref()));
+    for text in &texts {
         if let Err(kind) = refuse_private(text, home.as_deref(), user.as_deref()) {
             return format!("; not dumped: {kind}");
         }
     }
+    let withheld: usize = texts
+        .iter()
+        .map(|text| text.matches("<withheld>").count())
+        .sum();
     let file = at.replace('/', "-");
     let written = std::fs::create_dir_all(&folder).and_then(|()| {
-        std::fs::write(folder.join(format!("{file}.a.json")), first)?;
-        std::fs::write(folder.join(format!("{file}.b.json")), second)
+        std::fs::write(folder.join(format!("{file}.a.json")), &texts[0])?;
+        std::fs::write(folder.join(format!("{file}.b.json")), &texts[1])
     });
     match written {
-        Ok(()) => "; both captures dumped".to_owned(),
+        Ok(()) => format!("; both captures dumped, {withheld} lines withheld"),
         Err(error) => format!("; not dumped: {}", error.kind()),
     }
+}
+
+/// Replaces each line of golden text that `refuse_private` refuses with `<withheld>`, so a
+/// capture that cannot become a golden is still readable. Inputs: the text, the home folder
+/// and the user name. Output: the text with only those lines replaced.
+fn redacted(text: &str, home: Option<&str>, user: Option<&str>) -> String {
+    let lines: Vec<&str> = text
+        .split('\n')
+        .map(|line| match refuse_private(line, home, user) {
+            Ok(()) => line,
+            Err(_) => "<withheld>",
+        })
+        .collect();
+    lines.join("\n")
 }
 
 /// Checks one scenario against its golden, or captures it when `write` is set and none exists.

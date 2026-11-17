@@ -369,6 +369,19 @@ fn an_escaped_tool_root_below_the_owner_home_passes_and_an_unknown_name_is_refus
 }
 
 #[test]
+fn a_dump_withholds_only_the_lines_that_hold_private_text() {
+    let names = (Some("/Users/owner"), Some("owner"));
+    let text = "[\n  \"<owner-home>/.ssh\",\n  \"<owner-home>/\\\\.unlisted/x\",\n  \"/Users/someone/x\",\n  \"<path-1>/kept\"\n]\n";
+    let out = super::redacted(text, names.0, names.1);
+    assert_eq!(
+        out,
+        "[\n  \"<owner-home>/.ssh\",\n<withheld>\n<withheld>\n  \"<path-1>/kept\"\n]\n"
+    );
+    assert!(super::refuse_private(text, names.0, names.1).is_err());
+    assert_eq!(super::refuse_private(&out, names.0, names.1), Ok(()));
+}
+
+#[test]
 fn a_caseless_user_or_per_user_temp_path_is_refused_and_a_masked_one_is_not() {
     let names = (Some("/Users/owner"), Some("owner"));
     for leak in [
