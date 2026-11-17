@@ -16,6 +16,17 @@ pub(super) const JOBS_RUNNING_MAX: usize = 3;
 /// them is refused `job_busy`.
 pub(super) const JOBS_WAITING_MAX: usize = 8;
 
+/// The most ended jobs a start keeps for the clients: ends no status read listed yet and
+/// questions the owner has not answered (#380 F2). A start past them is refused `job_busy`
+/// until the owner dismisses or answers one, so no end is dropped unseen.
+pub(super) const JOBS_ENDED_MAX: usize = JOBS_RUNNING_MAX + JOBS_WAITING_MAX;
+
+/// The most jobs held at once: the live ones and the ended ones kept.
+const JOBS_HELD_MAX: usize = JOBS_RUNNING_MAX + JOBS_WAITING_MAX + JOBS_ENDED_MAX;
+
+/// How often an add waiting for the download slot looks for a stop (#380 F4).
+const TURN_STOP_EVERY: Duration = Duration::from_millis(20);
+
 const _: () = assert!(JOBS_RUNNING_MAX <= REVISION_TRIES);
 
 /// What a client asks a job to do: the change's request id, which names the job, the subject,
@@ -28,8 +39,9 @@ pub(super) struct Asked {
 }
 
 /// The engine's jobs, of any kind, in start order: the running ones, the ones waiting for
-/// their turn, and the ones ended since the last start until they are dismissed or another
-/// starts; and how many direct client folder adds and project moves run, read and changed
+/// their turn, and the ended ones until they are dismissed or a start drops them (once a
+/// status read listed them and they ask nothing, or when the start takes their place); and
+/// how many direct client folder adds and project moves run, read and changed
 /// only under the jobs' lock, so a job and a direct change never run at once. Adds onto
 /// names apart run side by side; any other job runs alone (DEC-197).
 #[derive(Default)]
@@ -59,9 +71,23 @@ struct Held {
     real: PathBuf,
     task: Option<tokio::task::JoinHandle<()>>,
     turn: Option<oneshot::Sender<()>>,
+    seen: bool,
 }
 
 impl Held {
+    /// Whether the job ended asking the owner a question, which only an answer or a dismiss
+    /// clears.
+    fn asks(&self) -> bool {
+        matches!(self.job.view().state, JobState::NeedsAnswer { .. })
+    }
+
+    /// Whether a start of `subject` on `real` drops this job: an ended job the start takes
+    /// the place of, as a retry or an answer does, or an ended job a status read listed that
+    /// asks nothing. Inputs: the start's subject and real folder. Output: the answer.
+    fn dropped_by(&self, subject: &JobSubject, real: &Path) -> bool {
+        !self.live() && (self.same(subject, real) || (self.seen && !self.asks()))
+    }
+
     /// Whether the job has not ended: running or waiting for its turn.
     fn live(&self) -> bool {
         !self.job.ended()
@@ -194,8 +220,8 @@ impl Intake {
     /// Inputs: the engine, the authority, the client packet, its admission and what to do.
     /// Output: the job's view; `job_same_folder` while a live job holds the folder or one
     /// inside or around it; `job_busy` while a direct client add or project move runs, the id
-    /// runs as a client change, or the waiting list is full; or the folder, override or move
-    /// check's code.
+    /// runs as a client change, the waiting list is full, or `JOBS_ENDED_MAX` kept ends wait
+    /// for a client; or the folder, override or move check's code.
     pub(super) async fn start(
         engine: &Arc<Engine>,
         authority: &Arc<Authority>,
@@ -285,6 +311,17 @@ impl Intake {
         if authority.intake.directs() > 0 {
             return Err(failure("job_busy"));
         }
+        let live = held.iter().filter(|current| current.live()).count();
+        if live >= JOBS_RUNNING_MAX + JOBS_WAITING_MAX {
+            return Err(failure("job_busy"));
+        }
+        let kept = held
+            .iter()
+            .filter(|current| !current.live() && !current.dropped_by(&asked.subject, &real))
+            .count();
+        if kept >= JOBS_ENDED_MAX {
+            return Err(failure("job_busy"));
+        }
         let waiting = held.iter().filter(|current| current.waiting()).count();
         assert!(waiting <= JOBS_WAITING_MAX);
         let taken = Running::claim(authority, &a.owner_id, &asked.request_id);
@@ -302,9 +339,10 @@ impl Intake {
         let (turn, turned) = oneshot::channel();
         held.push(Held {
             job: Arc::clone(&job),
-            real,
+            real: real.clone(),
             task: None,
             turn: Some(turn),
+            seen: false,
         });
         admit(&mut held);
         let queued = held.last().expect("the start was pushed").waiting();
@@ -315,15 +353,20 @@ impl Intake {
         }
         let mut replaced = Vec::new();
         held.retain(|current| {
-            let kept = current.live();
-            if !kept {
+            let dropped = current.dropped_by(&asked.subject, &real);
+            if dropped {
                 replaced.push(current.job.id().clone());
             }
-            kept
+            !dropped
         });
         let live = held.iter().filter(|current| current.live()).count();
-        assert_eq!(held.len(), live, "a start keeps only live jobs");
         assert!(live <= JOBS_RUNNING_MAX + JOBS_WAITING_MAX);
+        assert!(held.len() <= JOBS_HELD_MAX);
+        assert!(
+            held.iter()
+                .any(|current| current.job.id() == &asked.request_id),
+            "a start never drops itself"
+        );
         let task = tokio::spawn(run(
             Arc::clone(engine),
             Arc::clone(authority),
@@ -342,12 +385,20 @@ impl Intake {
         Ok(view)
     }
 
-    /// Every job held, running, waiting or ended since the last start, in start order.
+    /// Every job held, running, waiting or ended and kept, in start order. Marks each job this
+    /// read lists as ended as read by a client, so a later start may drop it (#380 F2).
     /// Output: their views.
     pub(super) fn status(&self) -> Vec<JobView> {
-        let held = self.lock();
-        assert!(held.len() <= 2 * (JOBS_RUNNING_MAX + JOBS_WAITING_MAX));
-        held.iter().map(|current| current.job.view()).collect()
+        let mut held = self.lock();
+        assert!(held.len() <= JOBS_HELD_MAX);
+        let views: Vec<JobView> = held.iter().map(|current| current.job.view()).collect();
+        for (current, view) in held.iter_mut().zip(&views) {
+            if view.state.over() {
+                current.seen = true;
+            }
+        }
+        assert_eq!(views.len(), held.len());
+        views
     }
 
     /// Lets go every waiting job whose turn came, once a job ended or left the waiting list.
@@ -386,8 +437,9 @@ impl Intake {
 
     /// Reads the jobs an engine stop cut short: a project move first, then a delete, then every
     /// add, which ran side by side (DEC-197), else a New Project, so status shows how each
-    /// ended until the owner dismisses it or a new job starts. The New Project read comes first
-    /// whatever is shown, since it ends every New Project mark an earlier engine process left.
+    /// ended until the owner dismisses it or a start drops it once read. The New Project read
+    /// comes first whatever is shown, since it ends every New Project mark an earlier engine
+    /// process left.
     /// Runs at server start, after the storage start finished any cut move from disk; a job a
     /// client started first wins. Jobs that only waited had not started, so none comes back.
     /// Inputs: the engine and the wait. Output: none; a failed read is logged and shows
@@ -410,6 +462,7 @@ impl Intake {
                 real,
                 task: None,
                 turn: None,
+                seen: false,
             });
         }
         assert!(!held.iter().any(Held::live));
@@ -612,7 +665,7 @@ async fn run(
     turn: oneshot::Receiver<()>,
 ) {
     assert_eq!(subject.kind(), job.kind());
-    assert!(replaced.len() <= 2 * (JOBS_RUNNING_MAX + JOBS_WAITING_MAX));
+    assert!(replaced.len() <= JOBS_HELD_MAX);
     let ending = Ending(Arc::clone(&job));
     for old in replaced {
         if let Err(e) = engine
@@ -783,10 +836,22 @@ impl Drop for Ending {
 
 /// Downloads what of the job's folder is only in iCloud, holding the engine's download slot
 /// once the downloads of the jobs before it ended, so jobs take turns instead of refusing
-/// each other. Input: the authority and the job. Output: Ok once every file is on this Mac,
-/// else the download's code, `icloud_download_busy` while a client's own download runs.
+/// each other; a stop asked while the job waits for the slot ends the wait at once (#380 F4).
+/// Input: the authority and the job. Output: Ok once every file is on this Mac, else the
+/// download's code, `icloud_download_busy` while a client's own download runs.
 async fn fetch(authority: &Arc<Authority>, job: &Arc<IntakeJob>) -> Result<(), EngineError> {
-    let _turn = authority.intake.downloads.lock().await;
+    let turn = authority.intake.downloads.lock();
+    tokio::pin!(turn);
+    let _turn = loop {
+        tokio::select! {
+            taken = &mut turn => break taken,
+            () = tokio::time::sleep(TURN_STOP_EVERY) => {
+                if job.download().cancelled() {
+                    return Err(failure("home_icloud_not_downloaded"));
+                }
+            }
+        }
+    };
     let claim = authority.icloud.claim_for(job.download())?;
     let download = claim.download();
     let path = job.source().to_owned();

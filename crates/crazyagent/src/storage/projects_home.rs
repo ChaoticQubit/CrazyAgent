@@ -1353,7 +1353,7 @@ pub(super) fn project_move_check(
 /// finished as `crate::projects_home::finish` does, a Copy never from disk alone; a move
 /// another exchange planned is left alone. A move finished at engine start is kept as the
 /// ended job the next status shows, `done` or `move_project_interrupted`, replacing an
-/// older one, until the owner dismisses it or a new job starts. Output: Ok, or any SQLite
+/// older one, until the owner dismisses it or a start drops it once read. Output: Ok, or any SQLite
 /// failure.
 pub(super) fn project_move_settle(
     db: &mut Connection,

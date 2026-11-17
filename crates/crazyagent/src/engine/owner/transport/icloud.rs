@@ -113,7 +113,7 @@ impl OwnerClient {
         }
     }
 
-    /// Reads every job: running, waiting for its turn, or ended since the last start.
+    /// Reads every job: running, waiting for its turn, or ended and kept for the clients.
     /// Output: their views in start order.
     pub async fn job_status(&self) -> Result<Vec<JobView>, EngineError> {
         match self.icloud_exchange(Action::Status).await? {
