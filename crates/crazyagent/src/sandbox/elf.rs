@@ -207,7 +207,7 @@ fn malformed() -> std::io::Error {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests {
     use super::*;
 
