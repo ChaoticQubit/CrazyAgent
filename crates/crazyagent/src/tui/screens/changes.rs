@@ -1556,6 +1556,12 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "changes_git_include" => {
             "Your project's Git config includes a file inside your project folder, where accepted changes can rewrite it. Move that file outside the project folder and include it by its full path, then try again."
         }
+        "changes_git_old" if cfg!(target_os = "macos") => {
+            "Landing changes needs Git 2.40 or newer, and the Git of Xcode or its Command Line Tools on this Mac is older; CrazyAgent doesn't use Homebrew's Git. Update them in Software Update, or in Terminal with softwareupdate --install --all or xcode-select --install, then try again."
+        }
+        "changes_git_old" => {
+            "Landing changes needs Git 2.40 or newer, and the Git on this computer is older. Update Git, then try again."
+        }
         "changes_git_unsupported" => {
             "The Git on this computer can't land changes. Update Git, then try again."
         }

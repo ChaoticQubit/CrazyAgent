@@ -322,6 +322,7 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
         "changes_branch_not_above_base",
         "changes_git_hooks",
         "changes_git_include",
+        "changes_git_old",
         "changes_git_unsupported",
         "changes_merge_unsafe",
         "changes_restore_expired",
@@ -347,6 +348,21 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
     assert_eq!(
         refusal("changes_git_include"),
         "Your project's Git config includes a file inside your project folder, where accepted changes can rewrite it. Move that file outside the project folder and include it by its full path, then try again."
+    );
+    assert!(crate::engine::owner::transport::cleanup::CLEANUP_CODES.contains(&"changes_git_old"));
+    let old = refusal("changes_git_old");
+    assert!(
+        old.starts_with("Landing changes needs Git 2.40 or newer"),
+        "{old}"
+    );
+    assert_eq!(
+        old.contains("Command Line Tools") && old.contains("xcode-select --install"),
+        cfg!(target_os = "macos"),
+        "{old}"
+    );
+    assert!(
+        !old.contains("brew upgrade") && !old.contains("brew install"),
+        "{old}"
     );
 }
 
