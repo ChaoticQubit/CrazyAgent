@@ -851,6 +851,67 @@ fn download_everything_lists_the_rebuildable_folders_too() {
     assert!(!left_behind(root, &modules, &metadata, COPY_BOUNDS, &look));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_download_keeps_the_folders_it_left_so_the_job_can_say_where_they_stayed() {
+    fake::placeholders();
+    let folder = project();
+    let root = folder.path();
+    let skipping = CopyBounds {
+        skip_rebuildable: true,
+        ..COPY_BOUNDS
+    };
+    let look = |path: &Path| fs::symlink_metadata(path);
+    let ask = |batch: &[PathBuf], _: &dyn Fn() -> bool| {
+        batch.iter().for_each(|path| land(path));
+        Ok::<(), EngineError>(())
+    };
+    assert!(Download::default().skipped().is_empty());
+    let download = Download::default();
+    let asked = run(
+        root,
+        &download,
+        &Pacer::default(),
+        &ask,
+        &look,
+        skipping,
+        FAST,
+    );
+    assert_eq!(asked.unwrap(), 3);
+    let mut left = download.skipped();
+    left.sort_by(|a, b| a.path.cmp(&b.path));
+    let paths: Vec<&str> = left.iter().map(|folder| folder.path.as_str()).collect();
+    assert_eq!(paths, ["dist", "node_modules", "web/__pycache__"]);
+
+    let only = tempfile::tempdir().unwrap();
+    let module = only.path().join("node_modules/a/index.js");
+    fs::create_dir_all(module.parent().unwrap()).unwrap();
+    fs::write(&module, "1").unwrap();
+    evict(&module);
+    let nothing = Download::default();
+    let asked = run(
+        only.path(),
+        &nothing,
+        &Pacer::default(),
+        &ask,
+        &look,
+        skipping,
+        FAST,
+    );
+    assert_eq!(
+        asked.unwrap(),
+        0,
+        "only a left folder needs iCloud, so nothing is asked"
+    );
+    assert_eq!(
+        nothing.skipped(),
+        [Skipped {
+            path: "node_modules".into(),
+            files: Some(1),
+        }]
+    );
+}
+
 #[test]
 fn a_gitignore_line_names_a_folder_only_plainly() {
     for line in ["dist", "dist/", "/dist", "**/dist", "**/dist/"] {

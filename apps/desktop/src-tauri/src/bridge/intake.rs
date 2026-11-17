@@ -1502,6 +1502,7 @@ mod tests {
     #[test]
     fn an_intake_job_reaches_the_window_with_listed_codes_only() {
         let view = |state| JobView {
+            left: Vec::new(),
             id: RequestId::new("add-1").unwrap(),
             kind: crazyagent::projects_home::job::JobKind::Add,
             project_id: None,
@@ -1567,6 +1568,7 @@ mod tests {
             );
         }
         let view = JobView {
+            left: Vec::new(),
             id: RequestId::new("delete-1").unwrap(),
             kind: crazyagent::projects_home::job::JobKind::Delete,
             project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),
@@ -1621,6 +1623,7 @@ mod tests {
             );
         }
         let view = |state| JobView {
+            left: Vec::new(),
             id: RequestId::new("setup-1").unwrap(),
             kind: crazyagent::projects_home::job::JobKind::Setup,
             project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),

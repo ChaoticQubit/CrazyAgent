@@ -1924,6 +1924,7 @@ mod tests {
 
     fn shop(state: JobState) -> JobView {
         JobView {
+            left: Vec::new(),
             id: crate::protocol::RequestId::new("add-1").unwrap(),
             kind: crate::projects_home::job::JobKind::Add,
             project_id: None,

@@ -99,14 +99,16 @@ pub struct Progress {
     pub bytes_done: u64,
 }
 
-/// One running download's shared state: its progress, read by progress requests, and its
-/// cancel flag, set by a cancel request or when the request that started it ends.
+/// One running download's shared state: its progress, read by progress requests, the
+/// rebuildable folders its last listing left out, and its cancel flag, set by a cancel request
+/// or when the request that started it ends.
 #[derive(Debug, Default)]
 pub struct Download {
     total: AtomicU64,
     done: AtomicU64,
     bytes_total: AtomicU64,
     bytes_done: AtomicU64,
+    skipped: Mutex<Vec<Skipped>>,
     cancelled: AtomicBool,
 }
 
@@ -134,6 +136,29 @@ impl Download {
     /// Whether the download was asked to stop.
     pub fn cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// The rebuildable folders the download left in iCloud, as its listings found them; an
+    /// add leaves the same ones behind. Output: their paths below the folder and file counts.
+    pub fn skipped(&self) -> Vec<Skipped> {
+        if !self.cancelled.load(Ordering::SeqCst) {
+            return Vec::new();
+        }
+        self.skipped
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Records the folders a listing left out. Inputs: the folders and whether the listing
+    /// went through the whole folder, so they replace the ones recorded, or one landed folder.
+    fn leave(&self, folders: Vec<Skipped>, whole: bool) {
+        let mut held = self.skipped.lock().unwrap_or_else(PoisonError::into_inner);
+        if whole {
+            held.clear();
+        }
+        held.extend(folders);
+        assert!(held.len() as u64 <= FORCED_COPY_BOUNDS.entries);
     }
 
     fn record(&self, now: Progress) {
@@ -799,6 +824,7 @@ impl Paced<'_> {
         if !listing.skipped.is_empty() {
             eprintln!("icloud_download_skipped folders={}", listing.skipped.len());
         }
+        self.download.leave(listing.skipped, true);
         let mut entries = listing.entries;
         let mut queue = Queue::default();
         queue.add(listing.wanted);
@@ -825,6 +851,7 @@ impl Paced<'_> {
                 if entries > self.bounds.entries {
                     return Err(refused("home_copy_too_large"));
                 }
+                self.download.leave(more.skipped, false);
                 queue.add(more.wanted);
             }
             log.note(queue.landings, Instant::now());
@@ -834,6 +861,7 @@ impl Paced<'_> {
                 }
                 checks += 1;
                 let check = survey(self.root, self.root, 0, self.bounds, self.look)?;
+                self.download.leave(check.skipped, true);
                 if check.wanted.is_empty() {
                     self.download.record(queue.progress);
                     return Ok(queue.progress.total);

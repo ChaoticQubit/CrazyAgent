@@ -1,4 +1,4 @@
-use super::icloud::{Download, Progress};
+use super::icloud::{Download, Progress, Skipped};
 use super::{ADD_OVERRIDES_MAX, AddMode, AddOverride, PATH_BYTES_MAX, Tally};
 use crate::engine::EngineError;
 use crate::project_setup::ProjectSetup;
@@ -124,8 +124,9 @@ pub enum JobState {
 /// One job as a client sees it: its id, which is the change's request id, its kind, the
 /// project a move, a delete or a New Project takes, the folder (for a delete or a New Project
 /// the project's name, which labels its end line), the mode (a delete reads Move, unused), the soft
-/// refusals it goes past, whether a stop was asked and its state. A client answering a soft
-/// refusal starts again with these overrides and the new one.
+/// refusals it goes past, whether a stop was asked, its state, and the rebuildable folders its
+/// download left in iCloud, which an add leaves out. A client answering a soft refusal starts
+/// again with these overrides and the new one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobView {
@@ -137,6 +138,8 @@ pub struct JobView {
     pub overrides: Vec<AddOverride>,
     pub stopping: bool,
     pub state: JobState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left: Vec<Skipped>,
 }
 
 impl JobState {
@@ -492,6 +495,7 @@ impl IntakeJob {
             overrides: self.overrides.clone(),
             stopping: self.tally.stopped(),
             state,
+            left: self.download.skipped(),
         };
         assert!(view.overrides.len() <= ADD_OVERRIDES_MAX);
         assert_eq!(view.kind != JobKind::Add, view.project_id.is_some());

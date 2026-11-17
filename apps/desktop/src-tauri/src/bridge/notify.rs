@@ -680,6 +680,7 @@ mod tests {
 
     fn job(state: crazyagent::projects_home::job::JobState) -> JobView {
         JobView {
+            left: Vec::new(),
             id: crazyagent::protocol::RequestId::new("add-1").unwrap(),
             kind: crazyagent::projects_home::job::JobKind::Add,
             project_id: None,

@@ -2,6 +2,7 @@ use super::intake::{AddWarning, COPY_WARN_BYTES, ask, copy, event};
 use super::intake_job;
 use super::new_project::{complete, expand, size_label};
 use super::{Flow, Place, Screen, open};
+use crate::projects_home::icloud::Skipped;
 use crate::projects_home::job::{JobKind, JobState, JobSubject, JobView};
 use crate::projects_home::{
     ADD_OVERRIDES_MAX, AddMode, AddOverride, GitLink, Measured, PATH_BYTES_MAX,
@@ -28,6 +29,7 @@ const SOFT_SIZE_CODES: [&str; 3] = [
     "folder_size_unreadable",
 ];
 const ICLOUD_CHOICES: [&str; 3] = ["Download and move", "Download and copy", "Cancel"];
+const ICLOUD_LOCAL_CHOICES: [&str; 3] = ["Move", "Copy", "Cancel"];
 const GONE: &str = "This folder no longer waits for an answer. See Home.";
 const OVERRIDE_ORDER: [AddOverride; ADD_OVERRIDES_MAX] = [
     AddOverride::Worktrees,
@@ -108,13 +110,40 @@ struct Question {
 }
 
 /// The open iCloud question for a folder whose files are not all on this Mac: the folder, how
-/// many of its files the read found only in iCloud (none when only the engine's refusal said
-/// so) and the selected answer (Download and move, Download and copy, Cancel).
+/// many of its files the read found only in iCloud outside the rebuildable folders the add
+/// leaves there (none when only the engine's refusal said so), those folders, whether the
+/// owner switched Download everything on, and the selected answer (Download and move,
+/// Download and copy, Cancel; Move and Copy when nothing is downloaded).
 #[derive(Clone, Debug)]
 struct Icloud {
     source: String,
     placeholders: Option<u64>,
+    skipped: Vec<Skipped>,
+    everything: bool,
     choice: usize,
+}
+
+impl Icloud {
+    /// How many files the download asks macOS for: the count outside the left folders, and
+    /// theirs too with Download everything. Returns None when one count is unknown.
+    fn wanted(&self) -> Option<u64> {
+        if !self.everything {
+            return self.placeholders;
+        }
+        self.skipped
+            .iter()
+            .try_fold(self.placeholders?, |sum, folder| {
+                sum.checked_add(folder.files?)
+            })
+    }
+
+    /// The answers' labels: with a download, or plain Move and Copy when nothing is fetched.
+    fn choices(&self) -> &'static [&'static str; 3] {
+        match self.wanted() {
+            Some(0) => &ICLOUD_LOCAL_CHOICES,
+            _ => &ICLOUD_CHOICES,
+        }
+    }
 }
 
 /// The Existing folder page: sets up a folder on this computer where it is
@@ -140,6 +169,7 @@ pub struct AddFolder {
     question: Option<Question>,
     icloud: Option<Icloud>,
     agreed: Option<String>,
+    everything: Option<String>,
     kept: Option<(String, AddMode, Vec<AddOverride>)>,
     answering: Option<RequestId>,
     moving: Option<ProjectId>,
@@ -166,6 +196,7 @@ impl AddFolder {
             question: None,
             icloud: None,
             agreed: None,
+            everything: None,
             kept: None,
             answering: None,
             moving: None,
@@ -413,16 +444,17 @@ impl AddFolder {
     }
 
     /// Goes on with a measured folder: the iCloud question while some of its files are only
-    /// in iCloud, then the question for its issues, then the Move confirmation, then the add.
-    /// Takes the folder, the way and the context. Returns the flow.
+    /// in iCloud or it holds rebuildable folders the add leaves there, then the question for
+    /// its issues, then the Move confirmation, then the add. Takes the folder, the way and the
+    /// context. Returns the flow.
     fn proceed(&mut self, source: String, mode: AddMode, ctx: &mut Ctx) -> Flow {
-        let placeholders = match self.sized(&source) {
-            Some(Load::Ready(measured)) if measured.placeholders > 0 => Some(measured.placeholders),
-            _ => None,
+        let (placeholders, skipped) = match self.sized(&source) {
+            Some(Load::Ready(measured)) => (measured.placeholders, measured.skipped.clone()),
+            _ => (0, Vec::new()),
         };
         let fetched = self.agreed.as_deref() == Some(source.as_str());
-        if !self.confirming && placeholders.is_some() && !fetched {
-            self.ask_icloud(&source, mode, placeholders);
+        if !self.confirming && (placeholders > 0) && !fetched {
+            self.ask_icloud(&source, mode, Some(placeholders), skipped);
             return Flow::Handled;
         }
         if !self.confirming && self.ask_anyway(&source, mode, None) {
@@ -436,14 +468,23 @@ impl AddFolder {
         self.send(source, mode, kept, ctx)
     }
 
-    /// Opens the iCloud question for `source` with the owner's way selected. Takes the folder,
-    /// the way and how many files the read found only in iCloud, if it counted them.
-    fn ask_icloud(&mut self, source: &str, mode: AddMode, placeholders: Option<u64>) {
-        assert!(placeholders != Some(0));
+    /// Opens the iCloud question for `source` with the owner's way selected and Download
+    /// everything off. Takes the folder, the way, how many files the read found only in iCloud
+    /// outside the left folders, if it counted them, and those folders.
+    fn ask_icloud(
+        &mut self,
+        source: &str,
+        mode: AddMode,
+        placeholders: Option<u64>,
+        skipped: Vec<Skipped>,
+    ) {
+        assert!(placeholders != Some(0) || !skipped.is_empty());
         assert!(self.agreed.as_deref() != Some(source));
         self.icloud = Some(Icloud {
             source: source.to_owned(),
             placeholders,
+            skipped,
+            everything: false,
             choice: match mode {
                 AddMode::Move => 0,
                 AddMode::Copy => 1,
@@ -453,10 +494,11 @@ impl AddFolder {
         self.confirming = false;
     }
 
-    /// Takes one key while the iCloud question is open: arrows and Tab pick the answer, Enter
-    /// gives it and Esc closes it. Download and move or copy goes on with that way; the
-    /// engine's job downloads the folder's files before it moves or copies them.
-    /// Takes the key and the context. Returns the flow.
+    /// Takes one key while the iCloud question is open: arrows and Tab pick the answer, Space
+    /// switches Download everything when the add leaves folders in iCloud, Enter gives the
+    /// answer and Esc closes it. Download and move or copy goes on with that way; the engine's
+    /// job downloads the folder's files before it moves or copies them. Takes the key and the
+    /// context. Returns the flow.
     fn answer_icloud(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let Some(icloud) = &mut self.icloud else {
             return Flow::Ignored;
@@ -467,6 +509,7 @@ impl AddFolder {
             Key::Right | Key::Tab => icloud.choice = (icloud.choice + 1) % count,
             Key::Left | Key::BackTab => icloud.choice = (icloud.choice + count - 1) % count,
             Key::Esc => self.icloud = None,
+            Key::Char(' ') if icloud.skipped.is_empty() => icloud.everything = !icloud.everything,
             Key::Enter => {
                 let mode = match icloud.choice {
                     0 => AddMode::Move,
@@ -477,6 +520,7 @@ impl AddFolder {
                     }
                 };
                 let source = icloud.source.clone();
+                self.everything = icloud.everything.then(|| source.clone());
                 self.icloud = None;
                 self.agreed = Some(source.clone());
                 self.way = Way::Into(mode);
@@ -497,9 +541,13 @@ impl AddFolder {
         &mut self,
         source: String,
         mode: AddMode,
-        overrides: Vec<AddOverride>,
+        mut overrides: Vec<AddOverride>,
         ctx: &mut Ctx,
     ) -> Flow {
+        let everything = AddOverride::DownloadEverything;
+        if self.everything.as_deref() == Some(source.as_str()) && overrides.contains(&everything) {
+            overrides.push(everything);
+        }
         assert!(overrides.len() <= ADD_OVERRIDES_MAX);
         self.confirming = false;
         self.question = None;
@@ -636,7 +684,7 @@ impl AddFolder {
 
     fn button(&self, ctx: &Ctx) -> &'static str {
         if let Some(icloud) = &self.icloud {
-            return ICLOUD_CHOICES[icloud.choice];
+            return icloud.choices()[icloud.choice];
         }
         if let Some(question) = &self.question {
             return match (question.choice, question.mode) {
@@ -1199,26 +1247,59 @@ fn question_lines(
     lines.push(buttons(&[keep, anyway], Some(question.choice), theme));
 }
 
-/// Draws the iCloud question: how many files are only in iCloud, that a move takes the folder
-/// out of iCloud on the owner's other Macs, and the three answers. Takes the question, the
-/// width, the context and the lines to add to.
+/// Draws the iCloud question: how many files are only in iCloud, the rebuildable folders the
+/// add leaves there with their file counts and where they stay, the Download everything
+/// switch, that a move takes the folder out of iCloud on the owner's other Macs, and the
+/// three answers. Takes the question, the width, the context and the lines to add to.
 fn icloud_lines(icloud: &Icloud, limit: usize, ctx: &Ctx, lines: &mut Vec<Line<'static>>) {
     let theme = &ctx.theme;
     let name = AddFolder::name(&icloud.source);
-    lines.push(styled(
-        format!("Download {name} from iCloud first?"),
-        Role::Heading,
-        theme,
-    ));
+    let wanted = icloud.wanted();
+    let heading = match wanted {
+        Some(0) => format!("Some of {name} stays in iCloud"),
+        _ => format!("Download {name} from iCloud first?"),
+    };
+    lines.push(styled(heading, Role::Heading, theme));
+    let mut texts = Vec::new();
+    if wanted != Some(0) {
+        texts.push(icloud_count(wanted));
+    }
+    if !icloud.skipped.is_empty() {
+        texts.push(
+            match icloud.everything {
+                true => "Downloaded too:",
+                false => "Left in iCloud, as they can be rebuilt:",
+            }
+            .to_owned(),
+        );
+        texts.extend(icloud.skipped.iter().map(|folder| {
+            let files = match folder.files {
+                Some(1) => "1 file".to_owned(),
+                Some(count) => format!("{count} files"),
+                None => "files not counted".to_owned(),
+            };
+            format!("  {} ({files})", folder.path)
+        }));
+        if !icloud.everything {
+            texts.push(format!(
+                "They stay in {}; reinstall them in the project after the add.",
+                icloud.source
+            ));
+        }
+        let mark = if icloud.everything { "[x]" } else { "[ ]" };
+        texts.push(format!(
+            "{mark} Download everything (slow): Space switches it"
+        ));
+    }
     let place = icloud_place(&icloud.source, ctx.home.as_deref());
-    for text in [
-        icloud_count(icloud.placeholders),
-        format!("Moving takes the folder out of {place} on your other Macs too."),
-    ] {
+    texts.push(format!(
+        "Moving takes the folder out of {place} on your other Macs too."
+    ));
+    for text in texts {
         lines.extend(wrap(&text, limit).into_iter().map(Line::raw));
     }
     lines.push(Line::default());
-    lines.push(buttons(&ICLOUD_CHOICES, Some(icloud.choice), theme));
+    lines.push(buttons(icloud.choices(), Some(icloud.choice), theme));
 }
 
 /// Says how many of a folder's files are only in iCloud and that CrazyAgent downloads them

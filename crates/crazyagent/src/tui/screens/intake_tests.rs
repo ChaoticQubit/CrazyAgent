@@ -8,7 +8,7 @@ use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::{FoundResearch, MappingFacts, MappingTry, OnboardingView, Step};
 use crate::project_setup::{KeptFile, ProjectSetup, ResearchKind, SetupAction, SetupQuery};
-use crate::projects_home::icloud::Progress;
+use crate::projects_home::icloud::{Progress, Skipped};
 use crate::projects_home::job::{JobKind, JobState, JobSubject, JobView, Phase};
 use crate::projects_home::{AddMode, AddOverride, Measured};
 use crate::protocol::{ProjectId, RequestId};
@@ -2739,6 +2739,17 @@ fn measured(
     placeholders: u64,
     shown: Option<JobState>,
 ) -> (Shell, String) {
+    measured_leaving(user, mode, placeholders, Vec::new(), shown)
+}
+
+/// As [`measured`], with the size read naming the rebuildable folders an add leaves in iCloud.
+fn measured_leaving(
+    user: &Path,
+    mode: AddMode,
+    placeholders: u64,
+    skipped: Vec<Skipped>,
+    shown: Option<JobState>,
+) -> (Shell, String) {
     let user = user.canonicalize().unwrap();
     let source = user.join("Desktop").join("shop");
     std::fs::create_dir_all(source.join(".git")).unwrap();
@@ -2764,7 +2775,7 @@ fn measured(
         Ok(IntakeView::FolderSize(Measured {
             bytes: 10,
             placeholders,
-            skipped: Vec::new(),
+            skipped,
         })),
     ));
     shell.key(Key::Enter);
@@ -2840,6 +2851,7 @@ fn with_start_id(query: IntakeQuery) -> IntakeQuery {
 
 fn job_for(folder: &str, mode: AddMode, state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
         id: RequestId::new("add-2").unwrap(),
         kind: JobKind::Add,
         project_id: None,
@@ -2936,6 +2948,86 @@ fn download_and_copy_turns_a_move_into_a_copy_and_starts_it_at_once() {
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "(*) Copy"), "{rows:#?}");
     assert!(shows(&rows, "Starting"), "{rows:#?}");
+}
+
+/// The rebuildable folders an iCloud size read names: one counted, one only in iCloud.
+fn left_folders() -> Vec<Skipped> {
+    vec![
+        Skipped {
+            path: "node_modules".into(),
+            files: Some(57_108),
+        },
+        Skipped {
+            path: "web/.venv".into(),
+            files: None,
+        },
+    ]
+}
+
+#[test]
+fn the_icloud_question_names_the_folders_it_leaves_and_space_downloads_everything() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, typed) = measured_leaving(user.path(), AddMode::Move, 3, left_folders(), None);
+    let rows = render(&mut shell, 80, 40);
+    for text in [
+        "3 files are only in iCloud; CrazyAgent",
+        "Left in iCloud, as they can be rebuilt:",
+        "node_modules (57108 files)",
+        "web/.venv (files not counted)",
+        "They stay in",
+        "[ ] Download everything (slow)",
+    ] {
+        assert!(shows(&rows, text), "{text} missing: {rows:#?}");
+    }
+    shell.key(Key::Char(' '));
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "[x] Download everything (slow)"), "{rows:#?}");
+    assert!(shows(&rows, "Downloaded too:"), "{rows:#?}");
+    assert!(shows(&rows, "Some files are only in iCloud"), "{rows:#?}");
+    assert!(!shows(&rows, "They stay in"), "{rows:#?}");
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    assert_eq!(
+        started(&mut shell, &typed),
+        [(AddMode::Move, vec![AddOverride::DownloadEverything])]
+    );
+}
+
+#[test]
+fn space_twice_leaves_the_folders_in_icloud_and_sends_no_override() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, typed) = measured_leaving(user.path(), AddMode::Copy, 3, left_folders(), None);
+    shell.key(Key::Char(' '));
+    shell.key(Key::Char(' '));
+    shell.key(Key::Enter);
+    assert_eq!(started(&mut shell, &typed), [(AddMode::Copy, Vec::new())]);
+}
+
+#[test]
+fn a_folder_whose_only_icloud_files_sit_in_left_folders_still_asks_and_offers_move_or_copy() {
+    let user = tempfile::tempdir().unwrap();
+    let only = vec![Skipped {
+        path: "node_modules".into(),
+        files: Some(2),
+    }];
+    let (mut shell, typed) = measured_leaving(user.path(), AddMode::Move, 0, only, None);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Some of shop stays in iCloud"), "{rows:#?}");
+    assert!(!shows(&rows, "only in iCloud;"), "{rows:#?}");
+    assert!(!shows(&rows, "Download and move"), "{rows:#?}");
+    assert!(shows(&rows, "Enter Move"), "{rows:#?}");
+    shell.key(Key::Char(' '));
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "Download shop from iCloud first?"),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "2 files are only in iCloud"), "{rows:#?}");
+    assert!(shows(&rows, "Enter Download and move"), "{rows:#?}");
+    shell.key(Key::Char(' '));
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    assert_eq!(started(&mut shell, &typed), [(AddMode::Move, Vec::new())]);
 }
 
 #[test]
@@ -3050,6 +3142,7 @@ fn a_start_refused_for_the_same_folder_says_so_though_a_job_for_it_runs() {
 
 fn shop_job(state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
         id: RequestId::new("add-1").unwrap(),
         kind: JobKind::Add,
         project_id: None,
@@ -3144,7 +3237,7 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
     assert!(!shows(&rows, "No projects yet."), "{rows:#?}");
     let badge = format!("{} Downloading", shell.ctx.glyphs.status(Status::Active));
     assert!(shows(&rows, &badge), "{rows:#?}");
-    let line = "Downloading shop from iCloud: 12 of 3000 files";
+    let line = "macOS is downloading shop: 12 of 3000 files";
     assert!(shows(&rows, line), "{rows:#?}");
     assert!(shows(&rows, "Enter stops it."), "{rows:#?}");
     assert!(shows(&rows, "Enter Stop"), "{rows:#?}");
@@ -3204,6 +3297,7 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
 /// A job that moves the registered project `reading` into the projects home, in `state`.
 fn reading_job(source: &str, state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
         id: RequestId::new("move-1").unwrap(),
         kind: JobKind::MoveProject,
         project_id: Some(ProjectId::new("reading").unwrap()),
@@ -3224,6 +3318,7 @@ fn home_opens_new_project_for_a_failed_new_project_job_and_starts_nothing() {
     let screen = open(&Place::Home, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let failed = JobView {
+        left: Vec::new(),
         id: RequestId::new("setup-1").unwrap(),
         kind: JobKind::Setup,
         project_id: Some(ProjectId::new("project-tidepool").unwrap()),
@@ -3263,6 +3358,7 @@ fn home_opens_new_project_for_a_failed_new_project_job_and_starts_nothing() {
 #[test]
 fn a_new_project_copying_its_documents_reads_in_the_desktops_words() {
     let building = |done, total| JobView {
+        left: Vec::new(),
         id: RequestId::new("setup-1").unwrap(),
         kind: JobKind::Setup,
         project_id: Some(ProjectId::new("project-tidepool").unwrap()),
@@ -3434,6 +3530,7 @@ fn answering_a_project_move_s_soft_refusal_moves_that_project_or_keeps_it_where_
 /// A delete job of the project "notes", whose name labels its card whole.
 fn notes_delete(state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
         id: RequestId::new("delete-1").unwrap(),
         kind: JobKind::Delete,
         project_id: Some(ProjectId::new("notes").unwrap()),

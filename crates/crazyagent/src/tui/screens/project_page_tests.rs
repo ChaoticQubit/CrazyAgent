@@ -3685,6 +3685,7 @@ fn setup_start(sent: &[Request]) -> Option<(RequestId, ProjectId, IntakeQuery)> 
 /// and its state. Returns the view.
 fn tidepool_job(id: &RequestId, project: &ProjectId, state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
         id: id.clone(),
         kind: JobKind::Setup,
         project_id: Some(project.clone()),

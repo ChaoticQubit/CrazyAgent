@@ -3,7 +3,7 @@
   Projects  3                                                Most recent first  
                                                                                 
   ▌ shop                                                         ▸ Downloading  
-  ▌ Downloading shop from iCloud: 12 of 3000 files                              
+  ▌ macOS is downloading shop: 12 of 3000 files                                 
   ▌ Enter stops it.                                                             
                                                                                 
     Tidepool                                                  2 agents running  
