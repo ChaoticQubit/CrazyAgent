@@ -44,6 +44,8 @@ fn tool(name: Dependency, state: DependencyState) -> DependencyStatus {
         name,
         label: name.label().into(),
         state,
+        busy: false,
+        waiting: None,
     }
 }
 
@@ -2490,9 +2492,13 @@ fn a_refused_tool_reads_found_not_used_and_p_fixes_only_the_tree_the_confirm_nam
     assert!(shell.busy());
 
     let mut running = refused_status(crate::setup::RefusedTool::FixButton);
-    running.running = true;
+    running.dependencies[2].busy = true;
     shell.arrive(event(AppSetupEvent::Status(Ok(running))));
-    assert_eq!(lead(&shell), "Fixing permissions on /h/py.");
+    assert_eq!(
+        lead(&shell),
+        "Fixing permissions on /h/py.",
+        "a lone fix holds only its row (DEC-199): the screen waits while that row is busy"
+    );
     shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
     assert_eq!(
         lead(&shell),
@@ -2696,4 +2702,67 @@ fn signed_in_setup_opens_the_github_rules_for_new_repositories_with_g_upper() {
     shell.key(Key::Esc);
     shell.key(Key::Char('G'));
     assert_eq!(shell.place(), Some(Place::Setup { first_run: false }));
+}
+
+/// V243-SETUP-PARALLEL (DEC-199): a tool row whose job waits behind another job in the
+/// engine's line reads Waiting and names that job, as the desktop row does.
+#[test]
+fn a_tool_row_waiting_behind_another_job_says_whom_it_waits_for() {
+    let mut shell = settings(120, 60);
+    let mut status = installed_status();
+    assert_eq!(status.dependencies[3].name, Dependency::Node);
+    status.dependencies[3].state = DependencyState::Missing {
+        line: String::new(),
+    };
+    status.dependencies[3].busy = true;
+    status.dependencies[3].waiting = Some("setup".into());
+    shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+    let rows = render(&mut shell, 120, 60);
+    assert!(find(&rows, "Node.js").contains("Waiting"), "{rows:#?}");
+    find(&rows, "Waiting for setup to finish...");
+}
+
+/// V243-SETUP-PARALLEL (DEC-199): fixes of two tools run together, so p offers the fix of a
+/// refused tool whose row has no job while another tool's fix runs, never the busy one.
+#[test]
+fn p_fixes_a_refused_tool_with_no_job_while_another_tools_fix_runs() {
+    let mut shell = settings(120, 60);
+    let mut status = refused_status(crate::setup::RefusedTool::FixButton);
+    assert_eq!(status.dependencies[1].name, Dependency::Uv);
+    status.dependencies[1].state = status.dependencies[2].state.clone();
+    status.dependencies[1].busy = true;
+    shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+    shell.key(Key::Char('p'));
+    shell.key(Key::Char('y'));
+    assert_eq!(
+        fix_sent(&mut shell),
+        (Dependency::Graphify, "/h/py".into(), true)
+    );
+}
+
+/// V243-SETUP-PARALLEL (leader 15:11, #378 F1): a lone job on one tool, this screen's own
+/// permission fix included, leaves Enter running setup, as the desktop offers Set up tools;
+/// the run takes its turn on that tool in the engine.
+#[test]
+fn enter_runs_setup_while_this_screens_own_fix_runs() {
+    let mut shell = first_run(120, 36);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::FixButton,
+    )))));
+    shell.key(Key::Char('p'));
+    shell.key(Key::Char('y'));
+    fix_sent(&mut shell);
+    shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
+    jobs(&mut shell);
+    let mut fixing = refused_status(crate::setup::RefusedTool::FixButton);
+    fixing.dependencies[2].busy = true;
+    shell.arrive(event(AppSetupEvent::Status(Ok(fixing))));
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Run { .. })),
+        "{}",
+        lead(&shell)
+    );
 }

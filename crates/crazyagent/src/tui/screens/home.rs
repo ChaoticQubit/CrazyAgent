@@ -1709,6 +1709,8 @@ pub(in crate::tui) mod tests {
                             version: Version::parse("1.0.0").unwrap(),
                         }
                     },
+                    busy: false,
+                    waiting: None,
                 })
                 .collect(),
             pack: Vec::new(),

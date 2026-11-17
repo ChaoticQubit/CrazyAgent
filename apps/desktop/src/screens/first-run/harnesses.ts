@@ -1,5 +1,5 @@
 import type { HarnessEntry } from "../../api";
-import type { DependencyState } from "../../engine-client";
+import type { DependencyState, SetupStatus } from "../../engine-client";
 import { displayText } from "../conversation";
 import { updateCopy, type HarnessVersions } from "../../api-harness-updates";
 
@@ -158,6 +158,15 @@ export type NodeOffer = { kind: "none" } | { kind: "offer" } | { kind: "installi
  * resolver found it but it can't run without Node. Input: the versions read. Output: the answer. */
 export function nodeNeeded(reads: readonly (HarnessVersions | null)[]): boolean {
   return reads.some((read) => read !== null && (read.refusal === NEEDS_NODE || read.needs?.program === "node"));
+}
+
+/** Setup's Node row as the Node.js offer reads it: installing while a job on Node runs, the setup
+ * run's step or a lone install, else its own state. Input: setup's status, null while unread.
+ * Output: the state, null without a Node row. */
+export function nodeRow(setup: SetupStatus | null): DependencyState | null {
+  const row = setup?.dependencies.find((item) => item.name === "node");
+  if (!row) return null;
+  return row.busy ? { state: "installing" } : row.state;
 }
 
 /** Tells whether the step reads again for Node while a harness needs it: setup's Node row is still

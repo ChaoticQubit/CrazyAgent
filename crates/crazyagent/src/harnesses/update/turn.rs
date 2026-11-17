@@ -1,4 +1,4 @@
-use super::{Fixed, Roots};
+use super::{BREW_PREFIXES, CHECK_TIME, Fixed, Roots, UPDATE_TIME, VERSION_TIME};
 use crate::harnesses;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
@@ -28,12 +28,13 @@ pub(super) fn folders(fixed: &Fixed, roots: &Roots) -> Vec<PathBuf> {
 }
 
 /// The folders running update and install jobs hold and the jobs waiting for theirs, in
-/// arrival order. A waiting job takes all of its folders at once, only when no running job
-/// holds one of them and no job that came before it still waits for one, so turns go in
-/// arrival order and no job ever holds part of what it needs. Jobs are catalog harnesses,
-/// one job each, so the line holds at most one entry per catalog harness.
+/// arrival order, one line for the whole engine: harness jobs and setup jobs. A waiting job
+/// takes all of its folders at once, only when no running job holds one of them and no job
+/// that came before it still waits for one, so turns go in arrival order and no job ever
+/// holds part of what it needs. Jobs are catalog harnesses, setup tools and one setup run
+/// ([`crate::setup::SETUP_JOB`]), one job each, so the line holds at most one entry each.
 #[derive(Default)]
-pub(super) struct Turns {
+pub(crate) struct Turns {
     line: Mutex<Line>,
     freed: Condvar,
 }
@@ -46,9 +47,36 @@ struct Line {
 
 /// One job's hold on its folders; dropping it frees them on every path and wakes the waiting
 /// jobs.
-pub(super) struct Turn<'a> {
+pub(crate) struct Turn<'a> {
     turns: &'a Turns,
     id: &'static str,
+}
+
+/// The most jobs the line can hold at once: one per catalog harness, one per setup tool and
+/// one setup run. Output: the count.
+pub(crate) fn jobs_max() -> usize {
+    harnesses::specs().len() + crate::setup::Dependency::ALL.len() + 1
+}
+
+/// The longest a job waits for its turn on its folders: every other job the line can hold
+/// ahead of it running a whole harness update, both version reads and the look that
+/// follows, which no setup install outlasts. Output: the wait.
+pub(crate) fn wait_max() -> Duration {
+    let ahead = u32::try_from(jobs_max()).unwrap_or(u32::MAX);
+    (UPDATE_TIME + VERSION_TIME * 2 + CHECK_TIME).saturating_mul(ahead)
+}
+
+/// One folder as the line compares it, made or not yet: the longest part of its path that
+/// exists, in its real spelling, then the rest of the path, so two spellings of one folder
+/// through a link are one key. Input: the folder. Output: the key.
+fn key(folder: &Path) -> PathBuf {
+    folder
+        .ancestors()
+        .find_map(|base| {
+            let real = crate::sandbox::canonical(base).ok()?;
+            Some(real.join(folder.strip_prefix(base).ok()?))
+        })
+        .unwrap_or_else(|| folder.to_path_buf())
 }
 
 fn shares(one: &[PathBuf], other: &[PathBuf]) -> bool {
@@ -78,15 +106,20 @@ impl Turns {
         self.line.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Waits for a job's turn on its folders and takes them all at once; a job with no
-    /// folder takes its turn at once. Inputs: the catalog id, its folders and the longest
-    /// wait. Output: the hold, or none once the wait passed, with the job out of the line.
-    pub(super) fn take(
+    /// Waits for a job's turn on its folders, each by its [`key`], and takes them all at
+    /// once; a job with no folder takes its turn at once. Inputs: the job's id, its folders
+    /// and the longest wait. Output: the hold, or none once the wait passed, with the job out
+    /// of the line.
+    pub(crate) fn take(
         &self,
         id: &'static str,
         folders: Vec<PathBuf>,
         wait_max: Duration,
     ) -> Option<Turn<'_>> {
+        let mut folders: Vec<PathBuf> = folders.iter().map(|folder| key(folder)).collect();
+        folders.sort();
+        folders.dedup();
+        assert!(folders.len() <= 1 + BREW_PREFIXES.len());
         let deadline = Instant::now() + wait_max;
         let mut line = self.line();
         assert!(
@@ -96,7 +129,7 @@ impl Turns {
                 .all(|(other, _)| *other != id)
         );
         line.waiting.push((id, folders));
-        assert!(line.held.len() + line.waiting.len() <= harnesses::specs().len());
+        assert!(line.held.len() + line.waiting.len() <= jobs_max());
         loop {
             if line.behind(id).is_none() {
                 let at = line.waiting.iter().position(|(waiting, _)| *waiting == id);
@@ -125,7 +158,7 @@ impl Turns {
 
     /// The job a waiting job waits behind. Input: the catalog id. Output: that job's catalog
     /// id, none when the job does not wait.
-    pub(super) fn behind(&self, id: &str) -> Option<&'static str> {
+    pub(crate) fn behind(&self, id: &str) -> Option<&'static str> {
         self.line().behind(id)
     }
 }

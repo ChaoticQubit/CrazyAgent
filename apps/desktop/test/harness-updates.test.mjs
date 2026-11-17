@@ -443,3 +443,10 @@ test("the page reads setup again while a listed harness needs Node and the Node 
   assert.equal(view.pageNodeReads(["codex"], { codex: { ...codexNeeds, needs: null } }, setupWith({ state: "checking" })), false, "nothing listed needs Node");
   assert.equal(view.pageNodeReads([], reads, setupWith({ state: "checking" })), false, "a harness gone from the list needs nothing");
 });
+
+test("the page reads Node as installing while a job on Node runs over an old failure (DEC-199)", () => {
+  const reads = { codex: codexNeeds };
+  const busy = (state) => ({ dependencies: [{ name: "node", label: "Node.js", state, busy: true, waiting: "setup" }], pack: [], running: true, version: 1 });
+  assert.deepEqual(view.pageNode(["codex"], reads, busy({ state: "failed", reason: NODE_FAILED })), { kind: "installing" });
+  assert.equal(view.pageNodeReads(["codex"], reads, busy({ state: "failed", reason: NODE_FAILED })), true);
+});

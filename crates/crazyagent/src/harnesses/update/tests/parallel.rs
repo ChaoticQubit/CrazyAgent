@@ -257,3 +257,77 @@ fn two_npm_updates_into_one_prefix_take_turns_and_both_finish() {
         assert!(done.last.unwrap().ok, "{id}");
     }
 }
+
+/// V243-SETUP-PARALLEL: setup jobs share the harness jobs' line under their tools' program
+/// names and one run name, so no catalog harness may go by one of those names.
+#[test]
+fn no_catalog_harness_goes_by_a_setup_tool_or_the_setup_run_name() {
+    let setup: Vec<&str> = crate::setup::Dependency::ALL
+        .iter()
+        .map(|dep| dep.program())
+        .chain([crate::setup::SETUP_JOB])
+        .collect();
+    assert_eq!(setup.len(), crate::setup::Dependency::ALL.len() + 1);
+    for spec in harnesses::specs() {
+        assert!(!setup.contains(&spec.id), "{}", spec.id);
+    }
+    assert_eq!(
+        super::super::turn::jobs_max(),
+        harnesses::specs().len() + setup.len()
+    );
+}
+
+/// V243-SETUP-PARALLEL: setup jobs name folders not made yet, and two spellings of one
+/// folder, one through a link, are one folder in the line: the second job waits for the
+/// first and takes its turn once the first ends.
+#[test]
+fn a_folder_not_made_yet_is_one_folder_whatever_path_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let turns = super::super::turn::Turns::default();
+    let tool = |base: &Path| vec![base.join("setup/.jobs/node")];
+    let first = turns
+        .take("claude-code", tool(&real), Duration::from_secs(5))
+        .unwrap();
+    assert!(
+        turns
+            .take("codex", tool(&alias), Duration::from_millis(200))
+            .is_none(),
+        "the same folder through a link waits"
+    );
+    drop(first);
+    assert!(
+        turns
+            .take("codex", tool(&alias), Duration::from_millis(200))
+            .is_some()
+    );
+}
+
+/// V243-SETUP-PARALLEL: a harness job waiting behind a setup job on one folder names that
+/// setup tool as the screens show it, not its program, then starts by itself once the
+/// setup job ends.
+#[test]
+fn a_harness_job_waiting_behind_a_setup_job_names_the_setup_tool() {
+    let queue = Queue::new();
+    let brew = queue.machine.root.path().join("brew");
+    let held = queue
+        .updates
+        .turns()
+        .take("node", vec![brew], Duration::from_secs(5))
+        .unwrap();
+    queue.install("aider").unwrap();
+    assert!(
+        eventually(|| queue.read("aider").waiting.as_deref() == Some("Node.js")),
+        "{:?}",
+        queue.read("aider")
+    );
+    assert_eq!(queue.logged(), "", "Aider's installer waits");
+    drop(held);
+    queue.open("aider");
+    assert!(eventually(|| queue.updates.idle()));
+    assert_eq!(queue.logged(), "start aider\nend aider\n");
+    assert_eq!(queue.read("aider").waiting, None);
+}

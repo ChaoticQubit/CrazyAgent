@@ -967,12 +967,13 @@ export function stateView(state: DependencyState): { word: string; tone: Tone; l
 }
 
 /** The fix a refused tool's row offers as a button (DEC-162): its fix while the setting is
- * the fix button, which an engine without the setting means, and no setup run, install or
- * check goes on. Inputs: the row and the status. Output: the fix, or null. */
+ * the fix button, which an engine without the setting means, no job on that tool runs
+ * (DEC-199: a setup run's fix takes its turn on the tool) and no check goes on. Inputs: the
+ * row and the status. Output: the fix, or null. */
 export function rowFix(dependency: Dependency, status: SetupStatus): ToolFix | null {
   if (dependency.state.state !== "refused" || !dependency.state.fix) return null;
   if ((status.refused_tool ?? "fix_button") !== "fix_button") return null;
-  return setupBusy(status) || toolsChecking(status) ? null : dependency.state.fix;
+  return dependency.busy || toolsChecking(status) ? null : dependency.state.fix;
 }
 
 /** The command a refused tool's row shows when the setting asks for the command only.
@@ -1007,9 +1008,13 @@ export const REFUSED_TOOL_CHOICES: { value: RefusedTool; title: string; detail: 
   { value: "command_only", title: "Show the command only", detail: "Setup shows the command to run yourself and never changes permissions." },
 ];
 
-/** One tool row for setup. Input: the dependency. Output: its name, what it is for and its state. */
+/** One tool row for setup: its state, or Waiting with the job it waits behind (DEC-199).
+ * Input: the dependency. Output: its name, what it is for and its state. */
 export function dependencyView(dependency: Dependency): { title: string; about: string; word: string; tone: Tone; line: string | null } {
-  return { title: displayText(dependency.label.trim() || dependency.name), about: DEPENDENCY_ABOUT[dependency.name] ?? "", ...stateView(dependency.state) };
+  const shown: { word: string; tone: Tone; line: string | null } = dependency.waiting
+    ? { word: "Waiting", tone: "info", line: `Waiting for ${displayText(dependency.waiting)} to finish...` }
+    : stateView(dependency.state);
+  return { title: displayText(dependency.label.trim() || dependency.name), about: DEPENDENCY_ABOUT[dependency.name] ?? "", ...shown };
 }
 
 /** Badge word, tone and detail line for a default-pack entry state.
@@ -1094,24 +1099,27 @@ export function toolsChecking(status: SetupStatus): boolean {
 }
 
 /** Tells whether a tool row offers its own Install: Node alone, while it is missing, failed or
- * found and not used (CrazyAgent's own copy), and no setup run, install or check goes on. Inputs: the row and the status. Output: the answer. */
+ * found and not used (CrazyAgent's own copy), no job on Node runs (DEC-199: during a setup run
+ * the install takes its turn on Node) and no check goes on. Inputs: the row and the status.
+ * Output: the answer. */
 export function rowInstall(dependency: Dependency, status: SetupStatus): boolean {
   const wanted = dependency.state.state === "missing" || dependency.state.state === "failed" || dependency.state.state === "refused";
-  return INSTALL_ALONE.has(dependency.name) && wanted && !setupBusy(status) && !toolsChecking(status);
+  return INSTALL_ALONE.has(dependency.name) && wanted && !dependency.busy && !toolsChecking(status);
 }
 
 /** Tells whether Settings, Pack offers Install tools: a tool is missing, failed or found and not
- * used, never one setup can't install on this system, and nothing is running or checking. Input: the status.
- * Output: the answer. */
+ * used, never one setup can't install on this system, no setup run goes on (DEC-199: a lone job
+ * on one tool leaves it offered, the run taking its turn on that tool) and nothing is checking.
+ * Input: the status. Output: the answer. */
 export function toolsOffer(status: SetupStatus): boolean {
   const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed" || item.state.state === "refused");
-  return wanted && !setupBusy(status) && !toolsChecking(status);
+  return wanted && !status.running && !toolsChecking(status);
 }
 
-/** Tells whether setup is still working. Input: the status. Output: true while it runs or
- * anything is installing. */
+/** Tells whether setup is still working. Input: the status. Output: true while a setup run
+ * goes on, a job runs on any tool, or anything is installing. */
 export function setupBusy(status: SetupStatus): boolean {
-  return status.running || status.dependencies.some((item) => item.state.state === "installing") || status.pack.some((item) => item.state.state === "installing");
+  return status.running || status.dependencies.some((item) => item.busy === true || item.state.state === "installing") || status.pack.some((item) => item.state.state === "installing");
 }
 
 /** Counts setup progress for the progress line: every tool and every ticked pack entry.

@@ -1,5 +1,5 @@
 use super::run::{run_raw, version_raw};
-use super::turn::{Turns, folders};
+use super::turn::{Turns, folders, wait_max};
 use super::{
     BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessNeeds, HarnessVersions,
     InstallFromApp, LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots,
@@ -202,14 +202,6 @@ fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
 #[cfg(not(unix))]
 fn ready_prefix(_fixed: &Fixed, _roots: &Roots) -> Result<(), &'static str> {
     Ok(())
-}
-
-/// The longest a job waits for its turn on its folders: the job of every catalog harness
-/// ahead of it running its whole update, both version reads and the look that follows.
-/// Output: the wait.
-fn turn_wait() -> Duration {
-    let ahead = u32::try_from(harnesses::specs().len()).unwrap_or(u32::MAX);
-    (UPDATE_TIME + VERSION_TIME * 2 + CHECK_TIME).saturating_mul(ahead)
 }
 
 fn now_ms() -> i64 {
@@ -570,6 +562,12 @@ impl Updates {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The engine's one line of install jobs, which setup jobs share with harness jobs so
+    /// two jobs never change one folder at once. Output: the line.
+    pub(crate) fn turns(&self) -> &Turns {
+        &self.turns
+    }
+
     /// Reports whether no update or install is running. Output: true when no job runs.
     pub fn idle(&self) -> bool {
         self.state().running.is_empty()
@@ -594,7 +592,7 @@ impl Updates {
     /// Starts the job thread: it waits for its turn on the folders its command changes
     /// ([`Turns::take`]), does the work, frees the folders, stores the record, frees the
     /// harness, then runs the follow-up with whether the work ended well. A turn that never
-    /// comes within [`turn_wait`] is recorded as `harness_update_start_failed`. Inputs: the
+    /// comes within [`wait_max`] is recorded as `harness_update_start_failed`. Inputs: the
     /// hold, the folders, the work and the follow-up. Output: Ok once the thread runs; a
     /// thread that cannot start frees the harness.
     fn spawn(
@@ -607,7 +605,7 @@ impl Updates {
             .name(JOB_THREAD.into())
             .spawn(move || {
                 let updates = running.updates.clone();
-                let last = match updates.turns.take(running.id, held, turn_wait()) {
+                let last = match updates.turns.take(running.id, held, wait_max()) {
                     Some(turn) => {
                         let last = work();
                         drop(turn);
@@ -774,7 +772,10 @@ impl Updates {
         versions.running = state.running.contains(&spec.id);
         versions.last = state.last.get(spec.id).cloned();
         drop(state);
-        versions.waiting = self.turns.behind(spec.id).map(str::to_owned);
+        versions.waiting = self
+            .turns
+            .behind(spec.id)
+            .map(|id| crate::setup::job_name(id).unwrap_or(id).to_owned());
         versions.sign_in_min = harnesses::sign_in_min(spec.id).map(str::to_owned);
         versions
     }

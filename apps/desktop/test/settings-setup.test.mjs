@@ -270,3 +270,10 @@ test("the permission fix confirm names the tool, the tree and the command, and c
   assert.match(starting, /<button[^>]*disabled=""[^>]*>Cancel<\/button>/);
   assert.equal(html(ToolFixDialog, { ask: null, pending: false, onCancel: forbidden, onConfirm: forbidden }), "");
 });
+
+test("Settings, Pack stays open while a lone job runs on one tool and no setup run goes on (DEC-199, #378 F1)", () => {
+  const lone = setup({ dependencies: [{ name: "node", label: "Node.js", state: { state: "installing" }, busy: true }] });
+  const markup = html(PackSettingsView, packProps(ok(lone)));
+  assert.doesNotMatch(markup, /Setup is installing\./);
+  assert.doesNotMatch(rowOf(markup, "superpowers"), /Wait for the current change\./);
+});

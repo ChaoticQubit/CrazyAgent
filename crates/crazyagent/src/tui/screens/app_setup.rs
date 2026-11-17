@@ -771,7 +771,7 @@ impl AppSetup {
             Load::Ready(status) => status.running,
             _ => return Flow::Handled,
         };
-        if running || self.started || self.sent.is_some() || self.fixing.is_some() {
+        if running || self.started || self.sent.is_some() {
             ctx.say(Message::warning(&setup_plain("setup_busy"), ""));
             return Flow::Handled;
         }
@@ -835,7 +835,9 @@ impl AppSetup {
         self.selected = self.selected.min(status.pack.len().saturating_sub(1));
         if let Some(name) = self.fixing {
             self.fixed(name, status, ctx);
-            return Flow::Handled;
+            if !self.started {
+                return Flow::Handled;
+            }
         }
         if status.running {
             self.started = true;
@@ -903,17 +905,17 @@ impl AppSetup {
         }
     }
 
-    /// Ends a permission fix once a status read shows it finished and the tool checked
-    /// again, saying how the tool's row reads now. Inputs: the tool, the status read and the
-    /// context.
+    /// Ends a permission fix once a status read shows it finished, its row no longer busy
+    /// (DEC-199), and the tool checked again, saying how the tool's row reads now. Inputs: the
+    /// tool, the status read and the context.
     fn fixed(&mut self, name: Dependency, status: &SetupStatus, ctx: &mut Ctx) {
-        if status.running {
-            return;
-        }
         let Some(row) = status.dependencies.iter().find(|tool| tool.name == name) else {
             self.fixing = None;
             return;
         };
+        if row.busy {
+            return;
+        }
         match &row.state {
             DependencyState::Checking => return,
             DependencyState::Refused {
@@ -938,8 +940,8 @@ impl AppSetup {
         self.fixing = None;
     }
 
-    /// The first tool found and passed over whose row offers a permission fix, with its
-    /// label and the fix. Output: the tool, or none.
+    /// The first tool found and passed over whose row offers a permission fix and has no
+    /// job on it (DEC-199), with its label and the fix. Output: the tool, or none.
     fn fixable(&self) -> Option<(Dependency, String, ToolFix)> {
         let Load::Ready(status) = &self.setup else {
             return None;
@@ -947,6 +949,7 @@ impl AppSetup {
         status
             .dependencies
             .iter()
+            .filter(|tool| !tool.busy)
             .find_map(|tool| match &tool.state {
                 DependencyState::Refused { fix: Some(fix), .. } => {
                     Some((tool.name, tool.label.clone(), fix.clone()))
@@ -2102,7 +2105,14 @@ impl AppSetup {
                     &[TOOL_WIDTH, rest],
                     vec![
                         Line::raw(tool.label.clone()),
-                        status(&tool_word(&tool.state), theme, glyphs),
+                        status(
+                            &tool
+                                .waiting
+                                .as_ref()
+                                .map_or_else(|| tool_word(&tool.state), |_| "Waiting".into()),
+                            theme,
+                            glyphs,
+                        ),
                     ],
                     2,
                     glyphs,
@@ -2110,6 +2120,12 @@ impl AppSetup {
             ]));
             let printable = super::new_project_view::printable;
             let mut details = Vec::new();
+            if let Some(waits) = &tool.waiting {
+                details.push((
+                    format!("Waiting for {} to finish...", printable(waits.clone())),
+                    Role::Muted,
+                ));
+            }
             match &tool.state {
                 DependencyState::Failed { reason } => {
                     details.push((setup_reason(reason), Role::Muted));

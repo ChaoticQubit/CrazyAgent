@@ -8,7 +8,7 @@ import {
 import { installDependency, loadSetupStatus } from "../../api-intake";
 import type { DependencyState, SetupStatus } from "../../engine-client";
 import { displayText } from "../conversation";
-import { HARNESS_WORDS, nodeNeeded, nodeOffer, nodeReadsAgain, rowBadge, type NodeOffer } from "../first-run/harnesses";
+import { HARNESS_WORDS, nodeNeeded, nodeOffer, nodeReadsAgain, nodeRow, rowBadge, type NodeOffer } from "../first-run/harnesses";
 import { choosable, chooseHarnessPath, findHarness, harnessFileName, isPathCode, pathCopy, pickHarnessFile, LOOKED_MAX, type ChoosableHarness, type Found } from "../../api-harness-path";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge } from "../../ui";
@@ -95,7 +95,7 @@ export function openLook(installed: boolean, mode: UpdateMode, onOpen: boolean):
  * to install it with npm or to run, and setup's Node row. Inputs: the listed ids, the reads by id
  * and setup's status, null while unread. Output: the offer. */
 export function pageNode(ids: readonly string[], reads: Reads, setup: SetupStatus | null): NodeOffer {
-  const node = setup?.dependencies.find((item) => item.name === "node")?.state ?? null;
+  const node = nodeRow(setup);
   return nodeOffer(nodeNeeded(ids.map((id) => reads[id] ?? null)), node, setup?.running ?? false);
 }
 
@@ -104,7 +104,7 @@ export function pageNode(ids: readonly string[], reads: Reads, setup: SetupStatu
  * a read still needs Node. Inputs: the listed ids, the reads by id and setup's status, null while
  * unread. Output: the answer; the caller bounds it with its poll cap. */
 export function pageNodeReads(ids: readonly string[], reads: Reads, setup: SetupStatus | null): boolean {
-  const node = setup?.dependencies.find((item) => item.name === "node")?.state ?? null;
+  const node = nodeRow(setup);
   return nodeReadsAgain(nodeNeeded(ids.map((id) => reads[id] ?? null)), node, setup?.running ?? false);
 }
 
