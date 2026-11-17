@@ -509,3 +509,5 @@ fn a_backup_stamp_reads_back_as_its_time() {
         assert_eq!(stamp_time(time), None, "{time}");
     }
 }
+
+mod restore;

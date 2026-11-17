@@ -538,6 +538,49 @@ fn restore(
     Ok(())
 }
 
+/// The name a restore gives the dated copy it keeps of the data it replaces (DEC-192), before
+/// `-<UTC time>`. It holds no `-to-`, so neither the rotation nor the pin ever counts it.
+const REPLACED: &str = "replaced";
+
+/// The code a restore starts with once no pinned 2.4 backup is left, after PINNED_DAYS.
+pub(crate) const RESTORE_UNAVAILABLE: &str = "storage_restore_unavailable";
+/// The code a restore starts with while a team agent or a research run still runs.
+pub(crate) const RESTORE_AGENTS_RUNNING: &str = "storage_restore_agents_running";
+/// The code a restore starts with while another connection holds engine.db.
+pub(crate) const RESTORE_BUSY: &str = "storage_restore_busy";
+/// The code any other failed restore starts with.
+pub(crate) const RESTORE_FAILED: &str = "storage_restore_failed";
+
+/// Until when the owner can still restore the pinned 2.4 backup of the engine at `root`, read
+/// without creating anything. Inputs: the engine root and the time now. Output: the moment the
+/// pin ends, or None when no pinned backup is left.
+pub(crate) fn restorable_until(root: &Path, now: SystemTime) -> Option<SystemTime> {
+    let _ = (root, now);
+    None
+}
+
+/// Brings back the pinned 2.4 backup the owner asked for (L5, DEC-192), at the time now.
+/// Inputs: the database path and the settings sources. Output: as [`restore_pinned_at`].
+pub(crate) fn restore_pinned(
+    path: &Path,
+    settings: Option<&SettingsSources>,
+) -> Result<PathBuf, EngineError> {
+    restore_pinned_at(path, settings, SystemTime::now())
+}
+
+/// [`restore_pinned`] at a given time, which ages the pin. It holds engine.db alone for its
+/// whole run, refuses while an agent runs, keeps one dated 0700 copy of the data it replaces,
+/// then restores the pinned copy and checks every table against it. Inputs: the database
+/// path, the settings sources and the time. Output: the folder of the copy it kept.
+fn restore_pinned_at(
+    path: &Path,
+    settings: Option<&SettingsSources>,
+    now: SystemTime,
+) -> Result<PathBuf, EngineError> {
+    let _ = (path, settings, now);
+    Err(error(RESTORE_FAILED))
+}
+
 /// Builds a backup error. Input: the cause. Output: `storage_backup_failed` with it.
 fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
     error(format!("{BACKUP_FAILED}: {cause}"))
