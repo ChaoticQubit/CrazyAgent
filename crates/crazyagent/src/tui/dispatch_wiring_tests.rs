@@ -2,7 +2,7 @@ use super::super::app::{App, Focus, UiEvent};
 use super::*;
 use crate::coordination::{OwnerAction, PlanAuthority, Role, WorkItem, WorkPlan};
 use crate::engine::bootstrap::EngineService;
-use crate::engine::owner::{OwnerControl, OwnerDecision, OwnerResult};
+use crate::engine::owner::{OwnerClientKind, OwnerControl, OwnerDecision, OwnerResult};
 use crate::protocol::{
     CredentialRef, ExecutionContext, Outcome, PlanId, SessionId, SnapshotId, TaskId,
 };

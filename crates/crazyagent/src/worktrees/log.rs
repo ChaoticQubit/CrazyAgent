@@ -62,8 +62,9 @@ pub struct Saved {
     pub(crate) body: LeaseBody,
 }
 
-/// An admission as an event carries it: decoded only when its repository is a checked path
-/// (v2.5 L1-N1), so free text cannot ride in it.
+/// An admission as an event carries it: decoded only with exactly its fields and a
+/// repository that is a checked absolute path (parts, length, no NUL; v2.5 L1-N1). The
+/// path's parts are not otherwise closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Admission", into = "Admission")]
 pub(crate) struct AdmissionBody(Admission);
@@ -95,9 +96,11 @@ impl From<AdmissionBody> for Admission {
     }
 }
 
-/// A lease record as an event carries it: decoded only when every text in it is closed,
-/// ids as ids, its repository and path checked paths, its branch the engine's and its head
-/// a commit id (v2.5 L1-N1), so free text cannot ride in it.
+/// A lease record as an event carries it: decoded only with exactly its fields at every
+/// level, ids as ids, its branch the engine's digest branch, its path a checked absolute
+/// path (parts, length, no NUL) ending in that digest, its repository a checked absolute
+/// path and its head a commit id (v2.5 L1-N1). The repository's and the path's root parts
+/// are not otherwise closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "LeaseRecord", into = "LeaseRecord")]
 pub(crate) struct LeaseBody(LeaseRecord);
@@ -110,6 +113,7 @@ impl LeaseBody {
         let branch = lease.branch.strip_prefix("crazyagent/").unwrap_or_default();
         let closed = absolute(&lease.repository)
             && absolute(&lease.path)
+            && lease.path.rsplit('/').next() == Some(branch)
             && lease.repository == record.admission.repository
             && branch.len() == 64
             && branch
@@ -169,8 +173,9 @@ pub(crate) fn admitted_for_test(project: &ProjectId, repository: &str) -> Event 
     })
 }
 
-/// One worktrees event. Each carries ids and the typed record its row stores, whose texts
-/// are checked paths, the engine's branch, a commit id and ids, never a secret or free text.
+/// One worktrees event. Each carries an id and the typed record its row stores, whose texts
+/// are ids, the engine's digest branch, a commit id and checked absolute paths (parts,
+/// length, no NUL); a path is the only text not otherwise closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Admitted(Admitted),
@@ -660,18 +665,20 @@ pub(crate) fn record_at(tx: &Transaction<'_>, next: u64, event: &Event) -> Resul
     Ok(())
 }
 
-/// Tombstones, for a project removal, every logged admission of the removed project, so its
-/// repository paths leave the log's events; snapshot runs keep theirs until compaction (L1b)
-/// rewrites them. The caller checkpoints the WAL after its commit. Inputs: the removal's
-/// transaction, the project, the removal's own `seq` and its fence. Output: how many events
-/// were tombstoned, or the redaction's refusal.
+/// Tombstones every logged admission of a project, for a removal or Create demo's clear of
+/// an earlier id (rv-sec2 #345 N4), so its repository paths leave the log's events; snapshot
+/// runs keep theirs until compaction (L1b), and only a removal checkpoints the WAL after
+/// commit. Inputs: the transaction, the project, the removal's own `seq` (none for a clear,
+/// which logs none; seqs start at 1) and the fence. Output: the count, or the refusal.
 pub(crate) fn forget_project(
     tx: &Transaction<'_>,
     project: &str,
-    keep: u64,
+    keep: Option<u64>,
     fence: &Fence,
 ) -> Result<usize, EngineError> {
-    assert!(keep > 0, "the removal is logged before its redaction");
+    if let Some(seq) = keep {
+        assert!(seq > 0, "the removal is logged before its redaction");
+    }
     let kinds = [KIND_ADMITTED];
     let redacted = replay::redact_matching(
         tx,
@@ -679,7 +686,7 @@ pub(crate) fn forget_project(
         Some(&kinds),
         "project",
         project,
-        keep,
+        keep.unwrap_or(0),
         fence,
     )?;
     assert!(!tx.is_autocommit(), "the redaction is part of the removal");

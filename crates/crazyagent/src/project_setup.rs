@@ -3129,17 +3129,17 @@ impl NewProjectPlan {
 
 /// Records a New Project whose folder the owner transport built, with a first agent
 /// policy that records the toolchains the owner has installed (F26).
-/// Takes the transaction, configuration, the Create action, the staged result and whether
-/// the request is Create demo, which clears what an earlier demo left first. Returns
-/// Applied once the rows are written, the brief is in place and the folder is moved into
-/// the home, else the refusal; the checks run again because other changes may have landed
-/// while the folder was built.
+/// Takes the transaction, configuration, the Create action, the staged result and, for
+/// Create demo, the owner's fence under which it clears what an earlier demo left first.
+/// Returns Applied once the rows are written, the brief is in place and the folder is moved
+/// into the home, else the refusal; the checks run again because other changes may have
+/// landed while the folder was built.
 pub(crate) fn record_new(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     action: &SetupAction,
     staged: &Result<Staged, String>,
-    demo: bool,
+    demo: Option<&crate::state_log::fence::Fence>,
 ) -> Result<Outcome, EngineError> {
     let SetupAction::Create {
         project_id,
@@ -3153,15 +3153,15 @@ pub(crate) fn record_new(
         Ok(staged) => staged,
         Err(code) => return Ok(rejected(code)),
     };
-    let checked = match check_new(tx, config, project_id, spec, setup, demo)? {
+    let checked = match check_new(tx, config, project_id, spec, setup, demo.is_some())? {
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(&code)),
     };
     if checked.folder != staged.folder {
         return Ok(rejected("home_new_project_failed"));
     }
-    if demo {
-        removed::clear(tx, project_id)?;
+    if let Some(fence) = demo {
+        removed::clear(tx, project_id, fence)?;
     }
     let outcome = record(
         tx,

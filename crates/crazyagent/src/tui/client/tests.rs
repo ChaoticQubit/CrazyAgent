@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::owner::OwnerClientKind;
 use crate::engine::{Engine, Server};
 
 /// rv-code2 RS1-2: a StartOnboarding whose answer came late and was settled afterwards
