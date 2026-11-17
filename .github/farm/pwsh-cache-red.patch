@@ -1,0 +1,21 @@
+diff --git a/crates/crazyagent/src/plugins/check.rs b/crates/crazyagent/src/plugins/check.rs
+index 64b1207eb..f191083c9 100644
+--- a/crates/crazyagent/src/plugins/check.rs
++++ b/crates/crazyagent/src/plugins/check.rs
+@@ -25,7 +25,7 @@ const ENV_KEPT: [&str; 6] = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR"
+ /// cache a machine image built, as the GitHub images do; without it a start there analyses
+ /// every installed module first, about 20 s, past [`CHECK_TIME`].
+ #[cfg(windows)]
+-pub(crate) const ENV_KEPT: [&str; 13] = [
++pub(crate) const ENV_KEPT: [&str; 12] = [
+     "PATH",
+     "PATHEXT",
+     "SystemRoot",
+@@ -38,7 +38,6 @@ pub(crate) const ENV_KEPT: [&str; 13] = [
+     "LOCALAPPDATA",
+     "TEMP",
+     "TMP",
+-    "PSModuleAnalysisCachePath",
+ ];
+ #[cfg(windows)]
+ const CREATE_SUSPENDED: u32 = 0x0000_0004;
