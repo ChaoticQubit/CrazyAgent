@@ -144,11 +144,10 @@ test("the IDE tab follows its panel, hides with the tab and with the page, and b
 
 test("no native command or main-window lookup goes through the WebviewWindow type that Tauri refuses while the IDE webview is in the window", () => {
   const native = read("src-tauri/src/lib.rs");
-  const app = native.slice(0, native.indexOf("mod tests {"));
-  assert.equal(app.match(/\.invoke_handler\(/g).length, 1, "a second handler would replace the gated one");
-  assert.match(app, /\.invoke_handler\(native_handler\(\)\)/, "the app registers the gated handler");
-  assert.equal(app.match(/generate_handler!/g).length, 1, "the one command list is the gated one");
-  assert.match(app, /admit_pages::<tauri::Wry>\(tauri::generate_handler!/, "the page check wraps the generated handler");
+  assert.equal(native.match(/\.invoke_handler\(/g).length, 1, "a second handler would replace the gated one");
+  assert.match(native, /\.invoke_handler\(native_handler\(\)\)/, "the app registers the gated handler");
+  assert.equal(native.match(/generate_handler!/g).length, 1, "the one command list is the gated one");
+  assert.match(native, /admit_pages::<tauri::Wry>\(tauri::generate_handler!/, "the page check wraps the generated handler");
   assert.doesNotMatch(native, /\bWebviewWindow\b/, "each command takes the calling Webview, which Tauri never refuses");
   for (const path of ["src-tauri/src/lib.rs", "src-tauri/src/bridge/notify.rs"]) {
     assert.doesNotMatch(read(path), /get_webview_window\("main"\)/, `${path} finds the main window while the IDE is loaded`);
