@@ -449,3 +449,133 @@ fn npm_installs_into_a_fresh_staging_folder() {
     );
     assert!(staged.join(MODULES).join(PACKAGE).join(PROGRAM).is_file());
 }
+
+/// The access list of a folder a job read or wrote, as `icacls` prints it, without the
+/// inherited mark a rewritten list may change. Only lists this case owns are compared, since
+/// other rows' containers come and go in the machine-wide Packages and grants folders while
+/// the farm runs rows side by side. Input: the folder. Output: the list.
+fn entries(folder: &Path) -> String {
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let listed = crate::spawn_gate::collected(
+        std::process::Command::new(system.join("icacls.exe")).arg(folder),
+    )
+    .unwrap();
+    assert!(listed.status.success(), "{}", shown(&listed));
+    let list = String::from_utf8_lossy(&listed.stdout).replace("(I)", "");
+    assert!(list.contains("(OI)(CI)"), "{list}");
+    list
+}
+
+/// The grants record and the AppContainer folder Windows keeps for one container, by its
+/// name, so a row checks only its own container. Input: the name. Output: both paths.
+fn container_files(name: &str) -> (PathBuf, PathBuf) {
+    let grants = crate::paths::Layout::current()
+        .unwrap()
+        .root()
+        .join(crate::sandbox::windows::GRANTS_FOLDER);
+    let packages = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("Packages");
+    assert!(name.starts_with("crazyagent."));
+    (
+        grants.join(format!("container-{name}.grants")),
+        packages.join(name),
+    )
+}
+
+/// V243-WIN-CONTAINER-RELEASE: the node probe releases the container it ran `node.exe` in once
+/// the probe ends, so npx's folder keeps no entry for it and no scratch folder is left; here
+/// `node.exe` is empty, so the probe names no version.
+#[test]
+fn the_node_probe_leaves_no_container_behind() {
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let before = entries(&case.bin);
+    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(entries(&case.bin), before);
+    assert_eq!(
+        fs::read_dir(&npm).unwrap().count(),
+        0,
+        "no scratch folder is left"
+    );
+}
+
+/// V243-WIN-CONTAINER-RELEASE: an npm install releases its container before its staging
+/// folder is published or removed, so a failed install, here with an empty `node.exe`, leaves
+/// no entry on npx's folder, no boundary profile and no install folder.
+#[test]
+fn a_failed_npm_install_leaves_no_container_behind() {
+    let case = case();
+    let folder = install_folder(&case.root, VERSION);
+    let before = entries(&case.bin);
+    assert_eq!(
+        replace(&case.root, &folder, &case.bin, VERSION),
+        Err(InstallError("context_mode_install_failed"))
+    );
+    assert_eq!(entries(&case.bin), before);
+    let parent = folder.parent().unwrap();
+    assert!(!npm_profile(parent, VERSION).exists());
+    assert!(!folder.exists());
+}
+
+/// V243-WIN-CONTAINER-RELEASE: npm's job gives its container an entry on the staging folder,
+/// a grants record and an AppContainer folder even when `node.exe` cannot start, and the
+/// release takes all three back with the profile, so a staging folder renamed into place
+/// carries no grant.
+#[test]
+fn the_release_takes_back_what_the_npm_job_was_granted() {
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    let before = entries(&staged);
+    let job = crate::sandbox::canonical(&staged).unwrap();
+    let home = crate::sandbox::canonical(&work).unwrap().join("home");
+    let (record, package) = container_files(&crate::sandbox::windows::container_for(&job, &home));
+    let mut command = npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
+    let ran = crate::spawn_gate::collected(&mut command).unwrap();
+    assert!(!ran.status.success(), "{}", shown(&ran));
+    assert_ne!(entries(&staged), before, "{}", shown(&ran));
+    assert!(record.is_file(), "{}", shown(&ran));
+    assert!(package.is_dir(), "{}", shown(&ran));
+    assert!(os::release(&npm_profile(&npm, VERSION), &job, &home));
+    assert_eq!(entries(&staged), before);
+    assert!(!record.exists());
+    assert!(!package.exists());
+    assert!(!npm_profile(&npm, VERSION).exists());
+}
+
+/// V243-WIN-CONTAINER-RELEASE: a release that cannot go ahead logs and reports false without
+/// stopping the engine: a profile path Windows cannot read, and a profile naming another
+/// container than the job's folders give, which is kept with nothing of it released.
+#[test]
+fn a_refused_release_reports_false_and_keeps_the_profile() {
+    let case = case();
+    let base = crate::sandbox::canonical(&case.root).unwrap();
+    let folders = ["project", "home", "tmp"].map(|name| base.join("job").join(name));
+    for folder in &folders {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let grants = base.join("grants");
+    fs::create_dir_all(&grants).unwrap();
+    assert!(!os::release(
+        Path::new("C:\\no\0such.sb"),
+        &folders[0],
+        &folders[1]
+    ));
+    let sandbox = crate::sandbox::ProjectSandbox::new(
+        &folders[0],
+        &folders[1],
+        &folders[2],
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
+    let derived = crate::sandbox::windows::container_for(&folders[0], &folders[1]);
+    assert_eq!(forged.container, derived);
+    forged.container = format!("crazyagent.{}", "0".repeat(32));
+    let profile = base.join("forged.sb");
+    fs::write(&profile, forged.encode().unwrap()).unwrap();
+    assert!(!os::release(&profile, &folders[0], &folders[1]));
+    assert!(profile.is_file());
+    assert!(!grants.join(format!("container-{derived}.lock")).exists());
+}
