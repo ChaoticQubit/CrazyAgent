@@ -874,6 +874,20 @@ fn a_move_whose_record_never_came_is_finished_from_disk_and_a_copy_is_not() {
     assert!(never.repo.join("README").is_file());
 }
 
+/// V243-FIRMLINK-HOME-REFUSAL r2: a launch in the moving folder typed through
+/// /System/Volumes/Data names the same folder, so the pending move holds it too.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pending_project_move_holds_its_folder_typed_through_the_data_volume() {
+    let case = Case::new();
+    let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    case.plan(AddMode::Move, &[]).unwrap();
+    assert!(long(&case.repo).is_dir());
+    assert!(move_holds(&case.db, &case.repo).unwrap());
+    assert!(move_holds(&case.db, &long(&case.repo)).unwrap());
+    assert!(!move_holds(&case.db, &long(&case.home)).unwrap());
+}
+
 /// A planned move holds launches in the project's folder and refuses a second move until
 /// it is finished or forgotten; a move of another exchange is not forgotten.
 #[test]
