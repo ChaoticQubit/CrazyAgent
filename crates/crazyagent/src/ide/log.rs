@@ -170,8 +170,17 @@ pub fn record(
         !change.project().is_empty(),
         "every ide event names its project"
     );
-    let _ = (host, at_ms, change.body()?);
-    apply(tx, change)
+    let body = change.body()?;
+    let mut appender = Appender::own(tx, Fence::Engine(host.clone()))?;
+    let seq = appender.append(&Draft {
+        aggregate: Aggregate::Ide,
+        kind: change.kind(),
+        schema: SCHEMA,
+        at_ms,
+        body: &body,
+    })?;
+    assert!(seq > 0);
+    appender.project(|tx| apply(tx, change))
 }
 
 /// Applies one ide change to its table with the same statements live and in replay.
@@ -201,9 +210,9 @@ impl Projection {
     /// other chunk starts a run, which empties each table before its first chunk.
     /// Inputs: the connection and the event. Output: Ok, or the refusal.
     pub fn apply(&mut self, db: &Connection, event: &Logged) -> Result<(), EngineError> {
-        let _ = (db, event);
-        if self.emptied.is_empty() {
-            return Ok(());
+        if event.kind != SNAPSHOT_CHUNK {
+            self.chunk_last = None;
+            return apply(db, &Change::parse(event)?);
         }
         if self.chunk_last.and_then(|last| last.checked_add(1)) != Some(event.seq) {
             self.emptied.clear();
@@ -235,9 +244,6 @@ pub fn rebuild(db: &Connection) -> Result<u64, EngineError> {
 /// body cap. `ide_workspaces` rows carry project and show_all only. A missing table gives
 /// an empty chunk. Input: the connection. Output: the chunks, or `ide_snapshot_*`.
 pub fn snapshot(db: &Connection) -> Result<Vec<Chunk>, EngineError> {
-    if db.is_autocommit() {
-        return Ok(Vec::new());
-    }
     let room = BODY_BYTES_MAX - CHUNK_ENVELOPE_BYTES;
     let mut chunks = Vec::with_capacity(TABLES.len());
     for table in &TABLES {
@@ -426,7 +432,7 @@ fn json(value: Value) -> Result<serde_json::Value, EngineError> {
 pub fn active_host(db: &Connection) -> Result<Option<HostStamp>, EngineError> {
     db.query_row(
         "SELECT db_instance,engine_epoch FROM owner_meta
-         WHERE singleton=1 AND schema_version=1",
+         WHERE singleton=1 AND schema_version=1 AND runtime_state='active'",
         [],
         |row| {
             Ok(HostStamp {
