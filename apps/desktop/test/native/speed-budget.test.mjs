@@ -576,6 +576,7 @@ test("the idle project page's 2.4.1 minute (gate 11-16 08:20, C1 candidate), 203
   const twoMinutes = budget.callBudgets({ counts: { ...IDLE_241, "idle:project": { desktop_changes: 9 } }, calls: calls(0), cpu: IDLE_CPU, idleMs: 120000 });
   assert.deepEqual(twoMinutes.rows[0], { budget: "idle_project_calls", scenario: "idle:project", reading: 4.5, limit: 5, pass: true });
   assert.throws(() => budget.callBudgets({ counts: { "idle:home": {} }, calls: calls(0), cpu: IDLE_CPU, idleMs: 60000 }), /idle:project/);
+  assert.throws(() => budget.callBudgets({ counts: IDLE_241, calls: calls(0), cpu: IDLE_CPU, idleMs: 30000 }), /idle window/);
 });
 
 test("95% of engine calls must be under 20 ms: six slow calls in a hundred miss it, five do not, and each command's p95 is kept with its count; an over-budget example, as 2.4.1's timed reads are about 6 ms (v2.5 S1)", () => {
@@ -605,4 +606,5 @@ test("ps's accumulated CPU time reads as ms, with minutes past 59, an hours fiel
   assert.equal(budget.cpuTimeMs("2-01:00:00.00"), 176400000);
   assert.throws(() => budget.cpuTimeMs("1.5"), /CPU time/);
   assert.throws(() => budget.cpuTimeMs(""), /CPU time/);
+  assert.throws(() => budget.cpuMs(0), /a pid/);
 });

@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { endTerminals, start, stop } from "./e2e-harness.mjs";
 import {
-  KEPT_MIN, REFUSED_EXIT, SPEED_STATE, compareExit, incomplete, joinSample, judge, noiseShares, prepareKeychain, privateFolder, quiet,
-  readQuiet, runSchedule, sampleMetrics, stayedQuiet,
+  KEPT_MIN, REFUSED_EXIT, SPEED_STATE, budgetRows, compareExit, incomplete, joinSample, judge, noiseShares, prepareKeychain, privateFolder,
+  quiet, readQuiet, runSchedule, sampleMetrics, stayedQuiet,
 } from "./speed-budget.mjs";
 import { PROJECT } from "./speed-seed.mjs";
 
@@ -172,12 +172,20 @@ async function collect(mode, sides, kept, out) {
   return progress;
 }
 
+/** Prints budget rows, each on its own line apart from the verdict's rows. Input: the rows.
+ * Output: none. */
+function printBudgets(rows) {
+  for (const row of rows) console.log(`budget ${(row.pass ? "pass" : "fail").padEnd(4)} ${row.budget} median ${row.median} p90 ${row.p90}, under ${row.limit}`);
+}
+
 /** The speed driver (DEC-169). `noise` runs the base against itself and writes noise.json;
  * `compare` runs the base against the candidate, judges every metric with that noise and writes
  * verdict.json. A failed run on a quiet Mac is counted in both, the verdict comes from the good
  * runs, and a candidate that failed more runs than the base fails; a failed run the Mac got busy
- * through runs again; a side short of `KEPT_MIN` good runs is not judged. Exits 0 pass, 1 fail,
- * error or not judged, 75 refused. */
+ * through runs again; a side short of `KEPT_MIN` good runs is not judged. Both also judge the
+ * build they time against the start to ready budget (v2.5 S1), written as `budgets` and printed
+ * apart from the verdict, never changing the exit. Exits 0 pass, 1 fail, error or not judged,
+ * 75 refused. */
 async function main() {
   const usage = "usage: speed-run.mjs noise|compare --base <dir> [--candidate <dir> --noise <noise.json>] --out <dir>";
   const mode = process.argv[2];
@@ -201,17 +209,21 @@ async function main() {
     return 1;
   }
   if (mode === "noise") {
-    const noise = { base: base.digest, shares: noiseShares(samples.base, samples.candidate), failed };
+    const budgets = budgetRows([...samples.base, ...samples.candidate]);
+    const noise = { base: base.digest, shares: noiseShares(samples.base, samples.candidate), failed, budgets };
     record(values.out, "noise.json", noise);
+    printBudgets(budgets);
     return 0;
   }
   const rows = judge(samples.base, samples.candidate, shares);
   const gaps = incomplete(rows);
-  record(values.out, "verdict.json", { base: base.digest, candidate: candidate.digest, rows, incomplete: gaps, failed });
+  const budgets = budgetRows(samples.candidate);
+  record(values.out, "verdict.json", { base: base.digest, candidate: candidate.digest, rows, incomplete: gaps, failed, budgets });
   for (const row of rows) {
     const medians = row.base ? `${row.base.median} -> ${row.candidate.median}` : `kept ${row.kept}`;
     console.log(`${row.status.padEnd(10)} ${row.metric} ${medians} ${(row.reasons ?? []).join("; ")}`);
   }
+  printBudgets(budgets);
   if (gaps.length > 0) console.error(`NOT JUDGED: ${gaps.join(", ")}`);
   return compareExit(rows, gaps, failed);
 }
