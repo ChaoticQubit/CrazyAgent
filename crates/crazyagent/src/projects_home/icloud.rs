@@ -173,6 +173,10 @@ impl Download {
     }
 }
 
+/// The most iCloud downloads the engine holds at once: more than the intake jobs that run side
+/// by side, every one opening its files through the one paced queue.
+pub const DOWNLOADS_MAX: usize = 8;
+
 /// The engine's one download slot, so at most one iCloud download runs at a time.
 #[derive(Debug, Default)]
 pub struct Downloads(Mutex<Option<Arc<Download>>>);
@@ -198,6 +202,12 @@ impl Downloads {
             slot: self,
             download,
         })
+    }
+
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        let slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        usize::from(slot.is_some())
     }
 
     /// The running download's progress. Output: None when none runs.

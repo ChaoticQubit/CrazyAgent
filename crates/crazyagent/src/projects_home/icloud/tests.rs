@@ -86,27 +86,33 @@ fn a_cancel_ends_the_pause_within_one_check() {
 }
 
 #[test]
-fn one_download_runs_at_a_time_and_a_dropped_claim_cancels_it_and_frees_the_slot() {
+fn downloads_run_side_by_side_and_each_dropped_claim_cancels_and_lets_go_only_its_own() {
     let downloads = Downloads::default();
-    assert_eq!(downloads.progress(), None);
-    assert!(!downloads.cancel());
-    let claim = downloads.claim().unwrap();
-    let download = claim.download();
-    let eight = Progress {
-        total: 8,
-        done: 3,
-        ..Default::default()
-    };
-    download.record(eight);
-    assert_eq!(downloads.progress(), Some(eight));
-    assert_eq!(downloads.claim().unwrap_err().0, "icloud_download_busy");
-    assert!(!download.cancelled());
-    drop(claim);
-    assert!(download.cancelled());
-    assert_eq!(downloads.progress(), None);
-    let again = downloads.claim().unwrap();
-    assert!(downloads.cancel());
-    assert!(again.download().cancelled());
+    let first = Arc::new(Download::default());
+    let second = Arc::new(Download::default());
+    let one = downloads.claim_for(Arc::clone(&first)).unwrap();
+    let two = downloads.claim_for(Arc::clone(&second)).unwrap();
+    assert!(Arc::ptr_eq(&one.download(), &first));
+    assert_eq!(downloads.held(), 2);
+    drop(one);
+    assert!(first.cancelled() && !second.cancelled());
+    assert_eq!(downloads.held(), 1);
+    drop(two);
+    assert!(second.cancelled());
+    assert_eq!(downloads.held(), 0);
+}
+
+#[test]
+fn the_registry_refuses_a_download_past_its_bound_until_one_ends() {
+    let downloads = Downloads::default();
+    let mut claims: Vec<Claim<'_>> = (0..DOWNLOADS_MAX)
+        .map(|_| downloads.claim_for(Arc::new(Download::default())).unwrap())
+        .collect();
+    let refused = downloads.claim_for(Arc::new(Download::default()));
+    assert_eq!(refused.unwrap_err().0, "icloud_download_busy");
+    claims.pop();
+    assert!(downloads.claim_for(Arc::new(Download::default())).is_ok());
+    assert_eq!(downloads.held(), DOWNLOADS_MAX - 1);
 }
 
 #[cfg(unix)]
