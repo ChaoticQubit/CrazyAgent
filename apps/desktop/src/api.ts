@@ -2,11 +2,13 @@ import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
+import type { AccountCheck, AccountDraft, AccountView, ProviderEntry } from "./api-account-types";
 
 export type { AgentMemoryScope, AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
 export type { CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, Overlaps, QuestionsTo, SubagentMode, ToolSwitch, ToolView } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
+export type { AccountCheck, AccountDraft, AccountField, AccountProvider, AccountStatus, AccountView, ProviderEntry, SignInMethod, SignInMethodEntry } from "./api-account-types";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
 export type Result<T> = { kind: "ok"; value: T } | Failure;
@@ -641,52 +643,6 @@ export function getMasterFrameSettings(): Promise<Result<MasterFrameSettings>> {
 /** Saves the master frame size limit. Input: the full setting. Output: ok once saved. */
 export function saveMasterFrameSettings(settings: MasterFrameSettings): Promise<Result<void>> {
   return change("desktop_set_master_frame_settings", { settings, generation: nextGeneration() });
-}
-
-export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
-export type SignInMethod = "subscription" | "api_key" | "url";
-export type AccountField = "hidden" | "optional" | "required";
-export type AccountStatus = "signed_in" | "not_signed_in" | "key_saved" | "unreachable" | "signing_in";
-
-export interface SignInMethodEntry {
-  method: SignInMethod;
-  label: string;
-  url: AccountField;
-  url_preset: string | null;
-  key: AccountField;
-  model: AccountField;
-}
-
-export interface ProviderEntry {
-  provider: AccountProvider;
-  name: string;
-  methods: SignInMethodEntry[];
-}
-
-export interface AccountDraft {
-  provider: AccountProvider;
-  method: SignInMethod;
-  name: string;
-  url?: string | null;
-  model?: string | null;
-}
-
-export interface AccountView {
-  id: string;
-  name: string;
-  provider: AccountProvider;
-  provider_name: string;
-  method: SignInMethod;
-  method_label: string;
-  url: string | null;
-  model: string | null;
-  status: AccountStatus;
-  status_label: string;
-}
-
-export interface AccountCheck {
-  account: AccountView;
-  models: string[];
 }
 
 /** Reads the provider catalog behind the Add account dialog. Output: providers in display
