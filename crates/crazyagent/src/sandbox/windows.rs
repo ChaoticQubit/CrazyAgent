@@ -636,6 +636,34 @@ mod tests {
         }
     }
 
+    /// V243-WIN-CONFINED-ASSERTS: a harness wrapped with a boundary profile, as the research
+    /// runner wraps its agent, starts at the boundary helper beside the engine with the
+    /// profile after `--profile`, inside the project. Without the helper beside the test
+    /// binary the wrap is refused with [`APPCONTAINER_MISSING`] and nothing is built.
+    #[test]
+    fn a_profile_wrapped_harness_starts_at_the_helper_beside_the_engine() {
+        let folders = folders();
+        let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
+        let profile = folders.profiles.join("agent.json");
+        fs::write(&profile, "{}").unwrap();
+        let beside = std::env::current_exe().unwrap().with_file_name(HELPER_NAME);
+        let mut harness = Command::new(cmd());
+        harness.arg("/C").arg("exit 0").current_dir(&folders.project);
+        match ProjectSandbox::wrap(&sandbox, &profile, &harness) {
+            Ok(command) => {
+                assert!(beside.is_file());
+                assert_eq!(command.get_program(), beside.as_os_str());
+                assert_eq!(command.get_args().nth(1), Some(profile.as_os_str()));
+                assert_eq!(command.get_current_dir(), Some(folders.project.as_path()));
+            }
+            Err(SandboxError::Unavailable(reason)) => {
+                assert!(!beside.is_file());
+                assert_eq!(reason, APPCONTAINER_MISSING);
+            }
+            Err(other) => panic!("unexpected refusal {other}"),
+        }
+    }
+
     #[test]
     fn a_wrapped_agent_cannot_write_a_protected_path_and_dies_with_its_helper() {
         let folders = folders();
