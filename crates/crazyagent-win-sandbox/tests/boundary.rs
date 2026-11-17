@@ -36,6 +36,14 @@ fn system(program: &str) -> String {
 fn case(container: &str) -> Case {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().to_path_buf();
+    let reset = Command::new(system("icacls.exe"))
+        .arg(&root)
+        .args(["/reset", "/q"])
+        .output()
+        .unwrap();
+    assert!(reset.status.success(), "{}", ran(&reset));
+    let reset_sddl = read_sddl(&root);
+    assert!(reset_sddl.starts_with("D:AI("), "{reset_sddl}");
     let project = root.join("project");
     let home = root.join("agent").join("home");
     let tmp = root.join("agent").join("tmp");
