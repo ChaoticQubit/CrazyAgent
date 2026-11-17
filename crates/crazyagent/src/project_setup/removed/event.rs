@@ -1,9 +1,9 @@
 use crate::engine::EngineError;
 use crate::engine::owner::Admission;
 use crate::project_setup::SetupAction;
-use crate::protocol::{Command, ProjectId, WireRequest};
+use crate::protocol::{Command, ProjectId};
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{Clock, redact_matching};
+use crate::state_log::replay::Clock;
 use crate::state_log::{Aggregate, Appender, Draft};
 use rusqlite::Transaction;
 use serde::{Deserialize, Serialize};
@@ -53,37 +53,18 @@ pub(crate) fn removal(command: &Command, deleting: bool) -> Option<ProjectRemove
     })
 }
 
-/// Logs the removal an applied owner request carries through [`append`], and nothing for
-/// any other request. Inputs: the request's transaction, the request as stored, whether it
-/// carries Delete everything's effect, the revision it moved to and the admission. Output:
-/// how many events the removal redacted, 0 for any other request, or the first refusal.
-pub(crate) fn record(
-    tx: &Transaction<'_>,
-    wire: &WireRequest,
-    deleting: bool,
-    revision: u64,
-    admission: &Admission,
-) -> Result<usize, EngineError> {
-    match removal(&wire.command, deleting) {
-        Some(removed) => append(tx, revision, admission, &removed),
-        None => Ok(0),
-    }
-}
-
-/// Appends a removal at the request's moved revision behind the owner's admission, applies
-/// its projection through the appender, then redacts every earlier ide event naming the
-/// project (rv-sec2 #309 N1); the caller checkpoints the WAL after commit. Inputs: the
-/// transaction, the moved revision, the admission and the event. Output: how many events
-/// were redacted, or the fence's, the revision's, a bound's or the redaction's refusal.
-fn append(
+/// Appends a removal at the request's moved revision behind the owner's admission and
+/// applies its projection through the appender, which checks the fence again. Inputs: the
+/// request's transaction, the revision it moved to, the admission and the event. Output:
+/// the event's seq, or the fence's, the revision's or a bound's refusal.
+pub(crate) fn append(
     tx: &Transaction<'_>,
     revision: u64,
     admission: &Admission,
     removed: &ProjectRemoved,
-) -> Result<usize, EngineError> {
+) -> Result<u64, EngineError> {
     let body = removed.body()?;
-    let fence = Fence::Owner(admission.clone());
-    let mut log = Appender::owner(tx, revision, fence.clone())?;
+    let mut log = Appender::owner(tx, revision, Fence::Owner(admission.clone()))?;
     let seq = log.append(&Draft {
         aggregate: Aggregate::Projects,
         kind: KIND,
@@ -91,17 +72,8 @@ fn append(
         at_ms: Clock::System.now_ms(),
         body: &body,
     })?;
-    assert!(seq > 0, "an appended removal has a seq");
     log.project(|tx| apply(tx, &body))?;
-    redact_matching(
-        tx,
-        &[Aggregate::Ide],
-        Some(crate::ide::log::KINDS.as_slice()),
-        "project",
-        removed.project.as_str(),
-        seq,
-        &fence,
-    )
+    Ok(seq)
 }
 
 /// The projection of a removal, live and in replay: forgets the removed project's GitHub
@@ -123,7 +95,7 @@ pub(crate) fn apply(tx: &Transaction<'_>, body: &[u8]) -> Result<(), EngineError
     crate::coord::forget_project(tx, &removed.project)?;
     crate::activity::forget_project(tx, &removed.project)?;
     crate::usage::forget_project(tx, project)?;
-    crate::ide::log::forget_project(tx, &removed.project)?;
+    crate::ide::log::forget_rows(tx, &removed.project)?;
     crate::storage::agent_text::forget_project(tx, &removed.project)?;
     crate::questions::forget_project(tx, &removed.project)?;
     crate::sandbox::hidden_paths::save(tx, project, &[]).map_err(failed)?;

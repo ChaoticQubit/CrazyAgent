@@ -2676,7 +2676,14 @@ fn owner_apply_with(
             command,
         };
         persist_event(&tx, config, &wire, next)?;
-        redacted = crate::project_setup::removed::event::record(&tx, &wire, deleting, next, a)?;
+        if let Some(removed) =
+            crate::project_setup::removed::event::removal(&wire.command, deleting)
+        {
+            let seq = crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
+            let fence = crate::state_log::fence::Fence::Owner(a.clone());
+            let project = removed.project.as_str();
+            redacted = crate::ide::log::forget_project(&tx, project, seq, &fence)?;
+        }
     }
     let provenance = OwnerProvenance {
         origin: "native_owner".into(),
@@ -2698,8 +2705,12 @@ fn owner_apply_with(
     )?;
     tx.commit().map_err(error)?;
     assert_eq!(next > revision, changed);
-    assert!(changed || redacted == 0, "only an applied removal redacts");
-    crate::state_log::replay::checkpoint(db, redacted);
+    assert!(redacted == 0 || changed, "only an applied removal redacts");
+    if redacted > 0
+        && let Err(failure) = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+    {
+        eprintln!("state_log_redact_checkpoint_deferred cause={failure}");
+    }
     if changed
         && let OwnerOperation::Apply {
             mutation: OwnerMutation::CreateDemo { project_id, .. },

@@ -334,11 +334,11 @@ static TABLES: [Table; 4] = [
 ];
 
 /// Forgets a removed project's ide rows in the removal's projection, live and in replay
-/// (rv-sec2 #309 N1, code F3): its asks, Run setting and workspace, and the files unlocked
-/// for its agents, so it runs before the projection deletes those agents. The removal
-/// redacts the project's ide events, so the tables stay equal to a replay of the ide log.
+/// (code F3): its asks, Run setting and workspace, and the files unlocked for its agents,
+/// so it runs before the projection deletes those agents. The removal tombstones the
+/// project's ide events ([`forget_project`]), so the tables equal a replay of the ide log.
 /// Inputs: the transaction and the project. Output: Ok, or `ide_log_unavailable`.
-pub(crate) fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+pub(crate) fn forget_rows(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
     assert!(!project.as_str().is_empty(), "a removal names its project");
     for table in &TABLES {
         db.execute_batch(table.schema).map_err(unavailable)?;
@@ -352,6 +352,31 @@ pub(crate) fn forget_project(db: &Connection, project: &ProjectId) -> Result<(),
         );
     }
     Ok(())
+}
+
+/// Tombstones, for a project removal, every logged ide event of the removed project, of
+/// each of [`KINDS`], so its asks, unlocked paths and workspaces leave the log's events
+/// (rv-sec2 #309 N1); snapshot runs keep theirs until compaction (L1b). The caller
+/// checkpoints the WAL after commit. Inputs: the removal's transaction, the project, the
+/// removal's own `seq` and its fence. Output: how many were tombstoned, or the refusal.
+pub(crate) fn forget_project(
+    tx: &Transaction<'_>,
+    project: &str,
+    keep: u64,
+    fence: &Fence,
+) -> Result<usize, EngineError> {
+    assert!(keep > 0, "the removal is logged before its redaction");
+    let redacted = replay::redact_matching(
+        tx,
+        &[Aggregate::Ide],
+        Some(KINDS.as_slice()),
+        "project",
+        project,
+        keep,
+        fence,
+    )?;
+    assert!(!tx.is_autocommit(), "the redaction is part of the removal");
+    Ok(redacted)
 }
 
 impl Table {
