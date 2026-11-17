@@ -3,7 +3,7 @@
 mod tests;
 
 use super::harness_catalog::listed_install;
-use super::master_runtime::{Capture, timed_out};
+use super::master_runtime::{Capture, POLICY_CHECK_EVERY, timed_out};
 use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::agents::Hold;
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
@@ -439,8 +439,10 @@ fn listed_turn_ended<T>(listed: HiddenRun, ran: &Result<T, EngineError>) {
 }
 
 /// Settles what a listed master turn's stop left: nothing after a confirmed stop, else
-/// [`STOP_UNCERTAIN`], which keeps the turn listed. Inputs: the stop's result, the account,
-/// what a hold keeps, who left it and the owner's leftover setting. Output: Ok, or the code.
+/// [`STOP_UNCERTAIN`], which keeps the turn listed, with processes it left running held
+/// under the owner's leftover setting with `kept`, as RCLI and native turns hold theirs
+/// (#216 F2). Inputs: the stop's result, the account, what a hold keeps, who left it and the
+/// setting. Output: Ok, or the code.
 fn listed_stop_settled<K: Send + 'static>(
     stopped: Result<(), Unstopped>,
     account: Option<CredentialRef>,
@@ -448,8 +450,14 @@ fn listed_stop_settled<K: Send + 'static>(
     by: leftovers::HoldBy,
     mode: impl FnOnce() -> leftovers::LeftoverMode,
 ) -> Result<(), EngineError> {
-    let _ = (account, kept, by, mode);
-    stopped.map_err(|_| failure(STOP_UNCERTAIN))
+    match stopped {
+        Ok(()) => Ok(()),
+        Err(Unstopped::Uncertain) => Err(failure(STOP_UNCERTAIN)),
+        Err(Unstopped::Left(left)) => {
+            left.hold(account, kept, by, mode());
+            Err(failure(STOP_UNCERTAIN))
+        }
+    }
 }
 
 /// The SHA-256 of the program a listed master turn runs, the artifact its stored run names,
@@ -783,6 +791,7 @@ impl OwnerRuntimeHandle {
         if sandbox.is_unconfined() {
             return Err(failure("launch_environment_refused"));
         }
+        let granted = prepared.agent_policy.allowed(&prepared.repository);
         let capture = Capture::new(file, resources.output_bytes)?;
         let request = LaunchRequest {
             harness: id.to_owned(),
@@ -811,17 +820,20 @@ impl OwnerRuntimeHandle {
         };
         let refs = (runtime_ref, capture_ref);
         let held = (custody, hold, folder);
-        self.drive_listed(prepared, turn_id, held, generation, turn, refs)
+        self.drive_listed(prepared, turn_id, held, granted, generation, turn, refs)
             .await
     }
 
     /// Runs one listed master turn's process on a thread of its own and waits for it: once
     /// the harness runs, its group and the turn as running are stored and the prompt goes,
     /// and while it works the stored turn is read again, telling the thread to stop for an
-    /// owner's stop or a revoked scope. Every path waits for the thread to end, and its stop
-    /// is settled by [`listed_stop_settled`] with the custody use, its hold and the turn folder
-    /// as what a hold keeps. Inputs: the turn's parts. Output: the observation to store, or
-    /// the stop code.
+    /// owner's stop, a revoked scope or, read every [`POLICY_CHECK_EVERY`], a saved policy that
+    /// no longer covers the toolchains granted at launch, as RCLI and native turns are
+    /// (#216 F1). Every path waits for the thread to end, and its stop is settled by
+    /// [`listed_stop_settled`] with the custody use, its hold and the turn folder as what a
+    /// hold keeps. Inputs: the turn's parts. Output: the observation to store, or the stop
+    /// code.
+    #[allow(clippy::too_many_arguments)]
     async fn drive_listed(
         &self,
         prepared: &PreparedMasterTurn,
@@ -831,6 +843,7 @@ impl OwnerRuntimeHandle {
             Option<Hold>,
             super::master_host_launch::MasterRuntimeFolder,
         ),
+        granted: Vec<crate::sandbox::toolchains::Toolchain>,
         generation: u64,
         turn: ListedTurn,
         (runtime_ref, capture_ref): (RequestId, RequestId),
@@ -853,6 +866,7 @@ impl OwnerRuntimeHandle {
         let stop = &thread.stop;
         let mut cancelled = matches!(begun, Ok(false));
         let mut scope = None;
+        let mut policy_checked = Instant::now();
         let joined = loop {
             tokio::select! {
                 joined = &mut thread.running => break joined,
@@ -861,6 +875,14 @@ impl OwnerRuntimeHandle {
                     match read.await {
                         Ok(current) => cancelled |= current.phase == MasterTurnPhase::Cancelled,
                         Err(error) => scope = Some(error),
+                    }
+                    if !cancelled
+                        && scope.is_none()
+                        && policy_checked.elapsed() >= POLICY_CHECK_EVERY
+                    {
+                        policy_checked = Instant::now();
+                        let covered = self.rcli_policy_covers(prepared, turn_id, &granted);
+                        scope = covered.await.err();
                     }
                     stop.store(cancelled || scope.is_some(), Ordering::SeqCst);
                 }
