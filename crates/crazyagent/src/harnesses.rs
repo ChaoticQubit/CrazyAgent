@@ -652,6 +652,13 @@ fn runnable(metadata: &std::fs::Metadata) -> bool {
     metadata.permissions().mode() & 0o111 != 0
 }
 
+/// Reports that a file may be run where the platform has no execute bit; the launch
+/// decides by extension. Takes the metadata, unused. Returns true.
+#[cfg(not(unix))]
+fn runnable(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
 /// Builds the catalog rows for every known harness, in owner priority order.
 /// Input: the search space. Output: one entry per spec with its detected status.
 pub fn catalog(search: &Search) -> Vec<HarnessEntry> {

@@ -1134,8 +1134,14 @@ fn named_interpreter(
 /// starts a copy the resolver never judged (rv-sec2 B11 r2 F2). [`entry_at`] asks it of the
 /// interpreter's real file name and of the name the line runs it as, its program word for
 /// `env` or the file name as written, since a multi-call binary such as coreutils or busybox
-/// picks its tool by that name (rv-code4 B18 F1). Input: the name. Output: the answer.
+/// picks its tool by that name (rv-code4 B18 F1). On Windows the name is read as Windows
+/// finds a program, ASCII case ignored and a trailing `.exe` dropped (#333 r1 sec F1).
+/// Input: the name. Output: the answer.
 fn launches_by_name(name: &str) -> bool {
+    #[cfg(windows)]
+    let lower = name.to_ascii_lowercase();
+    #[cfg(windows)]
+    let name = lower.strip_suffix(".exe").unwrap_or(&lower);
     NAME_LAUNCHERS.contains(&name)
 }
 
@@ -1208,18 +1214,15 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     }
     let (first, rest) = words.split_first().ok_or(Unreadable)?;
     let interpreter = PathBuf::from(first);
-    if !usable(&interpreter) {
-        return Err(Unreadable);
-    }
-    if interpreter.file_name() != Some(OsStr::new("env")) {
+    if interpreter != Path::new(ENV) {
+        if !usable(&interpreter) || interpreter.file_name() == Some(OsStr::new("env")) {
+            return Err(Unreadable);
+        }
         return Ok(Some(Shebang {
             interpreter,
             by_name: None,
             arguments: rest.iter().map(|word| (*word).to_owned()).collect(),
         }));
-    }
-    if interpreter != Path::new(ENV) {
-        return Err(Unreadable);
     }
     let split = rest.first() == Some(&"-S");
     let rest = if split { &rest[1..] } else { rest };
