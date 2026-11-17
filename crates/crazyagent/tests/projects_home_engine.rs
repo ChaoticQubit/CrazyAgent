@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+mod resend_support;
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{
@@ -1174,7 +1175,7 @@ async fn a_resend_or_a_check_of_an_add_still_copying_answers_in_progress_and_cop
             if operation.result == OwnerResult::Applied && !operation.historical_replay),
         "{answered:?}"
     );
-    let replayed = client.request(sent).await.unwrap().response;
+    let replayed = resend_support::settled(&second, &sent).await;
     assert!(
         matches!(&replayed, OwnerResponse::Applied { operation }
             if operation.result == OwnerResult::Applied && operation.historical_replay),
@@ -2497,8 +2498,7 @@ async fn a_resent_project_move_whose_old_folder_was_left_answers_that_code_again
     fs::create_dir(&origin).unwrap();
     fs::write(origin.join("notes.txt"), b"newer than the copy\n").unwrap();
     mark_left(&database, sent.request_id.as_str(), &origin);
-    let client = owner.controller.owner_client().unwrap();
-    let resent = client.request(sent.clone()).await.unwrap().response;
+    let resent = resend_support::settled(&owner.controller, &sent).await;
     assert_eq!(
         resent,
         OwnerResponse::Rejected {
@@ -2511,7 +2511,7 @@ async fn a_resent_project_move_whose_old_folder_was_left_answers_that_code_again
         "a resend deletes nothing"
     );
     fs::remove_dir_all(&origin).unwrap();
-    let replayed = client.request(sent).await.unwrap().response;
+    let replayed = resend_support::settled(&owner.controller, &sent).await;
     assert!(
         matches!(&replayed, OwnerResponse::Applied { operation }
             if operation.result == OwnerResult::Applied && operation.historical_replay),
