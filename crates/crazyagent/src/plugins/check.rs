@@ -690,4 +690,46 @@ pub(crate) mod windows_tests {
         }
         assert!(!running(pid), "the server's child {pid} outlived its check");
     }
+
+    /// A server on Windows PowerShell 5.1 answers its check within [`CHECK_TIME`] where the
+    /// engine's environment names a prebuilt module analysis cache, as the GitHub Windows
+    /// images do: without `PSModuleAnalysisCachePath` PowerShell analyses every installed
+    /// module before its first statement, about 20 s there. The same server answers first
+    /// with a wide limit, so a red here is the start time, never the stand-in.
+    #[test]
+    fn a_windows_powershell_server_answers_its_check_within_the_check_time() {
+        let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        let script = concat!(
+            "$q = [char]34; $o = [Console]::Out; ",
+            "while ($null -ne ($l = [Console]::In.ReadLine())) { ",
+            "if ($l -match '.id.:(\\d+)') { $id = $Matches[1]; ",
+            "if ($l -match 'initialize') { $r = '{~jsonrpc~:~2.0~,~id~:ID,~result~:",
+            "{~protocolVersion~:~2025-06-18~,~capabilities~:{~tools~:{}},",
+            "~serverInfo~:{~name~:~stand-in~,~version~:~1~}}}' } ",
+            "else { $r = '{~jsonrpc~:~2.0~,~id~:ID,~result~:{~tools~:[{~name~:~ping~,",
+            "~inputSchema~:{~type~:~object~}}]}}' }; ",
+            "$o.WriteLine($r.Replace('ID', $id).Replace('~', $q)); $o.Flush() } }"
+        );
+        let args = ["-NoProfile", "-NonInteractive", "-Command", script].map(String::from);
+        let program = powershell.to_str().unwrap();
+        let tools = Ok(vec!["ping".to_owned()]);
+        assert_eq!(
+            check_stdio(program, &args, &[], Duration::from_secs(90)),
+            tools,
+            "the stand-in server answers its check given time"
+        );
+        let cached = std::env::var_os("PSModuleAnalysisCachePath").is_some();
+        let began = Instant::now();
+        assert_eq!(
+            check_stdio(program, &args, &[], CHECK_TIME),
+            tools,
+            "a Windows PowerShell server answers within CHECK_TIME (took {:?}; \
+             PSModuleAnalysisCachePath set for the engine: {cached})",
+            began.elapsed()
+        );
+    }
 }
