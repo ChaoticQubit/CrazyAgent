@@ -11,7 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 mod tests;
 
-/// The folder beside engine.db that holds one folder per upgrade backup.
+/// The folder beside engine.db that holds one folder per upgrade backup, each with a full
+/// engine.db copy and the settings texts kept with it, and the dated copies a 2.5 restore
+/// keeps. The sandbox names it among the engine secrets, so no granted root may hold or sit
+/// inside it.
 pub(crate) const BACKUPS: &str = "backups";
 
 /// How many upgrade backups stay on disk. Older ones are removed once a new one exists.
