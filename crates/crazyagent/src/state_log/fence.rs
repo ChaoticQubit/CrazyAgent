@@ -41,19 +41,27 @@ impl Hosts {
     /// Starts a host as the newest, moving it there when it is already started, and drops
     /// the oldest past [`HOSTS_MAX`]. Input: the host. Output: none.
     pub(crate) fn start(&mut self, host: &HostStamp) {
-        let _ = (&self.hosts, host);
+        self.stop(host);
+        if self.hosts.len() == HOSTS_MAX {
+            self.hosts.pop_front();
+        }
+        self.hosts
+            .push_back((host.db_instance.clone(), host.engine_epoch.clone()));
     }
 
     /// Stops a host, so its writers are refused. Input: the host. Output: none.
     pub(crate) fn stop(&mut self, host: &HostStamp) {
-        let _ = (&self.hosts, host);
+        self.hosts.retain(|(db_instance, engine_epoch)| {
+            *db_instance != host.db_instance || *engine_epoch != host.engine_epoch
+        });
     }
 
     /// Whether a host is started. Inputs: its `db_instance` and `engine_epoch`. Output: true
     /// when it is.
     pub(crate) fn holds(&self, db_instance: &str, engine_epoch: &str) -> bool {
-        let _ = (&self.hosts, db_instance, engine_epoch);
-        false
+        self.hosts
+            .iter()
+            .any(|(instance, epoch)| instance == db_instance && epoch == engine_epoch)
     }
 }
 
@@ -82,8 +90,17 @@ pub(crate) fn hosted(host: &HostStamp) -> bool {
 /// the fence. Output: Ok, or `state_log_fence_out_of_process`, `owner_runtime_stale` or
 /// `owner_grant_stale_or_revoked`.
 pub(crate) fn check(tx: &Transaction<'_>, fence: &Fence) -> Result<(), EngineError> {
-    let _ = (tx, fence, hosts());
-    Ok(())
+    let (db_instance, engine_epoch) = match fence {
+        Fence::Owner(admission) => (&admission.db_instance, &admission.engine_epoch),
+        Fence::Engine(host) => (&host.db_instance, &host.engine_epoch),
+    };
+    if !hosts().holds(db_instance, engine_epoch) {
+        return Err(error("state_log_fence_out_of_process"));
+    }
+    match fence {
+        Fence::Owner(admission) => check_owner_admission(tx, admission),
+        Fence::Engine(host) => check_owner_host(tx, host),
+    }
 }
 
 /// The process's started hosts, taken over from a thread that panicked while holding them,
