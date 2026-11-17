@@ -94,7 +94,7 @@ impl OwnerClientKind {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Admission {
+pub struct Admission {
     pub(crate) db_instance: String,
     pub(crate) engine_epoch: String,
     pub(crate) owner_id: String,
@@ -102,7 +102,7 @@ pub(crate) struct Admission {
 }
 
 #[derive(Clone)]
-pub(crate) struct HostStamp {
+pub struct HostStamp {
     pub(crate) db_instance: String,
     pub(crate) engine_epoch: String,
 }

@@ -12,6 +12,7 @@ fn db() -> Connection {
         INSERT INTO state VALUES (1,0);",
     )
     .unwrap();
+    fence::seed(&db);
     db
 }
 
@@ -68,12 +69,12 @@ fn chunks() -> Vec<Chunk> {
 fn each_own_transaction_moves_the_revision_once_and_numbers_its_events_after_the_last() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 1);
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 2);
     tx.commit().unwrap();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     assert_eq!(log.revision(), 2);
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 3);
     tx.commit().unwrap();
@@ -95,7 +96,7 @@ fn an_owner_append_takes_the_revision_its_request_moved_and_refuses_a_stale_or_l
     let mut db = db();
     let tx = db.transaction().unwrap();
     assert_eq!(
-        code(Appender::owner(&tx, 0)),
+        code(Appender::owner(&tx, 0, fence::engine())),
         Some("state_log_revision_not_newer".into())
     );
     drop(tx);
@@ -103,22 +104,22 @@ fn an_owner_append_takes_the_revision_its_request_moved_and_refuses_a_stale_or_l
         .unwrap();
     let tx = db.transaction().unwrap();
     assert_eq!(
-        code(Appender::owner(&tx, 4)),
+        code(Appender::owner(&tx, 4, fence::engine())),
         Some("state_log_revision_stale".into())
     );
-    let mut log = Appender::owner(&tx, 5).unwrap();
+    let mut log = Appender::owner(&tx, 5, fence::engine()).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 1);
     tx.commit().unwrap();
     let tx = db.transaction().unwrap();
     assert_eq!(
-        code(Appender::owner(&tx, 5)),
+        code(Appender::owner(&tx, 5, fence::engine())),
         Some("state_log_revision_not_newer".into()),
         "a second appending transaction must move the revision again"
     );
     tx.execute("UPDATE state SET revision=3 WHERE id=1", [])
         .unwrap();
     assert_eq!(
-        code(Appender::owner(&tx, 3)),
+        code(Appender::owner(&tx, 3, fence::engine())),
         Some("state_log_revision_not_newer".into()),
         "a revision lower than the last logged one is refused"
     );
@@ -134,7 +135,7 @@ fn an_own_writer_is_refused_once_the_revision_is_exhausted() {
         .unwrap();
     let tx = db.transaction().unwrap();
     assert_eq!(
-        code(Appender::own(&tx)),
+        code(Appender::own(&tx, fence::engine())),
         Some("state_log_revision_exhausted".into())
     );
 }
@@ -143,7 +144,7 @@ fn an_own_writer_is_refused_once_the_revision_is_exhausted() {
 fn a_body_at_the_cap_is_kept_and_one_byte_over_is_refused() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let full = vec![b'x'; BODY_BYTES_MAX];
     assert_eq!(log.append(&draft(&full)).unwrap(), 1);
     let over = vec![b'x'; BODY_BYTES_MAX + 1];
@@ -158,7 +159,7 @@ fn a_body_at_the_cap_is_kept_and_one_byte_over_is_refused() {
 fn a_kind_schema_or_time_out_of_bounds_is_refused_and_snapshot_kinds_are_reserved() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let longest = "k".repeat(KIND_BYTES_MAX);
     let too_long = "k".repeat(KIND_BYTES_MAX + 1);
     let base = draft(b"{}");
@@ -201,7 +202,7 @@ fn a_kind_schema_or_time_out_of_bounds_is_refused_and_snapshot_kinds_are_reserve
 fn an_append_past_the_last_possible_seq_is_refused() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     tx.execute(
         "INSERT INTO state_log VALUES (?1,1,'worktrees','Planted',1,0,x'')",
         [i64::MAX],
@@ -217,7 +218,7 @@ fn an_append_past_the_last_possible_seq_is_refused() {
 fn one_transaction_holds_at_most_its_bound_of_events() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let last = TRANSACTION_EVENTS_MAX as u64;
     for seq in 1..last {
         assert_eq!(log.append(&draft(b"")).unwrap(), seq);
@@ -241,11 +242,11 @@ fn one_transaction_holds_at_most_its_bound_of_events() {
 fn the_log_and_the_revision_roll_back_with_their_transaction() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 1);
     tx.commit().unwrap();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 2);
     drop(tx);
     assert_eq!(revision(&db), 1);
@@ -256,7 +257,7 @@ fn the_log_and_the_revision_roll_back_with_their_transaction() {
 fn a_snapshot_run_verifies_and_a_missing_or_changed_chunk_fails_its_hash() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let done = log.snapshot(Aggregate::Worktrees, 9, chunks()).unwrap();
     let empty = log.snapshot(Aggregate::Ide, 9, Vec::new()).unwrap();
     tx.commit().unwrap();
@@ -307,7 +308,7 @@ fn a_snapshot_run_verifies_and_a_missing_or_changed_chunk_fails_its_hash() {
 fn a_closing_event_whose_hash_covers_rows_that_are_not_its_chunks_is_refused() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     log.append(&draft(b"a")).unwrap();
     log.append(&draft(b"b")).unwrap();
     let sha256 = format!("{:x}", Sha256::digest(b"ab"));
@@ -329,7 +330,7 @@ fn a_closing_event_whose_hash_covers_rows_that_are_not_its_chunks_is_refused() {
 fn a_snapshot_chunk_over_the_cap_is_refused_before_any_chunk_is_appended() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let mut run = chunks();
     run.push(Chunk {
         table: "worktrees".into(),
@@ -368,7 +369,7 @@ fn closing(chunks: u32, bodies: &[&[u8]]) -> Vec<u8> {
 fn a_closing_event_with_a_bad_body_or_a_count_no_run_can_hold_is_invalid() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    Appender::own(&tx).unwrap();
+    Appender::own(&tx, fence::engine()).unwrap();
     let impossible = u32::try_from(TRANSACTION_EVENTS_MAX).unwrap();
     plant(&tx, 1, SNAPSHOT_DONE, b"not json");
     plant(&tx, 2, SNAPSHOT_DONE, &closing(impossible, &[]));
@@ -390,7 +391,7 @@ fn a_closing_event_with_a_bad_body_or_a_count_no_run_can_hold_is_invalid() {
 fn a_run_short_of_its_count_or_with_chunks_out_of_order_or_of_another_aggregate_fails() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    Appender::own(&tx).unwrap();
+    Appender::own(&tx, fence::engine()).unwrap();
     plant(&tx, 1, SNAPSHOT_DONE, &closing(1, &[]));
     assert_eq!(
         code(verify_snapshot(&tx, 1)),
