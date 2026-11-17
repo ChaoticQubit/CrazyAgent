@@ -1147,9 +1147,9 @@ impl Storage {
                             let _ = reply.send(result);
                         }
                         Job::Close(reply) => {
-                            if let Some(stamp) = &owner_runtime {
-                                let _ = owner_stop(&mut connection, stamp);
-                                crate::state_log::fence::host_stopped(stamp);
+                            if let Some(stamp) = owner_runtime.take() {
+                                let _ = owner_stop(&mut connection, &stamp);
+                                crate::state_log::fence::host_stopped(&stamp);
                             }
                             drop(connection);
                             drop(custody.take());

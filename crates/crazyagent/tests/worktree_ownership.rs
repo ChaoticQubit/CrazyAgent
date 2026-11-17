@@ -826,6 +826,42 @@ async fn entries_agents_may_create_mark_only_the_lease_they_touch() {
     engine.close().await.unwrap();
 }
 
+/// v2.5 L6: an engine host ends with its storage worker. A started engine dropped without
+/// close leaves no host in the process, so its store reopens here and the open sweep, whose
+/// opening fence refuses while a host of the store runs, marks the Ready lease
+/// RecoveryRequired. Gives up after 30 s with the last open error.
+#[tokio::test]
+async fn a_started_engine_dropped_without_close_leaves_no_host_and_its_store_reopens() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    let repo = repository(&root, "repo");
+    let (engine, config) = setup(&root, &repo).await;
+    admit(&engine, &repo).await;
+    let allocation = allocate(&repo, "owner", None);
+    let at = revision(&engine).await;
+    assert_eq!(
+        apply(&engine, "allocate", at, allocation).await.outcome,
+        Outcome::Applied
+    );
+    drop(engine);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let engine = loop {
+        match Engine::open(&root.join("db"), config.clone()).await {
+            Ok(engine) => break engine,
+            Err(error) if std::time::Instant::now() < until => {
+                assert!(!error.0.is_empty());
+                tokio::task::yield_now().await;
+            }
+            Err(error) => panic!("the dropped engine's store did not reopen: {error:?}"),
+        }
+    };
+    assert_eq!(
+        leases(&engine).await[0].state,
+        crazyagent::worktrees::LeaseState::RecoveryRequired
+    );
+    engine.close().await.unwrap();
+}
+
 /// The revision and kind of each logged worktrees event other than a snapshot run, in log
 /// order. Input: the closed store's path. Output: the pairs.
 fn logged(database: &Path) -> Vec<(i64, String)> {
