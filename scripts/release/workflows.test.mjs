@@ -132,6 +132,16 @@ function exposedJobs(text) {
 }
 
 /**
+ * Lists the lines of a local composite action the secret guard refuses, by the workflow rules:
+ * a line YAML reads as more than its text ([unreadLines]), and a line that reads a secret or
+ * binds an environment, since every job that uses the action runs it. Input: the action text.
+ * Output: the lines.
+ */
+function actionSecretLines(text) {
+  return [...unreadLines(text), ...text.split("\n").filter((line) => SECRET.test(line) || /^\s*(environment|secrets):/.test(line))];
+}
+
+/**
  * Lists every runner of a workflow outside the allowed GitHub-hosted images, reading each
  * matrix runner value when a job takes `${{ matrix.runner }}`; a `runner:` key, in block or
  * flow form, whose value is not one plain name is a problem. A job that calls a reusable workflow has no runner of its own.
@@ -223,6 +233,55 @@ const ROSETTA = "Refuse to run under Rosetta";
  */
 function steps(workflowText, job) {
   return block(block(workflowText, 0, "jobs").join("\n"), 2, job).join("\n").split(/\n(?= {6}- )/).slice(1);
+}
+
+const ACTIONS = new URL("../../.github/actions/", import.meta.url);
+
+/**
+ * Reads every local composite action under .github/actions, one folder each. Input: none.
+ * Output: { name, text } per action, in name order.
+ */
+async function localActions() {
+  const names = (await readdir(ACTIONS, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+  const actions = [];
+  for (const name of names) {
+    const text = await readFile(new URL(`${name}/action.yml`, ACTIONS), "utf8");
+    assert(!text.includes("\r"), `${name} has LF line endings`);
+    actions.push({ name, text });
+  }
+  return actions;
+}
+
+/**
+ * Reads one local composite action. Input: its folder name under .github/actions. Output: its
+ * text.
+ */
+async function farmAction(name) {
+  const found = (await localActions()).find((action) => action.name === name);
+  assert(found, `.github/actions/${name} exists`);
+  return found.text;
+}
+
+/**
+ * Returns the steps of a composite action's text as one string per step. Input: the action
+ * text. Output: each `- ` step under `runs: steps:` with its indented lines.
+ */
+function actionSteps(text) {
+  const lines = text.split("\n");
+  const start = lines.indexOf("  steps:");
+  assert(start >= 0 && lines.includes("  using: composite"), "a composite action lists its steps under runs:");
+  return lines.slice(start + 1).join("\n").replace(/\s+$/, "").split(/\n(?= {4}- )/);
+}
+
+/**
+ * Puts one workflow or composite step in a form two places can compare: its own indentation
+ * removed, without the lines that only say where it runs, an OS condition or the bash shell a
+ * composite step must name. Input: the step text. Output: the compared text.
+ */
+function stepBody(step) {
+  const indent = step.length - step.trimStart().length;
+  return step.replace(/\s+$/, "").split("\n").map((line) => line.slice(indent))
+    .filter((line) => !/^ {2}(if: (matrix|inputs)\.os [!=]= '[a-z]+'|shell: bash)$/.test(line)).join("\n");
 }
 
 test("every CI job runs on a GitHub-hosted runner, macOS on macos-15, and no workflow picks its runner from a pull request", async () => {
@@ -859,6 +918,16 @@ function matrixEntries(workflowText, job) {
   return entries;
 }
 
+const FARM_OS = Object.freeze(["linux", "macos", "windows"]);
+
+/**
+ * Lists the matrix entries of one test farm job kind across its per-OS jobs, `<kind>-<os>`.
+ * Inputs: the workflow text and the kind, build or rust. Output: the entries, Linux first.
+ */
+function farmEntries(workflowText, kind) {
+  return FARM_OS.flatMap((os) => matrixEntries(workflowText, `${kind}-${os}`));
+}
+
 test("the test farm runs on a pushed integration batch or on demand, never for a pull request, one run per ref with a newer push cancelling the older, with a read-only token, and every job refuses a self-hosted runner first (DEC-191)", async () => {
   const farm = await workflow("tests.yml");
   assert.deepEqual(block(farm, 0, "on").filter(Boolean), ["on:", "  push:", "    branches:", '      - "chore/v242-batch*"', '      - "chore/v25*"', '      - "test-farm/**"', "  workflow_dispatch:"]);
@@ -867,7 +936,7 @@ test("the test farm runs on a pushed integration batch or on demand, never for a
   assert.deepEqual(block(farm, 0, "permissions").filter(Boolean), ["permissions:", "  contents: read"]);
   assert.doesNotMatch(farm, /^ {4}permissions:/m, "no job widens the token");
   const jobs = jobsOf(farm).map(({ name }) => name);
-  assert.deepEqual(jobs, ["build", "rust", "node", "typecheck", "report"]);
+  assert.deepEqual(jobs, [...FARM_OS.map((os) => `build-${os}`), ...FARM_OS.map((os) => `rust-${os}`), "node", "typecheck", "report"]);
   for (const job of jobs) {
     const [first] = steps(farm, job);
     assert(first.startsWith("      - name: Refuse a runner that is not GitHub-hosted\n"), job);
@@ -878,16 +947,19 @@ test("the test farm runs on a pushed integration batch or on demand, never for a
 
 test("the test farm keeps one Rust cache per OS and lockfile, saved only from master, and no other cache, so it fits the free 10 GB beside ci.yml (DEC-191)", async () => {
   const farm = await workflow("tests.yml");
-  assert.deepEqual(farm.split("\n").filter((line) => /uses: (Swatinem\/rust-cache|actions\/cache)@|^\s+cache(-dependency-path)?:/.test(line)).map((line) => line.trim()), ["- uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0"]);
-  const cache = steps(farm, "build").find((step) => step.includes("Swatinem/rust-cache@"));
-  assert.deepEqual(cache.split("\n").slice(1).map((line) => line.trim()), ["with:", "prefix-key: farm", "shared-key: ${{ matrix.os }}", "add-job-id-key: false", "add-rust-environment-hash-key: false", "cache-bin: false", "save-if: ${{ github.ref == 'refs/heads/master' }}"]);
-  for (const step of steps(farm, "build").filter((text) => text.includes("actions/upload-artifact@"))) assert(step.includes("          retention-days: 1\n"), "a test archive lives one day");
+  const texts = [farm, ...(await localActions()).map(({ text }) => text)];
+  assert.deepEqual(texts.join("\n").split("\n").filter((line) => /uses: (Swatinem\/rust-cache|actions\/cache)@|^\s+cache(-dependency-path)?:/.test(line)).map((line) => line.trim()), ["- uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0"]);
+  const archive = actionSteps(await farmAction("rust-archive"));
+  const cache = archive.find((step) => step.includes("Swatinem/rust-cache@"));
+  assert.deepEqual(cache.split("\n").slice(1).map((line) => line.trim()), ["with:", "prefix-key: farm", "shared-key: ${{ inputs.os }}", "add-job-id-key: false", "add-rust-environment-hash-key: false", "cache-bin: false", "save-if: ${{ github.ref == 'refs/heads/master' }}"]);
+  for (const step of archive.filter((text) => text.includes("actions/upload-artifact@"))) assert(step.includes("        retention-days: 1\n"), "a test archive lives one day");
 });
 
 test("every test farm part is one matrix entry that uploads one JUnit report, even when it crashed, and a run holds at most 5 macOS jobs and 20 jobs at once (DEC-191)", async () => {
   const farm = await workflow("tests.yml");
-  const builds = matrixEntries(farm, "build");
-  const rust = matrixEntries(farm, "rust");
+  const jobs = block(farm, 0, "jobs").join("\n");
+  const builds = farmEntries(farm, "build");
+  const rust = farmEntries(farm, "rust");
   const node = matrixEntries(farm, "node");
   for (const entry of [...builds, ...rust, ...node]) assert.equal(entry.runner, RUNNERS[entry.os], JSON.stringify(entry));
   assert.deepEqual(builds.map((entry) => entry.os), ["linux", "macos", "windows"]);
@@ -901,12 +973,22 @@ test("every test farm part is one matrix entry that uploads one JUnit report, ev
   }
   const parts = [...rust.map((entry) => `${entry.os}-rust-${entry.part}`), ...node.map((entry) => `${entry.os}-node-${entry.part}`), "linux-bun-1"];
   assert.deepEqual([...excluded(farm, "FARM_PARTS")].sort(), parts.sort(), "the report expects exactly the parts the matrices run");
-  for (const [job, part] of [["rust", "${{ matrix.os }}-rust-${{ matrix.part }}"], ["node", "${{ matrix.os }}-node-${{ matrix.part }}"], ["typecheck", "linux-bun-1"]]) {
-    assert(block(block(farm, 0, "jobs").join("\n"), 2, job).includes(`      FARM_PART: ${part}`), job);
-    const all = steps(farm, job);
-    const keep = all.findIndex((step) => step.startsWith("      - name: Keep a JUnit report for this part\n        if: always()\n"));
-    assert(keep >= 0 && all[keep].includes('if [ ! -s "$FARM_JUNIT" ]; then'), `${job} writes a failing report when none was written`);
-    assert.match(all[keep + 1], /uses: actions\/upload-artifact@[0-9a-f]{40}\n {8}if: always\(\)\n {8}with:\n {10}name: farm-junit-\$\{\{ env\.FARM_PART \}\}\n/, job);
+  const report = (all, label, name) => {
+    const keep = all.findIndex((step) => /^ *- name: Keep a JUnit report for this part\n *if: always\(\)\n/.test(step));
+    assert(keep >= 0 && all[keep].includes('if [ ! -s "$FARM_JUNIT" ]; then'), `${label} writes a failing report when none was written`);
+    assert(all[keep + 1].includes("actions/upload-artifact@") && /\n *if: always\(\)\n/.test(all[keep + 1]), `${label} uploads its report even after a failure`);
+    assert(all[keep + 1].includes(`name: farm-junit-${name}\n`), `${label} names its report after its part`);
+    return all[keep + 1];
+  };
+  for (const [job, part] of [["node", "${{ matrix.os }}-node-${{ matrix.part }}"], ["typecheck", "linux-bun-1"]]) {
+    assert(block(jobs, 2, job).includes(`      FARM_PART: ${part}`), job);
+    report(steps(farm, job), job, "${{ env.FARM_PART }}");
+  }
+  const upload = report(actionSteps(await farmAction("rust-shard")), "rust-shard", "${{ inputs.os }}-rust-${{ inputs.part }}");
+  assert(upload.includes("        path: target/nextest/farm/junit.xml\n"), "the shard uploads the JUnit file nextest's farm profile writes");
+  for (const os of FARM_OS) {
+    const job = block(jobs, 2, `rust-${os}`);
+    assert(job.includes("      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}") && job.includes("      FARM_JUNIT: target/nextest/farm/junit.xml"), `rust-${os} names the part and file the shard reports`);
   }
   const count = (os) => [builds, rust, node].flat().filter((entry) => entry.os === os).length;
   assert(count("macos") <= 5, "at most 5 macOS jobs, even if a build overlapped its shards");
@@ -921,29 +1003,68 @@ test("the test farm report needs every other job and fails on any that did not s
   assert(summary.includes("        env:\n          FARM_NEEDS: ${{ toJSON(needs) }}\n"), "the summary reads every needed job's result");
 });
 
+test("each OS's Rust shards wait only on that OS's build, so a slow macOS build holds no Linux or Windows shard, and every OS runs one shared build action and one shared shard action, its own steps limited to what only it needs (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  const jobs = block(farm, 0, "jobs").join("\n");
+  const head = (step) => step.split("\n")[0].replace(/^ *- (name: |uses: )?/, "");
+  const own = {
+    build: { linux: ["Free disk on the Linux runner", "checkout", "Install Linux build packages"], macos: ["Free disk on the macOS runner", "checkout"], windows: ["checkout", "Install SQLite for Windows"] },
+    rust: { linux: ["checkout", "Install Linux packages"], macos: ["checkout", "Install tmux on macOS"], windows: ["checkout", "Install SQLite for Windows"] },
+  };
+  const uses = {
+    build: "      - uses: ./.github/actions/rust-archive\n        with:\n          os: ${{ matrix.os }}\n          node-version: ${{ env.NODE_VERSION }}",
+    rust: "      - uses: ./.github/actions/rust-shard\n        with:\n          os: ${{ matrix.os }}\n          part: ${{ matrix.part }}\n          parts: ${{ matrix.parts }}\n          node-version: ${{ env.NODE_VERSION }}",
+  };
+  for (const os of FARM_OS) {
+    for (const kind of ["build", "rust"]) {
+      assert.deepEqual([...new Set(matrixEntries(farm, `${kind}-${os}`).map((entry) => entry.os))], [os], `${kind}-${os} runs ${os} only`);
+      const all = steps(farm, `${kind}-${os}`);
+      assert.deepEqual(all.slice(1, -1).map(head).map((name) => (name.startsWith("actions/checkout@") ? "checkout" : name)), own[kind][os], `${kind}-${os} runs only its own OS steps before the shared action`);
+      assert.equal(all.at(-1).replace(/\s+$/, ""), uses[kind], `${kind}-${os} ends with the shared action, fed only matrix and workflow values`);
+    }
+    assert(!block(jobs, 2, `build-${os}`).some((line) => line.startsWith("    needs:")), `build-${os} waits on nothing`);
+    const rust = block(jobs, 2, `rust-${os}`);
+    assert.deepEqual(rust.filter((line) => line.startsWith("    needs:")), [`    needs: build-${os}`], `rust-${os} waits on its own build only`);
+    assert(rust.includes("    if: ${{ !cancelled() }}"), `rust-${os} reports even when its build failed`);
+  }
+  for (const { name, text } of await localActions()) {
+    assert(text.includes("\nruns:\n  using: composite\n  steps:\n"), `${name} is a composite action`);
+    for (const step of actionSteps(text)) {
+      if (/\n {6}run: /.test(step)) assert(/\n {6}shell: bash\n/.test(step), `${name}: every run step names bash`);
+      const used = step.match(/^ {4}- uses: (\S+)$/m)?.[1];
+      if (used) assert.match(used, /^[a-z-]+\/[a-z-]+@[0-9a-f]{40}$/i, `${name}: every action it uses is pinned by commit`);
+    }
+    for (const [expression] of text.matchAll(/\$\{\{[^}]*\}\}/g)) {
+      assert.match(expression, /^\$\{\{ (inputs\.(os|part|parts|node-version)|runner\.temp|github\.ref == 'refs\/heads\/master'|steps\.ide\.outputs\.(version|url|sha256|bytes)) \}\}$/, `${name} expands only its inputs and fixed runner values: ${expression}`);
+    }
+  }
+});
+
 test("every test farm Rust shard installs the build job's toolchain, Windows SQLite and debug settings and fetches the locked crates before it runs, so rows that spawn the cargo that built them build offline (DEC-191)", async () => {
   const farm = await workflow("tests.yml");
-  const build = steps(farm, "build");
-  const rust = steps(farm, "rust");
-  const named = (all, name) => all.findIndex((step) => step.startsWith(`      - name: ${name}\n`));
+  const build = actionSteps(await farmAction("rust-archive"));
+  const rust = actionSteps(await farmAction("rust-shard"));
+  const named = (all, name) => all.findIndex((step) => step.startsWith(`    - name: ${name}\n`));
   const shard = rust.findIndex((step) => step.includes("bash scripts/ci/farm-rust-shard.sh "));
   assert(shard >= 0, "the shard step exists");
-  for (const name of ["Install Rust toolchain", "Install SQLite for Windows", "Set debug info for the platform's disk", "Fetch Rust dependencies"]) {
+  for (const name of ["Install Rust toolchain", "Set debug info for the platform's disk", "Fetch Rust dependencies"]) {
     const at = named(rust, name);
     assert(at >= 0 && at < shard, `${name} runs before the shard`);
-    assert.equal(rust[at], build[named(build, name)], `${name} is the build job's own step`);
+    assert.equal(rust[at], build[named(build, name)], `${name} is the build action's own step`);
   }
   assert(rust[named(rust, "Fetch Rust dependencies")].endsWith("run: cargo fetch --locked"));
   assert(named(rust, "Install Rust toolchain") < named(rust, "Fetch Rust dependencies"), "crates are fetched with the pinned cargo");
+  const sqlite = (job) => steps(farm, job).find((step) => step.startsWith("      - name: Install SQLite for Windows\n"));
+  assert(sqlite("rust-windows") && sqlite("rust-windows") === sqlite("build-windows"), "Windows shards install the build's SQLite before the shard action");
 });
 
 test("the test farm installs tmux only from pinned, checked sources: the Linux tarball by sha256, the macOS build by the release's pinned script, never from Homebrew (DEC-191)", async () => {
   const farm = await workflow("tests.yml");
-  assert.doesNotMatch(farm, /brew install/);
-  const rust = steps(farm, "rust");
-  const linux = rust.find((step) => step.startsWith("      - name: Install tmux on Linux\n"));
-  assert(linux.includes('echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -'));
-  const macos = rust.find((step) => step.startsWith("      - name: Install tmux on macOS\n"));
+  const shard = await farmAction("rust-shard");
+  assert.doesNotMatch(farm + shard, /brew install/);
+  const linux = actionSteps(shard).find((step) => step.startsWith("    - name: Install tmux on Linux\n"));
+  assert(linux.includes("      if: inputs.os == 'linux'\n") && linux.includes('echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -'));
+  const macos = steps(farm, "rust-macos").find((step) => step.startsWith("      - name: Install tmux on macOS\n"));
   assert(macos.includes("scripts/release/build-tmux.sh --target aarch64-apple-darwin "));
   assert(macos.includes('test "$(tmux -V)" = "tmux $TMUX_VERSION"'));
   const pinned = (await readFile(new URL("./build-tmux.sh", import.meta.url), "utf8")).match(/^TMUX_VERSION=(\S+)$/m)[1];
@@ -952,29 +1073,31 @@ test("the test farm installs tmux only from pinned, checked sources: the Linux t
 
 test("the test farm macOS build gets the hosted job's 330-minute budget and two cargo jobs, logging memory and swap, and Windows leaves only the desktop crate out of its archive, whose test exe cannot load without the app manifest (DEC-191)", async () => {
   const farm = await workflow("tests.yml");
-  assert(block(block(farm, 0, "jobs").join("\n"), 2, "build").includes("    timeout-minutes: ${{ matrix.os == 'macos' && 330 || 150 }}"));
-  const archive = steps(farm, "build").find((step) => step.startsWith("      - name: Build and archive every workspace test\n"));
+  for (const os of FARM_OS) assert(block(block(farm, 0, "jobs").join("\n"), 2, `build-${os}`).includes(`    timeout-minutes: ${os === "macos" ? 330 : 150}`), os);
+  const action = await farmAction("rust-archive");
+  const archive = actionSteps(action).find((step) => step.startsWith("    - name: Build and archive every workspace test\n"));
   assert(archive.includes('if [ "$RUNNER_OS" = Windows ]; then exclude=(--exclude crazyagent-desktop); fi'));
   assert(archive.includes("export CARGO_BUILD_JOBS=2"));
   assert(archive.includes("sysctl -n vm.swapusage"));
   assert(archive.includes('cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} --locked --offline'));
-  assert.equal(farm.match(/--exclude /g).length, 1, "no other crate is left out of any archive");
-  const size = steps(farm, "build").find((step) => step.startsWith("      - name: Show the free disk, the target and the archive size\n"));
+  assert.equal((farm + action).match(/--exclude /g).length, 1, "no other crate is left out of any archive");
+  const size = actionSteps(action).find((step) => step.startsWith("    - name: Show the free disk, the target and the archive size\n"));
   assert(size.includes("hw.memsize") && size.includes("free -g"), "every build prints its CPUs and memory");
 });
 
 test("every test farm node part installs what its rows run, tmux, the locked crates and the PDF Chrome, from the same pinned steps as the Rust jobs, and stops before the job limit so its JUnit is kept (DEC-191)", async () => {
   const farm = await workflow("tests.yml");
-  const build = steps(farm, "build");
-  const rust = steps(farm, "rust");
+  const build = actionSteps(await farmAction("rust-archive"));
+  const shard = actionSteps(await farmAction("rust-shard"));
   const node = steps(farm, "node");
-  const named = (all, name) => all.findIndex((step) => step.startsWith(`      - name: ${name}\n`));
+  const named = (all, name) => all.findIndex((step) => /^ *- name: (.+)\n/.exec(step)?.[1] === name);
   const run = named(node, "Run this share of the node suites");
   assert(run >= 0, "the node run step exists");
-  for (const [source, name] of [[build, "Install Rust toolchain"], [build, "Fetch Rust dependencies"], [rust, "Install Linux packages"], [rust, "Install tmux on Linux"], [rust, "Install tmux on macOS"]]) {
+  const sources = [[build, "Install Rust toolchain"], [build, "Fetch Rust dependencies"], [steps(farm, "rust-linux"), "Install Linux packages"], [shard, "Install tmux on Linux"], [steps(farm, "rust-macos"), "Install tmux on macOS"]];
+  for (const [source, name] of sources) {
     const at = named(node, name);
     assert(at >= 0 && at < run, `${name} runs before the node suites`);
-    assert.equal(node[at], source[named(source, name)], `${name} is the same step as in the Rust jobs`);
+    assert.equal(stepBody(node[at]), stepBody(source[named(source, name)]), `${name} is the same step as in the Rust jobs`);
   }
   const shell = node[named(node, "Install the pinned Chrome headless shell for the PDF rows")];
   assert(shell.includes('echo "$HEADLESS_SHA256  $work/headless.zip" | shasum -a 256 -c -'));
@@ -1635,7 +1758,7 @@ test("the release job marks every engine it builds for a target that ships crazy
   assert.match(tools, /pub const SHIPS_BUNDLED_TMUX: bool = match option_env!\("CRAZYAGENT_BUNDLES_TMUX"\) \{\n {4}Some\(mark\) => matches!\(mark\.as_bytes\(\), \[b'1'\]\),\n {4}None => false,\n\};/);
 });
 
-test("the secret and runner guards read every job of every workflow file, matrix runner values included (RV-DS241-38)", async () => {
+test("the secret and runner guards read every job of every workflow file, matrix runner values included, and the secret guard reads every local composite action by the same line rules (RV-DS241-38)", async () => {
   const names = (await readdir(WORKFLOWS)).filter((name) => /\.ya?ml$/.test(name)).sort();
   assert(names.includes("ci.yml") && names.includes("release.yml"), names.join(" "));
   const exposed = [];
@@ -1645,6 +1768,14 @@ test("the secret and runner guards read every job of every workflow file, matrix
     assert.deepEqual(runnerProblems(text), [], name);
   }
   assert.deepEqual(exposed, ["release.yml:build"], "only the release build reads a secret or binds an environment");
+  const actions = await localActions();
+  assert.deepEqual(actions.map(({ name }) => name), ["rust-archive", "rust-shard"], "the guard reads every local action");
+  for (const { name, text } of actions) assert.deepEqual(actionSecretLines(text), [], `.github/actions/${name} reads no secret and nothing YAML hides`);
+  const composite = (line) => ["name: x", "description: x", "runs:", "  using: composite", "  steps:", line, "      shell: bash", ""].join("\n");
+  assert.deepEqual(actionSecretLines(composite("    - run: echo ok")), []);
+  for (const line of ["    - run: echo ${{ secrets.TOKEN }}", "    - run: echo ${{ SECRETS['TOKEN'] }}", "    - run: *shared", '    - run: "echo \\x41"', "    - run: 'echo open"]) {
+    assert.notDeepEqual(actionSecretLines(composite(line)), [], line);
+  }
   const added = [
     "jobs:",
     "  lint:",
