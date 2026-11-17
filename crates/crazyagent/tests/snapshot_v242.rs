@@ -155,6 +155,18 @@ const OWNER_HOME_NAMES: [&str; 15] = [
     ".pypirc",
 ];
 
+/// The placeholders the normalisation writes; `<path-` and `<id-` take a number and `>`.
+const PLACEHOLDERS: [&str; 8] = [
+    "<owner-home>",
+    "<temp>",
+    "<t>",
+    "<pid>",
+    "<port>",
+    "<pane>",
+    "<path-",
+    "<id-",
+];
+
 /// Words that mark a key holding a security value: a pin, digest, limit or timeout. Nothing
 /// under a key with one of these words is masked, so a changed pin or limit fails; a driver
 /// captures a value that cannot be stable as a stable fact, such as `"pin_matches": true`.
@@ -551,6 +563,36 @@ fn compare(golden: &[u8], text: &str) -> Result<(), String> {
     ))
 }
 
+/// Blanks the runner's own placeholders, so a user name or token check never matches a word
+/// inside one, such as `owner` in `<owner-home>`. Input: the text. Output: the text with each
+/// placeholder replaced by one space; anything else is kept.
+fn without_placeholders(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(next) = rest.chars().next() {
+        let taken = PLACEHOLDERS.iter().find_map(|mark| {
+            let after = rest.strip_prefix(mark)?;
+            if mark.ends_with('>') {
+                return Some(mark.len());
+            }
+            let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+            (digits > 0 && after.as_bytes().get(digits) == Some(&b'>'))
+                .then_some(mark.len() + digits + 1)
+        });
+        match taken {
+            Some(len) => {
+                out.push(' ');
+                rest = &rest[len..];
+            }
+            None => {
+                out.push(next);
+                rest = &rest[next.len_utf8()..];
+            }
+        }
+    }
+    out
+}
+
 /// Says whether `word` occurs in `text` as a whole word, ignoring ASCII case.
 /// Inputs: the text and the word. Output: true when an occurrence has no letter, digit or `_`
 /// on either side.
@@ -594,14 +636,16 @@ fn refuse_private(text: &str, home: Option<&str>, user: Option<&str>) -> Result<
     if home.is_some_and(|home| home.len() > 1 && text.contains(home)) {
         return Err("holds the home folder".to_owned());
     }
-    if user.is_some_and(|user| user.len() >= 3 && has_word(text, user)) {
+    let plain = without_placeholders(text);
+    if user.is_some_and(|user| user.len() >= 3 && has_word(&plain, user)) {
         return Err("holds the user name".to_owned());
     }
+    let bytes = plain.as_bytes();
     for prefix in TOKEN_PREFIXES {
         let starts_word = |start: usize| {
             start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
         };
-        if text
+        if plain
             .match_indices(prefix)
             .any(|(start, _)| starts_word(start))
         {
@@ -731,7 +775,9 @@ fn every_scenario_matches_its_2_4_2_capture() {
         .collect();
     failures.extend(orphans(&all));
     let home = std::env::var("HOME").ok();
-    let user = std::env::var("USER").ok();
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|user| !KINDS.contains(&user.as_str()));
     let printed: Vec<String> = failures
         .iter()
         .map(|line| withheld(line, home.as_deref(), user.as_deref()))
@@ -888,6 +934,19 @@ fn the_golden_writer_writes_only_a_missing_file_and_refuses_private_text() {
     assert_eq!(
         refuse_private("\"<owner-home>/Library/Keychains\"", names.0, names.1),
         Ok(())
+    );
+    assert!(!has_word(
+        &without_placeholders("<owner-home>/.ssh"),
+        "owner"
+    ));
+    assert_eq!(without_placeholders("<id-3>x<pid>"), " x ");
+    assert_eq!(
+        without_placeholders("<path->/a <owner>"),
+        "<path->/a <owner>"
+    );
+    assert_eq!(
+        refuse_private("\"<path-1>/x by Owner\"", names.0, names.1),
+        Err("holds the user name".to_owned())
     );
     for below in ["Projects/plan", "Documents", "", ".sshkeys"] {
         let text = format!("\"<owner-home>/{below}\"");
