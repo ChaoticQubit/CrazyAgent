@@ -525,10 +525,17 @@ fn a_start_while_a_restore_still_copies_refuses_and_leaves_the_engine_process_ru
     ));
 
     let refused = outcome.expect_err("no start while a restore copies");
-    assert!(refused.to_string().contains("engine_restoring"), "{refused}");
+    assert!(
+        refused.to_string().contains("engine_restoring"),
+        "{refused}"
+    );
     let status = service.status().unwrap();
     assert!(status.running);
-    assert_eq!(status.pid, Some(pid), "the copy was neither stopped nor replaced");
+    assert_eq!(
+        status.pid,
+        Some(pid),
+        "the copy was neither stopped nor replaced"
+    );
     drop(installed);
 }
 
