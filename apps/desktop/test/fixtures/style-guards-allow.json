@@ -5,7 +5,6 @@
     "src/screens/project/projects.css": 7
   },
   "accent": {
-    "src/screens/changes/changes.css": 2,
     "src/screens/demo/demo.css": 1,
     "src/screens/metrics/metrics.css": 3,
     "src/screens/process.css": 1,
@@ -16,7 +15,7 @@
     "src/screens/skill-tag.css": 4,
     "src/screens/team/agent-messages.css": 2,
     "src/screens/team/team-graph.css": 11,
-    "src/style.css": 15
+    "src/style.css": 14
   },
   "weight600": {
     "src/screens/demo/demo.css": 1,
@@ -30,7 +29,7 @@
     "src/screens/team/agent-messages.css": 2,
     "src/screens/team/team-graph.css": 7,
     "src/screens/terminals/terminals.css": 2,
-    "src/style.css": 10
+    "src/style.css": 9
   },
   "fontSize": {
     "src/screens/changes/changes.css": 1,
@@ -46,6 +45,6 @@
     "src/screens/team/agent-messages.css": 4,
     "src/screens/team/team-graph.css": 17,
     "src/screens/terminals/terminals.css": 5,
-    "src/style.css": 24
+    "src/style.css": 23
   }
 }
