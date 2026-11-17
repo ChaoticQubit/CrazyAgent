@@ -1,7 +1,9 @@
 use super::projects_home::{Running, Sink, UNKNOWN};
 use super::*;
 use crate::projects_home::icloud;
-use crate::projects_home::job::{IntakeJob, JobKind, JobState, JobSubject, JobView};
+use crate::projects_home::job::{
+    IntakeJob, JOB_VIEW_BYTES_MAX, JobKind, JobState, JobSubject, JobView,
+};
 use crate::projects_home::{AddMode, AddOverride, HomeAction};
 
 /// How many times a job reads the current revision and plans its change again when another
@@ -27,7 +29,12 @@ const JOBS_HELD_MAX: usize = JOBS_RUNNING_MAX + JOBS_WAITING_MAX + JOBS_ENDED_MA
 /// How often an add waiting for the download slot looks for a stop (#380 F4).
 const TURN_STOP_EVERY: Duration = Duration::from_millis(20);
 
+/// The most bytes of JSON a status reply takes: every job held at its largest view, the
+/// commas between them and the reply's kind around the list, within one frame (#380 N3).
+const JOBS_REPLY_BYTES_MAX: usize = JOBS_HELD_MAX * JOB_VIEW_BYTES_MAX + JOBS_HELD_MAX + 64;
+
 const _: () = assert!(JOBS_RUNNING_MAX <= REVISION_TRIES);
+const _: () = assert!(JOBS_REPLY_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
 
 /// What a client asks a job to do: the change's request id, which names the job, the subject,
 /// the mode and the overrides.
@@ -231,6 +238,13 @@ fn admit(held: &mut [Held]) {
     assert!(running <= JOBS_RUNNING_MAX);
 }
 
+/// Whether a job's source fits the bound its view counts on: at most `PATH_BYTES_MAX`
+/// bytes with no control character, so JSON writes it in at most twice its bytes (#380 N3).
+/// Input: the source. Output: the answer.
+fn bounded(source: &str) -> bool {
+    source.len() <= crate::projects_home::PATH_BYTES_MAX && !source.chars().any(char::is_control)
+}
+
 impl Intake {
     /// Starts a job that runs apart from any client, beside the running jobs or waiting its
     /// turn (DEC-197), or attaches to the job with the same id or moving, deleting or building
@@ -243,8 +257,9 @@ impl Intake {
     /// inside or around it; `job_busy` while a direct client add or project move runs, the id
     /// runs as a client change, the waiting list is full, or `JOBS_ENDED_MAX` kept ends wait
     /// for a client; `home_add_in_progress` for a move while an add that is no job of this
-    /// engine holds the home (a move behind add jobs waits its turn); or the folder, override
-    /// or move check's code.
+    /// engine holds the home (a move behind add jobs waits its turn); `job_request_invalid`
+    /// for a source past the bound a view counts on; or the folder, override or move check's
+    /// code.
     pub(super) async fn start(
         engine: &Arc<Engine>,
         authority: &Arc<Authority>,
@@ -329,6 +344,9 @@ impl Intake {
             }
         };
         assert!(real.is_absolute());
+        if !bounded(&source) {
+            return Err(failure("job_request_invalid"));
+        }
         let mut held = authority.intake.lock();
         if let Some(answer) = found(&held, &asked.request_id, &asked.subject, &real) {
             return answer;
@@ -494,6 +512,13 @@ impl Intake {
         if jobs.is_empty() {
             jobs.extend(setup);
         }
+        jobs.retain(|(job, _)| {
+            let kept = bounded(job.source());
+            if !kept {
+                eprintln!("intake_job_not_restored cause=source_bounds");
+            }
+            kept
+        });
         assert!(jobs.len() <= JOBS_RUNNING_MAX);
         let mut held = self.lock();
         if !held.is_empty() {
