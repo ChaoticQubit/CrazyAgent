@@ -64,9 +64,30 @@ export function liveGpu() {
   return contexts.filter((context) => !context.isContextLost()).length;
 }
 
+/** Gives the page a working store: the test page is about:blank, whose storage refuses every
+ * call, so an in-memory store takes its place, as the app's own window storage keeps a
+ * choice. Output: none. */
+function keepStorage() {
+  try {
+    window.localStorage.getItem("crazyagent.terminal-renderer");
+  } catch {
+    const kept = new Map();
+    const store = { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, String(value)), removeItem: (key) => kept.delete(key), clear: () => kept.clear() };
+    Object.defineProperty(window, "localStorage", { configurable: true, value: store });
+  }
+}
+
 /** Saves a Terminal renderer choice as the Profile setting does. Input: the choice. */
 export function choose(choice) {
+  keepStorage();
   state.saveTerminalRenderer(choice);
+}
+
+/** Makes the page report one platform with nothing chosen yet, as a first start on that
+ * machine. Input: the platform name, as navigator.platform gives it. */
+export function startOn(platform) {
+  keepStorage();
+  Object.defineProperty(navigator, "platform", { configurable: true, value: platform });
 }
 
 /** Which renderer draws the page's one terminal, shown or parked: "webgl" while its screen
