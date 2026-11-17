@@ -1314,17 +1314,17 @@ pub(super) fn project_move_plan(
 
 /// Checks a project move job before it starts, as far as the move can be checked without
 /// reading inside the folder, writing nothing: the owner's admission, a projects home move
-/// or delete under way (`home_move_in_progress`, `home_move_delete_in_progress`), an add
-/// running (`home_add_in_progress`), then what `crate::projects_home::project_move_check`
-/// names. Inputs: the connection, the owner
-/// admission, the project and the mode. Output: the project's real folder as text, or the
-/// refusal code.
+/// or delete under way (`home_move_in_progress`, `home_move_delete_in_progress`), then what
+/// `crate::projects_home::project_move_check` names. An add running is reported, not
+/// refused, so the engine lets the move wait behind its own add jobs (DEC-197). Inputs: the
+/// connection, the owner admission, the project and the mode. Output: the project's real
+/// folder as text and whether an add runs, or the refusal code.
 pub(super) fn project_move_check(
     db: &mut Connection,
     a: &Admission,
     project: &ProjectId,
     mode: AddMode,
-) -> Result<String, EngineError> {
+) -> Result<(String, bool), EngineError> {
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
     if pending_move(&tx)?.is_some() {
@@ -1333,9 +1333,7 @@ pub(super) fn project_move_check(
     if delete_planned(&tx)? {
         return Err(error("home_move_delete_in_progress"));
     }
-    if adding(&tx)? {
-        return Err(error("home_add_in_progress"));
-    }
+    let add_running = adding(&tx)?;
     let real = home::project_move_check(&tx, &guarded(&tx)?, project, mode)?;
     let source = real
         .to_str()
@@ -1343,7 +1341,7 @@ pub(super) fn project_move_check(
         .to_owned();
     tx.rollback().map_err(error)?;
     assert!(!source.is_empty());
-    Ok(source)
+    Ok((source, add_running))
 }
 
 /// Finishes or forgets a pending project move in its own transaction. Input: the

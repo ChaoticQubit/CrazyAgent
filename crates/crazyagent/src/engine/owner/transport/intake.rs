@@ -221,7 +221,9 @@ impl Intake {
     /// Output: the job's view; `job_same_folder` while a live job holds the folder or one
     /// inside or around it; `job_busy` while a direct client add or project move runs, the id
     /// runs as a client change, the waiting list is full, or `JOBS_ENDED_MAX` kept ends wait
-    /// for a client; or the folder, override or move check's code.
+    /// for a client; `home_add_in_progress` for a move while an add that is no job of this
+    /// engine holds the home (a move behind add jobs waits its turn); or the folder, override
+    /// or move check's code.
     pub(super) async fn start(
         engine: &Arc<Engine>,
         authority: &Arc<Authority>,
@@ -229,6 +231,7 @@ impl Intake {
         a: &Admission,
         asked: Asked,
     ) -> Result<JobView, EngineError> {
+        let mut add_running = false;
         let (project, source, real) = match &asked.subject {
             JobSubject::Add { path } => {
                 HomeAction::Added {
@@ -253,7 +256,8 @@ impl Intake {
                 if let Some(answer) = early {
                     return answer;
                 }
-                let source = check_move(engine, a, project_id, asked.mode).await?;
+                let (source, adding) = check_move(engine, a, project_id, asked.mode).await?;
+                add_running = adding;
                 let real = PathBuf::from(&source);
                 (Some(project_id.clone()), source, real)
             }
@@ -307,6 +311,12 @@ impl Intake {
         let mut held = authority.intake.lock();
         if let Some(answer) = found(&held, &asked.request_id, &asked.subject, &real) {
             return answer;
+        }
+        let jobs_adding = held
+            .iter()
+            .any(|current| current.live() && current.job.kind() == JobKind::Add);
+        if add_running && !jobs_adding {
+            return Err(failure("home_add_in_progress"));
         }
         if authority.intake.directs() > 0 {
             return Err(failure("job_busy"));
@@ -795,21 +805,22 @@ async fn check_setup(
 }
 
 /// Checks a project move before its job starts, writing nothing. Inputs: the engine, the
-/// client's admission, the project and the mode. Output: the project's real folder, the
-/// refusal code, or the unknown-outcome code when storage does not answer in time.
+/// client's admission, the project and the mode. Output: the project's real folder and
+/// whether an add runs, the refusal code, or the unknown-outcome code when storage does not
+/// answer in time.
 async fn check_move(
     engine: &Engine,
     a: &Admission,
     project: &ProjectId,
     mode: AddMode,
-) -> Result<String, EngineError> {
+) -> Result<(String, bool), EngineError> {
     let ask = engine
         .owner_job(|reply| Job::HomeProjectMoveCheck(a.clone(), project.clone(), mode, reply));
     let checked = tokio::time::timeout(engine.timeout, ask)
         .await
         .map_err(|_| failure(UNKNOWN))?;
     assert!(!matches!(&checked, Err(e) if e.0.is_empty()));
-    assert!(!matches!(&checked, Ok(source) if source.is_empty()));
+    assert!(!matches!(&checked, Ok((source, _)) if source.is_empty()));
     checked
 }
 
