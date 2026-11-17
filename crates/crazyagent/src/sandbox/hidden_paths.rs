@@ -305,7 +305,9 @@ pub fn runs_seeing(project: &str, saved: &[PathBuf]) -> Vec<RunKind> {
 
 /// Checks one folder the owner wants this project's agents kept out of: an absolute existing
 /// folder, taken in its canonical form, that sits strictly inside the project root. A folder
-/// outside the project, the project root itself, or a path that is not a folder is refused.
+/// outside the project, the project root itself, or a path that is not a folder is refused,
+/// as is text that is not plain: on Windows a drive path joined by backslashes
+/// ([`crate::sandbox::windows_clean_text`]), elsewhere one with no quote or backslash.
 /// Inputs: the typed path and the project root. Output: the canonical folder, or a plain
 /// refusal code.
 pub fn checked(text: &str, project_root: &Path) -> Result<PathBuf, &'static str> {
@@ -313,10 +315,13 @@ pub fn checked(text: &str, project_root: &Path) -> Result<PathBuf, &'static str>
     if text.len() > PATH_TEXT_MAX || !typed.is_absolute() {
         return Err("hidden_path_not_absolute");
     }
-    if text
+    #[cfg(unix)]
+    let plain = !text
         .chars()
-        .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'')
-    {
+        .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'');
+    #[cfg(not(unix))]
+    let plain = crate::sandbox::windows_clean_text(text);
+    if !plain {
         return Err("hidden_path_not_plain");
     }
     let real = canonical(typed).map_err(|_| "hidden_path_missing")?;
