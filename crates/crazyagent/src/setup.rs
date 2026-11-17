@@ -108,6 +108,19 @@ pub const TARGET: &str = if cfg!(all(target_os = "macos", target_arch = "aarch64
 /// program name ([`Dependency::program`]).
 pub const SETUP_JOB: &str = "setup";
 
+/// The name a setup job in the engine's line goes by on a screen: the setup run's, or the
+/// tool's label for a lone install or fix. Input: the job's id. Output: the name, none for
+/// a harness job, which screens name from the catalog.
+pub fn job_name(id: &str) -> Option<&'static str> {
+    if id == SETUP_JOB {
+        return Some(SETUP_JOB);
+    }
+    Dependency::ALL
+        .iter()
+        .find(|dep| dep.program() == id)
+        .map(|dep| dep.label())
+}
+
 /// A system tool the app needs: tmux runs agent terminals, uv installs Graphify,
 /// Graphify builds each project's code graph and Node runs the harnesses npm installs.
 /// Setup finds each one or installs it.

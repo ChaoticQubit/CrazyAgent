@@ -286,14 +286,8 @@ async fn dependency_rows(root: &Path, deadline: Instant) -> Vec<crate::setup::De
 /// read just before it missed its start. Inputs: the rows, the engine root and the line.
 fn overlay(rows: &mut [DependencyStatus], root: &Path, turns: &Turns) {
     let progress = progress::snapshot(root);
-    let name = |id: &str| -> String {
-        if id == SETUP_JOB {
-            return SETUP_JOB.to_owned();
-        }
-        Dependency::ALL
-            .iter()
-            .find(|dep| dep.program() == id)
-            .map(|dep| dep.label())
+    let name = |id: &str| {
+        crate::setup::job_name(id)
             .or_else(|| crate::harnesses::spec(id).map(|spec| spec.name))
             .unwrap_or(id)
             .to_owned()
@@ -516,9 +510,10 @@ async fn fix_dependency(
     });
 }
 
-/// Installs one dependency setup did not find and stores its row once its turn comes in the
-/// engine's line, since the job ahead may have installed it: a tool found then drops its
-/// earlier row, else the row reads installed, unsupported, or why it failed. An install
+/// Installs one dependency setup did not find once its turn comes in the engine's line,
+/// since the job ahead may have installed it, and stores its row before freeing the turn,
+/// so the next job's row comes after it: a tool found then drops its earlier row, else the
+/// row reads installed, unsupported, or why it failed. An install
 /// whose program then reports no usable version shows the check's own line when that
 /// version is too old, naming it and the one needed (V243-TMUX-APT-OLD). A turn that never
 /// comes within the line's longest wait fails as `setup_busy`. Inputs: the installer, the
@@ -534,22 +529,31 @@ async fn install_dependency(
     let outcome = tokio::task::spawn_blocking(move || {
         let turns = updates.turns();
         let Some(turn) = turns.take(job, folders, wait_max()) else {
-            return Some(DependencyState::refused("setup_busy"));
+            progress::with(&at, |state| {
+                state
+                    .dependencies
+                    .insert(dep, DependencyState::refused("setup_busy"))
+            });
+            return;
         };
         let next = install_now(installer.as_ref(), &at, dep);
+        progress::with(&at, |state| match next {
+            Some(next) => state.dependencies.insert(dep, next),
+            None => state.dependencies.remove(&dep),
+        });
         drop(turn);
-        next
     })
-    .await
-    .unwrap_or_else(|_| {
-        Some(DependencyState::Failed {
-            reason: plain_reason("setup_install_failed").to_owned(),
-        })
-    });
-    progress::with(root, |state| match outcome {
-        Some(next) => state.dependencies.insert(dep, next),
-        None => state.dependencies.remove(&dep),
-    });
+    .await;
+    if outcome.is_err() {
+        progress::with(root, |state| {
+            state.dependencies.insert(
+                dep,
+                DependencyState::Failed {
+                    reason: plain_reason("setup_install_failed").to_owned(),
+                },
+            )
+        });
+    }
 }
 
 /// The install itself, on the job's turn: none when the tool is found, its earlier row then
@@ -818,6 +822,11 @@ async fn run_setup(
     let graph_tool = progress::snapshot(root).graph_tool;
     for dep in Dependency::ALL {
         if dep == Dependency::Graphify && !graph_tool {
+            progress::with(root, |state| {
+                if !state.jobs.contains(&dep) {
+                    state.dependencies.remove(&dep);
+                }
+            });
             continue;
         }
         run_step(installer.clone(), root.to_path_buf(), dep, updates.clone()).await;
@@ -839,7 +848,7 @@ mod install_tests {
     use super::*;
     use crate::setup::Version;
     use crate::tools::permission_fix::{Report, TOOL_FIX_CHANGED, Target};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     /// V243-SETUP-PARALLEL (DEC-199): a lone install or fix of one tool clears only that
     /// tool's earlier row, holds only that tool, and a second job on the same tool is
@@ -1075,7 +1084,7 @@ mod install_tests {
     struct Gated {
         dir: tempfile::TempDir,
         fail_first: bool,
-        installs: std::sync::Mutex<BTreeMap<Dependency, u32>>,
+        installs: std::sync::Mutex<std::collections::BTreeMap<Dependency, u32>>,
     }
 
     #[cfg(unix)]

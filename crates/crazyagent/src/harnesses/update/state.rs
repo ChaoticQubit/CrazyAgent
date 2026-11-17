@@ -772,7 +772,10 @@ impl Updates {
         versions.running = state.running.contains(&spec.id);
         versions.last = state.last.get(spec.id).cloned();
         drop(state);
-        versions.waiting = self.turns.behind(spec.id).map(str::to_owned);
+        versions.waiting = self
+            .turns
+            .behind(spec.id)
+            .map(|id| crate::setup::job_name(id).unwrap_or(id).to_owned());
         versions.sign_in_min = harnesses::sign_in_min(spec.id).map(str::to_owned);
         versions
     }
