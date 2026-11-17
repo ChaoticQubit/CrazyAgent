@@ -21,7 +21,11 @@
 }
 
 .cs:focus-within {
-  border-color: var(--focus);
+  border-color: var(--terminal-focus);
+}
+
+section.cs :focus-visible {
+  outline-color: var(--terminal-focus);
 }
 
 .cs ::selection {
