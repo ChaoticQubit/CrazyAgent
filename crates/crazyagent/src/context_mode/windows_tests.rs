@@ -273,3 +273,128 @@ fn the_windows_install_steps_take_strict_off_whatever_is_stored() {
         (LinuxSupervisor::On, LinuxStrict::Off)
     );
 }
+
+/// The runner's own Node folder: the first folder on PATH holding `node.exe` and npm's own
+/// `npm-cli.js`, canonical as the resolver hands it. Output: the folder; the row fails with
+/// UNAVAILABLE when PATH has none.
+fn system_bin() -> PathBuf {
+    let found = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .find(|folder| folder.join(NODE).is_file() && npm_cli(folder).is_file())
+    });
+    let Some(bin) = found else {
+        panic!("UNAVAILABLE: node.exe and npm's npm-cli.js on PATH");
+    };
+    let bin = crate::sandbox::canonical(&bin).unwrap();
+    assert!(bin.join(NODE).is_file());
+    bin
+}
+
+/// Packs a package named context-mode at the pinned version, its `package.json` and an empty
+/// program, with Windows' own `tar.exe`. Input: the folder to pack in. Output: the tarball.
+fn local_tarball(folder: &Path) -> PathBuf {
+    let package = folder.join("package");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        format!("{{\"name\":\"{PACKAGE}\",\"version\":\"{VERSION}\"}}"),
+    )
+    .unwrap();
+    fs::write(package.join(PROGRAM), "").unwrap();
+    let tarball = folder.join(format!("{PACKAGE}-{VERSION}.tgz"));
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let packed = crate::spawn_gate::status(
+        std::process::Command::new(system.join("tar.exe"))
+            .arg("-czf")
+            .arg(&tarball)
+            .arg("-C")
+            .arg(folder)
+            .arg("package"),
+    )
+    .unwrap();
+    assert!(packed.success());
+    assert!(tarball.is_file());
+    tarball
+}
+
+/// The install step `fill` runs, with its arguments, for a staging folder the caller
+/// prepared, with npm's output kept so a refusal shows npm's own reason. Inputs: the case,
+/// the staging and work folders, npm's folder and the tarball. Output: npm's exit and output.
+fn install_output(
+    case: &Case,
+    staged: &Path,
+    work: &Path,
+    bin: &Path,
+    tarball: &Path,
+) -> std::process::Output {
+    let mut command = npm_command(&case.root, staged, work, bin, VERSION).unwrap();
+    command
+        .arg("install")
+        .arg("--prefix")
+        .arg(staged)
+        .args([
+            "--no-audit",
+            "--no-fund",
+            "--no-update-notifier",
+            "--loglevel=error",
+            "--ignore-scripts",
+            "--no-save",
+        ])
+        .arg(tarball);
+    crate::spawn_gate::collected(&mut command).unwrap()
+}
+
+/// npm's exit and the first 4 KiB of each of its streams, for a failed assertion. Input:
+/// the output. Output: the text.
+fn shown(output: &std::process::Output) -> String {
+    let text = |bytes: &[u8]| String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).into_owned();
+    format!(
+        "{:?}\nstdout: {}\nstderr: {}",
+        output.status,
+        text(&output.stdout),
+        text(&output.stderr)
+    )
+}
+
+/// WIN-1 (DEC-193): inside its AppContainer boundary the runner's own npm installs a local
+/// package into a fresh staging folder once its `node_modules` is there, so only the pin
+/// refuses the unpinned tarball, by hand and through `fill`. The same install into a staging
+/// folder without `node_modules` is refused, since its root lets npm add entries only inside
+/// folders already there, so the row fails if `fill` stops making it.
+#[test]
+fn npm_installs_into_a_fresh_staging_folder_through_the_node_modules_made_first() {
+    let bin = system_bin();
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
+    let packing = work.join("tmp");
+    private_folder(&packing).unwrap();
+    let tarball = local_tarball(&packing);
+    let made = staging_folder(&npm, &prefix).unwrap();
+    fs::create_dir(made.join(MODULES)).unwrap();
+    let installed = install_output(&case, &made, &work, &bin, &tarball);
+    assert!(installed.status.success(), "{}", shown(&installed));
+    assert_eq!(
+        checked(&made, VERSION),
+        Err("context_mode_integrity_mismatch")
+    );
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    assert_eq!(
+        fill(
+            &case.root,
+            &staged,
+            &work,
+            &bin,
+            VERSION,
+            tarball.as_os_str()
+        ),
+        Err(InstallError("context_mode_integrity_mismatch")),
+        "fill makes node_modules and npm installs; only the pin refuses the tarball"
+    );
+    assert!(staged.join(MODULES).join(PACKAGE).join(PROGRAM).is_file());
+    let bare = staging_folder(&npm, &prefix).unwrap();
+    let refused = install_output(&case, &bare, &work, &bin, &tarball);
+    assert!(!refused.status.success(), "{}", shown(&refused));
+    assert!(!bare.join(MODULES).exists());
+}

@@ -211,6 +211,7 @@ impl Tally {
 
     /// Counts the documents a New Project copies, before the first. Input: the count.
     /// Output: Ok, or `home_add_cancelled` once a stop was asked.
+    #[cfg(any(unix, test))]
     pub(crate) fn documents(&self, total: u64) -> Result<(), EngineError> {
         self.go_on()?;
         assert_eq!(
@@ -224,6 +225,7 @@ impl Tally {
     }
 
     /// Counts one document a New Project copied.
+    #[cfg(any(unix, test))]
     pub(crate) fn document_copied(&self) {
         let total = self.documents_total.load(Ordering::SeqCst);
         let before = self.documents_done.fetch_add(1, Ordering::SeqCst);

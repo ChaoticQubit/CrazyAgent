@@ -2634,7 +2634,7 @@ fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
 /// hidden folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A
 /// r1): team agents, taken-over panes included, and the engine runs that started before
 /// (SA-VID14-R2-N2).
-const HIDDEN_SEERS_COVER: &str = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named under Hidden with h Restart them. Master turns, research jobs and overview, roadmap, onboarding, code graph and lockfile rebuild runs that started before are named there too, and keep their access until they end.";
+const HIDDEN_SEERS_COVER: &str = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named under Hidden with R Restart them. Master turns, research jobs and overview, roadmap, onboarding, code graph and lockfile rebuild runs that started before are named there too, and keep their access until they end.";
 
 /// The Settings line naming the running agents that can still open a folder hidden after
 /// they started, with the key that restarts them (SA-VID14-A). Takes the screen and look.
@@ -2646,7 +2646,7 @@ fn seers_line(screen: &ProjectScreen, look: &Look) -> Option<Row> {
             format!("{} can still open a hidden folder", seers.join(", ")),
             look.warning,
         )
-        .push("   h Restart them", look.muted)
+        .push("   R Restart them", look.muted)
     })
 }
 
@@ -2732,7 +2732,7 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
             "Folder",
             Row::of(folder(screen), look.fg)
                 .push("   x Remove project", look.muted)
-                .push("   m Move into CrazyAgent folder", look.muted),
+                .push("   M Move into CrazyAgent folder", look.muted),
         ),
         entry("Pool", pool),
         entry(
