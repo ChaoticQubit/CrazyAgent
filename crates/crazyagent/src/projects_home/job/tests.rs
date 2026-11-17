@@ -545,3 +545,15 @@ fn a_status_list_of_every_held_job_at_its_longest_fits_one_frame() {
     };
     assert!(code.starts_with("home_copy_failed: "), "{code}");
 }
+
+#[test]
+fn a_failure_code_of_control_characters_shows_within_twice_its_cut_bytes() {
+    let job = job();
+    job.end(Err(EngineError(format!(
+        "home_copy_failed: {}",
+        "\u{1}\n".repeat(2048)
+    ))));
+    let shown = serde_json::to_string(&job.view().state).unwrap();
+    assert!(shown.len() <= 2 * 128 + 64, "{} bytes", shown.len());
+    assert!(shown.contains("home_copy_failed: "), "{shown}");
+}
