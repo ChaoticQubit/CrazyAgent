@@ -6,29 +6,74 @@ import styles from "../../src/style.css?inline";
 import projectStyles from "../../src/screens/project/projects.css?inline";
 import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { keepTerminalsOf, TerminalPanel, useKeptTerminalProjects } from "../../src/screens/team/terminal-panel.tsx";
+import * as state from "../../src/state.ts";
 
 let root = null;
 let probe = null;
 let gpu = false;
+let identity = "";
+let failing = 0;
+const contexts = [];
 const engine = { callbacks: new Map(), channel: null, next: 0, typed: [], attaches: 0, detaches: 0, nodes: [], graphs: [], resizes: [] };
 const canvasContext = HTMLCanvasElement.prototype.getContext;
+const glParameter = WebGL2RenderingContext.prototype.getParameter;
+const UNMASKED_VENDOR = 0x9245;
+const UNMASKED_RENDERER = 0x9246;
 
-/** Lets the page's canvases hand out a WebGL2 context, or answers null for one as a machine
- * without WebGL2 does. Off by default, so every row that reads the DOM rows' text runs on the
- * DOM renderer; a renderer row turns it on before `open`. Input: whether WebGL2 is offered. */
-export function offerGpu(offered) {
+/** The renderer a Mac's GPU reports, as test Chrome on the build Mac does. */
+export const HARDWARE = "ANGLE (Apple, ANGLE Metal Renderer: Apple M2 Max, Unspecified Version)";
+
+/** The renderer a machine without a GPU reports, as the Linux farm's Chrome does. */
+export const SOFTWARE = "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)";
+
+/** Lets the page's canvases hand out a WebGL2 context that reports one renderer, or answers
+ * null for one as a machine without WebGL2 does. Off by default, so every row that does not
+ * name a renderer runs on the DOM renderer; a renderer row turns it on before `open`. Inputs:
+ * whether WebGL2 is offered and the renderer it reports. */
+export function offerGpu(offered, renderer = HARDWARE) {
   gpu = offered;
+  identity = renderer;
+}
+
+/** Makes the next WebGL2 contexts the page asks for fail, as a GPU that refuses a context
+ * does. Input: how many. */
+export function failGpu(count) {
+  failing = count;
 }
 
 HTMLCanvasElement.prototype.getContext = function getContext(kind, ...rest) {
-  if (kind === "webgl2" && !gpu) return null;
-  return canvasContext.call(this, kind, ...rest);
+  if (kind !== "webgl2") return canvasContext.call(this, kind, ...rest);
+  if (!gpu) return null;
+  if (failing > 0) {
+    failing -= 1;
+    return null;
+  }
+  const context = canvasContext.call(this, kind, ...rest);
+  if (context && !contexts.includes(context)) contexts.push(context);
+  return context;
 };
 
-/** Which renderer draws the shown terminal: "webgl" while its screen holds the WebGL canvas and
- * no DOM rows, "dom" while it holds DOM rows, "none" before it opens. Output: the name. */
+WebGL2RenderingContext.prototype.getParameter = function getParameter(name) {
+  if (name === UNMASKED_RENDERER) return identity;
+  if (name === UNMASKED_VENDOR) return "Google Inc.";
+  return glParameter.call(this, name);
+};
+
+/** How many WebGL2 contexts the page holds that were not lost. Output: the count. */
+export function liveGpu() {
+  return contexts.filter((context) => !context.isContextLost()).length;
+}
+
+/** Saves a Terminal renderer choice as the Profile setting does. Input: the choice. */
+export function choose(choice) {
+  state.saveTerminalRenderer(choice);
+}
+
+/** Which renderer draws the page's one terminal, shown or parked: "webgl" while its screen
+ * holds the WebGL canvas and no DOM rows, "dom" while it holds DOM rows, "none" before it
+ * opens. Output: the name. */
 export function renderer() {
-  const screen = document.querySelector(".tg-terminal-screen .xterm-screen");
+  const screen = document.querySelector(".tg-terminal-host .xterm-screen");
   if (!screen) return "none";
   if (screen.querySelector(".xterm-rows")) return "dom";
   return screen.querySelector("canvas") ? "webgl" : "none";
@@ -174,6 +219,13 @@ export function away() {
   root = null;
 }
 
+/** Takes the panel off the page and lets the window's views go, as closing the project does.
+ * Output: none. */
+export function drop() {
+  away();
+  keepTerminalsOf(() => false);
+}
+
 /** Mounts the panel for the agent again over the same stand-in engine, as a switch back does.
  * Inputs: the agent's role and its harness id. Output: the ms the mount took. */
 export function back(role, harness) {
@@ -229,7 +281,7 @@ export function view() {
   return {
     live: status !== null,
     note: status?.textContent ?? null,
-    text: rows?.textContent ?? "",
+    text: document.querySelector(".tg-terminal-screen .tg-terminal-host")?.readScreen?.().join("\n") ?? "",
     screen: box(document.querySelector(".tg-terminal-screen .xterm-screen")),
     rowHeight: rows?.firstElementChild?.getBoundingClientRect().height ?? 0,
     menu: [...document.querySelectorAll(".tg-terminal-menu [role=menuitem]")].map((item) => ({ text: item.textContent.trim(), disabled: item.disabled, ...box(item) })),
