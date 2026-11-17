@@ -183,6 +183,29 @@ fn the_native_profiles_folder_is_an_engine_secret_no_root_may_cover() {
     assert!(guarded(&case).secret_paths().contains(&profiles));
 }
 
+/// V243-BACKUPS-SECRET r2: the folder where 2.5 keeps the keys the owner entered for app
+/// plugins, which a failed 2.5 restore move leaves in place, is an engine secret on 2.4.3
+/// like the saved account keys: no read root or worktree may be it or sit inside it, in
+/// either order, and the guarded sandbox names it among its secret paths.
+#[test]
+fn the_plugin_keys_folder_is_an_engine_secret_no_root_may_cover() {
+    let case = case();
+    let keys = case.runtime.join("plugin-keys");
+    let inner = keys.join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    for root in [&keys, &inner] {
+        walled(guarded(&case).allow_read(root));
+        walled(guarded(&case).allow_worktree(root));
+        walled(
+            sandbox(&case)
+                .allow_read(root)
+                .unwrap()
+                .guard_engine(&case.runtime),
+        );
+    }
+    assert!(guarded(&case).secret_paths().contains(&keys));
+}
+
 /// V243-BACKUPS-SECRET: the folder of engine backups, which holds full copies of engine.db,
 /// the settings texts kept with them and, after a 2.5 restore, the keys, SDK homes and
 /// sign-in slots moved into its dated copy, is an engine secret like the saved account keys:
