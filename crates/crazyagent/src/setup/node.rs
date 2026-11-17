@@ -10,8 +10,6 @@ use std::time::Duration;
 pub const NODE_VERSION: &str = "26.13.1";
 
 const TAR: &str = "/usr/bin/tar";
-/// The system folders the install's programs search after `setup/bin`, where tar's `gzip` is.
-const SYSTEM_FOLDERS: [&str; 2] = ["/usr/bin", "/bin"];
 const UNPACK_TIME: Duration = Duration::from_secs(300);
 const VERSION_TIME: Duration = Duration::from_secs(10);
 const TOP_BYTES_MAX: usize = 64;
@@ -265,10 +263,14 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
 }
 
 /// The installer the Node install runs its programs through: `setup/bin` first, then the
-/// root-owned [`SYSTEM_FOLDERS`], so GNU tar finds the `gzip` it starts for `-z`, and no
-/// folder of the engine's own `PATH` or home. Input: the engine root. Output: the installer.
+/// root-owned system folders the tool resolver searches, so GNU tar finds the `gzip` it starts
+/// for `-z`, and no folder of the engine's own `PATH` or home. Input: the engine root.
+/// Output: the installer.
 fn installer(engine_root: &Path) -> PinnedInstaller {
-    let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
+    let system: Vec<PathBuf> = crate::tools::SYSTEM_FOLDERS
+        .iter()
+        .map(PathBuf::from)
+        .collect();
     assert!(system.iter().all(|folder| folder.is_absolute()));
     PinnedInstaller::with_paths(engine_root, system)
 }
