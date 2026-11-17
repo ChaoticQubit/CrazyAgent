@@ -193,8 +193,13 @@ const FIRMLINK: &str = "/system/volumes/data";
 /// Says whether text ends in the /System/Volumes/Data firmlink in plain letters of any case,
 /// starting a path, so a folder written right after it starts the path the firmlink leads to.
 /// Input: the text before a place. Output: true when it ends that way.
-pub(super) fn ends_in_firmlink(_text: &str) -> bool {
-    false
+pub(super) fn ends_in_firmlink(text: &str) -> bool {
+    let Some(start) = text.len().checked_sub(FIRMLINK.len()) else {
+        return false;
+    };
+    text.is_char_boundary(start)
+        && text[start..].eq_ignore_ascii_case(FIRMLINK)
+        && !text[..start].chars().next_back().is_some_and(inside_path)
 }
 
 /// Finds a caseless spelling that still names a user folder or a path below a temp folder
