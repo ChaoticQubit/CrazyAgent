@@ -628,13 +628,14 @@ fn restore_pinned_at(
 }
 
 /// Moves the owner's key files the restored 2.4 rows no longer name into the same key
-/// folders of the dated copy of the replaced 2.5 data (V250-L5-N5, DEC-192), where they stay
-/// with the data that names them: each plugin key no restored app plugin binding holds, so
-/// every one for a 2.4 copy, and each account key neither a restored account nor the live
-/// settings name, as the start sweep judges ([`super::trash::referenced`]); no settings, or
-/// settings that cannot be read, keep every account key in place. A failure is logged by
-/// folder and code and never fails the checked restore. Inputs: the restored connection,
-/// still held alone, the engine root, the settings sources and the dated copy's folder.
+/// folders of the dated copy of the replaced 2.5 data (V250-L5-N5, DEC-192), and deletes each
+/// generated SDK home and native sign-in that copy names (V250-L5-N5B): each plugin key no
+/// restored app plugin binding holds, so every one for a 2.4 copy, and each account key, home
+/// and sign-in neither a restored account nor the live settings name, as the start sweep
+/// judges ([`super::trash::referenced`]); no settings, or settings that cannot be read, keep
+/// every account's files. A failure is logged by what it swept and its code and never fails
+/// the checked restore. Inputs: the restored connection, still held alone, the engine root,
+/// the settings sources and the dated copy's folder.
 fn sweep_unbound_keys(
     db: &Connection,
     root: &Path,
@@ -642,24 +643,97 @@ fn sweep_unbound_keys(
     copy: &Path,
 ) {
     use super::accounts::{ACCOUNT_KEYS, PLUGIN_KEYS, move_unkept_in};
-    let plugin = move_unkept_in(root, PLUGIN_KEYS, copy, |name| plugin_key_bound(db, name));
-    let account = match settings.map(SettingsSources::config) {
+    let mut swept = vec![(
+        PLUGIN_KEYS,
+        move_unkept_in(root, PLUGIN_KEYS, copy, |name| plugin_key_bound(db, name)),
+    )];
+    match settings.map(SettingsSources::config) {
         Some(Ok(config)) => {
             let catalog = config.settings.model_access.as_ref();
-            move_unkept_in(root, ACCOUNT_KEYS, copy, |name| {
-                super::trash::referenced(db, catalog, super::trash::ACCOUNT_KEY, name)
-            })
+            let named = |kind: &str, name: &str| super::trash::referenced(db, catalog, kind, name);
+            let keys = move_unkept_in(root, ACCOUNT_KEYS, copy, |name| {
+                named(super::trash::ACCOUNT_KEY, name)
+            });
+            swept.push((ACCOUNT_KEYS, keys));
+            swept.push((PROFILES, remove_replaced_profiles(root, copy, &named)));
         }
-        Some(Err(cause)) => Err(cause),
-        None => Ok(0),
-    };
-    for (folder, swept) in [(PLUGIN_KEYS, plugin), (ACCOUNT_KEYS, account)] {
-        if let Err(cause) = swept {
+        Some(Err(cause)) => swept.push((ACCOUNT_KEYS, Err(cause))),
+        None => {}
+    }
+    for (folder, result) in swept {
+        if let Err(cause) = result {
             let code = cause.0.split(':').next().unwrap_or_default();
             eprintln!("restore_key_sweep_failed folder={folder} cause={code}");
         }
     }
 }
+
+/// What a restore's sweep calls the generated SDK homes and native sign-ins in its log.
+const PROFILES: &str = "account-profiles";
+
+/// Deletes each generated SDK home and native sign-in the replaced 2.5 copy names, by its
+/// saved accounts and by its trash notes, that `named` does not keep, through the start
+/// sweep's own removals ([`super::trash::delete`]); a failed removal does not stop the
+/// others. Inputs: the engine root, the copy's folder and the keep test by kind and name.
+/// Output: how many went, or the copy's or keep test's failure, or the first failed removal.
+fn remove_replaced_profiles(
+    root: &Path,
+    replaced: &Path,
+    named: impl Fn(&str, &str) -> Result<bool, EngineError>,
+) -> Result<usize, EngineError> {
+    let mut failed = None;
+    let mut removed = 0;
+    for (kind, name) in replaced_profiles(replaced)? {
+        if named(kind, name.as_str())? {
+            continue;
+        }
+        match super::trash::delete(root, kind, &name) {
+            Ok(()) => removed += 1,
+            Err(cause) => {
+                failed.get_or_insert(cause);
+            }
+        }
+    }
+    failed.map_or(Ok(removed), Err)
+}
+
+/// The generated SDK homes and native sign-ins the replaced 2.5 copy names: those of its
+/// saved accounts ([`super::accounts::profile_files`]) and those its trash still noted, once
+/// each. Input: the copy's folder. Output: each kind with its name, or the copy's failure.
+fn replaced_profiles(replaced: &Path) -> Result<Vec<(&'static str, String)>, EngineError> {
+    use super::trash::{GENERATED_HOME, NATIVE_SIGN_IN};
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let copy = Connection::open_with_flags(replaced.join(DATABASE), flags).map_err(error)?;
+    let mut found = super::accounts::profile_files(&copy)?;
+    if has_table(&copy, "file_trash")? {
+        let noted = copy
+            .prepare("SELECT kind, name FROM file_trash WHERE kind IN (?1, ?2) LIMIT ?3")
+            .map_err(error)?
+            .query_map(
+                rusqlite::params![GENERATED_HOME, NATIVE_SIGN_IN, SWEEP_NOTES_MAX],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        for (kind, name) in noted {
+            let kind = if kind == GENERATED_HOME {
+                GENERATED_HOME
+            } else {
+                NATIVE_SIGN_IN
+            };
+            found.push((kind, name));
+        }
+    }
+    found.sort();
+    found.dedup();
+    Ok(found)
+}
+
+/// The most trash notes a restore's sweep reads from the replaced copy.
+const SWEEP_NOTES_MAX: i64 = 10_000;
 
 /// Whether a restored app plugin binding holds a plugin key by its file name; a database
 /// with no binding table, as every 2.4 copy, holds none. Inputs: the restored connection

@@ -504,6 +504,46 @@ fn encode(record: &Record) -> Result<Vec<u8>, EngineError> {
     Ok(body)
 }
 
+/// The generated SDK homes and native sign-ins the saved accounts of a database name, for a
+/// restore's sweep of what only the replaced 2.5 data held (V250-L5-N5B), read from at most
+/// [`KEY_SWEEP_MAX`] rows; a row that does not decode names nothing. Input: the database.
+/// Output: each trash kind with its reference, none without an `accounts` table.
+#[cfg(unix)]
+pub(crate) fn profile_files(db: &Connection) -> Result<Vec<(&'static str, String)>, EngineError> {
+    if !registry_exists(db)? {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(KEY_SWEEP_MAX).map_err(error)?;
+    let rows = db
+        .prepare("SELECT id, body FROM accounts ORDER BY seq LIMIT ?1")
+        .map_err(error)?
+        .query_map([limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    assert!(rows.len() <= KEY_SWEEP_MAX);
+    let mut files = Vec::new();
+    for (id, body) in rows {
+        let Ok(record) = decode(&id, &body) else {
+            continue;
+        };
+        files.extend(
+            account_files(&record.connection.auth)
+                .into_iter()
+                .filter(|(kind, _)| {
+                    matches!(
+                        *kind,
+                        super::trash::GENERATED_HOME | super::trash::NATIVE_SIGN_IN
+                    )
+                })
+                .map(|(kind, name)| (kind, name.to_owned())),
+        );
+    }
+    Ok(files)
+}
+
 fn decode(id: &str, body: &[u8]) -> Result<Record, EngineError> {
     let record: Record =
         serde_json::from_slice(body).map_err(|_| error("account_record_invalid"))?;
