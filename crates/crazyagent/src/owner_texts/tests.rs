@@ -12,7 +12,7 @@ fn store() -> Connection {
 
 /// The number of rows in a text table. Inputs: the store and the table. Output: the count.
 fn count(db: &Connection, table: &str) -> i64 {
-    assert!(table.starts_with("owner_text"));
+    assert!(table.starts_with("kept_text"));
     db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
         row.get(0)
     })
@@ -29,7 +29,7 @@ fn a_shared_text_survives_until_its_last_holder_is_released() {
     let first = keep(&tx, "landing_change_sets/c1/prompt_line", None, prompt).unwrap();
     let second = keep(&tx, "landing_change_sets/c2/prompt_line", None, prompt).unwrap();
     assert_eq!(first, second, "one text, one digest");
-    assert_eq!(count(&tx, "owner_texts"), 1);
+    assert_eq!(count(&tx, "kept_texts"), 1);
     release(&tx, "landing_change_sets/c1/prompt_line").unwrap();
     assert_eq!(
         text(&tx, &first).unwrap().as_deref(),
@@ -39,7 +39,7 @@ fn a_shared_text_survives_until_its_last_holder_is_released() {
     release(&tx, "landing_change_sets/c2/prompt_line").unwrap();
     assert_eq!(text(&tx, &first).unwrap(), None);
     assert_eq!(
-        (count(&tx, "owner_texts"), count(&tx, "owner_text_refs")),
+        (count(&tx, "kept_texts"), count(&tx, "kept_text_refs")),
         (0, 0)
     );
     release(&tx, "landing_change_sets/c2/prompt_line").unwrap();
@@ -61,7 +61,7 @@ fn a_holder_kept_again_with_another_text_releases_the_old_one() {
     );
     assert_eq!(keep(&tx, HOLDER, None, b"second summary").unwrap(), new);
     assert_eq!(
-        (count(&tx, "owner_texts"), count(&tx, "owner_text_refs")),
+        (count(&tx, "kept_texts"), count(&tx, "kept_text_refs")),
         (1, 1)
     );
 }
@@ -80,9 +80,9 @@ fn a_text_over_its_bound_is_refused_and_nothing_is_written() {
     initialize(&tx).unwrap();
     assert_eq!(
         [
-            count(&tx, "owner_texts"),
-            count(&tx, "owner_text_refs"),
-            count(&tx, "owner_text_key")
+            count(&tx, "kept_texts"),
+            count(&tx, "kept_text_refs"),
+            count(&tx, "kept_text_key")
         ],
         [0, 0, 0]
     );
@@ -187,7 +187,7 @@ fn a_holder_key_that_is_not_engine_built_is_refused() {
         );
     }
     initialize(&tx).unwrap();
-    assert_eq!(count(&tx, "owner_texts"), 0);
+    assert_eq!(count(&tx, "kept_texts"), 0);
     let at = "h".repeat(HOLDER_BYTES_MAX);
     keep(&tx, &at, None, b"text").unwrap();
 }
@@ -206,10 +206,7 @@ fn a_project_clear_takes_its_texts_and_keeps_a_shared_one() {
     let wide = keep(&tx, "user_profile/owner/bio", None, b"p1 only").unwrap();
     assert_eq!(own, wide, "one text, one digest across holders");
     let cleared = tx
-        .execute(
-            "DELETE FROM owner_text_refs WHERE project=?1",
-            [p1.as_str()],
-        )
+        .execute("DELETE FROM kept_text_refs WHERE project=?1", [p1.as_str()])
         .unwrap();
     assert_eq!(cleared, 2);
     assert!(text(&tx, &shared).unwrap().is_some(), "p2 still holds it");
@@ -219,7 +216,7 @@ fn a_project_clear_takes_its_texts_and_keeps_a_shared_one() {
     );
     release(&tx, "user_profile/owner/bio").unwrap();
     assert_eq!(text(&tx, &own).unwrap(), None);
-    assert_eq!(count(&tx, "owner_text_refs"), 1);
+    assert_eq!(count(&tx, "kept_text_refs"), 1);
 }
 
 /// V250-OWNER-TEXT r2 (#347 F1): no kept-text table, index or trigger takes a name the owner

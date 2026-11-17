@@ -15,19 +15,19 @@ const KEY_BYTES: usize = 32;
 const BLOCK_BYTES: usize = 64;
 const _: () = assert!(KEY_BYTES <= BLOCK_BYTES);
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS owner_texts
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS kept_texts
     (digest TEXT PRIMARY KEY, text BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS owner_text_refs
+CREATE TABLE IF NOT EXISTS kept_text_refs
     (holder TEXT PRIMARY KEY, digest TEXT NOT NULL, project TEXT);
-CREATE INDEX IF NOT EXISTS owner_text_refs_digest ON owner_text_refs(digest);
-CREATE INDEX IF NOT EXISTS owner_text_refs_project ON owner_text_refs(project);
-CREATE TRIGGER IF NOT EXISTS owner_text_refs_deleted AFTER DELETE ON owner_text_refs
-BEGIN DELETE FROM owner_texts WHERE digest=OLD.digest
-    AND NOT EXISTS (SELECT 1 FROM owner_text_refs WHERE digest=OLD.digest); END;
-CREATE TRIGGER IF NOT EXISTS owner_text_refs_moved AFTER UPDATE OF digest ON owner_text_refs
-BEGIN DELETE FROM owner_texts WHERE digest=OLD.digest
-    AND NOT EXISTS (SELECT 1 FROM owner_text_refs WHERE digest=OLD.digest); END;
-CREATE TABLE IF NOT EXISTS owner_text_key
+CREATE INDEX IF NOT EXISTS kept_text_refs_digest ON kept_text_refs(digest);
+CREATE INDEX IF NOT EXISTS kept_text_refs_project ON kept_text_refs(project);
+CREATE TRIGGER IF NOT EXISTS kept_text_refs_deleted AFTER DELETE ON kept_text_refs
+BEGIN DELETE FROM kept_texts WHERE digest=OLD.digest
+    AND NOT EXISTS (SELECT 1 FROM kept_text_refs WHERE digest=OLD.digest); END;
+CREATE TRIGGER IF NOT EXISTS kept_text_refs_moved AFTER UPDATE OF digest ON kept_text_refs
+BEGIN DELETE FROM kept_texts WHERE digest=OLD.digest
+    AND NOT EXISTS (SELECT 1 FROM kept_text_refs WHERE digest=OLD.digest); END;
+CREATE TABLE IF NOT EXISTS kept_text_key
     (id INTEGER PRIMARY KEY CHECK(id=1), key BLOB NOT NULL);";
 
 /// A kept text's digest as an event body carries it: 64 lowercase hex digits, decoded only
@@ -88,10 +88,10 @@ fn holder_ok(holder: &str) -> bool {
         && holder.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
-/// Creates the text, holder and key tables when missing, none of them on the state log. The
-/// holder table has a `project` column, so a project's generic clear deletes its holders,
-/// and its triggers delete a text once no holder has its digest. Input: the connection.
-/// Output: Ok, or the storage error.
+/// Creates the text, holder and key tables when missing, none on the state log and all named
+/// `kept_text*`, outside the owner schema check's `owner_*`. The holder table's `project`
+/// column lets a project's generic clear delete its holders, and its triggers delete a text
+/// once no holder has its digest. Input: the connection. Output: Ok, or the storage error.
 pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(error)
 }
@@ -101,7 +101,7 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
 /// bytes can be read, or `owner_text_key_invalid` for a stored key of another length.
 fn store_key(db: &Connection) -> Result<[u8; KEY_BYTES], EngineError> {
     let stored: Option<Vec<u8>> = db
-        .query_row("SELECT key FROM owner_text_key WHERE id=1", [], |row| {
+        .query_row("SELECT key FROM kept_text_key WHERE id=1", [], |row| {
             row.get(0)
         })
         .optional()
@@ -112,7 +112,7 @@ fn store_key(db: &Connection) -> Result<[u8; KEY_BYTES], EngineError> {
             let mut fresh = [0u8; KEY_BYTES];
             getrandom::fill(&mut fresh).map_err(|_| error("owner_text_key_unavailable"))?;
             db.execute(
-                "INSERT INTO owner_text_key VALUES (1, ?1)",
+                "INSERT INTO kept_text_key VALUES (1, ?1)",
                 params![&fresh[..]],
             )
             .map_err(error)?;
@@ -168,19 +168,19 @@ pub fn keep(
     initialize(db)?;
     let digest = keyed(&store_key(db)?, text);
     db.execute(
-        "INSERT OR IGNORE INTO owner_texts VALUES (?1, ?2)",
+        "INSERT OR IGNORE INTO kept_texts VALUES (?1, ?2)",
         params![digest.as_str(), text],
     )
     .map_err(error)?;
     db.execute(
-        "INSERT INTO owner_text_refs VALUES (?1, ?2, ?3) ON CONFLICT(holder)
+        "INSERT INTO kept_text_refs VALUES (?1, ?2, ?3) ON CONFLICT(holder)
          DO UPDATE SET digest=excluded.digest, project=excluded.project",
         params![holder, digest.as_str(), project.map(ProjectId::as_str)],
     )
     .map_err(error)?;
     let stored: i64 = db
         .query_row(
-            "SELECT length(text) FROM owner_texts WHERE digest=?1",
+            "SELECT length(text) FROM kept_texts WHERE digest=?1",
             [digest.as_str()],
             |row| row.get(0),
         )
@@ -207,23 +207,42 @@ pub fn release(db: &Connection, holder: &str) -> Result<(), EngineError> {
     }
     initialize(db)?;
     let removed = db
-        .execute("DELETE FROM owner_text_refs WHERE holder=?1", [holder])
+        .execute("DELETE FROM kept_text_refs WHERE holder=?1", [holder])
         .map_err(error)?;
     assert!(removed <= 1, "a holder key names one row");
     Ok(())
 }
 
-/// The text kept under a digest. Inputs: the connection and the digest. Output: the text,
-/// none when no text is kept under it, or the storage error.
+/// The text kept under a digest. Reads only, so a read-only connection works and a read
+/// writes no schema: before any text is kept the tables are missing and it gives none.
+/// Inputs: the connection and the digest. Output: the text, none when no text is kept under
+/// it, or the storage error.
 pub fn text(db: &Connection, digest: &TextDigest) -> Result<Option<Vec<u8>>, EngineError> {
-    initialize(db)?;
-    db.query_row(
-        "SELECT text FROM owner_texts WHERE digest=?1",
-        [digest.as_str()],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(error)
+    let made: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='kept_texts')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !made {
+        return Ok(None);
+    }
+    let found: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT text FROM kept_texts WHERE digest=?1",
+            [digest.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    assert!(
+        found
+            .as_ref()
+            .is_none_or(|bytes| bytes.len() <= TEXT_BYTES_MAX),
+        "a kept text is in its bound"
+    );
+    Ok(found)
 }
 
 /// The text replay writes for a digest: the kept text, or empty bytes named on stderr
