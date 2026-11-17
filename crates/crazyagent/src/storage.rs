@@ -20,7 +20,7 @@ pub(crate) mod harness_groups;
 mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]
-mod migrations;
+pub(crate) mod migrations;
 #[cfg(all(test, unix))]
 pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
