@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { knownError, listAccounts, nextGeneration, oneSelection, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
+import { harnessCatalog, knownError, listAccounts, nextGeneration, oneSelection, plainError, removeAccount, signInRecord, type AccountView, type HarnessEntry, type Result } from "../../api";
 import { cancelNativeAuth, logoutNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode, withCode } from "../../engine-client";
 import {
   CHECK_SIGN_IN, nativeAuthAllowed, nativeAuthFailureCode, nativeAuthRunningAccount, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth,
   signInMethodFor, signInWay, signInWayUnavailable, validateClaudeAuthCode,
   type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView, type SignInWay,
 } from "../../native-auth";
-import { harnessVersions, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, updateHarness, type HarnessVersions, type UpdateMode } from "../../api-harness-updates";
+import { harnessVersions, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, runningLine, updateHarness, type HarnessVersions, type UpdateMode } from "../../api-harness-updates";
 import { useAppSession } from "../../state";
 import { Button, Icon, Notice, SecretField, thisComputer } from "../../ui";
 import { HarnessFile, lastLine, refusalLine, UpdateConfirm } from "./harnesses";
@@ -454,17 +454,19 @@ export function updateOffer(versions: HarnessVersions | null, mode: UpdateMode |
 }
 
 /** The panel for a sign-in refused because the harness is too old: the line, Update with that
- * harness's own update where the settings allow it, else how to update it, and Check again.
- * Pure on its props. Inputs: the harness name, the line, the versions row and update mode (null
- * until read), whether the update is starting, and the two actions. Output: the panel. */
-export function TooOldView({ name, line, versions, mode, pending, onUpdate, onCheck, after }: {
+ * harness's own update where the settings allow it, else how to update it, and Check again. A
+ * running update held behind another harness's job names that harness. Pure on its props.
+ * Inputs: the harness name, the line, the versions row and update mode (null until read),
+ * whether the update is starting, the catalog's names and the two actions. Output: the panel. */
+export function TooOldView({ name, line, versions, mode, pending, onUpdate, onCheck, after, nameOf = (id) => id }: {
   name: string; line: string; versions: HarnessVersions | null; mode: UpdateMode | null; pending: boolean;
-  onUpdate: () => void; onCheck: () => void; after?: string | null;
+  onUpdate: () => void; onCheck: () => void; after?: string | null; nameOf?: (id: string) => string;
 }) {
   const offer = updateOffer(versions, mode);
   return <div className="stack-small">
     <Notice tone="danger" alert>{line}</Notice>
-    {offer.kind === "running" && <p className="live" role="status"><Icon name="loader-circle" spin />{`Updating ${name}...`}</p>}
+    {offer.kind === "running" && <p className="live" role="status"><Icon name="loader-circle" spin />
+      {versions?.waiting ? runningLine(versions, false, nameOf) : `Updating ${name}...`}</p>}
     {offer.kind === "command" && <>
       <p>{`To update ${name}, run this in Terminal:`}</p>
       <pre className="mono">{offer.command}</pre>
@@ -494,6 +496,7 @@ export function TooOldPanel({ provider, onCheck }: { provider: SubscriptionProvi
   const [pending, setPending] = useState(false);
   const [updated, setUpdated] = useState(false);
   const [problem, setProblem] = useState<string>();
+  const [names, setNames] = useState<readonly HarnessEntry[]>([]);
   const alive = useRef(true);
   const take = useCallback((read: Result<HarnessVersions>) => {
     if (alive.current && read.kind === "ok") setVersions(read.value);
@@ -503,6 +506,7 @@ export function TooOldPanel({ provider, onCheck }: { provider: SubscriptionProvi
     alive.current = true;
     void harnessVersions(id, false).then(take);
     void loadHarnessUpdateSettings().then((read) => { if (alive.current && read.kind === "ok") setMode(read.value.mode); });
+    void harnessCatalog().then((read) => { if (alive.current && read.kind === "ok") setNames(read.value); });
     return () => { alive.current = false; };
   }, [id, take]);
   const ask = async () => {
@@ -523,7 +527,8 @@ export function TooOldPanel({ provider, onCheck }: { provider: SubscriptionProvi
   };
   return <>
     <TooOldView name={name} line={signInFailure(TOO_OLD, provider, undefined, versions).text} versions={versions} mode={mode} pending={pending}
-      after={updated && versions ? lastLine(versions, name) : null} onUpdate={() => void ask()} onCheck={onCheck} />
+      after={updated && versions ? lastLine(versions, name) : null} onUpdate={() => void ask()} onCheck={onCheck}
+      nameOf={(other) => names.find((entry) => entry.id === other)?.name ?? other} />
     {problem && <Notice tone="danger" alert>{problem}</Notice>}
     {versions?.command && <UpdateConfirm versions={versions} name={name} open={asking} pending={pending}
       onConfirm={() => void start()} onCancel={() => setAsking(false)} />}
