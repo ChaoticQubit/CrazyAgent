@@ -11355,9 +11355,10 @@ fn framing(
 }
 
 /// Tells a master that is not live how to wake a finished sub-agent, with its `wake` tool
-/// or, without team tools, a `crazyagent-task` block naming it (L6), and which ones it can
-/// wake (WK-R5). Input: the finished sub-agents' lines, newest first, and whether it has
-/// the team tools. Output: the text, or nothing when no sub-agent finished.
+/// or, without team tools, a `crazyagent-task` block naming it (L6) with what its task
+/// holds (V243-MASTER-WAKE-TEXT-HANDOFF), and which ones it can wake (WK-R5). Input: the
+/// finished sub-agents' lines, newest first, and whether it has the team tools. Output:
+/// the text, or nothing when no sub-agent finished.
 fn wake_text(finished: &[String], team_tool: bool) -> String {
     if finished.is_empty() {
         return String::new();
@@ -11369,8 +11370,9 @@ fn wake_text(finished: &[String], team_tool: bool) -> String {
         )
     } else {
         format!(
-            "put this block on lines of its own in your reply:\n{}\n{{\"wake\": \"<its name or Sub-agent number>\", \"task\": \"<the text>\"}}\n```",
-            tool::BLOCK_FENCE
+            "put this block on lines of its own in your reply:\n{}\n{{\"wake\": \"<its name or Sub-agent number>\", \"task\": \"<the text>\"}}\n```\nEach task: {}",
+            tool::BLOCK_FENCE,
+            tool::HAND_OFF_TASK
         )
     };
     format!(
