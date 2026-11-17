@@ -99,11 +99,10 @@ pub struct Status {
     pub pid: Option<u32>,
 }
 
-/// Builds the PATH the service gives the engine for its harness lookup: the absolute
-/// entries of the installing shell's PATH, then `~/.local/bin` and the usual system
-/// folders, each once. Folders inside the running AppImage's mount folder `appdir` and
-/// folders [`changeable_by_others`] names are left out, since the service outlives the
-/// mount and must not look harnesses up where another user can plant one.
+/// Builds the PATH the service gives the engine for its harness lookup: the absolute entries
+/// of the installing shell's PATH, then `~/.local/bin` and the usual system folders, each
+/// once, leaving out folders in the AppImage mount `appdir`, ones [`changeable_by_others`]
+/// names and, on Windows, missing ones, where a drive added later could plant a harness.
 /// Inputs: the current PATH, home folder and mount folder. Output: the joined PATH.
 pub fn service_path(
     current: Option<&OsStr>,
@@ -127,6 +126,7 @@ pub fn service_path(
             && !appdir
                 .as_ref()
                 .is_some_and(|appdir| canonical(&folder).starts_with(appdir))
+            && (!cfg!(windows) || folder.is_dir())
             && changeable_by_others(&folder).is_none()
         {
             folders.push(folder);
