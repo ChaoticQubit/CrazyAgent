@@ -135,34 +135,64 @@ const PORT_HOSTS: [&str; 4] = ["127.0.0.1:", "localhost:", "0.0.0.0:", "[::1]:"]
 /// The shortest lowercase hex run masked as an id: engine ids are 24, 32 or 64 characters.
 const HEX_ID_MIN: usize = 16;
 
-/// The numbering state of one capture's normalisation: the system temp folder in its raw and
-/// resolved spellings, longest first, and the ids and temp entries seen so far, so equal values
-/// get one placeholder number in order of first appearance.
+/// The numbering state of one capture's normalisation: every spelling of the temp folders
+/// (`$TMPDIR`, /private/tmp, /tmp) with the resolved folder it names, longest first, the owner
+/// home's spellings, and the ids and temp entries seen so far, so equal values get one
+/// placeholder number in order of first appearance.
 #[derive(Clone)]
 struct Masks {
-    roots: Vec<String>,
+    temp_spellings: Vec<String>,
+    temp_groups: Vec<String>,
+    homes: Vec<String>,
     ids: Vec<String>,
     paths: Vec<String>,
 }
 
 impl Masks {
-    /// Starts a capture's numbering with the system temp folder's spellings.
-    /// Output: masks with no id or path numbered yet.
+    /// Starts a capture's numbering with the temp folders and the owner home from the passwd
+    /// entry, the source the sandbox reads. Output: masks with no id or path numbered yet.
     fn new() -> Self {
-        let raw = std::env::temp_dir();
-        let mut roots = vec![raw.to_string_lossy().trim_end_matches('/').to_owned()];
-        if let Ok(real) = raw.canonicalize() {
-            roots.push(real.to_string_lossy().trim_end_matches('/').to_owned());
+        let trimmed = |path: &Path| path.to_string_lossy().trim_end_matches('/').to_owned();
+        let mut roots: Vec<(String, String)> = Vec::new();
+        for root in [
+            std::env::temp_dir(),
+            PathBuf::from("/private/tmp"),
+            PathBuf::from("/tmp"),
+        ] {
+            let Ok(real) = root.canonicalize() else {
+                continue;
+            };
+            for spelling in [trimmed(&root), trimmed(&real)] {
+                if !roots.iter().any(|(seen, _)| *seen == spelling) {
+                    roots.push((spelling, trimmed(&real)));
+                }
+            }
         }
-        roots.sort_by_key(|root| std::cmp::Reverse(root.len()));
-        roots.dedup();
+        roots.sort_by_key(|(spelling, _)| std::cmp::Reverse(spelling.len()));
+        let owner = nix::unistd::User::from_uid(nix::unistd::getuid())
+            .ok()
+            .flatten()
+            .expect("the passwd entry names this user's home");
+        let real = owner
+            .dir
+            .canonicalize()
+            .unwrap_or_else(|_| owner.dir.clone());
+        let mut homes = vec![trimmed(&owner.dir), trimmed(&real)];
+        homes.sort_by_key(|home| std::cmp::Reverse(home.len()));
+        homes.dedup();
+        assert!(!roots.is_empty());
+        let absolute = |spelling: &String| spelling.len() > 1 && spelling.starts_with('/');
         assert!(
             roots
                 .iter()
-                .all(|root| root.len() > 1 && root.starts_with('/'))
+                .all(|(spelling, group)| absolute(spelling) && absolute(group))
         );
+        assert!(homes.iter().all(absolute));
+        let (temp_spellings, temp_groups) = roots.into_iter().unzip();
         Masks {
-            roots,
+            temp_spellings,
+            temp_groups,
+            homes,
             ids: Vec::new(),
             paths: Vec::new(),
         }
@@ -201,12 +231,23 @@ impl Masks {
         }
     }
 
-    /// Masks one string: line endings to LF, then temp paths, RFC 3339 times, ids and ports.
-    /// Input: the raw string. Output: the masked string.
+    /// Masks one string: line endings to LF, then temp paths, the owner home, RFC 3339 times,
+    /// ids, ports and tmux pane ids. Input: the raw string. Output: the masked string.
     fn text(&mut self, raw: &str) -> String {
         let lf = raw.replace("\r\n", "\n").replace('\r', "\n");
-        let pathed = self.temp_paths(&lf);
-        let timed = replace_matches(&pathed, |rest| {
+        let groups = &self.temp_groups;
+        let paths = &mut self.paths;
+        let pathed = replace_folders(&lf, &self.temp_spellings, |which, after| {
+            let tail = after.strip_prefix('/').unwrap_or("");
+            let entry_len = tail.find(|c: char| !path_char(c)).unwrap_or(tail.len());
+            if entry_len == 0 {
+                return (0, "<temp>".to_owned());
+            }
+            let entry = format!("{}/{}", groups[which], &tail[..entry_len]);
+            (1 + entry_len, format!("<path-{}>", number(paths, &entry)))
+        });
+        let homed = replace_folders(&pathed, &self.homes, |_, _| (0, "<owner-home>".to_owned()));
+        let timed = replace_matches(&homed, |rest| {
             rfc3339_len(rest.as_bytes()).map(|len| (len, "<t>".to_owned()))
         });
         let ids = &mut self.ids;
@@ -219,49 +260,61 @@ impl Masks {
             let number = number(ids, &rest[..len].to_ascii_lowercase());
             Some((len, format!("<id-{number}>")))
         });
-        replace_matches(&named, port_len)
+        let ported = replace_matches(&named, port_len);
+        replace_matches(&ported, pane_len)
     }
+}
 
-    /// Masks every temp path in a string to `<path-N>` plus its tail below the temp entry, so a
-    /// rule on a parent folder still reads differently. Input: the string. Output: the string
-    /// with each temp root and its first entry replaced.
-    fn temp_paths(&mut self, text: &str) -> String {
-        let mut out = String::with_capacity(text.len());
-        let mut index = 0;
-        'scan: while index < text.len() {
-            let rest = &text[index..];
-            let boundary = out
-                .chars()
-                .next_back()
-                .is_none_or(|before| !path_char(before));
-            for root in &self.roots {
-                let Some(after) = rest.strip_prefix(root.as_str()) else {
-                    continue;
-                };
-                if !boundary || after.chars().next().is_some_and(path_char) {
-                    continue;
-                }
-                let tail = after.strip_prefix('/').unwrap_or("");
-                let entry_len = tail.find(|c: char| !path_char(c)).unwrap_or(tail.len());
-                let used = if entry_len > 0 {
-                    root.len() + 1 + entry_len
-                } else {
-                    root.len()
-                };
-                let number = number(&mut self.paths, &tail[..entry_len]);
-                out.push_str(&format!("<path-{number}>"));
-                index += used;
-                continue 'scan;
+/// Replaces each folder spelling that starts and ends at a path boundary. Inputs: the string,
+/// the spellings (longest first) and a mask that gets the spelling's index and the text after
+/// it and gives how many more bytes it takes and the placeholder. Output: the masked string.
+fn replace_folders(
+    text: &str,
+    folders: &[String],
+    mut mask: impl FnMut(usize, &str) -> (usize, String),
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    'scan: while index < text.len() {
+        let rest = &text[index..];
+        let boundary = out
+            .chars()
+            .next_back()
+            .is_none_or(|before| !path_char(before));
+        for (which, folder) in folders.iter().enumerate() {
+            let Some(after) = rest.strip_prefix(folder.as_str()) else {
+                continue;
+            };
+            if !boundary || after.chars().next().is_some_and(path_char) {
+                continue;
             }
-            let next = rest
-                .chars()
-                .next()
-                .expect("index is below the length on a char boundary");
-            out.push(next);
-            index += next.len_utf8();
+            let (extra, placeholder) = mask(which, after);
+            assert!(extra <= after.len() && after.is_char_boundary(extra));
+            out.push_str(&placeholder);
+            index += folder.len() + extra;
+            continue 'scan;
         }
-        out
+        let next = rest
+            .chars()
+            .next()
+            .expect("index is below the length on a char boundary");
+        out.push(next);
+        index += next.len_utf8();
     }
+    out
+}
+
+/// Reads a tmux pane id, `%` and 1 to 6 digits, at the start of a string.
+/// Input: the rest of the string. Output: the matched length and `<pane>`, or none.
+fn pane_len(rest: &str) -> Option<(usize, String)> {
+    let digits = rest
+        .strip_prefix('%')?
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    let after = rest.as_bytes().get(1 + digits);
+    ((1..=6).contains(&digits) && !after.is_some_and(u8::is_ascii_alphanumeric))
+        .then(|| (1 + digits, "<pane>".to_owned()))
 }
 
 /// Names the placeholder an integer field gets from its key: `*_at` and `*_ms` are times,
@@ -459,8 +512,17 @@ fn has_word(text: &str, word: &str) -> bool {
 /// Inputs: the text, the home folder and the user name when known. Output: nothing when the
 /// text is clean, else which kind of private value it holds (never the value itself).
 fn refuse_private(text: &str, home: Option<&str>, user: Option<&str>) -> Result<(), String> {
-    if text.contains("/Users/") || text.contains("/home/") {
-        return Err("holds a user path".to_owned());
+    let bytes = text.as_bytes();
+    let path_start = |start: usize| {
+        start == 0 || !(path_char(char::from(bytes[start - 1])) || bytes[start - 1] == b'>')
+    };
+    for user_folder in ["/Users/", "/home/"] {
+        if text
+            .match_indices(user_folder)
+            .any(|(start, _)| path_start(start))
+        {
+            return Err("holds a user path".to_owned());
+        }
     }
     if home.is_some_and(|home| home.len() > 1 && text.contains(home)) {
         return Err("holds the home folder".to_owned());
@@ -468,7 +530,6 @@ fn refuse_private(text: &str, home: Option<&str>, user: Option<&str>) -> Result<
     if user.is_some_and(|user| user.len() >= 3 && has_word(text, user)) {
         return Err("holds the user name".to_owned());
     }
-    let bytes = text.as_bytes();
     for prefix in TOKEN_PREFIXES {
         let starts_word = |start: usize| {
             start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
@@ -684,6 +745,31 @@ fn a_sandbox_rule_widened_to_its_parent_fails_after_normalisation() {
         let text = normalise(&rule(&wider)).unwrap();
         assert!(compare(golden.as_bytes(), &text).is_err(), "{text}");
     }
+    let bare = normalise(&rule(scratch.path())).unwrap();
+    let temp = std::env::temp_dir();
+    let whole = Path::new(temp.to_str().unwrap().trim_end_matches('/'));
+    let widened = normalise(&rule(whole)).unwrap();
+    assert!(widened.contains("\"<temp>\""), "{widened}");
+    assert!(compare(bare.as_bytes(), &widened).is_err(), "{widened}");
+}
+
+#[test]
+fn engine_temp_paths_the_owner_home_and_pane_ids_are_masked() {
+    let owner = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .unwrap()
+        .unwrap();
+    let capture = json!({
+        "tmp_whole": "/private/tmp",
+        "short": "/tmp/ca-b18-home-Ab12Cd/projects",
+        "pane": "%12",
+        "engine": "/private/tmp/ca-b18-home-Ab12Cd/projects/app",
+        "deny": [owner.dir.join(".ssh").to_str().unwrap()],
+        "percent": "50%12 and 100%",
+    });
+    assert_eq!(
+        normalise(&capture).unwrap(),
+        "{\n  \"deny\": [\n    \"<owner-home>/.ssh\"\n  ],\n  \"engine\": \"<path-1>/projects/app\",\n  \"pane\": \"<pane>\",\n  \"percent\": \"50%12 and 100%\",\n  \"short\": \"<path-1>/projects\",\n  \"tmp_whole\": \"<temp>\"\n}\n"
+    );
 }
 
 #[test]
@@ -695,6 +781,14 @@ fn the_golden_writer_writes_only_a_missing_file_and_refuses_private_text() {
     assert_eq!(write_missing(&path, "{\"x\": 1}\n"), Ok(false));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}\n");
     let names = (Some("/Users/owner"), Some("owner"));
+    assert_eq!(
+        refuse_private("\"<path-1>/home/.claude\"", names.0, names.1),
+        Ok(())
+    );
+    assert_eq!(
+        refuse_private("\"<owner-home>/.ssh\"", names.0, names.1),
+        Ok(())
+    );
     assert_eq!(
         refuse_private("\"<path-1>/projects/app\"", names.0, names.1),
         Ok(())
