@@ -32,7 +32,6 @@
     "src/style.css": 7
   },
   "fontSize": {
-    "src/screens/changes/changes.css": 1,
     "src/screens/demo/demo.css": 2,
     "src/screens/intake/intake.css": 2,
     "src/screens/metrics/metrics.css": 18,
