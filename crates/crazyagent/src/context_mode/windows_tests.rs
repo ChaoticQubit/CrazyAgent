@@ -356,6 +356,24 @@ fn shown(output: &std::process::Output) -> String {
     )
 }
 
+/// What the boundary was asked to grant, for a failed assertion: npm's folder with its access
+/// list as `icacls` prints it, and the boundary profile npm's step wrote beside the staging
+/// folders. Inputs: npm's folder and the staging folders' parent. Output: the text.
+fn granted(bin: &Path, npm: &Path) -> String {
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let listed = crate::spawn_gate::collected(
+        std::process::Command::new(system.join("icacls.exe")).arg(bin),
+    )
+    .unwrap();
+    let profile =
+        fs::read_to_string(npm.join(format!("{PACKAGE}@{VERSION}.sb"))).unwrap_or_default();
+    format!(
+        "bin {}\nicacls: {}\nprofile: {profile}",
+        bin.display(),
+        String::from_utf8_lossy(&listed.stdout)
+    )
+}
+
 /// WIN-1 (DEC-193): inside its AppContainer boundary the runner's own npm installs a local
 /// package into a fresh staging folder once its `node_modules` is there, so only the pin
 /// refuses the unpinned tarball, by hand and through `fill`. The same install into a staging
@@ -374,7 +392,12 @@ fn npm_installs_into_a_fresh_staging_folder_through_the_node_modules_made_first(
     let made = staging_folder(&npm, &prefix).unwrap();
     fs::create_dir(made.join(MODULES)).unwrap();
     let installed = install_output(&case, &made, &work, &bin, &tarball);
-    assert!(installed.status.success(), "{}", shown(&installed));
+    assert!(
+        installed.status.success(),
+        "{}\n{}",
+        shown(&installed),
+        granted(&bin, &npm)
+    );
     assert_eq!(
         checked(&made, VERSION),
         Err("context_mode_integrity_mismatch")
