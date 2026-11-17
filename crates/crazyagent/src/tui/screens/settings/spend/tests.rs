@@ -96,7 +96,10 @@ fn a_usage_read_naming_another_free_resets_source_is_a_source_change() {
         )
     };
     let mut spend = Spend::new();
-    assert!(!spend.take_view(with(ResetsSource::Off)), "the first read is no change");
+    assert!(
+        !spend.take_view(with(ResetsSource::Off)),
+        "the first read is no change"
+    );
     assert!(!spend.take_view(with(ResetsSource::Off)));
     assert!(spend.take_view(with(ResetsSource::AsClaudeCode)));
     assert!(!spend.take_view(with(ResetsSource::AsClaudeCode)));

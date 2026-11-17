@@ -259,6 +259,7 @@ pub struct Usage {
     endpoints: (url::Url, url::Url, bool),
     polled_ms: Option<i64>,
     detail_ms: Option<i64>,
+    detail_source: Option<spend::ResetsSource>,
     claude_version: Option<(ExecutableStamp, Option<String>)>,
     polls: u64,
     doing: UsageStep,
@@ -300,6 +301,7 @@ impl Usage {
             ),
             polled_ms: None,
             detail_ms: None,
+            detail_source: None,
             claude_version: None,
             polls: 0,
             doing: UsageStep::Poll,
@@ -367,8 +369,10 @@ impl Usage {
     /// since the last poll or the owner asked to refresh since, else makes only the Claude
     /// detail reads an open Pools page asks for when they are due, then counts every live or
     /// lately stopped agent's and recent research run's records, so a run's own limit
-    /// readings meet a poll as fresh as the step allows. Output: done, or the store's
-    /// failure.
+    /// readings meet a poll as fresh as the step allows. Don't read makes no detail read and
+    /// stamps none, and a source other than the last step's makes them due at once, so a
+    /// pick shows on the next step (V243-RESETS-SETTING-REFRESH). Output: done, or the
+    /// store's failure.
     pub fn step(&mut self, now_ms: i64) -> Result<(), EngineError> {
         self.doing = UsageStep::Poll;
         let access = (self.access)().unwrap_or_default();
@@ -377,7 +381,12 @@ impl Usage {
         if source == spend::ResetsSource::Off {
             forget_claude_resets(&self.db, &access)?;
         }
-        let detail = extras::detail_due(&self.db, self.detail_ms, now_ms)?;
+        if self.detail_source.is_some_and(|seen| seen != source) {
+            self.detail_ms = None;
+        }
+        self.detail_source = Some(source);
+        let detail = source != spend::ResetsSource::Off
+            && extras::detail_due(&self.db, self.detail_ms, now_ms)?;
         match poll_plan(self.polled_ms, refresh, detail, now_ms) {
             PollPlan::Every { detail } => {
                 self.polled_ms = Some(now_ms);
@@ -391,6 +400,7 @@ impl Usage {
                 self.completed(UsageStep::Poll, now_ms)?;
             }
             PollPlan::DetailOnly => {
+                assert!(source != spend::ResetsSource::Off);
                 self.detail_ms = Some(now_ms);
                 if let Some(agent) = self.detail_user_agent(source) {
                     self.detail_all(&access, now_ms, &agent)?;

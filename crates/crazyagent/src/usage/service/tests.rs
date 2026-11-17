@@ -580,7 +580,10 @@ fn a_fresh_install_reads_dont_read_and_a_due_step_makes_no_detail_call() {
     assert_eq!(detail_agent(fresh, Some("2.1.330")), None);
     extras::request_detail(&usage.db, NOW).unwrap();
     usage.step(NOW).unwrap();
-    assert_eq!(usage.detail_ms, None, "Don't read makes no detail read, so it stamps none");
+    assert_eq!(
+        usage.detail_ms, None,
+        "Don't read makes no detail read, so it stamps none"
+    );
     assert_eq!(ran(), 0, "Don't read asks Claude Code nothing");
     let stored = SpendSettings {
         resets_source: ResetsSource::ThroughClaudeCode,
@@ -631,7 +634,11 @@ fn a_changed_claude_free_resets_source_reads_on_the_next_step() {
     };
     extras::request_detail(&usage.db, NOW).unwrap();
     usage.step(NOW).unwrap();
-    assert_eq!((ran(), usage.detail_ms), (0, None), "Don't read reads nothing");
+    assert_eq!(
+        (ran(), usage.detail_ms),
+        (0, None),
+        "Don't read reads nothing"
+    );
     pick(&usage, ResetsSource::AsClaudeCode);
     usage.step(NOW + 5_000).unwrap();
     assert_eq!(

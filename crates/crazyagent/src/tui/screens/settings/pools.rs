@@ -28,6 +28,11 @@ const MODAL_TEXT: usize = 50;
 /// reread does, so the engine's lease on them never lapses while Pools stays open. The shell
 /// shows the top screen every few seconds; only an ask this old is sent again.
 const DETAIL_ASK_EVERY_MS: i64 = 60_000;
+/// The waits after a seen change of the Claude free resets source at which Pools asks for
+/// the detail rows again, so the engine's read on its next step shows within seconds; four
+/// asks over 30 s, as the desktop's `SOURCE_REREAD_MS` (V243-RESETS-SETTING-REFRESH).
+const SOURCE_REREAD_MS: [i64; 4] = [6_000, 12_000, 20_000, 30_000];
+const _: () = assert!(SOURCE_REREAD_MS[3] < DETAIL_ASK_EVERY_MS);
 
 /// Settings, Pools: every pool with its size, readiness and the projects using
 /// it.
@@ -45,6 +50,8 @@ pub struct Pools {
     spend: Spend,
     extras: std::collections::HashMap<String, LimitExtras>,
     detail_asked_ms: Option<i64>,
+    source_seen_ms: Option<i64>,
+    source_asks: usize,
 }
 
 struct Confirm {
@@ -78,14 +85,32 @@ impl Pools {
             spend: Spend::new(),
             extras: std::collections::HashMap::new(),
             detail_asked_ms: None,
+            source_seen_ms: None,
+            source_asks: 0,
         }
+    }
+
+    /// Starts the quick detail asks after a usage read named another Claude free resets
+    /// source at `now_ms`, replacing any still running. Input: the time.
+    fn source_changed(&mut self, now_ms: i64) {
+        self.source_seen_ms = Some(now_ms);
+        self.source_asks = 0;
     }
 
     /// Asks the engine for every account's extras with the detail rows, which it reads only
     /// while Pools is open (DEC-154), unless it asked within `DETAIL_ASK_EVERY_MS`; a clock
-    /// that went back asks again. Inputs: the context and now.
+    /// that went back asks again, and so does each `SOURCE_REREAD_MS` wait since a seen
+    /// source change. Inputs: the context and now.
     fn ask_detail(&mut self, ctx: &mut Ctx, now_ms: i64) {
-        if self
+        let follow_up = self.source_seen_ms.is_some_and(|seen| {
+            SOURCE_REREAD_MS
+                .get(self.source_asks)
+                .is_some_and(|wait| now_ms.saturating_sub(seen) >= *wait)
+        });
+        if follow_up {
+            self.source_asks += 1;
+            assert!(self.source_asks <= SOURCE_REREAD_MS.len());
+        } else if self
             .detail_asked_ms
             .is_some_and(|at| at <= now_ms && now_ms - at <= DETAIL_ASK_EVERY_MS)
         {
@@ -382,6 +407,9 @@ impl Screen for Pools {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         self.spend.arrive(arrival, ctx);
+        if self.spend.take_source_change() {
+            self.source_changed(crate::tui::clock::now_ms());
+        }
         match settings_event(arrival) {
             Some(SettingsEvent::Schedule(Ok(schedule))) if self.saving.is_empty() => {
                 self.schedule = Some(schedule.clone());
