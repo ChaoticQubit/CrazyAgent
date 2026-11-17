@@ -184,9 +184,9 @@ function printBudgets(rows) {
  * verdict.json. A failed run on a quiet Mac is counted in both, the verdict comes from the good
  * runs, and a candidate that failed more runs than the base fails; a failed run the Mac got busy
  * through runs again; a side short of `KEPT_MIN` good runs is not judged. Both also judge the
- * build they time against the start to ready budget (v2.5 S1), written as `budgets` and printed
- * apart from the verdict, never changing the exit. Exits 0 pass, 1 fail, error or not judged,
- * 75 refused. */
+ * build they time against the start to ready budget (v2.5 S1), written to budgets.json after
+ * noise.json or verdict.json and printed apart from the verdict, never changing the exit. Exits
+ * 0 pass, 1 fail, error or not judged, 75 refused. */
 async function main() {
   const usage = "usage: speed-run.mjs noise|compare --base <dir> [--candidate <dir> --noise <noise.json>] --out <dir>";
   const mode = process.argv[2];
@@ -210,16 +210,18 @@ async function main() {
     return 1;
   }
   if (mode === "noise") {
-    const budgets = budgetRows([...samples.base, ...samples.candidate]);
-    const noise = { base: base.digest, shares: noiseShares(samples.base, samples.candidate), failed, budgets };
+    const noise = { base: base.digest, shares: noiseShares(samples.base, samples.candidate), failed };
     record(values.out, "noise.json", noise);
+    const budgets = budgetRows([...samples.base, ...samples.candidate]);
+    record(values.out, "budgets.json", budgets);
     printBudgets(budgets);
     return 0;
   }
   const rows = judge(samples.base, samples.candidate, shares);
   const gaps = incomplete(rows);
+  record(values.out, "verdict.json", { base: base.digest, candidate: candidate.digest, rows, incomplete: gaps, failed });
   const budgets = budgetRows(samples.candidate);
-  record(values.out, "verdict.json", { base: base.digest, candidate: candidate.digest, rows, incomplete: gaps, failed, budgets });
+  record(values.out, "budgets.json", budgets);
   for (const row of rows) {
     const medians = row.base ? `${row.base.median} -> ${row.candidate.median}` : `kept ${row.kept}`;
     console.log(`${row.status.padEnd(10)} ${row.metric} ${medians} ${(row.reasons ?? []).join("; ")}`);

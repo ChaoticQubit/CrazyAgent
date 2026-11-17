@@ -94,10 +94,29 @@ function counted(log, mark) {
   return counts;
 }
 
+/** Reads the engine's CPU time, keeping a failed read as its message, so a budget-only reading
+ * never stops the C1 walk (#239 r1 F2). Input: the run. Output: the ms, or the message. */
+function engineCpu(run) {
+  try {
+    return cpuMs(run.engine.pid);
+  } catch (error) {
+    return `CPU read failed: ${error.message}`;
+  }
+}
+
+/** The CPU ms spent between two reads, or the first failed read's message, which the budget
+ * check then refuses. Inputs: the two reads. Output: the ms, or the message. */
+function spent(before, after) {
+  if (typeof before === "string") return before;
+  if (typeof after === "string") return after;
+  return after - before;
+}
+
 /** Walks one side's page the owner's way and counts its bridge calls per scenario: the start
  * on Home, each sidebar or tab switch, and a minute idle on Home and on the project, reading the
  * engine's CPU time across each idle minute. Input: the running side. Output: `{ counts:
- * { scenario: { cmd: count } }, cpu: { idle scenario: engine CPU ms } }`. */
+ * { scenario: { cmd: count } }, cpu: { idle scenario: engine CPU ms, or a failed read's
+ * message } }`. */
 async function walk(run, evidence) {
   return withPage(async ({ evaluate, send }) => {
     const me = owner({ evaluate, send }, evidence);
@@ -120,19 +139,19 @@ async function walk(run, evidence) {
       counts[`switch:${page}`] = counted(run.log, mark);
     }
     mark = run.log.calls.length;
-    let before = cpuMs(run.engine.pid);
+    let before = engineCpu(run);
     await pause(IDLE_MS);
     counts["idle:home"] = counted(run.log, mark);
-    const cpu = { "idle:home": cpuMs(run.engine.pid) - before };
+    const cpu = { "idle:home": spent(before, engineCpu(run)) };
     const project = await evaluate(`document.querySelector(${JSON.stringify(SWITCHES[0][1])}).getAttribute("href")`);
     await me.follow(SWITCHES[0][1]);
     await usable(evaluate, project);
     await pause(SETTLE_MS);
     mark = run.log.calls.length;
-    before = cpuMs(run.engine.pid);
+    before = engineCpu(run);
     await pause(IDLE_MS);
     counts["idle:project"] = counted(run.log, mark);
-    cpu["idle:project"] = cpuMs(run.engine.pid) - before;
+    cpu["idle:project"] = spent(before, engineCpu(run));
     await me.capture(`${run.label}-speed-calls-end`);
     assert.deepEqual(await evaluate("window.__e2eErrors"), [], `${run.label}: the page raised no errors`);
     return { counts, cpu };
