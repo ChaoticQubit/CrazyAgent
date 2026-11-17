@@ -351,6 +351,32 @@ test("the Windows signing tools are prepared only with all six Azure secrets: th
   assert.equal(all.status, 22, "the stand-in curl's failure ends it");
 });
 
+test("each Windows release leg installs the static SQLite of its own arch through vcpkg and builds against that triplet, and any other target fails before installing anything (DEC-195 Q8)", async () => {
+  const body = runBody(await releaseStep("build", "Install SQLite for Windows"));
+  const run = (target) => {
+    const root = mkdtempSync(join(tmpdir(), "ca-relwf-sqlite-"));
+    try {
+      writeFileSync(join(root, "env"), "");
+      writeFileSync(join(root, "step.sh"), `vcpkg() { printf '%s\\n' "$*" >> "$FAKE_STATE/calls"; }\n${body}`);
+      const result = spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", join(root, "step.sh")], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: STEP_MS,
+        env: { PATH: "/usr/bin:/bin", FAKE_STATE: root, TARGET: target, GITHUB_ENV: join(root, "env"), VCPKG_INSTALLATION_ROOT: "C:/vcpkg" },
+      });
+      assert.equal(result.error, undefined, `the step ends within ${STEP_MS} ms`);
+      return { status: result.status, calls: logged(root, "calls"), env: readFileSync(join(root, "env"), "utf8") };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  for (const [target, triplet] of [["x86_64-pc-windows-msvc", "x64-windows-static-md"], ["aarch64-pc-windows-msvc", "arm64-windows-static-md"]]) {
+    assert.deepEqual(run(target), { status: 0, calls: [`install sqlite3:${triplet}`], env: `VCPKG_ROOT=C:/vcpkg\nVCPKGRS_TRIPLET=${triplet}\n` }, target);
+  }
+  const other = run("i686-pc-windows-msvc");
+  assert.deepEqual([other.status, other.calls, other.env], [1, [], ""], "a target with no triplet installs nothing");
+});
+
 test("the Windows CI job is off until v2.2.1: an if that is always false skips it at no cost, its body kept to turn back on", async () => {
   const jobs = block(await workflow("ci.yml"), 0, "jobs").join("\n");
   const windows = block(jobs, 2, "windows");
