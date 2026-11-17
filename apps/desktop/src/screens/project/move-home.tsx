@@ -57,13 +57,21 @@ export async function stopThenMove(id: string, mode: AddFolderMode, overrides: A
   return { stopped: true, result: await steps.move(id, mode, overrides) };
 }
 
+/** Whether a move's folder read ended without a reading: an error, a build without the read, or
+ * an ok reply carrying the engine's size problem (timeout, too large, unreadable), which the
+ * bridge sends with no bytes. Input: the read. Output: the answer, false while it loads or before
+ * it starts. */
+function readFailed(size: Loaded<FolderSize> | null): boolean {
+  if (size === null || size.kind === "loading") return false;
+  return size.kind !== "ok" || size.value.size_problem != null;
+}
+
 /** The overrides a project move sends: the owner's, plus download_everything when the switch is
  * on or the folder read failed, as a move never leaves folders in iCloud it did not show first
  * (DEC-198, leader 16:30). Inputs: the overrides, the switch and the folder read. Output: the
  * overrides to send. */
 export function moveOverrides(overrides: AddOverride[], everything: boolean, size: Loaded<FolderSize> | null): AddOverride[] {
-  const unread = size !== null && size.kind !== "loading" && size.kind !== "ok";
-  return withEverything(overrides, everything || unread);
+  return withEverything(overrides, everything || readFailed(size));
 }
 
 /** The question before a project moves: what happens to the team and its work, Move or Copy,
@@ -103,7 +111,7 @@ export function MoveHomeDialog({ open, name, folder, home, way, size, busy, prob
     {!ready && <p className="pj-secondary" role="status">Reading the folder...</p>}
     {ready && (line.warn ? <Notice tone="warn">{line.text}</Notice> : <p className="pj-secondary" role="status">{line.text}</p>)}
     {leftInIcloud({ skipped: read?.skipped ?? [], skippedMore: read?.skipped_more ?? null, everything, onEverything, source: folder, job: way })}
-    {ready && read === null && <Notice tone="info">CrazyAgent couldn't read this folder. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow.</Notice>}
+    {readFailed(size) && <Notice tone="info">CrazyAgent couldn't read this folder. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow.</Notice>}
     {way === "copy" && <Notice tone="info">The copy becomes the project. The old folder stays where it is, with the agents' old copies in it.</Notice>}
     {way === "copy" && (read?.worktrees ?? 0) > 0 && <Notice tone="info">{worktreesLine(read?.worktrees ?? 0)}</Notice>}
     <Notice tone="warn">{loss.map((text) => <p key={text}>{text}</p>)}</Notice>
