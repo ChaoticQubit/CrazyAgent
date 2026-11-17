@@ -367,7 +367,18 @@ fn releasing_a_profile_takes_back_every_grant_its_record_and_its_container() {
         .join("crazyagent.test.release");
     assert!(container.is_dir());
     let granted_sddl = sddl(&watched);
-    crazyagent_win_sandbox::release(&case.profile).unwrap();
+    assert!(matches!(
+        crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.other"),
+        Err(crazyagent_win_sandbox::BoundaryError::Refused(_))
+    ));
+    assert!(record.is_file());
+    assert!(container.is_dir());
+    assert_eq!(
+        sddl(&watched),
+        granted_sddl,
+        "a refused release changes nothing"
+    );
+    crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.release").unwrap();
     assert_eq!(
         [&case.project, &context, &case.home].map(|path| icacls(path)),
         before,
@@ -379,5 +390,5 @@ fn releasing_a_profile_takes_back_every_grant_its_record_and_its_container() {
         !container.exists(),
         "the container's own folder goes with it"
     );
-    crazyagent_win_sandbox::release(&case.profile).unwrap();
+    crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.release").unwrap();
 }
