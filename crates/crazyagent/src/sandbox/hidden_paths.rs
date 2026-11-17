@@ -536,7 +536,7 @@ mod tests {
         let inside = root.path().join("notes");
         std::fs::create_dir(&inside).unwrap();
         let got = checked(inside.to_str().unwrap(), root.path()).unwrap();
-        assert_eq!(got, std::fs::canonicalize(&inside).unwrap());
+        assert_eq!(got, canonical(&inside).unwrap());
 
         let outside = project();
         assert_eq!(
@@ -572,6 +572,31 @@ mod tests {
                 .len(),
             HIDDEN_PATHS_MAX
         );
+    }
+
+    /// On Windows a hidden folder is typed as a drive path joined by backslashes, so one inside
+    /// the project is accepted; a quote, a forward slash or a UNC path is still refused.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_windows_drive_path_inside_the_project_is_accepted() {
+        let root = project();
+        let base = canonical(root.path()).unwrap();
+        let inside = base.join("notes");
+        std::fs::create_dir(&inside).unwrap();
+        let text = inside.to_str().unwrap();
+        assert!(text.contains('\\'), "{text}");
+        assert_eq!(checked(text, root.path()), Ok(inside.clone()));
+        for bad in [
+            format!("{text}\\a\"b"),
+            format!("{}/notes", base.display()),
+            r"\\server\share\notes".to_owned(),
+        ] {
+            assert_eq!(
+                checked(&bad, root.path()),
+                Err("hidden_path_not_plain"),
+                "{bad}"
+            );
+        }
     }
 
     #[cfg(unix)]
