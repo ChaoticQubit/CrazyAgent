@@ -14,7 +14,8 @@ xcrun actool "$work/Icon.icon" --compile "$work/out" --output-format human-reada
 test -s "$work/out/Assets.car" || { echo "assets-car: actool wrote no Assets.car" >&2; exit 1; }
 info="$(assetutil --info "$work/out/Assets.car")"
 grep -q '"NSAppearanceNameDarkAqua"' <<< "$info" || { echo "assets-car: the compiled Assets.car has no dark look" >&2; exit 1; }
-grep -q '"Name" : "Icon"' <<< "$info" || { echo "assets-car: the compiled Assets.car names no Icon" >&2; exit 1; }
+grep -Eq '"AssetType"[[:space:]]*:[[:space:]]*"Icon Image"' <<< "$info" || { echo "assets-car: the compiled Assets.car has no Icon Image, so Tauri would set no CFBundleIconName" >&2; exit 1; }
+grep -Eq '"Name"[[:space:]]*:[[:space:]]*"Icon"' <<< "$info" || { echo "assets-car: the compiled Assets.car names no Icon" >&2; exit 1; }
 cp "$work/out/Assets.car" "$icons/Assets.car"
 cd "$icons"
 {
