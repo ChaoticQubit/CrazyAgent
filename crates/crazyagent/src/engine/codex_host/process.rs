@@ -236,6 +236,7 @@ impl CodexHostProcess {
         loop {
             #[cfg(test)]
             self.shared.host_passes.fetch_add(1, Ordering::SeqCst);
+            let ended = self.worker_ended();
             let started = self.shared.lock()?.started;
             if let Some(result) = started {
                 self.pid = result.map_err(|code| EngineError(code.into()))?;
@@ -243,7 +244,7 @@ impl CodexHostProcess {
             }
             #[cfg(test)]
             self.shared.run_after_read();
-            if self.worker_ended() {
+            if ended {
                 return Err(EngineError("codex_host_custodian_stopped".into()));
             }
             self.check_deadline()?;
@@ -382,6 +383,7 @@ impl CodexHostProcess {
         loop {
             #[cfg(test)]
             self.shared.host_passes.fetch_add(1, Ordering::SeqCst);
+            let ended = self.worker_ended();
             {
                 let mut state = self.shared.lock()?;
                 let held = state.complete
@@ -411,7 +413,7 @@ impl CodexHostProcess {
             }
             #[cfg(test)]
             self.shared.run_after_read();
-            if self.worker_ended() {
+            if ended {
                 return Err(EngineError("codex_host_cleanup_uncertain".into()));
             }
             self.check_deadline()?;
@@ -425,6 +427,7 @@ impl CodexHostProcess {
         loop {
             #[cfg(test)]
             self.shared.host_passes.fetch_add(1, Ordering::SeqCst);
+            let ended = self.worker_ended();
             {
                 let mut state = self.shared.lock()?;
                 state.output.clear();
@@ -439,7 +442,7 @@ impl CodexHostProcess {
             }
             #[cfg(test)]
             self.shared.run_after_read();
-            if Instant::now() >= deadline || self.worker_ended() {
+            if Instant::now() >= deadline || ended {
                 return Err(EngineError("codex_host_cleanup_uncertain".into()));
             }
             self.changed(Some(deadline)).await;
@@ -460,7 +463,9 @@ impl CodexHostProcess {
     }
 
     /// Whether the custody worker has ended: its end mark, set before the thread counts as
-    /// finished, or the finished thread. Input: the process. Output: the answer.
+    /// finished, or the finished thread. A reader samples it before taking the state lock:
+    /// the worker publishes under the lock before its end mark, so an end seen first means
+    /// its last publish is in the state read next. Input: the process. Output: the answer.
     fn worker_ended(&self) -> bool {
         self.shared.ended.load(Ordering::Acquire) || self.worker.is_finished()
     }
