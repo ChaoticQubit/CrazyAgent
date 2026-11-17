@@ -17,6 +17,8 @@ const OTHER: &str = "other";
 /// rule proposals, the IDE Run setting, the schedule and usage, on this module's store,
 /// rebuilt from the log equal to the live store, and the engine's open writes off the log.
 mod areas;
+/// The removal's redaction of the project's ide events and its ide rows (v2.5 L7, #309 N1).
+mod ide_events;
 
 /// Each area the removal's projection clears, with the rows [`seed`] gives one project
 /// there: three agents (stopped, failed, working), each with a pane, own instructions and

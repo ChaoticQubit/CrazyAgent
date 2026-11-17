@@ -1,7 +1,8 @@
 use super::{error, failure, now_ms};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::state_log::fence::Fence;
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::Path;
 
 /// The `ProjectRemoved` event a removal appends to the state log, and its projection
@@ -387,26 +388,32 @@ fn suffixed(base: &ProjectId, n: u32) -> Result<ProjectId, EngineError> {
     ProjectId::new(id).map_err(|problem| failure(&problem.0))
 }
 
-/// Moves this id's token counts to Removed projects, then deletes every other row of it in
+/// Moves this id's token counts to Removed projects, forgets its ide rows and tombstones its
+/// ide events as a removal does (rv-sec2 L7 r2 N1), then deletes every other row of it in
 /// every table keyed by project, its removal record included, so a demo made again inherits
-/// nothing of an earlier one and the earlier one's counts stay under Removed projects.
-/// Inputs: the transaction and the id. Output: Ok or the database's failure.
-pub(crate) fn clear(connection: &Connection, project: &ProjectId) -> Result<(), EngineError> {
-    crate::usage::forget_project(connection, project.as_str())?;
-    for table in keyed_tables(connection)? {
-        connection
-            .execute(
-                &format!("DELETE FROM \"{table}\" WHERE project=?1"),
-                [project.as_str()],
-            )
-            .map_err(error)?;
-    }
-    connection
-        .execute(
-            "DELETE FROM projects_removed WHERE project=?1",
+/// nothing of an earlier one. Inputs: the transaction, the id and the owner's fence.
+/// Output: Ok, or the database's or the fence's refusal.
+pub(crate) fn clear(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    fence: &Fence,
+) -> Result<(), EngineError> {
+    assert!(!tx.is_autocommit(), "the clear is part of the Create demo");
+    crate::usage::forget_project(tx, project.as_str())?;
+    crate::ide::log::forget_rows(tx, project)?;
+    crate::ide::log::forget_project(tx, project.as_str(), None, fence)?;
+    for table in keyed_tables(tx)? {
+        tx.execute(
+            &format!("DELETE FROM \"{table}\" WHERE project=?1"),
             [project.as_str()],
         )
         .map_err(error)?;
-    assert!(!held(connection, project)?);
+    }
+    tx.execute(
+        "DELETE FROM projects_removed WHERE project=?1",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    assert!(!held(tx, project)?);
     Ok(())
 }
