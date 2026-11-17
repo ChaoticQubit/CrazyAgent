@@ -35,7 +35,7 @@ fn graph_and_terminal_commands_are_registered_in_all_four_places() {
     let build = include_str!("../build.rs");
     let bindings = include_str!("../src/lib.rs");
     let capability = include_str!("../capabilities/main-window.json");
-    let client = include_str!("../../src/engine-client.ts");
+    let client = include_str!("../../src/api.ts");
     for command in COMMANDS {
         assert_eq!(
             build.matches(&format!("\"{command}\"")).count(),
@@ -183,7 +183,11 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
     assert!(attach.contains("id: Option<String>"), "{attach}");
     assert!(attach.contains(PROJECT_WALL_GUARD), "{attach}");
     assert!(
-        attach.contains("bridge::terminal::graph_shows(&graph, &agent)"),
+        attach.contains("bridge::terminal::graph_shows(&graph, &key.agent)"),
+        "{attach}"
+    );
+    assert!(
+        attach.contains(".open_terminal(key.agent, key.pane)"),
         "{attach}"
     );
 }

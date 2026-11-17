@@ -242,7 +242,7 @@ function imports(source) {
     const base = brace === -1 ? text.slice(0, text.lastIndexOf("::")) : text.slice(0, brace).replace(/::$/, "");
     const leaves = brace === -1 ? [text.slice(text.lastIndexOf("::") + 2)] : splitTop(text.slice(brace + 1, text.lastIndexOf("}")));
     const root = base.startsWith("bridge") ? `crazyagent_desktop::${base}` : base;
-    if (!/^(crazyagent|crazyagent_desktop)\b/.test(root)) continue;
+    if (!/^(crazyagent|crazyagent_desktop|std)\b/.test(root)) continue;
     for (const leaf of leaves) if (/^\w+$/.test(leaf)) paths.set(leaf, `${root}::${leaf}`);
   }
   return paths;

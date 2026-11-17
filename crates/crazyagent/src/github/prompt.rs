@@ -183,7 +183,7 @@ pub(crate) fn carry_publish(db: &Connection, from: &Path, to: &Path) {
 /// Keeps an answer to a project's publish question as the owner's answer is kept, for rows
 /// outside the GitHub module. Inputs: the engine root, the project and the answer. Output:
 /// none; a failed write panics.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn keep_prompt_answer(root: &Path, project: &ProjectId, answer: GitHubPromptAnswer) {
     keep_answer(&open(root).unwrap(), project, answer, 0).unwrap();
 }
@@ -191,7 +191,7 @@ pub(crate) fn keep_prompt_answer(root: &Path, project: &ProjectId, answer: GitHu
 /// Says whether an answer to a project's publish question is kept, for rows outside the
 /// GitHub module. Inputs: the engine root and the project. Output: the answer; a failed
 /// read panics.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn kept_prompt_answer(root: &Path, project: &ProjectId) -> bool {
     open(root)
         .unwrap()
@@ -205,7 +205,7 @@ pub(crate) fn kept_prompt_answer(root: &Path, project: &ProjectId) -> bool {
 
 /// Saves a project's publish job where the engine keeps it, for rows outside the GitHub
 /// module. Inputs: the engine root and the job. Output: none; a failed save panics.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn keep_job(root: &Path, job: &super::GitHubPublishJob) {
     state::save_job(root, job).unwrap();
 }
@@ -213,7 +213,7 @@ pub(crate) fn keep_job(root: &Path, job: &super::GitHubPublishJob) {
 /// Reads a project's publish job from where the engine keeps it, for rows outside the
 /// GitHub module. Inputs: the engine root and the project folder. Output: the job, if
 /// any; a failed read panics.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn kept_job(root: &Path, project: &Path) -> Option<super::GitHubPublishJob> {
     state::load_job(root, project).unwrap()
 }

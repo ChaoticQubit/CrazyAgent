@@ -348,7 +348,7 @@ export function ActivityPanel({ data }: { data: ProjectData }) {
         <span className="pj-secondary">{displayText(row.progress)}</span>
         <span className="pj-small pj-muted">{row.elapsed}</span>
         <span>{row.report && <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=${encodeURIComponent(job.report_path)}`)}>Open report</button>}
-          {job.status === "failed" && <button type="button" className="btn" disabled={retrying === job.id} onClick={() => void retry(job)}>Try again</button>}</span>
+          {job.status === "failed" && job.retryable && <button type="button" className="btn" disabled={retrying === job.id} onClick={() => void retry(job)}>Try again</button>}</span>
       </li>)}</ul>}
       {allDone && <p>Research finished. <button type="button" className="pj-link" onClick={() => data.navigate(`${base}/conversation`)}>Ask the master what to build first.</button></p>}
     </section>
