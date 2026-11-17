@@ -342,7 +342,7 @@ fn replay_hands_apply_only_its_aggregate_but_checks_every_event() {
 }
 
 #[test]
-fn an_unknown_aggregate_or_an_out_of_range_schema_is_refused() {
+fn an_unknown_aggregate_an_out_of_range_schema_or_an_oversize_body_is_refused() {
     let db = store();
     plant(&db, 1, 1, "nowhere", 1);
     assert_eq!(
@@ -354,6 +354,22 @@ fn an_unknown_aggregate_or_an_out_of_range_schema_is_refused() {
     assert_eq!(
         code(replay(&db, Aggregate::Worktrees, 0, |_| Ok(()))),
         Some("state_log_replay_row".into())
+    );
+    let db = store();
+    db.execute_batch(
+        "CREATE TABLE state_log (seq INTEGER PRIMARY KEY, revision INTEGER, aggregate TEXT,
+        kind TEXT, schema INTEGER, at_ms INTEGER, body BLOB)",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO state_log VALUES (1,1,'worktrees','Planted',1,0,?1)",
+        [vec![b' '; BODY_BYTES_MAX + 1]],
+    )
+    .unwrap();
+    assert_eq!(
+        code(replay(&db, Aggregate::Worktrees, 0, |_| Ok(()))),
+        Some("state_log_replay_row".into()),
+        "a body over the cap in a log made without the table's checks"
     );
 }
 
