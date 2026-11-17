@@ -479,6 +479,59 @@ fn a_service_engine_slow_to_start_is_waited_for_while_launchd_still_runs_it() {
     wait_silent(&layout.socket());
 }
 
+/// A restore copies inside the engine process after it stopped answering (L5). A start in
+/// that window, the TUI's `r` among them, must neither reinstall nor restart the service:
+/// either would stop the copy halfway.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_start_while_a_restore_still_copies_refuses_and_leaves_the_engine_process_running() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let beside = tempfile::tempdir_in("/tmp").unwrap();
+    let layout = Layout::new(temp.path().join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let service = scripted_service(
+        "restoring",
+        temp.path(),
+        layout.root(),
+        beside.path(),
+        "exec sleep 120",
+    );
+    let installed = Installed(service.clone());
+    service.install().unwrap();
+    let pid = (0..100)
+        .find_map(|_| {
+            let status = service.status().unwrap();
+            if status.running {
+                return status.pid;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            None
+        })
+        .expect("launchd runs the stand-in for the copying engine process");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut record = options.open(layout.root().join("restore-record")).unwrap();
+    std::io::Write::write_all(&mut record, b"pending").unwrap();
+    drop(record);
+    assert!(!crazyagent::service::answering(&layout.socket()));
+
+    let outcome = runtime().block_on(crazyagent::service::ensure_running(
+        &layout,
+        &service,
+        Path::new(BIN),
+        Some(OsStr::new(BARE_PATH)),
+        READY_TIMEOUT,
+    ));
+
+    let refused = outcome.expect_err("no start while a restore copies");
+    assert!(refused.to_string().contains("engine_restoring"), "{refused}");
+    let status = service.status().unwrap();
+    assert!(status.running);
+    assert_eq!(status.pid, Some(pid), "the copy was neither stopped nor replaced");
+    drop(installed);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_service_engine_that_exits_while_starting_is_reported_at_once_not_waited_for() {
