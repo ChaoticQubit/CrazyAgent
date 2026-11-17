@@ -12738,6 +12738,93 @@ fn own_turn_outliving(
     }
 }
 
+/// DEC-200 (V243-AGENT-ORDERS-RECV): while a kept native lead's own turn runs, a stop order
+/// reaches `next_lead_turn` as it is sent, not after an `ORDER_WAIT` sleep. The order goes a
+/// fixed 15 ms after the worker starts, so a sleep step would hold it about 85 ms.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stop_order_reaches_a_lead_whose_own_turn_runs_without_the_order_sleep() {
+    let fixture = Fixture::new(1);
+    let base = fixture.base.join("own-order-wait");
+    let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
+    for path in [&home, &work, &bin] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let executable = bin.join("claude");
+    std::fs::write(
+        &executable,
+        OWN_BACKGROUND_CLAUDE.replace("/bin/sleep SECS\n", "/bin/sleep 1\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = base.join("agent.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let request = LaunchRequest {
+        harness: "claude-code".into(),
+        executable,
+        working_dir: work.canonicalize().unwrap(),
+        account: AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            key: None,
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile),
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let host = fixture.host();
+    let mut session = AgentSession::Terminal(Box::new(
+        TerminalSession::start(
+            host.clone(),
+            AgentId::new("own-order-wait").unwrap(),
+            request,
+            None,
+        )
+        .unwrap(),
+    ));
+    assert!(matches!(
+        session.next_event(Duration::from_secs(5)).unwrap(),
+        Some(LaunchEvent::Ready { .. })
+    ));
+    session.follow_own_turns();
+    let (order, orders) = channel();
+    let (reports, _reported) = channel();
+    let (started, start) = channel();
+    let cancel = AtomicBool::new(false);
+    let mut own = OwnTurn {
+        running: true,
+        ..OwnTurn::default()
+    };
+    let mut rules = TurnRules {
+        limit: None,
+        background: crate::team::BackgroundAtEnd::Wait,
+    };
+    let (lead, cancel_flag, own_state, rules) = (&mut session, &cancel, &mut own, &mut rules);
+    let (next, took) = std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            started.send(()).unwrap();
+            next_lead_turn(&orders, cancel_flag, lead, &reports, own_state, rules)
+        });
+        start.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(15));
+        let sent = Instant::now();
+        order.send(Order::Stop).unwrap();
+        let next = worker.join().unwrap();
+        (next, sent.elapsed())
+    });
+    assert!(matches!(next, Next::Stop));
+    assert!(
+        took < ORDER_WAIT * 9 / 20,
+        "the stop order waited {took:?}, about the rest of an {ORDER_WAIT:?} sleep"
+    );
+    session.stop().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// N-E9 (OP-26): under Wait, a turn a kept native lead's app takes by itself that ends while
 /// a command it started in the background still runs stays open until the app's turn on
 /// the command's end notification ends; its result has both replies, the command finished
