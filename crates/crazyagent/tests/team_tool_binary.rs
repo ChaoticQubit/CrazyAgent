@@ -515,7 +515,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
         .enable_all()
         .build()
         .unwrap();
-    let engine = host.block_on(async {
+    let stand_in = host.block_on(async {
         let engine = crazyagent::engine::Engine::open(&database, config)
             .await
             .unwrap();
@@ -817,7 +817,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
         ]
     );
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
-    host.block_on(engine.close()).unwrap();
+    host.block_on(stand_in.close()).unwrap();
 }
 
 /// Removes a placeholder harness socket a test created, and its folder once empty, when the
