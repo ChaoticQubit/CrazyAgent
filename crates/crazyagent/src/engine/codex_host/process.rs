@@ -53,6 +53,10 @@ pub(super) struct ProcessShared {
     pub(super) state: Mutex<ProcessState>,
     pub(super) stop: AtomicBool,
     pub(super) close_stdin: AtomicBool,
+    #[cfg(test)]
+    pub(super) custody_passes: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    pub(super) host_passes: std::sync::atomic::AtomicU64,
 }
 
 impl ProcessShared {
@@ -147,6 +151,10 @@ impl CodexHostProcess {
             }),
             stop: AtomicBool::new(false),
             close_stdin: AtomicBool::new(false),
+            #[cfg(test)]
+            custody_passes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            host_passes: std::sync::atomic::AtomicU64::new(0),
         });
         let (input, receiver) = mpsc::channel(COMMAND_QUEUE_MAX);
         let retained = Arc::clone(&shared);
@@ -180,6 +188,8 @@ impl CodexHostProcess {
 
     async fn await_start(&mut self) -> Result<(), EngineError> {
         loop {
+            #[cfg(test)]
+            self.shared.host_passes.fetch_add(1, Ordering::SeqCst);
             let started = self.shared.lock()?.started;
             if let Some(result) = started {
                 self.pid = result.map_err(|code| EngineError(code.into()))?;
@@ -195,6 +205,13 @@ impl CodexHostProcess {
 
     pub(super) fn pid(&self) -> u32 {
         self.pid
+    }
+
+    /// The state the process shares with its custody worker, so a row can count the passes
+    /// of both loops while it drives the process. Output: the shared state.
+    #[cfg(all(test, unix))]
+    pub(super) fn shared(&self) -> Arc<ProcessShared> {
+        Arc::clone(&self.shared)
     }
 
     #[cfg(all(test, unix))]
@@ -313,6 +330,8 @@ impl CodexHostProcess {
 
     pub(super) async fn next_output(&mut self) -> Result<CodexHostOutput, EngineError> {
         loop {
+            #[cfg(test)]
+            self.shared.host_passes.fetch_add(1, Ordering::SeqCst);
             {
                 let mut state = self.shared.lock()?;
                 let held = state.complete
@@ -349,6 +368,8 @@ impl CodexHostProcess {
         self.request_stop();
         let deadline = Instant::now() + self.close_time;
         loop {
+            #[cfg(test)]
+            self.shared.host_passes.fetch_add(1, Ordering::SeqCst);
             {
                 let mut state = self.shared.lock()?;
                 state.output.clear();

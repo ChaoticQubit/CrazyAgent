@@ -86,6 +86,8 @@ pub(super) fn run(
         return;
     };
     loop {
+        #[cfg(test)]
+        shared.custody_passes.fetch_add(1, Ordering::SeqCst);
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             shared.fail("codex_host_deadline");
         }
@@ -631,6 +633,8 @@ mod tests {
             }),
             stop: AtomicBool::new(false),
             close_stdin: AtomicBool::new(false),
+            custody_passes: std::sync::atomic::AtomicU64::new(0),
+            host_passes: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
