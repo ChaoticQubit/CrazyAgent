@@ -10,7 +10,7 @@ const MESSAGE: &str = "Publish with CrazyAgent";
 const LIMIT: Duration = Duration::from_secs(2);
 
 fn git_by(email: &str, args: &[&str], folder: &Path) -> String {
-    let output = crate::spawn_gate::output(
+    let output = crate::spawn_gate::collected(
         Command::new(GIT)
             .args(args)
             .current_dir(folder)

@@ -181,6 +181,12 @@ async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_publish_question_and_its_answer_reach_a_real_engine_for_the_named_project() {
     let root = private_root("ca-tprompt-");
+    #[cfg(target_os = "macos")]
+    let _keychain = {
+        let mut keychain = crate::credentials::test_keychain::TestKeychain::temporary();
+        keychain.serve(&crate::github::namespace(root.path()));
+        keychain
+    };
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let config = crate::tui::test_home::engine_config();
     let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
