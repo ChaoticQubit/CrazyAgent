@@ -125,6 +125,30 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     }
 }
 
+/// #333 r1 sec F1: on Windows a launcher found under another spelling is still a launcher. A
+/// first line asking `env` for `Env` finds `env.exe`, which is refused as one, and the name
+/// check reads `.exe` and case away, so `ENV.EXE` and `BusyBox.exe` count and `node.exe` not.
+#[test]
+fn a_launcher_found_under_another_spelling_is_refused_on_windows() {
+    let folder = tempfile::tempdir().unwrap();
+    let real = folder.path().canonicalize().unwrap();
+    let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("where.exe");
+    std::fs::copy(shipped, real.join("env.exe")).unwrap();
+    let script = real.join("tool.js");
+    std::fs::write(&script, "#!/usr/bin/env Env\n").unwrap();
+    let places = Places::new(vec![real.clone()], None);
+    let missing = resolve_entry(&script, &places).unwrap_err();
+    assert_eq!(missing.refused.unwrap().why, Refusal::FirstLine);
+    for name in ["env.exe", "ENV.EXE", "BusyBox.exe", "nice"] {
+        assert!(launches_by_name(name), "{name}");
+    }
+    for name in ["node.exe", "node", "env.cmd", "exe"] {
+        assert!(!launches_by_name(name), "{name}");
+    }
+}
+
 /// Writes the `.cmd` npm makes for Codex and the script it names into a folder. Input: the
 /// folder. Output: the shim and the script's real file.
 fn codex_shim(folder: &Path) -> (PathBuf, PathBuf) {
