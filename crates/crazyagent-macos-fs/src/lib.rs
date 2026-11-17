@@ -342,12 +342,144 @@ impl SocketRecord {
     }
 }
 
-/// Lists every TCP listener on `port` held by a process this user may read. Input: the port.
-/// Output: each holder's process id with the listener's local address.
+/// How many times a list the kernel fills is asked for again, with more room, while it
+/// comes back full.
+#[cfg(target_os = "macos")]
+const LIST_TRIES: usize = 4;
+
+/// Room for this many entries past the kernel's own count, for processes or descriptors
+/// that appear between the count and the read.
+#[cfg(target_os = "macos")]
+const LIST_SLACK: usize = 64;
+
+/// The most process ids or descriptors one list may hold.
+#[cfg(target_os = "macos")]
+const LIST_MAX: usize = 1 << 20;
+
+/// Lists every process id via `proc_listallpids`, asked again with more room while the answer
+/// fills it. Safety contract of its two unsafe calls: the first passes no buffer, so nothing
+/// is written; the second passes `pids`, exactly the byte size given, which outlives the call.
+/// Output: the ids, the system error, or `Other` when the list kept growing.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn all_pids() -> std::io::Result<Vec<libc::pid_t>> {
+    let counted = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let counted = usize::try_from(counted).map_err(|_| std::io::Error::last_os_error())?;
+    let mut room = counted + LIST_SLACK;
+    for _ in 0..LIST_TRIES {
+        if room > LIST_MAX {
+            break;
+        }
+        let mut pids: Vec<libc::pid_t> = vec![0; room];
+        let bytes = libc::c_int::try_from(room * std::mem::size_of::<libc::pid_t>())
+            .expect("bounded by LIST_MAX");
+        let listed = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+        let listed = usize::try_from(listed).map_err(|_| std::io::Error::last_os_error())?;
+        assert!(listed <= room);
+        if listed == 0 {
+            return Err(std::io::Error::other("no process listed"));
+        }
+        if listed < room {
+            pids.truncate(listed);
+            return Ok(pids);
+        }
+        room *= 2;
+    }
+    Err(std::io::Error::other("the process list kept growing"))
+}
+
+/// Lists one process's socket descriptors via `proc_pidinfo` with `PROC_PIDLISTFDS`, asked
+/// again with more room while the answer fills it; a process that ended or that this user may
+/// not read has none, as lsof shows none. Safety contract of its two unsafe calls: the first
+/// passes no buffer; the second passes `fds`, exactly the byte size given, which outlives the
+/// call. Input: the process id. Output: the descriptors, none, or `Other` past the bound.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn socket_fds(pid: libc::pid_t) -> std::io::Result<Option<Vec<i32>>> {
+    let entry = std::mem::size_of::<libc::proc_fdinfo>();
+    let counted =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if counted <= 0 {
+        return Ok(None);
+    }
+    let mut room = usize::try_from(counted).expect("positive") / entry + LIST_SLACK;
+    let socket = u32::try_from(libc::PROX_FDTYPE_SOCKET).expect("a small constant");
+    for _ in 0..LIST_TRIES {
+        if room > LIST_MAX {
+            break;
+        }
+        let empty = libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        };
+        let mut fds = vec![empty; room];
+        let bytes = libc::c_int::try_from(room * entry).expect("bounded by LIST_MAX");
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                fds.as_mut_ptr().cast(),
+                bytes,
+            )
+        };
+        if read <= 0 {
+            return Ok(None);
+        }
+        let read = usize::try_from(read).expect("positive");
+        assert!(read.is_multiple_of(entry) && read <= room * entry);
+        if read < room * entry {
+            fds.truncate(read / entry);
+            let sockets = fds.iter().filter(|fd| fd.proc_fdtype == socket);
+            return Ok(Some(sockets.map(|fd| fd.proc_fd).collect()));
+        }
+        room *= 2;
+    }
+    Err(std::io::Error::other("the descriptor list kept growing"))
+}
+
+/// Reads one socket descriptor's record via `proc_pidfdinfo` with `PROC_PIDFDSOCKETINFO`; a
+/// descriptor closed or reused for something else since it was listed reads as none. Safety
+/// contract of its one unsafe call: `record` is a local of exactly the size passed, aligned as
+/// the kernel's struct, and outlives the call. Inputs: the process and descriptor. Output: the
+/// record, or none.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn socket_record(pid: libc::pid_t, fd: i32) -> Option<SocketRecord> {
+    let mut record = SocketRecord([0; SOCKET_RECORD_SIZE]);
+    let size = libc::c_int::try_from(SOCKET_RECORD_SIZE).expect("792 fits an int");
+    let read =
+        unsafe { libc::proc_pidfdinfo(pid, fd, FD_SOCKET_INFO, (&raw mut record).cast(), size) };
+    (read == size).then_some(record)
+}
+
+/// Lists every TCP listener on `port` held by a process this user may read, as `lsof -iTCP:P
+/// -sTCP:LISTEN` does with no process spawned: every process and socket descriptor, so each
+/// process sharing one listening socket is named (rv-sa241 LEAD-2); what cannot be read is
+/// skipped, as lsof skips it. Input: the port. Output: each holder's id with the listener's
+/// local address, or an error, `InvalidData` for a listener with no address family.
 #[cfg(target_os = "macos")]
 pub fn tcp_listeners(port: u16) -> std::io::Result<Vec<(i32, std::net::IpAddr)>> {
     assert_ne!(port, 0);
-    Ok(Vec::new())
+    let mut found = Vec::new();
+    for pid in all_pids()? {
+        if pid <= 0 {
+            continue;
+        }
+        let Some(fds) = socket_fds(pid)? else {
+            continue;
+        };
+        for fd in fds {
+            let Some(record) = socket_record(pid, fd) else {
+                continue;
+            };
+            if let Some(address) = record.listening_on(port)? {
+                found.push((pid, address));
+            }
+        }
+    }
+    assert!(found.iter().all(|(pid, _)| *pid > 0));
+    Ok(found)
 }
 
 #[cfg(all(test, target_os = "macos"))]
