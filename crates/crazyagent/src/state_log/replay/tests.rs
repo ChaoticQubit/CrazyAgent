@@ -118,7 +118,6 @@ fn record(
         at_ms,
         body: body.clone(),
     };
-    drop(log);
     project(&tx, &event).unwrap();
     tx.commit().unwrap();
     seq
@@ -269,7 +268,6 @@ fn replay_reads_at_most_its_batch_and_a_store_without_a_log_replays_nothing() {
     for _ in 0..=REPLAY_BATCH_MAX {
         log.append(&tick).unwrap();
     }
-    drop(log);
     tx.commit().unwrap();
     let last = REPLAY_BATCH_MAX as u64 + 1;
     assert_eq!(batch(&db, 0, 0).unwrap().len(), REPLAY_BATCH_MAX);
@@ -327,7 +325,6 @@ fn replay_hands_apply_only_its_aggregate_but_checks_every_event() {
         })
         .unwrap();
     }
-    drop(log);
     tx.commit().unwrap();
     let mut seen = Vec::new();
     replay(&db, Aggregate::Ide, 0, |event| {
@@ -525,7 +522,6 @@ fn a_log_that_opens_with_a_snapshot_run_rebuilds_equal_and_a_changed_chunk_is_re
         ],
     }];
     assert_eq!(log.snapshot(Aggregate::Worktrees, 5, run).unwrap(), 2);
-    drop(log);
     tx.commit().unwrap();
     let worktrees = Aggregate::Worktrees;
     record(
@@ -671,7 +667,6 @@ fn redact_refuses_a_missing_event_or_a_snapshot_and_append_refuses_the_tombstone
         })),
         Some("state_log_body_reserved".into())
     );
-    drop(log);
     for seq in [99, u64::MAX] {
         assert_eq!(
             code(redact(&tx, seq)),
@@ -721,7 +716,6 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
             body: &body,
         })
         .unwrap();
-    drop(log);
     tx.commit().unwrap();
     checkpoint(&db);
     assert!(holds(&path, marker), "the body spills into the file first");
