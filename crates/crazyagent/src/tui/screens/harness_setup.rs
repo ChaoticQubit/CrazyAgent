@@ -4,7 +4,7 @@ use super::settings_harnesses::plain_update;
 use super::{Flow, Place, Screen, open};
 use crate::harnesses::HarnessEntry;
 use crate::harnesses::update::HarnessVersions;
-use crate::setup::{Dependency, DependencyState};
+use crate::setup::{Dependency, DependencyState, SetupStatus};
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::Ctx;
@@ -176,6 +176,17 @@ pub(super) fn node_offer(needed: bool, node: Option<&DependencyState>, busy: boo
         }
         Some(DependencyState::Checking) => NodeOffer::None,
     }
+}
+
+/// Setup's Node row as the Node.js offer reads it: installing while a job on Node runs, the
+/// setup run's step or a lone install, else its own state. Input: the setup status. Output:
+/// the state, none without a Node row.
+pub(super) fn node_row(status: &SetupStatus) -> Option<DependencyState> {
+    status
+        .dependencies
+        .iter()
+        .find(|tool| tool.name == Dependency::Node)
+        .map(|tool| tool.state.clone())
 }
 
 /// Tells whether the step reads again for Node while a harness needs it: setup's Node row is
@@ -539,13 +550,7 @@ impl HarnessSetup {
                     return;
                 }
                 self.setup_busy = result.as_ref().is_ok_and(|status| status.running);
-                self.node = result.as_ref().ok().and_then(|status| {
-                    status
-                        .dependencies
-                        .iter()
-                        .find(|tool| tool.name == Dependency::Node)
-                        .map(|tool| tool.state.clone())
-                });
+                self.node = result.as_ref().ok().and_then(node_row);
             }
             SettingsEvent::AppSetup(AppSetupEvent::Installed(result)) => {
                 if !self.sending_node {

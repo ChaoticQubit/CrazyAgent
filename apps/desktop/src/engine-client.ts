@@ -1774,6 +1774,8 @@ export interface Dependency {
   name: DependencyName;
   label: string;
   state: DependencyState;
+  busy?: boolean;
+  waiting?: string;
 }
 
 export type PackEntryKind = "skill" | "mcp_server";

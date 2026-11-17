@@ -180,3 +180,13 @@ test("a Node setup cannot install on this system is never offered or read again 
     assert.equal(model.nodeReadsAgain(true, { state: "unsupported" }, busy), false, `busy ${busy}`);
   }
 });
+
+test("setup's Node row reads installing while a job on Node runs, else its own state, and the step reads it that way (DEC-199)", () => {
+  const setup = (state, busy) => ({ dependencies: [{ name: "node", label: "Node.js", state, busy }], pack: [], running: false, version: 1 });
+  const failed = { state: "failed", reason: NODE_FAILED };
+  assert.deepEqual(model.nodeRow(setup(failed, true)), { state: "installing" });
+  assert.deepEqual(model.nodeRow(setup(failed, false)), failed);
+  assert.deepEqual(model.nodeRow(setup({ state: "missing" }, true)), { state: "installing" });
+  assert.equal(model.nodeRow(null), null);
+  assert.equal(model.nodeRow({ dependencies: [], pack: [], running: false, version: 1 }), null);
+});

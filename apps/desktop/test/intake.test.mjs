@@ -1222,7 +1222,7 @@ test("after an iCloud download Add folder adds only when it finished and was nei
   for (const result of [ok, ended, { kind: "not_ready" }]) assert.deepEqual(intake.icloudOutcome("left", result), { next: "none" });
 });
 
-test("the Node row says what Node is for and offers its own Install only while it is missing or failed and setup is idle", () => {
+test("the Node row says what Node is for and offers its own Install only while it is missing or failed and no job on Node runs", () => {
   const node = (state) => ({ name: "node", label: "Node.js", state });
   const status = (row, running = false) => ({ dependencies: [row], pack: [], running, version: 1 });
   const missing = node({ state: "missing" });
@@ -1234,7 +1234,9 @@ test("the Node row says what Node is for and offers its own Install only while i
   for (const state of [{ state: "found", version: "22.11.0" }, { state: "installed", version: "26.13.1" }, { state: "installing" }, { state: "checking" }]) {
     assert.equal(intake.rowInstall(node(state), status(node(state))), false, state.state);
   }
-  assert.equal(intake.rowInstall(missing, status(missing, true)), false, "not while a setup run goes on");
+  assert.equal(intake.rowInstall(missing, status(missing, true)), true, "during a setup run it takes its turn on Node (DEC-199)");
+  const held = { ...missing, busy: true };
+  assert.equal(intake.rowInstall(held, status(held)), false, "not while a job on Node runs");
   const uv = { name: "uv", label: "uv", state: { state: "missing" } };
   assert.equal(intake.rowInstall(uv, status(uv)), false, "only Node installs alone");
   const found = (name) => ({ name, label: name, state: { state: "found", version: "1.0" } });
@@ -1268,7 +1270,9 @@ test("a refused tool reads Found, not used with its line, offers its fix by the 
   assert.equal(intake.fixCommand(row, status(row)), null);
   assert.equal(intake.rowFix(row, status(row, { refused_tool: "command_only" })), null);
   assert.equal(intake.fixCommand(row, status(row, { refused_tool: "command_only" })), FIX.command);
-  assert.equal(intake.rowFix(row, status(row, { running: true })), null, "not while setup runs");
+  assert.deepEqual(intake.rowFix(row, status(row, { running: true })), FIX, "during a setup run it takes its turn on the tool (DEC-199)");
+  const held = { ...row, busy: true };
+  assert.equal(intake.rowFix(held, status(held)), null, "not while a job on the tool runs");
   const unfixable = refusedRow({ fix: null });
   assert.equal(intake.rowFix(unfixable, status(unfixable)), null);
   assert.equal(intake.fixCommand(unfixable, status(unfixable, { refused_tool: "command_only" })), null);
@@ -1295,4 +1299,12 @@ test("the tools step shows a refused tool's fix, its command only by the setting
   const command = rowOf(html(ToolsSetupView, base(value(refusedRow(), { refused_tool: "command_only" }))));
   assert.doesNotMatch(command, /Fix permissions/);
   assert.match(command, /To fix it, run in Terminal:[\s\S]*<code>chmod -R go-w &#x27;\/h\/py&#x27;<\/code>/);
+});
+
+test("a tool row waiting behind another job reads Waiting and names it, and a row with a job keeps setup reading", () => {
+  const row = { ...dep("node", { state: "missing" }, "Node.js"), busy: true, waiting: "setup" };
+  assert.deepEqual(intake.dependencyView(row), { title: "Node.js", about: "Runs the harnesses CrazyAgent installs with npm.", word: "Waiting", tone: "info", line: "Waiting for setup to finish..." });
+  const fixing = { ...dep("uv", { state: "found", version: "0.5" }), busy: true };
+  assert.equal(intake.setupBusy({ dependencies: [fixing], pack: [], running: false }), true);
+  assert.equal(intake.setupBusy({ dependencies: [{ ...fixing, busy: false }], pack: [], running: false }), false);
 });

@@ -1,7 +1,7 @@
 use super::app_setup::{setup_plain, setup_reason};
 use super::harness_setup::{
     CANT_RUN, INSTALL_NODE, INSTALLING_NODE, NodeOffer, TRY_AGAIN, node_needed, node_offer,
-    node_reads_again,
+    node_reads_again, node_row,
 };
 use super::project_markdown::sanitize;
 use super::settings::{draw_page, step};
@@ -678,11 +678,7 @@ impl Harnesses {
         };
         let waited = self.node_offer() == NodeOffer::Installing;
         self.setup_busy = status.running;
-        self.node = status
-            .dependencies
-            .iter()
-            .find(|tool| tool.name == Dependency::Node)
-            .map(|tool| tool.state.clone());
+        self.node = node_row(status);
         let settled = matches!(
             self.node,
             Some(DependencyState::Found { .. } | DependencyState::Installed { .. })
