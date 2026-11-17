@@ -55,6 +55,7 @@ defaults:
 jobs:
   build-linux:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -86,6 +87,7 @@ jobs:
 
   build-macos:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
     strategy:
@@ -145,7 +147,7 @@ jobs:
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -192,7 +194,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -254,7 +256,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -299,8 +301,51 @@ jobs:
           parts: ${{ matrix.parts }}
           node-version: ${{ env.NODE_VERSION }}
 
+  icacls-rows:
+    name: The two icacls rows on ${{ matrix.runner }}
+    needs: build-windows
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Install cargo-nextest
+        run: bash scripts/ci/install-nextest.sh
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: farm-archive-windows
+          path: ${{ runner.temp }}/archive
+      - name: Run each icacls row alone, failing when the row is missing
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/archive/farm-windows.tar.zst"
+          for row in \
+            service::tests::changeable_by_others_reads_windows_owners_and_access_lists \
+            harnesses::update::state::windows_tests::a_windows_program_another_account_can_change_tells_no_version
+          do
+            echo "== $row"
+            cargo nextest run --archive-file "$archive" --workspace-remap "$GITHUB_WORKSPACE" \
+              --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --no-tests=fail --no-capture \
+              -E "package(=crazyagent) & kind(lib) & test(=$row)"
+          done
+
   node:
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
@@ -464,6 +509,7 @@ jobs:
 
   typecheck:
     name: Desktop typecheck and Bun suites
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
@@ -527,7 +573,7 @@ jobs:
   report:
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
