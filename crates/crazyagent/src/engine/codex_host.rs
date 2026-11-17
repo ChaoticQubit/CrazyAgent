@@ -358,6 +358,9 @@ fn prepare_command(
     Ok((selected, cwd, tools))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "codex_host/process_tests.rs"]
 mod process_tests;
+#[cfg(all(test, windows))]
+#[path = "codex_host/process_windows_tests.rs"]
+mod process_windows_tests;

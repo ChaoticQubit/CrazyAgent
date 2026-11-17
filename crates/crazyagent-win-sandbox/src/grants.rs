@@ -1,18 +1,21 @@
-use crate::plan::{Access, Ace, within};
+use crate::plan::{Access, Ace, same};
 use crate::profile::check_path;
 
-/// The first line of every grants record, naming its format and version.
-pub const HEADER: &str = "crazyagent-win-grants 1";
+/// The first line of every grants record, naming its format and version: version 2 records
+/// roles that only allow (DEC-193), and any other version is refused.
+pub const HEADER: &str = "crazyagent-win-grants 2";
 /// The most entries one record holds: the plans of two profiles, each far below it.
 pub const ENTRIES_MAX: usize = 4096;
 /// The largest record the helper reads: every entry at the longest path a profile allows.
 pub const RECORD_BYTES_MAX: usize = ENTRIES_MAX * 1040;
 
-const ACCESSES: [(Access, &str); 6] = [
+const ACCESSES: [(Access, &str); 8] = [
     (Access::ReadExecute, "readexecute"),
     (Access::Modify, "modify"),
-    (Access::DenyWrite, "denywrite"),
-    (Access::DenyAll, "denyall"),
+    (Access::RootAnchor, "rootanchor"),
+    (Access::RootKeep, "rootkeep"),
+    (Access::ReadOnly, "readonly"),
+    (Access::Hidden, "hidden"),
     (Access::Anchor, "anchor"),
     (Access::KeepEntries, "keepentries"),
 ];
@@ -71,28 +74,30 @@ pub fn decode(text: &str) -> Result<Vec<Ace>, &'static str> {
             access: *access,
         });
     }
+    assert!(entries.len() <= ENTRIES_MAX);
     Ok(entries)
 }
 
-fn same(a: &str, b: &str) -> bool {
-    within(a, b) && within(b, a)
-}
-
-/// The recorded paths the new plan takes an access from: a path it no longer names, or one
-/// whose recorded access it no longer gives, such as modify narrowed to read and run or a
-/// protected path no longer kept. Paths compare without regard to case, as Windows does;
-/// each comes once, in record order. Inputs: the record and the new plan. Output: the paths.
+/// The recorded paths to withdraw before the new plan applies: a path the plan no longer
+/// names, and a path whose inheritance a recorded role cut where the plan names one that does
+/// not cut, so its own access list comes back first. Any other change of role is made in
+/// place when the plan applies. Paths compare without regard to case, as Windows does; each
+/// comes once, in record order. Inputs: the record and the new plan. Output: the paths.
 pub fn withdrawn<'a>(recorded: &'a [Ace], planned: &[Ace]) -> Vec<&'a str> {
     let mut paths: Vec<&'a str> = Vec::new();
     for entry in recorded {
-        let kept = planned
-            .iter()
-            .any(|plan| plan.access == entry.access && same(&plan.path, &entry.path));
+        let role = planned.iter().find(|plan| same(&plan.path, &entry.path));
+        let kept = role.is_some_and(|plan| plan.access.cuts() || !entry.access.cuts());
         if !kept && !paths.iter().any(|path| same(path, &entry.path)) {
             paths.push(&entry.path);
         }
     }
     assert!(paths.len() <= recorded.len());
+    assert!(
+        paths
+            .iter()
+            .all(|path| recorded.iter().any(|entry| entry.path == *path))
+    );
     paths
 }
 
@@ -117,6 +122,7 @@ mod tests {
 
     const PROJECT: &str = r"C:\Users\mira\Projects\shop";
     const CONTEXT: &str = r"C:\Users\mira\Projects\shop\context";
+    const GIT: &str = r"C:\Users\mira\Projects\shop\.git";
     const DOCUMENTS: &str = r"C:\Users\mira\Documents";
     const TOOLS: &str = r"C:\Tools";
 
@@ -130,18 +136,24 @@ mod tests {
     #[test]
     fn a_record_written_reads_back_the_same() {
         let record = [
-            ace(PROJECT, Access::Modify),
+            ace(CONTEXT, Access::ReadOnly),
+            ace(r"C:\Users\mira\Projects\shop\keys", Access::Hidden),
+            ace(GIT, Access::Anchor),
+            ace(
+                r"C:\Users\mira\Projects\shop\.crazyagent",
+                Access::KeepEntries,
+            ),
+            ace(PROJECT, Access::RootAnchor),
+            ace(DOCUMENTS, Access::RootKeep),
+            ace(r"C:\Users\mira\Downloads", Access::Modify),
             ace(TOOLS, Access::ReadExecute),
-            ace(CONTEXT, Access::DenyWrite),
-            ace(r"C:\Users\mira\Projects\shop\keys", Access::DenyAll),
-            ace(PROJECT, Access::KeepEntries),
-            ace(r"C:\Users\mira\Projects\shop\.git", Access::Anchor),
         ];
+        assert_eq!(record.len(), ACCESSES.len(), "every role once");
         let text = encode(&record).unwrap();
-        assert!(text.starts_with("crazyagent-win-grants 1\n"));
-        assert!(text.contains("\nmodify C:\\Users\\mira\\Projects\\shop\n"));
-        assert!(text.contains("\nkeepentries C:\\Users\\mira\\Projects\\shop\n"));
-        assert!(text.contains("\nanchor C:\\Users\\mira\\Projects\\shop\\.git\n"));
+        assert!(text.starts_with("crazyagent-win-grants 2\n"));
+        assert!(text.contains("\nreadonly C:\\Users\\mira\\Projects\\shop\\context\n"));
+        assert!(text.contains("\nrootanchor C:\\Users\\mira\\Projects\\shop\n"));
+        assert!(text.contains("\nrootkeep C:\\Users\\mira\\Documents\n"));
         assert!(text.ends_with('\n'));
         assert_eq!(decode(&text).unwrap(), record);
         assert_eq!(encode(&[]).unwrap(), format!("{HEADER}\n"));
@@ -153,7 +165,9 @@ mod tests {
         let good = encode(&[ace(PROJECT, Access::Modify)]).unwrap();
         for bad in [
             String::new(),
-            "crazyagent-win-grants 2\n".to_owned(),
+            "crazyagent-win-grants 1\n".to_owned(),
+            good.replace("grants 2", "grants 1"),
+            good.replace("modify", "denywrite"),
             good.replace("modify", "own"),
             good.replace(PROJECT, r"Projects\shop"),
             good.replace('\n', "\r\n"),
@@ -176,52 +190,50 @@ mod tests {
     }
 
     #[test]
-    fn a_path_is_withdrawn_when_the_new_plan_takes_an_access_from_it() {
+    fn a_path_is_withdrawn_when_it_leaves_the_plan_or_its_cut_ends() {
         let before = [
-            ace(PROJECT, Access::Modify),
+            ace(CONTEXT, Access::ReadOnly),
+            ace(GIT, Access::Anchor),
+            ace(PROJECT, Access::RootAnchor),
             ace(DOCUMENTS, Access::Modify),
-            ace(CONTEXT, Access::DenyWrite),
             ace(TOOLS, Access::ReadExecute),
-            ace(PROJECT, Access::KeepEntries),
         ];
         let after = [
+            ace(r"c:\users\MIRA\projects\shop\.GIT", Access::KeepEntries),
+            ace(CONTEXT, Access::Modify),
             ace(r"c:\users\MIRA\projects\shop", Access::Modify),
             ace(DOCUMENTS, Access::ReadExecute),
-            ace(TOOLS, Access::ReadExecute),
             ace(r"C:\New", Access::Modify),
         ];
         assert_eq!(
             withdrawn(&before, &after),
-            [DOCUMENTS, CONTEXT, PROJECT],
-            "a lost keep entry, a narrowed grant and a dropped deny are withdrawn; an unchanged \
-             grant written in another case is not"
+            [CONTEXT, TOOLS],
+            "a cut that ends and a dropped grant are withdrawn; a cut changed to another cut, \
+             a root no longer anchored and a narrowed grant change in place"
         );
         assert!(withdrawn(&before, &before).is_empty());
         assert!(withdrawn(&[], &after).is_empty());
         assert_eq!(
             withdrawn(&before, &[]),
-            [PROJECT, DOCUMENTS, CONTEXT, TOOLS]
+            [CONTEXT, GIT, PROJECT, DOCUMENTS, TOOLS]
         );
         let doubled = [
-            ace(PROJECT, Access::Modify),
-            ace(r"C:\USERS\mira\Projects\shop", Access::DenyWrite),
+            ace(GIT, Access::Anchor),
+            ace(r"C:\USERS\mira\Projects\shop\.git", Access::KeepEntries),
         ];
-        assert_eq!(withdrawn(&doubled, &[]), [PROJECT], "each path once");
-        let widened = [
-            ace(PROJECT, Access::Modify),
-            ace(PROJECT, Access::KeepEntries),
-        ];
+        assert_eq!(withdrawn(&doubled, &[]), [GIT], "each path once");
         assert!(
-            withdrawn(&[ace(PROJECT, Access::Modify)], &widened).is_empty(),
-            "an added entry needs no withdrawal"
+            withdrawn(&doubled, &[ace(GIT, Access::Hidden)]).is_empty(),
+            "an interrupted change listing two cuts keeps the path cut"
         );
-        let anchored = [ace(PROJECT, Access::Modify), ace(PROJECT, Access::Anchor)];
-        assert_eq!(
-            withdrawn(&widened, &anchored),
-            [PROJECT],
-            "a folder kept by an older plan loses its wider deny before it is anchored"
+        assert!(
+            withdrawn(
+                &[ace(PROJECT, Access::Modify)],
+                &[ace(PROJECT, Access::RootKeep)]
+            )
+            .is_empty(),
+            "a root that starts to keep its entries needs no withdrawal"
         );
-        assert_eq!(withdrawn(&anchored, &widened), [PROJECT]);
     }
 
     #[test]
