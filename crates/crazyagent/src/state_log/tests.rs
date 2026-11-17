@@ -530,6 +530,7 @@ const WRITERS: [(&str, &[&str]); 6] = [
             "KIND_STEPS,",
             "KIND_TIME,",
             "KIND_FRAMES,",
+            "KIND_PROFILE,",
         ],
     ),
     ("state_log.rs", &["SNAPSHOT_CHUNK,", "SNAPSHOT_DONE,"]),
