@@ -16,7 +16,7 @@
     "src/screens/skill-tag.css": 4,
     "src/screens/team/agent-messages.css": 2,
     "src/screens/team/team-graph.css": 11,
-    "src/style.css": 18
+    "src/style.css": 15
   },
   "weight600": {
     "src/screens/demo/demo.css": 1,
@@ -30,7 +30,7 @@
     "src/screens/team/agent-messages.css": 2,
     "src/screens/team/team-graph.css": 7,
     "src/screens/terminals/terminals.css": 2,
-    "src/style.css": 12
+    "src/style.css": 10
   },
   "fontSize": {
     "src/screens/changes/changes.css": 1,
@@ -42,7 +42,7 @@
     "src/screens/project/overview-tabs.css": 1,
     "src/screens/project/projects.css": 37,
     "src/screens/project/team-activity.css": 5,
-    "src/screens/settings/settings.css": 27,
+    "src/screens/settings/settings.css": 26,
     "src/screens/team/agent-messages.css": 4,
     "src/screens/team/team-graph.css": 17,
     "src/screens/terminals/terminals.css": 5,
