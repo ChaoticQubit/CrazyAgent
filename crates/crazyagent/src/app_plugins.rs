@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 use std::ops::RangeInclusive;
 
 pub mod manifest;
+pub mod store;
 pub mod yaml;
 
 /// The folder beside the engine database that holds the owner's own plugin files, one
