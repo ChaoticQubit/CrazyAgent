@@ -1,0 +1,334 @@
+{
+  "launches": [
+    {
+      "arguments": [
+        "--mcp-config",
+        "<path-1>/home-claude-code-off/crazyagent/mcp.json",
+        "--append-system-prompt-file",
+        "<path-1>/home-claude-code-off/crazyagent/instructions.md"
+      ],
+      "denied_tools": [],
+      "files": [
+        {
+          "path": "crazyagent/instructions.md",
+          "text": [
+            "# Project context from CrazyAgent",
+            "",
+            "You are working on the project \"Snapshot P4\".",
+            "Project folder: <path-1>/Projects/snapshot-p4",
+            "Context folder: <path-1>/Projects/snapshot-p4/.crazyagent",
+            "",
+            "## How your work lands",
+            "",
+            "Your worktree is your own copy of the project, on its own branch. Commit your work on the branch checked out in your worktree with conventional commit messages before your task ends: only your commits land, and uncommitted edits stay behind. Never create, switch, rename or delete a branch, never push, tag or rewrite history, and never write inside the project folder's `.git`. If the sandbox refuses a command, never retry it outside the sandbox or another way; say in your reply what was refused. When your task ends, CrazyAgent fetches your branch, and the owner's Accept in the project's Changes view lands your commits onto the branch checked out in the project folder. This rule wins over any other instruction about branches or commits.",
+            "",
+            "## Brief",
+            "",
+            "# Snapshot P4",
+            "",
+            "## About",
+            "",
+            "Watches sensor buoys and raises alerts.",
+            "",
+            "## Tech stack",
+            "",
+            "- rust",
+            "",
+            "## Target platforms",
+            "",
+            "- Website",
+            "",
+            "## Research",
+            "",
+            "- Market research -> context/research/market_research.md",
+            "",
+            "## Documents",
+            "",
+            "- None",
+            "",
+            "## Context files",
+            "",
+            "These paths are relative to the context folder. Open them when they help with your task.",
+            "",
+            "- context/brief.md (brief, 213 bytes)",
+            "",
+            "## Shared project folders",
+            "",
+            "<path-1>/Projects/snapshot-p4 holds folders your worktree does not have, such as data, programs and the folders git ignores. Read them there.",
+            "They are read-only to you.",
+            "Secret files there (.env files, keys, certificates, credential files) stay closed unless the owner shared them.",
+            "Toolchains: you use the owner's Rust, Node.js and Python read-only. Never install or download a toolchain or a language version (such as rustup toolchain install, uv python install or nvm install); when one is missing, say so in your reply."
+          ]
+        },
+        {
+          "path": "crazyagent/mcp.json",
+          "text": [
+            "{\"mcpServers\":{}}"
+          ]
+        },
+        {
+          "path": "crazyagent.lock",
+          "text": []
+        }
+      ],
+      "harness": "claude-code",
+      "tools": false
+    },
+    {
+      "arguments": [
+        "--mcp-config",
+        "<path-1>/home-claude-code-on/crazyagent/mcp.json",
+        "--plugin-dir",
+        "<path-1>/home-claude-code-on/crazyagent/plugin",
+        "--append-system-prompt-file",
+        "<path-1>/home-claude-code-on/crazyagent/instructions.md"
+      ],
+      "denied_tools": [],
+      "files": [
+        {
+          "path": "crazyagent/instructions.md",
+          "text": [
+            "# Project context from CrazyAgent",
+            "",
+            "You are working on the project \"Snapshot P4\".",
+            "Project folder: <path-1>/Projects/snapshot-p4",
+            "Context folder: <path-1>/Projects/snapshot-p4/.crazyagent",
+            "",
+            "## How your work lands",
+            "",
+            "Your worktree is your own copy of the project, on its own branch. Commit your work on the branch checked out in your worktree with conventional commit messages before your task ends: only your commits land, and uncommitted edits stay behind. Never create, switch, rename or delete a branch, never push, tag or rewrite history, and never write inside the project folder's `.git`. If the sandbox refuses a command, never retry it outside the sandbox or another way; say in your reply what was refused. When your task ends, CrazyAgent fetches your branch, and the owner's Accept in the project's Changes view lands your commits onto the branch checked out in the project folder. This rule wins over any other instruction about branches or commits.",
+            "",
+            "## Brief",
+            "",
+            "# Snapshot P4",
+            "",
+            "## About",
+            "",
+            "Watches sensor buoys and raises alerts.",
+            "",
+            "## Tech stack",
+            "",
+            "- rust",
+            "",
+            "## Target platforms",
+            "",
+            "- Website",
+            "",
+            "## Research",
+            "",
+            "- Market research -> context/research/market_research.md",
+            "",
+            "## Documents",
+            "",
+            "- None",
+            "",
+            "## Context files",
+            "",
+            "These paths are relative to the context folder. Open them when they help with your task.",
+            "",
+            "- context/brief.md (brief, 213 bytes)",
+            "",
+            "## Shared project folders",
+            "",
+            "<path-1>/Projects/snapshot-p4 holds folders your worktree does not have, such as data, programs and the folders git ignores. Read them there.",
+            "They are read-only to you.",
+            "Secret files there (.env files, keys, certificates, credential files) stay closed unless the owner shared them.",
+            "Toolchains: you use the owner's Rust, Node.js and Python read-only. Never install or download a toolchain or a language version (such as rustup toolchain install, uv python install or nvm install); when one is missing, say so in your reply.",
+            "",
+            "## Tools to use",
+            "",
+            "The owner's instructions and the sections above come first. These rules apply to every task; this section names the tools this launch has as you call them, and where other instructions name one another way, use the name here.",
+            "",
+            "- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part. If your worktree has no `graphify-out/graph.json`, say so in your report."
+          ]
+        },
+        {
+          "path": "crazyagent/mcp.json",
+          "text": [
+            "{\"mcpServers\":{}}"
+          ]
+        },
+        {
+          "path": "crazyagent/plugin/.claude-plugin/plugin.json",
+          "text": [
+            "{\"name\":\"crazyagent\",\"version\":\"1.0.0\",\"description\":\"Skills the owner approved for this project in CrazyAgent\"}"
+          ]
+        },
+        {
+          "path": "crazyagent/plugin/hook-plugins/hooks-<id-1>/hooks/hooks.json",
+          "text": [
+            "{\"hooks\": {\"PreToolUse\": [{\"matcher\": \"Bash\", \"hooks\": [{\"type\": \"command\", \"command\": \"/bin/echo checked\"}]}]}}"
+          ]
+        },
+        {
+          "path": "crazyagent/plugin/hooks/hooks.json",
+          "text": [
+            "{\"hooks\":{\"PreToolUse\":[{\"hooks\":[{\"command\":\"CRAZYAGENT_HOOK_ROOT=\\\"${CLAUDE_PLUGIN_ROOT}/hook-plugins/hooks-<id-1>\\\"; export CLAUDE_PLUGIN_ROOT=\\\"$CRAZYAGENT_HOOK_ROOT\\\"; /bin/echo checked\",\"type\":\"command\"}],\"matcher\":\"Bash\"}]}}"
+          ]
+        },
+        {
+          "path": "crazyagent.lock",
+          "text": []
+        }
+      ],
+      "harness": "claude-code",
+      "tools": true
+    },
+    {
+      "arguments": [],
+      "denied_tools": [],
+      "files": [
+        {
+          "path": "config.toml",
+          "text": [
+            "developer_instructions = \"\"\"",
+            "# Project context from CrazyAgent",
+            "",
+            "You are working on the project \"Snapshot P4\".",
+            "Project folder: <path-1>/Projects/snapshot-p4",
+            "Context folder: <path-1>/Projects/snapshot-p4/.crazyagent",
+            "",
+            "## How your work lands",
+            "",
+            "Your worktree is your own copy of the project, on its own branch. Commit your work on the branch checked out in your worktree with conventional commit messages before your task ends: only your commits land, and uncommitted edits stay behind. Never create, switch, rename or delete a branch, never push, tag or rewrite history, and never write inside the project folder's `.git`. If the sandbox refuses a command, never retry it outside the sandbox or another way; say in your reply what was refused. When your task ends, CrazyAgent fetches your branch, and the owner's Accept in the project's Changes view lands your commits onto the branch checked out in the project folder. This rule wins over any other instruction about branches or commits.",
+            "",
+            "## Brief",
+            "",
+            "# Snapshot P4",
+            "",
+            "## About",
+            "",
+            "Watches sensor buoys and raises alerts.",
+            "",
+            "## Tech stack",
+            "",
+            "- rust",
+            "",
+            "## Target platforms",
+            "",
+            "- Website",
+            "",
+            "## Research",
+            "",
+            "- Market research -> context/research/market_research.md",
+            "",
+            "## Documents",
+            "",
+            "- None",
+            "",
+            "## Context files",
+            "",
+            "These paths are relative to the context folder. Open them when they help with your task.",
+            "",
+            "- context/brief.md (brief, 213 bytes)",
+            "",
+            "## Shared project folders",
+            "",
+            "<path-1>/Projects/snapshot-p4 holds folders your worktree does not have, such as data, programs and the folders git ignores. Read them there.",
+            "They are read-only to you.",
+            "Secret files there (.env files, keys, certificates, credential files) stay closed unless the owner shared them.",
+            "Toolchains: you use the owner's Rust, Node.js and Python read-only. Never install or download a toolchain or a language version (such as rustup toolchain install, uv python install or nvm install); when one is missing, say so in your reply.",
+            "\"\"\"",
+            "project_doc_max_bytes = 0"
+          ]
+        },
+        {
+          "path": "crazyagent.lock",
+          "text": []
+        }
+      ],
+      "harness": "codex",
+      "tools": false
+    },
+    {
+      "arguments": [],
+      "denied_tools": [],
+      "files": [
+        {
+          "path": "config.toml",
+          "text": [
+            "developer_instructions = \"\"\"",
+            "# Project context from CrazyAgent",
+            "",
+            "You are working on the project \"Snapshot P4\".",
+            "Project folder: <path-1>/Projects/snapshot-p4",
+            "Context folder: <path-1>/Projects/snapshot-p4/.crazyagent",
+            "",
+            "## How your work lands",
+            "",
+            "Your worktree is your own copy of the project, on its own branch. Commit your work on the branch checked out in your worktree with conventional commit messages before your task ends: only your commits land, and uncommitted edits stay behind. Never create, switch, rename or delete a branch, never push, tag or rewrite history, and never write inside the project folder's `.git`. If the sandbox refuses a command, never retry it outside the sandbox or another way; say in your reply what was refused. When your task ends, CrazyAgent fetches your branch, and the owner's Accept in the project's Changes view lands your commits onto the branch checked out in the project folder. This rule wins over any other instruction about branches or commits.",
+            "",
+            "## Brief",
+            "",
+            "# Snapshot P4",
+            "",
+            "## About",
+            "",
+            "Watches sensor buoys and raises alerts.",
+            "",
+            "## Tech stack",
+            "",
+            "- rust",
+            "",
+            "## Target platforms",
+            "",
+            "- Website",
+            "",
+            "## Research",
+            "",
+            "- Market research -> context/research/market_research.md",
+            "",
+            "## Documents",
+            "",
+            "- None",
+            "",
+            "## Context files",
+            "",
+            "These paths are relative to the context folder. Open them when they help with your task.",
+            "",
+            "- context/brief.md (brief, 213 bytes)",
+            "",
+            "## Shared project folders",
+            "",
+            "<path-1>/Projects/snapshot-p4 holds folders your worktree does not have, such as data, programs and the folders git ignores. Read them there.",
+            "They are read-only to you.",
+            "Secret files there (.env files, keys, certificates, credential files) stay closed unless the owner shared them.",
+            "Toolchains: you use the owner's Rust, Node.js and Python read-only. Never install or download a toolchain or a language version (such as rustup toolchain install, uv python install or nvm install); when one is missing, say so in your reply.",
+            "",
+            "## Tools to use",
+            "",
+            "The owner's instructions and the sections above come first. These rules apply to every task; this section names the tools this launch has as you call them, and where other instructions name one another way, use the name here.",
+            "",
+            "- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part. If your worktree has no `graphify-out/graph.json`, say so in your report.",
+            "\"\"\"",
+            "project_doc_max_bytes = 0",
+            "",
+            "[[hooks.PreToolUse]]",
+            "matcher = \"Bash\"",
+            "",
+            "[[hooks.PreToolUse.hooks]]",
+            "type = \"command\"",
+            "command = 'CRAZYAGENT_HOOK_ROOT=\"<path-1>/home-codex-on/crazyagent/hook-plugins/hooks-<id-1>\"; export CLAUDE_PLUGIN_ROOT=\"$CRAZYAGENT_HOOK_ROOT\"; /bin/echo checked'",
+            "timeout = 600",
+            "",
+            "[hooks.state.\"<path-1>/home-codex-on/config.toml:pre_tool_use:0:0\"]",
+            "trusted_hash = \"sha256:<id-2>\""
+          ]
+        },
+        {
+          "path": "crazyagent/hook-plugins/hooks-<id-1>/hooks/hooks.json",
+          "text": [
+            "{\"hooks\": {\"PreToolUse\": [{\"matcher\": \"Bash\", \"hooks\": [{\"type\": \"command\", \"command\": \"/bin/echo checked\"}]}]}}"
+          ]
+        },
+        {
+          "path": "crazyagent.lock",
+          "text": []
+        }
+      ],
+      "harness": "codex",
+      "tools": true
+    }
+  ],
+  "read_paths": []
+}

@@ -1,9 +1,45 @@
-use super::{guarded, spawn};
+use super::{guarded, output, spawn, status};
+use std::process::{Command, Stdio};
+
+/// A command that exits 0 and prints nothing: `true` here.
 #[cfg(unix)]
-use super::{output, status};
-use std::process::Command;
+fn succeeding() -> Command {
+    Command::new("/usr/bin/true")
+}
+
+/// A command that exits 0 and prints nothing: the system `cmd.exe` running `exit 0`.
+#[cfg(windows)]
+fn succeeding() -> Command {
+    let mut command = Command::new(system_shell());
+    command.args(["/d", "/c", "exit", "0"]);
+    command
+}
+
+/// A command that exits 0 after printing `out` to stdout and `err` to stderr, with no newline
+/// on stdout: `sh` here.
 #[cfg(unix)]
-use std::process::Stdio;
+fn printing() -> Command {
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "printf out; printf err >&2"]);
+    command
+}
+
+/// A command that exits 0 after printing `out` to stdout, with no newline, and `err` to
+/// stderr: the system `cmd.exe`, whose `set /p` prompt with no input prints without one.
+#[cfg(windows)]
+fn printing() -> Command {
+    let mut command = Command::new(system_shell());
+    command.args(["/d", "/c", "<nul set /p =out&echo err 1>&2&exit 0"]);
+    command
+}
+
+/// The `cmd.exe` Windows ships, by its full path. Output: the path.
+#[cfg(windows)]
+fn system_shell() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("cmd.exe")
+}
 
 #[test]
 #[should_panic(expected = "spawn_gate entered again on a thread that already holds it")]
@@ -11,24 +47,17 @@ fn entering_the_gate_inside_the_gate_panics_instead_of_deadlocking() {
     let _ = guarded(|| spawn(&mut Command::new("/usr/bin/true")));
 }
 
-#[cfg(unix)]
 #[test]
 fn the_gate_is_usable_again_after_a_reentry_panic() {
-    let reentry = std::thread::spawn(|| guarded(|| status(&mut Command::new("/usr/bin/true"))));
+    let reentry = std::thread::spawn(|| guarded(|| status(&mut succeeding())));
     assert!(reentry.join().is_err());
-    assert!(
-        status(&mut Command::new("/usr/bin/true"))
-            .unwrap()
-            .success()
-    );
+    assert!(status(&mut succeeding()).unwrap().success());
 }
 
-#[cfg(unix)]
 #[test]
 fn output_keeps_the_stdio_the_caller_set() {
     let captured = output(
-        Command::new("/bin/sh")
-            .args(["-c", "printf out; printf err >&2"])
+        printing()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null()),

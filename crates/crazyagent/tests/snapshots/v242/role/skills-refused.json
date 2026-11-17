@@ -1,0 +1,13 @@
+{
+  "named_twice": {
+    "refused": "coord_settings_invalid"
+  },
+  "read": {
+    "lead": null,
+    "master": null,
+    "worker": null
+  },
+  "unsafe_name": {
+    "refused": "coord_settings_invalid"
+  }
+}

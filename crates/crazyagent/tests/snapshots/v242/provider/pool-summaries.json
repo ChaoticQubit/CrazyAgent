@@ -1,0 +1,18 @@
+[
+  {
+    "id": "snapshot-p2-pool",
+    "members": [
+      {
+        "id": "url-account-<id-1>",
+        "kind": "local",
+        "provider": "Local model",
+        "status": "set_up",
+        "status_label": "Set up"
+      }
+    ],
+    "name": "snapshot-p2-pool",
+    "project_count": 1,
+    "provider_quota_policy": "bounded_attempt",
+    "summary": "1 Local model"
+  }
+]

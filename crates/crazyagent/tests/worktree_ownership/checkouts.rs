@@ -826,6 +826,10 @@ async fn a_mixed_device_lease_record_is_still_refused() {
     }
 }
 
+/// One change a lease row makes to a lease worktree before the engine opens again, such as
+/// a tracked file removed or an index rewritten. Input: the lease worktree.
+type Damage = dyn Fn(&Path);
+
 /// Makes a Ready lease, lets `change` touch its worktree, stores the lease Uncertain with
 /// `renumber` applied, opens the engine once more, and runs `after` once it is closed.
 /// Inputs: the change and the after check, each given the lease worktree, and the renumber.
@@ -882,7 +886,7 @@ async fn a_failed_checkout_stays_uncertain_on_a_plain_and_a_renumbered_volume() 
         |worktree: &Path| std::fs::remove_file(admin_folder(worktree).join("index")).unwrap();
     let locked =
         |worktree: &Path| std::fs::write(admin_folder(worktree).join("index.lock"), "").unwrap();
-    let damages: [(&str, &dyn Fn(&Path)); 4] = [
+    let damages: [(&str, &Damage); 4] = [
         ("missing", &missing),
         ("short", &short),
         ("no index", &unindexed),
@@ -933,7 +937,7 @@ async fn an_uncertain_lease_whose_index_has_no_stat_data_is_checked_on_its_conte
         index_from_read_tree(worktree);
         std::fs::remove_file(worktree.join("tracked")).unwrap();
     };
-    let cases: [(&str, &dyn Fn(&Path), LeaseState); 3] = [
+    let cases: [(&str, &Damage, LeaseState); 3] = [
         ("whole", &index_from_read_tree, LeaseState::RecoveryRequired),
         ("same size, other bytes", &altered, LeaseState::Uncertain),
         ("missing", &missing, LeaseState::Uncertain),

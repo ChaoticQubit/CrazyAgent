@@ -1,0 +1,127 @@
+[
+  {
+    "name": "codex",
+    "reason": null,
+    "support": "terminal"
+  },
+  {
+    "name": "claude-code",
+    "reason": null,
+    "support": "terminal"
+  },
+  {
+    "name": "opencode",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "gemini-cli",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "cursor-agent",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "fx",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "antigravity",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "openclaw",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "pi",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "rcli",
+    "reason": "runs only as a CrazyAgent master",
+    "support": "headless_only"
+  },
+  {
+    "name": "amp",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "goose",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "aider",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "qwen-code",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "crush",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "droid",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "kiro",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "copilot",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "cline",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "continue",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "openhands",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "auggie",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "kimi",
+    "reason": "CrazyAgent cannot read its replies yet",
+    "support": "unavailable"
+  },
+  {
+    "name": "claude",
+    "reason": null,
+    "support": "terminal"
+  },
+  {
+    "name": "not-a-harness",
+    "reason": "not in the harness catalog",
+    "support": "headless_only"
+  }
+]

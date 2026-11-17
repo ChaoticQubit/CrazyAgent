@@ -1,0 +1,4041 @@
+{
+  "tables": [
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE account_limit_extras (",
+        "    account TEXT PRIMARY KEY NOT NULL,",
+        "    resets_count INTEGER CHECK (resets_count IS NULL OR resets_count BETWEEN 0 AND 1000),",
+        "    reset_kinds TEXT CHECK (reset_kinds IS NULL OR length(reset_kinds) <= 64),",
+        "    resets_expire_ms INTEGER CHECK (resets_expire_ms IS NULL OR resets_expire_ms BETWEEN 1 AND 32503680000000),",
+        "    resets_checked_ms INTEGER,",
+        "    resets_gained_ms INTEGER,",
+        "    credits TEXT CHECK (credits IS NULL OR length(credits) BETWEEN 1 AND 64),",
+        "    credits_checked_ms INTEGER,",
+        "    resets_unread TEXT CHECK (resets_unread IS NULL OR resets_unread IN ('surface','cli_version',",
+        "        'config_off','mobile','other_experiment','unavailable','unknown','other','no_reason',",
+        "        'no_answer','not_understood'))",
+        ")"
+      ],
+      "table": "account_limit_extras"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE account_limits (",
+        "    account TEXT PRIMARY KEY,",
+        "    plan TEXT,",
+        "    five_hour_percent REAL CHECK(five_hour_percent BETWEEN 0 AND 100),",
+        "    five_hour_resets_ms INTEGER,",
+        "    weekly_percent REAL CHECK(weekly_percent BETWEEN 0 AND 100),",
+        "    weekly_resets_ms INTEGER,",
+        "    five_hour_reset_override_ms INTEGER,",
+        "    weekly_reset_override_ms INTEGER,",
+        "    source TEXT CHECK(source IN ('poll','transcript')),",
+        "    observed_ms INTEGER,",
+        "    checked_ms INTEGER,",
+        "    failure TEXT,",
+        "    five_hour_polled_percent REAL CHECK(five_hour_polled_percent BETWEEN 0 AND 100),",
+        "    five_hour_polled_resets_ms INTEGER,",
+        "    weekly_polled_percent REAL CHECK(weekly_polled_percent BETWEEN 0 AND 100),",
+        "    weekly_polled_resets_ms INTEGER,",
+        "    five_hour_left_out TEXT CHECK(five_hour_left_out IN ('claude','codex')),",
+        "    weekly_left_out TEXT CHECK(weekly_left_out IN ('claude','codex'))",
+        ")"
+      ],
+      "table": "account_limits"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE account_live_master (",
+        "                id INTEGER PRIMARY KEY CHECK (id = 1),",
+        "                choice TEXT NOT NULL",
+        "            )"
+      ],
+      "table": "account_live_master"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE account_plans (",
+        "                connection TEXT PRIMARY KEY,",
+        "                rank INTEGER,",
+        "                reserve_percent INTEGER NOT NULL,",
+        "                pin TEXT",
+        "            )"
+      ],
+      "table": "account_plans"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE account_strategies (",
+        "                scope TEXT NOT NULL CHECK (scope IN ('app','pool','project')),",
+        "                id TEXT NOT NULL,",
+        "                strategy TEXT NOT NULL,",
+        "                PRIMARY KEY (scope, id)",
+        "            )"
+      ],
+      "table": "account_strategies"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE accounts (",
+        "    seq INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "    id TEXT NOT NULL UNIQUE CHECK(length(id) BETWEEN 1 AND 128),",
+        "    body BLOB NOT NULL CHECK(length(body) <= 16384)",
+        ")"
+      ],
+      "table": "accounts"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE agent_cleanup_settings (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    mode TEXT NOT NULL CHECK(mode IN ('after_days', 'once_landed', 'manual')),",
+        "    days INTEGER NOT NULL CHECK(days BETWEEN 1 AND 365)",
+        ")"
+      ],
+      "table": "agent_cleanup_settings"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE agent_instruction_app_settings (",
+        "            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "            edit_with_ai INTEGER NOT NULL CHECK(edit_with_ai IN (0, 1))",
+        "        )"
+      ],
+      "table": "agent_instruction_app_settings"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE agent_instruction_settings (",
+        "            project TEXT PRIMARY KEY,",
+        "            mode TEXT NOT NULL,",
+        "            transcripts INTEGER NOT NULL,",
+        "            edits TEXT NOT NULL DEFAULT 'next_message',",
+        "            repeated TEXT NOT NULL DEFAULT 'leave_out',",
+        "            edit_with_ai INTEGER NOT NULL DEFAULT 1 CHECK(edit_with_ai IN (0, 1))",
+        "        )"
+      ],
+      "table": "agent_instruction_settings"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE agent_quit_settings (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    on_quit TEXT NOT NULL CHECK(on_quit IN ('keep_running', 'stop')),",
+        "    left_running TEXT NOT NULL CHECK(left_running IN ('after_hours', 'never')),",
+        "    hours INTEGER NOT NULL CHECK(hours BETWEEN 1 AND 168)",
+        ")"
+      ],
+      "table": "agent_quit_settings"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX agent_runs_project ON agent_runs(project, started_ms)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE agent_runs(",
+        "    id TEXT PRIMARY KEY CHECK(length(id) = 32),",
+        "    project TEXT NOT NULL,",
+        "    role TEXT NOT NULL CHECK(role IN ('master','sub_agent','research')),",
+        "    label TEXT NOT NULL,",
+        "    harness TEXT NOT NULL,",
+        "    spec TEXT NOT NULL,",
+        "    state TEXT NOT NULL CHECK(state IN ('running','stopped','exited','failed','closed')),",
+        "    reattached INTEGER NOT NULL CHECK(reattached IN (0,1)),",
+        "    process_group INTEGER CHECK(process_group > 1),",
+        "    attempt INTEGER NOT NULL CHECK(attempt >= 1),",
+        "    epoch TEXT NOT NULL,",
+        "    exit_code INTEGER,",
+        "    reason TEXT,",
+        "    last_text TEXT,",
+        "    started_ms INTEGER NOT NULL,",
+        "    ended_ms INTEGER",
+        ")"
+      ],
+      "table": "agent_runs"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE asset_snapshots (id TEXT PRIMARY KEY, body TEXT NOT NULL)"
+      ],
+      "table": "asset_snapshots"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE asset_sources",
+        "        (id TEXT PRIMARY KEY, scope TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL,",
+        "        revoked INTEGER NOT NULL DEFAULT 0, UNIQUE(scope,name))"
+      ],
+      "table": "asset_sources"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE bootstrap_workspaces (",
+        "    session TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(session AS BLOB)) BETWEEN 1 AND 128),",
+        "    allocation TEXT NOT NULL UNIQUE CHECK(length(CAST(allocation AS BLOB)) BETWEEN 1 AND 128),",
+        "    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 32768)",
+        ")"
+      ],
+      "table": "bootstrap_workspaces"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 1,
+      "rows": [
+        {
+          "body": {
+            "descriptors": {
+              "allowed_destinations": {
+                "default": [],
+                "effect_timing": "NewTask",
+                "name": "allowed_destinations",
+                "origin": "Default",
+                "scope": "Global",
+                "value": []
+              },
+              "bulk_queue_capacity": {
+                "default": 64,
+                "effect_timing": "Restart",
+                "name": "bulk_queue_capacity",
+                "origin": "Default",
+                "scope": "Global",
+                "value": 64
+              },
+              "clients_max": {
+                "default": 16,
+                "effect_timing": "Restart",
+                "name": "clients_max",
+                "origin": "Default",
+                "scope": "Global",
+                "value": 16
+              },
+              "events_retained": {
+                "default": 128,
+                "effect_timing": "Restart",
+                "name": "events_retained",
+                "origin": "Default",
+                "scope": "Global",
+                "value": 128
+              },
+              "queue_capacity": {
+                "default": 32,
+                "effect_timing": "Restart",
+                "name": "queue_capacity",
+                "origin": "Default",
+                "scope": "Global",
+                "value": 32
+              },
+              "revoked_destinations": {
+                "default": [],
+                "effect_timing": "Immediate",
+                "name": "revoked_destinations",
+                "origin": "Default",
+                "scope": "Global",
+                "value": []
+              },
+              "routing.approval_mode": {
+                "default": "Human",
+                "effect_timing": "NewTask",
+                "name": "routing.approval_mode",
+                "origin": "Default",
+                "scope": "Global",
+                "value": "Human"
+              },
+              "routing.approved_accounts": {
+                "default": [],
+                "effect_timing": "NewTask",
+                "name": "routing.approved_accounts",
+                "origin": "Default",
+                "scope": "Global",
+                "value": []
+              },
+              "routing.fallback_allowed": {
+                "default": true,
+                "effect_timing": "NewTask",
+                "name": "routing.fallback_allowed",
+                "origin": "Default",
+                "scope": "Global",
+                "value": true
+              },
+              "routing.global_capacity": {
+                "default": {
+                  "cpu_millis": 16000,
+                  "memory_mib": 8192,
+                  "output_bytes": 67108864,
+                  "processes": 128,
+                  "slots": 16,
+                  "spend_microunits": 0,
+                  "wall_time_ms": "<t>"
+                },
+                "effect_timing": "Immediate",
+                "name": "routing.global_capacity",
+                "origin": "Default",
+                "scope": "Global",
+                "value": {
+                  "cpu_millis": 16000,
+                  "memory_mib": 8192,
+                  "output_bytes": 67108864,
+                  "processes": 128,
+                  "slots": 16,
+                  "spend_microunits": 0,
+                  "wall_time_ms": "<t>"
+                }
+              },
+              "routing.mailbox_capacity": {
+                "default": 32,
+                "effect_timing": "NewTask",
+                "name": "routing.mailbox_capacity",
+                "origin": "Default",
+                "scope": "Global",
+                "value": 32
+              },
+              "routing.preference_order": {
+                "default": [],
+                "effect_timing": "NewTask",
+                "name": "routing.preference_order",
+                "origin": "Default",
+                "scope": "Global",
+                "value": []
+              },
+              "routing.priority_weight": {
+                "default": 1,
+                "effect_timing": "NewTask",
+                "name": "routing.priority_weight",
+                "origin": "Default",
+                "scope": "Global",
+                "value": 1
+              },
+              "routing.project_capacity": {
+                "default": {
+                  "cpu_millis": 16000,
+                  "memory_mib": 8192,
+                  "output_bytes": 67108864,
+                  "processes": 128,
+                  "slots": 16,
+                  "spend_microunits": 0,
+                  "wall_time_ms": "<t>"
+                },
+                "effect_timing": "NewTask",
+                "name": "routing.project_capacity",
+                "origin": "Default",
+                "scope": "Global",
+                "value": {
+                  "cpu_millis": 16000,
+                  "memory_mib": 8192,
+                  "output_bytes": 67108864,
+                  "processes": 128,
+                  "slots": 16,
+                  "spend_microunits": 0,
+                  "wall_time_ms": "<t>"
+                }
+              },
+              "routing.scheduling": {
+                "default": "FairShare",
+                "effect_timing": "Immediate",
+                "name": "routing.scheduling",
+                "origin": "Default",
+                "scope": "Global",
+                "value": "FairShare"
+              },
+              "routing.task_capacity": {
+                "default": {
+                  "cpu_millis": 16000,
+                  "memory_mib": 8192,
+                  "output_bytes": 67108864,
+                  "processes": 128,
+                  "slots": 16,
+                  "spend_microunits": 0,
+                  "wall_time_ms": "<t>"
+                },
+                "effect_timing": "NewTask",
+                "name": "routing.task_capacity",
+                "origin": "Default",
+                "scope": "Global",
+                "value": {
+                  "cpu_millis": 16000,
+                  "memory_mib": 8192,
+                  "output_bytes": 67108864,
+                  "processes": 128,
+                  "slots": 16,
+                  "spend_microunits": 0,
+                  "wall_time_ms": "<t>"
+                }
+              },
+              "timeout_ms": {
+                "default": 1000,
+                "effect_timing": "Restart",
+                "name": "timeout_ms",
+                "origin": "Global",
+                "scope": "Global",
+                "value": 5000
+              }
+            },
+            "id": "<id-1>",
+            "settings": {
+              "allowed_destinations": [],
+              "bulk_queue_capacity": 64,
+              "clients_max": 16,
+              "events_retained": 128,
+              "queue_capacity": 32,
+              "revoked_destinations": [],
+              "timeout_ms": 5000
+            }
+          },
+          "id": "<id-1>"
+        }
+      ],
+      "schema": [
+        "CREATE TABLE configs (id TEXT PRIMARY KEY, body TEXT NOT NULL)"
+      ],
+      "table": "configs"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE configured_master_frames (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    frame_limit TEXT NOT NULL CHECK(frame_limit IN ('kib64', 'kib256', 'mib1'))",
+        ")"
+      ],
+      "table": "configured_master_frames"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE configured_master_profiles (",
+        "    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),",
+        "    session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),",
+        "    profile TEXT NOT NULL CHECK(length(profile) BETWEEN 1 AND 128),",
+        "    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384),",
+        "    UNIQUE(session,profile)",
+        ")"
+      ],
+      "table": "configured_master_profiles"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE configured_master_steps (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    step_limit TEXT NOT NULL CHECK(step_limit IN ('no_limit', 'steps50', 'steps100', 'steps200'))",
+        ")"
+      ],
+      "table": "configured_master_steps"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE configured_master_time (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    time_limit TEXT NOT NULL CHECK(time_limit IN ('no_limit', 'minutes10', 'minutes30', 'minutes60'))",
+        ")"
+      ],
+      "table": "configured_master_time"
+    },
+    {
+      "attached": [
+        [
+          "CREATE UNIQUE INDEX conversation_brief_version",
+          "    ON conversation_entries(project,brief_version) WHERE kind = 'brief'"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE conversation_entries (",
+        "    project TEXT NOT NULL,",
+        "    event_cursor INTEGER NOT NULL UNIQUE CHECK(event_cursor > 0),",
+        "    kind TEXT NOT NULL CHECK(kind IN ('message','brief')),",
+        "    brief_version INTEGER NOT NULL CHECK(brief_version >= 0),",
+        "    text TEXT NOT NULL CHECK(length(CAST(text AS BLOB)) BETWEEN 1 AND 8192),",
+        "    PRIMARY KEY(project,event_cursor),",
+        "    CHECK((kind = 'message' AND brief_version = 0) OR (kind = 'brief' AND brief_version > 0))",
+        ")"
+      ],
+      "table": "conversation_entries"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 1,
+      "rows": [
+        {
+          "version": 1
+        }
+      ],
+      "schema": [
+        "CREATE TABLE conversation_meta (",
+        "    version INTEGER PRIMARY KEY CHECK(version = 1)",
+        ")"
+      ],
+      "table": "conversation_meta"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_activity (",
+        "    agent INTEGER PRIMARY KEY,",
+        "    last_seen INTEGER NOT NULL,",
+        "    waiting TEXT,",
+        "    waiting_since INTEGER",
+        ")"
+      ],
+      "table": "coord_activity"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX coord_audit_agent ON coord_audit(by_kind, by_agent, action)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_audit (",
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "    project TEXT NOT NULL,",
+        "    work INTEGER NOT NULL,",
+        "    by_kind TEXT NOT NULL,",
+        "    by_agent INTEGER,",
+        "    action TEXT NOT NULL,",
+        "    from_version INTEGER NOT NULL,",
+        "    to_version INTEGER NOT NULL,",
+        "    at INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "coord_audit"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX coord_claims_project ON coord_claims(project, released)"
+        ],
+        [
+          "CREATE INDEX coord_claims_work ON coord_claims(work, released)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_claims (",
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "    project TEXT NOT NULL,",
+        "    agent INTEGER NOT NULL,",
+        "    work INTEGER NOT NULL,",
+        "    pattern TEXT NOT NULL,",
+        "    created INTEGER NOT NULL,",
+        "    released INTEGER",
+        ")"
+      ],
+      "table": "coord_claims"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_claims_full (",
+        "    project TEXT PRIMARY KEY,",
+        "    told INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "coord_claims_full"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_harness_settings (",
+        "    project TEXT NOT NULL,",
+        "    harness TEXT NOT NULL,",
+        "    mode TEXT NOT NULL DEFAULT 'app_spawned',",
+        "    delivery TEXT NOT NULL DEFAULT 'auto',",
+        "    PRIMARY KEY(project, harness)",
+        ")"
+      ],
+      "table": "coord_harness_settings"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX coord_held_set ON coord_held(change_set, released)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_held (",
+        "    claim INTEGER PRIMARY KEY,",
+        "    project TEXT NOT NULL,",
+        "    change_set TEXT NOT NULL,",
+        "    released INTEGER",
+        ")"
+      ],
+      "table": "coord_held"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX coord_lane_project ON coord_lane(project, seq)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_lane (",
+        "    project TEXT NOT NULL,",
+        "    agent INTEGER NOT NULL,",
+        "    ticket TEXT NOT NULL,",
+        "    uses TEXT NOT NULL,",
+        "    label TEXT NOT NULL,",
+        "    seq INTEGER NOT NULL,",
+        "    created_ms INTEGER NOT NULL,",
+        "    seen_ms INTEGER NOT NULL,",
+        "    granted_ms INTEGER,",
+        "    PRIMARY KEY(agent, ticket)",
+        ")"
+      ],
+      "table": "coord_lane"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX coord_messages_project ON coord_messages(project, kind, receipt)"
+        ],
+        [
+          "CREATE INDEX coord_messages_to ON coord_messages(to_kind, to_agent, receipt)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_messages (",
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "    project TEXT NOT NULL,",
+        "    from_kind TEXT NOT NULL,",
+        "    from_agent INTEGER,",
+        "    to_kind TEXT NOT NULL,",
+        "    to_agent INTEGER,",
+        "    kind TEXT NOT NULL,",
+        "    q_for TEXT,",
+        "    q_severity TEXT,",
+        "    work INTEGER,",
+        "    reply_to INTEGER,",
+        "    body TEXT NOT NULL,",
+        "    idem_key TEXT,",
+        "    receipt TEXT NOT NULL,",
+        "    created INTEGER NOT NULL,",
+        "    receipt_at INTEGER NOT NULL, turn TEXT,",
+        "    UNIQUE(from_agent, idem_key)",
+        ")"
+      ],
+      "table": "coord_messages"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_settings (",
+        "    project TEXT PRIMARY KEY,",
+        "    json TEXT NOT NULL",
+        ")"
+      ],
+      "table": "coord_settings"
+    },
+    {
+      "attached": [
+        [
+          "CREATE TRIGGER coord_tool_hours_added AFTER INSERT ON coord_tool_hours",
+          "    BEGIN INSERT INTO coord_tool_hours_rows (singleton,rows) VALUES (1,1)",
+          "        ON CONFLICT(singleton) DO UPDATE SET rows=rows+1; END"
+        ],
+        [
+          "CREATE TRIGGER coord_tool_hours_gone AFTER DELETE ON coord_tool_hours",
+          "    BEGIN UPDATE coord_tool_hours_rows SET rows=rows-1; END"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_tool_hours (",
+        "    hour_ms INTEGER NOT NULL,",
+        "    agent INTEGER NOT NULL,",
+        "    tool TEXT NOT NULL,",
+        "    count INTEGER NOT NULL,",
+        "    PRIMARY KEY (hour_ms, agent, tool)",
+        ") WITHOUT ROWID"
+      ],
+      "table": "coord_tool_hours"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_tool_hours_rows (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton=1),",
+        "    rows INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "coord_tool_hours_rows"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_tool_use (",
+        "    agent INTEGER NOT NULL,",
+        "    tool TEXT NOT NULL,",
+        "    count INTEGER NOT NULL,",
+        "    last INTEGER NOT NULL,",
+        "    PRIMARY KEY(agent, tool)",
+        ")"
+      ],
+      "table": "coord_tool_use"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_wait_cycles (",
+        "    project TEXT NOT NULL,",
+        "    first INTEGER NOT NULL,",
+        "    second INTEGER NOT NULL,",
+        "    holder INTEGER NOT NULL,",
+        "    file TEXT NOT NULL,",
+        "    created INTEGER NOT NULL,",
+        "    told INTEGER,",
+        "    PRIMARY KEY(project, first, second)",
+        ")"
+      ],
+      "table": "coord_wait_cycles"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_waits (",
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "    project TEXT NOT NULL,",
+        "    agent INTEGER NOT NULL,",
+        "    work INTEGER NOT NULL,",
+        "    file TEXT NOT NULL,",
+        "    held TEXT NOT NULL,",
+        "    created INTEGER NOT NULL,",
+        "    UNIQUE(agent, work)",
+        ")"
+      ],
+      "table": "coord_waits"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX coord_work_project ON coord_work(project, state)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coord_work (",
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "    project TEXT NOT NULL,",
+        "    title TEXT NOT NULL,",
+        "    owner_agent INTEGER,",
+        "    state TEXT NOT NULL,",
+        "    version INTEGER NOT NULL,",
+        "    evidence TEXT,",
+        "    created INTEGER NOT NULL,",
+        "    updated INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "coord_work"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coordination_links (id TEXT PRIMARY KEY, body TEXT NOT NULL)"
+      ],
+      "table": "coordination_links"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE coordination_plans",
+        "            (id TEXT PRIMARY KEY, task TEXT NOT NULL UNIQUE, body TEXT NOT NULL)"
+      ],
+      "table": "coordination_plans"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE demo_projects (",
+        "            project_id TEXT PRIMARY KEY NOT NULL CHECK(project_id = 'crazyagent-demo'),",
+        "            created_ms INTEGER NOT NULL CHECK(created_ms > 0),",
+        "            turn_floor INTEGER NOT NULL CHECK(turn_floor >= 0)",
+        "        )"
+      ],
+      "table": "demo_projects"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL)"
+      ],
+      "table": "events"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE file_trash (",
+        "    kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder','hook_folder','native_sign_in','generated_home')),",
+        "    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),",
+        "    PRIMARY KEY(kind, name)",
+        ") WITHOUT ROWID"
+      ],
+      "table": "file_trash"
+    },
+    {
+      "attached": [
+        [
+          "CREATE UNIQUE INDEX github_rule_requests_open",
+          "    ON github_rule_requests(project, asker, rule) WHERE status IN ('pending','approved','applying')"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE github_rule_requests (",
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "    project TEXT NOT NULL,",
+        "    asker TEXT NOT NULL,",
+        "    rule TEXT NOT NULL,",
+        "    turn_on INTEGER NOT NULL CHECK(turn_on IN (0,1)),",
+        "    why TEXT NOT NULL,",
+        "    repo TEXT NOT NULL,",
+        "    question INTEGER,",
+        "    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','applying','applied','refused','declined')),",
+        "    told INTEGER NOT NULL DEFAULT 0 CHECK(told IN (0,1)),",
+        "    created_ms INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "github_rule_requests"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE harness_groups (",
+        "    session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),",
+        "    turn TEXT NOT NULL CHECK(length(turn) BETWEEN 1 AND 128),",
+        "    process_group INTEGER CHECK(process_group > 1),",
+        "    started TEXT CHECK(length(started) BETWEEN 1 AND 64),",
+        "    UNIQUE(session,turn,process_group)",
+        ")"
+      ],
+      "table": "harness_groups"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE ide_asks (",
+        "                project TEXT NOT NULL,",
+        "                entry TEXT NOT NULL,",
+        "                version INTEGER NOT NULL CHECK (version > 0),",
+        "                decision TEXT NOT NULL CHECK (decision IN ('approve','reject')),",
+        "                asked_ms INTEGER NOT NULL,",
+        "                PRIMARY KEY (project, entry)",
+        "            ) WITHOUT ROWID"
+      ],
+      "table": "ide_asks"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE ide_workspaces (",
+        "    project TEXT PRIMARY KEY,",
+        "    show_all INTEGER NOT NULL CHECK(show_all IN (0,1)),",
+        "    body TEXT NOT NULL",
+        ")"
+      ],
+      "table": "ide_workspaces"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE instruction_imports (",
+        "            project TEXT PRIMARY KEY,",
+        "            moved TEXT NOT NULL",
+        "        )"
+      ],
+      "table": "instruction_imports"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX knowledge_activity_project ON knowledge_activity(project,ordinal)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE knowledge_activity",
+        "        (ordinal INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,",
+        "        project TEXT NOT NULL, source TEXT NOT NULL, body TEXT NOT NULL)"
+      ],
+      "table": "knowledge_activity"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE knowledge_entries",
+        "        (id TEXT NOT NULL, version INTEGER NOT NULL, project TEXT NOT NULL, body TEXT NOT NULL,",
+        "        PRIMARY KEY(id,version))"
+      ],
+      "table": "knowledge_entries"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX knowledge_global_approval ON knowledge_globals(entry,version,hash,approved)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE knowledge_globals",
+        "        (id TEXT PRIMARY KEY, entry TEXT NOT NULL, version INTEGER NOT NULL, hash TEXT NOT NULL,",
+        "        approved INTEGER NOT NULL DEFAULT 0, body TEXT NOT NULL)"
+      ],
+      "table": "knowledge_globals"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX knowledge_heads_project ON knowledge_heads(project,id)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE knowledge_heads",
+        "        (id TEXT PRIMARY KEY, version INTEGER NOT NULL, project TEXT NOT NULL)"
+      ],
+      "table": "knowledge_heads"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE knowledge_jobs",
+        "        (id TEXT PRIMARY KEY, project TEXT NOT NULL, destination TEXT NOT NULL, body TEXT NOT NULL,",
+        "        UNIQUE(project,destination))"
+      ],
+      "table": "knowledge_jobs"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX knowledge_nominations_project ON knowledge_nominations(project,id)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE knowledge_nominations",
+        "        (id TEXT PRIMARY KEY, project TEXT NOT NULL, body TEXT NOT NULL)"
+      ],
+      "table": "knowledge_nominations"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE knowledge_principals",
+        "        (id TEXT PRIMARY KEY, body TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0)"
+      ],
+      "table": "knowledge_principals"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE knowledge_sources",
+        "        (project TEXT NOT NULL, id TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0,",
+        "        PRIMARY KEY(project,id))"
+      ],
+      "table": "knowledge_sources"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE knowledge_watermarks",
+        "        (project TEXT NOT NULL, destination TEXT NOT NULL, ordinal INTEGER NOT NULL,",
+        "        PRIMARY KEY(project,destination))"
+      ],
+      "table": "knowledge_watermarks"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX landing_agent_branches_repository",
+          "    ON landing_agent_branches(repository, branch)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE landing_agent_branches (",
+        "    worktree TEXT PRIMARY KEY,",
+        "    repository TEXT NOT NULL,",
+        "    branch TEXT NOT NULL",
+        ")"
+      ],
+      "table": "landing_agent_branches"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE landing_bases (",
+        "    worktree TEXT PRIMARY KEY,",
+        "    base TEXT NOT NULL",
+        ")"
+      ],
+      "table": "landing_bases"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE landing_change_set_numbers (",
+        "    change_set TEXT PRIMARY KEY REFERENCES landing_change_sets(id),",
+        "    project TEXT NOT NULL,",
+        "    number INTEGER NOT NULL CHECK(number >= 1),",
+        "    UNIQUE(project, number)",
+        ")"
+      ],
+      "table": "landing_change_set_numbers"
+    },
+    {
+      "attached": [
+        [
+          "CREATE UNIQUE INDEX landing_change_sets_open",
+          "    ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating')"
+        ],
+        [
+          "CREATE INDEX landing_change_sets_project",
+          "    ON landing_change_sets(project, updated_ms)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE landing_change_sets (",
+        "    id TEXT PRIMARY KEY,",
+        "    project TEXT NOT NULL,",
+        "    agent_kind TEXT NOT NULL CHECK(agent_kind IN ('master','sub')),",
+        "    agent_id TEXT NOT NULL,",
+        "    label TEXT NOT NULL,",
+        "    repository TEXT NOT NULL,",
+        "    worktree TEXT NOT NULL,",
+        "    git_dir TEXT NOT NULL,",
+        "    base TEXT NOT NULL,",
+        "    head TEXT NOT NULL,",
+        "    state TEXT NOT NULL CHECK(state IN ('pending','conflict','updating','accepted','discarded')),",
+        "    last_outcome TEXT NOT NULL CHECK(last_outcome IN ('succeeded','failed','cancelled')),",
+        "    turn TEXT NOT NULL,",
+        "    prompt_line TEXT NOT NULL,",
+        "    files INTEGER NOT NULL,",
+        "    added INTEGER NOT NULL,",
+        "    removed INTEGER NOT NULL,",
+        "    conflicts TEXT NOT NULL,",
+        "    created_ms INTEGER NOT NULL,",
+        "    updated_ms INTEGER NOT NULL,",
+        "    restorable_until_ms INTEGER,",
+        "    pruned INTEGER NOT NULL DEFAULT 0 CHECK(pruned IN (0,1)),",
+        "    landed TEXT,",
+        "    intent TEXT,",
+        "    message TEXT NOT NULL DEFAULT '',",
+        "    waiting INTEGER NOT NULL DEFAULT 0 CHECK(waiting IN (0,1)),",
+        "    outside INTEGER NOT NULL DEFAULT 0 CHECK(outside IN (0,1)),",
+        "    made INTEGER NOT NULL DEFAULT 0 CHECK(made IN (0,1)),",
+        "    undone TEXT,",
+        "    landed_on TEXT,",
+        "    restored INTEGER NOT NULL DEFAULT 0 CHECK(restored IN (0,1)),",
+        "    regenerated_head TEXT,",
+        "    regenerated_files TEXT NOT NULL DEFAULT '[]',",
+        "    accepted_in TEXT,",
+        "    summary TEXT NOT NULL DEFAULT '',",
+        "    landing_result TEXT NOT NULL DEFAULT 'none'",
+        "        CHECK(landing_result IN ('none','landed','conflict','refused'))",
+        ")"
+      ],
+      "table": "landing_change_sets"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE learning_marks (",
+        "    step TEXT PRIMARY KEY,",
+        "    marked_ms INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "learning_marks"
+    },
+    {
+      "attached": [
+        [
+          "CREATE UNIQUE INDEX ledger_actions_pending",
+          "    ON ledger_actions(kind, action_key) WHERE outcome IS NULL"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE ledger_actions (",
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "    kind TEXT NOT NULL,",
+        "    action_key TEXT NOT NULL,",
+        "    payload TEXT NOT NULL,",
+        "    started_ms INTEGER NOT NULL,",
+        "    outcome TEXT CHECK(outcome IN ('done','failed','unknown')),",
+        "    finished_ms INTEGER,",
+        "    CHECK((outcome IS NULL) = (finished_ms IS NULL))",
+        ")"
+      ],
+      "table": "ledger_actions"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE master_preparations (",
+        "    session TEXT NOT NULL,",
+        "    turn TEXT NOT NULL,",
+        "    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384),",
+        "    PRIMARY KEY(session,turn),",
+        "    FOREIGN KEY(session,turn) REFERENCES master_turns(session,id)",
+        ")"
+      ],
+      "table": "master_preparations"
+    },
+    {
+      "attached": [
+        [
+          "CREATE UNIQUE INDEX master_current_project ON master_sessions(project) WHERE phase='configured'"
+        ],
+        [
+          "CREATE INDEX master_latest_project ON master_sessions(project,created DESC)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE master_sessions (",
+        "    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),",
+        "    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),",
+        "    created INTEGER NOT NULL UNIQUE CHECK(created > 0),",
+        "    version INTEGER NOT NULL CHECK(version >= created),",
+        "    phase TEXT NOT NULL CHECK(phase IN ('configured','parked','closed')),",
+        "    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384)",
+        ")"
+      ],
+      "table": "master_sessions"
+    },
+    {
+      "attached": [
+        [
+          "CREATE UNIQUE INDEX master_outstanding ON master_turns(session) WHERE phase IN ('queued','prepared','delivering','running','waiting_approval','uncertain')"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE master_turns (",
+        "    session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),",
+        "    ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 1024),",
+        "    id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 128),",
+        "    input INTEGER NOT NULL UNIQUE CHECK(input > 0),",
+        "    phase TEXT NOT NULL CHECK(phase IN ('queued','blocked','prepared','delivering','running','waiting_approval','succeeded','failed','cancelled','uncertain')),",
+        "    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384),",
+        "    PRIMARY KEY(session,ordinal),",
+        "    UNIQUE(session,id)",
+        ")"
+      ],
+      "table": "master_turns"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE master_waiting_resolves (",
+        "    session TEXT PRIMARY KEY,",
+        "    project TEXT NOT NULL,",
+        "    operation TEXT NOT NULL,",
+        "    input INTEGER NOT NULL CHECK(input > 0),",
+        "    body TEXT NOT NULL",
+        ")"
+      ],
+      "table": "master_waiting_resolves"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE memory_agent_scope (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton=1),",
+        "    scope TEXT NOT NULL CHECK(scope IN ('project','agent'))",
+        ")"
+      ],
+      "table": "memory_agent_scope"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX memory_library_scope ON memory_library(project, ordinal)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE memory_library (",
+        "    ordinal INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "    id TEXT NOT NULL UNIQUE,",
+        "    project TEXT,",
+        "    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 2 AND 1024),",
+        "    text TEXT NOT NULL CHECK(length(CAST(text AS BLOB)) BETWEEN 1 AND 4096)",
+        ")"
+      ],
+      "table": "memory_library"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE memory_settings (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton=1),",
+        "    agent_writes TEXT NOT NULL CHECK(agent_writes IN ('save','ask'))",
+        ")"
+      ],
+      "table": "memory_settings"
+    },
+    {
+      "attached": [
+        [
+          "CREATE UNIQUE INDEX model_gateway_active_task",
+          "            ON model_gateway_attempts(task_id) WHERE completion IS NULL"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE model_gateway_attempts (",
+        "            id TEXT PRIMARY KEY NOT NULL,",
+        "            task_id TEXT NOT NULL,",
+        "            previous_id TEXT UNIQUE,",
+        "            body TEXT NOT NULL CHECK(length(body) <= 32768),",
+        "            completion TEXT CHECK(length(completion) <= 4096),",
+        "            FOREIGN KEY(previous_id) REFERENCES model_gateway_attempts(id)",
+        "        )"
+      ],
+      "table": "model_gateway_attempts"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE model_gateway_observations (",
+        "            id TEXT PRIMARY KEY NOT NULL,",
+        "            connection_revision TEXT NOT NULL,",
+        "            sequence INTEGER NOT NULL CHECK(sequence > 0),",
+        "            body TEXT NOT NULL CHECK(length(body) <= 16384),",
+        "            UNIQUE(connection_revision, sequence)",
+        "        )"
+      ],
+      "table": "model_gateway_observations"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE native_auth_doubts (",
+        "            profile_key TEXT PRIMARY KEY NOT NULL CHECK(length(profile_key)=64),",
+        "            generation INTEGER NOT NULL CHECK(generation>0)",
+        "        )"
+      ],
+      "table": "native_auth_doubts"
+    },
+    {
+      "attached": [
+        [
+          "CREATE UNIQUE INDEX native_auth_one_flow ON native_auth_fences((1))"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE native_auth_fences (",
+        "            profile_key TEXT PRIMARY KEY NOT NULL CHECK(length(profile_key)=64),",
+        "            operation_id TEXT UNIQUE NOT NULL REFERENCES native_auth_operations(id)",
+        "                CHECK(length(operation_id) BETWEEN 1 AND 128),",
+        "            generation INTEGER NOT NULL CHECK(generation>0),",
+        "            db_instance TEXT NOT NULL CHECK(length(db_instance)=64),",
+        "            engine_epoch TEXT NOT NULL CHECK(length(engine_epoch)=64),",
+        "            custody_id TEXT NOT NULL CHECK(length(custody_id)=64),",
+        "            owner_id TEXT NOT NULL CHECK(length(owner_id)=64),",
+        "            owner_epoch INTEGER NOT NULL CHECK(owner_epoch>0)",
+        "        )"
+      ],
+      "table": "native_auth_fences"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX native_auth_profile_phase",
+          "        ON native_auth_operations(profile_key,phase)"
+        ],
+        [
+          "CREATE TRIGGER native_auth_operations_capacity",
+          "        BEFORE INSERT ON native_auth_operations",
+          "        WHEN (SELECT COUNT(*) FROM native_auth_operations)>=1024",
+          "        BEGIN SELECT RAISE(ABORT,'native_auth_operation_capacity'); END"
+        ]
+      ],
+      "excluded": [
+        "request",
+        "fact"
+      ],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE native_auth_operations (",
+        "            id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),",
+        "            profile_key TEXT NOT NULL CHECK(length(profile_key)=64),",
+        "            generation INTEGER NOT NULL CHECK(generation>0),",
+        "            phase TEXT NOT NULL CHECK(phase IN ('starting','awaiting_owner','checking_account',",
+        "                'authenticated_observed','unauthenticated_observed','cancelling','unavailable','uncertain')),",
+        "            request BLOB NOT NULL CHECK(length(request) BETWEEN 1 AND 8192),",
+        "            fact BLOB NOT NULL CHECK(length(fact) BETWEEN 1 AND 16384),",
+        "            UNIQUE(profile_key,generation)",
+        "        )"
+      ],
+      "table": "native_auth_operations"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE onboarding (",
+        "                project TEXT PRIMARY KEY,",
+        "                repo TEXT NOT NULL UNIQUE,",
+        "                pool TEXT NOT NULL,",
+        "                graph_state TEXT NOT NULL,",
+        "                graph_reason TEXT,",
+        "                mapping_state TEXT NOT NULL,",
+        "                mapping_reason TEXT,",
+        "                mapping_try INTEGER,",
+        "                mapping_try_ms INTEGER,",
+        "                mapping_try_earlier TEXT,",
+        "                drafted TEXT NOT NULL,",
+        "                mapping_found TEXT,",
+        "                runs INTEGER NOT NULL DEFAULT 0,",
+        "                claimer TEXT,",
+        "                heartbeat_ms INTEGER,",
+        "                created_ms INTEGER NOT NULL,",
+        "                updated_ms INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "onboarding"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE onboarding_saved_drafts (",
+        "                repo TEXT PRIMARY KEY,",
+        "                seal TEXT NOT NULL CHECK(length(seal)=64)",
+        "            )"
+      ],
+      "table": "onboarding_saved_drafts"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE onboarding_saved_overviews (",
+        "                repo TEXT PRIMARY KEY,",
+        "                seal TEXT NOT NULL CHECK(length(seal)=64)",
+        "            )"
+      ],
+      "table": "onboarding_saved_overviews"
+    },
+    {
+      "attached": [],
+      "excluded": [
+        "request",
+        "reply"
+      ],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE operations (client TEXT NOT NULL, id TEXT NOT NULL,",
+        "                request BLOB NOT NULL, reply BLOB NOT NULL, PRIMARY KEY(client,id))"
+      ],
+      "table": "operations"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 2,
+      "rows": [
+        {
+          "client_kind": "desktop",
+          "owner_epoch": 1,
+          "owner_id": "<id-2>",
+          "status": "active"
+        },
+        {
+          "client_kind": "tui",
+          "owner_epoch": 1,
+          "owner_id": "<id-3>",
+          "status": "active"
+        }
+      ],
+      "schema": [
+        "CREATE TABLE owner_identities (",
+        "    owner_id TEXT NOT NULL PRIMARY KEY CHECK(length(owner_id) = 64),",
+        "    client_kind TEXT NOT NULL UNIQUE CHECK(client_kind IN ('tui', 'desktop')),",
+        "    owner_epoch INTEGER NOT NULL CHECK(owner_epoch >= 1),",
+        "    status TEXT NOT NULL CHECK(status IN ('active', 'revoked'))",
+        ")"
+      ],
+      "table": "owner_identities"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 1,
+      "rows": [
+        {
+          "db_instance": "<id-4>",
+          "engine_epoch": "<id-5>",
+          "runtime_state": "offline",
+          "schema_version": 1,
+          "singleton": 1
+        }
+      ],
+      "schema": [
+        "CREATE TABLE owner_meta (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    schema_version INTEGER NOT NULL CHECK(schema_version = 1),",
+        "    db_instance TEXT NOT NULL CHECK(length(db_instance) = 64),",
+        "    engine_epoch TEXT NOT NULL CHECK(length(engine_epoch) = 64),",
+        "    runtime_state TEXT NOT NULL CHECK(runtime_state IN ('offline', 'active'))",
+        ")"
+      ],
+      "table": "owner_meta"
+    },
+    {
+      "attached": [
+        [
+          "CREATE UNIQUE INDEX owner_operation_event ON owner_operations(event_cursor) WHERE event_cursor IS NOT NULL"
+        ]
+      ],
+      "excluded": [
+        "request_hash",
+        "result"
+      ],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE owner_operations (",
+        "    origin TEXT NOT NULL CHECK(origin IN ('native_owner', 'trusted_host')),",
+        "    owner_id TEXT NOT NULL,",
+        "    operation_id TEXT NOT NULL CHECK(length(operation_id) BETWEEN 1 AND 128),",
+        "    request_hash BLOB NOT NULL CHECK(length(request_hash) = 32),",
+        "    engine_epoch TEXT NOT NULL CHECK(length(engine_epoch) = 64),",
+        "    admitted_epoch INTEGER NOT NULL CHECK(admitted_epoch >= 1),",
+        "    resulting_epoch INTEGER NOT NULL CHECK(resulting_epoch >= admitted_epoch),",
+        "    revision_before INTEGER NOT NULL CHECK(revision_before >= 0),",
+        "    revision_after INTEGER NOT NULL CHECK(revision_after >= revision_before),",
+        "    result BLOB NOT NULL CHECK(length(result) BETWEEN 1 AND 4096),",
+        "    event_cursor INTEGER CHECK(event_cursor IS NULL OR event_cursor >= 1),",
+        "    PRIMARY KEY(origin, owner_id, operation_id)",
+        ")"
+      ],
+      "table": "owner_operations"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE plugin_items (",
+        "    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),",
+        "    kind TEXT NOT NULL CHECK(kind IN ('skill','server','hook')),",
+        "    scope TEXT NOT NULL CHECK(length(scope) BETWEEN 1 AND 160),",
+        "    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64),",
+        "    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536),",
+        "    UNIQUE(kind, scope, name)",
+        ")"
+      ],
+      "table": "plugin_items"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE plugin_switches (",
+        "    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),",
+        "    item TEXT NOT NULL CHECK(length(item) BETWEEN 1 AND 64),",
+        "    PRIMARY KEY(project, item)",
+        ")"
+      ],
+      "table": "plugin_switches"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX project_activity_at ON project_activity(project, at_ms DESC)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE project_activity (",
+        "    id INTEGER PRIMARY KEY,",
+        "    project TEXT NOT NULL,",
+        "    at_ms INTEGER NOT NULL,",
+        "    kind TEXT NOT NULL,",
+        "    actor TEXT NOT NULL,",
+        "    goal TEXT,",
+        "    text TEXT NOT NULL,",
+        "    change_set TEXT,",
+        "    undone INTEGER NOT NULL DEFAULT 0",
+        ")"
+      ],
+      "table": "project_activity"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE project_activity_backfill (project TEXT PRIMARY KEY)"
+      ],
+      "table": "project_activity_backfill"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX project_activity_logged_by",
+          "    ON project_activity_logged(project, agent, master, at_ms)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE project_activity_logged (",
+        "    project TEXT NOT NULL,",
+        "    agent INTEGER NOT NULL,",
+        "    master INTEGER NOT NULL,",
+        "    at_ms INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "project_activity_logged"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE project_doc_links (",
+        "    project TEXT NOT NULL,",
+        "    path TEXT NOT NULL,",
+        "    kind TEXT NOT NULL,",
+        "    PRIMARY KEY (project, path, kind)",
+        ")"
+      ],
+      "table": "project_doc_links"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE project_overview(",
+        "  project TEXT PRIMARY KEY,",
+        "  refresh TEXT NOT NULL DEFAULT 'after_landing' CHECK(refresh IN ('after_landing','refresh_only','off')),",
+        "  apply TEXT NOT NULL DEFAULT 'always_ask' CHECK(apply IN ('always_ask','when_unedited')),",
+        "  stale INTEGER NOT NULL DEFAULT 0,",
+        "  due_ms INTEGER NOT NULL DEFAULT 0,",
+        "  running_ms INTEGER,",
+        "  checked_ms INTEGER,",
+        "  failure TEXT CHECK(failure IS NULL OR length(CAST(failure AS BLOB)) <= 200)",
+        ")"
+      ],
+      "table": "project_overview"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE project_overview_tabs(",
+        "  project TEXT NOT NULL,",
+        "  tab TEXT NOT NULL CHECK(tab IN ('quick_info','features','competitors','install_and_use')),",
+        "  seal TEXT,",
+        "  owner_seal TEXT,",
+        "  proposal TEXT CHECK(proposal IS NULL OR length(CAST(proposal AS BLOB)) <= 24576),",
+        "  PRIMARY KEY(project, tab)",
+        ")"
+      ],
+      "table": "project_overview_tabs"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE project_setups (project TEXT PRIMARY KEY, body TEXT NOT NULL)"
+      ],
+      "table": "project_setups"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)"
+      ],
+      "table": "projects"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE projects_delete_files (",
+        "    name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 96),",
+        "    inode INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "projects_delete_files"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE projects_delete_pending (",
+        "    exchange INTEGER PRIMARY KEY CHECK(exchange > 0)",
+        ")"
+      ],
+      "table": "projects_delete_pending"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE projects_home (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    path TEXT NOT NULL CHECK(length(CAST(path AS BLOB)) BETWEEN 1 AND 1024)",
+        ")"
+      ],
+      "table": "projects_home"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE projects_home_add (",
+        "    request TEXT PRIMARY KEY CHECK(length(request) BETWEEN 1 AND 128),",
+        "    owner TEXT NOT NULL CHECK(length(owner) BETWEEN 1 AND 256),",
+        "    source TEXT NOT NULL CHECK(length(CAST(source AS BLOB)) BETWEEN 1 AND 1024),",
+        "    destination TEXT NOT NULL CHECK(length(CAST(destination AS BLOB)) BETWEEN 1 AND 1024),",
+        "    mode TEXT NOT NULL CHECK(mode IN ('move', 'copy')),",
+        "    ended TEXT CHECK(ended IS NULL OR length(ended) BETWEEN 1 AND 64)",
+        ")"
+      ],
+      "table": "projects_home_add"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE projects_home_move (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),",
+        "    exchange INTEGER NOT NULL CHECK(exchange > 0),",
+        "    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),",
+        "    target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),",
+        "    folders TEXT NOT NULL CHECK(length(CAST(folders AS BLOB)) BETWEEN 2 AND 1048576)",
+        ")"
+      ],
+      "table": "projects_home_move"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE projects_home_project_move (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),",
+        "    exchange INTEGER NOT NULL CHECK(exchange > 0),",
+        "    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),",
+        "    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),",
+        "    target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),",
+        "    mode TEXT NOT NULL CHECK(mode IN ('move', 'copy'))",
+        ")"
+      ],
+      "table": "projects_home_project_move"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE projects_home_project_move_ended (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),",
+        "    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),",
+        "    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),",
+        "    mode TEXT NOT NULL CHECK(mode IN ('move', 'copy')),",
+        "    ended TEXT NOT NULL CHECK(length(ended) BETWEEN 1 AND 64)",
+        ")"
+      ],
+      "table": "projects_home_project_move_ended"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE projects_home_project_move_left (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),",
+        "    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),",
+        "    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024)",
+        ")"
+      ],
+      "table": "projects_home_project_move_left"
+    },
+    {
+      "attached": [
+        [
+          "CREATE UNIQUE INDEX projects_removed_return",
+          "                ON projects_removed(folder) WHERE returns=1"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE projects_removed (",
+        "                project TEXT PRIMARY KEY COLLATE NOCASE",
+        "                    CHECK(length(project) BETWEEN 1 AND 128),",
+        "                folder TEXT CHECK(folder IS NULL OR length(CAST(folder AS BLOB)) BETWEEN 1 AND 4096),",
+        "                returns INTEGER NOT NULL CHECK(returns IN (0,1)),",
+        "                removed_ms INTEGER NOT NULL,",
+        "                CHECK(returns=0 OR folder IS NOT NULL)",
+        "            )"
+      ],
+      "table": "projects_removed"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 1,
+      "rows": [
+        {
+          "done_ms": "<t>",
+          "only": 1
+        }
+      ],
+      "schema": [
+        "CREATE TABLE projects_removed_backfill (",
+        "                only INTEGER PRIMARY KEY CHECK(only=1),",
+        "                done_ms INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "projects_removed_backfill"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE provider_retry_settings (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    choice TEXT NOT NULL CHECK(choice IN ('stop_at_once', 'retry_briefly', 'harness_default'))",
+        ")"
+      ],
+      "table": "provider_retry_settings"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX questions_log_asker ON questions_log(project, asker, status)"
+        ],
+        [
+          "CREATE UNIQUE INDEX questions_log_coord ON questions_log(coord_message) WHERE coord_message IS NOT NULL"
+        ],
+        [
+          "CREATE INDEX questions_log_status ON questions_log(project, status, id)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE questions_log (",
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "    project TEXT NOT NULL,",
+        "    asker TEXT NOT NULL,",
+        "    source TEXT NOT NULL CHECK(source IN ('master','session','agent','engine','terminal')),",
+        "    question TEXT NOT NULL,",
+        "    options_json TEXT NOT NULL,",
+        "    recommended TEXT,",
+        "    context TEXT,",
+        "    status TEXT NOT NULL CHECK(status IN ('pending','answered','dismissed','answered_in_terminal')),",
+        "    answer TEXT,",
+        "    answered_by TEXT CHECK(answered_by IN ('owner','chat')),",
+        "    message INTEGER,",
+        "    turn_floor INTEGER NOT NULL,",
+        "    noted_ms INTEGER,",
+        "    created_ms INTEGER NOT NULL,",
+        "    settled_ms INTEGER,",
+        "    kind TEXT NOT NULL DEFAULT '',",
+        "    coord_message INTEGER,",
+        "    closed_by TEXT NOT NULL DEFAULT '',",
+        "    relay_key_ms INTEGER,",
+        "    reask INTEGER NOT NULL DEFAULT 0",
+        ")"
+      ],
+      "table": "questions_log"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX recovery_runs_agent ON recovery_runs(agent, state, id)"
+        ],
+        [
+          "CREATE UNIQUE INDEX recovery_runs_once ON recovery_runs(agent, at_ms)"
+        ],
+        [
+          "CREATE INDEX recovery_runs_state ON recovery_runs(state, project, id)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE recovery_runs (",
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "    agent INTEGER NOT NULL,",
+        "    project TEXT NOT NULL,",
+        "    kind TEXT NOT NULL CHECK(kind IN ('master','sub')),",
+        "    harness TEXT NOT NULL,",
+        "    at_ms INTEGER NOT NULL,",
+        "    turn INTEGER NOT NULL CHECK(turn >= 1),",
+        "    task INTEGER,",
+        "    message INTEGER,",
+        "    asked TEXT,",
+        "    record TEXT,",
+        "    cwd TEXT,",
+        "    record_file TEXT,",
+        "    paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0,1)),",
+        "    state TEXT NOT NULL CHECK(state IN ('stopped','interrupted','resuming','resumed','failed')),",
+        "    recorded_ms INTEGER,",
+        "    reason TEXT,",
+        "    retried INTEGER NOT NULL DEFAULT 0 CHECK(retried IN (0,1))",
+        ")"
+      ],
+      "table": "recovery_runs"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE recovery_sessions (",
+        "    agent INTEGER PRIMARY KEY,",
+        "    record TEXT NOT NULL",
+        ")"
+      ],
+      "table": "recovery_sessions"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE repository_admissions",
+        "        (project TEXT NOT NULL, repository TEXT NOT NULL, body TEXT NOT NULL,",
+        "         PRIMARY KEY(project,repository))"
+      ],
+      "table": "repository_admissions"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX research_jobs_project_status",
+          "                ON research_jobs(project, status, id)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE research_jobs (",
+        "                id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "                project TEXT NOT NULL,",
+        "                kind TEXT NOT NULL,",
+        "                harness TEXT NOT NULL,",
+        "                tools INTEGER NOT NULL,",
+        "                status TEXT NOT NULL,",
+        "                attempts INTEGER NOT NULL DEFAULT 0,",
+        "                claimer TEXT,",
+        "                report_path TEXT,",
+        "                error TEXT,",
+        "                cancel_requested INTEGER NOT NULL DEFAULT 0,",
+        "                output_bytes INTEGER NOT NULL DEFAULT 0,",
+        "                created_ms INTEGER NOT NULL,",
+        "                started_ms INTEGER,",
+        "                heartbeat_ms INTEGER,",
+        "                finished_ms INTEGER",
+        "            , limited INTEGER NOT NULL DEFAULT 0, refused INTEGER NOT NULL DEFAULT 0, not_before_ms INTEGER)"
+      ],
+      "table": "research_jobs"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE roadmap_status (",
+        "    project TEXT PRIMARY KEY,",
+        "    body TEXT NOT NULL DEFAULT '[]',",
+        "    source TEXT,",
+        "    problem TEXT,",
+        "    checked_ms INTEGER,",
+        "    stale INTEGER NOT NULL DEFAULT 0 CHECK(stale IN (0,1)),",
+        "    due_ms INTEGER NOT NULL DEFAULT 0,",
+        "    running_ms INTEGER",
+        ")"
+      ],
+      "table": "roadmap_status"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE roadmap_status_settings (",
+        "    project TEXT PRIMARY KEY,",
+        "    refresh TEXT NOT NULL CHECK(refresh IN ('after_landing','refresh_only','off'))",
+        ")"
+      ],
+      "table": "roadmap_status_settings"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE sandbox_settings (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    linux_sockets TEXT NOT NULL CHECK(linux_sockets IN ('tcp_only', 'refuse', 'tcp_ports')),",
+        "    linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off')),",
+        "    linux_strict TEXT NOT NULL DEFAULT 'off' CHECK(linux_strict IN ('off', 'on'))",
+        ")"
+      ],
+      "table": "sandbox_settings"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE session_marks (",
+        "    session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),",
+        "    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),",
+        "    started_ms INTEGER NOT NULL CHECK(started_ms >= 0),",
+        "    active_ms INTEGER NOT NULL CHECK(active_ms >= started_ms)",
+        ")"
+      ],
+      "table": "session_marks"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE session_messages (",
+        "    session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),",
+        "    seq INTEGER NOT NULL CHECK(seq > 0),",
+        "    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),",
+        "    speaker TEXT NOT NULL CHECK(speaker IN ('owner','engine','master','switch')),",
+        "    mode TEXT NOT NULL CHECK(mode IN ('one_turn','live')),",
+        "    harness TEXT CHECK(harness IS NULL OR length(harness) BETWEEN 1 AND 64),",
+        "    text TEXT CHECK(text IS NULL OR length(CAST(text AS BLOB)) BETWEEN 1 AND 8192),",
+        "    at_ms INTEGER NOT NULL CHECK(at_ms >= 0),",
+        "    source TEXT NOT NULL CHECK(source IN ('turn','terminal','record','counter','switch','backfill')),",
+        "    source_key TEXT NOT NULL CHECK(length(source_key) BETWEEN 1 AND 192),",
+        "    record TEXT CHECK(record IS NULL OR length(CAST(record AS BLOB)) BETWEEN 1 AND 128),",
+        "    record_at INTEGER CHECK(record_at IS NULL OR record_at >= 0),",
+        "    PRIMARY KEY(session,seq),",
+        "    UNIQUE(session,source,source_key)",
+        ")"
+      ],
+      "table": "session_messages"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE session_owner_turns (",
+        "    session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),",
+        "    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),",
+        "    turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 0),",
+        "    last_line TEXT CHECK(last_line IS NULL OR length(last_line) BETWEEN 1 AND 80)",
+        ")"
+      ],
+      "table": "session_owner_turns"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE settings_publication (singleton INTEGER PRIMARY KEY CHECK(singleton=1), body BLOB NOT NULL)"
+      ],
+      "table": "settings_publication"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE setup_pack (",
+        "    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),",
+        "    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536)",
+        ")"
+      ],
+      "table": "setup_pack"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE setup_refused_tool (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    choice TEXT NOT NULL CHECK(choice IN ('fix_button', 'command_only'))",
+        ")"
+      ],
+      "table": "setup_refused_tool"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE setup_trash (",
+        "    reference TEXT PRIMARY KEY CHECK(length(reference) BETWEEN 1 AND 128)",
+        ")"
+      ],
+      "table": "setup_trash"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 1,
+      "rows": [
+        {
+          "id": 1,
+          "revision": 0
+        }
+      ],
+      "schema": [
+        "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL)"
+      ],
+      "table": "state"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, body TEXT NOT NULL)"
+      ],
+      "table": "tasks"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_account_spread (",
+        "                project TEXT PRIMARY KEY,",
+        "                since_ms INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_account_spread"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_agent_branches (",
+        "                project TEXT PRIMARY KEY,",
+        "                mode TEXT NOT NULL CHECK(mode IN ('named','detached'))",
+        "            )"
+      ],
+      "table": "team_agent_branches"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_agent_conversations (",
+        "                agent INTEGER PRIMARY KEY,",
+        "                project TEXT NOT NULL,",
+        "                harness TEXT NOT NULL,",
+        "                connection TEXT NOT NULL,",
+        "                conversation TEXT NOT NULL CHECK(length(conversation) BETWEEN 1 AND 128),",
+        "                record TEXT NOT NULL CHECK(length(record) BETWEEN 1 AND 4096)",
+        "            )"
+      ],
+      "table": "team_agent_conversations"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_agent_ends_project ON team_agent_ends(project, id)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_agent_ends (",
+        "                id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "                project TEXT NOT NULL,",
+        "                agent INTEGER NOT NULL,",
+        "                role TEXT NOT NULL,",
+        "                harness TEXT NOT NULL,",
+        "                at_ms INTEGER NOT NULL,",
+        "                cause TEXT NOT NULL,",
+        "                problem TEXT CHECK(problem IS NULL OR length(problem) <= 300),",
+        "                turn_open INTEGER NOT NULL CHECK(turn_open IN (0,1)),",
+        "                leftovers INTEGER NOT NULL CHECK(leftovers IN (0,1))",
+        "            )"
+      ],
+      "table": "team_agent_ends"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_agent_messages_agent ON team_agent_messages(project, agent, created_ms)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_agent_messages (id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "         project TEXT NOT NULL,",
+        "         agent INTEGER NOT NULL,",
+        "         author TEXT NOT NULL CHECK(author IN ('master','owner','engine')),",
+        "         kind TEXT NOT NULL CHECK(kind IN ('message','answer','prompt')),",
+        "         text TEXT,",
+        "         created_ms INTEGER NOT NULL)"
+      ],
+      "table": "team_agent_messages"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_agents_project ON team_agents(project, status)"
+        ],
+        [
+          "CREATE TRIGGER team_status_logged",
+          "            AFTER UPDATE OF status ON team_agents",
+          "            WHEN NEW.status <> OLD.status",
+          "                AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project)",
+          "            BEGIN",
+          "                INSERT INTO team_status_log(project,agent,status,task,at_ms)",
+          "                VALUES (NEW.project,NEW.id,NEW.status,NEW.task,",
+          "                        CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER));",
+          "                DELETE FROM team_status_log WHERE id <= last_insert_rowid() - 20000;",
+          "            END"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_agents (",
+        "                id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "                project TEXT NOT NULL,",
+        "                role TEXT NOT NULL,",
+        "                harness TEXT NOT NULL,",
+        "                tools INTEGER NOT NULL,",
+        "                connection TEXT,",
+        "                worktree TEXT,",
+        "                status TEXT NOT NULL,",
+        "                task INTEGER,",
+        "                process_group INTEGER,",
+        "                turns INTEGER NOT NULL DEFAULT 0,",
+        "                error TEXT,",
+        "                created_ms INTEGER NOT NULL,",
+        "                heartbeat_ms INTEGER NOT NULL,",
+        "                stopped_ms INTEGER,",
+        "                session TEXT,",
+        "                parent INTEGER,",
+        "                pane TEXT,",
+        "                mode TEXT,",
+        "                hookless INTEGER NOT NULL DEFAULT 0,",
+        "                pane_pid INTEGER",
+        "            )"
+      ],
+      "table": "team_agents"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_background (",
+        "                project TEXT PRIMARY KEY,",
+        "                mode TEXT NOT NULL CHECK(mode IN ('wait','grace','stop')),",
+        "                grace_secs INTEGER CHECK((mode = 'grace') = (grace_secs IS NOT NULL))",
+        "            )"
+      ],
+      "table": "team_background"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_caps (",
+        "                project TEXT PRIMARY KEY,",
+        "                harnesses INTEGER CHECK(harnesses IS NULL OR harnesses BETWEEN 1 AND 15),",
+        "                teammates INTEGER CHECK(teammates IS NULL OR teammates BETWEEN 1 AND 15)",
+        "            )"
+      ],
+      "table": "team_caps"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_catch_up_main (",
+        "                project TEXT PRIMARY KEY,",
+        "                mode TEXT NOT NULL CHECK(mode IN ('on','off'))",
+        "            )"
+      ],
+      "table": "team_catch_up_main"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_conversation_tasks_turn ON team_conversation_tasks(session, turn)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_conversation_tasks (",
+        "                task INTEGER PRIMARY KEY,",
+        "                project TEXT NOT NULL,",
+        "                session TEXT NOT NULL,",
+        "                turn TEXT NOT NULL,",
+        "                note TEXT,",
+        "                noted_ms INTEGER",
+        "            )"
+      ],
+      "table": "team_conversation_tasks"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_done_quiet (",
+        "                project TEXT PRIMARY KEY,",
+        "                secs INTEGER NOT NULL CHECK(secs BETWEEN 0 AND 86400)",
+        "            )"
+      ],
+      "table": "team_done_quiet"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_event_pauses (",
+        "                project TEXT NOT NULL,",
+        "                agent INTEGER NOT NULL,",
+        "                since_ms INTEGER NOT NULL,",
+        "                PRIMARY KEY(project, agent)",
+        "            )"
+      ],
+      "table": "team_event_pauses"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_event_waiting (",
+        "                agent INTEGER PRIMARY KEY,",
+        "                project TEXT NOT NULL,",
+        "                text TEXT NOT NULL,",
+        "                since_ms INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_event_waiting"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_event_wakes_project ON team_event_wakes(project, at_ms)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_event_wakes (",
+        "                id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "                project TEXT NOT NULL,",
+        "                at_ms INTEGER NOT NULL,",
+        "                cold INTEGER NOT NULL DEFAULT 0",
+        "            )"
+      ],
+      "table": "team_event_wakes"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_events_agent ON team_events(project, agent, created_ms)"
+        ],
+        [
+          "CREATE INDEX team_events_project ON team_events(project, state)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_events (",
+        "                id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "                project TEXT NOT NULL,",
+        "                agent INTEGER NOT NULL,",
+        "                task INTEGER,",
+        "                kind TEXT NOT NULL,",
+        "                text TEXT NOT NULL,",
+        "                state TEXT NOT NULL,",
+        "                wake INTEGER,",
+        "                created_ms INTEGER NOT NULL,",
+        "                delivered_ms INTEGER",
+        "            )"
+      ],
+      "table": "team_events"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_finished_view (",
+        "                project TEXT PRIMARY KEY,",
+        "                show INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_finished_view"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_handles (",
+        "                project TEXT NOT NULL,",
+        "                handle TEXT NOT NULL,",
+        "                agent INTEGER NOT NULL,",
+        "                held_ms INTEGER NOT NULL,",
+        "                PRIMARY KEY(project, handle)",
+        "            )"
+      ],
+      "table": "team_handles"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_instruction_badges (",
+        "            agent INTEGER PRIMARY KEY,",
+        "            project TEXT NOT NULL",
+        "        )"
+      ],
+      "table": "team_instruction_badges"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_land_on (",
+        "                project TEXT PRIMARY KEY,",
+        "                branch TEXT NOT NULL",
+        "            )"
+      ],
+      "table": "team_land_on"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_landing_mode (",
+        "                project TEXT PRIMARY KEY,",
+        "                mode TEXT NOT NULL CHECK(mode IN ('squash','merge'))",
+        "            )"
+      ],
+      "table": "team_landing_mode"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_leftovers (",
+        "                project TEXT PRIMARY KEY,",
+        "                mode TEXT NOT NULL CHECK(mode IN ('end','keep','ask'))",
+        "            )"
+      ],
+      "table": "team_leftovers"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_live_masters (",
+        "                project TEXT PRIMARY KEY,",
+        "                live INTEGER NOT NULL,",
+        "                agent INTEGER,",
+        "                turn_open INTEGER NOT NULL DEFAULT 0,",
+        "                turns INTEGER NOT NULL DEFAULT 0,",
+        "                input_ms INTEGER,",
+        "                typed_ms INTEGER,",
+        "                draft INTEGER NOT NULL DEFAULT 0,",
+        "                problem TEXT",
+        "            )"
+      ],
+      "table": "team_live_masters"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_apply (",
+        "                project TEXT PRIMARY KEY,",
+        "                mode TEXT NOT NULL CHECK(mode IN ('when_idle','next_start'))",
+        "            )"
+      ],
+      "table": "team_master_apply"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_branch (",
+        "                project TEXT PRIMARY KEY,",
+        "                branch TEXT NOT NULL",
+        "            )"
+      ],
+      "table": "team_master_branch"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_clocks (",
+        "                project TEXT PRIMARY KEY,",
+        "                agent INTEGER NOT NULL CHECK(agent > 0),",
+        "                since_ms INTEGER NOT NULL CHECK(since_ms >= 0)",
+        "            )"
+      ],
+      "table": "team_master_clocks"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_conversations (",
+        "                session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),",
+        "                project TEXT NOT NULL,",
+        "                agent INTEGER NOT NULL,",
+        "                harness TEXT NOT NULL,",
+        "                connection TEXT NOT NULL,",
+        "                conversation TEXT NOT NULL CHECK(length(conversation) BETWEEN 1 AND 128),",
+        "                record TEXT NOT NULL CHECK(length(record) BETWEEN 1 AND 4096)",
+        "            )"
+      ],
+      "table": "team_master_conversations"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_idle_stop (",
+        "                project TEXT PRIMARY KEY,",
+        "                choice TEXT NOT NULL CHECK(choice IN ('off','fifteen_minutes','one_hour'))",
+        "            )"
+      ],
+      "table": "team_master_idle_stop"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_input_holds (",
+        "                agent INTEGER PRIMARY KEY",
+        "            )"
+      ],
+      "table": "team_master_input_holds"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_lands (",
+        "                project TEXT PRIMARY KEY,",
+        "                mode TEXT NOT NULL CHECK(mode IN ('merges','waits'))",
+        "            )"
+      ],
+      "table": "team_master_lands"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_limits (",
+        "                project TEXT PRIMARY KEY,",
+        "                rounds INTEGER CHECK(rounds IS NULL OR rounds BETWEEN 1 AND 255),",
+        "                run_secs INTEGER CHECK(run_secs IS NULL OR run_secs >= 0)",
+        "            )"
+      ],
+      "table": "team_master_limits"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_live_terminal (",
+        "                project TEXT PRIMARY KEY,",
+        "                terminal INTEGER NOT NULL CHECK(terminal IN (0,1))",
+        "            )"
+      ],
+      "table": "team_master_live_terminal"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_retries (",
+        "                project TEXT PRIMARY KEY",
+        "            )"
+      ],
+      "table": "team_master_retries"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_switch (",
+        "                project TEXT PRIMARY KEY,",
+        "                mode TEXT NOT NULL CHECK(mode IN ('carry','fresh'))",
+        "            )"
+      ],
+      "table": "team_master_switch"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_master_turns (",
+        "                agent INTEGER NOT NULL,",
+        "                turn INTEGER NOT NULL,",
+        "                project TEXT NOT NULL,",
+        "                started_ms INTEGER,",
+        "                finished_ms INTEGER NOT NULL,",
+        "                outcome TEXT NOT NULL,",
+        "                PRIMARY KEY (agent, turn)",
+        "            )"
+      ],
+      "table": "team_master_turns"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_merge_ask (",
+        "                project TEXT PRIMARY KEY,",
+        "                ask INTEGER NOT NULL CHECK(ask IN (0,1))",
+        "            )"
+      ],
+      "table": "team_merge_ask"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_message_settings (",
+        "                project TEXT PRIMARY KEY,",
+        "                keep_master INTEGER NOT NULL,",
+        "                kept INTEGER NOT NULL,",
+        "                progress INTEGER NOT NULL,",
+        "                results TEXT NOT NULL CHECK(results IN ('first_line','full')),",
+        "                owner_items INTEGER NOT NULL,",
+        "                page_size INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_message_settings"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_messages_project ON team_messages(project, state)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_messages (",
+        "                id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "                project TEXT NOT NULL,",
+        "                author TEXT NOT NULL,",
+        "                text TEXT NOT NULL,",
+        "                state TEXT NOT NULL,",
+        "                created_ms INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_messages"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_names_project ON team_names(project, handle)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_names (",
+        "                agent INTEGER PRIMARY KEY,",
+        "                project TEXT NOT NULL,",
+        "                persona TEXT NOT NULL,",
+        "                handle TEXT",
+        "            )"
+      ],
+      "table": "team_names"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_nesting (",
+        "                project TEXT PRIMARY KEY,",
+        "                depth INTEGER NOT NULL CHECK(depth BETWEEN 1 AND 3),",
+        "                lands TEXT NOT NULL CHECK(lands IN ('lead','owner'))",
+        "            )"
+      ],
+      "table": "team_nesting"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_new_folder_limit (",
+        "                project TEXT PRIMARY KEY,",
+        "                files INTEGER NOT NULL CHECK(files > 0)",
+        "            )"
+      ],
+      "table": "team_new_folder_limit"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_notifications_project ON team_notifications(project, seen_ms)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_notifications (",
+        "                id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "                project TEXT NOT NULL,",
+        "                kind TEXT NOT NULL,",
+        "                text TEXT NOT NULL,",
+        "                created_ms INTEGER NOT NULL,",
+        "                seen_ms INTEGER",
+        "            )"
+      ],
+      "table": "team_notifications"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_owner_alerts_paused ON team_owner_alerts(agent, paused)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_owner_alerts (",
+        "                source TEXT NOT NULL,",
+        "                ref INTEGER NOT NULL,",
+        "                since INTEGER NOT NULL,",
+        "                project TEXT NOT NULL,",
+        "                agent INTEGER NOT NULL,",
+        "                notification INTEGER,",
+        "                paused INTEGER,",
+        "                settled INTEGER,",
+        "                PRIMARY KEY(source, ref, since)",
+        "            )"
+      ],
+      "table": "team_owner_alerts"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_owner_prompts_project ON team_owner_prompts(project, id)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_owner_prompts (",
+        "                id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "                project TEXT NOT NULL,",
+        "                agent INTEGER NOT NULL,",
+        "                task INTEGER,",
+        "                harness TEXT NOT NULL,",
+        "                text TEXT NOT NULL,",
+        "                created_ms INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_owner_prompts"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_owner_stops (",
+        "                agent INTEGER PRIMARY KEY,",
+        "                project TEXT NOT NULL,",
+        "                stopped_ms INTEGER NOT NULL,",
+        "                stopped_by TEXT NOT NULL DEFAULT 'owner',",
+        "                last_by TEXT",
+        "            )"
+      ],
+      "table": "team_owner_stops"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_owner_turns_project ON team_owner_turns(project)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_owner_turns (",
+        "                message INTEGER PRIMARY KEY,",
+        "                project TEXT NOT NULL",
+        "            )"
+      ],
+      "table": "team_owner_turns"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_panes (",
+        "                agent INTEGER PRIMARY KEY,",
+        "                record TEXT NOT NULL",
+        "            )"
+      ],
+      "table": "team_panes"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_paused_accounts (",
+        "                connection TEXT PRIMARY KEY,",
+        "                until_ms INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_paused_accounts"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_paused_projects (",
+        "                project TEXT PRIMARY KEY,",
+        "                since_ms INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_paused_projects"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_project_pauses (",
+        "                project TEXT NOT NULL,",
+        "                connection TEXT NOT NULL,",
+        "                until_ms INTEGER NOT NULL,",
+        "                PRIMARY KEY(project, connection)",
+        "            )"
+      ],
+      "table": "team_project_pauses"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_reask_empty (",
+        "                project TEXT PRIMARY KEY,",
+        "                reask INTEGER NOT NULL CHECK(reask IN (0,1))",
+        "            )"
+      ],
+      "table": "team_reask_empty"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_retiring (",
+        "            agent INTEGER PRIMARY KEY,",
+        "            project TEXT NOT NULL,",
+        "            repository TEXT NOT NULL,",
+        "            worktree TEXT NOT NULL,",
+        "            git_dir TEXT NOT NULL,",
+        "            since_ms INTEGER NOT NULL,",
+        "            leftover INTEGER NOT NULL DEFAULT 0",
+        "        )"
+      ],
+      "table": "team_retiring"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_reuse_idle (",
+        "                project TEXT PRIMARY KEY,",
+        "                mode TEXT NOT NULL CHECK(mode IN ('on','off'))",
+        "            )"
+      ],
+      "table": "team_reuse_idle"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_session_switches (",
+        "                session TEXT PRIMARY KEY,",
+        "                project TEXT NOT NULL,",
+        "                harness TEXT NOT NULL,",
+        "                mode TEXT NOT NULL CHECK(mode IN ('carry','fresh')),",
+        "                created_ms INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_session_switches"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_settings (",
+        "                project TEXT PRIMARY KEY,",
+        "                keep_warm INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_settings"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_status_log (",
+        "                id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "                project TEXT NOT NULL,",
+        "                agent INTEGER NOT NULL,",
+        "                status TEXT NOT NULL,",
+        "                task INTEGER,",
+        "                at_ms INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_status_log"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_task_pins_agent ON team_task_pins(project, agent)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_task_pins (",
+        "                task INTEGER PRIMARY KEY,",
+        "                project TEXT NOT NULL,",
+        "                agent INTEGER NOT NULL,",
+        "                held INTEGER NOT NULL DEFAULT 0,",
+        "                resolve INTEGER NOT NULL DEFAULT 0",
+        "            )"
+      ],
+      "table": "team_task_pins"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_task_roles (",
+        "                task INTEGER PRIMARY KEY,",
+        "                project TEXT NOT NULL,",
+        "                role TEXT NOT NULL",
+        "            )"
+      ],
+      "table": "team_task_roles"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX team_tasks_agent ON team_tasks(project, agent, created_ms)"
+        ],
+        [
+          "CREATE INDEX team_tasks_project ON team_tasks(project, status)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_tasks (",
+        "                id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "                project TEXT NOT NULL,",
+        "                source TEXT NOT NULL,",
+        "                turn INTEGER,",
+        "                harness TEXT NOT NULL,",
+        "                tools INTEGER NOT NULL,",
+        "                prompt TEXT NOT NULL,",
+        "                status TEXT NOT NULL,",
+        "                agent INTEGER,",
+        "                attempts INTEGER NOT NULL DEFAULT 0,",
+        "                result TEXT,",
+        "                error TEXT,",
+        "                cancel_requested INTEGER NOT NULL DEFAULT 0,",
+        "                delivered INTEGER NOT NULL DEFAULT 0,",
+        "                output_bytes INTEGER NOT NULL DEFAULT 0,",
+        "                created_ms INTEGER NOT NULL,",
+        "                started_ms INTEGER,",
+        "                finished_ms INTEGER,",
+        "                session TEXT,",
+        "                parent INTEGER,",
+        "                mode TEXT",
+        "            , cancel_by TEXT CHECK(cancel_by IS NULL OR cancel_by IN ('task','all')), wait TEXT CHECK(wait IS NULL OR length(CAST(wait AS BLOB)) <= 300))"
+      ],
+      "table": "team_tasks"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_teammate_names (",
+        "                agent INTEGER PRIMARY KEY,",
+        "                name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64),",
+        "                save_refused TEXT CHECK(save_refused IS NULL OR length(save_refused) <= 128)",
+        "            )"
+      ],
+      "table": "team_teammate_names"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_teammates (",
+        "                agent INTEGER NOT NULL,",
+        "                project TEXT NOT NULL,",
+        "                pane TEXT NOT NULL,",
+        "                seen_ms INTEGER NOT NULL,",
+        "                ended_ms INTEGER,",
+        "                stopped_ms INTEGER,",
+        "                PRIMARY KEY(agent, pane)",
+        "            )"
+      ],
+      "table": "team_teammates"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_time_limits (",
+        "                project TEXT PRIMARY KEY,",
+        "                turn_secs INTEGER,",
+        "                session_secs INTEGER,",
+        "                idle_secs INTEGER NOT NULL DEFAULT 600",
+        "            )"
+      ],
+      "table": "team_time_limits"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_token_budgets (",
+        "                project TEXT PRIMARY KEY,",
+        "                tokens INTEGER NOT NULL CHECK(tokens > 0),",
+        "                since_ms INTEGER NOT NULL,",
+        "                baseline INTEGER NOT NULL CHECK(baseline >= 0),",
+        "                reached_ms INTEGER",
+        "            )"
+      ],
+      "table": "team_token_budgets"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_wake_requests (",
+        "                agent INTEGER PRIMARY KEY,",
+        "                project TEXT NOT NULL,",
+        "                requested_ms INTEGER NOT NULL",
+        "            )"
+      ],
+      "table": "team_wake_requests"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_wake_rules (",
+        "                project TEXT NOT NULL,",
+        "                agent INTEGER NOT NULL,",
+        "                question INTEGER NOT NULL,",
+        "                finished INTEGER NOT NULL,",
+        "                failed INTEGER NOT NULL,",
+        "                change_set_ready INTEGER NOT NULL,",
+        "                progress INTEGER NOT NULL,",
+        "                hourly_cap INTEGER NOT NULL,",
+        "                PRIMARY KEY(project, agent)",
+        "            )"
+      ],
+      "table": "team_wake_rules"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_wall (",
+        "                project TEXT PRIMARY KEY,",
+        "                per_window INTEGER NOT NULL CHECK(per_window IN (4,6,9))",
+        "            )"
+      ],
+      "table": "team_wall"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE team_worktrees (",
+        "                agent INTEGER PRIMARY KEY,",
+        "                project TEXT NOT NULL,",
+        "                repository TEXT NOT NULL,",
+        "                worktree TEXT NOT NULL,",
+        "                git_dir TEXT NOT NULL",
+        "            )"
+      ],
+      "table": "team_worktrees"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE tool_switches (",
+        "    scope_project TEXT NOT NULL,",
+        "    server TEXT NOT NULL,",
+        "    tool TEXT NOT NULL,",
+        "    switch TEXT NOT NULL,",
+        "    PRIMARY KEY(scope_project, server, tool)",
+        ")"
+      ],
+      "table": "tool_switches"
+    },
+    {
+      "attached": [
+        [
+          "CREATE TRIGGER usage_activity_added AFTER INSERT ON usage_activity",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows+1 WHERE name='usage_activity'; END"
+        ],
+        [
+          "CREATE TRIGGER usage_activity_gone AFTER DELETE ON usage_activity",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows-1 WHERE name='usage_activity'; END"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_activity (",
+        "    hour_ms INTEGER NOT NULL,",
+        "    project TEXT NOT NULL,",
+        "    agent TEXT NOT NULL,",
+        "    model TEXT NOT NULL,",
+        "    activity TEXT NOT NULL CHECK(activity IN ('coding','debugging','feature','refactoring','testing','exploration','planning','delegation','git','build_deploy','conversation','brainstorming','general')),",
+        "    turns INTEGER NOT NULL,",
+        "    edit_turns INTEGER NOT NULL,",
+        "    first_try_turns INTEGER NOT NULL,",
+        "    PRIMARY KEY (hour_ms, project, agent, model, activity)",
+        ")"
+      ],
+      "table": "usage_activity"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_auto_spends (",
+        "    account TEXT NOT NULL,",
+        "    window_reset_ms INTEGER NOT NULL,",
+        "    pool TEXT NOT NULL,",
+        "    at_ms INTEGER NOT NULL,",
+        "    PRIMARY KEY(account,window_reset_ms)",
+        ")"
+      ],
+      "table": "usage_auto_spends"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_cut (",
+        "    home TEXT PRIMARY KEY,",
+        "    project TEXT NOT NULL,",
+        "    cut_ms INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "usage_cut"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_detail (",
+        "    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),",
+        "    until_ms INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "usage_detail"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_files (",
+        "    path TEXT PRIMARY KEY,",
+        "    progress TEXT NOT NULL",
+        ")"
+      ],
+      "table": "usage_files"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_health (",
+        "    step TEXT PRIMARY KEY CHECK(step IN ('poll','team','runs','recount')),",
+        "    panics INTEGER NOT NULL CHECK(panics >= 1),",
+        "    last_ms INTEGER NOT NULL,",
+        "    recovered_ms INTEGER CHECK(recovered_ms IS NULL OR recovered_ms >= last_ms)",
+        ")"
+      ],
+      "table": "usage_health"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_limited_pools (",
+        "    pool TEXT PRIMARY KEY,",
+        "    name TEXT,",
+        "    since_ms INTEGER NOT NULL,",
+        "    with_resets TEXT NOT NULL",
+        ")"
+      ],
+      "table": "usage_limited_pools"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX usage_messages_last ON usage_messages(last_ms)"
+        ],
+        [
+          "CREATE TRIGGER usage_messages_added AFTER INSERT ON usage_messages",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows+1 WHERE name='usage_messages'; END"
+        ],
+        [
+          "CREATE TRIGGER usage_messages_gone AFTER DELETE ON usage_messages",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows-1 WHERE name='usage_messages'; END"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_messages (",
+        "    id TEXT PRIMARY KEY,",
+        "    input INTEGER NOT NULL,",
+        "    output INTEGER NOT NULL,",
+        "    cache_read INTEGER NOT NULL,",
+        "    cache_write INTEGER NOT NULL,",
+        "    web INTEGER NOT NULL DEFAULT 0,",
+        "    last_ms INTEGER NOT NULL",
+        ") WITHOUT ROWID"
+      ],
+      "table": "usage_messages"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_money (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton=1),",
+        "    main_number TEXT NOT NULL CHECK(main_number IN ('dollars','tokens')),",
+        "    prices TEXT NOT NULL CHECK(prices IN ('bundled','off'))",
+        ")"
+      ],
+      "table": "usage_money"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_project_limits (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton=1),",
+        "    choice TEXT NOT NULL CHECK(choice IN ('hidden','shown'))",
+        ")"
+      ],
+      "table": "usage_project_limits"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 1,
+      "rows": [
+        {
+          "decided_ms": "<t>",
+          "homes_partial": 0,
+          "seeded_to": "",
+          "singleton": 1,
+          "started_ms": "<t>",
+          "state": "nothing"
+        }
+      ],
+      "schema": [
+        "CREATE TABLE usage_recount (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton=1),",
+        "    state TEXT NOT NULL CHECK(state IN ('running','ready','used','kept','nothing')),",
+        "    started_ms INTEGER NOT NULL,",
+        "    decided_ms INTEGER,",
+        "    homes_partial INTEGER NOT NULL DEFAULT 0,",
+        "    seeded_to TEXT NOT NULL DEFAULT ''",
+        ")"
+      ],
+      "table": "usage_recount"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX usage_recount_files_todo ON usage_recount_files(done) WHERE done=0"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_recount_files (",
+        "    path TEXT PRIMARY KEY,",
+        "    home TEXT NOT NULL,",
+        "    session TEXT NOT NULL,",
+        "    fallback_ms INTEGER NOT NULL,",
+        "    progress TEXT NOT NULL DEFAULT '',",
+        "    done INTEGER NOT NULL DEFAULT 0,",
+        "    dev INTEGER NOT NULL DEFAULT 0,",
+        "    ino INTEGER NOT NULL DEFAULT 0,",
+        "    complete INTEGER NOT NULL DEFAULT 0,",
+        "    attempts INTEGER NOT NULL DEFAULT 0",
+        ")"
+      ],
+      "table": "usage_recount_files"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX usage_recount_homes_todo ON usage_recount_homes(listed) WHERE listed=0"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_recount_homes (",
+        "    home TEXT PRIMARY KEY,",
+        "    format TEXT NOT NULL CHECK(format IN ('claude','codex')),",
+        "    kind TEXT NOT NULL CHECK(kind IN ('master','agent','research')),",
+        "    project TEXT NOT NULL,",
+        "    pool TEXT NOT NULL,",
+        "    account TEXT NOT NULL,",
+        "    agent TEXT NOT NULL,",
+        "    harness TEXT NOT NULL,",
+        "    team_agent INTEGER,",
+        "    listed INTEGER NOT NULL DEFAULT 0",
+        ")"
+      ],
+      "table": "usage_recount_homes"
+    },
+    {
+      "attached": [
+        [
+          "CREATE TRIGGER usage_recount_live_added AFTER INSERT ON usage_recount_live",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows+1 WHERE name='usage_recount_live'; END"
+        ],
+        [
+          "CREATE TRIGGER usage_recount_live_gone AFTER DELETE ON usage_recount_live",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows-1 WHERE name='usage_recount_live'; END"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_recount_live (",
+        "    id TEXT PRIMARY KEY,",
+        "    path TEXT NOT NULL",
+        ") WITHOUT ROWID"
+      ],
+      "table": "usage_recount_live"
+    },
+    {
+      "attached": [
+        [
+          "CREATE TRIGGER usage_recount_messages_added AFTER INSERT ON usage_recount_messages",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows+1 WHERE name='usage_recount_messages'; END"
+        ],
+        [
+          "CREATE TRIGGER usage_recount_messages_gone AFTER DELETE ON usage_recount_messages",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows-1 WHERE name='usage_recount_messages'; END"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_recount_messages (",
+        "    id TEXT PRIMARY KEY,",
+        "    input INTEGER NOT NULL,",
+        "    output INTEGER NOT NULL,",
+        "    cache_read INTEGER NOT NULL,",
+        "    cache_write INTEGER NOT NULL,",
+        "    web INTEGER NOT NULL DEFAULT 0,",
+        "    last_ms INTEGER NOT NULL",
+        ") WITHOUT ROWID"
+      ],
+      "table": "usage_recount_messages"
+    },
+    {
+      "attached": [
+        [
+          "CREATE TRIGGER usage_recount_rows_added AFTER INSERT ON usage_recount_rows",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows+1 WHERE name='usage_recount_rows'; END"
+        ],
+        [
+          "CREATE TRIGGER usage_recount_rows_gone AFTER DELETE ON usage_recount_rows",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows-1 WHERE name='usage_recount_rows'; END"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_recount_rows (",
+        "    hour_ms INTEGER NOT NULL,",
+        "    kind TEXT NOT NULL,",
+        "    project TEXT NOT NULL,",
+        "    pool TEXT NOT NULL,",
+        "    account TEXT NOT NULL,",
+        "    agent TEXT NOT NULL,",
+        "    harness TEXT NOT NULL,",
+        "    session TEXT NOT NULL,",
+        "    model TEXT NOT NULL DEFAULT '',",
+        "    input INTEGER NOT NULL,",
+        "    output INTEGER NOT NULL,",
+        "    cache_read INTEGER NOT NULL,",
+        "    cache_write INTEGER NOT NULL,",
+        "    cost_nanos INTEGER NOT NULL DEFAULT 0,",
+        "    PRIMARY KEY (hour_ms, kind, project, pool, account, agent, harness, session, model)",
+        ")"
+      ],
+      "table": "usage_recount_rows"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_recount_sessions (",
+        "    project TEXT NOT NULL,",
+        "    agent TEXT NOT NULL,",
+        "    session TEXT NOT NULL,",
+        "    PRIMARY KEY (project, agent, session)",
+        ") WITHOUT ROWID"
+      ],
+      "table": "usage_recount_sessions"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_refresh (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton=1),",
+        "    requested_ms INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "usage_refresh"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 6,
+      "rows": [
+        {
+          "name": "usage_activity",
+          "rows": 0
+        },
+        {
+          "name": "usage_messages",
+          "rows": 0
+        },
+        {
+          "name": "usage_recount_live",
+          "rows": 0
+        },
+        {
+          "name": "usage_recount_messages",
+          "rows": 0
+        },
+        {
+          "name": "usage_recount_rows",
+          "rows": 0
+        },
+        {
+          "name": "usage_tokens",
+          "rows": 0
+        }
+      ],
+      "schema": [
+        "CREATE TABLE usage_row_counts (name TEXT PRIMARY KEY, rows INTEGER NOT NULL) WITHOUT ROWID"
+      ],
+      "table": "usage_row_counts"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX usage_runs_started ON usage_runs(started_ms)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_runs (",
+        "    home TEXT PRIMARY KEY,",
+        "    kind TEXT NOT NULL CHECK(kind IN ('master','agent','research')),",
+        "    project TEXT NOT NULL,",
+        "    account TEXT NOT NULL,",
+        "    agent TEXT NOT NULL,",
+        "    harness TEXT NOT NULL,",
+        "    started_ms INTEGER NOT NULL",
+        ")"
+      ],
+      "table": "usage_runs"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_seen (",
+        "    project TEXT NOT NULL,",
+        "    agent TEXT NOT NULL,",
+        "    session TEXT NOT NULL,",
+        "    last_ms INTEGER NOT NULL,",
+        "    PRIMARY KEY (project, agent, session)",
+        ")"
+      ],
+      "table": "usage_seen"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_spend (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton=1),",
+        "    confirm TEXT NOT NULL CHECK(confirm IN ('confirm_each','one_click','off')),",
+        "    all_limited TEXT NOT NULL CHECK(all_limited IN ('notice','no_hint','auto_spend')),",
+        "    resets_source TEXT NOT NULL DEFAULT 'off'",
+        "        CHECK(resets_source IN ('through_claude_code','as_claude_code','off'))",
+        ")"
+      ],
+      "table": "usage_spend"
+    },
+    {
+      "attached": [
+        [
+          "CREATE UNIQUE INDEX usage_spend_attempts_open",
+          "    ON usage_spend_attempts(account) WHERE state IN ('queued','sent')"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_spend_attempts (",
+        "    id INTEGER PRIMARY KEY,",
+        "    account TEXT NOT NULL,",
+        "    attempt_key TEXT NOT NULL UNIQUE CHECK(length(attempt_key)=36),",
+        "    origin TEXT NOT NULL CHECK(origin IN ('owner','auto')),",
+        "    state TEXT NOT NULL CHECK(state IN ('queued','sent','settled')),",
+        "    tries INTEGER NOT NULL DEFAULT 0 CHECK(tries>=0),",
+        "    outcome TEXT CHECK(outcome IS NULL OR length(outcome)<=64),",
+        "    requested_ms INTEGER NOT NULL,",
+        "    sent_ms INTEGER,",
+        "    settled_ms INTEGER",
+        ")"
+      ],
+      "table": "usage_spend_attempts"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX usage_tokens_hour ON usage_tokens(hour_ms)"
+        ],
+        [
+          "CREATE TRIGGER usage_tokens_added AFTER INSERT ON usage_tokens",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows+1 WHERE name='usage_tokens'; END"
+        ],
+        [
+          "CREATE TRIGGER usage_tokens_gone AFTER DELETE ON usage_tokens",
+          "                BEGIN UPDATE usage_row_counts SET rows=rows-1 WHERE name='usage_tokens'; END"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_tokens (",
+        "    hour_ms INTEGER NOT NULL,",
+        "    kind TEXT NOT NULL CHECK(kind IN ('master','agent','research')),",
+        "    project TEXT NOT NULL,",
+        "    pool TEXT NOT NULL,",
+        "    account TEXT NOT NULL,",
+        "    agent TEXT NOT NULL,",
+        "    harness TEXT NOT NULL,",
+        "    session TEXT NOT NULL,",
+        "    model TEXT NOT NULL DEFAULT '',",
+        "    input INTEGER NOT NULL,",
+        "    output INTEGER NOT NULL,",
+        "    cache_read INTEGER NOT NULL,",
+        "    cache_write INTEGER NOT NULL,",
+        "    cost_nanos INTEGER NOT NULL DEFAULT 0,",
+        "    PRIMARY KEY (hour_ms, kind, project, pool, account, agent, harness, session, model)",
+        ")"
+      ],
+      "table": "usage_tokens"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_turns (",
+        "    hour_ms INTEGER NOT NULL,",
+        "    project TEXT NOT NULL,",
+        "    agent TEXT NOT NULL,",
+        "    turns INTEGER NOT NULL CHECK(turns >= 0),",
+        "    PRIMARY KEY (hour_ms, project, agent)",
+        ")"
+      ],
+      "table": "usage_turns"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX usage_unreported_hour ON usage_unreported(hour_ms)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE usage_unreported (",
+        "    hour_ms INTEGER NOT NULL,",
+        "    kind TEXT NOT NULL CHECK(kind IN ('master','agent','research')),",
+        "    project TEXT NOT NULL,",
+        "    agent TEXT NOT NULL,",
+        "    harness TEXT NOT NULL,",
+        "    last_ms INTEGER NOT NULL,",
+        "    PRIMARY KEY (hour_ms, kind, project, agent, harness)",
+        ")"
+      ],
+      "table": "usage_unreported"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE user_profile (",
+        "    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),",
+        "    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 2 AND 8192)",
+        ")"
+      ],
+      "table": "user_profile"
+    },
+    {
+      "attached": [
+        [
+          "CREATE INDEX verification_attempt_candidate ON verification_attempts(candidate,id)"
+        ]
+      ],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE verification_attempts",
+        "        (id TEXT PRIMARY KEY, candidate TEXT NOT NULL, body TEXT NOT NULL)"
+      ],
+      "table": "verification_attempts"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE verification_baselines",
+        "        (id TEXT PRIMARY KEY, project TEXT NOT NULL, body TEXT NOT NULL,",
+        "         approved INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0)"
+      ],
+      "table": "verification_baselines"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE verification_candidates (id TEXT PRIMARY KEY, body TEXT NOT NULL)"
+      ],
+      "table": "verification_candidates"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE verification_current",
+        "        (project TEXT PRIMARY KEY, baseline TEXT NOT NULL)"
+      ],
+      "table": "verification_current"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE worker_dispatches",
+        "        (id TEXT PRIMARY KEY, plan TEXT NOT NULL, item TEXT NOT NULL, cursor INTEGER NOT NULL CHECK(cursor>0), lease_task TEXT NOT NULL, repository TEXT NOT NULL, body BLOB NOT NULL CHECK(length(body)<=16384),",
+        "         UNIQUE(plan,item,cursor), UNIQUE(lease_task,repository))"
+      ],
+      "table": "worker_dispatches"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE worker_runner_registrations",
+        "        (id TEXT PRIMARY KEY, attempt TEXT NOT NULL UNIQUE, body BLOB NOT NULL CHECK(length(body)<=2048), active INTEGER NOT NULL CHECK(active IN (0,1)))"
+      ],
+      "table": "worker_runner_registrations"
+    },
+    {
+      "attached": [],
+      "excluded": [],
+      "row_count": 0,
+      "rows": [],
+      "schema": [
+        "CREATE TABLE worktree_leases",
+        "        (task TEXT NOT NULL, repository TEXT NOT NULL, path TEXT NOT NULL UNIQUE,",
+        "         body TEXT NOT NULL, PRIMARY KEY(task,repository))"
+      ],
+      "table": "worktree_leases"
+    }
+  ],
+  "views": []
+}

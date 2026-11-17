@@ -1,0 +1,15 @@
+{
+  "proposed": {
+    "refused": "instructions_cleanup_pool_needed"
+  },
+  "saved": {
+    "ok": {
+      "kind": "saved",
+      "size": {
+        "bytes": 116,
+        "claude_bytes_max": 21142
+      },
+      "version": 1
+    }
+  }
+}

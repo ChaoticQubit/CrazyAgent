@@ -1,0 +1,722 @@
+[
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "codex",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "codex",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "codex",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "codex",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "codex",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "codex",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com",
+    "harness": "claude-code",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com",
+    "harness": "claude-code",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com",
+    "harness": "claude-code",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api",
+    "harness": "claude-code",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "claude-code",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "claude-code",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "opencode",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "opencode",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "opencode",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "opencode",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "opencode",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "opencode",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "gemini-cli",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "gemini-cli",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "gemini-cli",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "gemini-cli",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "gemini-cli",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "gemini-cli",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "cursor-agent",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "cursor-agent",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "cursor-agent",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "cursor-agent",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "cursor-agent",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "cursor-agent",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "fx",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "fx",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "fx",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "fx",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "fx",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "fx",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "antigravity",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "antigravity",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "antigravity",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "antigravity",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "antigravity",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "antigravity",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "openclaw",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "openclaw",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "openclaw",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "openclaw",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "openclaw",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "openclaw",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "pi",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "pi",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "pi",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "pi",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "pi",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "pi",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "rcli",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "rcli",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "rcli",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "rcli",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "rcli",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "rcli",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "amp",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "amp",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "amp",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "amp",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "amp",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "amp",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "goose",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "goose",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "goose",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "goose",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "goose",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "goose",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "aider",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "aider",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "aider",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "aider",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "aider",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "aider",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "qwen-code",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "qwen-code",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "qwen-code",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "qwen-code",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "qwen-code",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "qwen-code",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "crush",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "crush",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "crush",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "crush",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "crush",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "crush",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "droid",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "droid",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "droid",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "droid",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "droid",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "droid",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "kiro",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "kiro",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "kiro",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "kiro",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "kiro",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "kiro",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "copilot",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "copilot",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "copilot",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "copilot",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "copilot",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "copilot",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "cline",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "cline",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "cline",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "cline",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "cline",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "cline",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "continue",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "continue",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "continue",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "continue",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "continue",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "continue",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "openhands",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "openhands",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "openhands",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "openhands",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "openhands",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "openhands",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "auggie",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "auggie",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "auggie",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "auggie",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "auggie",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "auggie",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "kimi",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com/v1",
+    "harness": "kimi",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com/v1",
+    "harness": "kimi",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api/v1",
+    "harness": "kimi",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443/v1",
+    "harness": "kimi",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "kimi",
+    "stored": "https://models.example.invalid:8443"
+  },
+  {
+    "handed": "https://api.anthropic.com",
+    "harness": "claude",
+    "stored": "https://api.anthropic.com/v1"
+  },
+  {
+    "handed": "https://api.anthropic.com",
+    "harness": "claude",
+    "stored": "https://api.anthropic.com/v1/"
+  },
+  {
+    "handed": "https://api.openai.com",
+    "harness": "claude",
+    "stored": "https://api.openai.com/v1"
+  },
+  {
+    "handed": "https://openrouter.ai/api",
+    "harness": "claude",
+    "stored": "https://openrouter.ai/api/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "claude",
+    "stored": "https://models.example.invalid:8443/v1"
+  },
+  {
+    "handed": "https://models.example.invalid:8443",
+    "harness": "claude",
+    "stored": "https://models.example.invalid:8443"
+  }
+]

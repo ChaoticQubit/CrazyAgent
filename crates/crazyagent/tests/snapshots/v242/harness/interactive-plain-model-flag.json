@@ -1,0 +1,43 @@
+{
+  "argv": [
+    "/usr/bin/sandbox-exec",
+    "-f",
+    "<path-1>/work/project.sb",
+    "/usr/bin/true",
+    "--model",
+    "snapshot-model"
+  ],
+  "cwd": "<path-1>/work",
+  "env_names": [
+    "HOME",
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_AUTO_INSTALL",
+    "UV_PYTHON_DOWNLOADS",
+    "COREPACK_ENABLE_NETWORK",
+    "HOMEBREW_NO_AUTO_UPDATE",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_TERMINAL_PROMPT",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_KEY_0",
+    "GIT_CONFIG_VALUE_0",
+    "GIT_CONFIG_KEY_1",
+    "GIT_CONFIG_VALUE_1",
+    "SSL_CERT_FILE",
+    "GIT_CONFIG_GLOBAL",
+    "PYTHONNOUSERSITE",
+    "NPM_CONFIG_USERCONFIG"
+  ],
+  "handover": {
+    "key_absent": true,
+    "names_the_relay": null
+  },
+  "home_files": [],
+  "sdkroot": "as_the_engine_gives_it",
+  "transcript": {
+    "kind": "unavailable"
+  }
+}

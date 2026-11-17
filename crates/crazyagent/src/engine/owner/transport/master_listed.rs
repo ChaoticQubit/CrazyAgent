@@ -116,13 +116,13 @@ pub(super) struct ListedSpec<'a> {
     pub(super) instructions: &'a str,
 }
 
-/// The command a listed master turn spawns, exactly as built, the engine servers its ACP
-/// session opens with, and the files written for it in the private home: the rendered MCP
-/// config and the instruction file.
+/// The command a listed master turn spawns, exactly as built, and the engine servers its ACP
+/// session opens with. The macOS launch tests also read the files written for it in the
+/// private home: the rendered MCP config and the instruction file.
 pub(super) struct ListedLaunch {
     pub(super) command: Command,
     pub(super) servers: Vec<EngineServer>,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(all(test, target_os = "macos"))]
     pub(super) written: Vec<PathBuf>,
 }
 
@@ -182,6 +182,7 @@ pub(super) fn listed_launch(spec: &ListedSpec<'_>) -> Result<ListedLaunch, Engin
     Ok(ListedLaunch {
         command,
         servers,
+        #[cfg(all(test, target_os = "macos"))]
         written,
     })
 }
@@ -271,7 +272,7 @@ pub(super) fn collect(collected: &mut Collected, event: LaunchEvent) {
 /// and ending it cancelled once the session's stop grace passes after that; a turn the
 /// harness has already ended needs no stop. Inputs: the session, the prompt and the stop
 /// check. Output: what the turn gathered, with its end set, or the refusal code.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(super) fn drive(
     session: &mut Session,
     prompt: &str,
