@@ -13,7 +13,6 @@ use crazyagent::terminal::tmux::{SOCKET, installed};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::ErrorKind;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -233,10 +232,10 @@ pub fn git_text(folder: &Path, args: &[&str]) -> String {
 /// listening and no model is asked. Input: none. Output: the port; its thread stays blocked
 /// on the listener until the test process ends.
 pub fn silent_provider() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     assert!(port > 0);
-    std::thread::spawn(move || listener.incoming().for_each(drop));
+    std::thread::spawn(move || crazyagent::spawn_gate::incoming_tcp_std(&listener).for_each(drop));
     port
 }
 

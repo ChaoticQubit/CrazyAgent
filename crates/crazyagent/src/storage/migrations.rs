@@ -690,7 +690,7 @@ fn sweep_unbound_keys(
                 |name| referenced(&replaced, None, ACCOUNT_KEY, name),
             );
             swept.push((ACCOUNT_KEYS, keys));
-            let profiles = sweep_replaced_profiles(root, copy, &replaced, &named);
+            let profiles = sweep_replaced_profiles(root, copy, &replaced, named);
             swept.push((PROFILES, profiles));
         }
         Some(Err(cause)) => swept.push((ACCOUNT_KEYS, Err(cause))),

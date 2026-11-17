@@ -731,7 +731,7 @@ fn an_acp_manifest_names_its_own_tools_off_switch_or_says_tools_are_limited() {
     let other = bare.replace("driver: \"acp\"", "driver: \"jsonl-turn\"");
     assert_eq!(check(&parse(&other)), Ok(()));
     let built = crate::harnesses::registry::Registry::build(&[("standin-acp", bare.as_str())]);
-    let refused = built.err().expect("the registry refuses it");
+    let refused = built.expect_err("the registry refuses it");
     assert_eq!(refused.code, crate::harnesses::manifest::MISSING);
     assert!(
         refused
