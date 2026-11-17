@@ -330,3 +330,52 @@ fn a_research_agent_not_surely_stopped_stays_listed_after_its_run_returns() {
         assert_eq!(named, kept, "{project}");
     }
 }
+
+/// SA-VID14 on the harness layer (H5a r2): a listed or pane research agent whose stop left
+/// processes running holds them with its listing under the owner's leftover setting, so it
+/// stays on the hidden folders list while they run, and the run errs uncertain. Red at
+/// c561ba133, whose Left arm held the processes but dropped the listing.
+#[test]
+fn a_research_agent_whose_stop_left_processes_stays_listed_while_they_run() {
+    use crate::harnesses::leftovers::{Lineage, held_in};
+    use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+    use std::time::{Duration, Instant};
+    let project = "sa-vid14-research-left";
+    let saved = [PathBuf::from("/tmp/sa-vid14-research-left/vault")];
+    let mut sleeper = crate::spawn_gate::spawn(
+        std::process::Command::new("/usr/bin/perl")
+            .args(["-mPOSIX", "-e", "POSIX::setsid() > 0 or exit 1; sleep 60"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let pid = rustix::process::Pid::from_child(&sleeper);
+    let until = Instant::now() + Duration::from_secs(10);
+    while rustix::process::getsid(Some(pid)) != Ok(pid) {
+        assert!(Instant::now() < until, "the sleeper never left its session");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let listed = starting(RunKind::Research, project).expect("the list has room");
+    listed.hid(&[]);
+    let by = leftovers::HoldBy {
+        project: Some(project.into()),
+        who: "research job 1".into(),
+    };
+
+    let left = Lineage::of_sandboxed(sleeper.id(), None).and_then(Lineage::settle);
+    let ended = settled(left, None, None, listed, by, || {
+        leftovers::LeftoverMode::Keep
+    });
+    let held = held_in(project);
+    let named = runs_seeing(project, &saved) == vec![RunKind::Research];
+    sleeper.kill().unwrap();
+    sleeper.wait().unwrap();
+
+    assert!(
+        matches!(ended, Err(RunError::Uncertain(_))),
+        "a stop that left processes errs uncertain"
+    );
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert!(named, "the listing is held while the process runs");
+}
