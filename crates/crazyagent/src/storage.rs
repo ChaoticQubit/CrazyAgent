@@ -2660,6 +2660,7 @@ fn owner_apply_with(
             current_revision: Cursor::new(revision),
         });
     }
+    let deleting = matches!(effect, Some(Effect::Delete(_)));
     let mut onboarded = None;
     let outcome = match (effect, &command) {
         (Some(Effect::Home(effect)), _) => {
@@ -2742,6 +2743,11 @@ fn owner_apply_with(
             command,
         };
         persist_event(&tx, config, &wire, next)?;
+        if let Some(removed) =
+            crate::project_setup::removed::event::removal(&wire.command, deleting)
+        {
+            crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
+        }
     }
     let provenance = OwnerProvenance {
         origin: "native_owner".into(),

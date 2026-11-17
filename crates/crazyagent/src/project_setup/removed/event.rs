@@ -1,6 +1,10 @@
 use crate::engine::EngineError;
 use crate::engine::owner::Admission;
+use crate::project_setup::SetupAction;
 use crate::protocol::{Command, ProjectId};
+use crate::state_log::fence::Fence;
+use crate::state_log::replay::Clock;
+use crate::state_log::{Aggregate, Appender, Draft};
 use rusqlite::Transaction;
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +30,7 @@ impl ProjectRemoved {
     /// The bytes the event stores as its body. Output: the JSON body, or the encoder's
     /// failure.
     pub(crate) fn body(&self) -> Result<Vec<u8>, EngineError> {
-        Ok(Vec::new())
+        serde_json::to_vec(self).map_err(|error| EngineError(error.to_string()))
     }
 }
 
@@ -35,8 +39,18 @@ impl ProjectRemoved {
 /// request's command and whether it carries Delete everything's effect. Output: the event,
 /// or none for any other request.
 pub(crate) fn removal(command: &Command, deleting: bool) -> Option<ProjectRemoved> {
-    let _ = (command, deleting);
-    None
+    let Command::ProjectSetup { action } = command else {
+        return None;
+    };
+    let (project, kept) = match action {
+        SetupAction::Remove { project_id } if !deleting => (project_id, true),
+        SetupAction::Delete { project_id, .. } if deleting => (project_id, false),
+        _ => return None,
+    };
+    Some(ProjectRemoved {
+        project: project.clone(),
+        kept,
+    })
 }
 
 /// Appends a removal at the request's moved revision behind the owner's admission and
@@ -49,8 +63,17 @@ pub(crate) fn append(
     admission: &Admission,
     removed: &ProjectRemoved,
 ) -> Result<u64, EngineError> {
-    let _ = (tx, revision, admission, removed);
-    Err(EngineError("project_removed_unwired".into()))
+    let body = removed.body()?;
+    let mut log = Appender::owner(tx, revision, Fence::Owner(admission.clone()))?;
+    let seq = log.append(&Draft {
+        aggregate: Aggregate::Projects,
+        kind: KIND,
+        schema: 1,
+        at_ms: Clock::System.now_ms(),
+        body: &body,
+    })?;
+    log.project(|tx| apply(tx, &body))?;
+    Ok(seq)
 }
 
 /// The projection of a removal, live and in replay: deletes the removed project's agent
@@ -59,6 +82,30 @@ pub(crate) fn append(
 /// their panes, and its rows in [`TABLES`]. Inputs: the transaction and the event body.
 /// Output: Ok, `project_removed_body` for a body that is not a removal, or a store failure.
 pub(crate) fn apply(tx: &Transaction<'_>, body: &[u8]) -> Result<(), EngineError> {
-    let _ = (tx, body);
+    let removed: ProjectRemoved =
+        serde_json::from_slice(body).map_err(|_| EngineError("project_removed_body".into()))?;
+    let failed = |error: rusqlite::Error| EngineError(error.to_string());
+    let project = removed.project.as_str();
+    crate::storage::agent_text::forget_project(tx, &removed.project)?;
+    crate::questions::forget_project(tx, &removed.project)?;
+    crate::sandbox::hidden_paths::save(tx, project, &[]).map_err(failed)?;
+    crate::sandbox::hidden_paths::forget_seers(tx, project).map_err(failed)?;
+    crate::sandbox::policy::remove(tx, project).map_err(failed)?;
+    crate::sandbox::grants::forget_project(tx, project).map_err(failed)?;
+    tx.execute(
+        "DELETE FROM team_panes WHERE agent IN
+         (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
+        [project],
+    )
+    .map_err(failed)?;
+    tx.execute(
+        "DELETE FROM team_agents WHERE project=?1 AND status IN ('stopped','failed')",
+        [project],
+    )
+    .map_err(failed)?;
+    for table in TABLES {
+        tx.execute(&format!("DELETE FROM {table} WHERE project=?1"), [project])
+            .map_err(failed)?;
+    }
     Ok(())
 }
