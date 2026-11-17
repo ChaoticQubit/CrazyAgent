@@ -4,7 +4,6 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
-#[cfg(unix)]
 pub(crate) mod fd_wait;
 pub(crate) mod unix_socket;
 

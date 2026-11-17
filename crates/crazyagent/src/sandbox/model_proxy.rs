@@ -1,3 +1,4 @@
+use crate::platform::fd_wait::{self, Wake};
 use crate::spawn_gate;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -156,18 +157,8 @@ pub struct ModelProxy {
     port: u16,
     shared: Arc<Shared>,
     listener: Option<JoinHandle<()>>,
-    #[cfg(unix)]
-    wake: Option<Wake>,
+    wake: Wake,
 }
-
-/// One end of the pair that wakes the accept thread: the proxy holds one and drops it to
-/// stop the thread, which waits on the other.
-#[cfg(unix)]
-type Wake = std::os::unix::net::UnixStream;
-
-/// Stands in for the wake end where the accept thread has no poll(2) and sleeps instead.
-#[cfg(not(unix))]
-struct Wake;
 
 /// What one proxy's threads share: the agent its log lines name, its hosts, the stop flag,
 /// the open-tunnel count, the refusals so far, when its last refusal total was logged (in
@@ -315,10 +306,7 @@ impl ModelProxy {
             serve_passes: AtomicU64::new(0),
         });
         let serving = shared.clone();
-        #[cfg(unix)]
-        let (wake, woken) = spawn_gate::unix_pair_std()?;
-        #[cfg(not(unix))]
-        let woken = Wake;
+        let (wake, woken) = fd_wait::wake_pair()?;
         let thread = std::thread::Builder::new()
             .name(format!("model-proxy-{agent}"))
             .spawn(move || serve(&listeners, &serving, &woken))?;
@@ -326,8 +314,7 @@ impl ModelProxy {
             port: bound,
             shared,
             listener: Some(thread),
-            #[cfg(unix)]
-            wake: Some(wake),
+            wake,
         })
     }
 
@@ -406,8 +393,7 @@ impl Drop for ModelProxy {
     /// proxy.
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
-        #[cfg(unix)]
-        drop(self.wake.take());
+        self.wake.rouse();
         if let Some(thread) = self.listener.take() {
             let _ = thread.join();
         }
@@ -458,34 +444,10 @@ fn serve(listeners: &[TcpListener; 2], shared: &Arc<Shared>, woken: &Wake) {
         if failed && !waiting {
             std::thread::sleep(ACCEPT_POLL);
         } else if !waiting {
-            wait_for_clients(listeners, woken);
+            let until = Instant::now() + POLL;
+            fd_wait::wait_for_clients(&[&listeners[0], &listeners[1]], woken, until, ACCEPT_POLL);
         }
     }
-}
-
-/// Waits until a listener has a client or the wake end closes, for at most `POLL`, so a
-/// missed wake still lets the thread see the stop; a failed poll waits `ACCEPT_POLL`, so it
-/// never becomes a busy loop. Inputs: the listeners and the wake end. Output: none.
-#[cfg(unix)]
-fn wait_for_clients(listeners: &[TcpListener; 2], woken: &Wake) {
-    use rustix::event::{PollFd, PollFlags};
-
-    let mut fds = [
-        PollFd::new(&listeners[0], PollFlags::IN),
-        PollFd::new(&listeners[1], PollFlags::IN),
-        PollFd::new(woken, PollFlags::IN),
-    ];
-    let until = Instant::now() + POLL;
-    if crate::platform::fd_wait::ready(&mut fds, Some(until)).is_err() {
-        std::thread::sleep(ACCEPT_POLL);
-    }
-}
-
-/// Waits `ACCEPT_POLL` before the next pass over the listeners, as there is no poll(2) here.
-/// Inputs: the listeners and the wake end, both unused. Output: none.
-#[cfg(not(unix))]
-fn wait_for_clients(_listeners: &[TcpListener; 2], _woken: &Wake) {
-    std::thread::sleep(ACCEPT_POLL);
 }
 
 /// Starts a tunnel thread for one accepted connection, or answers a 503 to one past
