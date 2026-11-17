@@ -1,7 +1,7 @@
 use super::{Masks, Scenario, compare, normalise, refuse_private, snapshots_root, withheld};
 use crate::e2e_support::{self, Engine, Owner};
 use crazyagent::cleanup_settings::{CleanupMode, CleanupSettings};
-use crazyagent::engine::owner::{AccountSecret, OwnerResponse, OwnerResult};
+use crazyagent::engine::owner::{AccountSecret, OwnerResponse, OwnerResult, SavedText};
 use crazyagent::github::GitHubPromptAnswer;
 use crazyagent::harnesses::leftovers::LeftoverMode;
 use crazyagent::harnesses::update::{
@@ -18,14 +18,16 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::provider_retry::ProviderRetry;
 use crazyagent::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crazyagent::roadmap_status::Refresh;
+use crazyagent::sandbox::policy::AgentPolicy;
+use crazyagent::sandbox_settings::SandboxSettings;
 use crazyagent::setup::RefusedTool;
 use crazyagent::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, ResultsShown};
 use crazyagent::team::master_limits::{ROUND_CHOICES, RUN_CHOICES_SECS};
 use crazyagent::team::wall::TerminalsPerWindow;
 use crazyagent::team::{
     BUDGET_CHOICES, BackgroundAtEnd, BranchMode, CAP_CHOICES, CatchUpMain, ChildLanding,
-    DEPTH_CHOICES, IDLE_CHOICES_SECS, LandingMode, MasterIdleStop, MasterLands,
-    NEW_FOLDER_FILES_CHOICES, ReuseIdle, TeamAction,
+    DEPTH_CHOICES, IDLE_CHOICES_SECS, LIMIT_CHOICES_SECS, LandingMode, MasterIdleStop, MasterLands,
+    NEW_FOLDER_FILES_CHOICES, ReuseIdle, SwitchMode, TeamAction,
 };
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
@@ -43,6 +45,9 @@ const SENTINEL: &str = "SNAPSHOT-SENTINEL-NOT-A-SECRET";
 
 /// The PATH the fixture engine runs with, so no tool the owner installed lands in a row.
 const FIXTURE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// The fixture owner's git identity, so git never derives one from this machine's user.
+const OWNER_GIT: &str = "[user]\n\tname = Owner Example\n\temail = owner@example.invalid\n";
 
 /// Columns the dump never shows, by table: the raw owner request and reply frames, which can
 /// carry a secret the owner typed, and the hash and result frame kept for one request.
@@ -83,7 +88,7 @@ const SECRET_PHRASES: [&str; 7] = [
 
 /// The tables the settings fixture writes through its owner requests. A settings dump with
 /// one of them empty fails, so a request the engine answered without storing is caught.
-const SEEDED_TABLES: [&str; 39] = [
+const SEEDED_TABLES: [&str; 46] = [
     "agent_cleanup_settings",
     "agent_quit_settings",
     "configured_master_frames",
@@ -96,9 +101,12 @@ const SEEDED_TABLES: [&str; 39] = [
     "plugin_items",
     "project_overview",
     "project_setups",
+    "project_agent_policy",
+    "project_read_paths",
     "projects_home",
     "provider_retry_settings",
     "roadmap_status_settings",
+    "sandbox_settings",
     "setup_refused_tool",
     "team_account_spread",
     "team_agent_branches",
@@ -106,6 +114,7 @@ const SEEDED_TABLES: [&str; 39] = [
     "team_caps",
     "team_catch_up_main",
     "team_done_quiet",
+    "team_finished_view",
     "team_land_on",
     "team_landing_mode",
     "team_leftovers",
@@ -114,12 +123,15 @@ const SEEDED_TABLES: [&str; 39] = [
     "team_master_lands",
     "team_master_limits",
     "team_master_live_terminal",
+    "team_master_switch",
     "team_merge_ask",
     "team_message_settings",
     "team_nesting",
     "team_new_folder_limit",
     "team_reask_empty",
     "team_reuse_idle",
+    "team_settings",
+    "team_time_limits",
     "team_token_budgets",
     "team_wall",
     "user_profile",
@@ -142,9 +154,9 @@ fn fresh(_scratch: &Path) -> Result<Value, String> {
     dump(&stopped.engine.path().join("engine.db"))
 }
 
-/// The upgrade fixture's state: a profile, a projects home, one project with every team
-/// setting an owner request sets without a read version, the app-wide settings, two memories
-/// and three plugins, one an MCP server holding the fake secret. Input: unused. Output: the
+/// The upgrade fixture's state: a profile, a projects home, one project with its team
+/// settings, sandbox policy, extra read folder and instructions text, the app-wide settings,
+/// two memories and three plugins, one an MCP server holding the fake secret. Input: unused. Output: the
 /// checked dump of its engine.db.
 fn settings(_scratch: &Path) -> Result<Value, String> {
     let stopped = seeded("ca-p5-settings-", true)?;
@@ -164,6 +176,7 @@ struct Stopped {
 /// the settings. Output: the stopped engine, or the request that failed.
 fn seeded(prefix: &str, with_settings: bool) -> Result<Stopped, String> {
     let home = e2e_support::scratch("ca-p5-home-");
+    fs::write(home.path().join(".gitconfig"), OWNER_GIT).map_err(said)?;
     let disk = e2e_support::scratch("ca-p5-disk-");
     let projects = disk.path().join("Projects");
     fs::create_dir(&projects).map_err(said)?;
@@ -196,15 +209,19 @@ fn seeded(prefix: &str, with_settings: bool) -> Result<Stopped, String> {
     })
 }
 
-/// The skill folder and the hooks plugin folder the fixture adds, written on the scratch disk.
+/// The skill folder and the hooks plugin folder the fixture adds and the extra read folder it
+/// gives the project's agents, written on the scratch disk.
 struct Folders {
     skill: PathBuf,
     hooks: PathBuf,
+    reference: PathBuf,
 }
 
-/// Writes one skill folder and one hooks plugin folder. Input: the scratch disk.
-/// Output: both folders.
+/// Writes one skill folder, one hooks plugin folder and one reference folder.
+/// Input: the scratch disk. Output: the folders.
 fn plugin_folders(disk: &Path) -> Result<Folders, String> {
+    let reference = disk.join("tide-tables");
+    fs::create_dir(&reference).map_err(said)?;
     let skill = disk.join("skills").join("tide-notes");
     fs::create_dir_all(&skill).map_err(said)?;
     fs::write(
@@ -225,7 +242,11 @@ fn plugin_folders(disk: &Path) -> Result<Folders, String> {
         "{\"hooks\": {\"PreToolUse\": [{\"matcher\": \"Bash\", \"hooks\": [{\"type\": \"command\", \"command\": \"/bin/echo checked\"}]}]}}\n",
     )
     .map_err(said)?;
-    Ok(Folders { skill, hooks })
+    Ok(Folders {
+        skill,
+        hooks,
+        reference,
+    })
 }
 
 /// Sends every settings request in a fixed order, so two seedings give the same revisions.
@@ -250,6 +271,7 @@ async fn seed(
         let generation = owner.next();
         recorded(step, owner.controller.team_action(action, generation).await)?;
     }
+    versioned_settings(owner, folders, project).await?;
     app_settings(owner).await?;
     project_settings(owner, project).await?;
     plugins(owner, folders, project).await
@@ -444,6 +466,104 @@ fn team_actions(project: &ProjectId) -> Vec<(&'static str, TeamAction)> {
             },
         ),
     ]
+}
+
+/// Sends the settings that carry the version of a stored item. Each is that item's first
+/// write, so version 0, except the four team settings that share one item and so take 0 to 3
+/// in order (team.rs `settings_write`): keep warm, time limits, the finished agents view and
+/// the harness switch mode; then the sandbox settings, the agent policy, the extra read folder
+/// and the app-wide and project instructions text. Inputs: the attached owner, the fixture
+/// folders and the project. Output: nothing, or the request the engine did not store.
+async fn versioned_settings(
+    owner: &mut Owner,
+    folders: &Folders,
+    project: &ProjectId,
+) -> Result<(), String> {
+    let id = || project.clone();
+    let team = [
+        (
+            "keep_warm",
+            TeamAction::KeepWarm {
+                project_id: id(),
+                on: false,
+                version: 0,
+            },
+        ),
+        (
+            "time_limits",
+            TeamAction::TimeLimits {
+                project_id: id(),
+                turn_secs: Some(LIMIT_CHOICES_SECS[0]),
+                session_secs: Some(LIMIT_CHOICES_SECS[2]),
+                idle_secs: Some(IDLE_CHOICES_SECS[0]),
+                version: 1,
+            },
+        ),
+        (
+            "finished_agents",
+            TeamAction::FinishedAgents {
+                project_id: id(),
+                show: true,
+                version: 2,
+            },
+        ),
+        (
+            "on_harness_switch",
+            TeamAction::OnHarnessSwitch {
+                project_id: id(),
+                mode: SwitchMode::Fresh,
+                version: 3,
+            },
+        ),
+    ];
+    for (step, action) in team {
+        let generation = owner.next();
+        recorded(step, owner.controller.team_action(action, generation).await)?;
+    }
+    let generation = owner.next();
+    recorded(
+        "sandbox_settings",
+        owner
+            .controller
+            .set_sandbox_settings(SandboxSettings::default(), 0, generation)
+            .await,
+    )?;
+    let generation = owner.next();
+    let policy = AgentPolicy {
+        ide_git_hooks: true,
+        ..AgentPolicy::default()
+    };
+    recorded(
+        "agent_policy",
+        owner
+            .controller
+            .set_project_agent_policy(id(), 0, policy, generation)
+            .await,
+    )?;
+    let generation = owner.next();
+    recorded(
+        "read_paths",
+        owner
+            .controller
+            .set_project_read_paths(id(), 0, vec![path_text(&folders.reference)?], generation)
+            .await,
+    )?;
+    for (step, scope) in [
+        ("app_process_text", None),
+        ("project_process_text", Some(id())),
+    ] {
+        let saved = owner
+            .controller
+            .save_process_text(scope, "Write one note per tide.".to_owned(), 0, None)
+            .await
+            .map_err(|error| format!("{step}: {error:?}"))?;
+        if !matches!(saved, SavedText::Saved { .. }) {
+            return Err(format!(
+                "{step}: the engine answered that the text changed since"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Sends the app-wide settings requests: cleanup, quit, provider retry, the three master
@@ -691,9 +811,9 @@ fn recorded<E: std::fmt::Debug>(
 fn settled(dump: Value) -> Result<Value, String> {
     let empty: Vec<&str> = SEEDED_TABLES
         .into_iter()
-        .filter(|table| {
-            dump["tables"][*table]["row_count"]
-                .as_i64()
+        .filter(|name| {
+            table_entry(&dump, name)
+                .and_then(|entry| entry["row_count"].as_i64())
                 .is_none_or(|count| count == 0)
         })
         .collect();
@@ -711,34 +831,57 @@ fn settled(dump: Value) -> Result<Value, String> {
     Ok(dump)
 }
 
-/// Dumps every table of an engine.db: its CREATE text with its indexes and triggers, its
-/// row count, the columns left out as secret, and its other columns' rows in a stable order.
-/// The file is copied to a scratch folder and opened read-only there, so nothing is written
-/// next to it. Input: the engine.db path. Output: the dump, or why it could not be read.
+/// Dumps every table of an engine.db as a list sorted by name, so no table name is a key the
+/// normalisation reads: its CREATE text with its indexes and triggers, its row count, the
+/// columns left out as secret, and its other columns' rows in a stable order. Reads a scratch
+/// copy, so nothing is written next to the file. Input: the engine.db path. Output: the dump,
+/// or why it could not be read.
 pub(super) fn dump(db: &Path) -> Result<Value, String> {
-    let mut wal = db.as_os_str().to_owned();
-    wal.push("-wal");
-    if fs::metadata(&wal).is_ok_and(|meta| meta.len() > 0) {
-        return Err(
-            "engine.db has WAL pages not yet written back: the engine did not stop cleanly"
-                .to_owned(),
-        );
-    }
-    let scratch = tempfile::tempdir().map_err(said)?;
-    let copy = scratch.path().join("engine.db");
-    fs::copy(db, &copy).map_err(said)?;
-    let connection =
-        Connection::open_with_flags(&copy, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(said)?;
+    let (_scratch, connection) = scratch_copy(db)?;
     let probe = Masks::new();
-    let mut tables = Map::new();
+    let mut tables = Vec::new();
     for (name, sql) in schema(&connection, "table")? {
-        tables.insert(name.clone(), table(&connection, &probe, &name, &sql)?);
+        tables.push(table(&connection, &probe, &name, &sql)?);
     }
     let views: Vec<Value> = schema(&connection, "view")?
         .into_iter()
         .map(|(_, sql)| lines(&sql))
         .collect();
     Ok(json!({"tables": tables, "views": views}))
+}
+
+/// Finds one table's entry in a dump. Inputs: the dump and the table name. Output: the
+/// entry, or none when the engine.db has no such table.
+fn table_entry<'a>(dump: &'a Value, name: &str) -> Option<&'a Value> {
+    dump["tables"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["table"] == name)
+}
+
+/// Copies an engine.db and the WAL beside it, when there is one, into a new scratch folder and
+/// opens the copy there, so SQLite reads the WAL pages too and writes nothing beside the
+/// original. Input: the engine.db path. Output: the scratch folder, which must outlive the
+/// connection, and the connection.
+fn scratch_copy(db: &Path) -> Result<(tempfile::TempDir, Connection), String> {
+    let scratch = tempfile::tempdir().map_err(said)?;
+    let copy = scratch.path().join("engine.db");
+    fs::copy(db, &copy).map_err(said)?;
+    let wal = wal_path(db);
+    if wal.exists() {
+        fs::copy(&wal, wal_path(&copy)).map_err(said)?;
+    }
+    let connection =
+        Connection::open_with_flags(&copy, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(said)?;
+    Ok((scratch, connection))
+}
+
+/// Names the WAL file SQLite keeps beside a database. Input: the database path.
+/// Output: the path with `-wal` appended.
+fn wal_path(db: &Path) -> PathBuf {
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    PathBuf::from(wal)
 }
 
 /// Lists one kind of schema item with its CREATE text, by name, leaving out SQLite's own.
@@ -811,6 +954,7 @@ fn table(connection: &Connection, probe: &Masks, name: &str, sql: &str) -> Resul
     }
     assert!(shown.is_empty() || usize::try_from(count).is_ok_and(|count| count == rows.len()));
     Ok(json!({
+        "table": name,
         "schema": lines(sql),
         "attached": attached,
         "excluded": excluded,
@@ -943,27 +1087,26 @@ fn fixture_path() -> PathBuf {
 }
 
 /// Refuses private text with this machine's HOME and USER and with the passwd entry's home
-/// and name, the sources the engine reads. Input: the text. Output: nothing, or the kind of
-/// private text found.
+/// and name, the sources the engine reads. A user name that is also a snapshot kind, such as a
+/// farm account named runner, is not checked, as the runner's failure lines do.
+/// Input: the text. Output: nothing, or the kind of private text found.
 fn private_text(text: &str) -> Result<(), String> {
     let owner = nix::unistd::User::from_uid(nix::unistd::getuid())
         .map_err(said)?
         .ok_or("this user has no passwd entry")?;
+    let personal = |name: &str| !super::KINDS.contains(&name);
     let home = std::env::var("HOME").ok();
-    let user = std::env::var("USER").ok();
+    let user = std::env::var("USER").ok().filter(|user| personal(user));
+    let name = Some(owner.name.as_str()).filter(|name| personal(name));
     refuse_private(text, home.as_deref(), user.as_deref())?;
-    refuse_private(text, owner.dir.to_str(), Some(owner.name.as_str()))
+    refuse_private(text, owner.dir.to_str(), name)
 }
 
 /// Refuses private text in every cell of every table of an engine.db, the excluded columns
 /// too, with blobs read as UTF-8 where they hold it. Input: the engine.db path. Output:
 /// nothing, or the table and the kind of private text found.
 fn private_cells(db: &Path) -> Result<(), String> {
-    let scratch = tempfile::tempdir().map_err(said)?;
-    let copy = scratch.path().join("engine.db");
-    fs::copy(db, &copy).map_err(said)?;
-    let connection =
-        Connection::open_with_flags(&copy, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(said)?;
+    let (_scratch, connection) = scratch_copy(db)?;
     for (name, _) in schema(&connection, "table")? {
         let mut select = connection
             .prepare(&format!("SELECT * FROM {}", quoted(&name)))
@@ -989,8 +1132,8 @@ fn private_cells(db: &Path) -> Result<(), String> {
 
 /// Compares the committed upgrade fixture's dump with the settings golden. When the fixture
 /// is missing and `write` is set, seeds a fresh engine, requires its dump to equal the golden,
-/// refuses private text in every cell and in the raw bytes, then writes the fixture and fails
-/// so a writing run is never green. Input: the write switch. Output: nothing when the fixture
+/// a stop that left no WAL pages (the fixture is one file), and no private text in any cell or
+/// in the raw bytes, then writes the fixture and fails so a writing run is never green. Input: the write switch. Output: nothing when the fixture
 /// matches, else why not.
 fn fixture_matches(write: bool) -> Result<(), String> {
     let golden = fs::read(snapshots_root().join("storage/settings.json"))
@@ -1008,6 +1151,12 @@ fn fixture_matches(write: bool) -> Result<(), String> {
     let stopped = seeded("ca-p5-fixture-", true)?;
     let db = stopped.engine.path().join("engine.db");
     compare(&golden, &normalise(&settled(dump(&db)?)?)?)?;
+    if fs::metadata(wal_path(&db)).is_ok_and(|meta| meta.len() > 0) {
+        return Err(
+            "the stopped engine left WAL pages beside engine.db, so the fixture would not be one file"
+                .to_owned(),
+        );
+    }
     private_cells(&db)?;
     let bytes = fs::read(&db).map_err(said)?;
     private_text(&String::from_utf8_lossy(&bytes)).map_err(|kind| format!("raw bytes: {kind}"))?;
@@ -1087,16 +1236,15 @@ fn the_dump_leaves_out_secrets_orders_rows_stably_and_fails_on_one_changed_cell(
     let reordered = dump(&sample(scratch.path(), "reordered.db", true, 3)).unwrap();
     let changed = dump(&sample(scratch.path(), "changed.db", false, 4)).unwrap();
     assert!(!serde_json::to_string(&first).unwrap().contains(SENTINEL));
+    let operations = table_entry(&first, "operations").unwrap();
+    assert_eq!(operations["excluded"], json!(["request", "reply"]));
     assert_eq!(
-        first["tables"]["operations"]["excluded"],
-        json!(["request", "reply"])
-    );
-    assert_eq!(
-        first["tables"]["operations"]["rows"],
+        operations["rows"],
         json!([{"client": "owner:tui", "id": "r1"}])
     );
-    assert_eq!(first["tables"]["plugin_items"]["row_count"], json!(2));
-    let rows = first["tables"]["plugin_items"]["rows"].as_array().unwrap();
+    let plugin_items = table_entry(&first, "plugin_items").unwrap();
+    assert_eq!(plugin_items["row_count"], json!(2));
+    let rows = plugin_items["rows"].as_array().unwrap();
     let row = |id: &str| rows.iter().find(|row| row["id"] == json!(id)).unwrap();
     assert_eq!(
         row("a")["body"]["seen"],
@@ -1111,11 +1259,34 @@ fn the_dump_leaves_out_secrets_orders_rows_stably_and_fails_on_one_changed_cell(
 }
 
 #[test]
-fn the_dump_refuses_an_engine_db_with_unwritten_wal_pages() {
+fn the_dump_reads_rows_still_in_the_wal_beside_the_file_and_writes_nothing_there() {
     let scratch = tempfile::tempdir().unwrap();
-    let db = sample(scratch.path(), "engine.db", false, 3);
-    fs::write(scratch.path().join("engine.db-wal"), b"pages").unwrap();
-    assert!(dump(&db).unwrap_err().contains("WAL pages"));
+    let path = scratch.path().join("engine.db");
+    let writer = Connection::open(&path).unwrap();
+    let mode: String = writer
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    let pages: i64 = writer
+        .query_row("PRAGMA wal_autocheckpoint=0", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(pages, 0);
+    writer
+        .execute_batch(
+            "CREATE TABLE team_caps (project TEXT PRIMARY KEY, harnesses INTEGER);
+             INSERT INTO team_caps VALUES ('snapshot-p5', 3);",
+        )
+        .unwrap();
+    let wal = scratch.path().join("engine.db-wal");
+    let before = fs::read(&wal).unwrap();
+    assert!(!before.is_empty());
+    let dumped = dump(&path).unwrap();
+    assert_eq!(
+        table_entry(&dumped, "team_caps").unwrap()["rows"],
+        json!([{"harnesses": 3, "project": "snapshot-p5"}])
+    );
+    assert_eq!(fs::read(&wal).unwrap(), before);
+    drop(writer);
 }
 
 #[test]
