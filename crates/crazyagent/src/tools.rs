@@ -2,6 +2,8 @@ pub mod permission_fix;
 pub mod probe;
 #[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -51,7 +53,7 @@ const TEMP_FOLDERS: [&str; 7] = [
     "/dev/shm",
 ];
 const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
-const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+pub(crate) const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 /// The file name of the tmux the app ships beside the engine (DEC-157), which the name
 /// `tmux` finds before every folder ([`Places::bundled`]).
 pub const BUNDLED_TMUX: &str = "crazyagent-tmux";
@@ -609,19 +611,21 @@ pub(crate) fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) ->
     !inside(written) && inside(real)
 }
 
-/// The temp folders: the shared ones and this user's own, as given and with its links
-/// resolved, so a path matches however it is written; an owner temp folder of `/` is
-/// dropped. Output: the absolute folders.
+/// The temp folders: the shared ones and this user's own, as given, with its links resolved
+/// and in the plain form [`crate::sandbox::canonical`] gives (a Windows drive path without
+/// `\\?\`), so a path matches however it is written; an owner temp folder of `/` is
+/// dropped. Output: the absolute folders, each once.
 pub(crate) fn temp_roots() -> Vec<PathBuf> {
     let owner = std::env::temp_dir();
     let real = owner.canonicalize().ok();
+    let plain = crate::sandbox::canonical(&owner).ok();
     let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
-    roots.extend(
-        std::iter::once(owner)
-            .chain(real)
-            .filter(|root| root.is_absolute() && root.parent().is_some()),
-    );
-    assert!(roots.len() <= TEMP_FOLDERS.len() + 2);
+    for root in std::iter::once(owner).chain(real).chain(plain) {
+        if root.is_absolute() && root.parent().is_some() && !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    assert!(roots.len() <= TEMP_FOLDERS.len() + 3);
     roots
 }
 
@@ -762,14 +766,16 @@ pub struct Refused {
     pub why: Refusal,
 }
 
-/// A tool that cannot run: which one, why, the interpreter it needs when that is what is
-/// missing, the folders looked in and the first file passed over when no usable one was
-/// found, boxed so the error stays small, kept apart from the owner line so it is fixed.
+/// A tool that cannot run: which one, why, what it needs (the missing interpreter, or the
+/// version needed when the one found is too old), the version found when that is too old,
+/// the folders looked in and the first file passed over when no usable one was found,
+/// boxed so the error stays small, kept apart from the owner line so it is fixed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Missing {
     pub tool: String,
     pub reason: Reason,
     pub needs: Option<String>,
+    pub found: Option<String>,
     pub looked: Vec<PathBuf>,
     pub refused: Option<Box<Refused>>,
 }
@@ -791,9 +797,12 @@ impl Missing {
                     install_hint(needs)
                 )
             }
-            (Reason::WrongVersion, tool, _) => {
-                format!("{tool} is too old for CrazyAgent. Update it, then try again.")
-            }
+            (Reason::WrongVersion, tool, needs) => match (self.found.as_deref(), needs) {
+                (Some(found), Some(needs)) => format!(
+                    "{tool} {found} is too old for CrazyAgent; it needs {needs} or newer. Update it, then try again."
+                ),
+                _ => format!("{tool} is too old for CrazyAgent. Update it, then try again."),
+            },
             (Reason::Refused, tool, _) => match &self.refused {
                 Some(refused) => refused_line(tool, refused),
                 None => format!(
@@ -889,6 +898,7 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
         tool: name.to_owned(),
         reason: Reason::NotFound,
         needs: None,
+        found: None,
         looked: places.folders.clone(),
         refused: None,
     };
@@ -958,6 +968,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         tool: tool.clone(),
         reason: Reason::NotFound,
         needs: None,
+        found: None,
         looked: entry.parent().map(Path::to_path_buf).into_iter().collect(),
         refused: None,
     };
@@ -1007,6 +1018,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         tool: tool.clone(),
         reason: Reason::NeedsInterpreter,
         needs: Some(name.to_owned()),
+        found: None,
         looked: places.folders.clone(),
         refused: None,
     };

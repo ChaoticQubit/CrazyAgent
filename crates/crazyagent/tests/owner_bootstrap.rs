@@ -759,6 +759,19 @@ fn an_engine_start_with_nothing_cut_short_writes_no_cut_short_line() {
     assert!(!stderr.contains("project_delete_cut_short"), "{stderr}");
 }
 
+/// The first start of a new database holds no removed project, so it writes no backfill line
+/// and the stderr of a start keeps only what went wrong; the line is written only when the
+/// backfill held an id.
+#[test]
+fn the_first_start_of_a_new_database_writes_no_backfill_line() {
+    let root = private_root();
+    let mut process = Process::launch(root.path(), "e.sock");
+    process.ready();
+    process.stop("TERM");
+    let stderr = String::from_utf8_lossy(&process.stderr.lock().unwrap()).into_owned();
+    assert!(!stderr.contains("projects_removed_backfill"), "{stderr}");
+}
+
 #[test]
 fn cli_preserves_unrecorded_socket() {
     let root = tempfile::tempdir().unwrap();

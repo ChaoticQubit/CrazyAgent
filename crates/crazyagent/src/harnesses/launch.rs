@@ -729,7 +729,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         Some(request.working_dir.as_path())
     );
     assert_eq!(
-        command.get_program() == SANDBOX_EXEC,
+        crate::sandbox::starts_at_boundary(command.get_program()),
         request.sandbox_profile.is_some() && !request.unconfined
     );
     assert!(command.get_args().all(|argument| {

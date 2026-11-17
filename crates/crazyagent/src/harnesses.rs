@@ -672,7 +672,7 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
                         reason: reason.into(),
                     }),
                 model_selection: spec.model_selection,
-                account_kinds: spec.account_kinds.to_vec(),
+                account_kinds: account_kinds_here(spec),
                 team: match interactive::support(spec.id) {
                     interactive::Support::Terminal => TeamUse::Available,
                     interactive::Support::HeadlessOnly { reason }
@@ -970,14 +970,43 @@ pub fn account_fits(harness: &str, connection: &crate::config::ModelConnection) 
         (
             ModelEndpoint::Http { .. },
             ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {},
-        ) => match id {
-            "codex" => protocol.starts_with("openai"),
-            "claude-code" => protocol == "anthropic-messages",
-            "rcli" => true,
-            _ => false,
-        },
+        ) => {
+            let keyed = matches!(connection.auth, ModelAuthentication::ApiKey { .. });
+            (!keyed || keyed_runs_here(id))
+                && match id {
+                    "codex" => protocol.starts_with("openai"),
+                    "claude-code" => protocol == "anthropic-messages",
+                    "rcli" => true,
+                    _ => false,
+                }
+        }
         _ => false,
     }
+}
+
+/// The harnesses that reach an account holding a provider key only through the engine key
+/// relay, which [`launch::route`] starts for them.
+pub const KEY_RELAYED: [&str; 2] = ["codex", "claude-code"];
+
+/// Whether a harness can run on an account that holds a provider key on this system: one the
+/// key relay does not carry always can, a relayed one only where the relay can start.
+/// Input: the catalog id. Output: the answer.
+pub fn keyed_runs_here(id: &str) -> bool {
+    !KEY_RELAYED.contains(&id) || crate::model_gateway::relay::available()
+}
+
+/// The account kinds a harness can use on this system, which every client's account picker
+/// filters on: its catalog kinds, without API keys for a relayed harness where the relay
+/// cannot start. Input: the harness spec. Output: the kinds, in catalog order.
+pub fn account_kinds_here(spec: &HarnessSpec) -> Vec<AccountKind> {
+    let kinds: Vec<AccountKind> = spec
+        .account_kinds
+        .iter()
+        .copied()
+        .filter(|kind| *kind != AccountKind::ApiKey || keyed_runs_here(spec.id))
+        .collect();
+    assert!(kinds.len() <= spec.account_kinds.len());
+    kinds
 }
 
 /// The base URL a harness is given for an endpoint account. Claude Code adds `/v1/messages`

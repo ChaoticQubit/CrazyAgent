@@ -4,8 +4,9 @@ import { promisify } from "node:util";
 import { click, finishWelcome, observeModelAccess, pick, says, shot, shown, toasts, type, until } from "./settings-steps.mjs";
 
 const execute = promisify(execFile);
-const CODEX_MISSING = "CrazyAgent didn't find a Codex it can run on this Mac, so ChatGPT sign-in isn't available. Install Codex, then choose Check again, or choose its file.";
-const CLAUDE_MISSING = "CrazyAgent didn't find a Claude Code it can run on this Mac, so Claude sign-in isn't available. Install Claude Code, then choose Check again, or choose its file.";
+const COMPUTER = process.platform === "darwin" ? "this Mac" : "this computer";
+const CODEX_MISSING = `CrazyAgent didn't find a Codex it can run on ${COMPUTER}, so ChatGPT sign-in isn't available. Install Codex, then choose Check again, or choose its file.`;
+const CLAUDE_MISSING = `CrazyAgent didn't find a Claude Code it can run on ${COMPUTER}, so Claude sign-in isn't available. Install Claude Code, then choose Check again, or choose its file.`;
 
 async function observeSignIn(connection) {
   const result = await execute(process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE, ["observe-native-auth", connection],
