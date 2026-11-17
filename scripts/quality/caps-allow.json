@@ -76,7 +76,7 @@
   "crates/crazyagent/src/landing/owner.rs": 2909,
   "crates/crazyagent/src/landing/tests.rs": 17854,
   "crates/crazyagent/src/launch_context.rs": 3501,
-  "crates/crazyagent/src/launch_context/tests.rs": 5389,
+  "crates/crazyagent/src/launch_context/tests.rs": 5396,
   "crates/crazyagent/src/master_sessions.rs": 5981,
   "crates/crazyagent/src/memory.rs": 1788,
   "crates/crazyagent/src/memory/library.rs": 1535,

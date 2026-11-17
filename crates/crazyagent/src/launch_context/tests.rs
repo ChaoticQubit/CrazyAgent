@@ -5223,6 +5223,7 @@ fn both_mcp_configs_hold_each_secret_exactly() {
     let servers = [
         LaunchServer {
             name: "tools".into(),
+            engine: false,
             spec: ServerSpec::Stdio {
                 command: "/usr/bin/true".into(),
                 args: vec!["--stdio".into()],
@@ -5235,6 +5236,7 @@ fn both_mcp_configs_hold_each_secret_exactly() {
         },
         LaunchServer {
             name: "remote.docs".into(),
+            engine: false,
             spec: ServerSpec::Http {
                 url: "https://mcp.example.invalid/mcp".into(),
             },
@@ -5242,6 +5244,7 @@ fn both_mcp_configs_hold_each_secret_exactly() {
         },
         LaunchServer {
             name: "keyless".into(),
+            engine: false,
             spec: ServerSpec::Http {
                 url: "https://keyless.example.invalid/mcp".into(),
             },
@@ -5349,6 +5352,7 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
             servers: vec![
                 LaunchServer {
                     name: "tools".into(),
+                    engine: false,
                     spec: ServerSpec::Stdio {
                         command: "/usr/bin/true".into(),
                         args: vec!["--stdio".into()],
@@ -5360,6 +5364,7 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
                 },
                 LaunchServer {
                     name: "remote.docs".into(),
+                    engine: false,
                     spec: ServerSpec::Http {
                         url: "https://mcp.example.invalid/mcp".into(),
                     },
@@ -5380,6 +5385,8 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     context
         .install("codex", Path::new(&home), true)
