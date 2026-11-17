@@ -1,10 +1,12 @@
 mod acl;
 mod container;
+mod file_id;
 mod job;
 mod launch;
 mod name;
 mod record;
 
+pub use file_id::file_id;
 pub use name::final_name;
 
 use crate::plan::plan;

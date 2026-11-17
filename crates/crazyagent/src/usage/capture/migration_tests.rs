@@ -146,7 +146,7 @@ fn a_seeded_message_adds_only_its_growth_on_its_next_line() {
     };
     let first = line(10);
     std::fs::write(&file, &first).unwrap();
-    let (device, inode) = file_identity(&std::fs::metadata(&file).unwrap());
+    let (device, inode) = file_identity(&file, &std::fs::metadata(&file).unwrap()).unwrap();
     let progress = serde_json::json!({
         "identity": [device, inode], "offset": first.len(), "skipping": false, "message": "msg_a",
         "counted": {"input": 100, "output": 10, "cache_read": 0, "cache_write": 0},
