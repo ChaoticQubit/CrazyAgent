@@ -529,19 +529,20 @@ impl OwnerController {
             view.state.revision == refused.expected_revision
                 && !matches!(view.query, OwnerRead::Capabilities)
         }) else {
-            return Ok(refusal);
+            return Ok(self.refused(refusal));
         };
-        let Ok(after) = self.read(before.query.clone()).await else {
-            return Ok(refusal);
+        let after = match self.read(before.query.clone()).await {
+            Ok(after)
+                if after.revision.value() > refused.expected_revision.value()
+                    && after.config_id == before.state.config_id
+                    && after.data == before.state.data =>
+            {
+                after
+            }
+            _ => return Ok(self.refused(refusal)),
         };
-        if after.revision.value() <= refused.expected_revision.value()
-            || after.config_id != before.state.config_id
-            || after.data != before.state.data
-        {
-            return Ok(refusal);
-        }
         if self.begin_mutation(mutation.clone(), generation).is_err() {
-            return Ok(refusal);
+            return Ok(self.refused(refusal));
         }
         let resent = self.pending.as_ref().expect("the resend was just prepared");
         assert!(
@@ -552,6 +553,17 @@ impl OwnerController {
         );
         self.resent = Some((resent.request.request_id.clone(), resent.hash.clone()));
         self.send_exact().await
+    }
+
+    /// Leaves the view of a change the engine refused stale, as every send does, so the form
+    /// reads again before its next change even after the re-read `resend_stale` made.
+    /// Input: the refusal. Output: the same refusal.
+    fn refused(&mut self, refusal: OwnerResponse) -> OwnerResponse {
+        if let Some(view) = &mut self.view {
+            view.fresh = false;
+        }
+        assert!(self.pending.is_none(), "a refused change keeps no pending");
+        refusal
     }
 
     /// The request id and hash of the change the last `send_pending` sent again after a

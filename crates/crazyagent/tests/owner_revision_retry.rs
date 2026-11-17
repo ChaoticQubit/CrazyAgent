@@ -115,6 +115,10 @@ async fn a_save_after_its_own_setting_changed_is_refused() {
         }
     );
     assert!(form.pending().is_none());
+    assert!(
+        !form.view().unwrap().fresh,
+        "a refused change leaves the form to read again"
+    );
     assert_eq!(form.quit_settings().await.unwrap(), THEIRS);
 }
 
@@ -149,6 +153,10 @@ async fn a_save_from_an_older_version_is_still_refused() {
             code: "stale_revision".into()
         }
     );
+    assert!(
+        !form.view().unwrap().fresh,
+        "a refused change leaves the form to read again"
+    );
     assert_eq!(
         form.sandbox_settings().await.unwrap(),
         StoredSandboxSettings {
@@ -174,6 +182,10 @@ async fn a_save_after_a_capabilities_read_is_refused() {
         OwnerResponse::Rejected {
             code: "stale_revision".into()
         }
+    );
+    assert!(
+        !form.view().unwrap().fresh,
+        "a refused change leaves the form to read again"
     );
     assert_eq!(form.quit_settings().await.unwrap(), defaults);
 }
