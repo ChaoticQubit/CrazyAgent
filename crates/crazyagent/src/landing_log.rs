@@ -27,8 +27,10 @@ pub const WORKTREE_OWNER_EDITS_FORGOTTEN: &str = "WorktreeOwnerEditsForgotten";
 /// A change set stored before numbers given the next number of its project
 /// (`landing_change_set_numbers`), by the numbering pass at the owner upkeep.
 pub const CHANGE_SET_NUMBERED: &str = "ChangeSetNumbered";
+/// An owner approval made a baseline its project's current one (`verification_current`).
+pub const BASELINE_APPROVED: &str = "BaselineApproved";
 /// Every landing event kind.
-pub const KINDS: [&str; 9] = [
+pub const KINDS: [&str; 10] = [
     AGENT_BRANCH_SET,
     AGENT_BRANCH_FORGOTTEN,
     BASE_SET,
@@ -38,6 +40,7 @@ pub const KINDS: [&str; 9] = [
     OWNER_EDITS_FORGOTTEN,
     WORKTREE_OWNER_EDITS_FORGOTTEN,
     CHANGE_SET_NUMBERED,
+    BASELINE_APPROVED,
 ];
 
 /// Whether a body path is absolute: `/`, then names `owner_edit::check_path` accepts, so
