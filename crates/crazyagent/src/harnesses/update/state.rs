@@ -1033,4 +1033,36 @@ mod windows_tests {
         assert_eq!(version_if_runs(&curl, &home, &places), None);
         assert_eq!(super::super::version_under_home(&curl), None);
     }
+
+    /// V243-WIN-HARNESS-SEARCH: a script's version is read through the `node.exe` the places
+    /// hold only while no other account can change it. A curl copy standing in as node.exe
+    /// tells the version of a script whose first line asks for node; once the node folder
+    /// grants Users Modify, the script still resolves but the read asks nothing.
+    #[test]
+    fn a_script_s_node_another_account_can_change_tells_no_version() {
+        let home = home_folder().unwrap();
+        let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("curl.exe");
+        let folder = tempfile::tempdir_in(&home).unwrap();
+        let kept = crate::sandbox::canonical(folder.path()).unwrap();
+        let node = kept.join("node");
+        let package = kept.join("package").join("bin");
+        std::fs::create_dir_all(&node).unwrap();
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::copy(&shipped, node.join("node.exe")).unwrap();
+        let script = package.join("codex.js");
+        std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+        let places = crate::tools::Places::new(vec![node.clone()], None);
+        assert!(version_if_runs(&script, &home, &places).is_some());
+
+        let granted = std::process::Command::new("icacls")
+            .arg(&node)
+            .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"])
+            .output()
+            .unwrap();
+        assert!(granted.status.success(), "{granted:?}");
+        assert!(crate::tools::resolve_entry(&script, &places).is_ok());
+        assert_eq!(version_if_runs(&script, &home, &places), None);
+    }
 }
