@@ -234,6 +234,15 @@ jobs:
           sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
           test "$(command -v tmux)" = /usr/local/bin/tmux
           test "$(tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Select Xcode 26.3, whose git the engine runs
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+          git="$(env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git)"
+          version="$("$git" --version)"
+          echo "engine git $git: $version"
+          IFS=. read -r major minor _ <<< "${version#git version }"
+          (( major > 2 || (major == 2 && minor >= 40) )) || { echo "::error::the engine's landing needs git 2.40 or newer and xcrun finds $version"; exit 1; }
       - uses: ./.github/actions/rust-shard
         with:
           os: ${{ matrix.os }}

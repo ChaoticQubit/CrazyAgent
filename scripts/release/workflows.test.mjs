@@ -1009,7 +1009,7 @@ test("each OS's Rust shards wait only on that OS's build, so a slow macOS build 
   const head = (step) => step.split("\n")[0].replace(/^ *- (name: |uses: )?/, "");
   const own = {
     build: { linux: ["Free disk on the Linux runner", "checkout", "Install Linux build packages"], macos: ["Free disk on the macOS runner", "checkout"], windows: ["checkout", "Install SQLite for Windows"] },
-    rust: { linux: ["checkout", "Install Linux packages"], macos: ["checkout", "Install tmux on macOS"], windows: ["checkout", "Install SQLite for Windows"] },
+    rust: { linux: ["checkout", "Install Linux packages"], macos: ["checkout", "Install tmux on macOS", "Select Xcode 26.3, whose git the engine runs"], windows: ["checkout", "Install SQLite for Windows"] },
   };
   const uses = {
     build: "      - uses: ./.github/actions/rust-archive\n        with:\n          os: ${{ matrix.os }}\n          node-version: ${{ env.NODE_VERSION }}",
@@ -1069,6 +1069,20 @@ test("the test farm installs tmux only from pinned, checked sources: the Linux t
   assert(macos.includes('test "$(tmux -V)" = "tmux $TMUX_VERSION"'));
   const pinned = (await readFile(new URL("./build-tmux.sh", import.meta.url), "utf8")).match(/^TMUX_VERSION=(\S+)$/m)[1];
   assert(farm.includes(`  TMUX_VERSION: "${pinned}"\n`), "the Linux build and the release script pin one tmux version");
+});
+
+test("the macOS Rust shards select Xcode 26.3 after tmux is built and check that the git the engine finds, through xcrun with a cleared environment, meets the landing floor in landing/git.rs, since the runner's default Xcode 16.4 git is older (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  const all = steps(farm, "rust-macos");
+  const at = all.findIndex((step) => step.startsWith("      - name: Select Xcode 26.3, whose git the engine runs\n"));
+  assert(at > all.findIndex((step) => step.startsWith("      - name: Install tmux on macOS\n")) && at === all.length - 2, "after tmux, right before the shard action");
+  const select = all[at];
+  assert(select.includes("          sudo xcode-select -s /Applications/Xcode_26.3.app\n"));
+  assert(select.includes('          git="$(env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git)"\n'), "found the way setup_git finds it");
+  const source = await readFile(new URL("../../crates/crazyagent/src/landing/git.rs", import.meta.url), "utf8");
+  const [, major, minor] = source.match(/^const VERSION_MIN: \(u32, u32\) = \((\d+), (\d+)\);$/m);
+  assert(select.includes(`          (( major > ${major} || (major == ${major} && minor >= ${minor}) )) || {`), "the check uses the engine's own floor");
+  for (const os of ["linux", "windows"]) assert(!steps(farm, `rust-${os}`).some((step) => step.includes("xcode-select")), `${os} selects no Xcode`);
 });
 
 test("the test farm macOS build gets the hosted job's 330-minute budget and two cargo jobs, logging memory and swap, and Windows leaves only the desktop crate out of its archive, whose test exe cannot load without the app manifest (DEC-191)", async () => {
