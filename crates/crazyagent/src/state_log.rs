@@ -255,17 +255,20 @@ impl<'a, 'c> Appender<'a, 'c> {
 
 /// Checks the snapshot run a closing event ends: the sha256 of the bodies of the events
 /// before it, as many as it counts, must match, and each must be a chunk of its aggregate
-/// in order from 0. A missing, changed or reordered chunk fails the hash, and a count no
-/// run can hold is refused before any row is read. Inputs: the connection and the closing
-/// event's `seq`. Output: Ok, or `state_log_snapshot_missing`,
+/// in order from 0. A missing, changed or reordered chunk fails the hash; a count no run
+/// can hold is refused before any row is read, and a body over [`BODY_BYTES_MAX`] before
+/// it is loaded, as a log made without the table's checks can hold one. Inputs: the
+/// connection and the closing event's `seq`. Output: Ok, or `state_log_snapshot_missing`,
 /// `state_log_snapshot_invalid`, `state_log_snapshot_hash` or `state_log_snapshot_chunks`.
 pub fn verify_snapshot(db: &Connection, done: u64) -> Result<(), EngineError> {
     let missing = || error("state_log_snapshot_missing");
+    let invalid = || error("state_log_snapshot_invalid");
     let seq = i64::try_from(done).map_err(|_| missing())?;
-    let closing: Option<(String, Vec<u8>)> = db
+    let cap = BODY_BYTES_MAX as i64;
+    let closing: Option<(String, Option<Vec<u8>>)> = db
         .query_row(
-            "SELECT kind, body FROM state_log WHERE seq=?1",
-            [seq],
+            "SELECT kind, CASE WHEN length(body) <= ?2 THEN body END FROM state_log WHERE seq=?1",
+            [seq, cap],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
@@ -273,16 +276,19 @@ pub fn verify_snapshot(db: &Connection, done: u64) -> Result<(), EngineError> {
     let Some((_, body)) = closing.filter(|(kind, _)| kind == SNAPSHOT_DONE) else {
         return Err(missing());
     };
-    let closed = serde_json::from_slice::<SnapshotDone>(&body)
-        .ok()
+    let closed = body
+        .and_then(|body| serde_json::from_slice::<SnapshotDone>(&body).ok())
         .filter(|closed| (closed.chunks as usize) < TRANSACTION_EVENTS_MAX)
-        .ok_or_else(|| error("state_log_snapshot_invalid"))?;
+        .ok_or_else(invalid)?;
     let mut statement = db
-        .prepare("SELECT kind, body FROM state_log WHERE seq>=?1 AND seq<?2 ORDER BY seq")
+        .prepare(
+            "SELECT kind, CASE WHEN length(body) <= ?3 THEN body END FROM state_log
+            WHERE seq>=?1 AND seq<?2 ORDER BY seq",
+        )
         .map_err(error)?;
     let rows = statement
-        .query_map([seq - i64::from(closed.chunks), seq], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        .query_map([seq - i64::from(closed.chunks), seq, cap], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
         })
         .map_err(error)?;
     let mut digest = Sha256::new();
@@ -290,6 +296,7 @@ pub fn verify_snapshot(db: &Connection, done: u64) -> Result<(), EngineError> {
     let mut in_order = true;
     for row in rows {
         let (kind, body) = row.map_err(error)?;
+        let body = body.ok_or_else(invalid)?;
         digest.update(&body);
         let chunk = (kind == SNAPSHOT_CHUNK)
             .then(|| serde_json::from_slice::<SnapshotChunk>(&body).ok())
