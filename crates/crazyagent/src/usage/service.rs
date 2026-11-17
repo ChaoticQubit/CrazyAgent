@@ -370,9 +370,10 @@ impl Usage {
     /// detail reads an open Pools page asks for when they are due, then counts every live or
     /// lately stopped agent's and recent research run's records, so a run's own limit
     /// readings meet a poll as fresh as the step allows. Don't read makes no detail read and
-    /// stamps none, and a source other than the last step's makes them due at once, so a
-    /// pick shows on the next step (V243-RESETS-SETTING-REFRESH). Output: done, or the
-    /// store's failure.
+    /// stamps none, and a source whose detail call differs from the last step's, as a pick
+    /// after Don't read, makes them due at once, so it shows on the next step; Through and As
+    /// Claude Code make the same call, so a change between them keeps the rest
+    /// (V243-RESETS-SETTING-REFRESH). Output: done, or the store's failure.
     pub fn step(&mut self, now_ms: i64) -> Result<(), EngineError> {
         self.doing = UsageStep::Poll;
         let access = (self.access)().unwrap_or_default();
@@ -381,7 +382,10 @@ impl Usage {
         if source == spend::ResetsSource::Off {
             forget_claude_resets(&self.db, &access)?;
         }
-        if self.detail_source.is_some_and(|seen| seen != source) {
+        if self
+            .detail_source
+            .is_some_and(|seen| detail_agent(seen, None) != detail_agent(source, None))
+        {
             self.detail_ms = None;
         }
         self.detail_source = Some(source);
