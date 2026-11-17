@@ -799,6 +799,14 @@ pub(in crate::tui) fn overview_pending(overview: &crate::project_overview::Overv
     overview.running || waits
 }
 
+/// The plain sentence for a hidden folder refused as not plain, in this system's path form:
+/// a plain drive path on Windows, a path with no quote or backslash elsewhere.
+const HIDDEN_NOT_PLAIN: &str = if cfg!(windows) {
+    "A folder path must be a plain drive path such as C:\\Users\\you\\project\\secrets, with no quotes, / or control characters."
+} else {
+    "A folder path can't hold quotes, backslashes or control characters."
+};
+
 /// Turns an engine rejection code into a plain sentence.
 /// Takes the code.
 /// Returns what happened and what to do; a code with no sentence is named after a retry sentence.
@@ -874,9 +882,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "hidden_path_outside_project" => {
             "A hidden folder must sit inside the project. Pick a folder within it."
         }
-        "hidden_path_not_plain" => {
-            "A folder path can't hold quotes, backslashes or control characters."
-        }
+        "hidden_path_not_plain" => HIDDEN_NOT_PLAIN,
         "hidden_path_tracked" => {
             "git tracks a file in that folder. Only folders git does not track can be hidden."
         }
@@ -897,6 +903,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "model_access_read_only" => "Pools can't be changed in this setup.",
         "research_job_finished" => "This research already ended.",
         "research_job_not_retryable" => "Only failed or stopped research can run again.",
+        "research_unavailable_here" => {
+            "Research does not run on this computer in this version, so it cannot run again."
+        }
         "planning_busy" => {
             "A roadmap is already being planned for this project. Wait for it to finish."
         }

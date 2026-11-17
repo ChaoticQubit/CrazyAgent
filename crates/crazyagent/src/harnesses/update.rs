@@ -24,7 +24,7 @@ use run::read_pointer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 pub const VERSION_BYTES_MAX: usize = 64;
 pub const ARGS_MAX: usize = 5;
@@ -289,6 +289,9 @@ enum Found<'a> {
 
 /// Matches a harness's real path against its table row, on whole path parts only, in the
 /// order own installer, Homebrew, npm (a formula may wrap an npm package inside its Cellar).
+/// The path is absolute and plain: roots and folder names, after at most a drive prefix such
+/// as `C:`, on Windows as plain drive text ([`crate::sandbox::windows_clean_text`]), never a
+/// UNC, verbatim, device or forward-slash path, `.` or `..`.
 /// Inputs: the harness id, the real path and the roots. Output: the match or a refusal code.
 fn found<'a>(id: &str, real: &Path, roots: &'a Roots) -> Result<Found<'a>, &'static str> {
     let id = harnesses::canonical(id);
@@ -297,10 +300,19 @@ fn found<'a>(id: &str, real: &Path, roots: &'a Roots) -> Result<Found<'a>, &'sta
     }
     let recipe = recipe(id).ok_or(UNKNOWN_INSTALL)?;
     let plain = real.is_absolute()
-        && real
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)));
+        && real.components().all(|part| match part {
+            Component::Prefix(prefix) => matches!(prefix.kind(), Prefix::Disk(_)),
+            Component::RootDir | Component::Normal(_) => true,
+            Component::CurDir | Component::ParentDir => false,
+        });
     if !plain {
+        return Err(UNKNOWN_INSTALL);
+    }
+    #[cfg(windows)]
+    if !real
+        .to_str()
+        .is_some_and(crate::sandbox::windows_clean_text)
+    {
         return Err(UNKNOWN_INSTALL);
     }
     if let Some(own) = &recipe.own
@@ -565,7 +577,7 @@ pub fn update_command(
     match found(id, real, roots)? {
         Found::Own(own) => {
             let folder = entry.parent().ok_or(TOOL_MISSING)?;
-            if std::fs::canonicalize(entry).ok().as_deref() != Some(real) {
+            if crate::sandbox::canonical(entry).ok().as_deref() != Some(real) {
                 return Err(UNKNOWN_INSTALL);
             }
             checked(
@@ -779,16 +791,14 @@ fn numbers(text: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
-/// Asks an installed harness for its version under the engine's own HOME, as the updates
-/// check does, and only where the tool resolver would run it and every interpreter its
-/// first line names (`version_if_runs`), so the usage User-Agent read never starts a file or
-/// an interpreter copy agents or other users can change. Input: the harness executable.
-/// Output: the version, None when the harness is refused or cannot be asked, prints no plain
-/// version, or HOME is unset or relative.
+/// Asks an installed harness for its version under the engine's own home
+/// ([`state::home_folder`]), as the updates check does, and only where the tool resolver
+/// would run it and every interpreter its first line names (`version_if_runs`), so the usage
+/// User-Agent read never starts a file or an interpreter copy agents or other users can
+/// change. Input: the harness executable. Output: the version, None when the harness is
+/// refused or cannot be asked, prints no plain version, or the home is unknown.
 pub(crate) fn version_under_home(executable: &Path) -> Option<String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|home| home.is_absolute())?;
+    let home = state::home_folder()?;
     state::version_if_runs(
         executable,
         &home,
@@ -966,5 +976,72 @@ pub fn latest_from_pointer(pointer: &Pointer, body: &[u8], installed: &str) -> L
                 None => unreadable(),
             }
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// W1 (leader 01:25, DEC-194): on Windows a harness installed under a drive path is
+    /// named by how it was installed, as on Unix, while its update and its check stay refused
+    /// as unsupported here. A verbatim, UNC or forward-slash path names no install.
+    #[test]
+    fn a_windows_npm_install_is_named_and_its_update_and_check_stay_refused() {
+        let roots = Roots {
+            home: PathBuf::from(r"C:\Users\unit"),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: None,
+            places: crate::tools::Places::new(Vec::new(), None),
+        };
+        let real =
+            Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
+        assert_eq!(
+            method("codex", real, &roots),
+            Method::Npm {
+                package: "@openai/codex".into()
+            }
+        );
+        assert_eq!(
+            update_command("codex", real, real, &roots),
+            Err(UNSUPPORTED_HERE)
+        );
+        assert_eq!(check_command("codex", real, &roots), Err(UNSUPPORTED_HERE));
+        for refused in [
+            r"\\?\C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js",
+            r"\\server\share\npm\node_modules\@openai\codex\bin\codex.js",
+            r"C:/Users/unit/AppData/Roaming/npm/node_modules/@openai/codex/bin/codex.js",
+        ] {
+            assert_eq!(
+                method("codex", Path::new(refused), &roots),
+                Method::Unknown,
+                "{refused}"
+            );
+        }
+    }
+    /// V243-W1-VERSION-READ: with the engine's home now the profile folder on Windows, a
+    /// harness that installed itself under it is named as self-updating, and its update
+    /// stays refused as unsupported here.
+    #[test]
+    fn a_windows_self_updating_install_is_named_and_its_update_stays_refused() {
+        let folder = tempfile::tempdir().unwrap();
+        let home = crate::sandbox::canonical(folder.path()).unwrap();
+        let installed = home.join(".codex").join("packages").join("standalone");
+        std::fs::create_dir_all(&installed).unwrap();
+        let entry = installed.join("codex.exe");
+        std::fs::write(&entry, "").unwrap();
+        let roots = Roots {
+            home,
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: None,
+            places: crate::tools::Places::new(Vec::new(), None),
+        };
+        assert_eq!(method("codex", &entry, &roots), Method::SelfUpdate);
+        assert_eq!(
+            update_command("codex", &entry, &entry, &roots),
+            Err(UNSUPPORTED_HERE)
+        );
     }
 }

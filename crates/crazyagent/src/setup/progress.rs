@@ -415,6 +415,7 @@ mod tests {
             tool: "graphify".into(),
             reason: crate::tools::Reason::NeedsInterpreter,
             needs: Some("python3".into()),
+            found: None,
             looked: Vec::new(),
             refused: None,
         };
@@ -462,6 +463,7 @@ mod tests {
             tool: "graphify".into(),
             reason: crate::tools::Reason::Refused,
             needs: None,
+            found: None,
             looked: Vec::new(),
             refused: Some(Box::new(crate::tools::Refused {
                 file: PathBuf::from("/Users/me/.local/share/uv/tools/graphifyy/bin/python3"),

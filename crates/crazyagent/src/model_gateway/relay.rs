@@ -682,6 +682,12 @@ fn spawn_holding(_command: &mut Command, _reader: std::io::PipeReader) -> std::i
     Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
 }
 
+/// Whether a relay can start on this system, by the same check [`Relay::start`] makes, so
+/// clients are offered only the keyed accounts a launch can reach. Output: the answer.
+pub fn available() -> bool {
+    handed_bodies().is_ok()
+}
+
 /// Lets a relay start where curl can inherit the pipe that carries each request body.
 /// Output: Ok.
 #[cfg(unix)]

@@ -714,7 +714,7 @@ const NATIVE_PLACES: [&str; 15] = [
 /// Every other engine source file that still compares a harness id to a literal, with how
 /// many lines do and why. The task named moves the lines to the registry; a change in any
 /// count fails the row, so a new comparison is seen and a moved one leaves this list.
-const LISTED: [(&str, usize, &str); 23] = [
+const LISTED: [(&str, usize, &str); 22] = [
     (
         "accounts.rs",
         2,
@@ -728,8 +728,8 @@ const LISTED: [(&str, usize, &str); 23] = [
     ),
     (
         "harnesses.rs",
-        1,
-        "Claude Code base URL without /v1 for the key relay (Task 17)",
+        2,
+        "key relay: Claude Code's base URL without /v1 (Task 17), the two harnesses it serves",
     ),
     (
         "harnesses/finding.rs",
@@ -773,7 +773,6 @@ const LISTED: [(&str, usize, &str); 23] = [
         2,
         "install hints for the Codex and Claude programs the managed sign-in needs (Task 18)",
     ),
-    ("tui/master_session.rs", 3, "native masters (Task 20)"),
     (
         "tui/model_access.rs",
         1,

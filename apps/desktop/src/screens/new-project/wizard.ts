@@ -564,13 +564,16 @@ export function preselectPool(pools: PoolChoice[], summaries: PoolSummary[] = []
  * sign-in fits only the harness it was made with, by the catalog id or an alias such as "claude",
  * and only one that lists subscription accounts; a key or no-key URL account fits by the wire
  * format the harness lists, `*` standing for every format with that start; OAuth fits nothing.
+ * An account holding a key fits only where the engine lists API keys for the harness on this
+ * system, whatever harness it was stored with.
  * Inputs: the harness and the pool's connections. Output: true when one fits. */
 export function poolFits(harness: HarnessEntry, members: ModelConnection[]): boolean {
   const names = [harness.id, ...harness.aliases];
   const speaks = (protocol: string) => harness.account_protocols.some((listed) => listed.endsWith("*") ? protocol.startsWith(listed.slice(0, -1)) : listed === protocol);
   return members.some((member) => {
     if (member.endpoint.kind === "native") return member.auth.method === "native_managed" && member.protocol === "native" && harness.account_kinds.includes("subscription") && names.includes(member.harness);
-    return (member.auth.method === "api_key" || member.auth.method === "none") && speaks(member.protocol);
+    const keyed = member.auth.method === "api_key";
+    return (keyed ? harness.account_kinds.includes("api_key") : member.auth.method === "none") && speaks(member.protocol);
   });
 }
 

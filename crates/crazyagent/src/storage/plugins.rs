@@ -490,81 +490,6 @@ pub(crate) fn remove_secret(root: &Path, reference: &str) -> Result<(), EngineEr
     }
 }
 
-/// The folder under the engine root where an MCP server check keeps what it wrote, one
-/// folder per server id.
-pub(crate) const CHECK_FOLDER: &str = "mcp-checks";
-
-/// The name prefix of a removed MCP server's check folder moved aside in the check folder
-/// to be deleted: `.removed-<server id>-<32 hex digits>`.
-const REMOVED_CHECK: &str = ".removed-";
-
-/// Moves one removed MCP server's check folder aside to `.removed-<id>-<nonce>` in the same
-/// folder with one rename, so its path is free at once however much a check wrote there.
-/// Inputs: the engine's check folder and the server id. Output: the moved folder, none when
-/// there was no folder, `plugin_check_folder_invalid` for a name that is not one plain
-/// folder name, or `plugin_check_folder_not_removed`.
-pub(crate) fn move_check_folder_aside(
-    checks: &Path,
-    id: &str,
-) -> Result<Option<PathBuf>, EngineError> {
-    check_folder_name(id)?;
-    let nonce = crate::engine::owner::random_id()?;
-    let name = format!("{REMOVED_CHECK}{id}-{}", &nonce[..32]);
-    assert!(moved_aside(&name, id));
-    let aside = checks.join(name);
-    match std::fs::rename(checks.join(id), &aside) {
-        Ok(()) => Ok(Some(aside)),
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(error("plugin_check_folder_not_removed")),
-    }
-}
-
-/// Deletes one removed MCP server's check folder with everything in it, and each copy of it
-/// moved aside for deletion that a crash left, for the start sweep. Inputs: the engine root
-/// and the server id. Output: Ok when all are gone, including when already missing;
-/// `plugin_check_folder_invalid` for a name that is not one plain folder name.
-#[cfg(unix)]
-pub(crate) fn remove_check_folder(root: &Path, id: &str) -> Result<(), EngineError> {
-    check_folder_name(id)?;
-    let checks = root.join(CHECK_FOLDER);
-    let mut folders = vec![checks.join(id)];
-    match std::fs::read_dir(&checks) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry.map_err(|_| error("plugin_check_folder_not_removed"))?;
-                if moved_aside(&entry.file_name().to_string_lossy(), id) {
-                    folders.push(entry.path());
-                }
-            }
-        }
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(error("plugin_check_folder_not_removed")),
-    }
-    for folder in folders {
-        match std::fs::remove_dir_all(folder) {
-            Ok(()) => {}
-            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(error("plugin_check_folder_not_removed")),
-        }
-    }
-    Ok(())
-}
-
-fn check_folder_name(id: &str) -> Result<(), EngineError> {
-    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-        return Err(error("plugin_check_folder_invalid"));
-    }
-    Ok(())
-}
-
-fn moved_aside(name: &str, id: &str) -> bool {
-    name.strip_prefix(REMOVED_CHECK)
-        .and_then(|rest| rest.rsplit_once('-'))
-        .is_some_and(|(moved, nonce)| {
-            moved == id && nonce.len() == 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit())
-        })
-}
-
 /// Deletes one removed project's skill store folder with everything in it, for the start
 /// sweep. Inputs: the engine root and the project id. Output: Ok when the folder is gone,
 /// including when it was already missing; `plugin_skill_folder_invalid` for a name that is
@@ -2073,3 +1998,9 @@ mod windows_tests {
 #[cfg(all(test, unix))]
 #[path = "plugins_tests.rs"]
 mod tests;
+
+/// The MCP server check folders and profiles under the engine root: their names, the move
+/// aside and removal of one server's folder, and the start sweep of check containers a
+/// crash left. Input and output: per function.
+mod check_folders;
+pub(crate) use check_folders::*;

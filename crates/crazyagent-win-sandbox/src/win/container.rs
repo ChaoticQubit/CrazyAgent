@@ -1,8 +1,10 @@
 use super::{BoundaryError, Words, last_error, wide, windows};
 use crate::profile::Capability;
-use windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS;
+use windows_sys::Win32::Foundation::{
+    ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_NOT_FOUND, ERROR_PATH_NOT_FOUND,
+};
 use windows_sys::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
     CreateWellKnownSid, FreeSid, GetLengthSid, PSID, SECURITY_MAX_SID_SIZE, WELL_KNOWN_SID_TYPE,
@@ -10,6 +12,11 @@ use windows_sys::Win32::Security::{
 };
 
 const PROFILE_EXISTS: i32 = (0x8007_0000u32 | ERROR_ALREADY_EXISTS) as i32;
+const PROFILE_MISSING: [i32; 3] = [
+    (0x8007_0000u32 | ERROR_FILE_NOT_FOUND) as i32,
+    (0x8007_0000u32 | ERROR_PATH_NOT_FOUND) as i32,
+    (0x8007_0000u32 | ERROR_NOT_FOUND) as i32,
+];
 const SID_BYTES_MIN: usize = 8;
 
 /// Opens the AppContainer profile named `name`, creating it the first time, and returns a copy
@@ -38,6 +45,23 @@ pub(super) fn sid(name: &str) -> Result<Words, BoundaryError> {
     derive_sid(&wide(name)).map_err(|code| BoundaryError::Windows {
         step: "derive the agent's container SID",
         code: code as u32,
+    })
+}
+
+/// Deletes the AppContainer profile named `name` with the folder and settings Windows keeps
+/// for it, so nothing the container wrote there outlives it; a profile already gone is fine.
+/// Relies on the name being NUL-terminated UTF-16 that outlives the call. Input: a name
+/// `check_container` accepted. Output: Ok, or the failed step.
+pub(super) fn delete(name: &str) -> Result<(), BoundaryError> {
+    let name = wide(name);
+    assert_eq!(name.last(), Some(&0));
+    let result = unsafe { DeleteAppContainerProfile(name.as_ptr()) };
+    if result >= 0 || PROFILE_MISSING.contains(&result) {
+        return Ok(());
+    }
+    Err(BoundaryError::Windows {
+        step: "delete the agent's container",
+        code: result as u32,
     })
 }
 
