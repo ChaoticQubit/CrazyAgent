@@ -2669,3 +2669,48 @@ async fn a_claude_harness_that_closed_its_pipes_after_its_turn_is_waited_for_wit
     );
     claude.cancel().await.unwrap();
 }
+
+/// A stand-in Claude Code master that never reads its turn, leaves a descendant holding its
+/// stdout and stderr but not its stdin, marks the `run` folder and exits a second later, so
+/// its host keeps a half-written turn for a reaped harness whose pipes stay open.
+const HALF_READ_HARNESS: &str = r#"#!/bin/sh
+/bin/sleep 120 </dev/null &
+/bin/sleep 1
+: > run/exited
+exit 0
+"#;
+
+#[tokio::test]
+async fn a_reaped_claude_harness_with_a_half_written_turn_is_waited_for_without_spinning() {
+    use crate::engine::master_host_fixture::MasterFixture;
+    use crate::master_frame_limit::FrameSize;
+
+    let mut fixture = MasterFixture::new("claude");
+    let clock = Some(Duration::from_secs(300));
+    let frames = FrameSize::Mib1;
+    let mut claude =
+        stand_in_master_framed(&mut fixture, HALF_READ_HARNESS, false, clock, frames).await;
+    let text = "x".repeat(frames.bytes() / 2);
+    let turn = RequestId::new("half-written-turn").unwrap();
+    let wait = Duration::from_millis(500);
+    let started = tokio::time::timeout(wait, claude.start_turn(turn, &text)).await;
+    assert!(
+        started.is_err(),
+        "the stand-in took the whole turn: {started:?}"
+    );
+    let exited = fixture.project.join("run").join("exited");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !exited.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stand-in never exited"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let passes = passes_in_a_second(&claude, Duration::from_millis(300)).await;
+    assert!(
+        passes <= 10,
+        "{passes} drive passes in a second for a reaped harness"
+    );
+    claude.cancel().await.unwrap();
+}
