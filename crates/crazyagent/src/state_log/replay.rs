@@ -246,7 +246,7 @@ fn hits(
     let row_error = || error("state_log_replay_row");
     let from = i64::try_from(after).map_err(|_| row_error())?;
     let mut statement = tx
-        .prepare_cached(
+        .prepare(
             "SELECT seq, aggregate, kind, CASE WHEN length(body) <= ?4 THEN body END
             FROM state_log WHERE seq>?1 AND instr(body, ?2) > 0 ORDER BY seq LIMIT ?3",
         )
