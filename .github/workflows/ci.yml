@@ -137,6 +137,7 @@ jobs:
         with:
           prefix-key: ci-linux
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Keep the Rust build cache under 20 GiB
         if: runner.environment != 'github-hosted'
         run: |
@@ -391,6 +392,7 @@ jobs:
         with:
           prefix-key: ci-macos
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci --ignore-scripts --no-audit --no-fund
@@ -460,6 +462,7 @@ jobs:
         with:
           prefix-key: ci-windows
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install SQLite for Windows
         run: |
           set -euo pipefail

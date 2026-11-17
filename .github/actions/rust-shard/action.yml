@@ -1,0 +1,184 @@
+name: Rust test shard
+description: Installs what one OS's Rust rows run, then runs one slice of that OS's nextest archive and uploads its JUnit report.
+inputs:
+  os:
+    description: The farm OS, linux, macos or windows.
+    required: true
+  part:
+    description: This slice, 1 to parts.
+    required: true
+  parts:
+    description: The number of slices of this OS.
+    required: true
+  node-version:
+    description: The pinned Node version.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+      with:
+        node-version: ${{ inputs.node-version }}
+    - name: Install Rust toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+        echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+    - name: Set debug info for the platform's disk
+      shell: bash
+      run: |
+        set -euo pipefail
+        debug=0
+        if [ "$RUNNER_OS" = Linux ]; then debug=line-tables-only; fi
+        {
+          echo "CARGO_PROFILE_DEV_DEBUG=$debug"
+          echo "CARGO_PROFILE_TEST_DEBUG=$debug"
+        } >> "$GITHUB_ENV"
+    - name: Fetch Rust dependencies
+      shell: bash
+      run: cargo fetch --locked
+    - name: Install cargo-nextest
+      shell: bash
+      run: bash scripts/ci/install-nextest.sh
+    - name: Install tmux on Linux
+      if: inputs.os == 'linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/tmux"
+        prefix="$RUNNER_TEMP/tmux-$TMUX_VERSION"
+        mkdir -p "$work"
+        curl -fsSL --proto '=https' --tlsv1.2 -o "$work/tmux.tar.gz" "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
+        echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -
+        tar -xzf "$work/tmux.tar.gz" -C "$work"
+        (cd "$work/tmux-$TMUX_VERSION" && ./configure --prefix="$prefix" && make -j"$(nproc)" && make install)
+        sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
+        test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
+    - name: Install uv on Linux
+      if: inputs.os == 'linux'
+      env:
+        UV_TARGET: x86_64-unknown-linux-gnu
+        UV_SHA256: f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
+      shell: bash
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/uv"
+        mkdir -p "$work/bin"
+        curl -fsSL --proto '=https' --tlsv1.2 -o "$work/uv.tar.gz" "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz"
+        echo "$UV_SHA256  $work/uv.tar.gz" | sha256sum -c -
+        tar -xzf "$work/uv.tar.gz" -C "$work" "uv-$UV_TARGET/uv"
+        install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"
+        test "$("$work/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
+        echo "$work/bin" >> "$GITHUB_PATH"
+    - name: Install Claude Code and Codex
+      if: inputs.os != 'windows'
+      shell: bash
+      run: bash scripts/ci/install-harnesses.sh
+    - name: Read the pinned IDE build
+      id: ide
+      if: inputs.os == 'macos'
+      shell: bash
+      run: |
+        set -euo pipefail
+        node --input-type=module -e '
+          import { appendFileSync, readFileSync } from "node:fs";
+          const manifest = JSON.parse(readFileSync("crates/crazyagent/src/ide/builds.json", "utf8"));
+          const { version } = manifest;
+          const build = manifest.builds["aarch64-apple-darwin"];
+          const url = `https://github.com/VSCodium/vscodium/releases/download/${version}/vscodium-reh-web-darwin-arm64-${version}.tar.gz`;
+          const pinned = /^[0-9]+(\.[0-9]+)*$/.test(version) && build?.url === url && /^[0-9a-f]{64}$/.test(build.sha256)
+            && Number.isSafeInteger(build.bytes) && build.bytes > 0 && build.bytes <= 150 * 1024 * 1024;
+          if (!pinned) throw new Error("builds.json does not pin an official darwin-arm64 VSCodium build");
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nurl=${url}\nsha256=${build.sha256}\nbytes=${build.bytes}\n`);
+        '
+    - name: Provision the pinned IDE build
+      if: inputs.os == 'macos'
+      env:
+        IDE_VERSION: ${{ steps.ide.outputs.version }}
+        IDE_URL: ${{ steps.ide.outputs.url }}
+        IDE_SHA256: ${{ steps.ide.outputs.sha256 }}
+        IDE_BYTES: ${{ steps.ide.outputs.bytes }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/vscodium-reh-web"
+        build=".local-state/ide-cache/vscodium-$IDE_VERSION"
+        mkdir -p "$work" "$build"
+        curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize "$IDE_BYTES" -o "$work/vscodium.tgz" "$IDE_URL"
+        test "$(stat -f %z "$work/vscodium.tgz")" = "$IDE_BYTES"
+        echo "$IDE_SHA256  $work/vscodium.tgz" | shasum -a 256 -c -
+        tar -xzf "$work/vscodium.tgz" -C "$build"
+        test -f "$build/out/server-main.js"
+    - name: Install pinned graphify for the graph rows
+      if: inputs.os == 'macos'
+      env:
+        UV_TARGET: aarch64-apple-darwin
+        UV_SHA256: 743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73
+      shell: bash
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/uv"
+        mkdir -p "$work/bin"
+        curl -fsSL --proto '=https' --tlsv1.2 -o "$work/uv.tar.gz" "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz"
+        echo "$UV_SHA256  $work/uv.tar.gz" | shasum -a 256 -c -
+        tar -xzf "$work/uv.tar.gz" -C "$work" "uv-$UV_TARGET/uv"
+        install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"
+        test "$("$work/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
+        venv="$RUNNER_TEMP/graphify"
+        export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache" UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/uv-python" UV_PYTHON_BIN_DIR="$RUNNER_TEMP/uv-python-bin" UV_NO_CONFIG=1 UV_NO_PROGRESS=1 UV_PYTHON_PREFERENCE=only-managed
+        "$work/bin/uv" venv --no-project --no-config --python 3.12.15 "$venv"
+        "$work/bin/uv" pip install --no-config --python "$venv/bin/python" --require-hashes --no-build --requirements crates/crazyagent/src/setup/locks/graphifyy-0.9.9.txt
+        "$venv/bin/graphify" --help > /dev/null
+        echo "CRAZYAGENT_GRAPHIFY=$venv/bin/graphify" >> "$GITHUB_ENV"
+    - name: Install the pinned context-mode for the shared-install rows
+      if: inputs.os == 'macos'
+      shell: bash
+      run: |
+        set -euo pipefail
+        read -r version integrity < <(node -e '
+          const text = require("node:fs").readFileSync(process.argv[1], "utf8");
+          const entry = text.split("[[entries]]").find((block) => /^id = "context-mode"$/m.test(block));
+          const version = entry?.match(/^install = ".*\bcontext-mode@([0-9]+\.[0-9]+\.[0-9]+) /m)?.[1];
+          const integrity = entry?.match(/^integrity = "(sha512-[A-Za-z0-9+\/]+=*)"$/m)?.[1];
+          if (!version || !integrity) throw new Error("the default pack does not pin an exact context-mode");
+          console.log(version, integrity);
+        ' crates/crazyagent/src/setup/pack.toml)
+        test -n "$version" && test -n "$integrity"
+        install="$RUNNER_TEMP/context-mode"
+        mkdir -p "$install"
+        cp .github/ci/context-mode/package.json .github/ci/context-mode/package-lock.json "$install/"
+        locked="$(node -p 'const entry = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).packages["node_modules/context-mode"]; `${entry.version} ${entry.integrity}`' "$install/package-lock.json")"
+        test "$locked" = "$version $integrity"
+        npm ci --prefix "$install" --ignore-scripts --no-audit --no-fund --no-update-notifier --loglevel=error
+        recorded="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).packages["node_modules/context-mode"].integrity' "$install/node_modules/.package-lock.json")"
+        test "$recorded" = "$integrity"
+        npm_config_build_from_source=true npm_config_nodedir="$(dirname "$(dirname "$(command -v node)")")" \
+          npm rebuild better-sqlite3 --prefix "$install" --no-audit --no-fund --no-update-notifier --loglevel=error
+        test -f "$install/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+        test "$(node -p 'require(process.argv[1]).version' "$install/node_modules/context-mode/package.json")" = "$version"
+        echo "CRAZYAGENT_CONTEXT_MODE_INSTALL=$install" >> "$GITHUB_ENV"
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      continue-on-error: true
+      with:
+        name: farm-archive-${{ inputs.os }}
+        path: ${{ runner.temp }}/archive
+    - name: Run this slice of the workspace tests
+      shell: bash
+      run: bash scripts/ci/farm-rust-shard.sh "$RUNNER_TEMP/archive/farm-${{ inputs.os }}.tar.zst" "${{ inputs.part }}" "${{ inputs.parts }}"
+    - name: Keep a JUnit report for this part
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "$FARM_JUNIT")"
+        if [ ! -s "$FARM_JUNIT" ]; then
+          printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
+        fi
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      if: always()
+      with:
+        name: farm-junit-${{ inputs.os }}-rust-${{ inputs.part }}
+        path: target/nextest/farm/junit.xml
+        if-no-files-found: error
+        retention-days: 14
