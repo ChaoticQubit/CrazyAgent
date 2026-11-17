@@ -57,6 +57,18 @@ test("a shard extracts the archive over the checkout, runs its slice under the f
   assert.equal(run.host, "/work/repo/target/debug/crazyagent");
 });
 
+test("a farm scope narrows the run to its targets, keeps the exclusions and fails a slice that matches nothing", () => {
+  const plain = shard(["ARCHIVE", "1", "4"]);
+  assert.ok(plain.args.includes("--no-tests=warn"), plain.stderr);
+  const run = shard(["ARCHIVE", "1", "4"], { FARM_SCOPE: "binary_id(=crazyagent) | binary_id(=crazyagent::x)" });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(
+    run.args[run.args.indexOf("-E") + 1],
+    "(binary_id(=crazyagent) | binary_id(=crazyagent::x)) & (not (binary_id(=crazyagent::agents_live)))",
+  );
+  assert.ok(run.args.includes("--no-tests=fail"));
+});
+
 test("a shard refuses a bad k/N, a missing archive or another nextest profile before running anything", () => {
   for (const [args, extra, message] of [
     [["ARCHIVE", "5", "4"], {}, /no k\/N/],

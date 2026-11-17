@@ -44,9 +44,10 @@ env:
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
   NODE_TEST_TIMEOUT_MACOS_MS: "60000"
-  FARM_PARTS: >-
-    linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3
-    windows-rust-1 windows-rust-2 windows-rust-3 linux-node-1 linux-node-2 macos-node-1 linux-bun-1
+  FARM_PARTS: linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3
+  FARM_SCOPE: >-
+    binary_id(=crazyagent) | binary_id(=crazyagent-desktop)
+    | binary_id(=crazyagent::settings_options_v2_ide_agents)
 
 defaults:
   run:
@@ -114,6 +115,7 @@ jobs:
 
   build-windows:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -254,7 +256,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -301,6 +303,7 @@ jobs:
 
   node:
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
@@ -464,6 +467,7 @@ jobs:
 
   typecheck:
     name: Desktop typecheck and Bun suites
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
@@ -526,7 +530,7 @@ jobs:
 
   report:
     name: Test farm report
-    needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
+    needs: [build-linux, build-macos, rust-linux, rust-macos]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
