@@ -340,7 +340,7 @@ fn a_pinned_backup_joins_the_rotation_after_thirty_days() {
 }
 
 #[test]
-fn only_the_oldest_checked_backup_a_2_5_upgrade_took_from_a_2_4_database_is_pinned() {
+fn only_the_newest_checked_backup_a_2_5_upgrade_took_from_a_2_4_database_is_pinned() {
     let root = Root::new();
     let folder = root.path().join(BACKUPS);
     std::fs::DirBuilder::new()
@@ -359,13 +359,17 @@ fn only_the_oldest_checked_backup_a_2_5_upgrade_took_from_a_2_4_database_is_pinn
     let v24 = V24_VERSION_MAX;
     made(v24, v24 + 1, 0, false);
     made(v24 - 1, v24, 1, true);
-    let oldest = made(v24, v24 + 1, 2, true);
-    made(v24, v24 + 1, 3, true);
+    made(v24, v24 + 1, 2, true);
+    let newest = made(v24, v24 + 1, 3, true);
     made(v24 + 1, v24 + 2, 4, true);
     let not_a_file = made(v24, v24 + 1, 5, false);
     std::fs::create_dir(folder.join(&not_a_file).join(CHECKED)).unwrap();
 
-    assert_eq!(pinned_name(&root, start + HOUR * 6), Some(oldest));
+    assert_eq!(pinned_name(&root, start + HOUR * 6), Some(newest.clone()));
+    assert_eq!(
+        pinned_name(&root, start + DAY * PINNED_DAYS + HOUR * 2),
+        Some(newest)
+    );
     assert_eq!(
         pinned_name(&root, start + DAY * PINNED_DAYS + HOUR * 3),
         None
@@ -516,3 +520,5 @@ fn a_backup_stamp_reads_back_as_its_time() {
         assert_eq!(stamp_time(time), None, "{time}");
     }
 }
+
+mod restore;

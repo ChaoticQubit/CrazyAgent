@@ -546,6 +546,40 @@ fn losing_the_engine_after_start_says_so_and_refreshes_on_return() {
     assert!(requests.contains(&"Pools".to_owned()), "{requests:?}");
 }
 
+/// L5 F1: a lost engine that a restore still holds keeps retrying and says the restore
+/// runs; one whose restore brought the 2.4 data back stops retrying and opens the
+/// engine-down screen, whose `r` goes back to 2.5, as the desktop's engine-down view.
+#[test]
+fn a_restore_that_ends_the_engine_says_how_it_stands_and_restored_stops_retrying() {
+    use crate::restore::{ENGINE_RESTORED, ENGINE_RESTORING};
+    use crate::tui::frame::Tone;
+    let mut shell = at(Place::Home, ctx());
+    drain(&mut shell);
+    shell.arrive(Arrival::Disconnected(ENGINE_RESTORING.into()));
+    assert_eq!(
+        shell.ctx.link,
+        Link::Reconnecting,
+        "the copy may still fail"
+    );
+    let said = shell.ctx.message().unwrap();
+    assert_eq!(
+        (said.tone, said.lead.as_str()),
+        (Tone::Error, crate::tui::restore_words(ENGINE_RESTORING))
+    );
+    shell.arrive(Arrival::Disconnected(ENGINE_RESTORED.into()));
+    assert_eq!(shell.ctx.link, Link::Down(ENGINE_RESTORED.into()));
+    assert_eq!(
+        shell.place(),
+        None,
+        "the engine-down screen shows the sentence"
+    );
+    assert!(shell.ctx.message().is_none(), "the restoring line is gone");
+    shell.ctx.starts_engine = true;
+    shell.key(Key::Char('r'));
+    assert_eq!(shell.ctx.link, Link::Connecting);
+    assert!(shell.ctx.take_start() && shell.ctx.take_reconnect());
+}
+
 /// RV-DS241-134 r2: a stored profile the engine read back with its name left blank by
 /// the hidden-character cleaning opens Welcome, not Home, so the owner names it again.
 #[test]

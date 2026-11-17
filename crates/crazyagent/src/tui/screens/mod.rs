@@ -84,7 +84,8 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 
 /// A Settings section, in tab order.
-/// Input: none. Output: one section; `SettingsSection::ALL` gives the order.
+/// Input: none. Output: one section; `SettingsSection::ALL` gives the order, and Restore 2.4
+/// follows it only for an engine with a 2.4 backup or a restore record (L5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsSection {
     Accounts,
@@ -94,6 +95,7 @@ pub enum SettingsSection {
     Process,
     Memory,
     Profile,
+    Restore,
 }
 
 impl SettingsSection {
@@ -119,18 +121,21 @@ impl SettingsSection {
             Self::Process => "Process",
             Self::Memory => "Memory",
             Self::Profile => "Profile",
+            Self::Restore => "Restore 2.4",
         }
     }
 
-    /// The neighbouring section, wrapping at both ends.
-    /// Input: direction. Output: the next or previous section.
-    pub fn step(self, forward: bool) -> Self {
-        let index = Self::ALL
+    /// The neighbouring section among the shown ones, wrapping at both ends.
+    /// Inputs: direction and the shown sections, this one among them. Output: the next or
+    /// previous section.
+    pub fn step(self, forward: bool, shown: &[Self]) -> Self {
+        let index = shown
             .iter()
             .position(|section| *section == self)
-            .expect("every section is listed");
-        let count = Self::ALL.len();
-        Self::ALL[if forward {
+            .expect("the section is shown");
+        let count = shown.len();
+        assert!(count <= Self::ALL.len() + 1);
+        shown[if forward {
             (index + 1) % count
         } else {
             (index + count - 1) % count

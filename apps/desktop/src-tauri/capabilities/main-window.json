@@ -160,6 +160,8 @@
     "allow-desktop-install-dependency",
     "allow-desktop-fix-tool-permissions",
     "allow-desktop-set-refused-tool",
+    "allow-desktop-restore-status",
+    "allow-desktop-restore-pinned",
     "allow-desktop-set-pack-entry",
     "allow-desktop-remove-pack-entry",
     "allow-desktop-project-memories",
