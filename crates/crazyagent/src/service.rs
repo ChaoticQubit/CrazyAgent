@@ -288,13 +288,22 @@ impl Service {
                 "the service executable and data folder must be absolute",
             ));
         }
+        if self.platform == Platform::MacOs
+            && let Some(home) = &self.home
+            && (!home.is_absolute() || control(&home.to_string_lossy()))
+        {
+            return Err(failure(
+                "the service HOME must be absolute without control characters",
+            ));
+        }
         Ok(())
     }
 
     /// The text of the service definition: a launchd property list, a systemd unit or a
-    /// Task Scheduler XML document. It runs `<executable> engine --home <root>`, appends
-    /// output to `<root>/logs/engine.log` (through `cmd.exe` on Windows, whose task has no
-    /// output redirection) and restarts after a crash.
+    /// Task Scheduler XML document. It runs `<executable> engine --home <root>` with the
+    /// service PATH (and on macOS the defining HOME), appends output to
+    /// `<root>/logs/engine.log` (through `cmd.exe` on Windows, whose task has no output
+    /// redirection) and restarts after a crash.
     pub fn definition_text(&self) -> Result<String, ServiceError> {
         self.checked()?;
         let executable = self.executable.to_string_lossy();
@@ -320,6 +329,7 @@ impl Service {
 \t<dict>\n\
 \t\t<key>PATH</key>\n\
 \t\t<string>{path}</string>\n\
+{home}\
 \t</dict>\n\
 \t<key>RunAtLoad</key>\n\
 \t<true/>\n\
@@ -341,6 +351,12 @@ impl Service {
                 executable = self.written_executable(),
                 root = xml(&root),
                 path = xml(&self.path.to_string_lossy()),
+                home = self.home.as_deref().map_or_else(String::new, |home| {
+                    format!(
+                        "\t\t<key>HOME</key>\n\t\t<string>{}</string>\n",
+                        xml(&home.to_string_lossy())
+                    )
+                }),
                 log = xml(&log),
             ),
             Platform::Linux => format!(
