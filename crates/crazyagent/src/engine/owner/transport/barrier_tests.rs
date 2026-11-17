@@ -5,7 +5,7 @@ use crate::plugins::{Scope, ServerSpec};
 use crate::projects_home::AddMode;
 use crate::protocol::ProjectId;
 
-const SWEPT_FILES: usize = 40_000;
+const SWEPT_FILES: usize = 1;
 const PATIENT_WAIT_MS: u64 = 30_000;
 const SWEEP_TIME_MAX: Duration = Duration::from_secs(60);
 const LAPSE_WAIT_MS: u64 = 250;

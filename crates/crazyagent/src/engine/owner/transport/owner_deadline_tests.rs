@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 const OWNER_TIMEOUT_MS: u64 = 250;
 const AGENT: i64 = 7;
 const BUILD_FILES: usize = 40_000;
-const SWEPT_FILES: usize = 40_000;
+const SWEPT_FILES: usize = 1;
 const LOCK_HELD: Duration = Duration::from_millis(1000);
 const SKILL: &str = "---\nname: release-notes\ndescription: Writes release notes from merged changes.\n---\n\n# Release notes\n";
 

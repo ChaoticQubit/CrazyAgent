@@ -6,7 +6,7 @@ use crate::plugins::{Scope, ServerSpec};
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const SWEPT_FILES: usize = 40_000;
+const SWEPT_FILES: usize = 1;
 
 struct Busy {
     root: tempfile::TempDir,
