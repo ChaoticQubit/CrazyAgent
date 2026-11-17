@@ -8,7 +8,9 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, Screen, SettingsSection};
 use crate::harnesses::finding::{self, Found};
-use crate::harnesses::update::{HarnessVersions, Latest, Method, UpdateMode, UpdateSettings};
+use crate::harnesses::update::{
+    HarnessVersions, Latest, Method, UNSUPPORTED_HERE, UpdateMode, UpdateSettings,
+};
 use crate::harnesses::{AccountKind, HarnessEntry, HarnessStatus, ToolControl};
 use crate::setup::{Dependency, DependencyState, SetupStatus};
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
@@ -948,12 +950,7 @@ impl Harnesses {
         };
         let (id, name) = (entry.id.clone(), entry.name.clone());
         let lead = cant(Job::Update, &name);
-        let blocked = match self.mode() {
-            UpdateMode::Off => Some("harness_update_off"),
-            UpdateMode::CheckOnly => Some("harness_update_check_only"),
-            UpdateMode::CheckAndUpdate => None,
-        };
-        if let Some(code) = blocked {
+        if let Some(code) = update_blocked(self.mode()) {
             ctx.say(Message::error(&lead, update_copy(code)));
             return;
         }
@@ -1477,7 +1474,7 @@ impl Screen for Harnesses {
         }
         if self.chosen().is_some() && mode != UpdateMode::Off {
             hints.push(hint("c", "Check for updates"));
-            if mode == UpdateMode::CheckAndUpdate {
+            if update_blocked(mode).is_none() {
                 hints.push(hint("u", "Update"));
             }
         }
@@ -1717,5 +1714,42 @@ pub(super) fn plain_update(code: &str) -> &'static str {
     }
 }
 
+/// Why Update is not offered with these settings here, as an update code: updates are off,
+/// set to check only, or this is Windows, where the engine runs no updater (DEC-194: Update
+/// is hidden there and the engine's own refusal stays the guard). Input: the update mode.
+/// Output: the code, or none when Update is offered.
+fn update_blocked(mode: UpdateMode) -> Option<&'static str> {
+    match mode {
+        UpdateMode::Off => Some("harness_update_off"),
+        UpdateMode::CheckOnly => Some("harness_update_check_only"),
+        UpdateMode::CheckAndUpdate if !cfg!(unix) => Some(UNSUPPORTED_HERE),
+        UpdateMode::CheckAndUpdate => None,
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// W1 (leader 01:25, DEC-194): Windows offers no Update in any update mode, so the key bar
+    /// shows no `u`, and a press says CrazyAgent can't update it on this computer.
+    #[test]
+    fn windows_offers_no_update_in_any_mode() {
+        assert_eq!(
+            update_blocked(UpdateMode::CheckAndUpdate),
+            Some(UNSUPPORTED_HERE)
+        );
+        assert_eq!(
+            update_blocked(UpdateMode::CheckOnly),
+            Some("harness_update_check_only")
+        );
+        assert_eq!(update_blocked(UpdateMode::Off), Some("harness_update_off"));
+        assert_eq!(
+            update_copy(UNSUPPORTED_HERE),
+            "CrazyAgent can't update it on this computer."
+        );
+    }
+}

@@ -1013,6 +1013,19 @@ async fn actual_legacy_database_migrates_additively_and_readonly_does_not_instal
         let kept = after
             .get(name)
             .map(|sql| sql.replacen(&renamed, &format!("CREATE TABLE {name}"), 1));
+        if name == "projects_delete_files" {
+            let words = |sql: &str| {
+                sql.split_whitespace()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                kept.as_deref().map(words),
+                Some(words(sql.as_str())),
+                "{name}: step 11 rebuilds it with the same columns and check"
+            );
+            continue;
+        }
         assert_eq!(kept.as_ref(), Some(sql), "{name}");
     }
     assert!(

@@ -73,6 +73,10 @@ impl NativeProfileUse {
         match *self {}
     }
 
+    pub(crate) fn engine_root(&self) -> &Path {
+        match *self {}
+    }
+
     pub(crate) fn revalidate_retained(&self) -> Result<(), EngineError> {
         match *self {}
     }

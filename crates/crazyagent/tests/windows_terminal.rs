@@ -85,7 +85,11 @@ fn a_conpty_terminal_runs_streams_takes_input_and_ends() {
     let chunks = forward(stream);
     host.input(&agent, b"echo %PANE_MARK%-%USERNAME%-done\r")
         .unwrap();
-    read_until(&chunks, "pane-env-%USERNAME%-done", Duration::from_secs(30));
+    let seen = read_until(&chunks, "pane-env-%USERNAME%-done", Duration::from_secs(30));
+    assert!(
+        !seen.contains("\x1b[6n"),
+        "the host answers ConPTY's cursor query itself, so no viewer sees it: {seen:?}"
+    );
     host.resize(&agent, 100, 30).unwrap();
     let again = host.attach(&agent).unwrap();
     assert_eq!((again.cols, again.rows), (100, 30));

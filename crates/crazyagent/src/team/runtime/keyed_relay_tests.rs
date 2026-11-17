@@ -302,12 +302,13 @@ fn a_keyed_live_master_is_stopped_at_quit_so_nothing_dials_its_ended_relay_port(
     assert!(!running, "the keyed master's pane runs on");
 }
 
-/// B6b through the runtime: a native Claude Code lead on a keyed endpoint account starts its
-/// own and its teammates' servers under keepers that hold the engine's lifeline, so once the
-/// engine's end closes, as at its death, both servers end with their keepers.
+/// A native Claude Code lead on a keyed endpoint account is refused at prepare, with the
+/// owner sentence and `native_team_needs_hooks`, since such an account starts Claude Code
+/// bare and no hook fires (DEC-104 BARE-1). The refusal names no key, and no worktree, own
+/// server, server keeper or teammates' server name is made for the lead.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_keyed_native_lead_s_servers_end_once_the_engine_side_of_their_lifelines_closes() {
+fn a_native_lead_on_a_keyed_endpoint_is_refused_before_any_server_starts() {
     use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
     let fixture = Fixture::new(1);
     let project = ProjectId::new(PROJECT).unwrap();
@@ -337,53 +338,40 @@ fn a_keyed_native_lead_s_servers_end_once_the_engine_side_of_their_lifelines_clo
         },
     };
     let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
-    let (_, plan, _) = runtime
-        .prepare(
-            &fixture.setup,
-            id,
-            AgentRole::Sub,
-            "claude-code",
-            true,
-            &account,
-            false,
-            crate::agent_git::Layout::Linked,
-            false,
-        )
-        .unwrap();
-    assert!(plan.native, "the keyed lead starts with native teammates");
+    let Err(refused) = runtime.prepare(
+        &fixture.setup,
+        id,
+        AgentRole::Sub,
+        "claude-code",
+        true,
+        &account,
+        false,
+        crate::agent_git::Layout::Linked,
+        false,
+    ) else {
+        panic!("a native lead on a keyed endpoint account started");
+    };
+    assert!(refused.contains(NATIVE_NEEDS_HOOKS), "{refused}");
+    assert!(
+        refused.contains(crate::protocol::plain_code("native_team_needs_hooks")),
+        "{refused}"
+    );
+    assert!(!refused.contains(PROVIDER_KEY), "{refused}");
+    assert!(hookless_saved(&fixture, id));
+    let root = fixture.setup.project_folder().canonicalize().unwrap();
+    let worktree = crate::projects_home::state_folder(&root)
+        .join("worktrees")
+        .join(format!("agent-{id}"));
+    assert!(!worktree.exists(), "no worktree is made for a refused lead");
     let lead = AgentId::team(id).unwrap();
+    assert_eq!(host.server_keepers(&lead), Vec::new());
     let socket = crate::terminal::harness_socket(&fixture.base, &lead).unwrap();
-    let mates = crate::terminal::teammates_socket(&fixture.base, &lead).unwrap();
-    let _down = LeadServersDown {
-        host: host.clone(),
-        lead: lead.clone(),
-        tmux: fixture.tmux.clone(),
-        scratch: socket.parent().unwrap().to_path_buf(),
-    };
-    let command = InteractiveCommand {
-        argv: vec![
-            crate::sandbox::SANDBOX_EXEC.into(),
-            "-f".into(),
-            plan.sandbox_profile.to_str().unwrap().into(),
-            "/bin/sh".into(),
-        ],
-        cwd: plan.working_dir.clone(),
-        env: vec![("PS1".into(), "lead$ ".into())],
-        transcript: Transcript::Unavailable,
-    };
-    let (pane_host, _) = plan.pane.clone().unwrap();
-    pane_host.spawn(&lead, &command).unwrap();
-    let keepers = host.server_keepers(&lead);
-    assert_eq!(keepers.len(), 2, "{keepers:?}");
-    let listens = |at: &Path| crate::spawn_gate::connect_unix_std(at).is_ok();
-    assert!(listens(&socket) && listens(&mates));
-    host.sever_lifelines(&lead);
-    let until = Instant::now() + Duration::from_secs(20);
-    while listens(&socket) || listens(&mates) {
-        assert!(
-            Instant::now() < until,
-            "a keyed lead's servers outlived the engine side of their lifelines"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    assert!(
+        crate::spawn_gate::connect_unix_std(&socket).is_err(),
+        "a refused lead's own server runs"
+    );
+    assert!(
+        crate::terminal::teammates_socket(&fixture.base, &lead).is_err(),
+        "a refused lead's teammates' server is named"
+    );
 }

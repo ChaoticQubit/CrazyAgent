@@ -58,7 +58,7 @@ test("master-switch.wdio.conf gives the engine, the app and the spec's WebKit st
   assert.match(conf, /export const home = chooseHome\(join\(root, "home"\)\)\.home;/);
   assert.match(conf, /HOME: home, CFFIXED_USER_HOME: home/);
   const spec = source("./master-switch.e2e.mjs");
-  assert.match(spec, /import \{ TURN_S, home \} from "\.\/master-switch\.wdio\.conf\.mjs";/);
+  assert.match(spec, /^import \{[^}]*\bhome\b[^}]*\} from "\.\/master-switch\.wdio\.conf\.mjs";$/m, "the spec takes home from the conf");
   assert.match(spec, /join\(home, "Library", "WebKit"/);
   assert.doesNotMatch(spec, /join\(root, "home"/);
 });

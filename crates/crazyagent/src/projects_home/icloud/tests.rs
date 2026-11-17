@@ -118,8 +118,14 @@ fn brctl_runs_by_absolute_path_with_each_placeholder_as_its_own_argument() {
     );
 }
 
-/// Stands in for iCloud: `count` placeholders under /icloud, each landing the moment its ask
-/// ends, with every ask taking `ask_time`.
+/// The fake iCloud folder: an absolute path on this system, a drive path on Windows.
+#[cfg(unix)]
+const ICLOUD: &str = "/icloud";
+#[cfg(not(unix))]
+const ICLOUD: &str = r"C:\icloud";
+
+/// Stands in for iCloud: `count` placeholders under [`ICLOUD`], each landing the moment its
+/// ask ends, with every ask taking `ask_time`.
 struct FakeIcloud {
     paths: Vec<PathBuf>,
     landed: std::sync::atomic::AtomicUsize,
@@ -132,7 +138,7 @@ impl FakeIcloud {
         assert!(count > 0);
         Self {
             paths: (0..count)
-                .map(|n| PathBuf::from(format!("/icloud/f{n:05}")))
+                .map(|n| Path::new(ICLOUD).join(format!("f{n:05}")))
                 .collect(),
             landed: Default::default(),
             asks: Default::default(),
@@ -175,15 +181,7 @@ fn files_that_land_while_slow_asks_still_go_are_counted_before_the_last_ask_ends
     };
     let list = |_: &Path| icloud.list();
     let poll = Duration::from_millis(10);
-    let files = run(
-        Path::new("/icloud"),
-        &download,
-        &ask,
-        &list,
-        COPY_BOUNDS,
-        poll,
-    )
-    .unwrap();
+    let files = run(Path::new(ICLOUD), &download, &ask, &list, COPY_BOUNDS, poll).unwrap();
     let total = (BATCH_PATHS_MAX * batches) as u64;
     assert_eq!(files, total);
     assert_eq!(download.progress(), Progress { total, done: total });
@@ -210,7 +208,7 @@ fn a_failed_ask_ends_the_download_with_its_code_and_asks_nothing_more() {
     let list = |_: &Path| icloud.list();
     let started = Instant::now();
     let failed = run(
-        Path::new("/icloud"),
+        Path::new(ICLOUD),
         &download,
         &ask,
         &list,
@@ -240,7 +238,7 @@ fn a_cancel_during_slow_asks_stops_the_ask_and_the_download_within_one_check() {
     let list = |_: &Path| icloud.list();
     let started = Instant::now();
     let cancelled = run(
-        Path::new("/icloud"),
+        Path::new(ICLOUD),
         &download,
         &ask,
         &list,
