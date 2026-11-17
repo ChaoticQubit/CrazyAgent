@@ -10,7 +10,6 @@ use std::process::{Command, Stdio};
 const OWNER_TIMEOUT_MS: u64 = 250;
 const AGENT: i64 = 7;
 const BUILD_FILES: usize = 40_000;
-const SWEPT_FILES: usize = 1;
 const LOCK_HELD: Duration = Duration::from_millis(1000);
 const SKILL: &str = "---\nname: release-notes\ndescription: Writes release notes from merged changes.\n---\n\n# Release notes\n";
 
@@ -95,32 +94,6 @@ impl Owner {
             client,
             engine_root,
         }
-    }
-
-    /// Queues a real storage sweep of `SWEPT_FILES` files ahead of every later storage
-    /// job, in a removed skill folder of the private plugin store made as the engine makes
-    /// it. Output: the swept folder and the sweep's answer.
-    fn occupy_storage(&self) -> (PathBuf, oneshot::Receiver<Result<(), EngineError>>) {
-        let swept = crate::storage::plugins::store_folder(&self.engine_root, &["skills", "global"])
-            .unwrap()
-            .join(".removed-busy-storage");
-        std::fs::create_dir(&swept).unwrap();
-        for index in 0..SWEPT_FILES {
-            std::fs::write(swept.join(index.to_string()), b"x").unwrap();
-        }
-        let (send, sweep) = oneshot::channel();
-        self.service
-            .owner_runtime()
-            .unwrap()
-            .engine
-            .storage
-            .sender
-            .try_send(crate::storage::Job::Setup(
-                crate::storage::setup::Command::Sweep,
-                send,
-            ))
-            .unwrap();
-        (swept, sweep)
     }
 
     async fn stop(mut self) {
@@ -345,22 +318,28 @@ async fn a_skill_import_slower_than_the_owner_deadline_answers_with_the_skill() 
     let source = owner.root.path().join("work/release-notes");
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("SKILL.md"), SKILL).unwrap();
-    let (swept, sweep) = owner.occupy_storage();
+    let release = super::usage_tests::hold_storage(
+        &owner.service.owner_runtime().unwrap().engine.storage.sender,
+    );
 
     let started = std::time::Instant::now();
-    let imported = owner
-        .client
-        .import_skill(source.to_str().unwrap().to_owned(), None)
+    let mut importing = Box::pin(
+        owner
+            .client
+            .import_skill(source.to_str().unwrap().to_owned(), None),
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(2 * OWNER_TIMEOUT_MS), &mut importing)
+            .await
+            .is_err(),
+        "the import waits behind the held storage past the owner deadline"
+    );
+    release.send(()).unwrap();
+    let imported = importing
         .await
         .expect("an import past the owner deadline must still answer");
     outlasted_the_owner_deadline(started);
     assert_eq!(imported.skill.name, "release-notes");
-    tokio::time::timeout(Duration::from_secs(60), sweep)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(!swept.exists());
     owner.stop().await;
 }
 
