@@ -9,7 +9,21 @@ pub(super) const OUTPUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 pub(super) const LISTING_BYTES_MAX: usize = 64 * 1024;
 const STEP_TIME: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(2);
-const VERSION_MIN: (u32, u32) = (2, 40);
+/// The oldest git that every engine git call runs on, except the two that
+/// [`MERGE_VERSION_MIN`] guards: 2.39, the Apple Git-154 of Xcode 16 and its Command Line
+/// Tools (W-GIT-FLOOR).
+const VERSION_MIN: (u32, u32) = (2, 39);
+/// The oldest git with `merge-tree --merge-base` and `check-attr --source`, both new in
+/// git 2.40.0, which a squash merge and the attribute checks around it run (W-GIT-FLOOR).
+const MERGE_VERSION_MIN: (u32, u32) = (2, 40);
+
+#[cfg(test)]
+thread_local! {
+    /// What `git version` prints for engine git on this thread in a row, in place of the real
+    /// git's answer, so a row can shape the git as an older one (W-GIT-FLOOR).
+    pub(super) static VERSION_PRINTED: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
 const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
 /// The longest the owner's ignore file is looked up for in a repository (RV-DS241-145).
 const EXCLUDES_LOOKUP_TIME: Duration = Duration::from_secs(10);
@@ -442,7 +456,7 @@ impl Repo {
             #[cfg(target_os = "linux")]
             copies: false,
         };
-        repo.check_version()?;
+        repo.require_version(VERSION_MIN)?;
         let listing = repo.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
         let keys = crate::research::runner::listed_filter_keys(&listing)
             .ok_or_else(|| failure("changes_git_failed"))?;
@@ -769,19 +783,47 @@ impl Repo {
         self.confined(Writes::Index)
     }
 
-    fn check_version(&self) -> Result<(), EngineError> {
+    /// Refuses a git older than 2.40, which has neither `merge-tree --merge-base` nor
+    /// `check-attr --source`, before a squash merge or an attribute check would run one, so
+    /// listing, diffs and the rest still work on the 2.39 of Xcode 16 and its Command Line
+    /// Tools (W-GIT-FLOOR). Output: Ok, else `changes_git_old`, or `changes_git_unsupported`
+    /// when `git version` names no version.
+    pub(super) fn check_merge_version(&self) -> Result<(), EngineError> {
+        self.require_version(MERGE_VERSION_MIN)
+    }
+
+    /// Refuses a git older than `needed`, logging the version found and the one needed.
+    /// Input: the oldest major and minor version. Output: Ok, else `changes_git_old`, or
+    /// `changes_git_unsupported` when `git version` names no version.
+    fn require_version(&self, needed: (u32, u32)) -> Result<(), EngineError> {
         let printed = self.capture(&["version"], 256)?;
+        #[cfg(test)]
+        let printed = VERSION_PRINTED
+            .with_borrow(Clone::clone)
+            .map_or(printed, String::into_bytes);
         let text = String::from_utf8_lossy(&printed);
-        let mut numbers = text
+        let found: Vec<u32> = text
             .trim()
             .strip_prefix("git version ")
             .unwrap_or_default()
             .split(|c: char| !c.is_ascii_digit())
-            .map(|part| part.parse::<u32>().ok());
-        match (numbers.next().flatten(), numbers.next().flatten()) {
-            (Some(major), Some(minor)) if (major, minor) >= VERSION_MIN => Ok(()),
-            _ => Err(failure("changes_git_unsupported")),
+            .map_while(|part| part.parse::<u32>().ok())
+            .take(3)
+            .collect();
+        let (Some(&major), Some(&minor)) = (found.first(), found.get(1)) else {
+            return Err(failure("changes_git_unsupported"));
+        };
+        if (major, minor) >= needed {
+            return Ok(());
         }
+        let shown: Vec<String> = found.iter().map(u32::to_string).collect();
+        eprintln!(
+            "changes_git_old found={} needed={}.{}",
+            shown.join("."),
+            needed.0,
+            needed.1
+        );
+        Err(failure("changes_git_old"))
     }
 
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {

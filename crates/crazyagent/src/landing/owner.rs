@@ -110,7 +110,8 @@ pub(super) fn merge_paths(
 /// Says whether any path has a filter attribute, or a merge attribute naming a driver,
 /// in any of the trees, reading attributes from each tree and the repository's own
 /// info/attributes. Inputs: the repository, the paths and the trees. Output: true when
-/// one does, so the change cannot land without running a configured command.
+/// one does, so the change cannot land without running a configured command, or
+/// `changes_git_old` for a git without `check-attr --source` ([`Repo::check_merge_version`]).
 pub(super) fn uses_configured_commands(
     repo: &Repo,
     paths: &[String],
@@ -119,6 +120,7 @@ pub(super) fn uses_configured_commands(
     if paths.is_empty() {
         return Ok(false);
     }
+    repo.check_merge_version()?;
     let mut input = Vec::new();
     for path in paths {
         input.extend_from_slice(path.as_bytes());
@@ -177,13 +179,15 @@ pub(super) fn merge(
 
 /// As [`merge`], with the conflicting paths exactly as git printed them, for comparing
 /// with another git listing. Inputs: the repository, the merge base and both sides.
-/// Output: the merged tree and the conflicting paths.
+/// Output: the merged tree and the conflicting paths, or `changes_git_old` for a git
+/// without `merge-tree --merge-base` ([`Repo::check_merge_version`]).
 pub(super) fn merge_raw(
     repo: &Repo,
     base: &str,
     ours: &str,
     theirs: &str,
 ) -> Result<(String, Vec<Vec<u8>>), EngineError> {
+    repo.check_merge_version()?;
     let output = repo.exec(
         &[
             "merge-tree",
