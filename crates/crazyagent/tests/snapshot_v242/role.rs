@@ -1,21 +1,38 @@
 use super::Scenario;
 use super::e2e_support::Owner;
-use super::workflow::{attached, engine, recorded, reply, seeded};
-use crazyagent::coord::settings::{CoordSettings, RoleSkills};
+use super::workflow::{PROJECT, attached, engine, private_folder, recorded, reply, seeded};
+use crazyagent::agent_git::Layout;
+use crazyagent::coord::settings::{CoordSettings, RoleSkills, SkillRole};
 use crazyagent::coord::tool_switches::BUILTIN_TOOLS;
-use crazyagent::launch_context::team_tools_section;
+use crazyagent::launch_context::{self, team_tools_section};
+use crazyagent::plugins::Scope;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::TeamAction;
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The owner's own instructions the role scenarios try to save for one team agent.
 const AGENT_TEXT: &str = "Answer in short paragraphs.\n";
 
+/// The skills the launch scenarios add app-wide, each from its own SKILL.md folder.
+const SKILLS: [&str; 2] = ["release-notes", "code-review"];
+
+/// The harnesses a team agent launch installs for.
+const HARNESSES: [&str; 2] = ["claude-code", "codex"];
+
+/// The largest file whose text a launch capture keeps; a larger or non-UTF-8 file is kept
+/// by its path alone.
+const TEXT_BYTES_MAX: u64 = 64 * 1024;
+
+/// The deepest folder a launch capture walks below an agent home.
+const DEPTH_MAX: usize = 8;
+
 /// Lists the agent role scenarios: the skills each team role gets, what a team agent
-/// received before any launch, and the team tools section of a master's or sub-agent's
-/// instructions. Output: the scenarios in the order the snapshot row runs them.
+/// received before any launch, the team tools section of a master's or sub-agent's
+/// instructions, and what each team role's launch receives.
+/// Output: the scenarios in the order the snapshot row runs them.
 pub(super) fn scenarios() -> Vec<Scenario> {
     let role = |name: &'static str, capture: fn(&Path) -> Result<Value, String>| Scenario {
         kind: "role",
@@ -31,6 +48,8 @@ pub(super) fn scenarios() -> Vec<Scenario> {
         role("tools-section-plain", tools_section_plain),
         role("tools-section-own-clone-catch-up", tools_section_own_clone),
         role("tools-section-tools-off", tools_section_tools_off),
+        role("launch-all-approved", launch_all_approved),
+        role("launch-chosen-per-role", launch_chosen_per_role),
     ]
 }
 
@@ -207,4 +226,254 @@ fn tools_section_tools_off(_scratch: &Path) -> Result<Value, String> {
         .map(|tool| tool.0.to_owned())
         .collect();
     Ok(json!({ "off": off, "section": team_tools_section(&off, false, true) }))
+}
+
+/// Every team role's launch with the two app-wide skills and no role skills choice, so
+/// each role gets All approved skills. Input: the scratch folder. Output: see [`launches`].
+fn launch_all_approved(scratch: &Path) -> Result<Value, String> {
+    launches(scratch, None)
+}
+
+/// Every team role's launch after the owner chose All approved skills for the master, one
+/// approved skill and one name that is not approved for a lead, and no skills for a worker.
+/// Input: the scratch folder. Output: see [`launches`].
+fn launch_chosen_per_role(scratch: &Path) -> Result<Value, String> {
+    let chosen = RoleSkills {
+        master: None,
+        lead: Some(vec!["release-notes".into(), "tide-notes".into()]),
+        worker: Some(vec![]),
+    };
+    launches(scratch, Some(chosen))
+}
+
+/// Seeds the project with [`SKILLS`] and, when given, a role skills choice, all through
+/// owner requests, stops the engine, then reads its engine.db read-only through the public
+/// launch context calls the team runtime and the master conversation make.
+/// Inputs: the scratch folder and the choice. Output: the choice's save and what each
+/// launch receives (see [`read_launches`]).
+fn launches(scratch: &Path, chosen: Option<RoleSkills>) -> Result<Value, String> {
+    let mut engine = engine(scratch)?;
+    let folders = skill_folders(scratch)?;
+    let at = scratch.to_path_buf();
+    let saved = attached(&engine, |mut owner| async move {
+        let captured: Result<Value, String> = async {
+            let project = seeded(&mut owner, &at).await?;
+            for folder in folders {
+                let added = owner.controller.add_skill(Scope::Global, folder).await;
+                added.map_err(|error| error.0)?;
+            }
+            match chosen {
+                Some(chosen) => save_role_skills(&mut owner, &project, chosen).await,
+                None => Ok(Value::Null),
+            }
+        }
+        .await;
+        (owner, captured)
+    })?;
+    engine.stop();
+    let db = Connection::open_with_flags(
+        engine.path().join("engine.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|error| error.to_string())?;
+    let project = ProjectId::new(PROJECT).map_err(|error| error.to_string())?;
+    let mut captured = read_launches(scratch, &db, &project)?;
+    captured["role_skills_saved"] = saved;
+    Ok(captured)
+}
+
+/// Reads what each launch receives from the stopped engine's database: the instructions for
+/// a linked worktree and an own clone, whether every role gets the same instructions, the
+/// team index a master with tools off adds, the master conversation's startup instruction,
+/// and each role's skills and launches. Inputs: the scratch folder, the read-only
+/// connection and the project. Output: the capture.
+fn read_launches(scratch: &Path, db: &Connection, project: &ProjectId) -> Result<Value, String> {
+    let master = launch_context::for_team_role(db, project, Layout::Linked, SkillRole::Master)
+        .map_err(|error| error.0)?;
+    let linked = master.instructions().to_owned();
+    let indexed = master
+        .with_team_index(db, project)
+        .map_err(|error| error.0)?;
+    let index = indexed
+        .instructions()
+        .strip_prefix(linked.as_str())
+        .ok_or("the team index is not added after the instructions")?
+        .to_owned();
+    let clone = launch_context::for_team_role(db, project, Layout::Clone, SkillRole::Worker)
+        .map_err(|error| error.0)?;
+    let mut same = true;
+    let mut roles = Vec::new();
+    for role in SkillRole::ALL {
+        let context = launch_context::for_team_role(db, project, Layout::Linked, role)
+            .map_err(|error| error.0)?;
+        same &= context.instructions() == linked;
+        roles.push(role_launch(scratch, &context, role)?);
+    }
+    Ok(json!({
+        "instructions": {
+            "linked": lines(&linked),
+            "clone": lines(clone.instructions()),
+            "same_for_every_role": same,
+        },
+        "master_team_index": lines(&index),
+        "master_conversation": master_conversation(db, project)?,
+        "roles": roles,
+    }))
+}
+
+/// The startup instruction of the engine's own project master conversation with tools off
+/// and with tools on and no team tool switched off, without model access settings.
+/// Inputs: the read-only connection and the project. Output: both texts as lines.
+fn master_conversation(db: &Connection, project: &ProjectId) -> Result<Value, String> {
+    let tx = db
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let none_off: &[String] = &[];
+    let tools_off =
+        launch_context::for_master(&tx, project, None, None).map_err(|error| error.0)?;
+    let tools_on =
+        launch_context::for_master(&tx, project, Some(none_off), None).map_err(|error| error.0)?;
+    drop(tx);
+    Ok(json!({ "tools_off": lines(&tools_off), "tools_on": lines(&tools_on) }))
+}
+
+/// Installs one team role's launch context into a fresh private home for each harness and
+/// tools switch. With tools off it keeps the harness arguments, the denied tools and every
+/// file written; with tools on only the skill folders written, since the rest follows the
+/// default pack's context-mode state on this Mac (NOTE-20:43 Q3). Inputs: the scratch
+/// folder, the context and the role. Output: the role, its skills and its launches.
+fn role_launch(
+    scratch: &Path,
+    context: &launch_context::AgentContext,
+    role: SkillRole,
+) -> Result<Value, String> {
+    let skills: Vec<&str> = context
+        .plugins()
+        .skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    let mut launches = Vec::new();
+    for harness in HARNESSES {
+        for tools in [false, true] {
+            let home = launch_home(scratch, &format!("{role:?}-{harness}-{tools}"))?;
+            let installed = context
+                .install(harness, &home, tools)
+                .map_err(|error| error.0)?;
+            let launch = if tools {
+                let skills_written = skills_written(&home, 0)?;
+                json!({ "harness": harness, "tools": true, "skills_written": skills_written })
+            } else {
+                let arguments: Vec<String> = installed
+                    .arguments()
+                    .iter()
+                    .map(|argument| argument.to_string_lossy().into_owned())
+                    .collect();
+                json!({
+                    "harness": harness,
+                    "tools": false,
+                    "arguments": arguments,
+                    "denied_tools": installed.denied_tools(),
+                    "files": written(&home, &home, 0)?,
+                })
+            };
+            drop(installed);
+            launches.push(launch);
+        }
+    }
+    Ok(json!({ "role": role, "skills": skills, "launches": launches }))
+}
+
+/// Writes one SKILL.md folder per name in [`SKILLS`] below the scratch folder, as the owner
+/// picks them in Add skill. Input: the scratch folder. Output: the folders as text.
+fn skill_folders(scratch: &Path) -> Result<Vec<String>, String> {
+    let picked = private_folder(scratch, "picked")?;
+    let mut folders = Vec::with_capacity(SKILLS.len());
+    for name in SKILLS {
+        let folder = private_folder(&picked, name)?;
+        let text =
+            format!("---\nname: {name}\ndescription: Teaches {name}.\n---\n\nSteps for {name}.\n");
+        std::fs::write(folder.join("SKILL.md"), text).map_err(|error| error.to_string())?;
+        let folder = folder.to_str().ok_or("a skill folder is not UTF-8")?;
+        folders.push(folder.to_owned());
+    }
+    Ok(folders)
+}
+
+/// Makes a fresh 0700 agent home below the scratch folder, by its real path, as a launch
+/// requires. Inputs: the scratch folder and the home's name. Output: the home.
+fn launch_home(scratch: &Path, name: &str) -> Result<PathBuf, String> {
+    let homes = scratch.join("homes");
+    if !homes.is_dir() {
+        private_folder(scratch, "homes")?;
+    }
+    let home = private_folder(&homes, name)?;
+    home.canonicalize().map_err(|error| error.to_string())
+}
+
+/// Lists a folder's entries by path, sorted. Input: the folder. Output: the paths.
+fn sorted_entries(folder: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = std::fs::read_dir(folder).map_err(|error| error.to_string())?;
+    let mut paths = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    paths.sort();
+    Ok(paths)
+}
+
+/// Lists every file a launch wrote below a folder, sorted, with its text when it is UTF-8
+/// and at most [`TEXT_BYTES_MAX`] bytes, else a null text; a link is kept without its
+/// target, which may name this Mac's tools. Inputs: the home, the folder and its depth
+/// below the home. Output: one entry per file, its path relative to the home.
+fn written(home: &Path, folder: &Path, depth: usize) -> Result<Vec<Value>, String> {
+    if depth > DEPTH_MAX {
+        return Err(format!("a launch wrote folders deeper than {DEPTH_MAX}"));
+    }
+    let mut files = Vec::new();
+    for path in sorted_entries(folder)? {
+        let relative = path.strip_prefix(home).map_err(|error| error.to_string())?;
+        let relative = relative.to_string_lossy().into_owned();
+        let kind = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if kind.file_type().is_symlink() {
+            files.push(json!({ "path": relative, "link": true }));
+        } else if kind.is_dir() {
+            files.extend(written(home, &path, depth + 1)?);
+        } else {
+            let shown = (kind.len() <= TEXT_BYTES_MAX)
+                .then(|| std::fs::read_to_string(&path).ok())
+                .flatten();
+            let text = shown.as_deref().map(lines);
+            files.push(json!({ "path": relative, "text": text }));
+        }
+    }
+    Ok(files)
+}
+
+/// Names the skill folders a launch wrote: each folder or link below the home holding a
+/// SKILL.md, sorted, once per place it was written. Inputs: the folder and its depth below
+/// the home. Output: the folder names.
+fn skills_written(folder: &Path, depth: usize) -> Result<Vec<String>, String> {
+    if depth > DEPTH_MAX {
+        return Err(format!("a launch wrote folders deeper than {DEPTH_MAX}"));
+    }
+    let mut names = Vec::new();
+    for path in sorted_entries(folder)? {
+        let kind = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        let place = kind.is_dir() || kind.file_type().is_symlink();
+        if place && path.join("SKILL.md").is_file() {
+            let name = path.file_name().ok_or("a skill folder has no name")?;
+            names.push(name.to_string_lossy().into_owned());
+        }
+        if kind.is_dir() {
+            names.extend(skills_written(&path, depth + 1)?);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Splits a text into its lines for a readable golden. Input: the text. Output: the lines.
+fn lines(text: &str) -> Vec<&str> {
+    text.lines().collect()
 }
