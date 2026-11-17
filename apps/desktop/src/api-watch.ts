@@ -25,8 +25,8 @@ export interface WatchChange {
 
 /** Follows the engine's watch for this page (v2.5 S3b): named topics come at once and
  * "unknown" at most once every 5 s, also while the app cannot watch, as the old poll did.
- * A page load replaces the last page's handler. Input: the handler for each change.
- * Output: ok once the app follows the engine for this page. */
+ * Await it before the page's first load: a change made before it resolves may reach only
+ * the last page. Input: the handler for each change. Output: ok once this page gets them. */
 export function watchChanges(onChange: (change: WatchChange) => void): Promise<Result<void>> {
   const changes = new Channel<WatchChange>();
   changes.onmessage = onChange;

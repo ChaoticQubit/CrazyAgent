@@ -22,7 +22,7 @@ const _: () = assert!(0 < LISTINGS_MAX && LISTINGS_MAX < BRIDGE_READERS_MAX);
 const _: () =
     assert!(2 * (2 * BRIDGE_READERS_MAX as usize) <= crazyagent::protocol::OWNER_CLIENTS_MAX);
 const _: () = assert!(
-    2 * (2 * BRIDGE_READERS_MAX as usize) + WATCHES_HELD
+    2 * BRIDGE_READERS_MAX as usize + WATCHES_HELD
         <= crazyagent::protocol::OWNER_CLIENTS_MAX / 2 + 1
 );
 
@@ -32,8 +32,9 @@ const _: () = assert!(
 /// Each takes one engine connection, so with the connections they are still closing
 /// the `BRIDGE_READERS_MAX` of them take at most half of the engine's
 /// `OWNER_CLIENTS_MAX` and leave the rest to the terminal app and agents' team tools. The
-/// window's engine watch holds `WATCHES_HELD` more: 9 of 16 until v2.5 S3c drops the polls
-/// that take reader places today (250-S3B Q1).
+/// window's engine watch holds `WATCHES_HELD` more, 9 of 16 (a watch's socket still closing
+/// can make it 10 for a moment), until v2.5 S3c drops the polls that take reader places
+/// today (250-S3B Q1).
 /// Calls wait their turn first come first served, so a read asked after a change sees
 /// it, for at most `BRIDGE_WAIT`, with at most `BRIDGE_WAITERS_MAX` calls waiting at
 /// once. Past either bound the call is refused with `busy` before it does anything.
