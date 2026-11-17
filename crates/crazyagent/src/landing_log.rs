@@ -132,6 +132,22 @@ pub struct Approved {
     pub baseline: String,
 }
 
+/// A Not now to a project's publish prompt: the project id and the time in ms it asks again,
+/// from 0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snoozed {
+    pub project: String,
+    pub until_ms: i64,
+}
+
+/// A project an event is about, its id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Project {
+    pub project: String,
+}
+
 /// A change set an event is about, its id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -159,6 +175,8 @@ pub enum Change {
     WorktreeOwnerEditsForgotten(Worktree),
     ChangeSetNumbered(Numbered),
     BaselineApproved(Approved),
+    PublishPromptSnoozed(Snoozed),
+    PublishPromptNever(Project),
 }
 
 impl Change {
@@ -195,19 +213,35 @@ impl Change {
                 crate::protocol::ProjectId::new(approved.project.as_str()).is_ok()
                     && crate::protocol::BaselineId::new(approved.baseline.as_str()).is_ok()
             }
+            Self::PublishPromptSnoozed(snoozed) => {
+                crate::protocol::ProjectId::new(snoozed.project.as_str()).is_ok()
+                    && snoozed.until_ms >= 0
+            }
+            Self::PublishPromptNever(never) => {
+                crate::protocol::ProjectId::new(never.project.as_str()).is_ok()
+            }
         }
     }
 
-    /// Whether the change writes `landing_owner_edits`. Input: none. Output: the answer.
-    fn owner_edit(&self) -> bool {
-        matches!(
-            self,
+    /// The schema of a table the change writes that its module makes on first use, which
+    /// apply makes too, so a replay into a store without it holds. Input: none. Output: the
+    /// schema, or None for a table the store's open makes.
+    fn schema(&self) -> Option<&'static str> {
+        match self {
             Self::OwnerEditKept(_)
-                | Self::OwnerEditsSettled(_)
-                | Self::OwnerEditsDropped(_)
-                | Self::OwnerEditsForgotten(_)
-                | Self::WorktreeOwnerEditsForgotten(_)
-        )
+            | Self::OwnerEditsSettled(_)
+            | Self::OwnerEditsDropped(_)
+            | Self::OwnerEditsForgotten(_)
+            | Self::WorktreeOwnerEditsForgotten(_) => Some(crate::landing::owner_edit::SCHEMA),
+            Self::PublishPromptSnoozed(_) | Self::PublishPromptNever(_) => {
+                Some(crate::github::PROMPT_SCHEMA)
+            }
+            Self::AgentBranchSet(_)
+            | Self::AgentBranchForgotten(_)
+            | Self::BaseSet(_)
+            | Self::ChangeSetNumbered(_)
+            | Self::BaselineApproved(_) => None,
+        }
     }
 
     /// The most rows the change may touch: one for a single-row write, the waiting bound
@@ -221,7 +255,9 @@ impl Change {
             | Self::BaseSet(_)
             | Self::OwnerEditKept(_)
             | Self::ChangeSetNumbered(_)
-            | Self::BaselineApproved(_) => Some(1),
+            | Self::BaselineApproved(_)
+            | Self::PublishPromptSnoozed(_)
+            | Self::PublishPromptNever(_) => Some(1),
             Self::OwnerEditsSettled(_) | Self::OwnerEditsDropped(_) => Some(PATHS_PER_WORKTREE_MAX),
             Self::OwnerEditsForgotten(_) | Self::WorktreeOwnerEditsForgotten(_) => None,
         }
@@ -240,6 +276,8 @@ impl Change {
             Self::WorktreeOwnerEditsForgotten(_) => WORKTREE_OWNER_EDITS_FORGOTTEN,
             Self::ChangeSetNumbered(_) => CHANGE_SET_NUMBERED,
             Self::BaselineApproved(_) => BASELINE_APPROVED,
+            Self::PublishPromptSnoozed(_) => PUBLISH_PROMPT_SNOOZED,
+            Self::PublishPromptNever(_) => PUBLISH_PROMPT_NEVER,
         };
         assert!(KINDS.contains(&kind), "the landing kind {kind} is in KINDS");
         kind
@@ -263,6 +301,8 @@ impl Change {
             Self::OwnerEditsForgotten(gone) => serde_json::to_vec(gone),
             Self::ChangeSetNumbered(set) => serde_json::to_vec(set),
             Self::BaselineApproved(approved) => serde_json::to_vec(approved),
+            Self::PublishPromptSnoozed(snoozed) => serde_json::to_vec(snoozed),
+            Self::PublishPromptNever(never) => serde_json::to_vec(never),
         };
         body.map_err(|_| failure("landing_log_body"))
     }
@@ -289,6 +329,8 @@ impl Change {
             }
             CHANGE_SET_NUMBERED => serde_json::from_slice(body).map(Self::ChangeSetNumbered),
             BASELINE_APPROVED => serde_json::from_slice(body).map(Self::BaselineApproved),
+            PUBLISH_PROMPT_SNOOZED => serde_json::from_slice(body).map(Self::PublishPromptSnoozed),
+            PUBLISH_PROMPT_NEVER => serde_json::from_slice(body).map(Self::PublishPromptNever),
             _ => return Err(refused()),
         };
         let change = change.map_err(|_| refused())?;
@@ -404,9 +446,8 @@ pub(crate) fn write(db: &Connection, change: &Change) -> Result<(), EngineError>
 /// table's refusal.
 pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
     let unavailable = |_| failure("changes_unavailable");
-    if change.owner_edit() {
-        db.execute_batch(crate::landing::owner_edit::SCHEMA)
-            .map_err(unavailable)?;
+    if let Some(schema) = change.schema() {
+        db.execute_batch(schema).map_err(unavailable)?;
     }
     let changed = statements(db, change).map_err(unavailable)?;
     let changed = i64::try_from(changed).map_err(|_| failure("changes_unavailable"))?;
@@ -473,16 +514,27 @@ fn statements(db: &Connection, change: &Change) -> rusqlite::Result<usize> {
                     params![approved.project, approved.baseline],
                 )
             }),
+        Change::PublishPromptSnoozed(snoozed) => db.execute(
+            "INSERT INTO github_publish_prompt(project, snoozed_until, never) VALUES (?1, ?2, 0) \
+             ON CONFLICT(project) DO UPDATE SET snoozed_until = excluded.snoozed_until",
+            params![snoozed.project, snoozed.until_ms],
+        ),
+        Change::PublishPromptNever(never) => db.execute(
+            "INSERT INTO github_publish_prompt(project, snoozed_until, never) VALUES (?1, NULL, 1) \
+             ON CONFLICT(project) DO UPDATE SET never = 1",
+            [&never.project],
+        ),
     }
 }
 
 /// The tables the landing log rebuilds, emptied before its replay.
-const TABLES: [&str; 5] = [
+const TABLES: [&str; 6] = [
     "landing_agent_branches",
     "landing_bases",
     "landing_owner_edits",
     "landing_change_set_numbers",
     "verification_current",
+    "github_publish_prompt",
 ];
 
 /// Rebuilds the tables on the landing log from it: empties each one the store has, then

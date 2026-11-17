@@ -1,5 +1,6 @@
 use super::{GitHub, failure, publish, state};
 use crate::engine::EngineError;
+use crate::landing_log::{self, Change};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,8 @@ use std::time::Duration;
 /// How long a Not now keeps the Overview from asking to publish a project: 7 days, in ms.
 pub const SNOOZE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS github_publish_prompt(
+/// The publish prompt table, made on first use here and by the landing log's apply.
+pub(crate) const PROMPT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS github_publish_prompt(
     project TEXT PRIMARY KEY,
     snoozed_until INTEGER,
     never INTEGER
@@ -37,7 +39,7 @@ fn open(root: &Path) -> Result<Connection, EngineError> {
     let db = Connection::open(root.join("engine.db")).map_err(unavailable)?;
     db.busy_timeout(Duration::from_secs(5))
         .map_err(unavailable)?;
-    db.execute_batch(SCHEMA).map_err(unavailable)?;
+    db.execute_batch(PROMPT_SCHEMA).map_err(unavailable)?;
     Ok(db)
 }
 
@@ -92,26 +94,25 @@ impl GitHub {
     }
 }
 
+/// Keeps an answer to a project's publish prompt in its own transaction, logged as
+/// `PublishPromptSnoozed` or `PublishPromptNever` (v2.5 L9). Inputs: the database, the
+/// project, the answer and the time now in ms. Output: Ok, or the log's refusal with nothing
+/// kept.
 fn keep_answer(
     db: &Connection,
     project: &ProjectId,
     answer: GitHubPromptAnswer,
     now_ms: i64,
 ) -> Result<(), EngineError> {
-    match answer {
-        GitHubPromptAnswer::NotNow => db.execute(
-            "INSERT INTO github_publish_prompt(project, snoozed_until, never) VALUES (?1, ?2, 0)
-             ON CONFLICT(project) DO UPDATE SET snoozed_until = excluded.snoozed_until",
-            params![project.as_str(), now_ms.saturating_add(SNOOZE_MS)],
-        ),
-        GitHubPromptAnswer::Never => db.execute(
-            "INSERT INTO github_publish_prompt(project, snoozed_until, never) VALUES (?1, NULL, 1)
-             ON CONFLICT(project) DO UPDATE SET never = 1",
-            params![project.as_str()],
-        ),
-    }
-    .map_err(unavailable)?;
-    Ok(())
+    let project = project.as_str().to_owned();
+    let change = match answer {
+        GitHubPromptAnswer::NotNow => Change::PublishPromptSnoozed(landing_log::Snoozed {
+            project,
+            until_ms: now_ms.saturating_add(SNOOZE_MS),
+        }),
+        GitHubPromptAnswer::Never => Change::PublishPromptNever(landing_log::Project { project }),
+    };
+    landing_log::write(db, &change)
 }
 
 /// Forgets a project's answer to the Overview's publish question, as a Delete everything
