@@ -303,7 +303,9 @@ enum Origin {
 
 /// The access list a path must hold for the container's role on it, built from its current
 /// list. A role that cuts turns every inherited entry explicit; one that does not leaves
-/// inherited entries as they are. A role that narrows others keeps every other package SID's
+/// inherited entries as they are, and a root holding guards refuses an inherited allow that
+/// gives the container more on the root itself than its role does (see [`reaches`]), since
+/// no deny stops it there. A role that narrows others keeps every other package SID's
 /// explicit allow within the role's rights, split into a part for the folder itself and a
 /// part its files and folders inherit, and gone when nothing is left; it refuses a list
 /// holding an entry type other than allow or deny, so no entry the boundary cannot read keeps
@@ -379,6 +381,9 @@ fn parts(
             continue;
         };
         if inherited && !cut {
+            if narrow && grants_beyond(&entry, sid, access.rights().this) {
+                return Err("a root inherits more for containers than its role gives");
+            }
             body.push((bytes, Origin::Inherited));
             continue;
         }
@@ -403,6 +408,39 @@ fn parts(
     assert!(body.len() <= 2 * spans.len());
     assert!(!cut || body.iter().all(|(_, origin)| *origin != Origin::Inherited));
     Ok(body)
+}
+
+/// Whether an allow for `other` counts in the container's access check: the container's own
+/// SID, ALL APPLICATION PACKAGES or ALL RESTRICTED APPLICATION PACKAGES (`S-1-15-2-1` and
+/// `S-1-15-2-2`), or a capability (`S-1-15-3-*`), which the container may hold; another
+/// container's SID does not. Inputs: the entry's SID and the container SID. Output: the answer.
+fn reaches(other: &[u8], sid: &[u8]) -> bool {
+    assert!(package(sid), "a container SID is a package SID");
+    assert!(other.len() <= SID_BYTES_MAX);
+    if other == sid {
+        return true;
+    }
+    if !package(other) {
+        return false;
+    }
+    let part = |at: usize| {
+        other
+            .get(at..at + 4)
+            .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    };
+    match part(8) {
+        Some(3) => true,
+        _ => other[1] == 2 && matches!(part(12), Some(1 | 2)),
+    }
+}
+
+/// Whether an inherited allow gives the container, on the object itself, a right outside
+/// `this`, the role's rights there. An inherit-only entry gives the object nothing. Inputs:
+/// the entry, the container SID and the role's rights on the object. Output: the answer.
+fn grants_beyond(entry: &Entry<'_>, sid: &[u8], this: u32) -> bool {
+    assert_eq!(this & !crate::plan::MODIFY, 0);
+    let beyond = specific(entry.mask) & !this;
+    entry.allows && entry.flags & INHERIT_ONLY == 0 && beyond != 0 && reaches(entry.sid, sid)
 }
 
 /// The entries the container gets for its role: on a file, the role's rights on the file; on
@@ -964,6 +1002,59 @@ mod tests {
             converge(&kept, &CONTAINER, Access::KeepEntries, true),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn a_root_holding_guarded_paths_refuses_an_inherited_grant_beyond_its_role() {
+        let refused = "a root inherits more for containers than its role gives";
+        let restricted: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 2, 0, 0, 0];
+        let reaching: [&[u8]; 4] = [
+            &ALL_APPLICATION_PACKAGES,
+            &restricted,
+            &INTERNET_CLIENT,
+            &CONTAINER,
+        ];
+        for access in [Access::RootAnchor, Access::RootKeep] {
+            for sid in reaching {
+                let list = acl(&[
+                    ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+                    ace(ACCESS_ALLOWED, OICI | INHERITED, FULL, sid),
+                ]);
+                assert_eq!(
+                    converge(&list, &CONTAINER, access, true),
+                    Err(refused),
+                    "{access:?} {sid:?}"
+                );
+            }
+            let kept = acl(&[
+                ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+                ace(ACCESS_ALLOWED, OICI | INHERITED, FULL, &TEAMMATE),
+                ace(
+                    ACCESS_ALLOWED,
+                    OICI | INHERITED,
+                    GENERIC_READ_EXECUTE,
+                    &ALL_APPLICATION_PACKAGES,
+                ),
+                ace(
+                    ACCESS_ALLOWED,
+                    OICI | INHERIT_ONLY | INHERITED,
+                    FULL,
+                    &ALL_APPLICATION_PACKAGES,
+                ),
+            ]);
+            assert!(
+                converge(&kept, &CONTAINER, access, true).is_ok(),
+                "a teammate's grant, a read and an inherit-only grant give this root nothing \
+                 more: {access:?}"
+            );
+        }
+        let plain = acl(&[ace(
+            ACCESS_ALLOWED,
+            OICI | INHERITED,
+            FULL,
+            &ALL_APPLICATION_PACKAGES,
+        )]);
+        assert!(converge(&plain, &CONTAINER, Access::Modify, true).is_ok());
     }
 
     #[test]

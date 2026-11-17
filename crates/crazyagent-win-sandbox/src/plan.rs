@@ -62,7 +62,8 @@ impl Access {
 
     /// Whether the path's inheritance is cut, so it holds only explicit entries: guarded
     /// paths and the folders anchored or kept inside a writable root. A granted root keeps its
-    /// inheritance, since nothing above it grants a container.
+    /// inheritance; one holding guards is refused when what it inherits gives the container
+    /// more on it than its role ([`crate::dacl::converge`]).
     pub fn cuts(self) -> bool {
         matches!(
             self,
