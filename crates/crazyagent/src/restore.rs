@@ -21,7 +21,8 @@ const COPY_PREFIX: &str = "replaced-";
 
 /// How the owner's last restore of the pinned 2.4 backup stands, as the record beside
 /// engine.db says.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RestoreState {
     Pending,
     Restored { copy: String },
