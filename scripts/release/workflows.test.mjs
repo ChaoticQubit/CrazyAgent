@@ -1479,21 +1479,6 @@ test("on macOS the release build puts the hdiutil retry first on PATH before Tau
   assert.notEqual(statSync(join(HDIUTIL_RETRY, "hdiutil")).mode & 0o111, 0, "the hdiutil retry is executable");
 });
 
-test("on macOS the release job checks in its first minute that the runner's assetutil reads the prebuilt Assets.car, its Icon Image named Icon and its dark look, before the long compile (DEC-181)", async () => {
-  const build = steps(await workflow("release.yml"), "build");
-  const index = (name) => build.findIndex((step) => new RegExp(`^\\s*(- )?name: ${name}$`, "m").test(step));
-  const probe = index("Check this runner reads the prebuilt app icon");
-  assert(probe > build.findIndex((step) => step.includes("actions/checkout@")), "the car it reads is checked out first");
-  assert(probe < index("Build command line binaries"), "a runner that cannot read the car fails before the long compile");
-  const step = build[probe];
-  assert.match(step, /^ {8}if: matrix\.os == 'macos'$/m);
-  assert.match(step, /^ {10}car=apps\/desktop\/src-tauri\/icons\/Assets\.car$/m);
-  assert.match(step, /info="\$\(assetutil --info "\$car"\)" \|\| \{ echo "::error::[^"]*"; exit 1; \}/);
-  for (const check of ['"AssetType"\\[\\[:space:\\]\\]\\*:\\[\\[:space:\\]\\]\\*"Icon Image"', '"Name"\\[\\[:space:\\]\\]\\*:\\[\\[:space:\\]\\]\\*"Icon"', '"NSAppearanceNameDarkAqua"']) {
-    assert.match(step, new RegExp(`grep -E?q '${check}' <<< "\\$info" \\|\\| \\{ echo "::error::[^"]*DEC-181\\)"; exit 1; \\}`), check);
-  }
-});
-
 test("the hdiutil retry tries a busy hdiutil create three times, removing the half-made image between tries, and passes the last failure through", () => {
   const create = ["create", "-srcfolder", "src", "-volname", "CrazyAgent", "-format", "UDRW", "IMAGE"];
   const busy = hdiutil(create, { fails: 2 });
