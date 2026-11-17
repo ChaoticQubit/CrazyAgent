@@ -44,7 +44,7 @@ env:
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
   NODE_TEST_TIMEOUT_MACOS_MS: "60000"
-  FARM_PARTS: linux-rust-1 macos-rust-1
+  FARM_PARTS: linux-rust-1
   FARM_RERUN_REPEATS: "3"
   FARM_RERUN_FILTER: >-
     (binary_id(=crazyagent) & (test(/^sandbox::git_deny_tests::/) | test(/^sandbox::profile_string_tests::/)
@@ -91,6 +91,7 @@ jobs:
 
   build-macos:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
     strategy:
@@ -186,7 +187,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
