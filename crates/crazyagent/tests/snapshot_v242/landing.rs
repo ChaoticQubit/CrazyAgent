@@ -1,6 +1,5 @@
 use super::Scenario;
 use crate::e2e_support::{self, Engine, Owner};
-use crazyagent::activity::AcceptPlace;
 use crazyagent::agent_git::Layout;
 use crazyagent::engine::owner::OwnerResult;
 use crazyagent::landing::{
@@ -9,7 +8,7 @@ use crazyagent::landing::{
 use crazyagent::launch_context::{landing_rules, team_tools_section};
 use crazyagent::plugins::{Scope, ServerSpec};
 use crazyagent::protocol::ProjectId;
-use crazyagent::team::{self, LandingMode};
+use crazyagent::team::{LandingMode, TeamAction};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::fs;
@@ -41,17 +40,19 @@ pub(super) enum Plugin {
 /// home, the scratch disk the fixture folders live on and the project id.
 pub(super) struct Seeded {
     pub(super) engine: Engine,
-    pub(super) home: tempfile::TempDir,
+    pub(super) _home: tempfile::TempDir,
     pub(super) disk: tempfile::TempDir,
     pub(super) project: ProjectId,
 }
 
-/// Starts the engine on a fixture HOME, sets up the project and the plugins `fixtures`
-/// writes on the scratch disk through owner requests only, then stops it. Inputs: a scratch
-/// prefix and the fixture writer. Output: the seeded project, or the step that failed.
+/// Starts the engine on a fixture HOME, sets up the project, its Landing setting when one is
+/// given and the plugins `fixtures` writes on the scratch disk through owner requests only,
+/// then stops it. Inputs: a scratch prefix, the fixture writer and the Landing setting, none
+/// to keep the default. Output: the seeded project, or the step that failed.
 pub(super) fn seeded(
     prefix: &str,
     fixtures: fn(&Path) -> Result<Vec<Plugin>, String>,
+    landing: Option<LandingMode>,
 ) -> Result<Seeded, String> {
     let home = e2e_support::scratch("ca-p4-home-");
     fs::write(home.path().join(".gitconfig"), OWNER_GIT).map_err(text)?;
@@ -69,7 +70,7 @@ pub(super) fn seeded(
         .map_err(text)?
         .block_on(async {
             let mut owner = Owner::attach(&engine).await;
-            let done = seed(&mut owner, &projects, &project, &plugins).await;
+            let done = seed(&mut owner, &projects, &project, landing, &plugins).await;
             owner.controller.detach();
             done
         });
@@ -77,19 +78,20 @@ pub(super) fn seeded(
     seeding?;
     Ok(Seeded {
         engine,
-        home,
+        _home: home,
         disk,
         project,
     })
 }
 
-/// Sends the owner requests that set up the project and its plugins.
-/// Inputs: the attached owner, the projects home, the project and the plugins.
-/// Output: nothing, or the request the engine did not apply.
+/// Sends the owner requests that set up the project, its Landing setting and its plugins.
+/// Inputs: the attached owner, the projects home, the project, the Landing setting and the
+/// plugins. Output: nothing, or the request the engine did not apply.
 async fn seed(
     owner: &mut Owner,
     projects: &Path,
     project: &ProjectId,
+    landing: Option<LandingMode>,
     plugins: &[Plugin],
 ) -> Result<(), String> {
     applied(
@@ -101,6 +103,19 @@ async fn seed(
         "create_project",
         owner.create_project(PROJECT, "Snapshot P4").await,
     )?;
+    if let Some(mode) = landing {
+        let generation = owner.next();
+        let action = TeamAction::LandingMode {
+            project_id: project.clone(),
+            mode,
+        };
+        let response = owner
+            .controller
+            .team_action(action, generation)
+            .await
+            .map_err(debug)?;
+        applied("landing_mode", e2e_support::result(response))?;
+    }
     let scope = || Scope::Project {
         project_id: project.clone(),
     };
@@ -234,24 +249,100 @@ fn rules_text(_scratch: &Path) -> Result<Value, String> {
     }))
 }
 
-/// Captures the stored name of each landing setting a new project starts with.
-/// Input: the scratch folder, unused. Output: the setting names.
+/// Captures each landing setting a new project starts with, as the owner's team status
+/// shows it. Input: the scratch folder, unused. Output: the setting names, `master_lands`
+/// null when the status shows none.
 fn settings_defaults(_scratch: &Path) -> Result<Value, String> {
-    let seeded = seeded("ca-p4-settings-", no_plugins)?;
-    let db = landing::open(seeded.engine.path()).map_err(debug)?;
+    let mut seeded = seeded("ca-p4-settings-", no_plugins, None)?;
+    let project = seeded.project.clone();
+    let status = again(&mut seeded, async move |owner| {
+        owner.controller.team_status(project).await.map_err(debug)
+    })?;
     Ok(json!({
-        "landing": team::landing_mode(&db, &seeded.project).map_err(debug)?.name(),
-        "catch_up_main": team::catch_up_main(&db, &seeded.project).map_err(debug)?.name(),
-        "master_lands": team::master_lands(&db, &seeded.project).map_err(debug)?.name(),
+        "landing": status.landing_mode.name(),
+        "catch_up_main": status.catch_up_main.name(),
+        "master_lands": status.master_lands.map(|mode| mode.name()),
     }))
 }
 
-/// One agent's work recorded as a change set: the set and the head and message the owner
-/// is shown.
-struct Change {
+/// Starts the stopped engine again on the same root and HOME, as the app's next launch does,
+/// attaches as the TUI, runs one owner step, then stops the engine. Inputs: the seeded
+/// project and the step. Output: the step's answer.
+fn again<T>(
+    seeded: &mut Seeded,
+    step: impl AsyncFnOnce(&mut Owner) -> Result<T, String>,
+) -> Result<T, String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(text)?;
+    seeded.engine.launch();
+    let answer = runtime.block_on(async {
+        let mut owner = Owner::attach(&seeded.engine).await;
+        let answer = step(&mut owner).await;
+        owner.controller.detach();
+        answer
+    });
+    let _stderr = seeded.engine.stop();
+    answer
+}
+
+/// What the owner's Accept came to: the Landing setting the team status shows, the message
+/// Changes proposed and the engine's decision.
+struct Accepted {
+    landing: &'static str,
+    proposed: String,
+    outcome: AcceptOutcome,
+}
+
+/// Accepts one change set the way the owner does in Changes: with the engine started again,
+/// reads the team status and the Changes list, then sends Accept with the head the list
+/// shows, into `target` when given. Inputs: the seeded project, the change set, the owner's
+/// message and the target branch. Output: what the Accept came to, or the refusal.
+fn owner_accept(
+    seeded: &mut Seeded,
     set: ChangeSetId,
-    head: String,
-    message: String,
+    message: Option<&str>,
+    target: Option<&str>,
+) -> Result<Accepted, String> {
+    let project = seeded.project.clone();
+    let message = message.map(str::to_owned);
+    let target = target.map(str::to_owned);
+    again(seeded, async move |owner| {
+        let status = owner
+            .controller
+            .team_status(project.clone())
+            .await
+            .map_err(debug)?;
+        let view = owner
+            .controller
+            .change_sets(project)
+            .await
+            .map_err(debug)?
+            .into_iter()
+            .find(|view| view.id == set)
+            .ok_or("the owner's Changes list does not show the change set")?;
+        let outcome = match target {
+            None => {
+                owner
+                    .controller
+                    .accept_changes(set, view.head.clone(), message)
+                    .await
+            }
+            Some(target) => {
+                owner
+                    .controller
+                    .accept_changes_into(set, view.head.clone(), message, Some(target))
+                    .await
+            }
+        }
+        .map_err(debug)?;
+        Ok(Accepted {
+            landing: status.landing_mode.name(),
+            proposed: view.message,
+            outcome,
+        })
+    })
 }
 
 /// Makes the fixture owner repository on the scratch disk with the folder agents work in.
@@ -264,11 +355,15 @@ fn checkout(seeded: &Seeded) -> Result<PathBuf, String> {
     Ok(checkout)
 }
 
-/// Runs one agent turn the way the engine records it, through the public landing API: the
-/// agent's clone on its claimed branch, an edit of README line two plus a new file committed
-/// there, and the turn's end. Inputs: the store, the project and the owner checkout.
-/// Output: the change set the turn left.
-fn agent_change(db: &Connection, project: &ProjectId, checkout: &Path) -> Result<Change, String> {
+/// Runs one agent turn the way the engine records it, through the public landing API, since
+/// no owner request runs an agent: the agent's clone on its claimed branch, an edit of README
+/// line two plus a new file committed there, and the turn's end. Inputs: the store, the
+/// project and the owner checkout. Output: the change set the turn left.
+fn agent_change(
+    db: &Connection,
+    project: &ProjectId,
+    checkout: &Path,
+) -> Result<ChangeSetId, String> {
     let worktree = checkout.join(".crazyagent/worktrees/agent-1");
     let branch = landing::claim_task_branch(db, checkout, &worktree, "tide-fix").map_err(debug)?;
     landing::add_agent_clone_on(checkout, &worktree, None, &branch).map_err(debug)?;
@@ -294,17 +389,16 @@ fn agent_change(db: &Connection, project: &ProjectId, checkout: &Path) -> Result
         turn: "turn-1".into(),
         prompt_line: "Fix the tide table".into(),
     };
-    let set = landing::record_turn_end(db, &workspace, &turn)
+    landing::record_turn_end(db, &workspace, &turn)
         .map_err(debug)?
-        .ok_or_else(|| "the turn left no change set".to_owned())?;
-    let (_, view) = landing::change_set(db, &set)
-        .map_err(debug)?
-        .ok_or_else(|| "the change set is not stored".to_owned())?;
-    Ok(Change {
-        set,
-        head: view.head,
-        message: view.message,
-    })
+        .ok_or_else(|| "the turn left no change set".to_owned())
+}
+
+/// Records one agent change set on the stopped engine's store, closing the store before the
+/// engine starts again. Inputs: the seeded project and the owner checkout. Output: the set.
+fn recorded_change(seeded: &Seeded, checkout: &Path) -> Result<ChangeSetId, String> {
+    let db = landing::open(seeded.engine.path()).map_err(debug)?;
+    agent_change(&db, &seeded.project, checkout)
 }
 
 /// Names the decision an Accept came to, as the owner sees it.
@@ -362,49 +456,46 @@ pub(super) fn lines(text: &str) -> Vec<String> {
     text.lines().map(str::to_owned).collect()
 }
 
-/// Accepts one agent change set under a Landing setting, with the owner's message if given,
-/// and captures the decision and the owner's branch. Inputs: the fixture prefix, the Landing
-/// setting and the message. Output: the proposed message, the decision and the branch.
-fn accept_under(prefix: &str, mode: LandingMode, message: Option<&str>) -> Result<Value, String> {
-    let seeded = seeded(prefix, no_plugins)?;
+/// Accepts one agent change set through the owner's Changes request under a Landing setting,
+/// with the owner's message if given, and captures the decision and the owner's branch.
+/// Inputs: the fixture prefix, the Landing setting (none keeps the default) and the message.
+/// Output: the Landing the status shows, the proposed message, the decision and the branch.
+fn accept_under(
+    prefix: &str,
+    landing: Option<LandingMode>,
+    message: Option<&str>,
+) -> Result<Value, String> {
+    let mut seeded = seeded(prefix, no_plugins, landing)?;
     let checkout = checkout(&seeded)?;
-    let db = landing::open(seeded.engine.path()).map_err(debug)?;
-    team::set_landing_mode(&db, &seeded.project, mode).map_err(debug)?;
-    let change = agent_change(&db, &seeded.project, &checkout)?;
-    let outcome = landing::accept(
-        &db,
-        seeded.home.path(),
-        &change.set,
-        &change.head,
-        message,
-        AcceptPlace::Changes,
-    )
-    .map_err(debug)?;
+    let set = recorded_change(&seeded, &checkout)?;
+    let accepted = owner_accept(&mut seeded, set, message, None)?;
     Ok(json!({
-        "landing": mode.name(),
-        "proposed_message": lines(&change.message),
-        "decision": decision(&outcome),
+        "landing": accepted.landing,
+        "proposed_message": lines(&accepted.proposed),
+        "decision": decision(&accepted.outcome),
         "owner": branch_view(&checkout, "main"),
         "owner_status": lines(&stdout(&checkout, &["status", "--porcelain"])),
     }))
 }
 
-/// Accept under the default Landing, Squash. Input: unused. Output: see `accept_under`.
+/// Accept under the Landing a new project starts with. Input: unused.
+/// Output: see `accept_under`.
 fn accept_squash(_scratch: &Path) -> Result<Value, String> {
-    accept_under("ca-p4-squash-", LandingMode::Squash, None)
+    accept_under("ca-p4-squash-", None, None)
 }
 
-/// Accept under Landing Merge. Input: unused. Output: see `accept_under`.
+/// Accept under Landing Merge, set by the owner's request. Input: unused.
+/// Output: see `accept_under`.
 fn accept_merge(_scratch: &Path) -> Result<Value, String> {
-    accept_under("ca-p4-merge-", LandingMode::Merge, None)
+    accept_under("ca-p4-merge-", Some(LandingMode::Merge), None)
 }
 
-/// Accept under Squash with the owner's own message. Input: unused.
+/// Accept under the default Landing with the owner's own message. Input: unused.
 /// Output: see `accept_under`.
 fn accept_edited_message(_scratch: &Path) -> Result<Value, String> {
     accept_under(
         "ca-p4-message-",
-        LandingMode::Squash,
+        None,
         Some("Tide table fix, as the owner wrote it"),
     )
 }
@@ -413,23 +504,14 @@ fn accept_edited_message(_scratch: &Path) -> Result<Value, String> {
 /// and captures the conflict and the owner's untouched branch and files. Input: unused.
 /// Output: the decision, the owner's branch and its working state.
 fn accept_conflict(_scratch: &Path) -> Result<Value, String> {
-    let seeded = seeded("ca-p4-conflict-", no_plugins)?;
+    let mut seeded = seeded("ca-p4-conflict-", no_plugins, None)?;
     let checkout = checkout(&seeded)?;
-    let db = landing::open(seeded.engine.path()).map_err(debug)?;
-    let change = agent_change(&db, &seeded.project, &checkout)?;
+    let set = recorded_change(&seeded, &checkout)?;
     fs::write(checkout.join("README"), "one\ntwo owners\nthree\n").map_err(text)?;
     e2e_support::git(&checkout, &["commit", "--quiet", "-am", "Owner: line two"]);
-    let outcome = landing::accept(
-        &db,
-        seeded.home.path(),
-        &change.set,
-        &change.head,
-        None,
-        AcceptPlace::Changes,
-    )
-    .map_err(debug)?;
+    let accepted = owner_accept(&mut seeded, set, None, None)?;
     Ok(json!({
-        "decision": decision(&outcome),
+        "decision": decision(&accepted.outcome),
         "owner": branch_view(&checkout, "main"),
         "owner_status": lines(&stdout(&checkout, &["status", "--porcelain"])),
     }))
@@ -439,23 +521,13 @@ fn accept_conflict(_scratch: &Path) -> Result<Value, String> {
 /// and captures both branches and the owner's working state. Input: unused.
 /// Output: the decision and both branches.
 fn accept_into_free_branch(_scratch: &Path) -> Result<Value, String> {
-    let seeded = seeded("ca-p4-free-", no_plugins)?;
+    let mut seeded = seeded("ca-p4-free-", no_plugins, None)?;
     let checkout = checkout(&seeded)?;
     e2e_support::git(&checkout, &["branch", "release"]);
-    let db = landing::open(seeded.engine.path()).map_err(debug)?;
-    let change = agent_change(&db, &seeded.project, &checkout)?;
-    let outcome = landing::accept_into(
-        &db,
-        seeded.home.path(),
-        &change.set,
-        &change.head,
-        None,
-        "release",
-        AcceptPlace::Changes,
-    )
-    .map_err(debug)?;
+    let set = recorded_change(&seeded, &checkout)?;
+    let accepted = owner_accept(&mut seeded, set, None, Some("release"))?;
     Ok(json!({
-        "decision": decision(&outcome),
+        "decision": decision(&accepted.outcome),
         "release": branch_view(&checkout, "release"),
         "owner": branch_view(&checkout, "main"),
         "owner_status": lines(&stdout(&checkout, &["status", "--porcelain"])),

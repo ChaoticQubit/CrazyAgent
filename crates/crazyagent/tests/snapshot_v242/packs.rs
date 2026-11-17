@@ -1,8 +1,7 @@
 use super::Scenario;
 use super::landing::{Plugin, Seeded, debug, lines, no_plugins, seeded, text};
 use crazyagent::agent_git::Layout;
-use crazyagent::launch_context::{self, AgentContext};
-use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork};
+use crazyagent::launch_context;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use std::fs;
@@ -34,70 +33,115 @@ pub(super) fn scenarios() -> Vec<Scenario> {
 
 /// A project with no plugin. Input: unused. Output: see `launches`.
 fn none(_scratch: &Path) -> Result<Value, String> {
-    launches(&seeded("ca-p4-none-", no_plugins)?)
+    launches(&seeded("ca-p4-none-", no_plugins, None)?)
 }
 
 /// A project with one enabled skill folder. Input: unused. Output: see `launches`.
 fn skill_folder(_scratch: &Path) -> Result<Value, String> {
-    launches(&seeded("ca-p4-skill-", |disk| {
-        let folder = disk.join("skills").join("tide-notes");
-        fs::create_dir_all(&folder).map_err(text)?;
-        fs::write(
+    let captured = launches(&seeded(
+        "ca-p4-skill-",
+        |disk| {
+            let folder = disk.join("skills").join("tide-notes");
+            fs::create_dir_all(&folder).map_err(text)?;
+            fs::write(
             folder.join("SKILL.md"),
             "---\nname: tide-notes\ndescription: Writes tide table notes.\n---\nRead the tide table, then write one note per tide.\n",
         )
         .map_err(text)?;
-        Ok(vec![Plugin::Skill(folder)])
-    })?)
+            Ok(vec![Plugin::Skill(folder)])
+        },
+        None,
+    )?)?;
+    present(&captured, "tide-notes", "the enabled skill")?;
+    Ok(captured)
 }
 
 /// A project with one enabled hooks plugin folder. Input: unused. Output: see `launches`.
 fn hook_folder(_scratch: &Path) -> Result<Value, String> {
-    launches(&seeded("ca-p4-hooks-", |disk| {
-        let folder = disk.join("tide-hooks");
-        fs::create_dir_all(folder.join(".claude-plugin")).map_err(text)?;
-        fs::create_dir_all(folder.join("hooks")).map_err(text)?;
-        fs::write(
-            folder.join(".claude-plugin").join("plugin.json"),
-            "{\"name\": \"tide-hooks\"}\n",
-        )
-        .map_err(text)?;
-        fs::write(
+    let captured = launches(&seeded(
+        "ca-p4-hooks-",
+        |disk| {
+            let folder = disk.join("tide-hooks");
+            fs::create_dir_all(folder.join(".claude-plugin")).map_err(text)?;
+            fs::create_dir_all(folder.join("hooks")).map_err(text)?;
+            fs::write(
+                folder.join(".claude-plugin").join("plugin.json"),
+                "{\"name\": \"tide-hooks\"}\n",
+            )
+            .map_err(text)?;
+            fs::write(
             folder.join("hooks").join("hooks.json"),
             "{\"hooks\": {\"PreToolUse\": [{\"matcher\": \"Bash\", \"hooks\": [{\"type\": \"command\", \"command\": \"/bin/echo checked\"}]}]}}\n",
         )
         .map_err(text)?;
-        Ok(vec![Plugin::Hooks(folder)])
-    })?)
+            Ok(vec![Plugin::Hooks(folder)])
+        },
+        None,
+    )?)?;
+    present(&captured, "/bin/echo checked", "the enabled hook's command")?;
+    Ok(captured)
 }
 
 /// A project with one approved stdio MCP server. Input: unused. Output: see `launches`.
 fn mcp_stdio_approved(_scratch: &Path) -> Result<Value, String> {
-    launches(&seeded("ca-p4-mcp-", |_disk| {
-        Ok(vec![Plugin::Server {
-            name: "tide-server",
-            command: "/bin/cat",
-            approve: true,
-        }])
-    })?)
+    let captured = launches(&seeded(
+        "ca-p4-mcp-",
+        |_disk| {
+            Ok(vec![Plugin::Server {
+                name: "tide-server",
+                command: "/bin/cat",
+                approve: true,
+            }])
+        },
+        None,
+    )?)?;
+    present(&captured, "tide-server", "the approved server")?;
+    if !captured["read_paths"]
+        .as_array()
+        .is_some_and(|paths| paths.contains(&json!("/bin/cat")))
+    {
+        return Err(
+            "the approved server's command is not among the tools-on read paths".to_owned(),
+        );
+    }
+    Ok(captured)
 }
 
 /// A project with one stdio MCP server added but never approved. Input: unused.
 /// Output: see `launches`.
 fn mcp_added_not_approved(_scratch: &Path) -> Result<Value, String> {
-    launches(&seeded("ca-p4-mcp-added-", |_disk| {
-        Ok(vec![Plugin::Server {
-            name: "tide-server",
-            command: "/bin/cat",
-            approve: false,
-        }])
-    })?)
+    launches(&seeded(
+        "ca-p4-mcp-added-",
+        |_disk| {
+            Ok(vec![Plugin::Server {
+                name: "tide-server",
+                command: "/bin/cat",
+                approve: false,
+            }])
+        },
+        None,
+    )?)
+}
+
+/// Fails when a plugin the owner switched on never reaches a launch, so a fixture the engine
+/// took but does not launch with cannot pass as a pack capture. Inputs: the capture, a text
+/// only that plugin writes and what it is. Output: nothing, or which plugin is missing.
+fn present(captured: &Value, needle: &str, what: &str) -> Result<(), String> {
+    let shown = serde_json::to_string(&captured["launches"]).map_err(text)?;
+    if shown.contains(needle) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{what} reaches no launch: no launch file or argument names {needle}"
+        ))
+    }
 }
 
 /// Captures what leaves the engine for each launch of the seeded project: per harness and
 /// tools switch the harness arguments, the denied tools and every file written into the
-/// agent home, and the sandbox policy text with tools off and on. Input: the seeded project.
-/// Output: the launches and the policy.
+/// agent home, and the paths a tools-on sandbox must let the agent read. The Seatbelt text
+/// itself is not captured here: only a real launch shows it, and that row comes after P2's
+/// launch helper lands. Input: the seeded project. Output: the launches and the read paths.
 fn launches(seeded: &Seeded) -> Result<Value, String> {
     let db = Connection::open_with_flags(
         seeded.engine.path().join("engine.db"),
@@ -125,33 +169,15 @@ fn launches(seeded: &Seeded) -> Result<Value, String> {
             }));
         }
     }
+    let read_paths: Vec<String> = context
+        .read_paths()
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
     Ok(json!({
         "launches": launches,
-        "policy": {
-            "tools_off": lines(&policy(seeded, &context, false)?),
-            "tools_on": lines(&policy(seeded, &context, true)?),
-        },
+        "read_paths": read_paths,
     }))
-}
-
-/// Builds the Seatbelt text a project launch gets, with the pack step the team runtime adds
-/// (team/runtime.rs:9568-9573: read access to each approved command server's folder, tools on
-/// only). Inputs: the seeded project, its launch context and the tools switch.
-/// Output: the policy text.
-fn policy(seeded: &Seeded, context: &AgentContext, tools: bool) -> Result<String, String> {
-    let root = private_folder(seeded, &format!("project-{}", switch(tools)))?;
-    let home = private_folder(seeded, &format!("agent-home-{}", switch(tools)))?;
-    let tmp = private_folder(seeded, &format!("agent-tmp-{}", switch(tools)))?;
-    let mut sandbox =
-        ProjectSandbox::new(&root, &home, &tmp, SandboxNetwork::Open).map_err(debug)?;
-    if tools {
-        for server in context.read_paths() {
-            if let Some(folder) = server.parent() {
-                sandbox = sandbox.allow_read(folder).map_err(debug)?;
-            }
-        }
-    }
-    Ok(sandbox.profile())
 }
 
 /// Names a tools switch for a folder name. Input: the switch. Output: `on` or `off`.
