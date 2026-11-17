@@ -21,6 +21,8 @@ mod packs;
 mod provider;
 #[path = "snapshot_v242/role.rs"]
 mod role;
+#[path = "snapshot_v242/storage.rs"]
+mod storage;
 #[path = "snapshot_v242/workflow.rs"]
 mod workflow;
 
@@ -69,6 +71,7 @@ fn scenarios() -> Vec<Scenario> {
     all.extend(packs::scenarios());
     all.extend(provider::scenarios());
     all.extend(role::scenarios());
+    all.extend(storage::scenarios());
     all.extend(workflow::scenarios());
     all
 }
