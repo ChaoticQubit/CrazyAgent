@@ -645,3 +645,34 @@ fn the_first_run_carries_a_change_set_as_its_row_digest() {
     rebuild(&db).unwrap();
     assert_eq!(change_set_rows(&db), saved);
 }
+
+/// V250-L9 (QUESTION-1115): a change set whose conflicting paths total past one kept text's
+/// bound, as git's merge listing allows, still saves, logs and rebuilds to the live row.
+#[test]
+fn a_change_set_past_one_text_saves_logs_and_rebuilds() {
+    let (root, db) = store();
+    let mut record = change_set(root.path(), 'c');
+    let path = format!("src/{}.rs", "p".repeat(1_000));
+    let count = crate::owner_texts::TEXT_BYTES_MAX / path.len() + 64;
+    record.conflicts = (0..count).map(|index| format!("{path}{index}")).collect();
+    record.state = ChangeState::Conflict;
+    save(&db, &record).unwrap();
+    assert_eq!(events(&db).len(), 1);
+    let live = change_set_rows(&db);
+    rebuild(&db).unwrap();
+    assert_eq!(change_set_rows(&db), live);
+}
+
+/// V250-L9: a project Delete leaves its change sets and their kept row texts, as its
+/// projection does, so a rebuild across the logged Delete equals the live rows.
+#[test]
+fn a_deleted_projects_change_sets_rebuild_to_the_live_rows() {
+    let (root, db) = store();
+    let record = change_set(root.path(), 'c');
+    save(&db, &record).unwrap();
+    removal(&db, &record.project, false);
+    let live = change_set_rows(&db);
+    assert_eq!(live[0].len(), 1);
+    rebuild(&db).unwrap();
+    assert_eq!(change_set_rows(&db), live);
+}
