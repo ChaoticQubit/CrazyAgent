@@ -1014,29 +1014,27 @@ fn on_the_log(tx: &Transaction<'_>) -> Result<bool, EngineError> {
 
 /// The first snapshot run of the 14 tables, for the schema step that puts memory on the
 /// log: rows written before the log reach replay through it, through the open's proof. A
-/// store without the `state` table or a memory table has no log to write, one with no
-/// memory row needs no run, and one whose memory is already on the log needs none again,
-/// as when an upgrade from a reset version runs the step over it; none of them moves a
-/// revision. Inputs: the step's transaction and the open's proof. Output: whether a run
+/// store without the `state` table has no log to write. The 14 tables are made first, as
+/// the settings log's first run does, because the open makes them only after the steps and
+/// a store from an older release can lack one (v2.2.0 had no `memory_agent_scope`). One
+/// with no memory row needs no run, and one whose memory is already on the log needs none
+/// again, as when an upgrade from a reset version runs the step over it; none of them moves
+/// a revision. Inputs: the step's transaction and the open's proof. Output: whether a run
 /// was appended, or the log's refusal.
 #[cfg(any(unix, test))]
 pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
-    let names: Vec<String> = std::iter::once("'state'".to_owned())
-        .chain(TABLES.iter().map(|table| format!("'{}'", table.name())))
-        .collect();
-    let present: i64 = tx
+    let stated: bool = tx
         .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ({})",
-                names.join(",")
-            ),
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='state')",
             [],
             |row| row.get(0),
         )
         .map_err(error)?;
-    if present < names.len() as i64 {
+    if !stated {
         return Ok(false);
     }
+    crate::memory::initialize(tx)?;
+    crate::assets::initialize(tx)?;
     let counts: Vec<String> = TABLES
         .iter()
         .map(|table| format!("(SELECT COUNT(*) FROM {})", table.name()))
