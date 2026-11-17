@@ -4485,6 +4485,9 @@ mod knowledge_storage_tests {
 mod open_tests;
 
 #[cfg(all(test, unix))]
+mod project_removed_tests;
+
+#[cfg(all(test, unix))]
 pub(crate) use configured_conversation_fixture::{
     ConfiguredInitialConversationFixture, configured_initial_conversation_fixture,
 };
