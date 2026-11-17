@@ -1,4 +1,4 @@
-use super::run::run_raw;
+use super::run::{run_raw, version_raw};
 use super::{
     BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessNeeds, HarnessVersions,
     InstallFromApp, LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots,
@@ -115,21 +115,19 @@ pub fn set_settings(db: &Connection, settings: UpdateSettings) -> Result<(), Eng
 }
 
 impl Roots {
-    /// The roots of this machine: the engine's own HOME, the same one the harness search
-    /// uses, the usual Homebrew prefixes, casks only on macOS and the resolver's places with
-    /// no engine root. Output: the roots; an unset or relative HOME is an empty home.
+    /// The roots of this machine: the engine's own home ([`home_folder`]), the usual
+    /// Homebrew prefixes, casks only on macOS and the resolver's places with no engine root.
+    /// Output: the roots; an unknown home is an empty home.
     pub fn system() -> Self {
         Self::on(crate::tools::Places::from_environment(None))
     }
 
-    /// The roots of this machine with the given resolver places: the engine's HOME, the
-    /// usual Homebrew prefixes, casks only on macOS and no npm yet. Input: the places.
-    /// Output: the roots; an unset or relative HOME is an empty home that matches nothing.
+    /// The roots of this machine with the given resolver places: the engine's own home
+    /// ([`home_folder`]), the usual Homebrew prefixes, casks only on macOS and no npm yet.
+    /// Input: the places. Output: the roots; an unknown home is an empty home that matches
+    /// nothing.
     fn on(places: crate::tools::Places) -> Self {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|home| home.is_absolute())
-            .unwrap_or_default();
+        let home = home_folder().unwrap_or_default();
         Self {
             home,
             brew_prefixes: BREW_PREFIXES.iter().map(PathBuf::from).collect(),
@@ -234,7 +232,7 @@ fn version_command(executable: &Path) -> Option<Fixed> {
 /// Runs a version command, bounded like every other run. Inputs: the command and the home
 /// folder. Output: the version it printed, or none.
 fn version_ran(fixed: &Fixed, home: &Path) -> Option<String> {
-    let raw = run_raw(fixed, home, VERSION_TIME).ok()?;
+    let raw = version_raw(fixed, home, VERSION_TIME).ok()?;
     installed_version(&String::from_utf8_lossy(&raw.stdout))
         .or_else(|| installed_version(&String::from_utf8_lossy(&raw.stderr)))
 }
@@ -346,11 +344,43 @@ fn updated(
     outcome(ran, UPDATE_FAILED, from, to)
 }
 
-/// Asks a harness for its version only when it is a file this user can trust to start, as an
-/// update's program must be ([`super::trusted`]), and the tool resolver would run it and every
-/// interpreter its first line names, with no refused copy of one in its own folder
-/// ([`super::vetted`]), so a file agents can write, or one whose program is missing, is never
-/// started for a version. It runs the real file the resolver checked, once that file passes
+/// The engine's own home folder: HOME as given on Unix; on Windows the profile folder
+/// ([`crate::projects_home::owner_home`]) in its plain drive spelling, the one install
+/// paths are matched in ([`crate::sandbox::canonical`]). Output: the absolute folder, none
+/// when it is unset, relative or does not resolve.
+pub(super) fn home_folder() -> Option<PathBuf> {
+    #[cfg(unix)]
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    #[cfg(windows)]
+    let home = crate::projects_home::owner_home()
+        .ok()
+        .and_then(|home| crate::sandbox::canonical(&home).ok());
+    home.filter(|home| home.is_absolute())
+}
+
+/// Lets a harness file be started for its version only when it is a file this user can
+/// trust to start, as an update's program must be ([`super::trusted`]). Inputs: the harness
+/// file and the resolver's places, unused. Output: Some when it may start.
+#[cfg(unix)]
+fn version_gate(executable: &Path, _places: &crate::tools::Places) -> Option<()> {
+    super::trusted(executable).ok()
+}
+
+/// Lets a harness file be started for its version only when a session would start it, the
+/// gate Windows launch passes ([`crate::harnesses::interactive::launch_tool`]), since
+/// [`super::trusted`] refuses every program here and keeps every update refused. Inputs: the
+/// harness file and the resolver's places. Output: Some when it may start.
+#[cfg(windows)]
+fn version_gate(executable: &Path, places: &crate::tools::Places) -> Option<()> {
+    crate::harnesses::interactive::launch_tool(executable, places)
+        .ok()
+        .map(drop)
+}
+
+/// Asks a harness for its version only when it passes [`version_gate`] and the tool resolver
+/// would run it and every interpreter its first line names, with no refused copy of one in
+/// its own folder ([`super::vetted`]), so a file agents can write, or one whose program is
+/// missing, is never started for a version. It runs the real file the resolver checked, once that file passes
 /// again by its own path, with the entry's folder kept as the search an interpreter asked for
 /// by name is found in, so no link of the entry's chain is followed after the check.
 /// Inputs: the harness executable, the home folder and the resolver's places. Output: the
@@ -360,7 +390,7 @@ pub(super) fn version_if_runs(
     home: &Path,
     places: &crate::tools::Places,
 ) -> Option<String> {
-    super::trusted(executable).ok()?;
+    version_gate(executable, places)?;
     let entry = version_command(executable)?;
     let real = super::vetted(&entry, places).ok()?;
     let fixed = Fixed {
@@ -906,5 +936,25 @@ mod windows_tests {
                 "{method:?}"
             );
         }
+    }
+    /// V243-W1-VERSION-READ: on Windows the engine's home is the profile folder in its plain
+    /// drive spelling, and a program a session would start tells its version through a job
+    /// of its own, here the curl Windows ships.
+    #[test]
+    fn a_windows_program_tells_its_version_and_the_home_is_the_profile_folder() {
+        let profile = std::env::var_os("USERPROFILE").unwrap();
+        let home = home_folder().unwrap();
+        assert_eq!(
+            home,
+            crate::sandbox::canonical(Path::new(&profile)).unwrap()
+        );
+        assert!(!home.to_str().unwrap().starts_with(r"\\?\"), "{home:?}");
+        assert_eq!(Roots::system().home, home);
+        let curl = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("curl.exe");
+        let places = crate::tools::Places::from_environment(None);
+        let version = version_if_runs(&curl, &home, &places).unwrap();
+        assert!(super::super::plain_version(&version), "{version}");
     }
 }

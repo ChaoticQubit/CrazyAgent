@@ -20,7 +20,7 @@ const PAGES_MAX: u64 = 8;
 #[cfg(unix)]
 const ENV_KEPT: [&str; 6] = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR"];
 #[cfg(windows)]
-const ENV_KEPT: [&str; 12] = [
+pub(crate) const ENV_KEPT: [&str; 12] = [
     "PATH",
     "PATHEXT",
     "SystemRoot",
