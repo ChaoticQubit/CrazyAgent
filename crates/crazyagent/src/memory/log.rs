@@ -328,8 +328,10 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 
 /// Creates the touched-key table and, on each memory table, the triggers that note the key
 /// of every row an insert, update or delete touches, so each writer's change reaches the
-/// log whatever statement made it. Input: the connection, with the 14 tables made.
-/// Output: Ok, or the store's refusal.
+/// log whatever statement made it. A trigger skips a key already noted rather than relying
+/// on `OR IGNORE`, since SQLite runs a trigger's statements under the conflict policy of an
+/// outer statement that names one, and an upsert's update names ABORT. Input: the
+/// connection, with the 14 tables made. Output: Ok, or the store's refusal.
 pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     let mut sql = String::from(
         "CREATE TABLE IF NOT EXISTS memory_touched
@@ -339,14 +341,16 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
         let name = table.name();
         let columns = table.columns();
         let touch = |row: &str| {
+            let first = format!("{row}.{}", columns[0].0);
             let second = if table.keys() == 2 {
                 format!("{row}.{}", columns[1].0)
             } else {
                 "''".to_owned()
             };
             format!(
-                "INSERT OR IGNORE INTO memory_touched VALUES ('{name}', {row}.{}, {second});",
-                columns[0].0
+                "INSERT INTO memory_touched SELECT '{name}', {first}, {second}
+                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched
+                     WHERE tbl='{name}' AND k1={first} AND k2={second});"
             )
         };
         sql.push_str(&format!(
@@ -986,11 +990,35 @@ pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineErr
     Ok(changed)
 }
 
+/// Whether the log already holds a memory event, so the store's memory reached it as it
+/// was written. Input: the transaction. Output: the answer, or the store's refusal.
+#[cfg(any(unix, test))]
+fn on_the_log(tx: &Transaction<'_>) -> Result<bool, EngineError> {
+    let log: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='state_log')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !log {
+        return Ok(false);
+    }
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM state_log WHERE aggregate=?1)",
+        [Aggregate::Memory.name()],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
 /// The first snapshot run of the 14 tables, for the schema step that puts memory on the
 /// log: rows written before the log reach replay through it, through the open's proof. A
-/// store without the `state` table or a memory table has no log to write, and one with no
-/// memory row needs no run, so it moves no revision. Inputs: the step's transaction and the
-/// open's proof. Output: whether a run was appended, or the log's refusal.
+/// store without the `state` table or a memory table has no log to write, one with no
+/// memory row needs no run, and one whose memory is already on the log needs none again,
+/// as when an upgrade from a reset version runs the step over it; none of them moves a
+/// revision. Inputs: the step's transaction and the open's proof. Output: whether a run
+/// was appended, or the log's refusal.
 #[cfg(any(unix, test))]
 pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     let names: Vec<String> = std::iter::once("'state'".to_owned())
@@ -1018,7 +1046,7 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
             row.get(0)
         })
         .map_err(error)?;
-    if rows == 0 {
+    if rows == 0 || on_the_log(tx)? {
         return Ok(false);
     }
     let at_ms = opening.at_ms();
